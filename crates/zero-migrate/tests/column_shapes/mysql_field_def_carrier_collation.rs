@@ -78,7 +78,7 @@ fn every_character_spelling_pins_the_case_sensitive_collation() {
         (
             "string with no bound",
             serde_json::json!({ "type": "string" }),
-            format!("VARCHAR(191) {CASE_SENSITIVE}"),
+            format!("text {CASE_SENSITIVE}"),
         ),
         (
             "char with a length",

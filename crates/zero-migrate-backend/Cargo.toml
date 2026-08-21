@@ -29,7 +29,6 @@ serde = { workspace = true }
 base64 = { workspace = true }
 # MySQL spells a string literal in an expression position as `_utf8mb4 X'<hex>'` so
 # an inherited `NO_BACKSLASH_ESCAPES` mode cannot reinterpret it.
-hex = { workspace = true }
 # The render error enums are `thiserror` derives, with `#[error(transparent)]`
 # carrying the nested render errors' Display through byte-identically.
 thiserror = { workspace = true }

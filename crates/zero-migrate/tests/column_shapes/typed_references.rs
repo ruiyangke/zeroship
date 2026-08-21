@@ -1260,7 +1260,7 @@ fn sqlite_declared_bigint_reference_matches_managed_integer_storage() {
 }
 
 #[test]
-fn mysql_unmanaged_text_reference_validates_catalog_collation_intent() {
+fn mysql_unbounded_text_reference_is_refused_before_collation_comparison() {
     let case_insensitive = ir(
         "mysql_case_insensitive_reference",
         vec![create_table(
@@ -1277,7 +1277,7 @@ fn mysql_unmanaged_text_reference_validates_catalog_collation_intent() {
         )],
     );
 
-    IrAuthor::new(
+    let error = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
         SqlDialect::Mysql,
@@ -1287,19 +1287,10 @@ fn mysql_unmanaged_text_reference_validates_catalog_collation_intent() {
         &case_insensitive,
         &unmanaged_live_with_case_sensitive("text", Some(false)),
     )
-    .expect("matching MySQL case-insensitive catalog collation must validate");
-
-    let error = IrAuthor::new(
-        PROJECT_SCHEMA,
-        OWNER,
-        SqlDialect::Mysql,
-        &no_inject_policy(),
-    )
-    .lower(&case_insensitive, &unmanaged_live("text"))
-    .expect_err("a binary MySQL target must not satisfy caseSensitive=false");
+    .expect_err("MySQL cannot index the unbounded TEXT local side of a foreign key");
     assert!(
-        error.to_string().contains("collation intent"),
-        "unexpected MySQL collation diagnostic: {error}"
+        error.to_string().contains("TEXT storage"),
+        "unexpected MySQL unbounded-key diagnostic: {error}"
     );
 }
 

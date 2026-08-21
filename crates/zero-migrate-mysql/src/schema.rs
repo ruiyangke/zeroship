@@ -1,8 +1,10 @@
 //! MySQL schema/DDL spelling. The future `zero-migrate-mysql`.
 
+use crate::collation::mysql_pin_collation;
 use zero_migrate_backend::schema::{
-    def_case_sensitive, mysql_base_column_type_for_def, quote_ident_for_backend, SchemaRenderer,
+    char_len, decimal_precision_scale, def_case_sensitive, quote_ident_for_backend, SchemaRenderer,
 };
+use zero_migrate_backend::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::{DialectId, SqlDialect};
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
@@ -27,23 +29,33 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         )
     }
 
-    /// The MySQL column type for a field def, with an explicit collation on every
-    /// CHARACTER spelling.
-    ///
-    /// The collation is pinned through
-    /// [`crate::render::declarative::mysql_pin_collation`] - the same function the
-    /// snapshot-carrier renderer pins through - so the two MySQL renderers cannot
-    /// answer the same column with different comparison semantics. Without it every
-    /// character column this arm emits inherits the table default, which on a stock
-    /// MySQL 8 server is `utf8mb4_0900_ai_ci`: `'Active' = 'active'` compares TRUE and
-    /// a UNIQUE index rejects the second of the two, where PostgreSQL and SQLite
-    /// separate them. See [`mysql_base_column_type_for_def`] for which spellings are
-    /// character types and which are deliberately left bare.
-    fn column_type(&self, def: &serde_json::Value) -> String {
-        crate::collation::mysql_pin_collation(
-            &mysql_base_column_type_for_def(def),
-            def_case_sensitive(def),
-        )
+    fn column_type(&self, c: &ColumnSnapshot, _inline_pk: bool) -> String {
+        if let Some(ty) = &c.ddl_type_override {
+            return mysql_pin_native_enum_collation(ty, c.case_sensitive);
+        }
+
+        let rendered = if c.unbounded_text {
+            "text".to_string()
+        } else if let Some(def) = &c.type_def {
+            mysql_base_column_type_for_def(def)
+        } else if matches!(c.case_sensitive, Some(false))
+            && (c.authored_type || c.data_type.eq_ignore_ascii_case("text"))
+        {
+            "text".to_string()
+        } else {
+            mysql_ddl_type(&c.data_type)
+        };
+
+        if c.authored_type || c.type_def.is_some() {
+            let case_sensitive = c
+                .type_def
+                .as_ref()
+                .and_then(def_case_sensitive)
+                .or(c.case_sensitive);
+            mysql_pin_collation(&rendered, case_sensitive)
+        } else {
+            mysql_pin_native_enum_collation(&rendered, c.case_sensitive)
+        }
     }
 
     fn json_object_default(&self) -> String {
@@ -65,5 +77,241 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         _schema: &serde_json::Value,
     ) -> Vec<String> {
         Vec::new()
+    }
+}
+
+/// Pin an explicit collation onto a rendered MySQL `ENUM(...)` spelling.
+///
+/// Snapshot-native catalog carriers historically pin only native enums here;
+/// authored character columns take the broader pass in `column_type`. Keeping the
+/// distinction preserves catalog-carrier bytes while the neutral authored marker
+/// replaces the vendor-spelled override that core used to precompute.
+fn mysql_pin_native_enum_collation(rendered: &str, case_sensitive: Option<bool>) -> String {
+    if !rendered.trim().to_ascii_lowercase().starts_with("enum(") {
+        return rendered.to_string();
+    }
+    mysql_pin_collation(rendered, case_sensitive)
+}
+
+fn mysql_ddl_type(data_type: &str) -> String {
+    let lower = data_type.trim().to_ascii_lowercase();
+    if lower.starts_with("enum(") {
+        return data_type.to_string();
+    }
+    if lower.starts_with("vector(") {
+        return "BLOB".to_string();
+    }
+    if let Some(len) = char_len_from_data_type(&lower) {
+        return format!("CHAR({len})");
+    }
+    if let Some(len) = varchar_len_from_data_type(&lower) {
+        return format!("VARCHAR({len})");
+    }
+    match lower.as_str() {
+        "text" => "VARCHAR(191)".to_string(),
+        "double precision" | "float8" => "DOUBLE".to_string(),
+        "real" | "float4" => "FLOAT".to_string(),
+        "boolean" => "TINYINT(1)".to_string(),
+        "timestamp with time zone" | "timestamptz" => "DATETIME(6)".to_string(),
+        "date" => "DATE".to_string(),
+        "jsonb" | "json" => "JSON".to_string(),
+        "text[]" => "JSON".to_string(),
+        "bytea" | "blob" => "LONGBLOB".to_string(),
+        "numeric" | "decimal" => "DECIMAL(65, 30)".to_string(),
+        "integer" | "int" | "int4" => "INT".to_string(),
+        "smallint" | "int2" => "SMALLINT".to_string(),
+        "bigint" | "int8" => "BIGINT".to_string(),
+        "inet" => "VARCHAR(43)".to_string(),
+        "geography(point, 4326)" | "geography(POINT, 4326)" => "POINT SRID 4326".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn char_len_from_data_type(data_type: &str) -> Option<u32> {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let inner = lower
+        .strip_prefix("character(")
+        .or_else(|| lower.strip_prefix("char("))
+        .or_else(|| lower.strip_prefix("bpchar("))?
+        .strip_suffix(')')?;
+    inner.parse::<u32>().ok().filter(|len| *len > 0)
+}
+
+fn varchar_len_from_data_type(data_type: &str) -> Option<u32> {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let inner = lower
+        .strip_prefix("character varying(")
+        .or_else(|| lower.strip_prefix("varchar("))?
+        .strip_suffix(')')?;
+    inner.parse::<u32>().ok().filter(|len| *len > 0)
+}
+
+fn mysql_native_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
+    let values = def.get("enum")?.as_array()?;
+    let mut rendered = Vec::with_capacity(values.len());
+    for value in values {
+        let s = value.as_str()?;
+        // MySQL's ENUM value grammar accepts a bare hex literal but rejects the
+        // `_utf8mb4 X'…'` introduced form used in expression positions. The
+        // column's utf8mb4 character set consumes these UTF-8 bytes while the hex
+        // spelling remains independent of `NO_BACKSLASH_ESCAPES`.
+        rendered.push(format!("X'{}'", hex::encode(s.as_bytes())));
+    }
+    if rendered.is_empty() {
+        None
+    } else {
+        Some(rendered)
+    }
+}
+
+/// Legacy SDK-token-to-MySQL-spelling table, moved out of the neutral contract.
+///
+/// Snapshot rendering no longer calls this JSON carrier. It remains vendor-owned
+/// while the remaining SDK-definition producers lower to neutral snapshots.
+pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
+    if def.get("encrypted").is_some() {
+        return "LONGBLOB".to_string();
+    }
+
+    if let Some(values) = mysql_native_enum_values(def) {
+        return format!("ENUM({})", values.join(", "));
+    }
+
+    let zs_type = def.get("type").and_then(|t| t.as_str());
+
+    if zs_type == Some("vector") {
+        return "BLOB".to_string();
+    }
+
+    if zs_type == Some("geoPoint") {
+        return "POINT SRID 4326".to_string();
+    }
+
+    // The decimal half of the shared `number` token. `DOUBLE` is right for the
+    // float and wrong for `t.numeric({ precision, scale })`; the MySQL arm of
+    // `render::lower::author_type_override` already spells this column
+    // `DECIMAL(p, s)` on the snapshot carrier, so this is the field-def carrier
+    // catching up rather than a second opinion. Note that a BARE `DECIMAL` would
+    // not do: MySQL reads it as `DECIMAL(10, 0)` and silently truncates the
+    // scale, which is why the parameters have to reach this emitter at all.
+    if zs_type == Some("number") {
+        if let Some((precision, scale)) = decimal_precision_scale(def) {
+            return format!("DECIMAL({precision}, {scale})");
+        }
+    }
+
+    match zs_type {
+        Some("string") => {
+            let max = def
+                .get("maxLength")
+                .or_else(|| def.get("max"))
+                .and_then(serde_json::Value::as_u64)
+                .filter(|n| *n > 0 && *n <= 65_535);
+            match max {
+                Some(n) if n <= 16_383 => format!("VARCHAR({n})"),
+                Some(_) => "LONGTEXT".to_string(),
+                None => "VARCHAR(191)".to_string(),
+            }
+        }
+        Some("char") => match char_len(def) {
+            Some(len) => format!("CHAR({len})"),
+            None => "CHAR(1)".to_string(),
+        },
+        Some("number") => "DOUBLE".to_string(),
+        Some("real") => "FLOAT".to_string(),
+        Some("boolean") => "TINYINT(1)".to_string(),
+        Some("date") => "DATETIME(6)".to_string(),
+        Some("calendarDate") => "DATE".to_string(),
+        Some("json") | Some("object") | Some("array") | Some("union") => "JSON".to_string(),
+        Some("textArray") => "JSON".to_string(),
+        Some("ref") => "VARCHAR(191)".to_string(),
+        Some("bytes") => "LONGBLOB".to_string(),
+        Some("literal") => match def.get("literalValue") {
+            Some(serde_json::Value::Number(_)) => "DECIMAL(65, 30)".to_string(),
+            Some(serde_json::Value::Bool(_)) => "TINYINT(1)".to_string(),
+            _ => "VARCHAR(191)".to_string(),
+        },
+        Some("bigInt") | Some("bigint") | Some("int8") => "BIGINT".to_string(),
+        Some("integer") | Some("int") | Some("int4") => "INT".to_string(),
+        Some("smallInt") => "SMALLINT".to_string(),
+        Some("inet") => "VARCHAR(43)".to_string(),
+        _ => "VARCHAR(191)".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SchemaRenderer, RENDERER};
+    use zero_migrate_backend::snapshot::ColumnSnapshot;
+
+    const PIN: &str = "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs";
+
+    #[test]
+    fn both_unbounded_text_carriers_converge_on_text() {
+        let ir = ColumnSnapshot {
+            data_type: "text".to_string(),
+            unbounded_text: true,
+            authored_type: true,
+            ..Default::default()
+        };
+        let descriptor = ColumnSnapshot {
+            data_type: "text".to_string(),
+            unbounded_text: true,
+            type_def: Some(serde_json::json!({ "type": "string" })),
+            authored_type: true,
+            ..Default::default()
+        };
+
+        let expected = format!("text {PIN}");
+        assert_eq!(RENDERER.column_type(&ir, false), expected);
+        assert_eq!(RENDERER.column_type(&descriptor, false), expected);
+    }
+
+    #[test]
+    fn a_bounded_string_remains_varchar() {
+        let bounded = ColumnSnapshot {
+            data_type: "character varying(64)".to_string(),
+            authored_type: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            RENDERER.column_type(&bounded, false),
+            format!("VARCHAR(64) {PIN}")
+        );
+    }
+
+    #[test]
+    fn catalog_carrier_preserves_the_old_snapshot_dispatch_domain() {
+        let bounded = ColumnSnapshot {
+            data_type: "character varying(64)".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(RENDERER.column_type(&bounded, false), "VARCHAR(64)");
+
+        let non_text_case_facet = ColumnSnapshot {
+            data_type: "integer".to_string(),
+            case_sensitive: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(RENDERER.column_type(&non_text_case_facet, false), "INT");
+
+        let whitespace_override = ColumnSnapshot {
+            ddl_type_override: Some("  JSON  ".to_string()),
+            authored_type: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            RENDERER.column_type(&whitespace_override, false),
+            "  JSON  "
+        );
+
+        let native_enum = ColumnSnapshot {
+            data_type: "ENUM('open', 'closed')".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            RENDERER.column_type(&native_enum, false),
+            format!("ENUM('open', 'closed') {PIN}")
+        );
     }
 }

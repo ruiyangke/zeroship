@@ -178,6 +178,26 @@ pub struct ColumnSnapshot {
     /// `information_schema.COLUMNS.COLLATION_NAME`). `None` is the
     /// byte-identical default case-sensitive text behavior.
     pub case_sensitive: Option<bool>,
+    /// This authored column is semantically unbounded text.
+    ///
+    /// Emission-only: MySQL must distinguish an authored `t.text()` from a live
+    /// bounded `VARCHAR` whose canonical `data_type` is also `text`. Catalog
+    /// introspection cannot recover this authoring provenance, so the field is
+    /// excluded from `PartialEq` / `Eq` just like `ddl_type_override`.
+    pub unbounded_text: bool,
+    /// Original neutral SDK field-definition tokens for the legacy schema-query
+    /// carrier.
+    ///
+    /// Emission-only. Vendors interpret this value with their own moved token
+    /// table; core never converts it to a vendor spelling. Snapshot-native paths
+    /// leave it `None` and use `data_type` plus semantic facets instead.
+    pub type_def: Option<serde_json::Value>,
+    /// Whether this type came from an authored schema rather than a catalog read.
+    ///
+    /// Emission-only provenance. A backend may need to materialize an authored
+    /// default that its catalog-normalized `data_type` cannot carry. It is excluded
+    /// from `PartialEq` / `Eq`: provenance is not schema shape.
+    pub authored_type: bool,
     /// Exact non-default catalog collation identity for PostgreSQL and SQLite.
     ///
     /// This is deliberately separate from [`Self::case_sensitive`]: `C` and
@@ -313,6 +333,12 @@ impl std::fmt::Debug for ColumnSnapshot {
             .field("id_default", &self.id_default)
             .field("case_sensitive", &self.case_sensitive)
             .field("collation", &self.collation);
+        if self.unbounded_text {
+            s.field("unbounded_text", &self.unbounded_text);
+        }
+        if self.type_def.is_some() {
+            s.field("type_def", &self.type_def);
+        }
         if self.catalog_uuid_format_check {
             s.field("catalog_uuid_format_check", &self.catalog_uuid_format_check);
         }

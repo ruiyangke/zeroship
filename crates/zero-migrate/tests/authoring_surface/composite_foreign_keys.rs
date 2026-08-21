@@ -43,6 +43,17 @@ fn column(
     column
 }
 
+fn bounded_string_column(
+    name: &str,
+    length: u32,
+    nullable: bool,
+    case_sensitive: Option<bool>,
+) -> Value {
+    let mut column = column(name, "text", nullable, None, case_sensitive);
+    column["type"] = json!({ "string": { "length": length } });
+    column
+}
+
 fn type_id(prefix: &str) -> Value {
     json!({ "typeId": { "prefix": prefix } })
 }
@@ -719,7 +730,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
                 "parents",
                 vec![
                     column("tenant_id", "int", false, None, None),
-                    column("code", "text", false, None, Some(true)),
+                    bounded_string_column("code", 64, false, Some(true)),
                 ],
                 Some(&["tenant_id", "code"]),
                 vec![],
@@ -729,7 +740,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
                 "children",
                 vec![
                     column("parent_tenant", "int", true, None, None),
-                    column("parent_code", "text", true, None, Some(true)),
+                    bounded_string_column("parent_code", 64, true, Some(true)),
                 ],
                 None,
                 vec![],

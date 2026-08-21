@@ -8,7 +8,7 @@
 //! That is a property, and this file is the property test. It asks ONE question of a
 //! type: **if I change exactly one field, does `==` notice?** A type that answers "yes"
 //! for every field cannot silently ignore a field added tomorrow. A type that answers
-//! "no" for eleven of twenty-one already does, right now, for eleven fields.
+//! "no" for fourteen of twenty-four already does, right now, for fourteen fields.
 //!
 //! ## Why this is not a compile-error test
 //!
@@ -65,9 +65,12 @@ fn fields_invisible_to_equality<T: Clone + PartialEq + std::fmt::Debug>(
         // "invisible" for the model (a false RED) and as "compared" for the snapshot
         // types (a false GREEN). `Debug` is the only witness available, because
         // `PartialEq` is the thing under test and cannot be used to check its own input.
-        assert_ne!(
-            format!("{base:?}"),
-            format!("{mutated:?}"),
+        let changed = probe.changed.map_or_else(
+            || format!("{base:?}") != format!("{mutated:?}"),
+            |witness| witness(base, &mutated),
+        );
+        assert!(
+            changed,
             "the probe for `{}` did not actually change the value, so it can prove \
              nothing about equality. Fix the mutation, never the assertion.",
             probe.field
@@ -81,13 +84,13 @@ fn fields_invisible_to_equality<T: Clone + PartialEq + std::fmt::Debug>(
 
 /// Every `ColumnSnapshot` field that can differ while `==` reports EQUAL.
 ///
-/// MEASURED, not asserted from the impl body. Eleven of twenty-one. Each one is
+/// MEASURED, not asserted from the impl body. Fourteen of twenty-four. Each one is
 /// individually defensible - every entry has a reason in its own field doc - and the
 /// point of section D is that being individually defensible is not the same as being
 /// manageable, because the list is consulted implicitly by every consumer of column
 /// equality and there are three different questions among them.
 ///
-/// Four of the eleven are VENDOR facts (`catalog_uuid_format_check`,
+/// Four of the fourteen are VENDOR facts (`catalog_uuid_format_check`,
 /// `mysql_default_generated`, `mysql_text_storage`, `mysql_physical_type`). In the
 /// neutral model those are not excluded, they are ABSENT - they live in
 /// `schema_model::VendorFacts` and a neutral comparator cannot name them.
@@ -99,6 +102,9 @@ const SILENTLY_IGNORED_BY_COLUMN_SNAPSHOT_EQ: &[&str] = &[
     "ColumnSnapshot::generated_kind",
     "ColumnSnapshot::catalog_uuid_format_check",
     "ColumnSnapshot::mysql_default_generated",
+    "ColumnSnapshot::unbounded_text",
+    "ColumnSnapshot::type_def",
+    "ColumnSnapshot::authored_type",
     "ColumnSnapshot::mysql_text_storage",
     "ColumnSnapshot::mysql_physical_type",
     "ColumnSnapshot::encryption_sentinel",
@@ -125,6 +131,8 @@ fn model_column_probes() -> ProbeSet<schema_model::Column> {
         value_format,
         id_default,
         case_sensitive,
+        unbounded_text,
+        authored_type,
         collation,
         encryption_sentinel,
         comment_sentinel,
@@ -166,6 +174,12 @@ fn model_column_probes() -> ProbeSet<schema_model::Column> {
     });
     set.probe("Column::case_sensitive", case_sensitive, |c| {
         c.case_sensitive = Some(false);
+    });
+    set.probe("Column::unbounded_text", unbounded_text, |c| {
+        c.unbounded_text = true;
+    });
+    set.probe("Column::authored_type", authored_type, |c| {
+        c.authored_type = true;
     });
     set.probe("Column::collation", collation, |c| {
         c.collation = Some(ColumnCollationSnapshot {
@@ -342,11 +356,11 @@ fn base_constraint() -> schema_model::Constraint {
 /// the reason section D exists. It is pinned in BOTH directions so it cannot drift: a
 /// field added to `ColumnSnapshot::eq` fails here, and so does a field removed from it.
 #[test]
-fn eleven_of_twenty_one_column_snapshot_fields_are_invisible_to_equality_today() {
+fn fourteen_of_twenty_four_column_snapshot_fields_are_invisible_to_equality_today() {
     let set = field_probes::column_snapshot_probes();
     assert_eq!(
         set.probes.len(),
-        21,
+        24,
         "the `ColumnSnapshot` probe list drifted from the type's field count"
     );
 
@@ -370,7 +384,7 @@ fn every_field_of_the_neutral_column_is_compared_by_default() {
     let set = model_column_probes();
     assert_eq!(
         set.probes.len(),
-        16,
+        18,
         "the `Column` probe list drifted from the type's field count"
     );
 

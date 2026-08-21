@@ -1155,20 +1155,19 @@ async fn golden_sqlite_add_column() {
         .expect("add-column diff")
         .all_migrations();
 
-    // plain — unqualified, lowercase `text` (engine `ddl_type`, NOT shared `TEXT`),
-    // NO COMMENT ON COLUMN.
+    // Plain — unqualified SQLite `TEXT`, with no COMMENT ON COLUMN.
     let note = golden_find(&migs, "add_column_accounts_note");
-    assert_eq!(note.up, r#"ALTER TABLE "accounts" ADD COLUMN "note" text"#);
+    assert_eq!(note.up, r#"ALTER TABLE "accounts" ADD COLUMN "note" TEXT"#);
     assert_eq!(
         note.down.as_deref(),
         Some(r#"ALTER TABLE "accounts" DROP COLUMN "note""#)
     );
 
-    // encrypted — inline `/* zero-migrate:enc:… */`, lowercase `bytea`, no COMMENT tail.
+    // Encrypted — SQLite `BLOB` plus the inline encryption sentinel, no COMMENT tail.
     let secret = golden_find(&migs, "add_column_accounts_secret");
     assert_eq!(
         secret.up,
-        r#"ALTER TABLE "accounts" ADD COLUMN "secret" bytea /* zero-migrate:enc:randomised:k1:string */"#,
+        r#"ALTER TABLE "accounts" ADD COLUMN "secret" BLOB /* zero-migrate:enc:randomised:k1:string */"#,
     );
     assert_eq!(
         secret.down.as_deref(),
@@ -1179,7 +1178,7 @@ async fn golden_sqlite_add_column() {
     let masked = golden_find(&migs, "add_column_accounts_ssn_masked");
     assert_eq!(
         masked.up,
-        r#"ALTER TABLE "accounts" ADD COLUMN "ssn_masked" text /* zero-migrate:mask:kind=last4,classification=pii */"#,
+        r#"ALTER TABLE "accounts" ADD COLUMN "ssn_masked" TEXT /* zero-migrate:mask:kind=last4,classification=pii */"#,
     );
     assert_eq!(
         masked.down.as_deref(),

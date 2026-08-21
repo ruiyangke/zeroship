@@ -87,26 +87,23 @@ pub use zero_migrate_ir::dialect::SqlDialect;
 /// The schema/DDL half of the backend CONTRACT, and the spelling primitives its
 /// three vendor implementations call.
 ///
-/// MOVED to `zero-migrate-backend` and re-exported here, so every existing
-/// `schema::query::{SchemaRenderer, quote_ident_for_dialect, def_to_pg_type, …}`
-/// path resolves unchanged.
+/// The contract MOVED to `zero-migrate-backend` and is re-exported here so the
+/// schema composers keep a stable trait path.
 ///
-/// WHAT MOVED IS EXACTLY WHAT THE VENDORS CALL, and no more: the trait, the ONE
-/// identifier forwarder into `render::dml`, the JSON field-shape readers, the two
-/// per-vendor type maps, and the sentinel-comment builders PostgreSQL's
-/// `column_comment_statements` spells. The rest of this 5973-line module — the
+/// The contract crate holds the trait, neutral field-shape readers, and sentinel
+/// builders. Each vendor's type table lives in that vendor crate. The rest of this
+/// module — the
 /// CREATE TABLE composer, the FK/index/constraint builders, the identifier and
 /// reserved-name validators, `canonical_type_for_dialect`,
-/// `def_to_column_type_for_dialect` — stayed, because each of them DECIDES
-/// something about a vendor rather than ASKING a vendor how to write something.
+/// `def_to_column_type_for_dialect` — stays as composition while asking the selected
+/// renderer to spell each neutral column token.
 /// That is the boundary rule `render::backends` states at length, and it is what
 /// kept this move from dragging `render::declarative` and `render::lower` (and
 /// therefore the whole engine) into the leaf.
 pub use zero_migrate_backend::schema::{
-    char_len, decimal_precision_scale, def_case_sensitive, def_to_pg_type,
-    encryption_sentinel_body_for_field, is_schema_metadata_key, mask_sentinel_for_field,
-    mask_sibling_column_for_field, max_length, mysql_base_column_type_for_def,
-    mysql_native_enum_values, SchemaRenderer,
+    char_len, decimal_precision_scale, def_case_sensitive, encryption_sentinel_body_for_field,
+    is_schema_metadata_key, mask_sentinel_for_field, mask_sibling_column_for_field, max_length,
+    string_enum_values, SchemaRenderer,
 };
 
 /// EMIT a schema-layer identifier in `dialect`'s own spelling.
@@ -178,6 +175,33 @@ pub fn build_mask_sentinel_comments(
 /// couplings it deliberately does NOT remove.
 pub use crate::schema::backends::renderer;
 
+/// Wrap neutral SDK field-definition tokens in the snapshot carrier accepted by
+/// every vendor renderer.
+///
+/// This function deliberately emits no SQL type spelling. The raw token object is
+/// preserved for the selected backend to interpret with its own moved table. The
+/// only projected facet is semantic unbounded text, because MySQL cannot infer it
+/// from `data_type == "text"` without confusing a live bounded `VARCHAR`.
+fn column_snapshot_for_type_def(def: &serde_json::Value) -> crate::model::snapshot::ColumnSnapshot {
+    let legacy_bound = def
+        .get("max")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|length| length > 0);
+    let unbounded_text = def.get("type").and_then(serde_json::Value::as_str) == Some("string")
+        && max_length(def).is_none()
+        && !legacy_bound
+        && def.get("encrypted").is_none()
+        && def.get("enum").is_none()
+        && def.get("idPrefix").is_none();
+    crate::model::snapshot::ColumnSnapshot {
+        case_sensitive: def_case_sensitive(def),
+        unbounded_text,
+        type_def: Some(def.clone()),
+        authored_type: true,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod schema_renderer_tests {
     use super::*;
@@ -209,12 +233,12 @@ mod schema_renderer_tests {
         // float, contradicting the documented exact-decimal-text guarantee and
         // diverging from the `t.numeric()` SQLite override (also TEXT).
         let def = serde_json::json!({ "type": "literal", "literalValue": 2.5 });
-        assert_eq!(renderer(SqlDialect::Sqlite).column_type(&def), "TEXT");
+        let render = |dialect, def: &serde_json::Value| {
+            renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
+        };
+        assert_eq!(render(SqlDialect::Sqlite, &def), "TEXT");
         // MySQL keeps exact fixed-precision; PG keeps `numeric`.
-        assert_eq!(
-            renderer(SqlDialect::Mysql).column_type(&def),
-            "DECIMAL(65, 30)"
-        );
+        assert_eq!(render(SqlDialect::Mysql, &def), "DECIMAL(65, 30)");
     }
 
     /// **The three spellings a `number` field with a `precision` facet renders into.**
@@ -246,39 +270,30 @@ mod schema_renderer_tests {
     /// token changed.
     #[test]
     fn a_number_field_carrying_precision_renders_as_a_decimal_on_every_dialect() {
+        let render = |dialect, def: &serde_json::Value| {
+            renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
+        };
         let decimal = serde_json::json!({ "type": "number", "precision": 20, "scale": 4 });
-        assert_eq!(
-            renderer(SqlDialect::Postgres).column_type(&decimal),
-            "numeric(20, 4)"
-        );
-        assert_eq!(renderer(SqlDialect::Sqlite).column_type(&decimal), "TEXT");
-        assert_eq!(
-            renderer(SqlDialect::Mysql).column_type(&decimal),
-            "DECIMAL(20, 4)"
-        );
+        assert_eq!(render(SqlDialect::Postgres, &decimal), "numeric(20, 4)");
+        assert_eq!(render(SqlDialect::Sqlite, &decimal), "TEXT");
+        assert_eq!(render(SqlDialect::Mysql, &decimal), "DECIMAL(20, 4)");
 
         // `scale` may be absent; `precision` alone still means fixed-precision.
         let scaleless = serde_json::json!({ "type": "number", "precision": 20 });
-        assert_eq!(
-            renderer(SqlDialect::Mysql).column_type(&scaleless),
-            "DECIMAL(20, 0)"
-        );
+        assert_eq!(render(SqlDialect::Mysql, &scaleless), "DECIMAL(20, 0)");
 
         // The float half, unchanged. A `number` with no precision is `t.number()`, an
         // IEEE-754 double, and narrowing it to NUMERIC would break the decode path
         // `def_to_pg_type`'s own doc-comment warns about.
         let float = serde_json::json!({ "type": "number" });
-        assert_eq!(
-            renderer(SqlDialect::Postgres).column_type(&float),
-            "DOUBLE PRECISION"
-        );
-        assert_eq!(renderer(SqlDialect::Sqlite).column_type(&float), "REAL");
-        assert_eq!(renderer(SqlDialect::Mysql).column_type(&float), "DOUBLE");
+        assert_eq!(render(SqlDialect::Postgres, &float), "DOUBLE PRECISION");
+        assert_eq!(render(SqlDialect::Sqlite, &float), "REAL");
+        assert_eq!(render(SqlDialect::Mysql, &float), "DOUBLE");
 
         // A zero precision is not a type any dialect accepts, so it falls back to the
         // float spelling rather than emitting DDL no server would take.
         let malformed = serde_json::json!({ "type": "number", "precision": 0, "scale": 4 });
-        assert_eq!(renderer(SqlDialect::Sqlite).column_type(&malformed), "REAL");
+        assert_eq!(render(SqlDialect::Sqlite, &malformed), "REAL");
     }
 
     #[test]
@@ -1173,7 +1188,7 @@ fn injected_column_type(
             )))
         }
     };
-    Ok(backend.column_type(&def))
+    Ok(backend.column_type(&column_snapshot_for_type_def(&def), false))
 }
 
 /// Render the active policy's canonical injected indexes. Physical names are
@@ -1445,7 +1460,8 @@ pub fn build_add_column(
     validate_schema(app_id)?;
 
     let table = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
-    let pg_type = def_to_pg_type(def);
+    let pg_type =
+        renderer(SqlDialect::Postgres).column_type(&column_snapshot_for_type_def(def), false);
     let constraints = def_to_constraints(field, def);
 
     let mut sql = format!(
@@ -2130,7 +2146,7 @@ fn field_to_column_for_dialect(
     } else {
         ""
     };
-    let sql_type = backend.column_type(def);
+    let sql_type = backend.column_type(&column_snapshot_for_type_def(def), false);
     let constraints = def_to_constraints_for_dialect(field, def, dialect, backend);
     // The sentinel comment (when present) sits between the type and the
     // constraints so the parsed shape is `"<col>" BYTEA /* zero-migrate:enc:... */
@@ -2159,7 +2175,7 @@ fn field_to_column_for_dialect(
 /// `DOUBLE PRECISION`, `TIMESTAMPTZ`, …); callers that need the
 /// `information_schema.data_type` spelling translate it themselves.
 pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDialect) -> String {
-    renderer(dialect).column_type(def)
+    renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
 }
 
 fn parse_character_type_len(data_type: &str) -> Option<u64> {
@@ -2640,7 +2656,7 @@ fn def_to_constraints_for_dialect(
     }
 
     // Enum constraint — supports both string and numeric values
-    if matches!(dialect, SqlDialect::Mysql) && mysql_native_enum_values(def).is_some() {
+    if matches!(dialect, SqlDialect::Mysql) && string_enum_values(def).is_some() {
         return parts.join(" ");
     }
 
@@ -3515,14 +3531,15 @@ columns = [
     // FK column type cascade (TEXT)
     // -----------------------------------------------------------------
 
-    /// `def_to_pg_type` returns TEXT for a ref field so the FK column
+    /// The PostgreSQL renderer returns TEXT for a ref field so the FK column
     /// matches the `id TEXT PRIMARY KEY` shape.
     /// Pin via the single-arm helper so a future regression that
     /// switches the arm back to INTEGER trips here.
     #[test]
     fn fk_ref_field_emits_text_column_type_pg() {
         let def = json!({"type": "ref", "refTarget": "users"});
-        let pg_type = super::def_to_pg_type(&def);
+        let pg_type = renderer(SqlDialect::Postgres)
+            .column_type(&super::column_snapshot_for_type_def(&def), false);
         assert_eq!(
             pg_type, "TEXT",
             "ref column type must cascade to TEXT to match the id TEXT PRIMARY KEY"

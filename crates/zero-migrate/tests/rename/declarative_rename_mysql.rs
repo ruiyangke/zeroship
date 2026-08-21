@@ -125,6 +125,10 @@ fn people(email_column: &str, with_added: bool) -> CollectionDescriptor {
         FieldDescriptor {
             name: "id".into(),
             ty: "string".into(),
+            // This column backs `people_id_key`. A widthless string is unbounded
+            // text, which MySQL cannot key without a prefix length (error 1170).
+            // Preserve the fixture's former physical width explicitly.
+            max_length: Some(191),
             required: true,
             ..Default::default()
         },

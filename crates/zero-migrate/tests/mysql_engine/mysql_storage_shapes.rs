@@ -19,12 +19,18 @@
 //! expressible on the descriptor path and is covered by the agreement test
 //! beside the renderer.
 
+use std::collections::HashMap;
+
+use crate::support;
 use zero_migrate::model::ir::{
-    ColType, EmptyContainerKind, IndexElement, IrColumn, IrDefault, IrFlagsOverride, IrScalar, Op,
-    ValueFormat,
+    AlterPrimaryKeyAction, ColType, ColumnReference, EmptyContainerKind, IndexElement, IrColumn,
+    IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride, IrIndex, IrScalar, Op, ValueFormat,
 };
 use zero_migrate::model::validate::{validate_ir, Dialect};
-use zero_migrate::{MigrationIr, CURRENT_IR_VERSION};
+use zero_migrate::{
+    desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
+    IndexDescriptor, MigrationIr, SchemaSnapshot, SqlDialect, CURRENT_IR_VERSION,
+};
 
 const OWNER: &str = "app_mysql_storage";
 
@@ -98,6 +104,75 @@ fn create_index(table: &str, name: &str, column: &str) -> Op {
         schema: None,
         existence_guard: None,
     }
+}
+
+fn key_element(name: &str) -> IndexElement {
+    IndexElement::Column {
+        name: name.to_string(),
+        order: None,
+        opclass: None,
+        collation: None,
+    }
+}
+
+fn inline_index(name: &str, column: &str) -> IrIndex {
+    IrIndex {
+        name: Some(name.to_string()),
+        columns: vec![key_element(column)],
+        unique: None,
+        using: None,
+        r#where: None,
+        include: vec![],
+        with: None,
+        only: None,
+        nulls_not_distinct: None,
+    }
+}
+
+fn unique_constraint(name: &str, column: &str) -> IrConstraint {
+    IrConstraint {
+        name: Some(name.to_string()),
+        kind: IrConstraintKind::Unique {
+            columns: vec![column.to_string()],
+        },
+    }
+}
+
+fn fk_constraint(
+    name: &str,
+    column: &str,
+    references_table: &str,
+    references_column: &str,
+) -> IrConstraint {
+    IrConstraint {
+        name: Some(name.to_string()),
+        kind: IrConstraintKind::Fk {
+            columns: vec![column.to_string()],
+            references_table: references_table.to_string(),
+            references_columns: vec![references_column.to_string()],
+            on_delete: None,
+            on_update: None,
+            deferrable: None,
+            initially_deferred: None,
+            not_valid: None,
+        },
+    }
+}
+
+fn assert_mysql_key_refusal(migration: &MigrationIr, position: &str, column: &str) {
+    let rendered = refused(
+        migration,
+        Dialect::Mysql,
+        "MySQL 1170: an unbounded TEXT key needs a prefix length",
+    );
+    assert!(
+        rendered.contains(position),
+        "the refusal should name the key carrier {position:?}: {rendered}"
+    );
+    assert!(
+        rendered.contains(column),
+        "the refusal should name the keyed column {column:?}: {rendered}"
+    );
 }
 
 fn refused(migration: &MigrationIr, dialect: Dialect, what: &str) -> String {
@@ -259,4 +334,255 @@ fn mysql_accepts_an_index_over_an_id_prefixed_text_column() {
     ]);
 
     accepted(&migration, Dialect::Mysql, "an id-prefixed text index");
+}
+
+#[test]
+fn mysql_refuses_a_primary_key_over_unbounded_text() {
+    let mut table = create_table("documents", vec![column("slug", ColType::Text)]);
+    let Op::CreateTable { primary_key, .. } = &mut table else {
+        unreachable!("the helper returns createTable")
+    };
+    *primary_key = Some(vec!["slug".to_string()]);
+
+    assert_mysql_key_refusal(&ir(vec![table]), "createTable.primaryKey", "documents.slug");
+}
+
+#[test]
+fn mysql_refuses_a_column_unique_key_over_unbounded_text() {
+    let mut slug = column("slug", ColType::Text);
+    slug.unique = Some(true);
+
+    assert_mysql_key_refusal(
+        &ir(vec![create_table("documents", vec![slug])]),
+        "createTable column unique",
+        "documents.slug",
+    );
+}
+
+#[test]
+fn mysql_refuses_an_inline_index_over_unbounded_text() {
+    let mut table = create_table("documents", vec![column("body", ColType::Text)]);
+    let Op::CreateTable { indexes, .. } = &mut table else {
+        unreachable!("the helper returns createTable")
+    };
+    indexes.push(inline_index("documents_body_idx", "body"));
+
+    assert_mysql_key_refusal(&ir(vec![table]), "createTable.indexes", "documents.body");
+}
+
+#[test]
+fn mysql_refuses_a_table_unique_constraint_over_unbounded_text() {
+    let mut table = create_table("documents", vec![column("slug", ColType::Text)]);
+    let Op::CreateTable { constraints, .. } = &mut table else {
+        unreachable!("the helper returns createTable")
+    };
+    constraints.push(unique_constraint("documents_slug_key", "slug"));
+
+    assert_mysql_key_refusal(
+        &ir(vec![table]),
+        "createTable.constraints unique",
+        "documents.slug",
+    );
+}
+
+#[test]
+fn mysql_refuses_an_alter_primary_key_target_over_unbounded_text() {
+    let migration = ir(vec![
+        create_table("documents", vec![column("slug", ColType::Text)]),
+        Op::AlterPrimaryKey {
+            table: "documents".to_string(),
+            action: AlterPrimaryKeyAction::Add {
+                columns: vec!["slug".to_string()],
+            },
+            schema: None,
+        },
+    ]);
+
+    assert_mysql_key_refusal(&migration, "alterPrimaryKey target", "documents.slug");
+}
+
+#[test]
+fn mysql_refuses_a_column_reference_that_would_synthesize_a_text_key() {
+    let mut parent_id = column("id", ColType::String { length: 64 });
+    parent_id.unique = Some(true);
+    let mut parent_id_ref = column("parent_id", ColType::Text);
+    parent_id_ref.references = Some(ColumnReference {
+        table: "parents".to_string(),
+        column: "id".to_string(),
+        on_delete: None,
+        on_update: None,
+        name: Some("children_parent_fkey".to_string()),
+    });
+    let migration = ir(vec![
+        create_table("parents", vec![parent_id]),
+        create_table("children", vec![parent_id_ref]),
+    ]);
+
+    assert_mysql_key_refusal(
+        &migration,
+        "createTable column reference local key",
+        "children.parent_id",
+    );
+}
+
+#[test]
+fn mysql_refuses_an_inline_foreign_key_that_would_synthesize_a_text_key() {
+    let mut parent_id = column("id", ColType::String { length: 64 });
+    parent_id.unique = Some(true);
+    let mut child = create_table("children", vec![column("parent_id", ColType::Text)]);
+    let Op::CreateTable { constraints, .. } = &mut child else {
+        unreachable!("the helper returns createTable")
+    };
+    constraints.push(fk_constraint(
+        "children_parent_fkey",
+        "parent_id",
+        "parents",
+        "id",
+    ));
+    let migration = ir(vec![create_table("parents", vec![parent_id]), child]);
+
+    assert_mysql_key_refusal(
+        &migration,
+        "createTable.constraints foreign key local key",
+        "children.parent_id",
+    );
+}
+
+#[test]
+fn mysql_refuses_an_added_foreign_key_that_would_synthesize_a_text_key() {
+    let mut parent_id = column("id", ColType::String { length: 64 });
+    parent_id.unique = Some(true);
+    let migration = ir(vec![
+        create_table("parents", vec![parent_id]),
+        create_table("children", vec![column("parent_id", ColType::Text)]),
+        Op::AddConstraint {
+            table: "children".to_string(),
+            constraint: fk_constraint("children_parent_fkey", "parent_id", "parents", "id"),
+            schema: None,
+            existence_guard: None,
+        },
+    ]);
+
+    assert_mysql_key_refusal(
+        &migration,
+        "addConstraint foreign key local key",
+        "children.parent_id",
+    );
+}
+
+#[test]
+fn mysql_refuses_a_foreign_key_target_over_unbounded_text() {
+    let mut target_slug = column("slug", ColType::Text);
+    target_slug.unique = Some(true);
+    let mut child = create_table(
+        "children",
+        vec![column("parent_slug", ColType::String { length: 64 })],
+    );
+    let Op::CreateTable { constraints, .. } = &mut child else {
+        unreachable!("the helper returns createTable")
+    };
+    constraints.push(fk_constraint(
+        "children_parent_fkey",
+        "parent_slug",
+        "parents",
+        "slug",
+    ));
+    // Put the FK first so the target-key refusal is the first MySQL key-storage
+    // verdict; declaration collection is deliberately two-pass and still sees the
+    // later parent table.
+    let migration = ir(vec![child, create_table("parents", vec![target_slug])]);
+
+    assert_mysql_key_refusal(
+        &migration,
+        "createTable.constraints foreign key target key",
+        "parents.slug",
+    );
+}
+
+#[test]
+fn mysql_declarative_refuses_the_live_fixture_shape_of_a_widthless_indexed_string() {
+    let descriptor = CollectionDescriptor {
+        name: "people".to_string(),
+        owner_app: OWNER.to_string(),
+        fields: vec![FieldDescriptor {
+            name: "id".to_string(),
+            ty: "string".to_string(),
+            required: true,
+            ..FieldDescriptor::default()
+        }],
+        indexes: vec![IndexDescriptor {
+            name: "people_id_key".to_string(),
+            columns: vec!["id".to_string()],
+            unique: true,
+        }],
+        runtime_options: Default::default(),
+    };
+    let policy = support::no_inject("mysql_key_gate");
+    let desired =
+        desired_snapshot_for_dialect("mysql_key_gate", &[descriptor], SqlDialect::Mysql, &policy)
+            .expect("the descriptor compiles before the storage gate runs");
+    let error = DeclarativeAuthor::new_for_dialect("mysql_key_gate", OWNER, SqlDialect::Mysql)
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &policy,
+        )
+        .expect_err("a widthless string renders TEXT and cannot back a MySQL index");
+    let rendered = format!("{error}");
+    assert!(rendered.contains("people_id_key"), "{rendered}");
+    assert!(rendered.contains("people.id"), "{rendered}");
+}
+
+#[test]
+fn mysql_declarative_refuses_an_implicit_foreign_key_index_over_widthless_string() {
+    let parent = CollectionDescriptor {
+        name: "parents".to_string(),
+        owner_app: OWNER.to_string(),
+        fields: vec![FieldDescriptor {
+            name: "id".to_string(),
+            ty: "string".to_string(),
+            max_length: Some(64),
+            required: true,
+            unique: true,
+            ..FieldDescriptor::default()
+        }],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    };
+    let child = CollectionDescriptor {
+        name: "children".to_string(),
+        owner_app: OWNER.to_string(),
+        fields: vec![FieldDescriptor {
+            name: "parent_id".to_string(),
+            ty: "string".to_string(),
+            required: true,
+            references: Some("parents".to_string()),
+            reference_column: Some("id".to_string()),
+            ..FieldDescriptor::default()
+        }],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    };
+    let policy = support::no_inject("mysql_key_gate");
+    let desired = desired_snapshot_for_dialect(
+        "mysql_key_gate",
+        &[parent, child],
+        SqlDialect::Mysql,
+        &policy,
+    )
+    .expect("the descriptors compile before the storage gate runs");
+    let error = DeclarativeAuthor::new_for_dialect("mysql_key_gate", OWNER, SqlDialect::Mysql)
+        .diff(
+            &desired,
+            &SchemaSnapshot::default(),
+            &HashMap::new(),
+            &[],
+            &policy,
+        )
+        .expect_err("InnoDB would synthesize an illegal index over the TEXT child column");
+    let rendered = format!("{error}");
+    assert!(rendered.contains("foreign key"), "{rendered}");
+    assert!(rendered.contains("children.parent_id"), "{rendered}");
 }

@@ -33,6 +33,8 @@ pub struct Probe<T> {
     pub field: &'static str,
     /// Applies the mutation in place.
     pub mutate: fn(&mut T),
+    /// Optional field-level witness for values deliberately omitted from `Debug`.
+    pub changed: Option<fn(&T, &T) -> bool>,
 }
 
 /// The accumulator. Every binding of an exhaustive destructure has to reach
@@ -53,7 +55,27 @@ impl<T> ProbeSet<T> {
     /// purpose: passing it is the proof that the binding was routed, exactly as
     /// `support::carriers`' three classifiers demand.
     pub fn probe<B>(&mut self, field: &'static str, _binding: B, mutate: fn(&mut T)) {
-        self.probes.push(Probe { field, mutate });
+        self.probes.push(Probe {
+            field,
+            mutate,
+            changed: None,
+        });
+    }
+
+    /// Declare a field whose manual `Debug` intentionally omits it, with an
+    /// independent witness that the probe mutation changed that field.
+    pub fn probe_with_witness<B>(
+        &mut self,
+        field: &'static str,
+        _binding: B,
+        mutate: fn(&mut T),
+        changed: fn(&T, &T) -> bool,
+    ) {
+        self.probes.push(Probe {
+            field,
+            mutate,
+            changed: Some(changed),
+        });
     }
 }
 
@@ -110,6 +132,9 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
         id_default,
         mysql_default_generated,
         case_sensitive,
+        unbounded_text,
+        type_def,
+        authored_type,
         collation,
         mysql_text_storage,
         mysql_physical_type,
@@ -171,6 +196,18 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
     set.probe("ColumnSnapshot::case_sensitive", case_sensitive, |c| {
         c.case_sensitive = Some(false);
     });
+    set.probe("ColumnSnapshot::unbounded_text", unbounded_text, |c| {
+        c.unbounded_text = true;
+    });
+    set.probe("ColumnSnapshot::type_def", type_def, |c| {
+        c.type_def = Some(serde_json::json!({ "type": "string" }));
+    });
+    set.probe_with_witness(
+        "ColumnSnapshot::authored_type",
+        authored_type,
+        |c| c.authored_type = true,
+        |base, mutated| base.authored_type != mutated.authored_type,
+    );
     set.probe("ColumnSnapshot::collation", collation, |c| {
         c.collation = Some(ColumnCollationSnapshot {
             schema: None,

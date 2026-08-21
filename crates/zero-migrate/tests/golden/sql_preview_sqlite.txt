@@ -9,11 +9,11 @@ CREATE INDEX IF NOT EXISTS "codes_updated_at_idx" ON "codes" ("updated_at");
 
 CREATE UNIQUE INDEX IF NOT EXISTS "codes_code_key" ON "codes" ("code");
 
-ALTER TABLE "codes" ADD COLUMN "note" text;
+ALTER TABLE "codes" ADD COLUMN "note" TEXT;
 
 -- [runtime-resolved] addColumn "codes"."flag" (ifNotExists): catalog-probed at apply (run / satisfied-noop / fail-drift); the statement below is the bare DDL the apply runs when the probe says run
 
-ALTER TABLE "codes" ADD COLUMN "flag" boolean;
+ALTER TABLE "codes" ADD COLUMN "flag" INTEGER;
 
 CREATE INDEX IF NOT EXISTS "codes_label_idx" ON "codes" ("label");
 

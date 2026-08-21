@@ -22,18 +22,12 @@
 //! (`validate_ident` / `validate_type`, mirroring
 //! [`crate::render::expand_contract`]) AND re-checked by the guard as the second line.
 //!
-//! # Type-mapping provenance (shared-truth-to-extract-later)
+//! # Type-mapping provenance
 //!
-//! The DSL-type → Postgres-type table here is **replicated** from the runtime
-//! plugin's `def_to_pg_type` / `def_to_column_type_for_dialect`, which live in a
-//! separate repository and are not reachable from this tree. It is duplicated
-//! *deliberately*:
-//! `zero-migrate` and `plugin-db` are different trust domains and the migrate
-//! crate must not depend on the runtime plugin. The shared vocabulary should be
-//! lifted into a small shared crate later; until then the
-//! [`desired_snapshot`]-round-trips-to-live test
-//! (`tests/pg_declarative.rs`, `declarative_deploy_creates_table_and_round_trips_with_zero_drift`) is
-//! the guard against the two copies drifting apart.
+//! This module carries neutral column tokens and facets into [`ColumnSnapshot`].
+//! PostgreSQL, SQLite, and MySQL spell those snapshots in their own schema-renderer
+//! crates; core contains no shared fallback type table. End-to-end declarative
+//! round-trip tests guard each vendor mapping against its live catalog.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -61,8 +55,7 @@ use crate::IndexSortOrder;
 // call every one of them, so a shared helper cannot stay above the vendors.
 use zero_migrate_backend::ddl::{
     default_clause, generated_clause, inline_checks_clause, inline_pk_for_column, null_clause,
-    primary_key_clause, should_render_table_pk, sqlite_auto_increment_identity_pk,
-    CreateTableRequest, DdlEmitter, GENERATED_PREFIX,
+    primary_key_clause, should_render_table_pk, CreateTableRequest, DdlEmitter, GENERATED_PREFIX,
 };
 
 /// The ONE dialect identity of every MySQL-owned render path in this module — the
@@ -1234,53 +1227,6 @@ pub(crate) fn pg_identity_type(data_type: &str) -> bool {
     )
 }
 
-/// The column type a snapshot renders as, for one dialect.
-///
-/// On MySQL the result is passed through [`mysql_pin_enum_collation`], because an
-/// `ENUM(...)` reaches this function by three routes that share no other code - a
-/// named-type `ddl_type_override` set by the lower and the fold, an `enum(...)`
-/// `data_type` read back from `information_schema.COLUMNS`, and (separately) a CHECK
-/// body folded into a native type inside
-/// [`MysqlEmitter::create_table`]. Pinning at
-/// each producer would be three copies of one decision; pinning here is one.
-pub(crate) fn column_type_for_render(
-    c: &ColumnSnapshot,
-    dialect: SqlDialect,
-    inline_pk: bool,
-) -> String {
-    let rendered = column_type_for_render_uncollated(c, dialect, inline_pk);
-    if matches!(dialect, SqlDialect::Mysql) {
-        return mysql_pin_enum_collation(&rendered, c.case_sensitive);
-    }
-    rendered
-}
-
-fn column_type_for_render_uncollated(
-    c: &ColumnSnapshot,
-    dialect: SqlDialect,
-    inline_pk: bool,
-) -> String {
-    if let Some(ty) = &c.ddl_type_override {
-        ty.clone()
-    } else if matches!(c.case_sensitive, Some(false)) && c.data_type.eq_ignore_ascii_case("text") {
-        match dialect {
-            SqlDialect::Postgres => "public.citext".to_string(),
-            SqlDialect::Sqlite => "text COLLATE NOCASE".to_string(),
-            SqlDialect::Mysql => "text".to_string(),
-        }
-    } else if matches!(dialect, SqlDialect::Sqlite)
-        && sqlite_auto_increment_identity_pk(c, inline_pk)
-    {
-        "INTEGER".to_string()
-    } else if matches!(dialect, SqlDialect::Sqlite) {
-        sqlite_ddl_type(&c.data_type).to_string()
-    } else if matches!(dialect, SqlDialect::Mysql) {
-        mysql_ddl_type(&c.data_type)
-    } else {
-        ddl_type(&c.data_type).to_string()
-    }
-}
-
 // `inline_checks_clause` MOVED to `zero_migrate_backend::ddl`.
 
 // ── MySQL's `CHARACTER SET` / `COLLATE` spelling MOVED to `zero-migrate-mysql`.
@@ -1291,12 +1237,7 @@ fn column_type_for_render_uncollated(
 // `utf8mb4_0900_ai_ci` is how MySQL WRITES case sensitivity, so by this crate's own
 // boundary rule it is spelling and belongs in the vendor.
 //
-// `mysql_pin_enum_collation` below stayed: it is the differ deciding WHICH rendered
-// types get pinned, which is a decision about a vendor rather than a vendor's
-// spelling.
-use zero_migrate_mysql::collation::{
-    mysql_collation_clause, mysql_pin_collation, mysql_type_takes_collation,
-};
+use zero_migrate_mysql::collation::mysql_collation_clause;
 
 /// The rendered MySQL type with any engine-chosen `CHARACTER SET … COLLATE …`
 /// suffix removed — the spelling a RETYPE restates.
@@ -1322,128 +1263,12 @@ pub(crate) fn mysql_type_without_collation(rendered: &str) -> &str {
     rendered
 }
 
-/// Pin an explicit collation onto a rendered MySQL `ENUM(...)` spelling.
-///
-/// **Why `ENUM` needs this and why it is not in [`mysql_type_takes_collation`].**
-/// MySQL treats `ENUM` as a CHARACTER type: member lookup, comparison and uniqueness
-/// all run under the column's collation. An `ENUM` emitted with no collation inherits
-/// the table default, which on a stock MySQL 8 server is `utf8mb4_0900_ai_ci` -
-/// case-INSENSITIVE - and that breaks the engine's stated promise three ways, all
-/// MEASURED against MySQL 8.4.11 with `@@collation_server = utf8mb4_0900_ai_ci`:
-///
-/// - `INSERT ... 'ACTIVE'` into `ENUM('active','archived')` SUCCEEDS and silently
-///   stores `'active'`, where PostgreSQL raises `22P02`.
-/// - `ENUM('active','Active')` is REFUSED outright (`ERROR 1291 ... has duplicated
-///   value 'active' in ENUM`) while PostgreSQL and SQLite accept the same authored
-///   members, so the schema cannot be deployed on MySQL at all.
-/// - Structural drift never converges: the catalog reports `_ai_ci`, which normalizes
-///   to `case_sensitive: Some(false)`, against a desired snapshot that says nothing.
-///
-/// [`mysql_type_takes_collation`] cannot host this. It is fed
-/// [`mysql_base_column_type`], whose input is always the PostgreSQL-mapped
-/// `field_data_type` - an enum column arrives there as `text`, never as `ENUM(...)`.
-/// The `ENUM(...)` spelling reaches rendering by three OTHER routes (a named-type
-/// `ddl_type_override` from the lower and the fold, an `enum(...)` `data_type` read
-/// back from `information_schema.COLUMNS`, and a CHECK body folded back into a native
-/// type by [`mysql_enum_type_from_check`]), and [`column_type_for_render`] is the one
-/// choke point all of them pass through.
-///
-/// Idempotent: a spelling that already carries a `COLLATE` is returned untouched, so
-/// re-rendering a column cannot stack two clauses.
-///
-/// # What an ALREADY-DEPLOYED table experiences: nothing, and that is the caveat
-///
-/// This changes what the engine EMITS, so it reaches new `CREATE TABLE` / `ADD COLUMN`
-/// statements only. A table deployed before it keeps its inherited `_ai_ci` enum and
-/// keeps reporting the `case_sensitive expected "" actual "false"` drift line, because
-/// the engine has no path that would fix it: the declarative differ refuses a MySQL
-/// column type change outright, and `SetColumnType` to a named enum on MySQL is
-/// `NamedTypeUnsupported { reason: "unreachable use-site" }`. Closing that gap is a
-/// separate change to the MySQL alter lane.
-///
-/// The manual repair was MEASURED rather than assumed, on MySQL 8.4.11, and it is
-/// cheaper than it looks:
-///
-/// ```sql
-/// ALTER TABLE t MODIFY c ENUM(...) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs
-/// ```
-///
-/// succeeds under `ALGORITHM=INSTANT`, copies no rows and leaves every stored value
-/// byte-identical - MySQL stores an enum as an index into the member list, so
-/// tightening the collation cannot reinterpret the data. What it CANNOT undo is the
-/// coercion that already happened: a row inserted as `'ARCHIVED'` under `_ai_ci` was
-/// stored as `'archived'` at INSERT time, and the original case is gone before any
-/// ALTER runs.
-pub(crate) fn mysql_pin_enum_collation(rendered: &str, case_sensitive: Option<bool>) -> String {
-    if !rendered.trim().to_ascii_lowercase().starts_with("enum(") {
-        return rendered.to_string();
-    }
-    mysql_pin_collation(rendered, case_sensitive)
-}
-
-/// The full MySQL column type (base spelling + an explicit collation) for a field,
-/// or `None` for a non-character column (which needs no override and renders via
-/// [`mysql_ddl_type`]). A `caseSensitive: false` facet or an unbounded `t.text()`
-/// renders `TEXT`; every character type pins an explicit collation so string
-/// comparison is case-SENSITIVE by default (matching Postgres/SQLite) unless
-/// `caseSensitive: false` asks for a case-insensitive collation. Typed-id columns
-/// overwrite this with their own `ascii_bin` via value-format metadata.
-fn mysql_type_override_with_collation(f: &FieldDescriptor, data_type: &str) -> Option<String> {
-    let case_insensitive = matches!(f.case_sensitive, Some(false));
-    let base = mysql_base_column_type(f, data_type);
-    if !mysql_type_takes_collation(&base) {
-        return None;
-    }
-    let collation = mysql_collation_clause(if case_insensitive { Some(false) } else { None });
-    Some(format!("{base} {collation}"))
-}
-
-/// The MySQL base column type a field renders as, before any collation suffix.
-///
-/// This is the ONE MySQL storage decision. The DDL renderer spells columns from
-/// it ([`mysql_type_override_with_collation`]), and the load-and-validate gate
-/// refuses MySQL-fatal column shapes from it
-/// (`crate::model::validate`), so a shape the renderer emits and a shape the
-/// validator judges can never drift apart. A second copy of this decision in the
-/// validator is what let `text NOT NULL DEFAULT 'new'` render and lint green.
-///
-/// A `caseSensitive: false` facet or an unbounded `t.text()` renders a bare
-/// `TEXT`; everything else takes the plain type map. The result keys on RENDERED
-/// storage rather than on the authored type name.
-///
-/// **The `caseSensitive: false` arm is read BEFORE the type map and would drop a
-/// declared width, and nothing in this function stops it.** What stops it is one
-/// rule two modules away: `crate::model::validate::validate_column_facets` refuses
-/// `caseSensitive: false` on any column that is not a `ColType::Text`, for every
-/// dialect, and [`FieldDescriptor::max_length`] is `Some` only for
-/// `ColType::String { length }` (`crate::render::lower::ir_column_to_field`). A
-/// field carrying both a width and the facet therefore cannot be authored;
-/// `t.char({ length })` has no `caseSensitive` option to pair with `char_len` at
-/// all. See `mysql_storage_agreement_tests`, which pins that invariant - this doc
-/// used to assert the opposite as fact, and it has since sent more than one reader
-/// hunting a live width-loss defect that no authored schema can reach.
-///
-/// Measured rather than read off the call graph: a tripwire panicking on this arm
-/// whenever a width was present, run over the whole Rust suite against live
-/// PostgreSQL and MySQL, was tripped by exactly ONE thing - the synthetic
-/// `label_ci` fixture in `mysql_storage_agreement_tests` that exists to document
-/// the shape. The same tripwire widened to ANY `caseSensitive: false` column was
-/// tripped by fourteen tests, every one of them widthless, so the arm is
-/// unreachable-with-a-width rather than merely uncovered.
-pub(crate) fn mysql_base_column_type(f: &FieldDescriptor, data_type: &str) -> String {
-    if matches!(f.case_sensitive, Some(false)) || f.unbounded_text {
-        "text".to_string()
-    } else {
-        mysql_ddl_type(data_type)
-    }
-}
-
 /// The MySQL storage families whose DDL rules differ from every other column.
 ///
 /// MySQL 8 refuses a bare literal `DEFAULT` on all four, and refuses a key over
-/// [`Self::Text`] / [`Self::Blob`] with no prefix length (error 1170). Classified
-/// from the spelling [`mysql_base_column_type`] produces, so the classification
-/// follows the renderer rather than the authored type name.
+/// [`Self::Text`] / [`Self::Blob`] with no prefix length (error 1170). Callers
+/// classify the MySQL renderer's output, so this follows physical storage rather
+/// than guessing from an authored type name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MysqlStorage {
     /// The `TEXT` family.
@@ -1495,61 +1320,6 @@ impl MysqlStorage {
             Self::Geometry => "GEOMETRY",
             Self::Other => "other",
         }
-    }
-}
-
-fn mysql_ddl_type(data_type: &str) -> String {
-    let lower = data_type.trim().to_ascii_lowercase();
-    if lower.starts_with("enum(") {
-        return data_type.to_string();
-    }
-    if lower.starts_with("vector(") {
-        return "BLOB".to_string();
-    }
-    if let Some(len) = char_len_from_data_type(&lower) {
-        return format!("CHAR({len})");
-    }
-    if let Some(len) = varchar_len_from_data_type(&lower) {
-        return format!("VARCHAR({len})");
-    }
-    match lower.as_str() {
-        "text" => "VARCHAR(191)".to_string(),
-        "double precision" | "float8" => "DOUBLE".to_string(),
-        "real" | "float4" => "FLOAT".to_string(),
-        "boolean" => "TINYINT(1)".to_string(),
-        "timestamp with time zone" | "timestamptz" => "DATETIME(6)".to_string(),
-        "date" => "DATE".to_string(),
-        "jsonb" | "json" => "JSON".to_string(),
-        "text[]" => "JSON".to_string(),
-        "bytea" | "blob" => "LONGBLOB".to_string(),
-        "numeric" | "decimal" => "DECIMAL(65, 30)".to_string(),
-        "integer" | "int" | "int4" => "INT".to_string(),
-        "smallint" | "int2" => "SMALLINT".to_string(),
-        "bigint" | "int8" => "BIGINT".to_string(),
-        "inet" => "VARCHAR(43)".to_string(),
-        "geography(point, 4326)" | "geography(POINT, 4326)" => "POINT SRID 4326".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn sqlite_ddl_type(data_type: &str) -> &'static str {
-    let lower = data_type.to_ascii_lowercase();
-    if lower.starts_with("vector(") || lower.starts_with("geography(") {
-        return "BLOB";
-    }
-    match lower.as_str() {
-        "integer" | "int" | "int4" | "smallint" | "int2" | "bigint" | "int8" => "INTEGER",
-        "real" | "double precision" => "REAL",
-        // `numeric`/`decimal` are EXACT types. SQLite has no fixed-precision decimal
-        // storage class; REAL (or NUMERIC) affinity coerces a sufficiently wide
-        // decimal through a binary float, silently losing precision and diverging
-        // from the documented "exact decimal text" guarantee (dialects.md). Store as
-        // TEXT affinity — byte-for-byte decimal text — matching the typed
-        // `ColType::Decimal` SQLite override.
-        "numeric" | "decimal" => "TEXT",
-        "bytea" | "blob" | "geography(point, 4326)" => "BLOB",
-        "boolean" => "INTEGER",
-        _ => "TEXT",
     }
 }
 
@@ -3541,25 +3311,24 @@ pub(crate) fn column_snapshot_for_field(
     } else {
         None
     };
-    // On MySQL, every character column carries an EXPLICIT collation so that string
-    // equality and uniqueness match Postgres/SQLite (case-SENSITIVE) instead of
-    // depending on the MySQL server default (typically `utf8mb4_0900_ai_ci`, which is
-    // case-INSENSITIVE). The base spelling also folds in the case-insensitive facet
-    // and the unbounded `t.text()` -> `TEXT` mapping (Postgres/SQLite and the base
-    // `data_type` are unaffected — the collation lives only in the emitted MySQL DDL).
-    // Typed-id columns overwrite this with their own `ascii_bin` via value-format
-    // metadata applied after the snapshot is built, so ids/typed-refs still match.
-    let ddl_type_override = if matches!(dialect, SqlDialect::Mysql) {
-        mysql_type_override_with_collation(f, &data_type)
-    } else {
-        None
-    };
+    // The descriptor carrier has no distinct wire token for bounded and unbounded
+    // strings: `maxLength` is the discriminator. The IR carrier records the same
+    // fact explicitly because value-formatted/id-prefixed text is not unbounded
+    // storage. Preserve that semantic fact on the neutral snapshot; the MySQL
+    // renderer, not core, decides how to spell it.
+    let unbounded_text = f.unbounded_text
+        || (f.ty == "string"
+            && f.max_length.is_none()
+            && f.encrypted.is_none()
+            && f.enum_values.is_none()
+            && f.id_prefix.is_none());
     let mut column = ColumnSnapshot {
         name: f.name.clone(),
         data_type,
         nullable: !f.required,
         default: default.clone(),
-        ddl_type_override,
+        unbounded_text,
+        authored_type: true,
         generated: f
             .generated
             .as_ref()
@@ -3630,7 +3399,7 @@ pub(crate) fn stamp_mysql_physical_type(column: &mut ColumnSnapshot, dialect: Sq
     if !matches!(dialect, SqlDialect::Mysql) {
         return;
     }
-    let rendered = column_type_for_render(column, dialect, false);
+    let rendered = crate::render::backends::schema_renderer(dialect).column_type(column, false);
     column.mysql_physical_type = Some(MysqlPhysicalType::parse(&rendered));
 }
 
@@ -5837,6 +5606,7 @@ impl DeclarativeAuthor {
         // Author-boundary validation: every desired table/column/index name and
         // every column data_type must be safe BEFORE we render any SQL.
         Self::validate_desired(desired)?;
+        self.validate_mysql_key_storage(desired, live)?;
 
         // Cross-app FK: every FK target must exist in the UNION (it may be a
         // table owned by another app, but it must be declared by SOME member app)
@@ -6093,11 +5863,16 @@ impl DeclarativeAuthor {
 
             let ec = ExpandContractAuthor::new(&self.project_schema, &self.owner_app);
             for r in &table_renames {
+                let rename_column = ColumnSnapshot {
+                    data_type: r.ty.clone(),
+                    ..Default::default()
+                };
                 let plan = ec.author(&OnlineIntent::RenameColumn {
                     table: table.clone(),
                     from: r.from.clone(),
                     to: r.to.clone(),
-                    ty: ddl_type(&r.ty).to_string(),
+                    ty: crate::render::backends::schema_renderer(SqlDialect::Postgres)
+                        .column_type(&rename_column, false),
                 })?;
                 renames.push(plan);
             }
@@ -6182,7 +5957,8 @@ impl DeclarativeAuthor {
                                 return Err(DeclarativeError::IdentityColumnTypeUnsupported {
                                     table: table.clone(),
                                     column: c.name.clone(),
-                                    to_type: column_type_for_render(c, self.dialect, false),
+                                    to_type: crate::render::backends::schema_renderer(self.dialect)
+                                        .column_type(c, false),
                                 });
                             }
                             out.push(self.render_alter_column_type(table, c));
@@ -6538,6 +6314,88 @@ impl DeclarativeAuthor {
             }
             for c in &t.constraints {
                 validate_ident("constraint", &c.name)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse every desired MySQL key whose rendered column storage is a LOB.
+    ///
+    /// InnoDB requires an index for BOTH sides of a foreign key and silently
+    /// synthesizes the child-side index when the author did not declare one. The
+    /// snapshot therefore has two key carriers to inspect: explicit/implicit
+    /// primary, unique, and ordinary indexes, plus each FOREIGN KEY's local and
+    /// referenced tuples. The IR has no prefix-length element, so none of these
+    /// can make a `TEXT`/`BLOB` key legal; letting one reach apply produces MySQL
+    /// error 1170 after earlier migration units may already have committed.
+    ///
+    /// Classification reads [`ColumnSnapshot::mysql_physical_type`], never the
+    /// neutral `data_type`: MySQL catalog normalization deliberately folds
+    /// `VARCHAR(n)` into `"text"`, while the physical contract preserves the
+    /// distinction between a bounded character column and a LOB.
+    fn validate_mysql_key_storage(
+        &self,
+        desired: &SchemaSnapshot,
+        live: &SchemaSnapshot,
+    ) -> Result<(), DeclarativeError> {
+        if !matches!(self.dialect, SqlDialect::Mysql) {
+            return Ok(());
+        }
+
+        let check =
+            |position: &str, table: &str, columns: &[String]| -> Result<(), DeclarativeError> {
+                let snapshot = desired.tables.get(table).or_else(|| live.tables.get(table));
+                let Some(snapshot) = snapshot else {
+                    return Ok(());
+                };
+                for name in columns {
+                    let Some(column) = snapshot.columns.iter().find(|column| column.name == *name)
+                    else {
+                        continue;
+                    };
+                    let Some(MysqlPhysicalType::Lob { tier }) = &column.mysql_physical_type else {
+                        continue;
+                    };
+                    return Err(DeclarativeError::Invalid(format!(
+                        "{position} keys {table}.{name}, which renders as MySQL {} storage; \
+                     MySQL refuses a key over a TEXT or BLOB column with no prefix length",
+                        tier.to_ascii_uppercase()
+                    )));
+                }
+                Ok(())
+            };
+
+        for (table, snapshot) in &desired.tables {
+            for index in &snapshot.indexes {
+                check(
+                    &format!("desired index {}", index.name),
+                    table,
+                    &index.columns,
+                )?;
+            }
+            for constraint in &snapshot.constraints {
+                match constraint.kind.as_str() {
+                    "PRIMARY KEY" | "UNIQUE" => check(
+                        &format!("desired {} constraint {}", constraint.kind, constraint.name),
+                        table,
+                        &fk_local_columns(&constraint.definition),
+                    )?,
+                    "FOREIGN KEY" => {
+                        check(
+                            &format!("desired foreign key {} local key", constraint.name),
+                            table,
+                            &fk_local_columns(&constraint.definition),
+                        )?;
+                        if let Some(target) = fk_target_table(&constraint.definition) {
+                            check(
+                                &format!("desired foreign key {} target key", constraint.name),
+                                &target,
+                                &fk_referenced_columns(&constraint.definition),
+                            )?;
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(())
@@ -7871,7 +7729,7 @@ impl DeclarativeAuthor {
     /// and the fold) and the structural kind (`generated_kind`, from the fold and
     /// the PostgreSQL catalog read).
     fn render_alter_column_type(&self, table: &str, c: &ColumnSnapshot) -> Migration {
-        let ty = column_type_for_render(c, self.dialect, false);
+        let ty = crate::render::backends::schema_renderer(self.dialect).column_type(c, false);
         let using = if is_engine_computed_column(c) {
             String::new()
         } else {
@@ -8859,7 +8717,8 @@ impl DdlEmitter for PgEmitter {
         let mut parts: Vec<String> = Vec::new();
         for c in &t.columns {
             let inline_pk = inline_pk_for_column(table, t, &c.name);
-            let ty = column_type_for_render(c, SqlDialect::Postgres, inline_pk);
+            let ty = crate::render::backends::schema_renderer(SqlDialect::Postgres)
+                .column_type(c, inline_pk);
             let pk = primary_key_clause(c, SqlDialect::Postgres, inline_pk);
             let null = null_clause(c, SqlDialect::Postgres, inline_pk);
             let identity = pg_identity_clause(c);
@@ -8962,7 +8821,8 @@ impl DdlEmitter for PgEmitter {
             "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}{}{}",
             table_ref,
             quote_ident(&c.name),
-            column_type_for_render(c, SqlDialect::Postgres, inline_pk),
+            crate::render::backends::schema_renderer(SqlDialect::Postgres)
+                .column_type(c, inline_pk),
             enc,
             identity,
             generated,
@@ -9173,7 +9033,8 @@ impl DdlEmitter for SqliteEmitter {
         let mut parts: Vec<String> = Vec::new();
         for c in &t.columns {
             let inline_pk = inline_pk_for_column(table, t, &c.name);
-            let ty = column_type_for_render(c, SqlDialect::Sqlite, inline_pk);
+            let ty = crate::render::backends::schema_renderer(SqlDialect::Sqlite)
+                .column_type(c, inline_pk);
             let pk = primary_key_clause(c, SqlDialect::Sqlite, inline_pk);
             let null = null_clause(c, SqlDialect::Sqlite, inline_pk);
             let generated = generated_clause(c.generated.as_ref());
@@ -9278,15 +9139,8 @@ impl DdlEmitter for SqliteEmitter {
         } else {
             String::new()
         };
-        let ty = if c.ddl_type_override.is_some()
-            || c.generated.is_some()
-            || c.identity.is_some()
-            || matches!(c.case_sensitive, Some(false))
-        {
-            column_type_for_render(c, SqlDialect::Sqlite, inline_pk)
-        } else {
-            ddl_type(&c.data_type).to_string()
-        };
+        let ty =
+            crate::render::backends::schema_renderer(SqlDialect::Sqlite).column_type(c, inline_pk);
         let up = format!(
             "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}{}{}",
             table_ref,
@@ -9424,15 +9278,18 @@ impl DdlEmitter for MysqlEmitter {
             if enum_type.is_some() {
                 consumed_enum_checks.insert(enum_check_name);
             }
-            // This arm REPLACES the column's whole rendered type, so it also replaces
-            // the collation `column_type_for_render` would have pinned. Without the
-            // pin the enum inherits the table default (`utf8mb4_0900_ai_ci` on a stock
-            // MySQL 8), which is the defect `mysql_pin_enum_collation` documents - and
-            // for a descriptor that asked for `caseSensitive: false` it would silently
-            // drop the facet the author DID declare.
-            let ty = enum_type
-                .map(|enum_type| mysql_pin_enum_collation(&enum_type, c.case_sensitive))
-                .unwrap_or_else(|| column_type_for_render(c, SqlDialect::Mysql, inline_pk));
+            // The CHECK fold replaces the base type with a native enum, then hands
+            // that override back to the same vendor renderer so its collation rule
+            // remains the one spelling authority.
+            let ty = if let Some(enum_type) = enum_type {
+                let mut enum_column = c.clone();
+                enum_column.ddl_type_override = Some(enum_type);
+                crate::render::backends::schema_renderer(SqlDialect::Mysql)
+                    .column_type(&enum_column, inline_pk)
+            } else {
+                crate::render::backends::schema_renderer(SqlDialect::Mysql)
+                    .column_type(c, inline_pk)
+            };
             let pk = primary_key_clause(c, SqlDialect::Mysql, inline_pk);
             let null = null_clause(c, SqlDialect::Mysql, inline_pk);
             let identity = mysql_identity_clause(c);
@@ -9498,7 +9355,7 @@ impl DdlEmitter for MysqlEmitter {
             "ALTER TABLE {} ADD COLUMN {} {}{}{}{}{}{}",
             table_ref,
             mysql_quote_ident(&c.name),
-            column_type_for_render(c, SqlDialect::Mysql, inline_pk),
+            crate::render::backends::schema_renderer(SqlDialect::Mysql).column_type(c, inline_pk),
             identity,
             generated,
             null,
@@ -9582,45 +9439,6 @@ fn destructive_flags() -> MigrationFlags {
         requires_approval: true,
         ..MigrationFlags::default()
     }
-}
-
-/// Map an `information_schema` data-type spelling back to the DDL spelling for
-/// emission. `snapshot_schema` reports `timestamp with time zone`, but the DDL
-/// is written `TIMESTAMPTZ` (both round-trip to the same `information_schema`
-/// type). All others are spelled identically (lowercased is valid DDL).
-///
-/// `pub(crate)` so [`crate::render::lower::IrAuthor`] derives the IR `renameColumn`'s
-/// PG `OnlineIntent` column type the SAME way the declarative rename path does
-/// (live `data_type` → `ddl_type`), preserving E1's `ADD COLUMN <to> <ty>`
-/// byte-equality between the two paths.
-pub(crate) fn ddl_type(data_type: &str) -> &str {
-    match data_type {
-        "timestamp with time zone" => "timestamptz",
-        "double precision" => "double precision",
-        other => other,
-    }
-}
-
-pub(crate) fn char_len_from_data_type(data_type: &str) -> Option<u32> {
-    let lower = data_type.trim().to_ascii_lowercase();
-    let inner = lower
-        .strip_prefix("character(")
-        .or_else(|| lower.strip_prefix("char("))
-        .or_else(|| lower.strip_prefix("bpchar("))?
-        .strip_suffix(')')?;
-    inner.parse::<u32>().ok().filter(|len| *len > 0)
-}
-
-/// The declared length of a bounded `VARCHAR` base type (`character varying(N)`
-/// / `varchar(N)`), as produced for a `t.string({ length })` column. Fixed-length
-/// `character(N)` is handled by [`char_len_from_data_type`] and is excluded here.
-pub(crate) fn varchar_len_from_data_type(data_type: &str) -> Option<u32> {
-    let lower = data_type.trim().to_ascii_lowercase();
-    let inner = lower
-        .strip_prefix("character varying(")
-        .or_else(|| lower.strip_prefix("varchar("))?
-        .strip_suffix(')')?;
-    inner.parse::<u32>().ok().filter(|len| *len > 0)
 }
 
 /// Validate a bare SQL identifier at the author boundary: non-empty, starts with
@@ -10758,11 +10576,9 @@ mod numeric_default_literal_tests {
 
 #[cfg(test)]
 mod mysql_storage_agreement_tests {
-    //! One predicate, two callers. [`mysql_base_column_type`] is the single
-    //! MySQL storage decision: the DDL renderer spells columns from it, and the
-    //! load-and-validate gate refuses MySQL-fatal shapes from it. A second copy
-    //! of that decision in the validator is what produced the defect this rule
-    //! closes, so the two are pinned to each other here.
+    //! The validator classifies the MySQL renderer's output rather than keeping a
+    //! second type table. These cases pin the semantic snapshot inputs to the
+    //! physical storage families that MySQL's DDL rules act on.
     //!
     //! The table below includes the shape a name-keyed rule misses: a bounded
     //! `t.string({ length })` marked case-insensitive renders a bare MySQL
@@ -10770,10 +10586,7 @@ mod mysql_storage_agreement_tests {
     //! COUNTERFACTUAL - a shape the engine refuses rather than one it ships - and
     //! the refusal it depends on is pinned by
     //! [`a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it`].
-    use super::{
-        column_snapshot_for_field, column_type_for_render, field_data_type, mysql_base_column_type,
-        FieldDescriptor, MysqlStorage,
-    };
+    use super::{column_snapshot_for_field, FieldDescriptor, MysqlStorage};
     use crate::schema::query::SqlDialect;
 
     fn field(name: &str, ty: &str) -> FieldDescriptor {
@@ -10813,6 +10626,18 @@ mod mysql_storage_agreement_tests {
         f
     }
 
+    fn native_enum(name: &str) -> FieldDescriptor {
+        let mut f = field(name, "string");
+        f.enum_values = Some(vec![serde_json::json!("open"), serde_json::json!("closed")]);
+        f
+    }
+
+    fn prefixed_id(name: &str) -> FieldDescriptor {
+        let mut f = field(name, "string");
+        f.id_prefix = Some("ticket".to_string());
+        f
+    }
+
     #[test]
     fn the_shared_predicate_and_the_renderer_agree_on_mysql_storage() {
         let cases: Vec<(FieldDescriptor, MysqlStorage)> = vec![
@@ -10827,7 +10652,11 @@ mod mysql_storage_agreement_tests {
                 MysqlStorage::Text,
             ),
             (bounded("label", 50), MysqlStorage::Other),
-            (field("brand", "string"), MysqlStorage::Other),
+            // A descriptor `string` with no maxLength is the direct `t.text()`
+            // carrier and deliberately converges with the IR marker on TEXT.
+            (field("brand", "string"), MysqlStorage::Text),
+            (native_enum("status"), MysqlStorage::Other),
+            (prefixed_id("ticket_id"), MysqlStorage::Other),
             (fixed_char("code", 10), MysqlStorage::Other),
             (field("doc", "json"), MysqlStorage::Json),
             (field("tags", "textArray"), MysqlStorage::Json),
@@ -10842,30 +10671,22 @@ mod mysql_storage_agreement_tests {
         ];
 
         for (f, expected) in cases {
-            let data_type = field_data_type(&f)
-                .unwrap_or_else(|error| panic!("{:?} has a data type: {error}", f.name));
-            let base = mysql_base_column_type(&f, &data_type);
-            assert_eq!(
-                MysqlStorage::of(&base),
-                expected,
-                "{:?} renders {base:?}",
-                f.name
-            );
-
             let snapshot = column_snapshot_for_field(&f, SqlDialect::Mysql, false)
                 .unwrap_or_else(|error| panic!("{:?} snapshots: {error}", f.name));
-            let rendered = column_type_for_render(&snapshot, SqlDialect::Mysql, false);
-            assert!(
-                rendered.starts_with(&base),
-                "{:?}: the renderer emits {rendered:?} but the shared predicate says {base:?}",
-                f.name
+            let rendered = crate::render::backends::schema_renderer(SqlDialect::Mysql)
+                .column_type(&snapshot, false);
+            assert_eq!(
+                MysqlStorage::of(&rendered),
+                expected,
+                "{:?} renders {rendered:?}",
+                f.name,
             );
         }
     }
 
     /// The `label_ci` row above is a shape the engine REFUSES, not one it ships.
     ///
-    /// [`mysql_base_column_type`] reads `caseSensitive: false` ahead of the type map,
+    /// The MySQL renderer reads `caseSensitive: false` ahead of the type map,
     /// so a field carrying that facet AND a declared width has its width dropped
     /// outright - not narrowed, dropped. Nothing in the renderer prevents that. The
     /// invariant that keeps it unreachable lives in
@@ -10875,7 +10696,7 @@ mod mysql_storage_agreement_tests {
     ///
     /// This test is that invariant's guard on the MySQL side. If the rule is ever
     /// relaxed - to let a bounded string be case-insensitive, which MySQL itself is
-    /// perfectly happy to store - then `mysql_base_column_type` must stop reading the
+    /// perfectly happy to store - then the renderer must stop reading the
     /// facet first, or the bound silently disappears. Measured on MySQL 8.4.11
     /// (`@@collation_server = utf8mb4_0900_ai_ci`), the two spellings are not
     /// equivalent and the difference is not cosmetic:
@@ -10942,7 +10763,7 @@ mod mysql_storage_agreement_tests {
 
             let error = validate_ir(&ir, dialect).expect_err(
                 "a bounded case-insensitive string must be refused; \
-                 mysql_base_column_type would otherwise drop its width to TEXT",
+                 the MySQL renderer would otherwise drop its width to TEXT",
             );
             assert!(
                 error.reason.contains("caseSensitive:false"),
@@ -10963,7 +10784,7 @@ mod mysql_storage_agreement_tests {
         assert_eq!(
             derived.max_length, None,
             "the only case-insensitive-legal ColType must derive no width; if it ever \
-             does, the facet refusal stops being enough and mysql_base_column_type has \
+             does, the facet refusal stops being enough and the MySQL renderer has \
              to stop reading the facet ahead of the type map"
         );
         assert!(

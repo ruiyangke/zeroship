@@ -2521,6 +2521,23 @@ fn validate_mysql_key_storage_op(
                 name,
                 &column_uniques,
             )?;
+            for column in columns {
+                let Some(reference) = &column.references else {
+                    continue;
+                };
+                check(
+                    "createTable column reference local key",
+                    schema.as_deref(),
+                    name,
+                    std::slice::from_ref(&column.name),
+                )?;
+                check(
+                    "createTable column reference target key",
+                    schema.as_deref(),
+                    &reference.table,
+                    std::slice::from_ref(&reference.column),
+                )?;
+            }
             for index in indexes {
                 check(
                     "createTable.indexes",
@@ -2530,13 +2547,35 @@ fn validate_mysql_key_storage_op(
                 )?;
             }
             for constraint in constraints {
-                if let IrConstraintKind::Unique { columns } = &constraint.kind {
-                    check(
-                        "createTable.constraints unique",
-                        schema.as_deref(),
-                        name,
+                match &constraint.kind {
+                    IrConstraintKind::Unique { columns } => {
+                        check(
+                            "createTable.constraints unique",
+                            schema.as_deref(),
+                            name,
+                            columns,
+                        )?;
+                    }
+                    IrConstraintKind::Fk {
                         columns,
-                    )?;
+                        references_table,
+                        references_columns,
+                        ..
+                    } => {
+                        check(
+                            "createTable.constraints foreign key local key",
+                            schema.as_deref(),
+                            name,
+                            columns,
+                        )?;
+                        check(
+                            "createTable.constraints foreign key target key",
+                            schema.as_deref(),
+                            references_table,
+                            references_columns,
+                        )?;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -2546,9 +2585,41 @@ fn validate_mysql_key_storage_op(
             schema,
             ..
         } => {
-            if let IrConstraintKind::Unique { columns } = &constraint.kind {
+            let schema = schema_mode.resolve(schema.as_deref());
+            match &constraint.kind {
+                IrConstraintKind::Unique { columns } => {
+                    check("addConstraint unique", schema.as_deref(), table, columns)?;
+                }
+                IrConstraintKind::Fk {
+                    columns,
+                    references_table,
+                    references_columns,
+                    ..
+                } => {
+                    check(
+                        "addConstraint foreign key local key",
+                        schema.as_deref(),
+                        table,
+                        columns,
+                    )?;
+                    check(
+                        "addConstraint foreign key target key",
+                        schema.as_deref(),
+                        references_table,
+                        references_columns,
+                    )?;
+                }
+                _ => {}
+            }
+        }
+        Op::AlterPrimaryKey {
+            table,
+            action,
+            schema,
+        } => {
+            if let Some(columns) = action.target_columns() {
                 let schema = schema_mode.resolve(schema.as_deref());
-                check("addConstraint unique", schema.as_deref(), table, columns)?;
+                check("alterPrimaryKey target", schema.as_deref(), table, columns)?;
             }
         }
         _ => {}

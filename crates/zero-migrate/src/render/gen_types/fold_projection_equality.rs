@@ -571,6 +571,9 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
         id_default,
         mysql_default_generated,
         case_sensitive,
+        unbounded_text,
+        type_def,
+        authored_type,
         collation,
         mysql_text_storage,
         mysql_physical_type,
@@ -608,6 +611,9 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
         *mysql_default_generated == theirs.mysql_default_generated,
     );
     check("case_sensitive", *case_sensitive == theirs.case_sensitive);
+    check("unbounded_text", *unbounded_text == theirs.unbounded_text);
+    check("type_def", *type_def == theirs.type_def);
+    check("authored_type", *authored_type == theirs.authored_type);
     check("collation", *collation == theirs.collation);
     check(
         "mysql_text_storage",

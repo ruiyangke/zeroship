@@ -5158,11 +5158,8 @@ impl IrAuthor {
                     return Err(IrLowerError::IdentityColumnTypeUnsupported {
                         table: table.clone(),
                         column: column.clone(),
-                        to_type: crate::render::declarative::column_type_for_render(
-                            &col,
-                            self.dialect,
-                            false,
-                        ),
+                        to_type: crate::render::backends::schema_renderer(self.dialect)
+                            .column_type(&col, false),
                     });
                 }
                 // A GENERATED column takes no `USING`, and the renderer decides that
@@ -5208,11 +5205,8 @@ impl IrAuthor {
                     // engine creates a column and wrong when it retypes one — see
                     // `mysql_type_without_collation`.
                     let ddl_type = crate::render::declarative::mysql_type_without_collation(
-                        &crate::render::declarative::column_type_for_render(
-                            &col,
-                            self.dialect,
-                            false,
-                        ),
+                        &crate::render::backends::schema_renderer(self.dialect)
+                            .column_type(&col, false),
                     )
                     .to_string();
                     let owner_app = self.decl.owner_app().to_string();
@@ -7433,7 +7427,7 @@ impl IrAuthor {
                 return Err(IrLowerError::UnsupportedOp("collated column folded away"));
             };
             let rendered =
-                crate::render::declarative::column_type_for_render(col, self.dialect, false);
+                crate::render::backends::schema_renderer(self.dialect).column_type(col, false);
             let (ddl_type, collation) =
                 crate::render::value_format::bytewise_column_metadata(&rendered, self.dialect);
             col.ddl_type_override = Some(ddl_type);
@@ -7605,6 +7599,8 @@ impl IrAuthor {
                 )?;
                 col.data_type = base.data_type;
                 col.ddl_type_override = base.ddl_type_override;
+                col.unbounded_text = base.unbounded_text;
+                col.authored_type = base.authored_type;
                 if self.dialect.supports(Capability::MaterializedDomainType) {
                     col.data_type = pg_type_data_type(&def.schema, name);
                     col.ddl_type_override = Some(pg_type_qname(&def.schema, name)?);
@@ -7655,7 +7651,7 @@ impl IrAuthor {
                 reason: "nested named base type",
             }),
             _ => {
-                let col = self.add_column_snapshot(
+                let mut col = self.add_column_snapshot(
                     effective_schema,
                     "__domain",
                     "VALUE",
@@ -7668,7 +7664,15 @@ impl IrAuthor {
                     None,
                     None,
                 )?;
-                Ok(crate::render::declarative::ddl_type(&col.data_type).to_string())
+                // A PostgreSQL DOMAIN base historically uses the canonical catalog
+                // type, not the column-use-site modifier override (for example
+                // `numeric`, not `numeric(p, s)`). Preserve those bytes while asking
+                // the PostgreSQL renderer to spell that canonical token.
+                col.ddl_type_override = None;
+                Ok(
+                    crate::render::backends::schema_renderer(SqlDialect::Postgres)
+                        .column_type(&col, false),
+                )
             }
         }
     }
@@ -7844,12 +7848,10 @@ impl IrAuthor {
                         "PostgreSQL named type metadata carried no DDL spelling",
                     ))?
                 } else {
-                    live_from_column
-                        .ddl_type_override
-                        .clone()
-                        .unwrap_or_else(|| {
-                            crate::render::declarative::ddl_type(&ir_data_type).to_string()
-                        })
+                    let mut render_column = live_from_column.clone();
+                    render_column.data_type = ir_data_type.clone();
+                    crate::render::backends::schema_renderer(SqlDialect::Postgres)
+                        .column_type(&render_column, false)
                 };
                 // The PG expand-contract author derives the dual-write from
                 // `{table, from, to, ty}` and needs no live table SHAPE; the type was
@@ -9978,13 +9980,10 @@ pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty
 
 /// The MySQL storage the declared facets of an authored column render into.
 ///
-/// The IR-side entry to the ONE storage decision
-/// ([`crate::render::declarative::mysql_base_column_type`]): the facets are
-/// routed through the SAME [`ir_column_to_field`] translation the lower uses, so
-/// the `unbounded_text` marker and the type map are computed exactly once and
-/// the load-and-validate gate can never disagree with the DDL the renderer will
-/// emit. `None` for a column whose type token has no data type at all, which the
-/// type-position validation refuses on its own.
+/// The facets are routed through the same neutral snapshot input the vendor
+/// renderer consumes, so the load-and-validate gate classifies the spelling the
+/// renderer actually emits. `None` means the type-position validation already
+/// refused a token with no data type.
 ///
 /// Only the four facets that move the storage are taken; nullability, defaults,
 /// keys, and generation do not change the rendered type.
@@ -10012,9 +10011,15 @@ pub(crate) fn mysql_storage_for_column_facets(
     };
     let field = ir_column_to_field(&column);
     let data_type = crate::render::declarative::field_data_type(&field).ok()?;
-    Some(crate::render::declarative::MysqlStorage::of(
-        &crate::render::declarative::mysql_base_column_type(&field, &data_type),
-    ))
+    let snapshot = crate::model::snapshot::ColumnSnapshot {
+        data_type,
+        case_sensitive: field.case_sensitive,
+        unbounded_text: field.unbounded_text,
+        ..Default::default()
+    };
+    let rendered =
+        crate::render::backends::schema_renderer(SqlDialect::Mysql).column_type(&snapshot, false);
+    Some(crate::render::declarative::MysqlStorage::of(&rendered))
 }
 
 /// The `DEFAULT` clause body an authored column renders on MySQL, or `None` when

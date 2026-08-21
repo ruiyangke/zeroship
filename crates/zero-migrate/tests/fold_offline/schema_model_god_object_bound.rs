@@ -72,12 +72,6 @@ impl Routing {
     fn vendor_fact<T>(&mut self, field: &'static str, _binding: T, _vendor: &str) {
         self.vendor_fact.push(field);
     }
-
-    /// Not a schema fact. Computed by the projection, and carrying it in the model would
-    /// be carrying a projection's private state - the god-object failure mode itself.
-    fn projection_local<T>(&mut self, field: &'static str, _binding: T, _why: &str) {
-        self.projection_local.push(field);
-    }
 }
 
 fn route_the_runtime_descriptor() -> Routing {
@@ -122,6 +116,11 @@ fn route_the_runtime_descriptor() -> Routing {
     routing.already_in_the_model("case_sensitive", case_sensitive, "Column::case_sensitive");
     routing.already_in_the_model("generated", generated, "Column::generated");
     routing.already_in_the_model("identity", identity, "Column::identity");
+    routing.already_in_the_model(
+        "unbounded_text",
+        unbounded_text,
+        "Column::unbounded_text, the neutral authored-storage fact handed to each vendor renderer",
+    );
     routing.already_in_the_model(
         "encrypted",
         encrypted,
@@ -240,23 +239,12 @@ fn route_the_runtime_descriptor() -> Routing {
          `VendorFacts` family here for exactly that reason.",
     );
 
-    // ---- projection-local ------------------------------------------------------
-    routing.projection_local(
-        "unbounded_text",
-        unbounded_text,
-        "its own doc says `#[serde(skip)]` and \"Never serialized\": a RENDER-ONLY \
-         marker that exists to pick a MySQL `TEXT` spelling. It is derived from \
-         `ColType::Text` plus the absence of a value-format facet, both of which the \
-         model already carries, so a model field for it would be a cached projection \
-         decision - the god-object failure mode in miniature.",
-    );
-
     routing
 }
 
 /// **The answer.** Counted, pinned, and a compile error to ignore.
 #[test]
-fn the_unified_model_would_grow_eighteen_fields_and_only_one_is_a_projections_private_state() {
+fn the_unified_model_would_grow_eighteen_fields_and_has_no_projection_private_state() {
     let routing = route_the_runtime_descriptor();
     let total = routing.already_in_the_model.len()
         + routing.would_join_the_model.len()
@@ -277,7 +265,7 @@ fn the_unified_model_would_grow_eighteen_fields_and_only_one_is_a_projections_pr
 
     assert_eq!(
         routing.already_in_the_model.len(),
-        8,
+        9,
         "descriptor facts the neutral model ALREADY carries: {:?}",
         routing.already_in_the_model
     );
@@ -297,26 +285,21 @@ fn the_unified_model_would_grow_eighteen_fields_and_only_one_is_a_projections_pr
     );
     assert_eq!(
         routing.projection_local.len(),
-        1,
+        0,
         "descriptor facts that are a PROJECTION'S state and must never enter the model. \
          If this grows, the model is becoming a god-object and the growth is the \
          evidence: {:?}",
         routing.projection_local
     );
 
-    // The load-bearing conclusion, asserted rather than left in prose: only ONE of the
-    // runtime descriptor's twenty-eight fields is something a neutral model must refuse.
-    // The unification is therefore NOT blocked by a vocabulary clash - it is blocked, if
-    // at all, by SIZE, and the size is 16 + 18 = 34 neutral column fields.
-    assert!(
-        routing.projection_local.len() <= 1,
-        "more than one descriptor field is projection-private, which is the shape that \
-         would make a unified model a god-object"
-    );
+    // The load-bearing conclusion, asserted rather than left in prose: the authored
+    // unbounded-text fact is now a neutral renderer input, so none of the descriptor's
+    // fields is projection-private. The remaining cost is SIZE: 18 + 18 = 36 fields.
+    assert!(routing.projection_local.is_empty());
     assert_eq!(
-        16 + routing.would_join_the_model.len(),
-        34,
-        "the neutral `Column` has 16 fields today; a unified one would have 34. Recorded \
+        18 + routing.would_join_the_model.len(),
+        36,
+        "the neutral `Column` has 18 fields today; a unified one would have 36. Recorded \
          so the cost is a number in a test rather than an opinion in a proposal."
     );
 }
@@ -324,23 +307,24 @@ fn the_unified_model_would_grow_eighteen_fields_and_only_one_is_a_projections_pr
 /// The neutral model's own size, pinned beside the projection's, so "the model must be
 /// RICHER than either current type" (section C) is a measurement.
 #[test]
-fn the_neutral_column_carries_sixteen_fields_and_the_catalog_snapshot_carries_twenty_one() {
+fn the_neutral_column_carries_eighteen_fields_and_the_catalog_snapshot_carries_twenty_four() {
     let probes = support::field_probes::column_snapshot_probes();
     assert_eq!(
         probes.probes.len(),
-        21,
+        24,
         "`ColumnSnapshot` field count changed"
     );
 
-    // 21 catalog fields = 16 neutral + 5 vendor. The vendor five are `sqlite_rowid`,
+    // 24 catalog fields = 18 neutral + 5 vendor + one ephemeral schema-query token
+    // carrier. The vendor five are `sqlite_rowid`,
     // `catalog_uuid_format_check`, `mysql_default_generated`, `mysql_text_storage` and
     // `mysql_physical_type`, and `tests/schema_model_equivalence_mysql.rs` proves the
     // split is lossless with all of them populated.
     let neutral = schema_model::Column::default();
     let _: &schema_model::Column = &neutral;
     assert_eq!(
-        16 + 5,
-        21,
-        "the neutral/vendor split must account for every catalog field"
+        18 + 5 + 1,
+        24,
+        "the neutral/vendor split plus the ephemeral token carrier must account for every catalog field"
     );
 }

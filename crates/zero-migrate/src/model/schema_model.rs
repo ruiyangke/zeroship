@@ -407,6 +407,10 @@ pub struct Column {
     pub id_default: Option<IdDefaultSnapshot>,
     /// `Some(false)` means this logical text column is case-insensitive.
     pub case_sensitive: Option<bool>,
+    /// Whether this authored logical text column is unbounded.
+    pub unbounded_text: bool,
+    /// Whether this type came from authored tokens rather than a catalog read.
+    pub authored_type: bool,
     /// Exact non-default catalog collation identity.
     pub collation: Option<ColumnCollationSnapshot>,
     /// The inline encryption sentinel to append after this column's type.
@@ -542,6 +546,8 @@ impl Column {
             value_format: snapshot.value_format.clone(),
             id_default: snapshot.id_default.clone(),
             case_sensitive: snapshot.case_sensitive,
+            unbounded_text: snapshot.unbounded_text,
+            authored_type: snapshot.authored_type,
             collation: snapshot.collation.clone(),
             encryption_sentinel: snapshot.encryption_sentinel.clone(),
             comment_sentinel: snapshot.comment_sentinel.clone(),
@@ -575,6 +581,9 @@ impl Column {
             id_default: self.id_default.clone(),
             mysql_default_generated: vendor.mysql_default_generated.get(&key).copied(),
             case_sensitive: self.case_sensitive,
+            unbounded_text: self.unbounded_text,
+            type_def: None,
+            authored_type: self.authored_type,
             collation: self.collation.clone(),
             mysql_text_storage: vendor.mysql_text_storage.get(&key).cloned(),
             mysql_physical_type: vendor.mysql_physical_type.get(&key).cloned(),
@@ -967,6 +976,8 @@ pub fn column_shape_identity(left: &Column, right: &Column) -> bool {
         value_format,
         id_default,
         case_sensitive,
+        unbounded_text: _ignored_unbounded_text_emission_only,
+        authored_type: _ignored_authored_type_emission_only,
         collation,
         encryption_sentinel: _ignored_encryption_sentinel,
         comment_sentinel: _ignored_comment_sentinel,
@@ -1026,6 +1037,8 @@ pub fn drift_identity(left: &Column, right: &Column) -> bool {
         value_format: _routed_by_shape_identity_5,
         id_default: _routed_by_shape_identity_6,
         case_sensitive: _routed_by_shape_identity_7,
+        unbounded_text: _ignored_unbounded_text_emission_only,
+        authored_type: _ignored_authored_type_emission_only,
         collation: _routed_by_shape_identity_8,
         encryption_sentinel: _ignored_encryption_sentinel,
         comment_sentinel: _ignored_comment_sentinel,

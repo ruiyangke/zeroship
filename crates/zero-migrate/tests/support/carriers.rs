@@ -194,6 +194,9 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
         id_default,
         mysql_default_generated,
         case_sensitive,
+        unbounded_text,
+        type_def,
+        authored_type,
         collation,
         mysql_text_storage,
         mysql_physical_type,
@@ -270,6 +273,21 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
         "TableSnapshot::columns[].case_sensitive",
         case_sensitive,
         "an `Option<bool>`.",
+    );
+    never_a_column_name(
+        "TableSnapshot::columns[].unbounded_text",
+        unbounded_text,
+        "a bool describing this column's own storage shape.",
+    );
+    never_a_column_name(
+        "TableSnapshot::columns[].type_def",
+        type_def,
+        "neutral SDK type tokens describing this column itself.",
+    );
+    never_a_column_name(
+        "TableSnapshot::columns[].authored_type",
+        authored_type,
+        "a bool recording type provenance, never another column.",
     );
     never_a_column_name(
         "TableSnapshot::columns[].collation",

@@ -3361,8 +3361,8 @@ pub fn fold_ops_onto(
 /// and LOSE the precision and scale the server reported. Re-deriving a column the
 /// replay never touched would therefore corrupt the base rather than repair it.
 ///
-/// The test is the derivation's own inputs - the three fields
-/// `declarative::column_type_for_render` reads on MySQL. When all three are what the
+/// The test is the derivation's own inputs - the fields the MySQL schema renderer
+/// reads. When all are what the
 /// base had, the column renders to the same type it always did and its existing
 /// contract still describes it; when any moved, this fold decided the type and owes
 /// the matching contract.
@@ -3412,13 +3412,12 @@ fn restamp_mysql_physical_types(
     }
 }
 
-/// Whether two columns feed `declarative::column_type_for_render` identical inputs on
-/// MySQL, and therefore render to the same physical type.
+/// Whether two columns feed the MySQL schema renderer identical type inputs, and
+/// therefore render to the same physical type.
 ///
-/// These three fields are that function's whole MySQL input: `ddl_type_override` wins
-/// outright when present, the case-insensitive `text` spelling is chosen from
-/// `case_sensitive` plus `data_type`, and everything else falls through to
-/// `mysql_ddl_type(data_type)`. Its two remaining branches are SQLite-only.
+/// `ddl_type_override` wins outright when present; the ephemeral `type_def` carrier
+/// has its own vendor table; otherwise `unbounded_text`, `case_sensitive`, and
+/// `data_type` select the vendor's base spelling.
 ///
 /// Deliberately NOT `ColumnSnapshot`'s `PartialEq`, which EXCLUDES
 /// `ddl_type_override` - the single field most likely to have moved when a fold
@@ -3428,6 +3427,9 @@ fn renders_the_same_mysql_type(left: &ColumnSnapshot, right: &ColumnSnapshot) ->
     left.data_type == right.data_type
         && left.ddl_type_override == right.ddl_type_override
         && left.case_sensitive == right.case_sensitive
+        && left.unbounded_text == right.unbounded_text
+        && left.type_def == right.type_def
+        && left.authored_type == right.authored_type
 }
 
 fn apply_fold_sqlite_rowid_metadata(snap: &mut TableSnapshot) -> Result<(), FoldError> {
@@ -3831,7 +3833,7 @@ fn apply_fold_collation_metadata(
             .ok_or(FoldError::Unsupported("collated column folded away"))?;
         // The type spelling the renderer would have used, so the override REPLACES
         // that decision rather than guessing beside it.
-        let rendered = crate::render::declarative::column_type_for_render(col, dialect, false);
+        let rendered = crate::render::backends::schema_renderer(dialect).column_type(col, false);
         let (ddl_type, collation) =
             crate::render::value_format::bytewise_column_metadata(&rendered, dialect);
         col.ddl_type_override = Some(ddl_type);
@@ -4046,6 +4048,8 @@ fn apply_fold_named_type_column_metadata(
             )?;
             col.data_type = base.data_type;
             col.ddl_type_override = base.ddl_type_override;
+            col.unbounded_text = base.unbounded_text;
+            col.authored_type = base.authored_type;
             if dialect.supports(Capability::MaterializedDomainType) {
                 col.data_type = pg_type_data_type(&def.schema, name);
             } else {

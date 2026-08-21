@@ -26,6 +26,7 @@ use zero_migrate_backend::dml::DmlError;
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::SchemaRenderer;
+use zero_migrate_backend::snapshot::ColumnSnapshot;
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_backend::vendor::VendorStatement;
 use zero_migrate_ir::backend::{
@@ -262,10 +263,10 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         format!("\"{app_id}\".\"{target}\"")
     }
 
-    fn column_type(&self, def: &serde_json::Value) -> String {
-        match def.get("type").and_then(serde_json::Value::as_str) {
-            Some("number") => "DOUBLE".to_string(),
-            Some("boolean") => "BOOLEAN".to_string(),
+    fn column_type(&self, column: &ColumnSnapshot, _inline_pk: bool) -> String {
+        match column.data_type.as_str() {
+            "double precision" => "DOUBLE".to_string(),
+            "boolean" => "BOOLEAN".to_string(),
             _ => "VARCHAR".to_string(),
         }
     }
