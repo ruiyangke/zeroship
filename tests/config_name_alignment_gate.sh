@@ -20,6 +20,8 @@
 #   6b alias equality    a container value that is EXACTLY one interpolation
 #                        must satisfy LEFT == RIGHT (proposal Section 4.3)
 #   6c command argv      no `command:`/`entrypoint:` item carries a credential
+#   6d environment       no `environment:` value inlines the cluster superuser's
+#                        credential (the env half of 6c's detector A)
 #   7 ops TOML           every leaf in deploy/ops/*.toml is a generated overlay
 #                        path with a real consumer
 #   8 tracked secrets    no secret-classed leaf in ANY tracked *.toml holds a
@@ -48,6 +50,11 @@
 # 2026-08-12 amendment made and only half executed: the runtime refusal of a
 # plaintext overlay secret was deleted on the understanding that this gate
 # would replace it, and until now it did not exist. See its own header.
+#
+# Check 6d was armed on 2026-08-21 against the last of the credential defaults
+# check 8's header had counted and deferred: `migrated`'s provisioning DSN
+# carried the postgres SUPERUSER inline. Its own header says why it stops at the
+# superuser and what that leaves standing.
 #
 # Run `tests/config_name_alignment_gate.sh --self-test` to prove checks 6, 7
 # and 8 still FAIL on a planted violation. A gate that accepts everything and a
@@ -178,6 +185,42 @@ compose_service_env() {
                 for (i = 1; i <= count[s]; i++)
                     print s "\t" b "\t" keys[s, i] "\t" aliases[s, i]
             }
+        }
+    ' "$1"
+}
+
+# Emit `service<TAB>line<TAB>KEY<TAB>value` for every explicit `environment:`
+# assignment, on EVERY service.
+#
+# WHY THIS EXTRACTOR EXISTS ALONGSIDE `compose_service_env`. That one walks the
+# same blocks and throws away all three things check 6d needs. It drops the
+# VALUE unless the value is exactly one interpolation (a composite is recorded
+# as an empty alias, which is precisely the `${NAME:-<default>}` shape a
+# credential default has); it drops the LINE NUMBER, so a violation could not be
+# pointed at; and it emits rows only for services running $PLATFORM_IMAGE, so
+# the backing services are outside it entirely. This is the same relationship
+# `toml_assignments` has to `toml_leaves` a few functions down: the value half
+# is what nothing could see.
+#
+# The KEY and VALUE derivations are copied CHARACTER FOR CHARACTER from
+# `compose_service_env` above, so the two extractors cannot come to disagree
+# about where a key ends and a value begins.
+compose_env_values() {
+    awk '
+        /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ {
+            svc = $1; sub(/:$/, "", svc); inenv = 0; next
+        }
+        svc == "" { next }
+        /^    environment:/ { inenv = 1; next }
+        /^    [a-zA-Z_]+:/ { inenv = 0; next }
+        inenv && match($0, /^      -?[[:space:]]*[A-Z][A-Z0-9_]*/) {
+            key = substr($0, RSTART, RLENGTH)
+            gsub(/[ -]/, "", key)
+            val = $0
+            sub(/^[^:]*:[[:space:]]*/, "", val)
+            sub(/[[:space:]]+$/, "", val)
+            print svc "\t" NR "\t" key "\t" val
+            next
         }
     ' "$1"
 }
@@ -517,6 +560,132 @@ check_compose_command_secrets() {
     return 0
 }
 
+# The cluster SUPERUSER's role name, read out of the compose file's OWN postgres
+# service. Emits nothing if that service, or its `environment:` block, cannot be
+# found - the caller turns that into a refusal rather than a green.
+#
+# DERIVED, NOT WRITTEN DOWN. `POSTGRES_USER` is the name the postgres image
+# creates as the bootstrap superuser; when it is unset the image creates
+# `postgres`, and this file leaves it unset while its own healthcheck spells
+# `pg_isready -U postgres`. Taking the declared value when there is one means a
+# deployment that renames its superuser is still covered, with nothing to edit
+# here. Finding `POSTGRES_PASSWORD` is what proves the environment block was
+# actually reached: without it the fallback would be indistinguishable from an
+# extractor that matched nothing.
+compose_superuser_role() {
+    local rows svc key value pg_svc="" user="" saw_password=0
+    rows="$(compose_env_values "$1")"
+    [ -n "$rows" ] || return 0
+    pg_svc="$(awk '
+        /^  [a-z][a-z0-9_-]*:[[:space:]]*$/ { svc = $1; sub(/:$/, "", svc); next }
+        svc != "" && $1 == "image:" && $2 ~ /^postgres(:|$)/ { print svc; exit }
+    ' "$1")"
+    [ -n "$pg_svc" ] || return 0
+    while IFS=$'\t' read -r svc _line key value; do
+        [ "$svc" = "$pg_svc" ] || continue
+        case "$key" in
+            POSTGRES_PASSWORD) saw_password=1 ;;
+            POSTGRES_USER) user="$value" ;;
+        esac
+    done <<<"$rows"
+    [ "$saw_password" = 1 ] || return 0
+    printf '%s\n' "${user:-postgres}"
+}
+
+# No compose `environment:` value may inline a SUPERUSER credential.
+#
+# THE ARGV HALF OF THIS RULE IS CHECK 6c, AND IT HAS BEEN GREEN OVER A HOLE.
+# 6c's detector A refuses `scheme://user:secret@host` in a `command:` item and
+# its own header says, correctly, that `environment:` is "a different and
+# narrower exposure than argv, not a safe one". Check 8's header then counted
+# what that leaves uncovered - eight inline `${NAME:-<default>}` secrets, six of
+# them DSNs carrying userinfo - and deferred them as "a KNOWN, COUNTED hole".
+# One of the six was `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL`, whose default
+# was the cluster SUPERUSER's DSN. This arm is the half that closes it.
+#
+# WHY SUPERUSER AND NOT ALL USERINFO, which is what 6c bans in argv. The other
+# five are per-service LEAST-PRIVILEGE role DSNs (`zeroship_gateway`,
+# `zeroship_auth`, ...), and their passwords are not merely also in the tree -
+# they are set BY the tree, in `db/migrations-ts/20260702000100_
+# schema_roles_extensions.ts` (`role("zeroship_control").create({ password:
+# "zeroship_control" })`), a migration a deployed database has applied and which
+# is therefore frozen. Banning them here would not remove one byte of credential
+# from git; it would relocate five literals from this compose file into
+# `secret_specs()` in crates/cli/src/dev.rs, which would have to generate the
+# same five strings for `zeroship dev init` to keep working. That is the check-8
+# violation this gate exists to prevent, committed to buy a green here.
+#
+# The superuser is categorically different and the difference is not a judgement
+# call: it can CREATE ROLE, DROP DATABASE and read every schema in the cluster,
+# which is why `migrated` needs it at all and why no least-privilege role can
+# stand in. A deployment hands it to a service or it does not, and a tracked
+# file naming it inline hands it to everything that can read the file or the
+# container's /proc/<pid>/environ.
+#
+# WHAT IT DOES NOT CHECK, so a green is not over-read:
+#   - the five least-privilege DSN defaults above. Uncovered ON PURPOSE, for the
+#     reason given; they remain plaintext credentials in a tracked file.
+#   - `POSTGRES_PASSWORD: <literal>` on the postgres service itself. It is the
+#     INPUT this arm derives the superuser's identity from, and it carries no
+#     URL grammar - check 8's header records the same value as undetectable by
+#     any registry-driven means. Refusing it would need a name heuristic.
+#   - compose files other than the one passed in. `deploy/compose/cluster.yml`
+#     and the two backing-service overlays are not walked by any check here.
+#   - what a container does after parsing. This is a text check on a deploy file.
+check_compose_env_superuser() {
+    local env_arm="$1" compose="$2" label="$3"
+    local rows role bad=0 checked=0 svc line key value
+
+    rows="$(compose_env_values "$compose")"
+    if [ -z "$rows" ]; then
+        fail "$label: extracted zero environment values from $compose"
+        return 1
+    fi
+    role="$(compose_superuser_role "$compose")"
+    if [ -z "$role" ]; then
+        fail "$label: could not derive the cluster superuser from $compose"
+        echo "      No service runs a postgres image with a POSTGRES_PASSWORD, so there is"
+        echo "      nothing to compare against and a clean result would mean nothing."
+        return 1
+    fi
+
+    while IFS=$'\t' read -r svc line key value; do
+        [ -n "$key" ] || continue
+        checked=$((checked + 1))
+        # The same userinfo grammar check 6c applies to argv, narrowed to the
+        # one role whose credential no deployment may inline.
+        if printf '%s' "$value" \
+            | grep -qE "[a-zA-Z][a-zA-Z0-9+.-]*://${role}:[^/@[:space:]\"]*@"; then
+            echo "  $compose:$line ($svc) sets $key to a URL carrying the $role superuser's"
+            echo "      credential; a secret-classed value takes urn:zeroship:file:<path>"
+            echo "      naming a mounted file, never the material"
+            bad=$((bad + 1))
+        fi
+    done <<<"$rows"
+
+    # Anti-hollow: the detector passes at zero if the extractor stops matching,
+    # and that is indistinguishable from a file with no environment blocks.
+    # MEASURED on deploy/compose/docker-compose.yml 2026-08-21: 45 values across
+    # seven services - the 42 check 6b sees on the platform image (control 13,
+    # auth 9, gateway 8, migrated 6, worker 6) plus postgres 2 and caddy 1, and
+    # those last three are exactly what dropping the image filter buys. Every
+    # extracted value is ruled on, so this is already the post-filter number.
+    # The floor is 30 rather than 45 because it must also hold for the mutated
+    # copies --self-test drives this same function over.
+    local min_values=30
+    if ! gate_arm "$env_arm" "$checked" "$min_values"; then
+        fail "$label: only $checked environment values scanned, expected at least $min_values"
+        echo "      The environment extraction stopped matching, so a clean result would mean nothing."
+        return 1
+    fi
+    if [ "$bad" -ne 0 ]; then
+        fail "$label: $bad environment value(s) inline the $role superuser's credential"
+        return 1
+    fi
+    pass "$label: all $checked environment values are free of an inline $role superuser credential"
+    return 0
+}
+
 check_ops_toml() {
     local ops_arm="$1" file="$2" label="$3" contract="$4"
     local bad=0 checked=0 leaf
@@ -592,14 +761,24 @@ check_ops_toml() {
 #     deploy/compose/docker-compose.yml: 24 secret-classed keys, of which 2
 #     carry a `urn:zeroship:file:` reference, 13 are `${NAME:?...}`, 1 is
 #     `${NAME:-}`, and 8 carry an inline `${NAME:-<default>}`. SIX of those
-#     defaults are DSNs with userinfo - lines 257, 431, 435, 517, 610 and 731 -
-#     so they ARE plaintext credentials in a tracked file by the same
-#     userinfo-grammar rule check 6c applies to argv. They are not gated here
-#     because the only non-arbitrary fix is to make all six required inputs,
-#     and `zeroship dev init` does not write a single DSN
+#     defaults were DSNs with userinfo, so they ARE plaintext credentials in a
+#     tracked file by the same userinfo-grammar rule check 6c applies to argv.
+#     FIVE still are; they are per-service LEAST-PRIVILEGE role DSNs and check
+#     6d's header says why moving them would relocate the literal rather than
+#     remove it. The sixth - `migrated`'s SUPERUSER provisioning DSN - is closed
+#     as of 2026-08-21 and check 6d now refuses its return.
+#
+#     THE REASON THIS PARAGRAPH GAVE FOR DEFERRING ALL SIX WAS FALSE WHEN
+#     WRITTEN. It said "`zeroship dev init` does not write a single DSN
 #     (crates/cli/src/dev.rs:36-43), so `docker compose up` would stop working
-#     for every local developer. Line 435's superuser DSN is the subject of its
-#     own queued task. This is a KNOWN, COUNTED hole, not an unexamined one.
+#     for every local developer". Those lines are the doc comment of
+#     `env_keys()`, which enumerates the .env SECRETS; the DSN is written by the
+#     other producer in the same file, `secret_specs()`, whose FIRST entry is
+#     `("migrate-dsn", generate_migrate_dsn, validate_migrate_dsn)` - and the
+#     compose file has mounted that very file into the `migrate` one-shot since
+#     2026-08-16. A citation to real lines that do not say what the sentence
+#     claims reads as evidence and is not; the fix cost one mount and one
+#     `urn:zeroship:file:` reference.
 #
 #   - Values with no canonical identity. `POSTGRES_PASSWORD: zeroship` at
 #     deploy/compose/docker-compose.yml:108 is a plaintext credential in a
@@ -784,6 +963,28 @@ if [ "${1:-}" = "--self-test" ]; then
         fail "self-test: the command check PASSED a secret passed as a value flag"
     fi
 
+    # Check 6d: the SUPERUSER credential inlined as an `environment:` default.
+    # This is the exact text that stood at `migrated`'s
+    # ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL until 2026-08-21, and which check
+    # 6c could not see because it reads `command:` blocks alone. The planted
+    # password is deliberately NOT the one the postgres service carries, so this
+    # also proves the detector keys on the superuser ROLE and not on a value it
+    # happened to find elsewhere in the file.
+    sed 's|^      ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: .*|      ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-postgres://postgres:hunter2@postgres:5432/zeroship}|' \
+        "$COMPOSE" >"$TMP/self/env_superuser.yml"
+    if ! grep -q 'PROVISION_DATABASE_URL: ${ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-postgres://postgres:hunter2@' "$TMP/self/env_superuser.yml"; then
+        fail "self-test: the environment-superuser mutation did not apply; the run below proves nothing"
+        exit 1
+    fi
+    before=$FAIL
+    check_compose_env_superuser env_superuser_mutation "$TMP/self/env_superuser.yml" "environment-superuser self-test" >/dev/null 2>&1
+    if [ "$FAIL" -gt "$before" ]; then
+        FAIL=$before
+        pass "self-test: an inline superuser DSN in an environment default is rejected"
+    else
+        fail "self-test: the environment check PASSED a superuser DSN default"
+    fi
+
     printf '[control]\nnot_a_real_setting = 1\n' >"$TMP/self/ops.toml"
     before=$FAIL
     check_ops_toml ops_mutation "$TMP/self/ops.toml" "ops-toml self-test" "$TMP/contract.tsv" >/dev/null 2>&1
@@ -820,15 +1021,16 @@ if [ "${1:-}" = "--self-test" ]; then
     check_compose compose_control "$COMPOSE" "compose control" "$TMP/contract.tsv"
     check_compose_alias_equality alias_control "$COMPOSE" "alias control"
     check_compose_command_secrets argv_control "$COMPOSE" "command control" "$TMP/contract.tsv"
+    check_compose_env_superuser env_superuser_control "$COMPOSE" "environment-superuser control"
     check_ops_toml ops_control "deploy/ops/zeroship.toml" "ops-toml control" "$TMP/contract.tsv"
     check_tracked_secret_literals secret_control "tracked-secret control" "$TMP/contract.tsv" "${TRACKED_TOML[@]}"
 
     echo ""
     echo "Self-test summary: $PASS passed, $FAIL failed"
     # --self-test is a completed run and owes the same trailer. Its arms are the
-    # ten above: the five mutated inputs and the five real ones, each with its own
-    # id, so a mutation whose fixture stopped resembling the real file shows up
-    # here as a count that no longer matches its control.
+    # twelve above: the six mutated inputs and the six real ones, each with its
+    # own id, so a mutation whose fixture stopped resembling the real file shows
+    # up here as a count that no longer matches its control.
     arms_rc=0
     gate_arms_finish || arms_rc=1
     [ "$FAIL" -eq 0 ] || exit 1
@@ -885,6 +1087,10 @@ echo "=== 6c. No compose command/entrypoint item carries a credential ==="
 check_compose_command_secrets compose_argv "$COMPOSE" "compose command argv" "$TMP/contract.tsv"
 
 echo ""
+echo "=== 6d. No compose environment value inlines the superuser credential ==="
+check_compose_env_superuser compose_env "$COMPOSE" "compose environment"
+
+echo ""
 echo "=== 7. Every ops-TOML leaf is a generated overlay path ==="
 for file in deploy/ops/zeroship.toml deploy/ops/zeroship.example.toml; do
     [ -f "$file" ] || { fail "expected $file to exist"; continue; }
@@ -915,8 +1121,8 @@ gate_arms_finish || arms_rc=1
 # ANTI-HOLLOW FLOOR. Every check above passes at zero if its extraction stops
 # matching, and this catches the case where several do at once. MEASURED on a
 # clean tree 2026-08-13: 9, then 10 once check 6b was armed, then 11 once 6c
-# was, then 12 once check 8 was.
-CONFIG_GATE_MIN_PASSED=12
+# was, then 12 once check 8 was, then 13 once 6d was.
+CONFIG_GATE_MIN_PASSED=13
 if [ "$PASS" -lt "$CONFIG_GATE_MIN_PASSED" ]; then
     echo "" >&2
     echo "FLOOR: only $PASS checks passed, expected at least $CONFIG_GATE_MIN_PASSED." >&2

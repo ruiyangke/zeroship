@@ -322,6 +322,88 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
     assert!(!env_file.exists());
 }
 
+/// Both privileged readers take the superuser DSN from the ONE file dev init
+/// writes, and neither inlines it.
+///
+/// WHAT WENT WRONG. `migrate` has read `/etc/zeroship/secrets/migrate-dsn`
+/// since 2026-08-16, but `migrated` - the other service that needs superuser
+/// rights, to `CREATE SCHEMA` and `CREATE ROLE` per app - carried its own
+/// inline default, `postgres://postgres:<password>@postgres:5432/zeroship`, in
+/// its `environment:` block. Two consequences, and the second is the one a
+/// gate cannot see:
+///
+///   1. the cluster superuser's credential sat in a tracked file that people
+///      copy, on the one surface check 6c of
+///      `tests/config_name_alignment_gate.sh` does not read (it parses argv);
+///   2. `generate_migrate_dsn` writes that file only when it is ABSENT,
+///      precisely so an operator can repoint it at a real database. Doing so
+///      moved the platform one-shot and left `migrated` provisioning against
+///      the in-compose Postgres, with nothing anywhere reporting the split.
+///
+/// This asserts the coupling directly, which the gate cannot: the gate rules on
+/// the compose file's grammar, and would stay green if `secret_specs()` renamed
+/// `migrate-dsn` out from under both mounts.
+///
+/// Does NOT cover: that the DSN authenticates, that the container can open the
+/// path (that is `deploy/scripts/deploy-remote.sh`'s per-service probe), or the
+/// five least-privilege role DSNs still inlined on other services.
+#[test]
+fn compose_takes_the_privileged_dsn_from_the_one_file_dev_init_writes() {
+    let root = workspace_root();
+    let compose_path = root.join("deploy/compose/docker-compose.yml");
+    let compose = std::fs::read_to_string(&compose_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", compose_path.display()));
+
+    // The name is taken from the set dev init is asserted to write, not spelled
+    // again here, so a rename that misses compose fails at this line.
+    let dsn_file = SECRET_FILES
+        .iter()
+        .find(|name| **name == "migrate-dsn")
+        .expect("dev init must still write a privileged DSN file");
+    let container_path = format!("/etc/zeroship/secrets/{dsn_file}");
+    let mount = format!("${{ZEROSHIP_SECRETS_DIR:-./secrets}}/{dsn_file}:{container_path}:ro");
+
+    for service in ["migrate", "migrated"] {
+        let block = service_block(&compose, service);
+        assert!(
+            block.contains(&mount),
+            "{service} must bind-mount {dsn_file}; deploy-remote.sh derives the host's \
+             required secret files from these mount lines"
+        );
+        assert!(
+            block.contains(&container_path),
+            "{service} must name {container_path} as the source of its privileged DSN"
+        );
+    }
+
+    let migrated = service_block(&compose, "migrated");
+    assert!(
+        migrated.contains(&format!(
+            "ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL: \
+             ${{ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL:-urn:zeroship:file:{container_path}}}"
+        )),
+        "migrated's provisioning DSN must default to a urn:zeroship:file: reference, \
+         not to material; got:\n{migrated}"
+    );
+
+    // The superuser's own role name, read from the postgres service rather than
+    // written here, so a rename cannot leave this asserting about nobody.
+    let postgres = service_block(&compose, "postgres");
+    assert!(
+        postgres.contains("POSTGRES_PASSWORD:"),
+        "the postgres service must still declare POSTGRES_PASSWORD"
+    );
+    let superuser = "postgres";
+    for service in ["control", "gateway", "worker", "auth", "migrated", "migrate"] {
+        let block = service_block(&compose, service);
+        assert!(
+            !block.contains(&format!("://{superuser}:")),
+            "{service} inlines a {superuser} superuser DSN; a privileged credential \
+             belongs in the mounted file, never in a tracked deploy file"
+        );
+    }
+}
+
 #[test]
 fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
     let root = workspace_root();
