@@ -30,6 +30,12 @@
 //! first, so the next borrower never inherits it; see `Pool::return_client`
 //! for why that is a ROLLBACK and not a `DISCARD ALL`.
 //!
+//! [`Pool::close`] is the coordinated shutdown path. It irreversibly rejects
+//! acquisitions, wakes queued callers, drops idle and assigned entries, stops
+//! housekeeping, and waits for this pool's borrowed [`PooledClient`]s to be
+//! returned. It deliberately does not use the driver's thread-wide connection
+//! drain, which would couple one pool's shutdown to unrelated pools.
+//!
 //! Lifecycle callbacks are configured separately through [`PoolHooks`], so
 //! [`PoolConfig`] keeps its original exhaustive shape. `after_connect` and
 //! `before_acquire` are asynchronous and run before a candidate becomes active.
@@ -200,7 +206,9 @@ impl PoolHooks {
     /// Returning `true` makes the connection available for another checkout;
     /// returning `false` closes it and releases its capacity slot. The callback
     /// is not invoked for a connection already known to be expired or closed,
-    /// and runs before the pool queues its raw-transaction rollback barrier.
+    /// or for a return during [`Pool::close`]: shutdown has already chosen to
+    /// discard that connection, so a reuse predicate has no decision to make.
+    /// On an open pool it runs before the raw-transaction rollback barrier.
     pub fn after_release<F>(mut self, hook: F) -> Self
     where
         F: Fn(&Client) -> bool + 'static,
@@ -373,6 +381,48 @@ fn pool_error(msg: impl Into<String>) -> Error {
     Error::connect(io::Error::other(msg.into()))
 }
 
+#[derive(Debug)]
+struct PoolClosedError;
+
+impl std::fmt::Display for PoolClosedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("pool is closed")
+    }
+}
+
+impl std::error::Error for PoolClosedError {}
+
+fn pool_closed_error() -> Error {
+    Error::connect(io::Error::other(PoolClosedError))
+}
+
+impl Error {
+    /// Whether this error reports an acquisition rejected by a closed pool.
+    #[must_use]
+    pub fn is_pool_closed(&self) -> bool {
+        let mut source = std::error::Error::source(self);
+        while let Some(error) = source {
+            if error.is::<PoolClosedError>() {
+                return true;
+            }
+            // `Error::connect` stores an `io::Error`, whose custom payload is
+            // available through `get_ref()` but is not exposed as its standard
+            // error-chain source on every supported Rust version.
+            if let Some(io_error) = error.downcast_ref::<io::Error>()
+                && io_error
+                    .get_ref()
+                    .is_some_and(
+                        <dyn std::error::Error + Send + Sync>::is::<PoolClosedError>,
+                    )
+            {
+                return true;
+            }
+            source = error.source();
+        }
+        false
+    }
+}
+
 /// Reject a mode that needs a TLS connector this build does not contain.
 ///
 /// This is a build-capability check, not a policy: the contradictions between
@@ -493,6 +543,12 @@ impl Transport {
 /// background maintenance (idle eviction, max-lifetime rotation, min-idle
 /// refill). Without the housekeeper, the pool still works but connections
 /// are never proactively evicted.
+///
+/// Dropping a pool without calling [`Pool::close`] preserves the original
+/// immediate RAII behaviour: idle clients and the retained housekeeper handle
+/// are dropped, with no asynchronous coordination step. Ordinary ownership
+/// keeps the pool alive while a [`PooledClient`] borrows it; deliberately
+/// forgetting a borrower bypasses its return path and cannot be recovered.
 pub struct Pool {
     transport: Transport,
     config: PoolConfig,
@@ -514,6 +570,16 @@ pub struct Pool {
     /// Cancelled waiters remove their slot by `Rc` identity, so this queue
     /// contains live callers only and cannot accumulate tombstones.
     waiters: RefCell<VecDeque<Rc<WaiterSlot>>>,
+    /// Direct hand-offs popped from `waiters` but not yet claimed by their
+    /// recipient. Tracking these otherwise-hidden entries lets close discard
+    /// and account for them before it returns.
+    handoffs: RefCell<Vec<Rc<WaiterSlot>>>,
+    /// Irreversible shutdown state. All mutations happen on the owning compio
+    /// thread, so a `Cell` is the atomic linearization point for this pool.
+    closed: Cell<bool>,
+    /// Every in-progress close gets its own wake slot. A single stored Waker
+    /// would strand concurrent close callers by overwriting the earlier one.
+    close_waiters: RefCell<Vec<Rc<CloseWaiterSlot>>>,
     /// Retaining the handle makes dropping the pool cancel housekeeping even
     /// if the task is blocked in a connection attempt. The task itself holds
     /// only a `Weak<Pool>`, so this field does not form a reference cycle.
@@ -523,6 +589,46 @@ pub struct Pool {
 }
 
 impl Pool {
+    /// Gracefully close this pool and wait for all borrowed clients to return.
+    ///
+    /// On its first poll, this method irreversibly marks the pool closed,
+    /// rejects future acquisitions, wakes every queued acquisition with a
+    /// pool-closed error, discards idle and not-yet-claimed hand-off entries,
+    /// and cancels the housekeeper. Connections still held by callers remain
+    /// usable until their [`PooledClient`] is dropped; each is then closed
+    /// instead of returned to idle. The future completes when `active == 0`.
+    ///
+    /// Calls are idempotent. Concurrent and later callers join the same drain,
+    /// and calls made after the drain return immediately.
+    ///
+    /// There is intentionally no timeout or force-close variant. A borrower
+    /// that is never dropped can keep this future pending forever. Callers may
+    /// wrap it in [`compio::time::timeout`]. Once the close future has begun,
+    /// cancelling it (including through an elapsed timeout) leaves the pool
+    /// closed; existing borrowers remain usable, and a later `close()` resumes
+    /// waiting for them. A timeout whose timer wins before polling `close()`
+    /// has not begun shutdown. An acquisition already inside an async
+    /// connection or hook await is not a borrower and is not awaited; when it
+    /// resumes (or is cancelled), its capacity guard discards the candidate.
+    pub async fn close(&self) {
+        self.begin_close();
+        CloseWaiter::new(self).await;
+    }
+
+    /// Whether graceful shutdown has begun.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed.get()
+    }
+
+    fn ensure_open(&self) -> Result<(), Error> {
+        if self.closed.get() {
+            Err(pool_closed_error())
+        } else {
+            Ok(())
+        }
+    }
+
     /// Create a new pool. Eagerly opens `min_idle` connections to verify
     /// the URL and warm the pool.
     ///
@@ -659,6 +765,9 @@ impl Pool {
             active: Cell::new(0),
             total: Cell::new(total),
             waiters: RefCell::new(VecDeque::new()),
+            handoffs: RefCell::new(Vec::new()),
+            closed: Cell::new(false),
+            close_waiters: RefCell::new(Vec::new()),
             housekeeper: RefCell::new(None),
             metrics: PoolMetrics::new(),
         };
@@ -676,13 +785,17 @@ impl Pool {
     /// Must be called on the compio event loop thread that owns the pool.
     /// The housekeeper holds a `Weak<Pool>` across awaits, and the pool retains
     /// its task handle. Dropping the last strong `Rc` therefore releases the
-    /// pool and cancels even a blocked housekeeping connection attempt.
+    /// pool and cancels even a blocked housekeeping connection attempt. Calling
+    /// this after [`Pool::close`] is a no-op.
     pub fn start_housekeeper(self: &std::rc::Rc<Self>) {
         self.start_housekeeper_with_interval(Duration::from_secs(30));
     }
 
     /// Interval-injectable form used by deterministic lifecycle tests.
     fn start_housekeeper_with_interval(self: &std::rc::Rc<Self>, interval: Duration) {
+        if self.closed.get() {
+            return;
+        }
         let weak = std::rc::Rc::downgrade(self);
         let handle = compio::runtime::spawn(async move {
             loop {
@@ -695,6 +808,93 @@ impl Pool {
         *self.housekeeper.borrow_mut() = Some(handle);
     }
 
+    /// Perform the synchronous, one-shot half of graceful shutdown. The closed
+    /// bit is set before any other mutation, and every counter/owner transition
+    /// is committed before an arbitrary acquisition Waker is invoked.
+    fn begin_close(&self) {
+        if self.closed.replace(true) {
+            return;
+        }
+
+        // Dropping a compio JoinHandle cancels its task. Do this after marking
+        // closed so a cancellation guard, or a task already queued to resume,
+        // can only release capacity and can never refill the pool.
+        let housekeeper = self.housekeeper.borrow_mut().take();
+        drop(housekeeper);
+
+        let mut discarded_entries = std::mem::take(&mut *self.idle.borrow_mut());
+        let queued_waiters: Vec<_> = self.waiters.borrow_mut().drain(..).collect();
+        let assigned_handoffs = std::mem::take(&mut *self.handoffs.borrow_mut());
+        let mut wakers = Vec::with_capacity(queued_waiters.len() + assigned_handoffs.len());
+
+        for slot in queued_waiters {
+            if let Some(waker) = slot.waker.borrow_mut().take() {
+                wakers.push(waker);
+            }
+        }
+
+        // A direct FIFO hand-off has already been popped from `waiters`, but
+        // is not active until its recipient polls it out and passes checkout
+        // validation. Close owns the decision first: take and discard the
+        // entry here, then the recipient observes `closed` on its next poll.
+        for slot in assigned_handoffs {
+            if let Some(entry) = slot.entry.borrow_mut().take() {
+                discarded_entries.push(entry);
+            }
+            if let Some(waker) = slot.waker.borrow_mut().take() {
+                wakers.push(waker);
+            }
+        }
+
+        self.release_total_slots(discarded_entries.len());
+        drop(discarded_entries);
+
+        // Wake all queued callers even if one custom Waker panics. Accounting
+        // and ownership are already final, so rethrowing afterwards cannot let
+        // any caller acquire an entry shutdown decided to discard.
+        wake_all(wakers);
+    }
+
+    fn release_total_slots(&self, slots: usize) {
+        if slots == 0 {
+            return;
+        }
+        let total = self.total.get();
+        debug_assert!(
+            slots <= total,
+            "pool total underflow: releasing {slots} slot(s) from {total}"
+        );
+        self.total.set(total.saturating_sub(slots));
+    }
+
+    fn discard_unowned_entry(&self, entry: PoolEntry) {
+        self.release_total_slots(1);
+        drop(entry);
+    }
+
+    fn remove_handoff_slot(&self, slot: &Rc<WaiterSlot>) {
+        let mut handoffs = self.handoffs.borrow_mut();
+        if let Some(index) = handoffs
+            .iter()
+            .position(|assigned| Rc::ptr_eq(assigned, slot))
+        {
+            handoffs.swap_remove(index);
+        }
+    }
+
+    fn wake_close_waiters_if_drained(&self) {
+        if self.active.get() != 0 {
+            return;
+        }
+
+        let slots = std::mem::take(&mut *self.close_waiters.borrow_mut());
+        let wakers = slots
+            .into_iter()
+            .filter_map(|slot| slot.waker.borrow_mut().take())
+            .collect();
+        wake_all(wakers);
+    }
+
     /// Acquire a connection from the pool.
     ///
     /// Tries idle connections first (with alive-bypass validation), then
@@ -703,9 +903,14 @@ impl Pool {
     /// hooks are inside that timeout; cancellation discards their candidate and
     /// releases its capacity slot.
     pub async fn get(&self) -> Result<PooledClient<'_>, Error> {
+        self.ensure_open()?;
         match compio::time::timeout(self.config.connection_timeout, self.get_inner()).await {
             Ok(result) => result,
             Err(_) => {
+                // If shutdown raced the timeout, report the terminal state and
+                // do not count a capacity timeout. The pool cannot become open
+                // again, so this is the more specific and stable answer.
+                self.ensure_open()?;
                 self.metrics.inc_timeouts();
                 Err(pool_error(format!(
                     "connection timeout after {}s (pool: {}/{} idle, {}/{} total)",
@@ -721,6 +926,8 @@ impl Pool {
 
     async fn get_inner(&self) -> Result<PooledClient<'_>, Error> {
         loop {
+            self.ensure_open()?;
+
             // 1. Try to pop an idle connection
             let entry = self.idle.borrow_mut().pop();
             if let Some(mut entry) = entry {
@@ -760,7 +967,9 @@ impl Pool {
                 // extremely recent, because dirtiness is precisely the case
                 // where "last_used was recent" is insufficient.
                 if entry.client.is_dirty() {
-                    match entry.client.simple_query("").await {
+                    let validation = entry.client.simple_query("").await;
+                    self.ensure_open()?;
+                    match validation {
                         Ok(_) => entry.client.clear_dirty(),
                         Err(_) => {
                             self.metrics.inc_evictions();
@@ -769,17 +978,22 @@ impl Pool {
                     }
                     // The barrier itself provides the alive-check; skip the
                     // second `simple_query("")` below.
-                } else if entry.last_used.elapsed() > self.config.validation_bypass
-                    && entry.client.simple_query("").await.is_err()
-                {
-                    // Alive-bypass validation: a clean connection used outside
-                    // the bypass window gets a cheap server round trip. Dirty
-                    // connections used the stronger barrier above instead.
-                    self.metrics.inc_evictions();
-                    continue;
+                } else if entry.last_used.elapsed() > self.config.validation_bypass {
+                    let validation = entry.client.simple_query("").await;
+                    self.ensure_open()?;
+                    if validation.is_err() {
+                        // Alive-bypass validation: a clean connection used
+                        // outside the bypass window gets a cheap server round
+                        // trip. Dirty connections used the stronger barrier
+                        // above instead.
+                        self.metrics.inc_evictions();
+                        continue;
+                    }
                 }
 
-                match self.hooks.run_before_acquire(&entry.client).await {
+                let before_acquire = self.hooks.run_before_acquire(&entry.client).await;
+                self.ensure_open()?;
+                match before_acquire {
                     Ok(true) => {}
                     Ok(false) => {
                         self.metrics.inc_evictions();
@@ -791,6 +1005,11 @@ impl Pool {
                     }
                 }
 
+                // This check is deliberately adjacent to the active commit.
+                // Every awaited path checks above as well, and the
+                // single-threaded executor cannot interleave close between
+                // these two synchronous statements.
+                self.ensure_open()?;
                 entry.touch();
                 self.active.set(self.active.get() + 1);
                 // PooledClient now owns the slot; its Drop -> return_client
@@ -813,7 +1032,9 @@ impl Pool {
             // forever (POOL-1). On Err the guard also releases it on return.
             if self.total.get() < self.config.max_size {
                 let permit = PermitGuard::reserve(self);
-                let client = match self.transport.connect_one().await {
+                let connected = self.transport.connect_one().await;
+                self.ensure_open()?;
+                let client = match connected {
                     Ok(c) => c,
                     Err(e) => {
                         // `permit` drops here -> total -= 1.
@@ -822,13 +1043,17 @@ impl Pool {
                 };
                 self.metrics.inc_created();
                 let mut entry = PoolEntry::new(client, self.config.max_lifetime);
-                if let Err(e) = self.hooks.run_after_connect(&entry.client).await {
+                let after_connect = self.hooks.run_after_connect(&entry.client).await;
+                self.ensure_open()?;
+                if let Err(e) = after_connect {
                     self.metrics.inc_evictions();
                     // `entry` is dropped and `permit` releases the reserved
                     // slot; this connection is never made active or idle.
                     return Err(e);
                 }
-                match self.hooks.run_before_acquire(&entry.client).await {
+                let before_acquire = self.hooks.run_before_acquire(&entry.client).await;
+                self.ensure_open()?;
+                match before_acquire {
                     Ok(true) => {}
                     Ok(false) => {
                         self.metrics.inc_evictions();
@@ -839,6 +1064,7 @@ impl Pool {
                         return Err(e);
                     }
                 }
+                self.ensure_open()?;
                 entry.touch();
                 self.active.set(self.active.get() + 1);
                 // PooledClient now owns the slot; its Drop -> return_client
@@ -885,6 +1111,17 @@ impl Pool {
         // FIFO head; successful redeposit disarms it.
         let permit = ReturnPermitGuard::adopt(self);
 
+        // `after_release` is a reuse predicate. Once shutdown has begun there
+        // is no keep/discard decision left to delegate to user code: close the
+        // session, release its exact capacity slot, then notify every close
+        // caller if this was the last borrower.
+        if self.closed.get() {
+            drop(entry);
+            drop(permit);
+            self.wake_close_waiters_if_drained();
+            return;
+        }
+
         // Eviction criteria:
         //   - expired (max_lifetime reached)
         //   - closed: Client::is_closed() indicates the connection task exited
@@ -897,7 +1134,17 @@ impl Pool {
         // synchronous keep-or-discard predicate, and the entry stays invisible
         // to both `idle` and waiter slots until it returns. False drops the
         // session; closing it also rolls back any open transaction.
-        if !self.hooks.run_after_release(&entry.client) {
+        let keep = self.hooks.run_after_release(&entry.client);
+        // Re-check after arbitrary hook code. Re-entry is forbidden by the
+        // hook contract, but preserving shutdown accounting is cheap and keeps
+        // a violating hook from depositing an entry after close linearized.
+        if self.closed.get() {
+            drop(entry);
+            drop(permit);
+            self.wake_close_waiters_if_drained();
+            return;
+        }
+        if !keep {
             self.metrics.inc_evictions();
             return;
         }
@@ -980,6 +1227,10 @@ impl Pool {
     /// `Waiter::drop` (reclaim of an entry deposited into a slot that was then
     /// cancelled before polling it out).
     fn redeposit_freed_entry(&self, entry: PoolEntry) {
+        if self.closed.get() {
+            self.discard_unowned_entry(entry);
+            return;
+        }
         if let Some(waker) = self.deposit_freed_entry(entry) {
             waker.wake();
         }
@@ -990,6 +1241,7 @@ impl Pool {
     /// disarm after this returns, then wake, so a panicking waker cannot make a
     /// deposited entry disappear from `total`.
     fn deposit_freed_entry(&self, entry: PoolEntry) -> Option<Waker> {
+        debug_assert!(!self.closed.get(), "deposited an entry into a closed pool");
         match self.take_front_waiter() {
             Some(slot) => {
                 // Deposit into the waiter's rendezvous slot and wake it. The
@@ -997,6 +1249,7 @@ impl Pool {
                 // "waiting"); it now owns the right to this entry via its
                 // retained `Rc<WaiterSlot>` clone.
                 *slot.entry.borrow_mut() = Some(entry);
+                self.handoffs.borrow_mut().push(Rc::clone(&slot));
                 slot.waker.borrow_mut().take()
             }
             None => {
@@ -1017,6 +1270,9 @@ impl Pool {
     /// takes the capacity before the waiter is polled, and lets `Waiter::drop`
     /// pass the wake onward if that waiter is cancelled while capacity remains.
     fn wake_one_waiter(&self) {
+        if self.closed.get() {
+            return;
+        }
         let slot = self.waiters.borrow().front().cloned();
         if let Some(slot) = slot
             && let Some(w) = slot.waker.borrow_mut().take()
@@ -1035,16 +1291,20 @@ impl Pool {
     }
 
     fn has_available_resource(&self) -> bool {
-        !self.idle.borrow().is_empty() || self.total.get() < self.config.max_size
+        !self.closed.get()
+            && (!self.idle.borrow().is_empty() || self.total.get() < self.config.max_size)
     }
 
     /// Run one housekeeper cycle. A strong pool reference is held only while
     /// reading or mutating pool state, never across a connection await.
-    /// Returns false once the pool has been dropped.
+    /// Returns false once the pool has been dropped or closed.
     async fn housekeep(weak: &Weak<Self>) -> bool {
         let Some(pool) = weak.upgrade() else {
             return false;
         };
+        if pool.closed.get() {
+            return false;
+        }
 
         // Take counts and do all mutations inside tight borrows. Release
         // every borrow before awaiting.
@@ -1126,6 +1386,9 @@ impl Pool {
                 let Some(pool) = weak.upgrade() else {
                     return false;
                 };
+                if pool.closed.get() {
+                    return false;
+                }
                 if pool.total.get() >= pool.config.max_size {
                     break;
                 }
@@ -1141,12 +1404,25 @@ impl Pool {
                     let Some(pool) = weak.upgrade() else {
                         return false;
                     };
+                    if pool.closed.get() {
+                        return false;
+                    }
                     pool.metrics.inc_created();
                     drop(pool);
 
                     let entry = PoolEntry::new(client, max_lifetime);
-                    if let Err(e) = hooks.run_after_connect(&entry.client).await {
-                        if let Some(pool) = weak.upgrade() {
+                    let after_connect = hooks.run_after_connect(&entry.client).await;
+                    let Some(pool) = weak.upgrade() else {
+                        return false;
+                    };
+                    if pool.closed.get() {
+                        return false;
+                    }
+                    drop(pool);
+                    if let Err(e) = after_connect {
+                        if let Some(pool) = weak.upgrade()
+                            && !pool.closed.get()
+                        {
                             pool.metrics.inc_evictions();
                         }
                         eprintln!(
@@ -1160,6 +1436,9 @@ impl Pool {
                     let Some(pool) = weak.upgrade() else {
                         return false;
                     };
+                    if pool.closed.get() {
+                        return false;
+                    }
                     created += 1;
                     let waker = pool.deposit_freed_entry(entry);
                     // The entry is now idle or assigned to the head waiter and
@@ -1171,6 +1450,9 @@ impl Pool {
                 }
                 Err(e) => {
                     // `permit` drops here -> total -= 1.
+                    if weak.upgrade().is_some_and(|pool| pool.closed.get()) {
+                        return false;
+                    }
                     eprintln!("[compio-postgres] housekeeper: failed to create connection: {e}");
                     break;
                 }
@@ -1181,6 +1463,9 @@ impl Pool {
             let Some(pool) = weak.upgrade() else {
                 return false;
             };
+            if pool.closed.get() {
+                return false;
+            }
             let after_idle = pool.idle.borrow().len();
             let active = pool.active.get();
             let total = pool.total.get();
@@ -1190,7 +1475,7 @@ impl Pool {
             );
         }
 
-        weak.upgrade().is_some()
+        weak.upgrade().is_some_and(|pool| !pool.closed.get())
     }
 
     // ── Convenience methods ──────────────────────────────────────────────
@@ -1404,6 +1689,9 @@ impl std::fmt::Debug for Pool {
             .field("total", &self.total.get())
             .field("max_size", &self.config.max_size)
             .field("waiters", &self.waiters.borrow().len())
+            .field("handoffs", &self.handoffs.borrow().len())
+            .field("closed", &self.closed.get())
+            .field("close_waiters", &self.close_waiters.borrow().len())
             .field("hooks", &self.hooks)
             .finish()
     }
@@ -1523,11 +1811,22 @@ impl Future for Waiter<'_> {
     type Output = Option<PoolEntry>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // 1. A connection handed directly to us takes priority — claim it.
-        if let Some(slot) = &self.slot
-            && let Some(entry) = slot.entry.borrow_mut().take()
-        {
-            return Poll::Ready(Some(entry));
+        // Shutdown takes priority over a direct hand-off. `begin_close`
+        // discards tracked assigned entries before waking their recipients; a
+        // defensive reclaim in Drop handles any entry deposited by a broken
+        // future caller without ever exposing it to checkout.
+        if self.pool.closed.get() {
+            return Poll::Ready(None);
+        }
+
+        // 1. A connection handed directly to us takes priority — claim it and
+        // remove its otherwise-hidden ownership record.
+        if let Some(slot) = self.slot.as_ref().map(Rc::clone) {
+            let entry = slot.entry.borrow_mut().take();
+            if let Some(entry) = entry {
+                self.pool.remove_handoff_slot(&slot);
+                return Poll::Ready(Some(entry));
+            }
         }
 
         // 2. Register or refresh our FIFO slot before consulting global
@@ -1578,10 +1877,15 @@ impl Drop for Waiter<'_> {
         //    lost. `active` was NEVER incremented for this entry (that happens
         //    only after checkout validation), so the reclaim must NOT touch
         //    `active`; nor `total` (the connection is still alive and counted).
-        if let Some(slot) = self.slot.take()
-            && let Some(entry) = slot.entry.borrow_mut().take()
-        {
-            self.pool.redeposit_freed_entry(entry);
+        if let Some(slot) = self.slot.take() {
+            let entry = slot.entry.borrow_mut().take();
+            if let Some(entry) = entry {
+                self.pool.remove_handoff_slot(&slot);
+                // On an open pool this preserves the existing reclaim and FIFO
+                // semantics. During close it discards the entry and releases
+                // its `total` slot instead of making it visible again.
+                self.pool.redeposit_freed_entry(entry);
+            }
         }
 
         // A capacity-only wake deliberately leaves the slot queued. If that
@@ -1592,6 +1896,98 @@ impl Drop for Waiter<'_> {
         if removed_queued_slot && self.pool.has_available_resource() {
             self.pool.wake_one_waiter();
         }
+    }
+}
+
+fn wake_all(wakers: Vec<Waker>) {
+    let mut first_panic: Option<Box<dyn std::any::Any + Send>> = None;
+    for waker in wakers {
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
+            && first_panic.is_none()
+        {
+            first_panic = Some(payload);
+        }
+    }
+    if let Some(payload) = first_panic {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Close waiter — cancellation-safe multi-caller active drain
+// ---------------------------------------------------------------------------
+
+struct CloseWaiterSlot {
+    waker: RefCell<Option<Waker>>,
+}
+
+impl CloseWaiterSlot {
+    fn new(waker: Waker) -> Rc<Self> {
+        Rc::new(Self {
+            waker: RefCell::new(Some(waker)),
+        })
+    }
+}
+
+struct CloseWaiter<'a> {
+    pool: &'a Pool,
+    slot: Option<Rc<CloseWaiterSlot>>,
+}
+
+impl<'a> CloseWaiter<'a> {
+    fn new(pool: &'a Pool) -> Self {
+        Self { pool, slot: None }
+    }
+
+    fn remove_slot(&self) {
+        let Some(slot) = &self.slot else {
+            return;
+        };
+        let mut close_waiters = self.pool.close_waiters.borrow_mut();
+        if let Some(index) = close_waiters
+            .iter()
+            .position(|registered| Rc::ptr_eq(registered, slot))
+        {
+            close_waiters.swap_remove(index);
+        }
+    }
+}
+
+impl Future for CloseWaiter<'_> {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.pool.active.get() == 0 {
+            return Poll::Ready(());
+        }
+
+        let new_waker = cx.waker();
+        let current_slot = self.slot.as_ref().map(Rc::clone);
+        let mut close_waiters = self.pool.close_waiters.borrow_mut();
+        if let Some(slot) = current_slot
+            && close_waiters
+                .iter()
+                .any(|registered| Rc::ptr_eq(registered, &slot))
+        {
+            let mut waker = slot.waker.borrow_mut();
+            match &*waker {
+                Some(existing) if existing.will_wake(new_waker) => {}
+                _ => *waker = Some(new_waker.clone()),
+            }
+        } else {
+            let slot = CloseWaiterSlot::new(new_waker.clone());
+            close_waiters.push(Rc::clone(&slot));
+            self.slot = Some(slot);
+        }
+
+        Poll::Pending
+    }
+}
+
+impl Drop for CloseWaiter<'_> {
+    fn drop(&mut self) {
+        self.remove_slot();
     }
 }
 
@@ -1700,6 +2096,9 @@ mod tests {
             active: Cell::new(active),
             total: Cell::new(total),
             waiters: RefCell::new(VecDeque::new()),
+            handoffs: RefCell::new(Vec::new()),
+            closed: Cell::new(false),
+            close_waiters: RefCell::new(Vec::new()),
             housekeeper: RefCell::new(None),
             metrics: PoolMetrics::new(),
         }
@@ -1853,6 +2252,45 @@ mod tests {
             poll_with_waker(waiter.as_mut(), &waker),
             Poll::Ready(None)
         ));
+    }
+
+    #[test]
+    fn reentrant_close_from_after_release_cannot_redeposit_after_shutdown() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let pool_slot = Rc::new(RefCell::new(Weak::<Pool>::new()));
+        let hook_pool_slot = Rc::clone(&pool_slot);
+        let mut pool = test_pool(config, Vec::new(), 1, 1);
+        pool.hooks = PoolHooks::new().after_release(move |_| {
+            let pool = hook_pool_slot
+                .borrow()
+                .upgrade()
+                .expect("test pool disappeared inside after_release");
+            let mut close = Box::pin(pool.close());
+            assert!(
+                poll_once(close.as_mut()).is_ready(),
+                "close waited for a return that had already left active"
+            );
+            true
+        });
+        let pool = Rc::new(pool);
+        *pool_slot.borrow_mut() = Rc::downgrade(&pool);
+        let (client, _receiver) = fake_client(341);
+        let held = PooledClient {
+            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
+            pool: &pool,
+        };
+
+        drop(held);
+
+        assert!(pool.is_closed());
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 0, "return was deposited after close");
+        assert_eq!(pool.total_count(), 0, "return kept a slot after close");
     }
 
     #[test]
@@ -2255,6 +2693,30 @@ mod tests {
         assert_eq!(pool.idle_count(), 0, "expired connection was not evicted");
         assert_eq!(pool.total_count(), 0, "eviction did not release capacity");
         assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
+    #[compio::test]
+    async fn close_stops_housekeeping_and_prevents_restart() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = Rc::new(test_pool(config, Vec::new(), 0, 0));
+        pool.start_housekeeper_with_interval(Duration::from_secs(60));
+        assert!(pool.housekeeper.borrow().is_some());
+
+        pool.close().await;
+        assert!(
+            pool.housekeeper.borrow().is_none(),
+            "close retained the housekeeper task"
+        );
+
+        pool.start_housekeeper_with_interval(Duration::ZERO);
+        assert!(
+            pool.housekeeper.borrow().is_none(),
+            "closed pool restarted its housekeeper"
+        );
     }
 
     #[compio::test]
