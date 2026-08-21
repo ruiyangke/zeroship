@@ -20,7 +20,15 @@
 //! setup script. There is no longer a state in which this file reports success
 //! without having connected to anything.
 
-use compio_postgres::{Client, Error, NoTls, Pool};
+// This target deliberately carries many independent async behavioral pairs;
+// their state-machine layouts exceed rustc's default query-depth budget.
+#![recursion_limit = "256"]
+
+use compio_postgres::config::SslCertMode;
+use compio_postgres::{Client, Config, Error, MakeRustlsConnect, NoTls, Pool};
+use futures_channel::oneshot;
+use rustls::server::{ClientHello, ResolvesServerCert};
+use std::sync::Mutex;
 
 /// Written by `tls_live_setup.sh`. A file, not an environment variable,
 /// because `libs/compio-postgres` may not read the environment outside
@@ -163,6 +171,105 @@ const WRONG_KEY_PASSWORD_MARKER: &str = "definitely-wrong";
 
 fn describe(err: &Error) -> String {
     format!("{err}: {:?}", std::error::Error::source(err))
+}
+
+#[derive(Debug)]
+struct SniRecorder {
+    sender: Mutex<Option<oneshot::Sender<Option<String>>>>,
+}
+
+impl ResolvesServerCert for SniRecorder {
+    fn resolve(
+        &self,
+        client_hello: ClientHello<'_>,
+    ) -> Option<std::sync::Arc<rustls::sign::CertifiedKey>> {
+        self.sender
+            .lock()
+            .expect("lock SNI recorder")
+            .take()
+            .expect("record exactly one ClientHello")
+            .send(client_hello.server_name().map(str::to_owned))
+            .expect("deliver observed SNI");
+
+        // Parsing the real ClientHello is this server's whole job. Ending the
+        // handshake here keeps the assertion independent of certificate
+        // generation and PostgreSQL startup.
+        None
+    }
+}
+
+/// Capture SNI from the server side of a serialized ClientHello.
+async fn sni_offered_by(option: &str) -> Option<String> {
+    let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind SNI recorder");
+    let address = listener.local_addr().expect("SNI recorder address");
+    let (sender, receiver) = oneshot::channel();
+    let server_config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("safe TLS protocol versions")
+    .with_no_client_auth()
+    .with_cert_resolver(std::sync::Arc::new(SniRecorder {
+        sender: Mutex::new(Some(sender)),
+    }));
+    let acceptor = compio_tls::TlsAcceptor::from(std::sync::Arc::new(server_config));
+    let server = compio::runtime::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept SNI probe");
+        assert!(
+            acceptor.accept(stream).await.is_err(),
+            "capture-only TLS server unexpectedly completed a handshake"
+        );
+    });
+
+    let dsn = format!(
+        "host=localhost hostaddr=127.0.0.1 port={} user=postgres sslmode=require \
+         sslnegotiation=direct {option}",
+        address.port()
+    );
+    let config = dsn.parse::<Config>().expect("parse SNI probe DSN");
+    let tls = MakeRustlsConnect::from_config(&config).expect("build SNI probe connector");
+    let connection = compio::time::timeout(
+        std::time::Duration::from_secs(5),
+        config.connect(tls),
+    )
+    .await
+    .expect("SNI probe connection timed out");
+    assert!(
+        connection.is_err(),
+        "capture-only TLS server completed a connection after ClientHello"
+    );
+    compio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("SNI recorder task timed out")
+        .expect("SNI recorder task");
+    compio::time::timeout(std::time::Duration::from_secs(5), receiver)
+        .await
+        .expect("observed SNI delivery timed out")
+        .expect("receive observed SNI")
+}
+
+/// `sslsni` reaches rustls' wire output, rather than merely surviving parsing.
+/// The hostname is retained while `hostaddr` bypasses DNS; an IP-only endpoint
+/// would omit SNI in both modes and make this test vacuous.
+#[compio::test]
+async fn sslsni_controls_the_client_hello_extension() {
+    assert_eq!(
+        sni_offered_by("").await.as_deref(),
+        Some("localhost"),
+        "the default must send SNI"
+    );
+    assert_eq!(
+        sni_offered_by("sslsni=1").await.as_deref(),
+        Some("localhost"),
+        "sslsni=1 must send SNI"
+    );
+    assert_eq!(
+        sni_offered_by("sslsni=0").await,
+        None,
+        "sslsni=0 must omit SNI"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -609,6 +716,192 @@ async fn client_certificates_authenticate_the_session() {
             .await
             .expect("the client certificate must authenticate"),
         "client-certificate session was not encrypted"
+    );
+}
+
+/// One variable, opposite outcomes: both attempts name the same certificate
+/// and key against the same `cert`-authentication server. `allow` sends the
+/// requested identity; `disable` must not even load or send it.
+#[compio::test]
+async fn sslcertmode_controls_whether_the_same_certificate_is_sent() {
+    let s = servers();
+    let base = format!(
+        "{} sslmode=verify-full sslrootcert={} sslcert={} sslkey={} sslcertmode=",
+        s.clientcert_url, s.ca, s.client_cert, s.client_key
+    );
+
+    assert!(
+        transport_of(&format!("{base}allow"))
+            .await
+            .expect("sslcertmode=allow must send the requested certificate"),
+        "the allowed client-certificate session was not encrypted"
+    );
+
+    let refused = transport_of(&format!("{base}disable"))
+        .await
+        .expect_err("sslcertmode=disable must withhold the same certificate");
+    assert!(
+        describe(&refused).contains("certificate") || describe(&refused).contains("pg_hba"),
+        "the server did not refuse the missing client identity: {}",
+        describe(&refused)
+    );
+}
+
+/// `require` observes CertificateRequest, not just configured file paths. The
+/// ordinary password-authentication server does not request a client
+/// certificate: `allow` succeeds, while changing only the mode to `require`
+/// refuses the otherwise successful session.
+#[compio::test]
+async fn sslcertmode_require_needs_a_server_certificate_request() {
+    let s = servers();
+    let base = format!(
+        "{} sslmode=verify-full sslrootcert={} sslcert={} sslkey={} sslcertmode=",
+        s.tls_url, s.ca, s.client_cert, s.client_key
+    );
+
+    assert!(
+        transport_of(&format!("{base}allow"))
+            .await
+            .expect("allow does not require the server to request the configured certificate"),
+        "the allow control was not encrypted"
+    );
+
+    let refused = transport_of(&format!("{base}require"))
+        .await
+        .expect_err("require must reject a server that sent no CertificateRequest");
+    let text = describe(&refused);
+    assert!(
+        text.contains("sslcertmode=require") && text.contains("did not request"),
+        "the refusal did not identify the missing CertificateRequest: {text}"
+    );
+}
+
+/// A plaintext fallback must not bypass `sslcertmode=require`. Both attempts
+/// name the same identity against the same non-TLS server; changing only the
+/// certificate mode turns an otherwise successful plaintext connection into a
+/// refusal.
+#[compio::test]
+async fn sslcertmode_require_cannot_finish_on_plaintext() {
+    let s = servers();
+    let base = format!(
+        "{} sslmode=prefer sslcert={} sslkey={} sslcertmode=",
+        s.plain_url, s.client_cert, s.client_key
+    );
+
+    assert!(
+        !transport_of(&format!("{base}allow"))
+            .await
+            .expect("allow may finish on the non-TLS server"),
+        "the allow control unexpectedly negotiated TLS"
+    );
+
+    let refused = transport_of(&format!("{base}require"))
+        .await
+        .expect_err("require must reject the plaintext fallback");
+    let text = describe(&refused);
+    assert!(
+        text.contains("sslcertmode=require") && text.contains("did not request"),
+        "the plaintext refusal did not name the unmet certificate mode: {text}"
+    );
+}
+
+/// A connector built from a different configuration must fail by parameter
+/// name before its stale policy can reach a ClientHello.
+#[compio::test]
+async fn stale_tls_connector_cannot_override_sni_or_certificate_mode() {
+    let s = servers();
+    let dsn = format!(
+        "{} sslmode=verify-full sslrootcert={} sslcert={} sslkey={} \
+         sslsni=1 sslcertmode=allow",
+        s.tls_url, s.ca, s.client_cert, s.client_key
+    );
+
+    let mut sni_config = dsn.parse::<Config>().expect("parse stale SNI control");
+    let stale_sni =
+        MakeRustlsConnect::from_config(&sni_config).expect("build SNI-enabled connector");
+    sni_config.ssl_sni(false);
+    let sni_error = match sni_config.connect(stale_sni).await {
+        Ok(_) => panic!("a stale connector silently overrode sslsni=0"),
+        Err(error) => error,
+    };
+    assert!(
+        describe(&sni_error).contains("sslsni=0"),
+        "the stale SNI connector was not refused by key: {}",
+        describe(&sni_error)
+    );
+
+    let mut cert_config = dsn
+        .parse::<Config>()
+        .expect("parse stale certificate-mode control");
+    let stale_cert =
+        MakeRustlsConnect::from_config(&cert_config).expect("build certificate-allow connector");
+    cert_config.ssl_cert_mode(SslCertMode::Disable);
+    let cert_error = match cert_config.connect(stale_cert).await {
+        Ok(_) => panic!("a stale connector silently overrode sslcertmode=disable"),
+        Err(error) => error,
+    };
+    assert!(
+        describe(&cert_error).contains("sslcertmode=disable"),
+        "the stale certificate connector was not refused by key: {}",
+        describe(&cert_error)
+    );
+}
+
+/// The positive half for `require`: a server that requests the configured
+/// certificate and authenticates it must be accepted.
+#[compio::test]
+async fn sslcertmode_require_accepts_a_requested_certificate() {
+    let s = servers();
+    let url = format!(
+        "{} sslmode=verify-full sslrootcert={} sslcert={} sslkey={} sslcertmode=require",
+        s.clientcert_url, s.ca, s.client_cert, s.client_key
+    );
+    assert!(
+        transport_of(&url)
+            .await
+            .expect("the requested and selected certificate must satisfy require"),
+        "the required client-certificate session was not encrypted"
+    );
+}
+
+/// This driver deliberately has no implicit `~/.postgresql` certificate
+/// lookup. With no configured identity, `require` therefore has no possible
+/// successful outcome and fails before opening a socket, naming all three
+/// relevant parameters.
+#[compio::test]
+async fn sslcertmode_require_without_configured_identity_fails_loudly() {
+    let s = servers();
+    let err = transport_of(&format!(
+        "{} sslmode=verify-full sslrootcert={} sslcertmode=require",
+        s.clientcert_url, s.ca
+    ))
+    .await
+    .expect_err("require without sslcert/sslkey cannot be honoured");
+    let text = describe(&err);
+    assert!(
+        text.contains("sslcertmode=require")
+            && text.contains("sslcert")
+            && text.contains("sslkey"),
+        "the impossible client-certificate configuration was unclear: {text}"
+    );
+}
+
+/// Disabled certificate use must not touch the configured identity files.
+/// These paths do not exist; reaching the password-authenticated server proves
+/// the mode branched before certificate/key loading.
+#[compio::test]
+async fn sslcertmode_disable_does_not_load_client_identity_files() {
+    let s = servers();
+    let url = format!(
+        "{} sslmode=verify-full sslrootcert={} sslcertmode=disable \
+         sslcert=/definitely/missing/client.crt sslkey=/definitely/missing/client.key",
+        s.tls_url, s.ca
+    );
+    assert!(
+        transport_of(&url)
+            .await
+            .expect("disabled client-certificate files must not be opened"),
+        "the disable control was not encrypted"
     );
 }
 

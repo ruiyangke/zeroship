@@ -52,6 +52,7 @@ where
             config.port,
             config.tcp_user_timeout,
             config.keepalive.as_ref(),
+            config.require_peer.as_deref(),
         )
         .await?;
 
@@ -108,6 +109,7 @@ where
             config.port,
             config.tcp_user_timeout,
             config.keepalive.as_ref(),
+            config.require_peer.as_deref(),
         )
         .await?;
 
@@ -185,6 +187,7 @@ mod tests {
             connect_timeout: None,
             tcp_user_timeout: None,
             keepalive: None,
+            require_peer: None,
         };
         let cancel = Box::pin(cancel_query_confirmed(
             Some(config),
@@ -431,6 +434,7 @@ mod tests {
             connect_timeout: None,
             tcp_user_timeout: None,
             keepalive: None,
+            require_peer: None,
         };
         let connected = Arc::new(AtomicBool::new(false));
 

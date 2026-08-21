@@ -4,7 +4,7 @@
 // methods), so the wrapper is a plain enum; no pin_project_lite needed.
 
 use crate::buf_stream::SplitStream;
-use crate::tls::{ChannelBinding, TlsStream};
+use crate::tls::{ChannelBinding, ClientCertStatus, TlsStream};
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use std::io;
@@ -66,6 +66,13 @@ where
         match self {
             MaybeTlsStream::Raw(_) => ChannelBinding::none(),
             MaybeTlsStream::Tls(s) => s.channel_binding(),
+        }
+    }
+
+    fn client_cert_status(&self) -> ClientCertStatus {
+        match self {
+            MaybeTlsStream::Raw(_) => ClientCertStatus::NotApplicable,
+            MaybeTlsStream::Tls(s) => s.client_cert_status(),
         }
     }
 }

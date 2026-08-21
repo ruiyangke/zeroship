@@ -232,6 +232,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
+    validate_tls_connector_parameters(&tls, encryption, config)?;
     let stream = negotiate_tls(
         stream,
         encryption,
@@ -256,6 +257,7 @@ where
 
     startup(&mut handshake, config, &user).await?;
     authenticate(&mut handshake, config, &user).await?;
+    check_ssl_cert_mode(config, handshake.stream.get_mut().client_cert_status())?;
     let (process_id, secret_key, mut parameters) = read_info(&mut handshake).await?;
     probe_target_session_attrs(
         &mut handshake,
@@ -297,6 +299,49 @@ where
     );
 
     Ok((client, connection))
+}
+
+/// Refuse a TLS parameter before the connector can emit a ClientHello.
+///
+/// The generic connector traits deliberately support implementations other
+/// than rustls. Those implementations must opt in to nondefault policies;
+/// otherwise accepting the connection string would falsely claim the policy
+/// was active.
+pub(crate) fn validate_tls_connector_parameters<S, T>(
+    tls: &T,
+    encryption: Encryption,
+    config: &Config,
+) -> Result<(), Error>
+where
+    T: TlsConnect<S>,
+{
+    if encryption == Encryption::Plaintext {
+        return Ok(());
+    }
+
+    let ssl_sni = config.get_ssl_sni();
+    if !tls.can_honor_sslsni(ssl_sni) {
+        return Err(Error::tls(
+            format!(
+                "sslsni={} cannot be honoured by the supplied TLS connector",
+                u8::from(ssl_sni)
+            )
+            .into(),
+        ));
+    }
+
+    let ssl_cert_mode = config.get_ssl_cert_mode();
+    if !tls.can_honor_sslcertmode(ssl_cert_mode) {
+        return Err(Error::tls(
+            format!(
+                "sslcertmode={} cannot be honoured by the supplied TLS connector",
+                ssl_cert_mode.as_str()
+            )
+            .into(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Check the requested session property while the startup stream is still
@@ -509,9 +554,44 @@ where
 
     startup(&mut handshake, config, &user).await?;
     authenticate(&mut handshake, config, &user).await?;
+    check_ssl_cert_mode(config, handshake.stream.get_mut().client_cert_status())?;
     let (_pid, _key, parameters) = read_info(&mut handshake).await?;
 
     Ok((handshake.stream.into_inner(), parameters))
+}
+
+/// Enforce `sslcertmode=require` only after PostgreSQL authentication succeeds.
+///
+/// That timing matches libpq: an earlier server authentication failure remains
+/// the primary error, while a server that would otherwise accept the session
+/// cannot quietly omit the requested TLS client-certificate exchange.
+fn check_ssl_cert_mode(
+    config: &Config,
+    status: crate::tls::ClientCertStatus,
+) -> Result<(), Error> {
+    use crate::tls::ClientCertStatus;
+
+    if config.get_ssl_cert_mode() != config::SslCertMode::Require {
+        return Ok(());
+    }
+
+    match status {
+        ClientCertStatus::Sent => Ok(()),
+        ClientCertStatus::NotApplicable | ClientCertStatus::NotRequested => {
+            Err(Error::authentication(
+                "sslcertmode=require: server did not request an SSL certificate".into(),
+            ))
+        }
+        ClientCertStatus::NotSent => Err(Error::authentication(
+            "sslcertmode=require: server accepted connection without a valid SSL certificate"
+                .into(),
+        )),
+        ClientCertStatus::Unknown => Err(Error::authentication(
+            "sslcertmode=require cannot be honoured: the TLS connector did not report whether \
+             it sent a client certificate"
+                .into(),
+        )),
+    }
 }
 
 async fn startup<S, T>(

@@ -156,6 +156,35 @@ pub enum SslNegotiation {
     Direct,
 }
 
+/// Whether a TLS client certificate may or must be sent.
+///
+/// This is libpq's `sslcertmode`. [`Require`](SslCertMode::Require) is not
+/// merely a requirement that certificate files exist: a successful connection
+/// must prove that the server requested a certificate and the TLS client
+/// selected one to send.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum SslCertMode {
+    /// Never send a client certificate, even when one is configured.
+    Disable,
+    /// Send a configured client certificate when the server requests one.
+    #[default]
+    Allow,
+    /// Require the server to request, and the client to send, a certificate.
+    Require,
+}
+
+impl SslCertMode {
+    /// The spelling this mode has in a connection string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disable => "disable",
+            Self::Allow => "allow",
+            Self::Require => "require",
+        }
+    }
+}
+
 /// A TLS protocol version this driver's rustls backend can negotiate.
 ///
 /// libpq also recognises `TLSv1` and `TLSv1.1`. rustls deliberately does not
@@ -509,9 +538,16 @@ pub enum Host {
 ///     and an error for `verify-ca`/`verify-full`. Point it at your CA (or at the server's own certificate, if
 ///     self-signed) when the server does not chain to a public root. `system` may only be combined with
 ///     `sslmode=verify-full`.
-/// * `sslcert` - Path to the client certificate chain (PEM) for client-certificate authentication. Must be given
-///     together with `sslkey`.
-/// * `sslkey` - Path to the private key (PEM) matching `sslcert`.
+/// * `sslcert` - Path to the client certificate chain (PEM) for
+///     client-certificate authentication. Unless `sslcertmode=disable`, it
+///     must be given together with `sslkey`.
+/// * `sslkey` - Path to the private key (PEM) matching `sslcert`. Unless
+///     `sslcertmode=disable`, it must be given together with `sslcert`.
+/// * `sslcertmode` - Whether a client certificate is disabled, allowed (the
+///     default), or required. `require` also verifies that the server requested
+///     the certificate and that the client sent it. This crate does not load
+///     libpq's default `~/.postgresql` identity, so `require` needs explicit
+///     `sslcert` and `sslkey` paths when using the built-in rustls connector.
 /// * `sslpassword` - Passphrase for an encrypted PKCS#8 `sslkey`. A blank value
 ///     behaves as absent, and a value is ignored when `sslkey` is unencrypted.
 /// * `sslcrl` - Path to a PEM certificate revocation list used while verifying
@@ -525,6 +561,13 @@ pub enum Host {
 /// * `ssl_max_protocol_version` - Maximum TLS version: `TLSv1.2` or `TLSv1.3`.
 ///     Unset by default. A maximum below the minimum is rejected before
 ///     connecting.
+/// * `sslsni` - Whether TLS ClientHello messages for DNS names carry the Server
+///     Name Indication extension. Accepts `1` (the default) or `0`; IP server
+///     names never produce SNI.
+/// * `requirepeer` - On Linux Unix-domain sockets, require the connected server
+///     process to be owned by this operating-system user. Other Unix platforms
+///     fail loudly until their peer-credential API is implemented. As in
+///     libpq, the setting is ignored on TCP connections.
 /// * `host` - The host to connect to. On Unix platforms, if the host starts with a `/` character it is treated as the
 ///     path to the directory containing Unix domain sockets. Otherwise, it is treated as a hostname. Multiple hosts
 ///     can be specified, separated by commas. Each host will be tried in turn when connecting. Required if connecting
@@ -644,11 +687,14 @@ pub struct Config {
     pub(crate) ssl_root_cert: SslRootCert,
     pub(crate) ssl_cert: Option<String>,
     pub(crate) ssl_key: Option<String>,
+    pub(crate) ssl_cert_mode: SslCertMode,
     pub(crate) ssl_password: Option<Vec<u8>>,
     pub(crate) ssl_crl: Option<String>,
     pub(crate) ssl_crl_dir: Option<String>,
     pub(crate) ssl_min_protocol_version: SslProtocolVersion,
     pub(crate) ssl_max_protocol_version: Option<SslProtocolVersion>,
+    pub(crate) ssl_sni: bool,
+    pub(crate) require_peer: Option<String>,
     pub(crate) host: Vec<Host>,
     pub(crate) hostaddr: Vec<IpAddr>,
     pub(crate) port: Vec<u16>,
@@ -690,11 +736,14 @@ impl Config {
             ssl_root_cert: SslRootCert::Unset,
             ssl_cert: None,
             ssl_key: None,
+            ssl_cert_mode: SslCertMode::Allow,
             ssl_password: None,
             ssl_crl: None,
             ssl_crl_dir: None,
             ssl_min_protocol_version: SslProtocolVersion::TlsV1_2,
             ssl_max_protocol_version: None,
+            ssl_sni: true,
+            require_peer: None,
             host: vec![],
             hostaddr: vec![],
             port: vec![],
@@ -926,7 +975,8 @@ impl Config {
 
     /// Sets the path to the client certificate chain (PEM) sent to the server.
     ///
-    /// Must be paired with [`Config::ssl_key`].
+    /// Must be paired with [`Config::ssl_key`] unless
+    /// [`SslCertMode::Disable`] is selected.
     pub fn ssl_cert(&mut self, ssl_cert: impl Into<String>) -> &mut Config {
         self.ssl_cert = Some(ssl_cert.into());
         self
@@ -938,6 +988,9 @@ impl Config {
     }
 
     /// Sets the path to the client private key (PEM) matching [`Config::ssl_cert`].
+    ///
+    /// Must be paired with [`Config::ssl_cert`] unless
+    /// [`SslCertMode::Disable`] is selected.
     pub fn ssl_key(&mut self, ssl_key: impl Into<String>) -> &mut Config {
         self.ssl_key = Some(ssl_key.into());
         self
@@ -946,6 +999,23 @@ impl Config {
     /// Gets the path to the client private key, if one has been set.
     pub fn get_ssl_key(&self) -> Option<&str> {
         self.ssl_key.as_deref()
+    }
+
+    /// Sets whether a TLS client certificate may or must be sent.
+    ///
+    /// The built-in rustls connector requires explicit [`Config::ssl_cert`]
+    /// and [`Config::ssl_key`] paths for [`SslCertMode::Require`]; unlike
+    /// libpq, this crate does not search `~/.postgresql` for a default identity.
+    ///
+    /// Defaults to [`SslCertMode::Allow`].
+    pub fn ssl_cert_mode(&mut self, ssl_cert_mode: SslCertMode) -> &mut Config {
+        self.ssl_cert_mode = ssl_cert_mode;
+        self
+    }
+
+    /// Gets the client-certificate mode.
+    pub fn get_ssl_cert_mode(&self) -> SslCertMode {
+        self.ssl_cert_mode
     }
 
     /// Sets the passphrase used to decrypt an encrypted PKCS#8 client key.
@@ -1020,6 +1090,39 @@ impl Config {
     /// Gets the maximum TLS protocol version, if one has been set.
     pub fn get_ssl_max_protocol_version(&self) -> Option<SslProtocolVersion> {
         self.ssl_max_protocol_version
+    }
+
+    /// Sets whether TLS handshakes for DNS names send the Server Name
+    /// Indication extension. IP server names never send SNI.
+    ///
+    /// Defaults to `true`.
+    pub fn ssl_sni(&mut self, ssl_sni: bool) -> &mut Config {
+        self.ssl_sni = ssl_sni;
+        self
+    }
+
+    /// Gets whether TLS handshakes for DNS names may send Server Name
+    /// Indication.
+    pub fn get_ssl_sni(&self) -> bool {
+        self.ssl_sni
+    }
+
+    /// Requires a Linux Unix-domain server socket's peer process to be owned
+    /// by the named operating-system user.
+    ///
+    /// An empty name disables the check. The setting is ignored for TCP,
+    /// matching libpq's address-family-specific behavior. Other Unix platforms
+    /// refuse the setting until an equivalent peer-credential check is
+    /// implemented.
+    pub fn require_peer(&mut self, require_peer: impl Into<String>) -> &mut Config {
+        let require_peer = require_peer.into();
+        self.require_peer = (!require_peer.is_empty()).then_some(require_peer);
+        self
+    }
+
+    /// Gets the required Unix-domain peer user, if one has been configured.
+    pub fn get_require_peer(&self) -> Option<&str> {
+        self.require_peer.as_deref()
     }
 
     /// Adds a host to the configuration.
@@ -1378,6 +1481,19 @@ impl Config {
                 }
                 self.ssl_key(value);
             }
+            "sslcertmode" => {
+                let mode = match value {
+                    "disable" => SslCertMode::Disable,
+                    "allow" => SslCertMode::Allow,
+                    "require" => SslCertMode::Require,
+                    _ => {
+                        return Err(Error::config_parse(Box::new(InvalidValue(
+                            "sslcertmode",
+                        ))));
+                    }
+                };
+                self.ssl_cert_mode(mode);
+            }
             "sslpassword" => {
                 self.ssl_password(value);
             }
@@ -1402,6 +1518,17 @@ impl Config {
                         value,
                     )?)
                 };
+            }
+            "sslsni" => {
+                let enabled = match value {
+                    "0" => false,
+                    "1" => true,
+                    _ => return Err(Error::config_parse(Box::new(InvalidValue("sslsni")))),
+                };
+                self.ssl_sni(enabled);
+            }
+            "requirepeer" => {
+                self.require_peer(value);
             }
             "host" => {
                 for host in value.split(',') {
@@ -1555,10 +1682,13 @@ impl Config {
     /// connect time is the difference between naming the cause and blaming the
     /// server for a handshake that was never going to happen.
     ///
-    /// The latter two rules are libpq's, including the wording:
+    /// The rules mirror libpq's validation and fail before an impossible
+    /// configuration can be mistaken for a server error:
     ///
     /// * A maximum TLS version below the minimum names an empty protocol set.
     ///   rustls cannot honour it without crossing one of the caller's bounds.
+    /// * `sslcertmode=require` cannot be combined with `sslmode=disable`,
+    ///   because plaintext cannot carry a TLS client certificate.
     /// * `sslrootcert=system` demands `sslmode=verify-full`. Trusting the
     ///   public root program *without* checking the host name accepts any
     ///   certificate any public CA has issued for any name, which is barely
@@ -1569,6 +1699,14 @@ impl Config {
     ///   fall back *from*; a mode that permits plaintext must not drive it.
     pub(crate) fn validate_tls_settings(&self) -> Result<(), Error> {
         self.validate_ssl_protocol_version_range()?;
+
+        if self.ssl_cert_mode == SslCertMode::Require && !self.ssl_mode.permits_tls() {
+            return Err(Error::config(
+                "sslcertmode=require cannot be satisfied with sslmode=disable because no TLS \
+                 client certificate can be sent"
+                    .into(),
+            ));
+        }
 
         if self.ssl_root_cert == SslRootCert::System && self.ssl_mode != SslMode::VerifyFull {
             return Err(Error::config(
@@ -1625,19 +1763,19 @@ impl Config {
 
     /// Connects to a PostgreSQL database over an arbitrary stream.
     ///
-    /// Uses `user`, `password`, `dbname`, `options`, `application_name`,
-    /// `connect_timeout`, `read_timeout`, `statement_cache_capacity`,
-    /// `statement_cache_execution_threshold`, and `require_auth`; all other
-    /// settings are ignored. The connect timeout starts with TLS negotiation,
-    /// covers startup and authentication, and cannot cover the caller's work
-    /// to open that stream. The read timeout is installed only after startup
-    /// succeeds.
+    /// Uses the startup, authentication, timeout, statement-cache, TLS mode,
+    /// `sslsni`, and `sslcertmode` settings. A configured `requirepeer` is
+    /// refused because an arbitrary stream exposes neither its address family
+    /// nor peer credentials. Transport-address settings such as `host`,
+    /// `hostaddr`, `port`, keepalives, and `tcp_user_timeout` are ignored. The
+    /// connect timeout starts with TLS negotiation, covers startup and
+    /// authentication, and cannot cover the caller's work to open that stream.
+    /// The read timeout is installed only after startup succeeds.
     ///
-    /// One exception, and it is the reason this is not simply "sslmode is
-    /// ignored": the caller owns the stream, so this entry point cannot open a
-    /// second one. `allow` and `prefer` are therefore reduced to the transport
-    /// they attempt *first* - plaintext and TLS respectively - with no
-    /// reconnect if it fails. Use [`Config::connect`] to get the fallback.
+    /// The caller owns the stream, so this entry point cannot open a second
+    /// one. `allow` and `prefer` are therefore reduced to the transport they
+    /// attempt *first* - plaintext and TLS respectively - with no reconnect if
+    /// it fails. Use [`Config::connect`] to get the fallback.
     pub async fn connect_raw<S, T>(
         &self,
         stream: S,
@@ -1647,6 +1785,17 @@ impl Config {
         S: AsyncRead + AsyncWrite + Unpin,
         T: TlsConnect<S>,
     {
+        if self.require_peer.is_some() {
+            // A generic stream does not expose an address family or peer
+            // credentials. Pretending this is a Unix socket would be unsafe,
+            // while ignoring the requested identity check would turn it into
+            // false assurance.
+            return Err(Error::config(
+                "requirepeer cannot be checked by Config::connect_raw; use Config::connect \
+                 with a Unix-domain host"
+                    .into(),
+            ));
+        }
         self.validate_tls_settings()?;
         // No release handle: the stream is the caller's, `S` is unconstrained,
         // and a stream that is not a socket has no descriptor to shut down.
@@ -1709,6 +1858,7 @@ impl fmt::Debug for Config {
             .field("ssl_root_cert", &self.ssl_root_cert)
             .field("ssl_cert", &self.ssl_cert)
             .field("ssl_key", &self.ssl_key)
+            .field("ssl_cert_mode", &self.ssl_cert_mode)
             .field(
                 "ssl_password",
                 &self.ssl_password.as_ref().map(|_| Redaction {}),
@@ -1717,6 +1867,8 @@ impl fmt::Debug for Config {
             .field("ssl_crl_dir", &self.ssl_crl_dir)
             .field("ssl_min_protocol_version", &self.ssl_min_protocol_version)
             .field("ssl_max_protocol_version", &self.ssl_max_protocol_version)
+            .field("ssl_sni", &self.ssl_sni)
+            .field("require_peer", &self.require_peer)
             .field("host", &self.host)
             .field("hostaddr", &self.hostaddr)
             .field("port", &self.port)
@@ -2184,8 +2336,8 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use crate::config::{
-        AuthMethod, AuthMethods, RequireAuth, SslMode, SslNegotiation, SslProtocolVersion,
-        SslRootCert, TargetSessionAttrs,
+        AuthMethod, AuthMethods, RequireAuth, SslCertMode, SslMode, SslNegotiation,
+        SslProtocolVersion, SslRootCert, TargetSessionAttrs,
     };
     use crate::{Config, config::Host};
 
@@ -2393,6 +2545,77 @@ mod tests {
         assert_eq!(built.get_ssl_crl(), Some("/tmp/built.crl"));
         assert_eq!(built.get_ssl_crl_dir(), Some("/tmp/built-crls"));
         assert!(!format!("{built:?}").contains("built-secret"));
+    }
+
+    #[test]
+    fn sslcertmode_sslsni_and_requirepeer_parse_their_closed_sets() {
+        assert_eq!(Config::new().get_ssl_cert_mode(), SslCertMode::Allow);
+        assert!(Config::new().get_ssl_sni());
+        assert_eq!(Config::new().get_require_peer(), None);
+
+        for (value, expected) in [
+            ("disable", SslCertMode::Disable),
+            ("allow", SslCertMode::Allow),
+            ("require", SslCertMode::Require),
+        ] {
+            let config = format!("host=h sslcertmode={value}")
+                .parse::<Config>()
+                .unwrap();
+            assert_eq!(config.get_ssl_cert_mode(), expected);
+            assert_eq!(expected.as_str(), value);
+        }
+        for value in ["", "prefer", "ALLOW"] {
+            assert!(
+                format!("host=h sslcertmode='{value}'")
+                    .parse::<Config>()
+                    .is_err(),
+                "sslcertmode={value:?} parsed"
+            );
+        }
+
+        assert!(
+            "host=h sslsni=1"
+                .parse::<Config>()
+                .unwrap()
+                .get_ssl_sni()
+        );
+        assert!(
+            !"host=h sslsni=0"
+                .parse::<Config>()
+                .unwrap()
+                .get_ssl_sni()
+        );
+        for value in ["", "2", "true", "10"] {
+            assert!(
+                format!("host=h sslsni='{value}'")
+                    .parse::<Config>()
+                    .is_err(),
+                "sslsni={value:?} parsed"
+            );
+        }
+
+        let required = "host=h requirepeer=postgres".parse::<Config>().unwrap();
+        assert_eq!(required.get_require_peer(), Some("postgres"));
+        let empty = "host=h requirepeer=''".parse::<Config>().unwrap();
+        assert_eq!(empty.get_require_peer(), None);
+    }
+
+    #[test]
+    fn required_client_certificate_cannot_be_combined_with_disabled_tls() {
+        let config = "host=h sslmode=disable sslcertmode=require"
+            .parse::<Config>()
+            .unwrap();
+        let error = config
+            .validate_tls_settings()
+            .expect_err("plaintext cannot send a required TLS client certificate");
+        let text = error.to_string()
+            + &std::error::Error::source(&error)
+                .map(|source| format!(": {source}"))
+                .unwrap_or_default();
+        assert!(
+            text.contains("sslcertmode=require") && text.contains("sslmode=disable"),
+            "the contradiction was not named: {text}"
+        );
     }
 
     #[test]
