@@ -1381,7 +1381,6 @@ where
                     in_flight_requests,
                     read_deadline,
                     read_error_release,
-                    _live.clone(),
                 )
                 .await
             }
@@ -1474,7 +1473,6 @@ where
         in_flight_requests: Arc<AtomicUsize>,
         read_deadline: Option<ReadDeadline>,
         read_error_release: Option<crate::release::ConnectionDropRelease>,
-        _read_live: crate::live::LiveConnectionGuard,
     ) -> Result<(), Error> {
         // ---- Spawn the dedicated read task. It OWNS `read_half` and loops
         // `read_backend` forever, forwarding each frame over a bounded
@@ -1507,9 +1505,6 @@ where
         let read_error_status = Arc::clone(&tx_status);
         let acknowledge_reads = read_deadline.is_some();
         let read_handle = compio::runtime::spawn(async move {
-            // Keep the one connection count armed until this task releases
-            // the split read half, including deferred task cancellation.
-            let _read_live = _read_live;
             let mut read_half = read_half;
             loop {
                 match read_backend(&mut read_half).await {
@@ -2646,60 +2641,6 @@ mod tests {
     }
 
     #[compio::test]
-    async fn live_count_covers_a_cancelled_split_reader_until_its_half_drops() {
-        compio::time::timeout(Duration::from_secs(1), async {
-            assert_eq!(
-                crate::live::live_connections(),
-                0,
-                "the isolated fixture started with a live connection"
-            );
-            let read_half_dropped = Rc::new(Cell::new(false));
-            let stream: BufStream<MaybeTlsStream<_, TimeoutSplitStream>> = BufStream::new(
-                MaybeTlsStream::Raw(TimeoutSplitStream {
-                    read_half_dropped: Rc::clone(&read_half_dropped),
-                }),
-            );
-            let (_request_tx, request_rx) = mpsc::unbounded();
-            let connection = Connection::new(
-                stream,
-                VecDeque::new(),
-                HashMap::new(),
-                request_rx,
-                Arc::new(AtomicU8::new(b'I')),
-                Arc::new(AtomicUsize::new(0)),
-                None,
-            );
-            assert_eq!(crate::live::live_connections(), 1);
-
-            let mut driver = Box::pin(connection.run());
-            assert!(
-                futures_util::poll!(driver.as_mut()).is_pending(),
-                "the idle split connection did not park its reader"
-            );
-            drop(driver);
-            assert!(
-                !read_half_dropped.get(),
-                "dropping the driver synchronously dropped its spawned read half"
-            );
-
-            let drain_finished_before_reader_drop =
-                crate::live::drain_connections(Duration::from_millis(100)).await
-                    && !read_half_dropped.get();
-
-            while !read_half_dropped.get() {
-                compio::time::sleep(Duration::from_millis(1)).await;
-            }
-            assert!(
-                !drain_finished_before_reader_drop,
-                "drain reported no live connection while its read task still owned the split half"
-            );
-            assert_eq!(crate::live::live_connections(), 0);
-        })
-        .await
-        .expect("cancelled split-reader live-count test exceeded its watchdog");
-    }
-
-    #[compio::test]
     async fn write_error_teardown_drops_the_parked_read_half() {
         compio::time::timeout(Duration::from_secs(1), async {
             let read_half_dropped = Rc::new(Cell::new(false));
@@ -2737,7 +2678,6 @@ mod tests {
                     Arc::new(AtomicUsize::new(1)),
                     None,
                     None,
-                    crate::live::LiveConnectionGuard::new(),
                 )
                 .await;
 
@@ -2808,7 +2748,6 @@ mod tests {
                 Arc::new(AtomicUsize::new(1)),
                 read_deadline,
                 None,
-                crate::live::LiveConnectionGuard::new(),
             )
             .await;
 
