@@ -1,5 +1,5 @@
 //! `deploy/scripts/deploy-remote.sh` reads the generated-secret names out of
-//! `crates/core/src/config/secrets.rs` with sed. This asserts that the
+//! `crates/zeroship-secret-policy/src/lib.rs` with sed. This asserts that the
 //! extraction still yields the table.
 //!
 //! WHY A SHELL SCRIPT IS STILL ALLOWED TO SCRAPE SOURCE. `deploy-remote.sh`
@@ -22,9 +22,9 @@
 
 use std::path::Path;
 
-use zeroship_core::config::PLATFORM_SECRETS;
+use zeroship_secret_policy::PLATFORM_SECRETS;
 
-const SECRETS_RS: &str = "../core/src/config/secrets.rs";
+const SECRETS_RS: &str = "../zeroship-secret-policy/src/lib.rs";
 const SCRIPT: &str = "../../deploy/scripts/deploy-remote.sh";
 
 /// The Rust twin of `sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p'`.
@@ -72,7 +72,7 @@ fn the_deploy_scripts_sed_still_yields_the_whole_table() {
     let script = std::fs::read_to_string(Path::new(SCRIPT))
         .unwrap_or_else(|e| panic!("read {SCRIPT}: {e}"));
     assert!(
-        script.contains(r#"sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' crates/core/src/config/secrets.rs"#),
+        script.contains(r#"sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' crates/zeroship-secret-policy/src/lib.rs"#),
         "{SCRIPT} no longer runs the extraction this test reproduces; update both together"
     );
 }

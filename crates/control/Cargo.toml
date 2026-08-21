@@ -47,6 +47,7 @@ path = "src/bin/dev_provision.rs"
 
 [dependencies]
 zeroship-core = { workspace = true }
+zeroship-secret-policy = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-authn = { workspace = true }
 zeroship-authz = { workspace = true }

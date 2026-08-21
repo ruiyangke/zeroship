@@ -6,9 +6,13 @@
 //! - [`source`] — overlay discovery (`ConfigSource`, `LoadedOverlay`, resolve/load).
 //! - [`env`] - the sole raw process-environment boundary, plus pure truthiness.
 //! - [`declared`] - typed keys for reads the config contract does not generate.
-//! - [`secrets`] — secret-strength validation + literal loopback checks.
-//! - [`credential_gate`] - the named sentinel, the boot refusal and its banner,
-//!   the per-subsystem audit, and the build-profile dev escape.
+//! - [`secrets`] - the part of the secret policy typed on this crate's
+//!   `Secret`. The policy proper - the table, the strength rules, every
+//!   validator, the sentinel and secret-reference resolution - is the
+//!   [`zeroship_secret_policy`] LEAF crate, which callers import directly.
+//!   This module does not re-export it.
+//! - [`credential_gate`] - the boot refusal and its banner, the per-subsystem
+//!   audit, and the build-profile dev escape.
 //! - [`diagnostics`] - the shared env-name scanner every binary's
 //!   "this refusal names something settable" test drives.
 //! - [`bootstrap`] — the shared boot dance + structured `--check-config` emitter.
@@ -42,10 +46,14 @@ pub use declared::{
 
 pub use auth_kind::AuthProviderKind;
 
+// The sentinel itself (`SERVICE_CREDENTIAL_SENTINEL`, `REMEDIATION_COMMAND`,
+// `is_unset_credential`, `unset_credential_message`) moved to the
+// `zeroship-secret-policy` leaf with the validators that consume it, and is
+// imported from there by whoever needs it. What stays here is the AUDIT built
+// on top of it, which is typed on this crate's `Secret` and `ConfigSource`.
 pub use credential_gate::{
-    audit_credentials, dev_escape_active, is_unset_credential, mark_dev_escape_active,
-    unset_credential_message, BuildProfile, CredentialPosture, CredentialVerdict,
-    SubsystemCredential, WeakCredential, REMEDIATION_COMMAND, SERVICE_CREDENTIAL_SENTINEL,
+    audit_credentials, dev_escape_active, mark_dev_escape_active, BuildProfile, CredentialPosture,
+    CredentialVerdict, SubsystemCredential, WeakCredential,
 };
 
 pub use diagnostics::env_like_tokens;
@@ -68,13 +76,21 @@ pub use names::{
     resolve_operational, resolve_secret_sources,
 };
 pub use zeroship_config_macros::zeroship_config;
-pub use secrets::{
-    decoded_master_key_len, is_loopback_url, parse_secret_ref, platform_secret, read_secret_file,
-    require_nonempty, resolve_secret, validate_master_key_material, validate_pairwise_salt,
-    validate_secret_material, validate_secret_ref, validate_stash_key, validate_worker_key,
-    PlatformSecret, SecretError, SecretRef, SecretStrength, MIN_DECODED_KEY_BYTES,
-    MIN_SECRET_BYTES, PLATFORM_SECRETS,
-};
+pub use secrets::validate_secret_material;
+// AND NOTHING ELSE FROM THE SECRET POLICY. `PLATFORM_SECRETS`, the strength
+// rules, every validator, the sentinel and secret-reference resolution are the
+// `zeroship-secret-policy` crate's public API, and callers name that crate.
+// This module deliberately does NOT re-export them.
+//
+// It did for one commit, and the reason given was that the ~19 existing callers
+// would not have to change - which is a back-compat argument wearing a facade's
+// clothes. The cost was real: `crates/cli/src/dev.rs` reached the table through
+// here while `crates/zeroship-gatekit` reached it through the leaf, so one
+// constant had two public paths and which one a file used was arbitrary.
+//
+// The rest of this module IS a facade over sibling submodules, and that is a
+// different thing: those are parts of this crate, not a second crate with a
+// public name of its own.
 pub use source::{
     load_overlay, log_overlay_source, resolve_overlay_string, ConfigSource, LoadedOverlay,
     SYSTEM_CONFIG_PATH,

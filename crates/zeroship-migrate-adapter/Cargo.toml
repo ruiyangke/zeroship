@@ -59,6 +59,7 @@ zero-migrate-policy = { workspace = true, optional = true }
 # gated on `platform-cli` would not cover the two feature-free test targets.
 # zeroship-core does NOT depend on this crate, so this adds no cycle.
 zeroship-core = { workspace = true }
+zeroship-secret-policy = { workspace = true }
 # NOT optional, and not gated on `platform-cli`. `src/config.rs` is outside that
 # feature so the contract checker can link the declaration without linking V8,
 # and the generated carrier there expands clap's `Parser` derive, whose own
