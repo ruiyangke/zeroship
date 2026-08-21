@@ -297,6 +297,12 @@ impl ReadObligation {
         })
     }
 
+    fn accepts_copy_input(&self) -> bool {
+        self.inner
+            .as_ref()
+            .is_some_and(|inner| inner.state.get() == ReadObligationState::PausedForCopyInput)
+    }
+
     fn is_complete(&self) -> bool {
         self.inner.as_ref().is_some_and(|inner| {
             inner.state.get() == ReadObligationState::Complete
@@ -1571,6 +1577,17 @@ where
         // task and emits a FIN. `?` and `return` inside resolve this block.
         let run_result: Result<(), Error> = async {
             loop {
+                if copy_initial_flushed
+                    && copy_read_obligation
+                        .as_ref()
+                        .is_some_and(ReadObligation::is_complete)
+                {
+                    copy_in = None;
+                    copy_in_observation = None;
+                    copy_read_obligation = None;
+                    copy_initial_flushed = false;
+                }
+
                 // ---- Shutdown sequencing. Once the client is gone and no
                 // awaited response/COPY work remains, send Terminate once,
                 // then emit a FIN via the write half's `shutdown` (mirrors the
@@ -1623,7 +1640,11 @@ where
                 // mid-COPY. COPY frames always drain so an in-flight sink can
                 // complete.
                 let accept_request = !client_gone && copy_in.is_none();
-                let accept_copy = copy_in.is_some();
+                let accept_copy = copy_in.is_some()
+                    && (!copy_initial_flushed
+                        || copy_read_obligation
+                            .as_ref()
+                            .is_some_and(ReadObligation::accepts_copy_input));
 
                 // ---- Single-event select. Every branch is a channel op or a
                 // `poll_ready` — all cancel-safe, so a not-ready branch being

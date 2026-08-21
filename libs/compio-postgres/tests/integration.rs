@@ -6548,3 +6548,73 @@ async fn statement_cache_threshold_one_does_not_cache_wrong_parameter_arity() {
     .await
     .expect("threshold-one rejected-execution test exceeded its watchdog");
 }
+
+#[compio::test]
+async fn abandoned_copy_in_startup_rejection_does_not_poison_the_next_operation() {
+    use bytes::Bytes;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    compio::time::timeout(std::time::Duration::from_secs(10), async {
+        let Some(url) = require_pg().await else {
+            return;
+        };
+        let target = connect(&url).await.unwrap();
+        let blocker = connect(&url).await.unwrap();
+        let table = common::test_object_name("cpg_copy_abandoned_startup");
+
+        target
+            .batch_execute(&format!("CREATE TABLE {table} (value text NOT NULL)"))
+            .await
+            .unwrap();
+        let statement = target
+            .prepare(&format!("COPY {table} (value) FROM STDIN"))
+            .await
+            .unwrap();
+        blocker
+            .batch_execute(&format!(
+                "BEGIN; LOCK TABLE {table} IN ACCESS EXCLUSIVE MODE"
+            ))
+            .await
+            .unwrap();
+
+        let mut startup = Box::pin(target.copy_in::<_, Bytes>(&statement));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            matches!(startup.as_mut().poll(&mut context), Poll::Pending),
+            "COPY startup completed while its table lock was held"
+        );
+        drop(startup);
+
+        loop {
+            let waiting: bool = blocker
+                .query_one_scalar(
+                    "SELECT EXISTS (\
+                         SELECT 1 FROM pg_stat_activity \
+                         WHERE pid = $1 \
+                           AND state = 'active' \
+                           AND wait_event_type = 'Lock'\
+                     )",
+                    &[&target.process_id()],
+                )
+                .await
+                .expect("inspect the abandoned COPY backend");
+            if waiting {
+                break;
+            }
+        }
+
+        blocker
+            .batch_execute(&format!("DROP TABLE {table}; COMMIT"))
+            .await
+            .unwrap();
+
+        let answer: i32 = target
+            .query_one_scalar("SELECT 42::int4", &[])
+            .await
+            .expect("abandoned rejected COPY poisoned the same connection");
+        assert_eq!(answer, 42);
+    })
+    .await
+    .expect("abandoned COPY startup recovery exceeded its watchdog");
+}
