@@ -412,7 +412,18 @@ echo "------------------------------------------------------------------"
 #     blind the gate to the rest of the file.
 SKIP_ALLOWLIST='AUTH_TEST_SMTP_SINK'
 
-if ! zs_skip_census "$LOG" "$SKIP_ALLOWLIST"; then
+# Two non-zero statuses, two different findings, and they must not print the
+# same sentence. 1 is "the census ruled and found skips". 2 is "the census could
+# not rule" - the log is missing or empty, so the suite above it very likely
+# never ran. The old single branch would have reported the second as
+# "FAIL:  test(s) skipped", with the count blank, blaming a run that had not
+# happened.
+census_rc=0
+zs_skip_census "$LOG" "$SKIP_ALLOWLIST" || census_rc=$?
+if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
+  echo "FAIL: the skip census refused ${LOG}, so this run proved nothing about skips." >&2
+  status=1
+elif [ "$census_rc" -ne 0 ]; then
   echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped despite a provisioned database." >&2
   echo "A skipped auth test is a silent pass. Offending lines:" >&2
   zs_skip_lines "$LOG" "$SKIP_ALLOWLIST" | sort -u | head -20 >&2

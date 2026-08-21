@@ -22,7 +22,12 @@
 # FAILING test - an announcement made through a macro is invisible on a pass,
 # which is exactly the run where it matters. This file handles the first half.
 #
-# `tests/lib_skip_census_selftest.sh` covers both directions.
+# THE THIRD DIRECTION, added 2026-08-21: the census REFUSES (status 2) rather
+# than reporting zero when its log is missing, unreadable, not a regular file or
+# empty. This is an anti-vacuity instrument, so "no input" must not spell
+# "nothing to report" - see `zs_skip_log_problem` for the run that proved it.
+#
+# `tests/lib_skip_census_selftest.sh` covers all three directions.
 
 # The token every announcement carries. Kept byte-identical to
 # `crates/test-support/src/lib.rs` and to the verbatim `SKIP_MARKER` consts in
@@ -46,10 +51,80 @@
 # legal in a Rust identifier, so no test name can forge it.
 ZS_SKIP_MARKER='ZEROSHIP-TEST-SKIPPED'
 
+# The status a census returns when it COULD NOT RULE, as opposed to ruling and
+# finding skips. `zs_check_binary_freshness` in tests/lib/binary_freshness.sh
+# already uses this split (0 fresh / 1 stale-and-strict / 2 cannot answer) and
+# `zeroship_testkit::live_db::REFUSED_EXIT_CODE` is the same 2 for a cargo test
+# binary, so a caller reading a status here reads the same vocabulary it reads
+# everywhere else in this tree.
+#
+# WHY IT IS A SEPARATE STATUS AND NOT JUST 1. "This suite skipped tests" and
+# "there is no evidence about what this suite did" demand opposite responses:
+# the first means provision a backend or allowlist the gap, the second means the
+# run never happened and nothing above it can be believed. Collapsing them into
+# one non-zero would let a caller's "skips are tolerated here" arm - which is a
+# legitimate arm, see the report-only census in ci.yml - swallow a void run.
+ZS_SKIP_REFUSED_STATUS=2
+
+# zs_skip_log_problem <log>
+#
+# Echo the reason <log> cannot be censused at all, and return 0. Return 1, with
+# no output, when it is a usable source.
+#
+# THE FAILURE THIS EXISTS FOR, hit on 2026-08-21 by an acceptance harness whose
+# run log went to a path that failed to open. The harness therefore never ran,
+# and `zs_skip_census /that/path` printed
+#
+#     ==> skip census: 0 test(s) announced they did nothing (0 allowlisted, 0 not)
+#
+# and exited 0. A clean green over a file that does not exist. This library is
+# the repo's ANTI-VACUITY instrument - it exists to prove a suite did not
+# silently skip its work - so returning success on no input at all is precisely
+# the failure it exists to prevent, one level out. Note that the counting arm
+# below was already careful about the ADJACENT vacuity (an empty string still
+# has one line, so `wc -l` cannot be trusted unguarded); nobody had asked the
+# same question about the SOURCE.
+#
+# The five arms, and why each is a refusal rather than a zero:
+#
+#   no path         the caller passed nothing; there is no log to be right about
+#   does not exist  the run wrote somewhere else, or did not run
+#   not a regular   this library reads the log TWICE (once for the total, once
+#     file          for the offenders), so a fifo or a directory cannot serve it
+#                   even when readable - a fifo yields its bytes to the first
+#                   pass and nothing to the second, and grep over a directory
+#                   prints "Is a directory" and matches nothing
+#   unreadable      permissions; grep would print zero lines and rc 2
+#   empty           0 bytes. This is the case the broken redirect ABOVE would
+#                   have produced on a writable path, and it is not the same as
+#                   a clean run: every producer in this tree pipes cargo through
+#                   `tee`, and cargo cannot emit zero bytes and still have run.
+zs_skip_log_problem() {
+  local log="${1:-}"
+  if [ -z "$log" ]; then
+    echo "no log path was given"
+  elif [ ! -e "$log" ]; then
+    echo "no such file: $log"
+  elif [ ! -f "$log" ]; then
+    echo "not a regular file (this census reads it twice): $log"
+  elif [ ! -r "$log" ]; then
+    echo "not readable: $log"
+  elif [ ! -s "$log" ]; then
+    echo "empty, 0 bytes: $log"
+  else
+    return 1
+  fi
+  return 0
+}
+
 # zs_skip_lines <log> [allowlist_regex]
 #
 # Print the unique announcement lines, optionally restricted to those NOT
-# matching the allowlist.
+# matching the allowlist. Returns $ZS_SKIP_REFUSED_STATUS, having printed one
+# line naming the path on stderr, when the log is not a source it can read;
+# it used to `return 0` there, which is the same false green the census had.
+# `zs_skip_census` checks the source itself and returns BEFORE calling this, so
+# the banner is printed once, not twice.
 #
 # `grep -a` is load-bearing, not decoration, and the measurement says exactly
 # how. A cargo run log is not guaranteed to be text: a panic payload, a driver
@@ -74,8 +149,11 @@ ZS_SKIP_MARKER='ZEROSHIP-TEST-SKIPPED'
 # output rather than the file, so it is not at risk today, but a mixed pair
 # invites someone to "tidy" the surviving flag away.
 zs_skip_lines() {
-  local log="${1:-}" allow="${2:-}"
-  [ -n "$log" ] && [ -r "$log" ] || return 0
+  local log="${1:-}" allow="${2:-}" problem
+  if problem="$(zs_skip_log_problem "$log")"; then
+    echo "  x REFUSED: skip census log unusable - ${problem}" >&2
+    return "$ZS_SKIP_REFUSED_STATUS"
+  fi
   if [ -n "$allow" ]; then
     grep -aF "$ZS_SKIP_MARKER" "$log" 2>/dev/null | grep -avE "$allow" || true
   else
@@ -85,15 +163,43 @@ zs_skip_lines() {
 
 # zs_skip_census <log> [allowlist_regex]
 #
-# Print the census and set ZS_SKIP_COUNT / ZS_SKIP_TOLERATED. Returns 0 when no
-# non-allowlisted skip is present, 1 otherwise.
+# Print the census and set ZS_SKIP_COUNT / ZS_SKIP_TOLERATED / ZS_SKIP_REFUSED.
 #
-# The return value is advisory ON PURPOSE and the caller decides what to do with
-# it. Whether a given suite SHOULD have its backend provisioned is an operator
+#   0  ruled: no non-allowlisted skip is present
+#   1  ruled: there are skips this allowlist does not cover
+#   2  REFUSED (= $ZS_SKIP_REFUSED_STATUS): no verdict was reachable, because
+#      <log> is missing, unreadable, not a regular file, or empty
+#
+# A REFUSAL IS NOT A FAILURE, and the distinction is one this tree already
+# draws in two places rather than one this function invents.
+# `crates/zeroship-testkit/src/live_db.rs` states it directly - "a failure is a
+# verdict about the code; a refusal is the statement that no verdict was
+# reachable" - and `tests/project_config_gate.sh` acts on it, printing
+# `FAIL: no zeroship binary at <path>` and emitting ZERO arm lines rather than
+# ruling on nothing. So a refusal here prints NO `==> skip census:` line at all.
+# That line is the artefact of the bug: its "0 test(s) announced they did
+# nothing" is a positive claim about a run, and a reader who saw it over a
+# phantom log would have no way to know it was made of nothing.
+#
+# ZS_SKIP_COUNT and ZS_SKIP_TOLERATED are set to the EMPTY STRING on a refusal,
+# not to 0. They are assigned, so `set -u` callers still work; they are not a
+# number, so a caller that reads the count while ignoring the status - the shape
+# ci.yml's report-only census had - gets a loud "integer expression expected"
+# instead of a quiet zero. ZS_SKIP_REFUSED is the flag to branch on.
+#
+# STATUS 1 is advisory ON PURPOSE and the caller decides what to do with it.
+# Whether a given suite SHOULD have its backend provisioned is an operator
 # decision; whether the absence is visible is not. A gate that has provisioned
-# the backend treats a non-zero return as failure (see tests/run_auth_suite.sh);
-# a gate that has not yet still prints the census, so the gap is reported rather
-# than silent.
+# the backend treats a 1 as failure (see tests/run_auth_suite.sh); a gate that
+# has not yet still prints the census, so the gap is reported rather than
+# silent.
+#
+# STATUS 2 IS NOT ADVISORY, and that asymmetry is the point. Tolerating skips is
+# an operator's call about provisioning; tolerating a census that never ran is
+# nobody's call, because there is no fact to tolerate. Every caller in this tree
+# treats a 2 as a hard failure, including the report-only one - a caller that
+# folded 2 back into "|| true" would restore the original bug wearing a
+# different hat.
 #
 # An EMPTY allowlist must match nothing. This is the trap the whole function has
 # to get right: `grep -E ''` matches every line, so passing an unset allowlist
@@ -102,7 +208,31 @@ zs_skip_lines() {
 # zs_skip_lines rather than one unconditional pipeline.
 zs_skip_census() {
   local log="${1:-}" allow="${2:-}"
-  local all offenders
+  local all offenders problem
+
+  # Checked BEFORE anything is counted, so no census line is ever printed over
+  # a source that could not be read.
+  if problem="$(zs_skip_log_problem "$log")"; then
+    ZS_SKIP_REFUSED=1
+    ZS_SKIP_COUNT=""
+    ZS_SKIP_TOLERATED=""
+    {
+      echo "=================================================================="
+      echo "  x REFUSED: the skip census could not read its log."
+      echo "             ${problem}"
+      echo
+      echo "This is NOT a result. No census was taken, so nothing here says"
+      echo "whether the run skipped tests - or whether the run happened at all."
+      echo "Do not read the absence of offenders as an absence of skips."
+      echo
+      echo "Usual cause: the producer's redirect went somewhere it could not"
+      echo "write, or died before it wrote, so the suite never ran. Check that"
+      echo "the log path is the one the suite tees to, then re-run the suite."
+      echo "=================================================================="
+    } >&2
+    return "$ZS_SKIP_REFUSED_STATUS"
+  fi
+  ZS_SKIP_REFUSED=0
 
   all="$(zs_skip_lines "$log")"
   offenders="$(zs_skip_lines "$log" "$allow")"
