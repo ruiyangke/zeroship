@@ -94,9 +94,9 @@ pub use zero_migrate_ir::dialect::SqlDialect;
 /// builders. Each vendor's type table lives in that vendor crate. The rest of this
 /// module — the
 /// CREATE TABLE composer, the FK/index/constraint builders, the identifier and
-/// reserved-name validators, `canonical_type_for_dialect`,
-/// `def_to_column_type_for_dialect` — stays as composition while asking the selected
-/// renderer to spell each neutral column token.
+/// reserved-name validators, and `def_to_column_type_for_dialect` — stays as
+/// composition while asking the selected renderer to spell and canonicalize each
+/// neutral column token.
 /// That is the boundary rule `render::backends` states at length, and it is what
 /// kept this move from dragging `render::declarative` and `render::lower` (and
 /// therefore the whole engine) into the leaf.
@@ -270,15 +270,16 @@ mod schema_renderer_tests {
 
     #[test]
     fn sqlite_numeric_and_decimal_canonicalise_to_text_affinity() {
+        let backend = renderer(&SqlDialect::Sqlite.id());
         // The model's logical `numeric`/`decimal` type and a live SQLite column
         // (now declared TEXT) must canonicalise to the SAME affinity token, so a
         // numeric column no longer shows phantom snapshot<->introspection drift.
-        assert_eq!(sqlite_canonical_type("numeric"), "text");
-        assert_eq!(sqlite_canonical_type("decimal"), "text");
-        assert_eq!(sqlite_canonical_type("text"), "text");
+        assert_eq!(backend.canonical_type("numeric"), "text");
+        assert_eq!(backend.canonical_type("decimal"), "text");
+        assert_eq!(backend.canonical_type("text"), "text");
         // `double precision` / `real` stay REAL affinity — they ARE binary floats.
-        assert_eq!(sqlite_canonical_type("double precision"), "real");
-        assert_eq!(sqlite_canonical_type("real"), "real");
+        assert_eq!(backend.canonical_type("double precision"), "real");
+        assert_eq!(backend.canonical_type("real"), "real");
     }
 }
 
@@ -658,38 +659,6 @@ pub enum FkEmission<'a> {
     Deferred(&'a std::collections::HashSet<String>),
 }
 
-/// Controls **how the SQLite arm namespaces** the table / index targets it
-/// emits. This is a SQLite-only concern — it has NO effect on the Postgres
-/// arm, which always qualifies into the project schema (`"<schema>"."<table>"`).
-///
-/// Two different consumers ATTACH the app file under two different aliases, so
-/// the SAME emitter must spell SQLite DDL two ways:
-///
-/// - [`SqliteEmitScope::AttachAlias`] — the **plugin-db runtime** ATTACHes each
-///   app file under its `<app_id>` alias (`ATTACH … AS "<app_id>"`), so its DDL
-///   is `"<app_id>"."<table>"` (table) and `"<app_id>"."<index>" ON "<table>"`
-///   (index). This is the historical behaviour and the default for the
-///   stable [`build_create_table_with_fks_for_dialect`] entry point.
-/// - [`SqliteEmitScope::MainUnqualified`] — the **zero-migrate engine**'s
-///   `SqliteBackend` ATTACHes the one app file as `main` (`main` IS the app
-///   file), and its hardened authorizer DENIES any other alias. An unqualified
-///   `CREATE TABLE users(...)` therefore lands in (and persists to) the app
-///   file. A `"<app_id>"`-qualified statement would target a nonexistent alias
-///   and be denied. So the engine MUST emit UNqualified DDL — that is this
-///   variant: no schema qualifier on the table name OR the index name.
-///
-/// The Postgres arm ignores this enum entirely.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SqliteEmitScope {
-    /// SQLite DDL is `"<app_id>"`-qualified (the data-plane ATTACH-alias model).
-    /// The default for the stable dialected entry point.
-    AttachAlias,
-    /// SQLite DDL is UNqualified — `main` IS the app file (the zero-migrate
-    /// `SqliteBackend` model). The schema qualifier is dropped on the table
-    /// name and the index name.
-    MainUnqualified,
-}
-
 /// Dialect-aware CREATE TABLE emitter.
 ///
 /// Prepends exactly the columns injected by `effective` for this table before
@@ -716,31 +685,23 @@ pub fn build_create_table_with_fks_for_dialect(
     dialect: SqlDialect,
     effective: &EffectivePolicy,
 ) -> Result<String, QueryError> {
-    // The stable entry point keeps the historical data-plane namespacing: SQLite
-    // DDL is `"<app_id>"`-qualified (the ATTACH-alias model). The zero-migrate
-    // engine calls the `_scoped` form with `MainUnqualified` instead.
+    // The stable entry point keeps the historical data-plane namespacing. The
+    // engine calls the scoped form with `unqualified = true` instead.
     build_create_table_with_fks_for_dialect_scoped(
-        app_id,
-        collection,
-        schema,
-        fk_emit,
-        dialect,
-        SqliteEmitScope::AttachAlias,
-        effective,
+        app_id, collection, schema, fk_emit, dialect, false, effective,
     )
 }
 
 /// Scope-aware variant of [`build_create_table_with_fks_for_dialect`]. Identical
-/// in every respect except that the SQLite arm's table/index namespacing is
-/// chosen by `sqlite_scope` (see [`SqliteEmitScope`]). The Postgres arm is
-/// **byte-identical** regardless of `sqlite_scope` — the scope only flips the
-/// SQLite qualifier.
+/// in every respect except that a caller may request unqualified table/index
+/// targets. The selected backend owns whether that primitive changes its syntax;
+/// PostgreSQL and MySQL explicitly ignore it.
 ///
 /// The migrate engine's Confined SQLite path passes
-/// [`SqliteEmitScope::MainUnqualified`] so the emitted DDL is UNqualified and
+/// `unqualified = true` so the emitted DDL is UNqualified and
 /// lands in `main` (= the app file) under the hardened authorizer (which denies
 /// any non-`main` alias). The plugin-db runtime passes
-/// [`SqliteEmitScope::AttachAlias`] (via the stable entry point) because it
+/// `unqualified = false` (via the stable entry point) because it
 /// ATTACHes the file under the `<app_id>` alias.
 ///
 /// # Errors
@@ -751,7 +712,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
     dialect: SqlDialect,
-    sqlite_scope: SqliteEmitScope,
+    unqualified: bool,
     effective: &EffectivePolicy,
 ) -> Result<String, QueryError> {
     // The canonical multi-statement payload is `;\n`-joined here; the STRUCTURAL
@@ -765,7 +726,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
         schema,
         fk_emit,
         dialect,
-        sqlite_scope,
+        unqualified,
         effective,
     )?
     .join(";\n"))
@@ -787,7 +748,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
     dialect: SqlDialect,
-    sqlite_scope: SqliteEmitScope,
+    unqualified: bool,
     effective: &EffectivePolicy,
 ) -> Result<Vec<String>, QueryError> {
     validate_collection(collection)?;
@@ -795,9 +756,8 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
 
     // The ONE dialect->backend resolution for this whole emit. Everything below
     // that needs a vendor spelling receives THIS value; nothing under here asks
-    // the registry again. `dialect` stays in scope because core still needs it as
-    // a normalization key (identifier quoting, FK-action folding, the SQLite
-    // scope test) — parameterized semantics, not a vendor lookup.
+    // the registry again. `dialect` stays in scope for the remaining neutral
+    // normalization keys, not for vendor spelling dispatch.
     let backend = renderer(&dialect.id());
     let inject = ResolvedInject::for_table(effective, app_id, collection).map_err(|error| {
         QueryError::InvalidFilter(format!(
@@ -805,20 +765,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
         ))
     })?;
 
-    // SQLite `MainUnqualified` drops the schema qualifier entirely (`main` is the
-    // app file); every other case keeps the `"<schema>"."<table>"` form. PG always
-    // qualifies. `sqlite_table_unqualified` is true ONLY on the SQLite engine arm.
-    let sqlite_table_unqualified =
-        matches!(dialect, SqlDialect::Sqlite) && sqlite_scope == SqliteEmitScope::MainUnqualified;
-    let table = if sqlite_table_unqualified {
-        backend.quote_ident(collection)
-    } else {
-        format!(
-            "{}.{}",
-            backend.quote_ident(app_id),
-            backend.quote_ident(collection)
-        )
-    };
+    let table = backend.create_table_target(app_id, collection, unqualified);
 
     let mut columns = build_injected_columns(collection, &inject, dialect, backend)?;
 
@@ -1016,7 +963,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // Append exactly the policy-injected indexes as structural statements bound
     // 1:1 to the table lifecycle.
     let system_index_stmts =
-        build_injected_indexes(app_id, collection, dialect, sqlite_scope, &inject, backend)?;
+        build_injected_indexes(app_id, collection, unqualified, &inject, backend)?;
 
     let mut statements: Vec<String> = vec![create_table];
     statements.extend(system_index_stmts);
@@ -1174,25 +1121,21 @@ fn injected_column_type(
 fn build_injected_indexes(
     app_id: &str,
     collection: &str,
-    dialect: SqlDialect,
-    sqlite_scope: SqliteEmitScope,
+    unqualified: bool,
     inject: &ResolvedInject,
     backend: &'static dyn SchemaRenderer,
 ) -> Result<Vec<String>, QueryError> {
     inject
         .indexes()
         .iter()
-        .map(|index| {
-            render_injected_index(app_id, collection, dialect, sqlite_scope, index, backend)
-        })
+        .map(|index| render_injected_index(app_id, collection, unqualified, index, backend))
         .collect()
 }
 
 fn render_injected_index(
     app_id: &str,
     collection: &str,
-    dialect: SqlDialect,
-    sqlite_scope: SqliteEmitScope,
+    unqualified: bool,
     index: &IrIndex,
     backend: &'static dyn SchemaRenderer,
 ) -> Result<String, QueryError> {
@@ -1232,37 +1175,14 @@ fn render_injected_index(
         .name
         .clone()
         .unwrap_or_else(|| index_name(collection, &columns, unique));
-    let unique_clause = if unique { "UNIQUE " } else { "" };
-    let rendered_columns = columns
-        .iter()
-        .map(|column| backend.quote_ident(column))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Ok(match dialect {
-        SqlDialect::Postgres => format!(
-            "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {}.{} ({rendered_columns})",
-            backend.quote_ident(&index_name),
-            backend.quote_ident(app_id),
-            backend.quote_ident(collection),
-        ),
-        SqlDialect::Sqlite if sqlite_scope == SqliteEmitScope::MainUnqualified => format!(
-            "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {} ({rendered_columns})",
-            backend.quote_ident(&index_name),
-            backend.quote_ident(collection),
-        ),
-        SqlDialect::Sqlite => format!(
-            "CREATE {unique_clause}INDEX IF NOT EXISTS {}.{} ON {} ({rendered_columns})",
-            backend.quote_ident(app_id),
-            backend.quote_ident(&index_name),
-            backend.quote_ident(collection),
-        ),
-        SqlDialect::Mysql => format!(
-            "CREATE {unique_clause}INDEX {} ON {}.{} ({rendered_columns})",
-            backend.quote_ident(&index_name),
-            backend.quote_ident(app_id),
-            backend.quote_ident(collection),
-        ),
-    })
+    Ok(backend.injected_index_statement(
+        app_id,
+        collection,
+        &index_name,
+        unique,
+        &columns,
+        unqualified,
+    ))
 }
 
 /// Build an `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statement (B2).
@@ -2181,16 +2101,6 @@ pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDiale
     renderer(&dialect.id()).column_type(&column_snapshot_for_type_def(def), false)
 }
 
-fn parse_character_type_len(data_type: &str) -> Option<u64> {
-    let lower = data_type.trim().to_ascii_lowercase();
-    let inner = lower
-        .strip_prefix("character(")
-        .or_else(|| lower.strip_prefix("char("))
-        .or_else(|| lower.strip_prefix("bpchar("))?
-        .strip_suffix(')')?;
-    inner.parse::<u64>().ok().filter(|len| *len > 0)
-}
-
 /// Emit per-variant CHECK constraints for a flat-expanded
 /// discriminated union. The discriminator field carries
 /// the per-variant shape map; for each variant we emit a clause like
@@ -2332,181 +2242,6 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
         prefix.pop();
     }
     format!("{prefix}_{hash}")
-}
-
-/// Fold a raw type spelling to the form the drift comparators compare, for a
-/// named dialect.
-///
-/// A COMPARATOR, not a speller, and that is why it is a core free function rather
-/// than a [`SchemaRenderer`] method — which is what it used to be. It answers "do
-/// these two type spellings MEAN the same on this vendor", which is core DECIDING
-/// something about a vendor; a renderer method is core ASKING a vendor how to
-/// write something. `render::backends`'s header states that boundary and names
-/// `render::value_format` as the worked example of the same shape.
-///
-/// The PostgreSQL arm being the IDENTITY is the tell: a vendor with nothing to
-/// spell has nothing to be asked. The other two arms delegate to the two folds
-/// that already existed as core free functions and that core already called
-/// directly — [`sqlite_canonical_type`] and [`mysql_canonical_type`] — so this
-/// changes no byte, only who owns the question.
-#[must_use]
-pub fn canonical_type_for_dialect(raw: &str, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::Postgres => raw.to_string(),
-        SqlDialect::Sqlite => sqlite_canonical_type(raw).to_string(),
-        SqlDialect::Mysql => mysql_canonical_type(raw),
-    }
-}
-
-/// Canonicalise a column type to the SQLite affinity token used when comparing
-/// PG-spelled desired snapshots against live SQLite declared types.
-#[must_use]
-pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
-    let lower = data_type.trim().to_ascii_lowercase();
-    // Parameterised extension types keep their DDL spelling in the snapshot
-    // (`vector(384)`, `geography(POINT, 4326)`); both emit BLOB on SQLite.
-    if lower.starts_with("vector(")
-        || lower == "vector"
-        || lower.starts_with("geography(")
-        || lower.starts_with("geometry(")
-    {
-        return "blob";
-    }
-    match lower.as_str() {
-        // TEXT affinity: PG `text`/`jsonb`/`timestamp with time zone`/`date`
-        // (date→TIMESTAMPTZ, calendarDate→DATE on PG; both → SQLite TEXT), and the
-        // live SQLite `text` token itself.
-        "text"
-        | "text[]"
-        | "jsonb"
-        | "json"
-        | "timestamp with time zone"
-        | "timestamptz"
-        | "date"
-        | "inet"
-        | "character"
-        | "char"
-        | "bpchar" => "text",
-        // REAL affinity: PG `double precision` (`t.number()`), and live `real`.
-        "double precision" | "float8" | "real" => "real",
-        // INTEGER affinity: PG `boolean`/`integer` (and `bigint`), and live `integer`.
-        "boolean" | "integer" | "bigint" | "smallint" | "int8" | "int4" | "int2" | "int" => {
-            "integer"
-        }
-        // TEXT affinity: `numeric`/`decimal` (a numeric `t.literal()`, `t.numeric()`)
-        // are stored as exact decimal TEXT on SQLite — no fixed-precision storage
-        // class — matching the emitter and the `t.numeric()` override. A live
-        // `numeric`/`decimal` declaration canonicalises the same way, so the model
-        // and introspection agree instead of drifting (numeric-vs-real).
-        "numeric" | "decimal" => "text",
-        // BLOB affinity: PG `bytea` (encrypted / `t.bytes()`), and live `blob`.
-        "bytea" | "blob" => "blob",
-        // Unknown / future spelling: fall back to TEXT (SQLite's catch-all affinity,
-        // matching the emitter's `_ => TEXT` arm). An unrecognised pair still
-        // compares equal-to-equal by its own lowercased form first (see the caller),
-        // so this fallback only collapses genuinely unmapped tokens.
-        _ => "text",
-    }
-}
-
-/// Canonicalise MySQL `information_schema.COLUMNS.COLUMN_TYPE` / rendered DDL
-/// type strings for drift/probe comparison.
-#[must_use]
-pub fn mysql_canonical_type(data_type: &str) -> String {
-    let lower = data_type.trim().to_ascii_lowercase();
-    // Strip an explicit `CHARACTER SET ... COLLATE ...` clause: it is the column's
-    // collation, which the base-family canonicalization ignores (charset/collation
-    // is compared independently). `VARCHAR(255) CHARACTER SET utf8mb4 COLLATE
-    // utf8mb4_0900_as_cs` and a bare `varchar(255)` canonicalize to the same base family.
-    let lower = lower
-        .split(" character set ")
-        .next()
-        .and_then(|head| head.split(" collate ").next())
-        .unwrap_or(&lower)
-        .trim()
-        .to_string();
-    let no_width = strip_mysql_int_display_width(&lower);
-    if no_width.starts_with("enum(") {
-        return no_width;
-    }
-    if no_width == "varchar(43)" || no_width == "inet" {
-        return "inet".to_string();
-    }
-    if let Some(len) = parse_character_type_len(&no_width) {
-        return format!("character({len})");
-    }
-    // `character varying(n)` is the DIALECT-NEUTRAL spelling a bounded `t.string({
-    // length })` carries in `data_type`; `varchar(n)` is what MySQL's catalog reports for
-    // the same column. Both must fold to the same family or the differ sees a phantom
-    // type change on every bounded string and refuses the deploy. Measured: a live
-    // MySQL declarative re-deploy of a `character varying(191)` id column was refused
-    // with `MysqlAlterColumnUnsupported { change: "type" }` until this arm existed.
-    if no_width.starts_with("varchar(")
-        || no_width.starts_with("character varying(")
-        || no_width == "character varying"
-        || no_width.ends_with("text")
-        || no_width == "char"
-    {
-        return "text".to_string();
-    }
-    if no_width.starts_with("varbinary(") || no_width.ends_with("blob") || no_width == "bytea" {
-        return "blob".to_string();
-    }
-    if no_width.starts_with("datetime")
-        || no_width.starts_with("timestamp")
-        || matches!(
-            no_width.as_str(),
-            "timestamp with time zone" | "timestamptz"
-        )
-    {
-        return "datetime".to_string();
-    }
-    if no_width.starts_with("decimal") || no_width == "numeric" {
-        return "decimal".to_string();
-    }
-    if no_width.starts_with("double") || matches!(no_width.as_str(), "double precision" | "float8")
-    {
-        return "double".to_string();
-    }
-    if matches!(no_width.as_str(), "float" | "real" | "float4") {
-        return "real".to_string();
-    }
-    if no_width.starts_with("tinyint(1)") || no_width == "boolean" {
-        return "boolean".to_string();
-    }
-    match no_width.as_str() {
-        "smallint" | "int2" => "smallint".to_string(),
-        "int" | "integer" | "int4" => "int".to_string(),
-        "bigint" | "int8" => "bigint".to_string(),
-        "json" | "jsonb" | "text[]" => "json".to_string(),
-        "date" => "date".to_string(),
-        "point" | "point srid 4326" | "geography(point, 4326)" | "geography(POINT, 4326)" => {
-            "point".to_string()
-        }
-        other => other.to_string(),
-    }
-}
-
-fn strip_mysql_int_display_width(input: &str) -> String {
-    for ty in [
-        "tinyint",
-        "smallint",
-        "mediumint",
-        "int",
-        "integer",
-        "bigint",
-    ] {
-        if let Some(rest) = input.strip_prefix(ty) {
-            if let Some(after_open) = rest.strip_prefix('(') {
-                if let Some((digits, after_close)) = after_open.split_once(')') {
-                    if digits.chars().all(|c| c.is_ascii_digit()) {
-                        return format!("{ty}{after_close}");
-                    }
-                }
-            }
-        }
-    }
-    input.to_string()
 }
 
 /// Generate column constraints from field definition.
@@ -2807,7 +2542,7 @@ columns = [
         schema: &serde_json::Value,
         fk_emit: &FkEmission<'_>,
         dialect: SqlDialect,
-        sqlite_scope: SqliteEmitScope,
+        unqualified: bool,
     ) -> Result<String, QueryError> {
         super::build_create_table_with_fks_for_dialect_scoped(
             app_id,
@@ -2815,7 +2550,7 @@ columns = [
             schema,
             fk_emit,
             dialect,
-            sqlite_scope,
+            unqualified,
             &confined_policy(),
         )
     }
@@ -5325,7 +5060,7 @@ columns = [
     // ----------------------------------------------------------------
 
     // -----------------------------------------------------------------------
-    // `SqliteEmitScope` namespacing (descriptor→DDL for the migrate
+    // boolean scope namespacing (descriptor→DDL for the migrate
     // engine). The `MainUnqualified` scope drops the `<app_id>` qualifier on
     // the SQLite arm so the DDL lands in `main` (= the app file). PG and the
     // `AttachAlias` SQLite default are unchanged (regression guard).
@@ -5362,7 +5097,7 @@ columns = [
             &json!({ "title": { "type": "string", "required": true } }),
             &FkEmission::Inline,
             SqlDialect::Sqlite,
-            SqliteEmitScope::MainUnqualified,
+            true,
         )
         .expect("build unqualified sqlite ddl");
 
@@ -5403,7 +5138,7 @@ columns = [
             &json!({ "title": { "type": "string", "required": true } }),
             &FkEmission::Inline,
             SqlDialect::Sqlite,
-            SqliteEmitScope::AttachAlias,
+            false,
         )
         .expect("build attach-alias sqlite ddl");
 
@@ -5423,8 +5158,8 @@ columns = [
         );
     }
 
-    /// The PG arm is BYTE-IDENTICAL regardless of `sqlite_scope` (the scope only
-    /// flips the SQLite qualifier). This is the PG-regression bar.
+    /// The PG arm is BYTE-IDENTICAL regardless of the unqualified request (the
+    /// primitive only flips the SQLite qualifier). This is the PG-regression bar.
     #[test]
     fn pg_arm_byte_identical_across_sqlite_scopes() {
         let app_id = "app_demo";
@@ -5437,22 +5172,19 @@ columns = [
             SqlDialect::Postgres,
         )
         .expect("pg via stable entry");
-        for scope in [
-            SqliteEmitScope::AttachAlias,
-            SqliteEmitScope::MainUnqualified,
-        ] {
+        for unqualified in [false, true] {
             let via_scoped = build_create_table_with_fks_for_dialect_scoped(
                 app_id,
                 "accounts",
                 &schema,
                 &FkEmission::Inline,
                 SqlDialect::Postgres,
-                scope,
+                unqualified,
             )
             .expect("pg via scoped entry");
             assert_eq!(
                 via_stable, via_scoped,
-                "PG arm must be byte-identical regardless of sqlite_scope ({scope:?})"
+                "PG arm must be byte-identical regardless of unqualified ({unqualified:?})"
             );
         }
         // And the PG arm is still `<schema>`-qualified.
@@ -5471,7 +5203,7 @@ columns = [
             &goodies_schema(),
             &FkEmission::Inline,
             SqlDialect::Sqlite,
-            SqliteEmitScope::MainUnqualified,
+            true,
         )
         .expect("build goodies sqlite ddl");
 

@@ -229,9 +229,10 @@ pub struct ColumnSnapshot {
     /// a MySQL catalog. `None` on every other dialect and on author-built desired
     /// snapshots that have not derived it yet.
     ///
-    /// This exists because `data_type` cannot carry it: `mysql_canonical_type` folds
-    /// every `varchar(n)` to the literal `text`, so a live `varchar(64)` and a
-    /// declared `varchar(255)` are the same string by the time they are compared.
+    /// This exists because `data_type` cannot carry it: MySQL's
+    /// [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
+    /// folds every `varchar(n)` to the literal `text`, so a live `varchar(64)` and
+    /// a declared `varchar(255)` are the same string by the time they are compared.
     ///
     /// Like [`MysqlTextStorageSnapshot`] above it is excluded from this type's
     /// `PartialEq` / `Eq`, but for the OPPOSITE reason. That one is excluded
@@ -525,9 +526,10 @@ impl ColumnCollationSnapshot {
 /// The physical identity of one MySQL column, as parsed VALUES rather than as
 /// rendered type text.
 ///
-/// The portable `data_type` cannot answer this: `mysql_canonical_type` folds every
-/// `varchar(n)` to the literal `text` (`schema/query.rs`), so a live `varchar(64)`
-/// and a declared `varchar(255)` are indistinguishable once stored. Both sides of a
+/// The portable `data_type` cannot answer this: MySQL's
+/// [`SchemaRenderer::canonical_type`](crate::schema::SchemaRenderer::canonical_type)
+/// folds every `varchar(n)` to the literal `text`, so a live `varchar(64)` and a
+/// declared `varchar(255)` are indistinguishable once stored. Both sides of a
 /// comparison fold the same way, so the blindness is symmetric and silent.
 ///
 /// COMPARING RENDERED TEXT INSTEAD WAS REJECTED, and the reason is measured rather

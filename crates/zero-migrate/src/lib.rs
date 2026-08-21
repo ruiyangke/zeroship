@@ -161,9 +161,9 @@ pub use plan::author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
 pub use render::declarative::{
-    desired_snapshot, desired_snapshot_for_dialect, sqlite_canonical_type, AcceptedIndexAlias,
-    CollectionDescriptor, DeclarativeAuthor, DeclarativeError, DeclarativePlan, DesiredSchema,
-    FieldDescriptor, IndexDescriptor, RenameHint, TableRebuild,
+    desired_snapshot, desired_snapshot_for_dialect, AcceptedIndexAlias, CollectionDescriptor,
+    DeclarativeAuthor, DeclarativeError, DeclarativePlan, DesiredSchema, FieldDescriptor,
+    IndexDescriptor, RenameHint, TableRebuild,
 };
 pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,

@@ -55,6 +55,43 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         }
     }
 
+    /// PostgreSQL's desired and catalog spellings are already compared in their
+    /// retained form, so its canonicalizer is an explicit identity.
+    fn canonical_type(&self, raw: &str) -> String {
+        raw.to_string()
+    }
+
+    fn create_table_target(&self, app_id: &str, collection: &str, _unqualified: bool) -> String {
+        format!(
+            "{}.{}",
+            self.quote_ident(app_id),
+            self.quote_ident(collection)
+        )
+    }
+
+    fn injected_index_statement(
+        &self,
+        app_id: &str,
+        collection: &str,
+        index_name: &str,
+        unique: bool,
+        columns: &[&str],
+        _unqualified: bool,
+    ) -> String {
+        let unique_clause = if unique { "UNIQUE " } else { "" };
+        let rendered_columns = columns
+            .iter()
+            .map(|column| self.quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {}.{} ({rendered_columns})",
+            self.quote_ident(index_name),
+            self.quote_ident(app_id),
+            self.quote_ident(collection),
+        )
+    }
+
     /// PostgreSQL represents the portable case-insensitive choice as the `citext`
     /// TYPE in `column_type`; named catalog collations are separate column facets.
     /// There is therefore no engine-added type suffix to pin here.
@@ -234,5 +271,13 @@ mod tests {
         let rendered = "  public.citext COLLATE custom  ";
         assert_eq!(RENDERER.pin_collation(rendered, Some(false)), rendered);
         assert_eq!(RENDERER.strip_collation(rendered), rendered);
+    }
+
+    #[test]
+    fn canonical_type_is_explicit_postgres_identity() {
+        assert_eq!(
+            RENDERER.canonical_type("timestamp with time zone"),
+            "timestamp with time zone"
+        );
     }
 }

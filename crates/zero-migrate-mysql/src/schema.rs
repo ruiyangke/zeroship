@@ -69,6 +69,41 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         }
     }
 
+    fn canonical_type(&self, raw: &str) -> String {
+        mysql_canonical_type(raw)
+    }
+
+    fn create_table_target(&self, app_id: &str, collection: &str, _unqualified: bool) -> String {
+        format!(
+            "{}.{}",
+            self.quote_ident(app_id),
+            self.quote_ident(collection)
+        )
+    }
+
+    fn injected_index_statement(
+        &self,
+        app_id: &str,
+        collection: &str,
+        index_name: &str,
+        unique: bool,
+        columns: &[&str],
+        _unqualified: bool,
+    ) -> String {
+        let unique_clause = if unique { "UNIQUE " } else { "" };
+        let rendered_columns = columns
+            .iter()
+            .map(|column| self.quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "CREATE {unique_clause}INDEX {} ON {}.{} ({rendered_columns})",
+            self.quote_ident(index_name),
+            self.quote_ident(app_id),
+            self.quote_ident(collection),
+        )
+    }
+
     fn pin_collation(&self, rendered: &str, case_sensitive: Option<bool>) -> String {
         mysql_pin_collation(rendered, case_sensitive)
     }
@@ -97,6 +132,116 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     ) -> Vec<String> {
         Vec::new()
     }
+}
+
+fn parse_character_type_len(data_type: &str) -> Option<u64> {
+    let lower = data_type.trim().to_ascii_lowercase();
+    let inner = lower
+        .strip_prefix("character(")
+        .or_else(|| lower.strip_prefix("char("))
+        .or_else(|| lower.strip_prefix("bpchar("))?
+        .strip_suffix(')')?;
+    inner.parse::<u64>().ok().filter(|len| *len > 0)
+}
+
+/// Canonicalise MySQL `information_schema.COLUMNS.COLUMN_TYPE` / rendered DDL
+/// type strings for drift/probe comparison.
+#[must_use]
+fn mysql_canonical_type(data_type: &str) -> String {
+    let lower = data_type.trim().to_ascii_lowercase();
+    // Strip an explicit `CHARACTER SET ... COLLATE ...` clause: it is the column's
+    // collation, which the base-family canonicalization ignores (charset/collation
+    // is compared independently). `VARCHAR(255) CHARACTER SET utf8mb4 COLLATE
+    // utf8mb4_0900_as_cs` and a bare `varchar(255)` canonicalize to the same base family.
+    let lower = lower
+        .split(" character set ")
+        .next()
+        .and_then(|head| head.split(" collate ").next())
+        .unwrap_or(&lower)
+        .trim()
+        .to_string();
+    let no_width = strip_mysql_int_display_width(&lower);
+    if no_width.starts_with("enum(") {
+        return no_width;
+    }
+    if no_width == "varchar(43)" || no_width == "inet" {
+        return "inet".to_string();
+    }
+    if let Some(len) = parse_character_type_len(&no_width) {
+        return format!("character({len})");
+    }
+    // `character varying(n)` is the DIALECT-NEUTRAL spelling a bounded `t.string({
+    // length })` carries in `data_type`; `varchar(n)` is what MySQL's catalog reports for
+    // the same column. Both must fold to the same family or the differ sees a phantom
+    // type change on every bounded string and refuses the deploy. Measured: a live
+    // MySQL declarative re-deploy of a `character varying(191)` id column was refused
+    // with `MysqlAlterColumnUnsupported { change: "type" }` until this arm existed.
+    if no_width.starts_with("varchar(")
+        || no_width.starts_with("character varying(")
+        || no_width == "character varying"
+        || no_width.ends_with("text")
+        || no_width == "char"
+    {
+        return "text".to_string();
+    }
+    if no_width.starts_with("varbinary(") || no_width.ends_with("blob") || no_width == "bytea" {
+        return "blob".to_string();
+    }
+    if no_width.starts_with("datetime")
+        || no_width.starts_with("timestamp")
+        || matches!(
+            no_width.as_str(),
+            "timestamp with time zone" | "timestamptz"
+        )
+    {
+        return "datetime".to_string();
+    }
+    if no_width.starts_with("decimal") || no_width == "numeric" {
+        return "decimal".to_string();
+    }
+    if no_width.starts_with("double") || matches!(no_width.as_str(), "double precision" | "float8")
+    {
+        return "double".to_string();
+    }
+    if matches!(no_width.as_str(), "float" | "real" | "float4") {
+        return "real".to_string();
+    }
+    if no_width.starts_with("tinyint(1)") || no_width == "boolean" {
+        return "boolean".to_string();
+    }
+    match no_width.as_str() {
+        "smallint" | "int2" => "smallint".to_string(),
+        "int" | "integer" | "int4" => "int".to_string(),
+        "bigint" | "int8" => "bigint".to_string(),
+        "json" | "jsonb" | "text[]" => "json".to_string(),
+        "date" => "date".to_string(),
+        "point" | "point srid 4326" | "geography(point, 4326)" | "geography(POINT, 4326)" => {
+            "point".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+fn strip_mysql_int_display_width(input: &str) -> String {
+    for ty in [
+        "tinyint",
+        "smallint",
+        "mediumint",
+        "int",
+        "integer",
+        "bigint",
+    ] {
+        if let Some(rest) = input.strip_prefix(ty) {
+            if let Some(after_open) = rest.strip_prefix('(') {
+                if let Some((digits, after_close)) = after_open.split_once(')') {
+                    if digits.chars().all(|c| c.is_ascii_digit()) {
+                        return format!("{ty}{after_close}");
+                    }
+                }
+            }
+        }
+    }
+    input.to_string()
 }
 
 /// Pin an explicit collation onto a rendered MySQL `ENUM(...)` spelling.

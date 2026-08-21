@@ -46,7 +46,7 @@ use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{ExpandContractAuthor, ExpandContractPlan, OnlineIntent};
 use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::schema::query::{canonical_type_for_dialect, SqlDialect};
+use crate::schema::query::SqlDialect;
 // The per-dialect DDL emission seam. Declared below the engine so the three impls
 // can leave it for the three vendor crates without Cargo seeing a cycle.
 // The column-clause spellings moved with it, for the same reason: all three impls
@@ -1149,44 +1149,6 @@ fn ddl_to_information_schema(ddl: &str) -> String {
         // their DDL spelling — see the doc note.
         _ => ddl.to_string(),
     }
-}
-
-/// Canonicalise a column `data_type` to the SQLite type-affinity token used to
-/// compare a DESIRED snapshot (PG-spelled, from `ddl_to_information_schema`)
-/// against a LIVE snapshot REAL-introspected from SQLite
-/// (`sqlite::drift_sql::snapshot_schema`, which returns the
-/// lowercased SQLite declared type).
-///
-/// # Why this exists
-///
-/// `desired_snapshot` always emits the Postgres `information_schema` spelling for
-/// `data_type` (`text`, `bytea`, `double precision`, `timestamp with time zone`,
-/// …) regardless of dialect — the snapshot model is dialect-agnostic. But a REAL
-/// SQLite introspection reports the SQLite *declared* type the emitter wrote
-/// (`text`, `blob`, `real`, `integer`, `numeric`). Comparing the two raw spellings
-/// on the SQLite leg falsely flags a type change on every column whose PG and
-/// SQLite spellings differ — e.g. an encrypted column (`bytea` desired vs `blob`
-/// live), a number (`double precision` vs `real`), a timestamp (`timestamp with
-/// time zone` vs `text`) — yielding a spurious [`DeclarativeError::SqliteRebuildRequired`].
-///
-/// # Source of truth
-///
-/// The five target tokens are exactly the SQLite column types the shared emitter
-/// ([`crate::schema::query::def_to_column_type_for_dialect`] with
-/// `SqlDialect::Sqlite`) produces — `TEXT` / `REAL` / `INTEGER` / `NUMERIC` /
-/// `BLOB` — so emit and compare agree. Each arm below maps a PG `data_type`
-/// spelling (LHS) to the SQLite type the emitter would have written for the SAME
-/// field, AND folds the already-SQLite-spelled live token to the same canonical
-/// form. Parameterised extension types (`vector(N)`, `geography(POINT, 4326)`)
-/// emit `BLOB` on SQLite, so any `vector(`/`geography(` prefix folds to `blob`.
-///
-/// This is applied ONLY on the SQLite comparison leg; the PG leg compares the raw
-/// `information_schema` spellings unchanged (it never calls this), so the PG
-/// type-change detection is untouched — and a REAL SQLite type change (e.g.
-/// `text` → `real`, i.e. string → number) still maps to two DIFFERENT canonical
-/// tokens and IS detected.
-pub fn sqlite_canonical_type(data_type: &str) -> &'static str {
-    crate::schema::query::sqlite_canonical_type(data_type)
 }
 
 /// Single-quote a SQL string literal (double embedded quotes). Mirrors
@@ -2364,8 +2326,9 @@ pub fn desired_snapshot_for_dialect(
 /// FK definition spelling is dialect-divergent: SQLite FK targets are
 /// unqualified. (Full-text search was named here too, until it was removed from
 /// the engine entirely.) Column `data_type` remains in the PG `information_schema`
-/// spelling; SQLite comparison canonicalises it (see [`ddl_to_information_schema`]
-/// / [`sqlite_canonical_type`]).
+/// spelling; the selected backend canonicalises it for comparison (see
+/// [`ddl_to_information_schema`] and
+/// [`SchemaRenderer::canonical_type`]).
 ///
 /// # Errors
 /// - [`DeclarativeError::UnsupportedType`] — a field used an unknown type token.
@@ -4542,11 +4505,11 @@ impl DeclarativeAuthor {
                         // UNREACHABLE here; if one is somehow seen, it is a detector
                         // bug — fail closed with an internal error (NEVER emit dangling
                         // PG `ALTER COLUMN` DDL, NEVER silently skip). The dialect-aware
-                        // type compare uses the SAME `sqlite_canonical_type` folding
+                        // type compare uses the SAME registered SQLite canonicalizer
                         // the detector uses, so the two agree.
                         if is_sqlite {
-                            if sqlite_canonical_type(&lc.data_type)
-                                != sqlite_canonical_type(&c.data_type)
+                            if self.schema_renderer().canonical_type(&lc.data_type)
+                                != self.schema_renderer().canonical_type(&c.data_type)
                                 || lc.nullable != c.nullable
                                 || lc.case_sensitive != c.case_sensitive
                             {
@@ -4573,8 +4536,8 @@ impl DeclarativeAuthor {
                         // such column looks like a type change. Same idiom as
                         // `existence_probe`'s `dtypes_match`, which canonicalises both
                         // sides before asking whether they differ.
-                        let live_ct = canonical_type_for_dialect(&lc.data_type, self.dialect);
-                        let desired_ct = canonical_type_for_dialect(&c.data_type, self.dialect);
+                        let live_ct = self.schema_renderer().canonical_type(&lc.data_type);
+                        let desired_ct = self.schema_renderer().canonical_type(&c.data_type);
                         if self.dialect == SqlDialect::Mysql
                             && (live_ct != desired_ct
                                 || lc.case_sensitive != c.case_sensitive
@@ -5363,7 +5326,7 @@ impl DeclarativeAuthor {
                 &schema,
                 &crate::schema::query::FkEmission::Inline,
                 SqlDialect::Sqlite,
-                crate::schema::query::SqliteEmitScope::MainUnqualified,
+                true,
                 effective,
             )
             .map_err(|error| {
@@ -5421,12 +5384,14 @@ impl DeclarativeAuthor {
             lt.columns.iter().map(|c| (c.name.as_str(), c)).collect();
 
         // (2)/(3) A same-name column with a TYPE or NULLABILITY change. The
-        //     dialect-aware `sqlite_canonical_type` fold avoids false positives on
+        //     the registered SQLite canonicalizer avoids false positives on
         //     PG-vs-SQLite spelling differences (bytea↔blob, double precision↔real,
         //     timestamptz↔text); a GENUINE change maps to two distinct tokens.
         for c in &dt.columns {
             if let Some(lc) = live_cols.get(c.name.as_str()) {
-                if sqlite_canonical_type(&lc.data_type) != sqlite_canonical_type(&c.data_type) {
+                if self.schema_renderer().canonical_type(&lc.data_type)
+                    != self.schema_renderer().canonical_type(&c.data_type)
+                {
                     return Some(format!(
                         "alter column {} type {} → {}",
                         c.name, lc.data_type, c.data_type
@@ -6083,11 +6048,11 @@ impl DeclarativeAuthor {
                      rename-field check and the affinity guard (internal invariant)"
                     )));
                 };
-                let to_affinity = sqlite_canonical_type(&def_to_column_type_for_dialect(
+                let to_affinity = backend.canonical_type(&def_to_column_type_for_dialect(
                     to_def,
                     SqlDialect::Postgres,
                 ));
-                let from_affinity = sqlite_canonical_type(&live_from.data_type);
+                let from_affinity = backend.canonical_type(&live_from.data_type);
                 if to_affinity != from_affinity {
                     return Err(DeclarativeError::RenameHintTypeMismatch {
                         table: table.to_string(),

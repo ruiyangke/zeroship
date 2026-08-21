@@ -21,9 +21,10 @@
 //!   ([`build_encryption_sentinel_comments`], [`build_mask_sentinel_comments`] and
 //!   the three field-level readers under them).
 //!
-//! Composition, validation, and semantic comparison stay in the engine. Physical
-//! type and identifier spellings live in the backend that owns them, which is the
-//! boundary rule stated at length in `zero_migrate::render::backends`.
+//! Composition and validation stay in the engine. Physical type and identifier
+//! spellings, including the vendor's catalog-type canonicalization, live in the
+//! backend that owns them. This is the boundary rule stated at length in
+//! `zero_migrate::render::backends`.
 //!
 use crate::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::DialectId;
@@ -45,25 +46,16 @@ use zero_migrate_ir::dialect::DialectId;
 /// perform is worse than no seam, because the next reader budgets for it. All three
 /// are deleted rather than kept warm: 10 methods to 8.
 ///
-/// IT THEN LOST A NINTH, AND FOR THE OPPOSITE REASON — `canonical_type` was ALIVE,
-/// with a real caller. It was never a SPELLING. PostgreSQL's arm was the IDENTITY
-/// (`raw.to_string()`), SQLite's folded to storage affinity and MySQL's folded
-/// `varchar(n)` to `text`, so the question it answered was "do these two type
-/// spellings MEAN the same" — a drift COMPARISON, not "how does this vendor write
-/// a type". By this crate's own backend-boundary rule (stated at length in
-/// `render::backends`'s header) comparison and normalization stay in core,
-/// dialect-PARAMETERIZED, even when the answer depends on the vendor; only
-/// spelling is core ASKING a vendor something. It is now the free function
-/// `canonical_type_for_dialect`, sitting beside the two core folds its arms
-/// already delegated to, and that is what let `render::existence_probe` — the only
-/// caller of this trait outside this module — stop resolving a renderer at all.
-/// 8 methods to 7.
-///
 /// It then gained TWO required collation spellings. Pinning an engine-selected
 /// collation when a column is created and stripping that pin when a retype must
 /// preserve the live column's collation are inverse-looking but distinct vendor
 /// operations. Keeping both required makes a new backend state each position in
 /// its own crate instead of inheriting another engine's answer.
+///
+/// It also gained THREE required schema-emission operations. Catalog-type
+/// canonicalization, CREATE TABLE target qualification, and injected-index syntax
+/// all depend on vendor grammar. Keeping their bodies in the registering backend
+/// means core never dispatches on a closed vendor enum to answer them.
 pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// Which vendor this is, as the OPEN [`DialectId`] rather than the closed
     /// [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect).
@@ -97,6 +89,27 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
 
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
     fn column_type(&self, c: &ColumnSnapshot, inline_pk: bool) -> String;
+
+    /// Fold a raw catalog/DDL type spelling to this backend's drift-comparison
+    /// token.
+    fn canonical_type(&self, raw: &str) -> String;
+
+    /// Spell the target of a CREATE TABLE statement. `unqualified` is the
+    /// caller's primitive request for the engine's main-database mode; backends
+    /// whose table namespace is always qualified state that explicitly by
+    /// ignoring it.
+    fn create_table_target(&self, app_id: &str, collection: &str, unqualified: bool) -> String;
+
+    /// Spell one already-validated policy-injected index statement.
+    fn injected_index_statement(
+        &self,
+        app_id: &str,
+        collection: &str,
+        index_name: &str,
+        unique: bool,
+        columns: &[&str],
+        unqualified: bool,
+    ) -> String;
 
     /// Pin this vendor's explicit collation spelling onto a rendered type when the
     /// type can carry one.

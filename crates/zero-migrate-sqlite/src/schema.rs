@@ -52,6 +52,56 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         }
     }
 
+    fn canonical_type(&self, raw: &str) -> String {
+        sqlite_canonical_type(raw).to_string()
+    }
+
+    fn create_table_target(&self, app_id: &str, collection: &str, unqualified: bool) -> String {
+        let backend = self;
+        let sqlite_table_unqualified = unqualified;
+        let table = if sqlite_table_unqualified {
+            backend.quote_ident(collection)
+        } else {
+            format!(
+                "{}.{}",
+                backend.quote_ident(app_id),
+                backend.quote_ident(collection)
+            )
+        };
+        table
+    }
+
+    fn injected_index_statement(
+        &self,
+        app_id: &str,
+        collection: &str,
+        index_name: &str,
+        unique: bool,
+        columns: &[&str],
+        unqualified: bool,
+    ) -> String {
+        let unique_clause = if unique { "UNIQUE " } else { "" };
+        let rendered_columns = columns
+            .iter()
+            .map(|column| self.quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if unqualified {
+            format!(
+                "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {} ({rendered_columns})",
+                self.quote_ident(index_name),
+                self.quote_ident(collection),
+            )
+        } else {
+            format!(
+                "CREATE {unique_clause}INDEX IF NOT EXISTS {}.{} ON {} ({rendered_columns})",
+                self.quote_ident(app_id),
+                self.quote_ident(index_name),
+                self.quote_ident(collection),
+            )
+        }
+    }
+
     /// SQLite's `column_type` owns its `text COLLATE NOCASE` spelling directly;
     /// there is no separate character-set/collation suffix for this hook to add.
     fn pin_collation(&self, rendered: &str, _case_sensitive: Option<bool>) -> String {
@@ -83,6 +133,57 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         _schema: &serde_json::Value,
     ) -> Vec<String> {
         Vec::new()
+    }
+}
+
+/// Canonicalise a column type to the SQLite affinity token used when comparing
+/// PG-spelled desired snapshots against live SQLite declared types.
+#[must_use]
+fn sqlite_canonical_type(data_type: &str) -> &'static str {
+    let lower = data_type.trim().to_ascii_lowercase();
+    // Parameterised extension types keep their DDL spelling in the snapshot
+    // (`vector(384)`, `geography(POINT, 4326)`); both emit BLOB on SQLite.
+    if lower.starts_with("vector(")
+        || lower == "vector"
+        || lower.starts_with("geography(")
+        || lower.starts_with("geometry(")
+    {
+        return "blob";
+    }
+    match lower.as_str() {
+        // TEXT affinity: PG `text`/`jsonb`/`timestamp with time zone`/`date`
+        // (date→TIMESTAMPTZ, calendarDate→DATE on PG; both → SQLite TEXT), and the
+        // live SQLite `text` token itself.
+        "text"
+        | "text[]"
+        | "jsonb"
+        | "json"
+        | "timestamp with time zone"
+        | "timestamptz"
+        | "date"
+        | "inet"
+        | "character"
+        | "char"
+        | "bpchar" => "text",
+        // REAL affinity: PG `double precision` (`t.number()`), and live `real`.
+        "double precision" | "float8" | "real" => "real",
+        // INTEGER affinity: PG `boolean`/`integer` (and `bigint`), and live `integer`.
+        "boolean" | "integer" | "bigint" | "smallint" | "int8" | "int4" | "int2" | "int" => {
+            "integer"
+        }
+        // TEXT affinity: `numeric`/`decimal` (a numeric `t.literal()`, `t.numeric()`)
+        // are stored as exact decimal TEXT on SQLite — no fixed-precision storage
+        // class — matching the emitter and the `t.numeric()` override. A live
+        // `numeric`/`decimal` declaration canonicalises the same way, so the model
+        // and introspection agree instead of drifting (numeric-vs-real).
+        "numeric" | "decimal" => "text",
+        // BLOB affinity: PG `bytea` (encrypted / `t.bytes()`), and live `blob`.
+        "bytea" | "blob" => "blob",
+        // Unknown / future spelling: fall back to TEXT (SQLite's catch-all affinity,
+        // matching the emitter's `_ => TEXT` arm). An unrecognised pair still
+        // compares equal-to-equal by its own lowercased form first (see the caller),
+        // so this fallback only collapses genuinely unmapped tokens.
+        _ => "text",
     }
 }
 
@@ -161,6 +262,11 @@ mod tests {
         let rendered = "  text COLLATE NOCASE  ";
         assert_eq!(RENDERER.pin_collation(rendered, Some(false)), rendered);
         assert_eq!(RENDERER.strip_collation(rendered), rendered);
+    }
+
+    #[test]
+    fn canonical_type_is_owned_by_sqlite() {
+        assert_eq!(RENDERER.canonical_type("timestamp with time zone"), "text");
     }
 
     #[test]

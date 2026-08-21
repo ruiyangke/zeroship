@@ -290,6 +290,44 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         }
     }
 
+    fn canonical_type(&self, raw: &str) -> String {
+        raw.to_string()
+    }
+
+    fn create_table_target(&self, app_id: &str, collection: &str, unqualified: bool) -> String {
+        if unqualified {
+            self.quote_ident(collection)
+        } else {
+            format!(
+                "{}.{}",
+                self.quote_ident(app_id),
+                self.quote_ident(collection)
+            )
+        }
+    }
+
+    fn injected_index_statement(
+        &self,
+        app_id: &str,
+        collection: &str,
+        index_name: &str,
+        unique: bool,
+        columns: &[&str],
+        unqualified: bool,
+    ) -> String {
+        let unique_clause = if unique { "UNIQUE " } else { "" };
+        let table = self.create_table_target(app_id, collection, unqualified);
+        let columns = columns
+            .iter()
+            .map(|column| self.quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "CREATE {unique_clause}INDEX {} ON {table} ({columns})",
+            self.quote_ident(index_name)
+        )
+    }
+
     /// This stub deliberately supports no collation spelling. The required method
     /// makes that refusal-to-transform explicit in the outsider's own crate.
     fn pin_collation(&self, rendered: &str, _case_sensitive: Option<bool>) -> String {

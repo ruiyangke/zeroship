@@ -12,17 +12,17 @@
 //!
 //! - [`query`] — the DSL→SQL **DDL builders** (CREATE TABLE / index / FK /
 //!   constraints; vector / geoPoint / encrypted-column / mask-sibling;
-//!   policy-injected columns; [`query::SqlDialect`]), the type map
-//!   ([`query::def_to_column_type_for_dialect`], [`query::sqlite_canonical_type`],
-//!   [`query::mysql_canonical_type`]), the encryption + mask sentinel
-//!   builders, and the identifier/field validators. Dual-dialect (PG + SQLite,
-//!   with a MySQL render leg). It also owns the `SchemaRenderer` CONTRACT and
-//!   re-exports the dispatch; the vendors themselves are next door.
-//! - `backends` — one module per shipping dialect, holding that dialect's
-//!   `SchemaRenderer` impl and nothing else, plus the single exhaustive dispatch
-//!   match over them. The sibling of `render::backends`, and the same
-//!   one-dialect-literal rule applies (enforced by
-//!   `tests/dialect_matrix/backend_modules_name_one_dialect.rs`).
+//!   policy-injected columns; [`query::SqlDialect`]), the neutral field-definition
+//!   lowering ([`query::def_to_column_type_for_dialect`]), the encryption + mask
+//!   sentinel builders, and the identifier/field validators. Vendor type
+//!   canonicalization is reached through
+//!   [`query::SchemaRenderer::canonical_type`].
+//! - `backends` — the schema-renderer view of the one shipping
+//!   [`VendorSet`](zero_migrate_backend::registry::VendorSet)
+//!   registry. Implementations live in the PostgreSQL, SQLite, and MySQL backend
+//!   crates; core performs an open
+//!   [`DialectId`](zero_migrate_ir::dialect::DialectId) lookup and no enum match
+//!   over them.
 //! - [`diff`] — the **diff classifier** ([`diff::compute_diff`],
 //!   [`diff::ChangeKind`], [`diff::ChangeClass`]) and the schema **metadata
 //!   types** ([`diff::MaskMeta`], [`diff::EncryptionMeta`], [`diff::MaskKind`],

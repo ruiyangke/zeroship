@@ -56,7 +56,7 @@ use crate::support;
 
 use serde_json::json;
 use zero_migrate::schema::query::{
-    build_create_table_with_fks_for_dialect_scoped_statements, FkEmission, SqliteEmitScope,
+    build_create_table_with_fks_for_dialect_scoped_statements, FkEmission,
 };
 use zero_migrate::SqlDialect;
 
@@ -106,7 +106,7 @@ fn create_table_sql(schema: &str) -> Vec<String> {
         &field_defs(),
         &FkEmission::Inline,
         SqlDialect::Postgres,
-        SqliteEmitScope::AttachAlias,
+        false,
         &support::no_inject(schema),
     )
     .expect("the field-def map renders a CREATE TABLE")

@@ -63,9 +63,10 @@
 //!   therefore false-drifts on EVERY non-text type on SQLite (a `timestamp with time
 //!   zone` / `jsonb` / `uuid`→`text` snapshot vs a `text` live affinity,
 //!   `double precision`→`real`, `bytea`→`blob`). The SQLite leg of [`decide`] folds
-//!   BOTH the declared and the live data_type through
-//!   [`crate::render::declarative::sqlite_canonical_type`] — the SAME affinity fold the
-//!   declarative DIFFER uses — so a clean guarded `createTable`/`addColumn` re-run is
+//!   BOTH the declared and the live data_type through the selected backend's
+//!   [`SchemaRenderer::canonical_type`](crate::schema::query::SchemaRenderer::canonical_type)
+//!   — the SAME affinity fold the declarative DIFFER uses — so a clean guarded
+//!   `createTable`/`addColumn` re-run is
 //!   idempotent for every type, while a genuine affinity change (string→number, i.e.
 //!   `text` vs `real`) still maps to two distinct canonical tokens and IS a
 //!   divergence. Several distinct SDK facets collapse to the `text` affinity on SQLite
@@ -102,7 +103,7 @@ use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::plan::author::pg_max_ident_bytes;
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::schema::query::{canonical_type_for_dialect, SqlDialect};
+use crate::schema::query::SqlDialect;
 
 // `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
 // (the type moved into the leaf wire-contract crate — an inherent `impl` here would
@@ -152,9 +153,11 @@ pub enum GuardVerdict {
 /// `numeric`/`blob`). A raw `expect != live` compare therefore false-drifts on EVERY
 /// non-text-affinity type on SQLite (a `timestamp with time zone` snapshot vs a
 /// `text` live affinity, etc.). On the SQLite leg we therefore canonicalize BOTH
-/// sides through [`crate::render::declarative::sqlite_canonical_type`] — the SAME affinity
-/// fold the differ uses (`declarative.rs`) — so a guarded `createTable`/`addColumn`
-/// re-run is idempotent for every type, while a real affinity change still diverges.
+/// sides through the selected backend's
+/// [`SchemaRenderer::canonical_type`](crate::schema::query::SchemaRenderer::canonical_type)
+/// — the SAME affinity fold the differ uses (`declarative.rs`) — so a guarded
+/// `createTable`/`addColumn` re-run is idempotent for every type, while a real
+/// affinity change still diverges.
 #[must_use]
 pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) -> GuardVerdict {
     match probe {
@@ -564,9 +567,9 @@ struct ExpectColumnShape<'a> {
 /// so a raw `expect_dtype != live_dtype` compare false-drifts on EVERY non-text
 /// type on SQLite (a `timestamp with time zone` / `jsonb` / `uuid`→`text` snapshot
 /// vs a `text` live affinity, `double precision`→`real`, `bytea`→`blob`, …). On the
-/// SQLite leg we therefore fold BOTH sides through
-/// [`crate::render::declarative::sqlite_canonical_type`] — the SAME affinity fold the
-/// declarative differ uses — so a clean guarded re-run is idempotent for every
+/// SQLite leg we therefore fold BOTH sides through the selected backend's
+/// [`SchemaRenderer::canonical_type`](crate::schema::query::SchemaRenderer::canonical_type)
+/// — the SAME affinity fold the declarative differ uses — so a clean guarded re-run is idempotent for every
 /// type, while a real affinity change (`text` vs `real`, i.e. string→number) still
 /// maps to two DIFFERENT canonical tokens and IS a divergence. On PG both sides are
 /// already the `information_schema` spelling and the raw compare is exact.
@@ -577,8 +580,8 @@ struct ExpectColumnShape<'a> {
 /// live catalog stores only the affinity — the un-collapsed SDK facet is NOT
 /// recoverable. We do NOT fail closed on that blind spot: an affinity-match is a
 /// `SatisfiedNoop`, exactly as the declarative DIFFER treats it (it compares only
-/// `sqlite_canonical_type` on SQLite — a within-affinity facet change is a documented
-/// SQLite divergence). This is what makes
+/// the backend canonicalizer on SQLite — a within-affinity facet change is a
+/// documented SQLite divergence). This is what makes
 /// a guarded `createTable`/`addColumn ifNotExists` RE-RUN idempotent on SQLite (every
 /// table carries text-affinity system columns; a stand-alone `addColumn` of a `ref`
 /// over a live `string` is physically a no-op anyway — SQLite cannot add an FK via
@@ -600,8 +603,8 @@ fn column_shape_divergence(shape: &ExpectColumnShape<'_>) -> Option<GuardVerdict
     // to the SQLite affinity the emitter would have written, AND the already-SQLite
     // live token folded to the same canonical form). On PG, compare the raw
     // `information_schema` spellings unchanged.
-    let dtypes_match = canonical_type_for_dialect(expect_dtype, dialect)
-        == canonical_type_for_dialect(live_dtype, dialect);
+    let backend = crate::render::backends::schema_renderer(&dialect.id());
+    let dtypes_match = backend.canonical_type(expect_dtype) == backend.canonical_type(live_dtype);
     if !dtypes_match {
         return Some(drift(
             &format!("column {table}.{column}"),
@@ -1206,7 +1209,7 @@ mod tests {
         // guard declares a column whose snapshot is `timestamp with time zone` (a
         // `date` facet) which folds to the same `text` affinity. The within-text-
         // affinity facet blind spot is a documented SQLite divergence the DIFFER also
-        // accepts (it compares only `sqlite_canonical_type`). The guard matches: an
+        // accepts (it compares only the SQLite backend canonicalizer). The guard matches: an
         // affinity-match is a SatisfiedNoop (idempotent re-run), NOT a fail-closed and
         // NOT a false `timestamp with time zone != text` drift. (On SQLite a `ref`/date
         // column is physically a plain `text` column anyway — no provable divergence.)

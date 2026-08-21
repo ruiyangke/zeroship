@@ -33,7 +33,7 @@ use serde_json::Value;
 use zero_migrate::manifest_entry::sha256_hex;
 use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::schema::query::{
-    build_create_table_with_fks_for_dialect_scoped_statements, FkEmission, SqliteEmitScope,
+    build_create_table_with_fks_for_dialect_scoped_statements, FkEmission,
 };
 use zero_migrate::{render_artifacts, EffectivePolicy, SqlDialect};
 
@@ -346,7 +346,7 @@ pub fn field_defs_from_runtime_json(runtime_json: &str) -> BTreeMap<String, Valu
 ///
 /// This is the DDL leg, reproduced through the SAME emitter and the SAME arguments
 /// `render/declarative.rs` passes on the rebuild path: `FkEmission::Inline` and
-/// `SqliteEmitScope::MainUnqualified`. It is the reason this corpus exists rather than
+/// `unqualified = true`. It is the reason this corpus exists rather than
 /// a JSON-only one - `min`/`max`/`enum` become an inline `CHECK`, a `ref` becomes an
 /// inline `REFERENCES … ON DELETE …`, and both of those are copied over real rows.
 pub fn sqlite_rebuild_create(
@@ -360,7 +360,7 @@ pub fn sqlite_rebuild_create(
         schema,
         &FkEmission::Inline,
         SqlDialect::Sqlite,
-        SqliteEmitScope::MainUnqualified,
+        true,
         policy,
     )
     .map_err(|error| error.to_string())?

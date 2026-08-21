@@ -61,7 +61,7 @@ use crate::support;
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use zero_migrate::driver::{Bind, SqlSession};
 use zero_migrate::schema::query::{
-    build_create_table_with_fks_for_dialect_scoped_statements, FkEmission, SqliteEmitScope,
+    build_create_table_with_fks_for_dialect_scoped_statements, FkEmission,
 };
 use zero_migrate::SqlDialect;
 
@@ -122,7 +122,7 @@ fn render_create(dialect: SqlDialect, schema_name: &str, table: &str) -> Result<
         &schema,
         &FkEmission::Inline,
         dialect,
-        SqliteEmitScope::AttachAlias,
+        false,
         &policy,
     )
     .map_err(|error| format!("render the probe CREATE TABLE: {error}"))?
@@ -503,7 +503,7 @@ async fn a_case_insensitive_field_gets_the_case_insensitive_collation() {
             &schema,
             &FkEmission::Inline,
             SqlDialect::Mysql,
-            SqliteEmitScope::AttachAlias,
+            false,
             &support::no_inject(&database),
         )
         .map_err(|e| format!("render the case-insensitive probe: {e}"))?

@@ -21,6 +21,7 @@ use crate::model::backfill::{
 };
 use crate::model::ir::{CursorStability, IrScalar, PerRowGenerator};
 use crate::model::migration::{Checksum, MigrationId};
+use crate::schema::query::SqlDialect;
 
 use super::{journal_sql, session};
 
@@ -1638,7 +1639,8 @@ fn mysql_live_cursor_column(
         CursorColumnContract {
             name: name.to_string(),
             scalar_type,
-            database_type: crate::schema::query::mysql_canonical_type(&column_type),
+            database_type: crate::schema::query::renderer(&SqlDialect::Mysql.id())
+                .canonical_type(&column_type),
             comparison,
         },
         bind_expression,

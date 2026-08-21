@@ -907,9 +907,10 @@ fn canonical_reference_catalog_type(
     data_type: &str,
     sqlite_integer_width_is_logically_proven: bool,
 ) -> String {
+    let backend = crate::render::backends::schema_renderer(&dialect.id());
     match dialect {
         SqlDialect::Postgres => data_type.trim().to_ascii_lowercase(),
-        SqlDialect::Mysql => crate::schema::query::mysql_canonical_type(data_type),
+        SqlDialect::Mysql => backend.canonical_type(data_type),
         SqlDialect::Sqlite => {
             // Reference compatibility must retain the authored integer width.
             // SQLite gives all three spellings INTEGER affinity, but PRAGMA
@@ -930,7 +931,7 @@ fn canonical_reference_catalog_type(
                 "smallint" | "int2" => "smallint".to_string(),
                 "integer" | "int" | "int4" => "int".to_string(),
                 "bigint" | "int8" => "bigint".to_string(),
-                _ => crate::schema::query::sqlite_canonical_type(data_type).to_string(),
+                _ => backend.canonical_type(data_type),
             }
         }
     }
@@ -1160,7 +1161,8 @@ fn cursor_column_contract(
                 unreachable!("SQLite cursor scalar inference does not admit decimal")
             }
         },
-        SqlDialect::Mysql => crate::schema::query::mysql_canonical_type(&snapshot_database_type),
+        SqlDialect::Mysql => crate::render::backends::schema_renderer(&dialect.id())
+            .canonical_type(&snapshot_database_type),
         SqlDialect::Postgres => snapshot_database_type.clone(),
     };
 

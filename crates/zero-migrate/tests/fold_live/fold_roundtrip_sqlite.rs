@@ -25,9 +25,9 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::{
-    apply::executor::LockMode, fold_ops, model::ir::Op, resolve_create_table_policy,
-    sqlite_canonical_type, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine,
-    MigrationIr, SchemaSnapshot, SqlDialect, SqliteBackend,
+    apply::executor::LockMode, fold_ops, model::ir::Op, resolve_create_table_policy, Approval,
+    ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, SchemaSnapshot, SqlDialect,
+    SqliteBackend,
 };
 
 const PROJECT: &str = "prj_fold";
@@ -169,7 +169,8 @@ async fn apply_doc(
 fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
     for t in snap.tables.values_mut() {
         for c in &mut t.columns {
-            c.data_type = sqlite_canonical_type(&c.data_type).to_string();
+            c.data_type = zero_migrate::schema::query::renderer(&SqlDialect::Sqlite.id())
+                .canonical_type(&c.data_type);
         }
         // Drop every PRIMARY KEY constraint + its implicit same-named index.
         let pk_names: Vec<String> = t
