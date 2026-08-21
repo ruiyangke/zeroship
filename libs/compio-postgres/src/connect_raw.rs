@@ -299,32 +299,38 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    if target == TargetSessionAttrs::Any {
-        return Ok(());
-    }
+    let probe = match target {
+        TargetSessionAttrs::Any => return Ok(()),
+        TargetSessionAttrs::ReadWrite | TargetSessionAttrs::ReadOnly => {
+            TargetSessionProbe::TransactionReadOnly
+        }
+        TargetSessionAttrs::Primary
+        | TargetSessionAttrs::Standby
+        | TargetSessionAttrs::PreferStandby => TargetSessionProbe::InRecovery,
+    };
 
     let mut buf = BytesMut::new();
-    frontend::query("SHOW transaction_read_only", &mut buf).map_err(Error::encode)?;
+    frontend::query(probe.query(), &mut buf).map_err(Error::encode)?;
     handshake.send(FrontendMessage::Raw(buf.freeze())).await?;
 
     let mut saw_row_description = false;
-    let mut read_only = None;
+    let mut state = None;
     let mut saw_command_complete = false;
 
     loop {
         match handshake.next().await? {
             Some(Message::RowDescription(_))
-                if !saw_row_description && read_only.is_none() && !saw_command_complete =>
+                if !saw_row_description && state.is_none() && !saw_command_complete =>
             {
                 saw_row_description = true;
             }
             Some(Message::DataRow(row))
-                if saw_row_description && read_only.is_none() && !saw_command_complete =>
+                if saw_row_description && state.is_none() && !saw_command_complete =>
             {
-                read_only = Some(parse_transaction_read_only(&row)?);
+                state = Some(probe.parse(&row)?);
             }
             Some(Message::CommandComplete(_))
-                if saw_row_description && read_only.is_some() && !saw_command_complete =>
+                if saw_row_description && state.is_some() && !saw_command_complete =>
             {
                 saw_command_complete = true;
             }
@@ -337,8 +343,8 @@ where
             Some(Message::ReadyForQuery(_))
                 if saw_row_description && saw_command_complete =>
             {
-                let read_only = read_only.ok_or_else(Error::unexpected_message)?;
-                return require_target_session_attrs(target, read_only);
+                let state = state.ok_or_else(Error::unexpected_message)?;
+                return require_target_session_attrs(target, state);
             }
             Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
             Some(_) => return Err(Error::unexpected_message()),
@@ -347,7 +353,50 @@ where
     }
 }
 
-fn parse_transaction_read_only(row: &DataRowBody) -> Result<bool, Error> {
+#[derive(Debug, Copy, Clone)]
+enum TargetSessionProbe {
+    TransactionReadOnly,
+    InRecovery,
+}
+
+impl TargetSessionProbe {
+    const fn query(self) -> &'static str {
+        match self {
+            Self::TransactionReadOnly => "SHOW transaction_read_only",
+            Self::InRecovery => "SELECT pg_catalog.pg_is_in_recovery()",
+        }
+    }
+
+    fn parse(self, row: &DataRowBody) -> Result<TargetSessionState, Error> {
+        let value = single_text_value(row)?;
+        match (self, value) {
+            (Self::TransactionReadOnly, b"on") => {
+                Ok(TargetSessionState::TransactionReadOnly(true))
+            }
+            (Self::TransactionReadOnly, b"off") => {
+                Ok(TargetSessionState::TransactionReadOnly(false))
+            }
+            (Self::InRecovery, b"t") => Ok(TargetSessionState::InRecovery(true)),
+            (Self::InRecovery, b"f") => Ok(TargetSessionState::InRecovery(false)),
+            (Self::TransactionReadOnly, _) => Err(Error::connect(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "server returned an invalid transaction_read_only value",
+            ))),
+            (Self::InRecovery, _) => Err(Error::connect(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "server returned an invalid pg_is_in_recovery value",
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+enum TargetSessionState {
+    TransactionReadOnly(bool),
+    InRecovery(bool),
+}
+
+fn single_text_value(row: &DataRowBody) -> Result<&[u8], Error> {
     let mut ranges = row.ranges();
     let Some(Some(range)) = ranges.next().map_err(Error::parse)? else {
         return Err(Error::unexpected_message());
@@ -356,32 +405,59 @@ fn parse_transaction_read_only(row: &DataRowBody) -> Result<bool, Error> {
         return Err(Error::unexpected_message());
     }
 
-    match row.buffer().get(range) {
-        Some(b"on") => Ok(true),
-        Some(b"off") => Ok(false),
-        _ => Err(Error::connect(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "server returned an invalid transaction_read_only value",
-        ))),
-    }
+    row.buffer()
+        .get(range)
+        .ok_or_else(Error::unexpected_message)
 }
 
 fn require_target_session_attrs(
     target: TargetSessionAttrs,
-    read_only: bool,
+    state: TargetSessionState,
 ) -> Result<(), Error> {
-    match (target, read_only) {
-        (TargetSessionAttrs::ReadWrite, true) => Err(Error::connect(io::Error::new(
+    match (target, state) {
+        (TargetSessionAttrs::ReadWrite, TargetSessionState::TransactionReadOnly(true)) => {
+            Err(Error::connect(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "database does not allow writes",
+            )))
+        }
+        (TargetSessionAttrs::ReadOnly, TargetSessionState::TransactionReadOnly(false)) => {
+            Err(Error::connect(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "database is not read only",
+            )))
+        }
+        (TargetSessionAttrs::Primary, TargetSessionState::InRecovery(true)) => {
+            Err(Error::connect(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "database server is in recovery",
+            )))
+        }
+        (
+            TargetSessionAttrs::Standby | TargetSessionAttrs::PreferStandby,
+            TargetSessionState::InRecovery(false),
+        ) => Err(Error::connect(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "database does not allow writes",
-        ))),
-        (TargetSessionAttrs::ReadOnly, false) => Err(Error::connect(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "database is not read only",
+            "database server is not in recovery",
         ))),
         (TargetSessionAttrs::Any, _)
-        | (TargetSessionAttrs::ReadWrite, false)
-        | (TargetSessionAttrs::ReadOnly, true) => Ok(()),
+        | (
+            TargetSessionAttrs::ReadWrite,
+            TargetSessionState::TransactionReadOnly(false),
+        )
+        | (
+            TargetSessionAttrs::ReadOnly,
+            TargetSessionState::TransactionReadOnly(true),
+        )
+        | (TargetSessionAttrs::Primary, TargetSessionState::InRecovery(false))
+        | (
+            TargetSessionAttrs::Standby | TargetSessionAttrs::PreferStandby,
+            TargetSessionState::InRecovery(true),
+        ) => Ok(()),
+        _ => Err(Error::connect(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "target session attribute probe returned the wrong property",
+        ))),
     }
 }
 
