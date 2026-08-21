@@ -81,7 +81,7 @@ jsonwebtoken = "9"
 openidconnect = { version = "4.0", default-features = false }
 
 # Database
-postgres-protocol = "0.6"
+postgres-protocol = "0.6.12"
 postgres-types = { version = "0.2", features = ["with-uuid-1"] }
 fallible-iterator = "0.2"
 percent-encoding = "2"
