@@ -88,7 +88,7 @@ pub(crate) async fn apply(
     mode: ApplyMode<'_>,
 ) -> Result<(), DbError> {
     // DB-8: validate every USER-supplied document field key BEFORE the system /
-    // encryption / mask passes below add their own (reserved-suffix / `__zsenc__`)
+    // encryption / mask passes below add their own (reserved-suffix / `__zsbin__`)
     // sibling columns. The write SQL builders only `quote_ident`'d these keys —
     // they skipped the `validate_field_name` fence the read/filter path enforces,
     // letting a write smuggle a null-byte key, a >63-byte key (NAMEDATALEN
@@ -373,7 +373,7 @@ fn update_touches_randomised_encrypted_field(schema: &Value, patch: &Value) -> b
     }
 
     update_obj.iter().any(|(field, value)| {
-        if field.starts_with('$') || field.starts_with("__zsenc__") {
+        if field.starts_with('$') || field.starts_with("__zsbin__") {
             return false;
         }
         schema_obj
@@ -392,7 +392,7 @@ fn doc_touches_randomised_encrypted_field(schema: &Value, doc: &Value) -> bool {
     };
 
     doc_obj.iter().any(|(field, value)| {
-        if field.starts_with("__zsenc__") || value.is_null() {
+        if field.starts_with("__zsbin__") || value.is_null() {
             return false;
         }
         schema_obj
@@ -600,9 +600,9 @@ mod tests {
         assert!(validate_user_doc_keys(&json!({ "name": "a", "ssn": "x" })).is_ok());
         // The user must not forge the masked sibling suffix the platform emits.
         assert!(validate_user_doc_keys(&json!({ "ssn_masked": "x" })).is_err());
-        // Nor a platform-internal `_`-prefixed name (covers `__zsenc__` markers,
+        // Nor a platform-internal `_`-prefixed name (covers `__zsbin__` markers,
         // `__zs_`, synthetic `_rank`/`_score`).
-        assert!(validate_user_doc_keys(&json!({ "__zsenc__ssn": true })).is_err());
+        assert!(validate_user_doc_keys(&json!({ "__zsbin__ssn": true })).is_err());
         assert!(validate_user_doc_keys(&json!({ "_rank": 1 })).is_err());
         // Null-byte and >63-byte keys (NAMEDATALEN truncation collision).
         assert!(validate_user_doc_keys(&json!({ "a\u{0}b": 1 })).is_err());

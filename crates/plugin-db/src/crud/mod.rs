@@ -241,7 +241,7 @@ fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
         return;
     };
     for (field, value) in obj {
-        if field.starts_with("__zsenc__") {
+        if field.starts_with("__zsbin__") {
             continue;
         }
         if schema_field_type(schema, field) == Some("boolean") {
@@ -258,7 +258,7 @@ fn lower_boolean_update_with_schema(schema: &Value, patch: &mut Value) {
         lower_boolean_doc_with_schema(schema, set_doc);
     }
     for (field, value) in obj {
-        if field.starts_with('$') || field.starts_with("__zsenc__") {
+        if field.starts_with('$') || field.starts_with("__zsbin__") {
             continue;
         }
         if schema_field_type(schema, field) != Some("boolean") {
@@ -348,7 +348,7 @@ fn sqlite_blob_param(bytes: &[u8]) -> String {
 
     format!(
         "{}{}",
-        crate::query::SQLITE_ENC_BLOB_PREFIX,
+        crate::query::SQLITE_BINARY_BIND_PREFIX,
         base64::engine::general_purpose::STANDARD.encode(bytes),
     )
 }
@@ -357,7 +357,7 @@ fn encode_sqlite_binary_scalar(field: &str, field_def: &Value, value: &mut Value
     if value.is_null() {
         return Ok(());
     }
-    if matches!(value, Value::String(s) if s.starts_with(crate::query::SQLITE_ENC_BLOB_PREFIX)) {
+    if matches!(value, Value::String(s) if s.starts_with(crate::query::SQLITE_BINARY_BIND_PREFIX)) {
         return Ok(());
     }
 
@@ -456,7 +456,7 @@ fn encode_sqlite_binary_update_with_schema(schema: &Value, patch: &mut Value) ->
         encode_sqlite_binary_doc_with_schema(schema, set_doc)?;
     }
     for (field, value) in obj {
-        if field.starts_with('$') || field.starts_with("__zsenc__") {
+        if field.starts_with('$') || field.starts_with("__zsbin__") {
             continue;
         }
         let Some(field_def) = schema_field(schema, field) else {
@@ -2613,7 +2613,7 @@ async fn prepare_upsert_doc_for_write(
 ///   `SqliteBackend`'s `EncryptedColumn` impl using env-var-sourced
 ///   keys. The SQL builder (when called with `SqlDialect::Sqlite`)
 ///   emits `$N` and tags the encrypted-column param with
-///   `SQLITE_ENC_BLOB_PREFIX`; the session actor binds the raw bytes
+///   `SQLITE_BINARY_BIND_PREFIX`; the session actor binds the raw bytes
 ///   as a BLOB.
 ///
 /// Encrypted columns work end-to-end on both backends through the
@@ -2777,19 +2777,19 @@ mod tests {
             .expect("loc should be sentinel-wrapped base64");
 
         assert!(
-            embedding.starts_with(crate::query::SQLITE_ENC_BLOB_PREFIX),
+            embedding.starts_with(crate::query::SQLITE_BINARY_BIND_PREFIX),
             "vector payload must use the sqlite blob sentinel: {embedding}"
         );
         assert!(
-            loc.starts_with(crate::query::SQLITE_ENC_BLOB_PREFIX),
+            loc.starts_with(crate::query::SQLITE_BINARY_BIND_PREFIX),
             "geo payload must use the sqlite blob sentinel: {loc}"
         );
 
         let embedding_bytes = base64::engine::general_purpose::STANDARD
-            .decode(embedding.trim_start_matches(crate::query::SQLITE_ENC_BLOB_PREFIX))
+            .decode(embedding.trim_start_matches(crate::query::SQLITE_BINARY_BIND_PREFIX))
             .expect("decode vector blob");
         let loc_bytes = base64::engine::general_purpose::STANDARD
-            .decode(loc.trim_start_matches(crate::query::SQLITE_ENC_BLOB_PREFIX))
+            .decode(loc.trim_start_matches(crate::query::SQLITE_BINARY_BIND_PREFIX))
             .expect("decode geo blob");
 
         assert_eq!(
