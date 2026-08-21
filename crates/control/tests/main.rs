@@ -20,7 +20,7 @@
 //! separately from the target it belongs to. The five modules below are
 //! deliberately ungated (see the "Live-database test gate" comment in
 //! `Cargo.toml`): they pass with no database and must keep running under a bare
-//! `cargo test --workspace`. The 41 files in `tests/live_db.rs` carry
+//! `cargo test --workspace`. The 42 files in `tests/live_db.rs` carry
 //! `required-features = ["live-db-tests"]`. Merging those two would either gate
 //! the ungated ones out of the default build or ungate the rest into it; both
 //! destroy the gate.
@@ -163,7 +163,6 @@
 
 mod common;
 
-mod authz_guard_supabase_test;
 mod billing_pipeline_redpanda_e2e;
 mod config_env_tier;
 mod durable_workflows_keystone_e2e;

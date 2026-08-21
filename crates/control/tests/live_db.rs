@@ -59,6 +59,7 @@ mod app_logs_http_test;
 mod app_oauth_client_test;
 mod audit_retention_test;
 mod authz_guard_oauth_test;
+mod authz_guard_supabase_test;
 mod billing_credit_test;
 mod billing_dispute_test;
 mod billing_invoice_payments_test;

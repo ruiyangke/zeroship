@@ -2888,14 +2888,64 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
     )
 }
 
-#[compio::test]
+/// This test SIZES the stack it runs on, and the body is a separate `async fn`
+/// reached through that thread, because its future does not fit the stack
+/// libtest hands a test.
+///
+/// MEASURED 2026-08-20 against this file, one variable changed - `RUST_MIN_STACK`,
+/// which is the size libtest's per-test thread gets:
+///
+///     2304 KiB   SIGABRT, "has overflowed its stack"
+///     2560 KiB   test result: ok
+///
+/// Rust's default thread stack is 2 MiB, so the future sat about 400 KiB over it.
+/// The consequence is not a failing test: the process ABORTS and takes every
+/// later test in the binary with it. `cargo test -p zeroship-control --test main`
+/// exited 101 on SIGABRT having reported 14 of 26, and `tests/run_billing_suite.sh`
+/// exited 1 for the same reason. That target is ungated, so `cargo test
+/// --workspace` hit it with no database at all.
+///
+/// BOTH HALVES OF THE SHAPE BELOW MATTER. The overflow happened while `block_on`
+/// placed the future on the stack, which is BEFORE the body's first line - so it
+/// fired on the skip path too, where this test does nothing. `enabled()` is now
+/// checked outside any future, so a run without `ZEROSHIP_DW_E2E` constructs
+/// nothing; the enabled run gets 16 MiB, six times the measured need.
+///
+/// ONE BEHAVIOUR CHANGES, and it is worth knowing: libtest's output capture is
+/// thread-local, so the body's `println!`s now reach the terminal instead of
+/// being buffered and replayed only on failure. `tests/e2e_durable_workflows.sh`
+/// is the only caller that enables this test and it already passes `--nocapture`,
+/// so nothing it prints was being captured anyway.
+///
+/// WHAT THIS DOES NOT FIX: the body is one 2000-line `async fn`, and a named
+/// 16 MiB budget only makes the next 13 MiB of growth affordable rather than
+/// impossible. Splitting it is the real answer and needs a run of
+/// `tests/e2e_durable_workflows.sh` to verify, which this change did not have.
+#[test]
 #[serial]
-async fn durable_workflows_m1_keystone_real_spine() {
+fn durable_workflows_m1_keystone_real_spine() {
     if !enabled() {
         zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
         return;
     }
 
+    let handle = thread::Builder::new()
+        .name("dw-keystone".to_owned())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let rt = compio::runtime::Runtime::new().expect("compio runtime");
+            rt.block_on(keystone_real_spine());
+        })
+        .expect("spawn the keystone thread");
+    // `resume_unwind`, not `expect`: an assertion anywhere in the body has to
+    // reach libtest as its own payload, or every failure in 2000 lines is
+    // reported as one message naming this join.
+    if let Err(payload) = handle.join() {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+async fn keystone_real_spine() {
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
