@@ -11,9 +11,10 @@
 //! effects on tmp dir / blob store) rather than re-cover the
 //! ingest logic itself.
 //!
-//! All cases gate on a test database — Postgres is required to
+//! All cases gate on a test database - Postgres is required to
 //! construct `AppState` (registry/env_store/auth all dial the DB
-//! on startup), so the file is a silent skip in dev.
+//! on startup). `common::require_control_db` REFUSES the run when
+//! there is no migrated database, rather than skipping it.
 //!
 //! Note on the missing case: a "body exceeds the 256 MiB cap"
 //! test isn't here — sending 256+ MiB through ntex test plumbing
@@ -47,11 +48,7 @@ use crate::common;
 // ---------------------------------------------------------------------------
 
 fn db_url() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| {
-            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
-        })
+    crate::common::require_control_db()
 }
 
 // ---------------------------------------------------------------------------

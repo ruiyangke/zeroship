@@ -7,10 +7,10 @@
 //! is rejected) and that `get_versions` derives runtime limits from the catalog
 //! row rather than a hardcoded plan-name table.
 //!
-//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
-//! run `tests/provision_test_backends.sh` to provision one) to run; tests
-//! silently skip otherwise (CI without a DB stays green). The pure tier math
-//! is unit-tested DB-free in `src/pricing.rs`.
+//! The database comes from `common::require_control_db`, which REFUSES the run
+//! when there is no migrated one; provision it with
+//! `tests/provision_test_backends.sh`. The pure tier math is unit-tested DB-free
+//! in `src/pricing.rs`.
 
 use crate::common;
 

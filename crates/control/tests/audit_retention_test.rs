@@ -18,11 +18,7 @@ use zeroship_control::Registry;
 use crate::common;
 
 fn db_url() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| {
-            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
-        })
+    crate::common::require_control_db()
 }
 
 async fn raw_conn(dsn: &str) -> compio_postgres::Client {

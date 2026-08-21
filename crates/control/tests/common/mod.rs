@@ -56,12 +56,51 @@ pub async fn drain_pg() {
     }
 }
 
+/// The database every live-DB test in this crate dials, or a REFUSAL.
+///
+/// THE ONE PLACE THIS CRATE RESOLVES A DSN. Until 2026-08-21 there were
+/// eighteen: this function, fifteen private `db_url()` copies beside it, and
+/// two more in the lib's own `#[cfg(test)]` modules (`src/http_util.rs`,
+/// `src/cron/spend_recompute.rs`), each carrying the same
+///
+///   .unwrap_or_else(|| "postgresql://postgres:zeroship@localhost:5440/\
+///                       zeroship_billing_test".to_string())
+///
+/// A silent fallback is bad in the ordinary way -- a run with no configuration
+/// reports passes for work it did not do -- and this one was worse than that.
+/// It named the BILLING database from files like `authz_guard_oauth_test.rs`
+/// and `deploy_test.rs`, which have nothing to do with billing, so the failure
+/// mode was not "no database" but "the wrong database, silently".
+///
+/// WHAT THE PREFLIGHT ADDS ON TOP OF DELETING THE FALLBACK. Having a DSN is not
+/// the same as having a database. On 2026-08-21 the overlay named the shared
+/// `zeroship` database on :5440 and that database's `zeroship` schema had been
+/// dropped out from under it, so every test here connected, ran its fixture and
+/// failed inside an assertion with `42P01 relation "zeroship.plans" does not
+/// exist`. Forty-one modules share this target, so that presented as a wall of
+/// named tests FAILING with a database error -- which is what a real regression
+/// looks like. It cost two people an evening.
+///
+/// [`zeroship_testkit::live_db::require`] ends the process with one block
+/// instead. See its header for why exiting beats panicking here.
+///
+/// MEMOISED, so the probe costs one connection per test binary rather than one
+/// per test.
 pub fn require_control_db() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| {
-            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
+    static CHECKED: OnceLock<String> = OnceLock::new();
+    CHECKED
+        .get_or_init(|| {
+            // `zeroship` is the platform schema; `zeroship_migrations` is the
+            // journal beside it. Asking for BOTH is what separates "never
+            // migrated" from "migrated and then partly dismantled" - the second
+            // is what actually happened, and a check for the journal alone
+            // would have called that database ready.
+            zeroship_testkit::live_db::require_configured(
+                zeroship_core::config::test_database_url_opt(),
+                &["zeroship", "zeroship_migrations"],
+            )
         })
+        .clone()
 }
 
 pub struct PlatformJwks {

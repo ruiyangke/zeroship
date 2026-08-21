@@ -12,7 +12,8 @@
 //! tick + the shared `api::purge_app`. No shims.
 //!
 //! All cases gate on a configured test database
-//! (`zeroship_core::config::test_database_url_opt`); silent skip in dev.
+//! (`common::require_control_db`); an absent or unmigrated one REFUSES
+//! the run.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -28,11 +29,7 @@ use zeroship_control::{
 use crate::common;
 
 fn db_url() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| {
-            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
-        })
+    crate::common::require_control_db()
 }
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
