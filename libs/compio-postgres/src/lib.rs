@@ -217,6 +217,6 @@ where
 
 pub(crate) fn slice_iter<'a>(
     s: &'a [&'a (dyn ToSql + Sync)],
-) -> impl ExactSizeIterator<Item = &'a dyn ToSql> + 'a {
-    s.iter().map(|s| *s as _)
+) -> impl ExactSizeIterator<Item = &'a (dyn ToSql + Sync)> + 'a {
+    s.iter().copied()
 }
