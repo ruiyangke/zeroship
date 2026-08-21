@@ -64,9 +64,11 @@ use crate::buf_stream::BufStream;
 use crate::client::Addr;
 use crate::codec::FrontendMessage;
 use crate::config::{Config, ReplicationMode};
-use crate::connect::{Endpoint, Resolver, SystemResolver, endpoints, with_connect_timeout};
+use crate::connect::{
+    Endpoint, Resolver, SystemResolver, endpoints, first_encryption_for_addr, with_connect_timeout,
+};
 use crate::connect_socket::connect_socket;
-use crate::connect_tls::{Encryption, negotiate_tls};
+use crate::connect_tls::negotiate_tls;
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::MakeTlsConnect;
 use crate::{Error, Socket};
@@ -242,9 +244,16 @@ where
     // get the transport they try first and stop. A replication connection is a
     // deliberate, operator-configured thing - it is not the surface where
     // "whatever the server happens to accept" is worth the plumbing.
+    // Routed through the SAME helper the query path uses, not
+    // `Encryption::first_for`, because the choice depends on the ADDRESS and
+    // not only on the mode. libpq: "sslmode is ignored for Unix domain socket
+    // communication." A local socket has no network to eavesdrop on and no
+    // host name to put in a certificate. Selecting on the mode alone made
+    // `host=/path sslmode=require` open an ordinary query connection and fail
+    // a replication one.
     let stream = negotiate_tls(
         socket,
-        Encryption::first_for(cfg.get_ssl_mode()),
+        first_encryption_for_addr(&addr, cfg.get_ssl_mode()),
         cfg.get_ssl_mode(),
         cfg.get_ssl_negotiation(),
         tls_inst,
@@ -1744,6 +1753,122 @@ mod tests {
         .detach();
 
         (addr, startup_observed)
+    }
+
+    /// The protocol code in the first 8 bytes a client writes: either an
+    /// `SSLRequest` or a 3.0 `StartupMessage`. That single u32 is what says
+    /// which transport the driver chose, without needing a TLS stack.
+    #[cfg(unix)]
+    const SSL_REQUEST_CODE: u32 = 80_877_103;
+    #[cfg(unix)]
+    const STARTUP_V3_CODE: u32 = 196_608;
+    /// Not a protocol code: the client closed without writing anything.
+    #[cfg(unix)]
+    const NOTHING_WRITTEN: u32 = 0;
+
+    /// A walsender on a UNIX socket that reports which opening message it got.
+    ///
+    /// `/tmp` literally, not `std::env::temp_dir()`: Linux caps a
+    /// `sockaddr_un` path at 108 bytes including the `.s.PGSQL.<port>` suffix,
+    /// and this repo's agent scratchpad root alone is 79 characters, which
+    /// overruns it and fails `bind` with ENAMETOOLONG on a healthy machine.
+    #[cfg(unix)]
+    struct UnixProbe {
+        dir: std::path::PathBuf,
+        seen: futures_channel::oneshot::Receiver<u32>,
+    }
+
+    #[cfg(unix)]
+    async fn unix_probe(port: u16) -> UnixProbe {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+        let dir = std::path::PathBuf::from("/tmp").join(format!(
+            "cpg-repl-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).expect("create temporary socket directory");
+        let listener = compio::net::UnixListener::bind(dir.join(format!(".s.PGSQL.{port}")))
+            .await
+            .expect("bind unix walsender");
+        let (tx, seen) = futures_channel::oneshot::channel::<u32>();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept unix connection");
+            let compio::BufResult(result, head) = socket.read_exact(vec![0u8; 8]).await;
+            // A client that picks a transport it cannot build closes without
+            // writing. Report that as its own code rather than panicking in a
+            // detached task, so the assertion below can name what happened.
+            let code = match result {
+                Ok(_) => u32::from_be_bytes(head[4..8].try_into().unwrap()),
+                Err(_) => NOTHING_WRITTEN,
+            };
+            let _ = tx.send(code);
+        })
+        .detach();
+
+        UnixProbe { dir, seen }
+    }
+
+    /// `sslmode` is ignored for Unix-domain sockets on the replication path,
+    /// exactly as it is on the query path.
+    ///
+    /// libpq: "sslmode is ignored for Unix domain socket communication." A
+    /// local socket has no network to eavesdrop on and no host name to put in
+    /// a certificate. `connect_replication_addr` chose its transport from the
+    /// MODE alone, so `host=/path sslmode=require` sent an `SSLRequest` down a
+    /// Unix socket -- a configuration that connects fine as an ordinary query.
+    ///
+    /// Asserted on the protocol code actually written to the socket, because
+    /// that is the thing that differs; a test that only asserted "did not
+    /// succeed" would pass on both sides of the fix.
+    #[cfg(unix)]
+    #[compio::test]
+    async fn unix_socket_replication_ignores_sslmode() {
+        let port = 5432;
+        let probe = unix_probe(port).await;
+
+        let mut cfg = Config::new();
+        cfg.user("scripted-user")
+            .ssl_mode(SslMode::Require)
+            .replication(ReplicationMode::Logical);
+
+        // The connect will not complete -- the probe never answers -- so the
+        // result is deliberately ignored. What is under test is the opening
+        // message, which has been written by then.
+        let _ = compio::time::timeout(
+            std::time::Duration::from_secs(5),
+            connect_replication_addr(
+                Addr::Unix(probe.dir.clone()),
+                None,
+                port,
+                &mut NoTls,
+                &cfg,
+            ),
+        )
+        .await;
+
+        let code = compio::time::timeout(std::time::Duration::from_secs(5), probe.seen)
+            .await
+            .expect("the driver never opened the unix socket")
+            .expect("the probe never reported an opening message");
+        let _ = std::fs::remove_dir_all(&probe.dir);
+
+        assert_eq!(
+            code, STARTUP_V3_CODE,
+            "expected a plaintext StartupMessage over the unix socket, got {}",
+            match code {
+                // What this test sees pre-fix, because `NoTls` cannot build the
+                // TLS transport that `sslmode=require` selected, so the attempt
+                // dies before a byte is written.
+                NOTHING_WRITTEN => "nothing: sslmode selected a transport this \
+                                    connector cannot build over a local socket",
+                // What a real TLS connector would send pre-fix.
+                SSL_REQUEST_CODE => "an SSLRequest: sslmode was applied to a local socket",
+                _ => "an unrecognised opening message",
+            }
+        );
     }
 
     struct ListResolver(Vec<std::net::SocketAddr>);
