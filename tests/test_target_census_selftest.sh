@@ -79,12 +79,26 @@ bin_artifact() {
   printf '{"reason":"compiler-artifact","package_id":"%s","target":{"name":"%s","kind":["bin"]},"profile":{"test":false},"executable":"%s"}\n' "$1" "$2" "$3"
 }
 
-# run_gate <json> <census> <floor> -> sets OUT, RC
+# run_gate <json> <census> <name-floor> [min-packages] -> sets OUT, RC
+#
+# THE FIXTURE DECLARES ITS OWN BOUNDS, and that is the point of this signature.
+# The gate's arm 1 used to carry `floor 15`, a number measured against the real
+# ~30-package workspace, and every case below drives it over a TWO-package
+# fixture where 2 is the whole truth. The floor fired on five of these cases.
+#
+# So the corpus and its bounds arrive together, on argv, from the caller that
+# supplies the corpus - here, explicitly, per call. Not an ambient environment
+# variable (something outside the invocation could set one, and then a real run
+# gates against a fixture's numbers with nothing in the command line to show
+# it), and not a "am I a self-test?" sniff (an ambient opt-out is how a gate
+# gets silently disabled). The gate refuses a partial redirection, which is
+# asserted below.
 run_gate() {
-  OUT="$(ZS_CENSUS_METADATA="$TMP/metadata.json" \
-         ZS_CENSUS_FILE="$2" \
-         ZS_CENSUS_NAME_FLOOR="$3" \
-         bash "$GATE" "$1" 2>&1)"
+  OUT="$(bash "$GATE" "$1" \
+           --metadata "$TMP/metadata.json" \
+           --census "$2" \
+           --name-floor "$3" \
+           --min-packages "${4:-2}" 2>&1)"
   RC=$?
 }
 
@@ -193,7 +207,7 @@ check 1 "ARM 1: and it is red even when the name floor alone would pass" "covera
 # The mirror image: a package builds tests but nothing expects it to, so its
 # disappearance tomorrow would be silent.
 printf 'pkg-alpha\n' > "$TMP/census_short.txt"
-run_gate "$TMP/before.json" "$TMP/census_short.txt" 50
+run_gate "$TMP/before.json" "$TMP/census_short.txt" 50 1
 check 1 "ARM 1: a package building tests but absent from the census is red" "pkg-beta"
 
 # ============================================= INSTRUMENT: BROKEN ENUMERATOR
@@ -239,6 +253,58 @@ check 2 "an empty census file is a configuration fault, not a pass" "lists no pa
 # A missing json argument must not be a pass either.
 OUT="$(bash "$GATE" 2>&1)"; RC=$?
 check 2 "no argument is a usage error" "usage:"
+
+# ==================================== ARM 1'S FLOOR IS THE CORPUS, NOT A NUMBER
+# The regression this file exists for from 2026-08-20 on. Arm 1 carried a
+# constant 15, measured against the real ~30-package workspace, and fired on
+# every case above because this fixture offers two packages and two is the
+# complete answer. Assert the emitted census line directly: the floor must equal
+# the number of rows the census file offered, so that redirecting the corpus
+# redirects the bound with it. A constant would show here as `floor=15`.
+run_gate "$TMP/before.json" "$TMP/census.txt" 50
+if printf '%s\n' "$OUT" | grep -qx 'zsgate-arm gate=test_target_census arm=package_census examined=2 floor=2'; then
+  pass=$((pass + 1))
+  echo "ok   - arm 1's floor is the census row count, not a number measured elsewhere"
+else
+  fail=$((fail + 1))
+  echo "FAIL - arm 1 did not gate on the corpus it was handed:" >&2
+  printf '%s\n' "$OUT" | grep '^zsgate-arm' | sed 's/^/       | /' >&2
+fi
+
+# And it is a COMPLETENESS assertion, so it is strictly stronger than the
+# constant was: three census rows against two observed packages is red on the
+# arm, where floor 15 and floor 2 alike would have passed the observed count.
+printf 'pkg-alpha\npkg-beta\npkg-gamma\n' > "$TMP/census_three.txt"
+run_gate "$TMP/before.json" "$TMP/census_three.txt" 50
+check 1 "ARM 1: fewer packages observed than the census offers is red" "ruled on 2 item(s), floor 3"
+
+# ============================================ THE DENOMINATOR HAS A FLOOR TOO
+# Deriving arm 1's floor from the corpus moves the vacuity one level out: a
+# census that collapsed to nothing would satisfy completeness with nothing in
+# it. --min-packages is the bound on the corpus itself.
+run_gate "$TMP/before.json" "$TMP/census_short.txt" 50 2
+check 2 "a census smaller than its declared minimum is refused, not completed vacuously" \
+  "below the declared"
+
+# ONE-VARIABLE CONTROL: the same one-row census, declaring one row. The refusal
+# above is about the DECLARED minimum, not about small censuses in general -
+# otherwise it would just be the old constant wearing a new name.
+run_gate "$TMP/before.json" "$TMP/census_short.txt" 50 1
+if printf '%s' "$OUT" | grep -qF "below the declared"; then
+  fail=$((fail + 1))
+  echo "FAIL - a census that meets its own declared minimum was still refused" >&2
+  printf '%s\n' "$OUT" | sed 's/^/       | /' >&2
+else
+  pass=$((pass + 1))
+  echo "ok   - the same census declaring its own size is not refused for its size"
+fi
+
+# ============================================ A HALF-REDIRECTED CORPUS REFUSES
+# The four corpus flags are all-or-nothing. Supplying the fixture's census while
+# leaving the floors at the real workspace's numbers is precisely the defect
+# repaired here, so it is a refusal rather than a run.
+OUT="$(bash "$GATE" "$TMP/before.json" --census "$TMP/census.txt" 2>&1)"; RC=$?
+check 2 "redirecting the corpus without redeclaring its bounds is refused" "must be given"
 
 echo
 echo "passed $pass, failed $fail"

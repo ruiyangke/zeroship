@@ -104,9 +104,30 @@ full_stream() {
   artifact "$ID_EXT" serde lib
 }
 
-# run <json-file> -> sets RC and OUT
+# run <json-file> [metadata-file] -> sets RC and OUT
+#
+# THE FIXTURE DECLARES ITS OWN BOUNDS. Until 2026-08-20 the gate's arms carried
+# constants sized to THIS fixture - 3 members, 4 expected targets, 1 include_str!
+# literal - because every case here drives them through the same code path, and
+# a floor near the real workspace's 30/146/239 would have failed the self-test
+# instead of a broken tree. That made the self-test set the bound the real tree
+# was held to, and the real tree passed while ruling on a tenth of itself.
+#
+# So the corpus and its bounds travel together, on argv, declared here per call.
+# `--min-targets 5` is the number case 6 deliberately resolves down to; if a
+# target is later deleted from the fixture this goes red, which is correct - the
+# fixture changed and its declaration must change with it.
 run() {
-  OUT="$(ZS_CLIPPY_METADATA="$TMP/metadata.json" "$GATE" --audit-only "$1" 2>&1)"
+  OUT="$("$GATE" --audit-only "$1" \
+           --metadata "${2:-$TMP/metadata.json}" \
+           --min-members 3 --min-targets 5 2>&1)"
+  RC=$?
+}
+
+# preflight <src-root> -> sets RC and OUT. Two literals is what fixture_src
+# holds; the empty root is the same declaration over a corpus that offers none.
+preflight() {
+  OUT="$("$GATE" --preflight-only --src-roots "$1" --min-literals 2 2>&1)"
   RC=$?
 }
 
@@ -210,7 +231,7 @@ fi
 # must not be demanded. Same stream as case 1, but resolved with the feature
 # off: `mike_live` disappears from BOTH sides and the run is still green.
 sed 's/"features": \["live-db-tests"\]/"features": []/' "$TMP/metadata.json" > "$TMP/metadata_nofeat.json"
-OUT="$(ZS_CLIPPY_METADATA="$TMP/metadata_nofeat.json" "$GATE" --audit-only "$TMP/clean.json" 2>&1)"; RC=$?
+run "$TMP/clean.json" "$TMP/metadata_nofeat.json"
 check "a target gated off by required-features is not demanded" 0 \
   "linted:   6 targets in 3 packages (expected 5 in 3)"
 
@@ -244,7 +265,7 @@ const B: &str = include_str!(
 EOF
 mkdir -p "$TMP/fixture_src/generated"
 : > "$TMP/fixture_src/generated/present.js"
-OUT="$(ZS_CLIPPY_SRC_ROOTS="$TMP/fixture_src" "$GATE" --preflight-only 2>&1)"; RC=$?
+preflight "$TMP/fixture_src"
 check "a missing include_str! input refuses before linting" 2 \
   "do not exist" "generated/absent.js"
 
@@ -253,7 +274,7 @@ check "a missing include_str! input refuses before linting" 2 \
 # is written in exactly that form, so a single-line-only scanner passes case 9
 # by finding nothing - which is why case 10 asserts the count too.
 : > "$TMP/fixture_src/generated/absent.js"
-OUT="$(ZS_CLIPPY_SRC_ROOTS="$TMP/fixture_src" "$GATE" --preflight-only 2>&1)"; RC=$?
+preflight "$TMP/fixture_src"
 check "the preflight scan sees both the inline and the multi-line form" 0 \
   "2 include_str! literals"
 
@@ -262,8 +283,45 @@ check "the preflight scan sees both the inline and the multi-line form" 0 \
 # empty missing-list. Only the count tells them apart, so an empty scan is
 # refused rather than waved through.
 mkdir -p "$TMP/fixture_empty"
-OUT="$(ZS_CLIPPY_SRC_ROOTS="$TMP/fixture_empty" "$GATE" --preflight-only 2>&1)"; RC=$?
+preflight "$TMP/fixture_empty"
 check "an empty preflight scan is refused, not passed" 2 "found no literals at all"
+
+# ------------------------------------------------------------------ case 12
+# THE ARM FLOORS ARE FUNCTIONS OF THE CORPUS, and arm 2's is derived from it.
+# Assert the emitted census line: the fixture declares three workspace members
+# and the arm must rule on all three, so a constant would show here as floor=3
+# only by coincidence and as floor=20 (this workspace's default) if the caller's
+# declaration were ignored. Case 13 is the half that makes this discriminating.
+run "$TMP/clean.json"
+if printf '%s\n' "$OUT" | grep -qx 'zsgate-arm gate=clippy arm=workspace_members examined=3 floor=3'; then
+  pass=$((pass + 1))
+else
+  echo "FAIL: arm 2 did not gate on the corpus it was handed"
+  printf '%s\n' "$OUT" | grep '^zsgate-arm' | sed 's/^/       /'
+  fail=$((fail + 1))
+fi
+
+# ------------------------------------------------------------------ case 13
+# A metadata blob whose member list collapsed must not satisfy completeness with
+# nothing in it - examined == offered == 0 is the same defect one level out. The
+# declared minimum is the bound on the denominator.
+jq '.workspace_members = []' "$TMP/metadata.json" > "$TMP/metadata_nomembers.json"
+run "$TMP/clean.json" "$TMP/metadata_nomembers.json"
+check "a collapsed member list is refused, not completed vacuously" 2 \
+  "below the declared minimum"
+
+# ------------------------------------------------------------------ case 14
+# ONE-VARIABLE CONTROL for the two above: a corpus supplied without its bounds
+# is a refusal. This is the pairing the whole change rests on - if the flags
+# could be given apart, a fixture would again be gated against the real tree's
+# numbers or vice versa.
+OUT="$("$GATE" --audit-only "$TMP/clean.json" --metadata "$TMP/metadata.json" 2>&1)"; RC=$?
+check "redirecting the metadata without redeclaring its bounds is refused" 2 \
+  "must be given together"
+
+OUT="$("$GATE" --preflight-only --src-roots "$TMP/fixture_src" 2>&1)"; RC=$?
+check "redirecting the source roots without redeclaring their bound is refused" 2 \
+  "must be given together"
 
 # --------------------------------------------------------------------------
 echo "clippy gate self-test: $pass passed, $fail failed"
