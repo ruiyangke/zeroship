@@ -113,10 +113,22 @@ zeroship_core::declare_env_consumer!(
 pub use transport::handler as http;
 pub use transport::egress::{
     EgressRefusal, EgressResolver, ResolveFailure, ResolveFuture, SystemResolver,
-    gate_opened_resolutions,
+    gate_opened_resolutions, resolve_timeout, set_resolve_hang, set_resolve_timeout,
 };
-pub use transport::net_policy::{Destination, EgressRule, EgressRules, NetPolicy, Verdict};
+pub use transport::net_policy::{
+    Destination, EgressRule, EgressRules, NetPolicy, Verdict, global_max_sockets,
+    set_global_max_sockets,
+};
 pub use transport::ssrf as fetch;
+
+// The process-level dev-relaxation gate. Exported at the root because the
+// callers that STATE the mode - the embedding process, and the integration
+// tests and bench that live outside this crate - should not have to know
+// which transport module owns the cell.
+pub use transport::ssrf::{dev_mode_enabled, set_dev_mode};
+
+#[cfg(feature = "runtime_tls")]
+pub use transport::tls::set_native_roots_pem;
 
 // Back-compat re-exports for modules now grouped under `web/`.
 // External crates (`worker`, `cli`, plugin-*, tests) import via top-level

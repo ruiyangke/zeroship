@@ -48,4 +48,4 @@ pub use aad::canonical_aad;
 #[allow(unused_imports)]
 pub use aead::{decrypt, encrypt_deterministic, encrypt_randomised, AeadKey};
 #[allow(unused_imports)]
-pub use keys::{KeySource, KeyStore};
+pub use keys::{KeySource, KeyStore, LocalKeySource, SuppliedRootKeys};

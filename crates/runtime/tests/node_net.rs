@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -13,34 +11,33 @@ use zeroship_runtime::{EgressRule, Verdict,
     EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
 };
 
-struct EnvGuard {
-    prev_dev: Option<std::ffi::OsString>,
-    prev_global_cap: Option<std::ffi::OsString>,
+/// States the two runtime settings a test in this file needs - dev mode, and
+/// the process-wide socket ceiling - and restores the previous values on drop.
+///
+/// Both are process-wide cells inside the runtime, which is why every user
+/// still takes [`lock_env`]: two tests disagreeing about dev mode still
+/// disagree. What they are not is process ENVIRONMENT, so nothing here races
+/// libc `getenv`.
+///
+/// `global_cap: None` means "the default ceiling", i.e. out of the way.
+struct SettingsGuard {
+    prev_dev: bool,
+    prev_global_cap: u32,
 }
 
-impl EnvGuard {
-    fn set(dev: bool, global_cap: Option<usize>) -> Self {
-        let prev_dev = zeroship_core::declared_env_os!(
-            dev,
-            "ZEROSHIP_DEV",
-            zeroship_runtime::RuntimeConsumer
+/// Mirrors `DEFAULT_GLOBAL_MAX_SOCKETS` in
+/// `crates/runtime/src/transport/net_policy.rs`. Tests passing `None` want the
+/// cap out of the way, not a specific number.
+const DEFAULT_GLOBAL_MAX_SOCKETS: u32 = 4096;
+
+impl SettingsGuard {
+    fn set(dev: bool, global_cap: Option<u32>) -> Self {
+        let prev_dev = zeroship_runtime::dev_mode_enabled();
+        let prev_global_cap = zeroship_runtime::global_max_sockets();
+        zeroship_runtime::set_dev_mode(dev);
+        zeroship_runtime::set_global_max_sockets(
+            global_cap.unwrap_or(DEFAULT_GLOBAL_MAX_SOCKETS),
         );
-        let prev_global_cap = zeroship_core::declared_env_os!(
-            platform,
-            "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
-            zeroship_runtime::RuntimeConsumer
-        );
-        unsafe {
-            if dev {
-                std::env::set_var("ZEROSHIP_DEV", "1");
-            } else {
-                std::env::remove_var("ZEROSHIP_DEV");
-            }
-            match global_cap {
-                Some(cap) => std::env::set_var("ZEROSHIP_NET_GLOBAL_MAX_SOCKETS", cap.to_string()),
-                None => std::env::remove_var("ZEROSHIP_NET_GLOBAL_MAX_SOCKETS"),
-            }
-        }
         Self {
             prev_dev,
             prev_global_cap,
@@ -48,18 +45,10 @@ impl EnvGuard {
     }
 }
 
-impl Drop for EnvGuard {
+impl Drop for SettingsGuard {
     fn drop(&mut self) {
-        unsafe {
-            match &self.prev_dev {
-                Some(v) => std::env::set_var("ZEROSHIP_DEV", v),
-                None => std::env::remove_var("ZEROSHIP_DEV"),
-            }
-            match &self.prev_global_cap {
-                Some(v) => std::env::set_var("ZEROSHIP_NET_GLOBAL_MAX_SOCKETS", v),
-                None => std::env::remove_var("ZEROSHIP_NET_GLOBAL_MAX_SOCKETS"),
-            }
-        }
+        zeroship_runtime::set_dev_mode(self.prev_dev);
+        zeroship_runtime::set_global_max_sockets(self.prev_global_cap);
     }
 }
 
@@ -274,7 +263,7 @@ fn allowlist(addr: SocketAddr, max_sockets: u32) -> NetPolicy {
 #[test]
 fn node_events_common_compat_surface() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_js_module(
             wrap_module(
@@ -324,7 +313,7 @@ return `${before};max=${ee.getMaxListeners()};count=${EventEmitter.listenerCount
 #[test]
 fn socket_echo_lifecycle_and_is_ip() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
         run_net_js(
@@ -376,7 +365,7 @@ return new Promise((resolve) => {{
 #[test]
 fn socket_half_close_emits_end_then_close() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
         run_net_js(
@@ -416,7 +405,7 @@ return new Promise((resolve) => {{
 #[test]
 fn socket_connect_refused_emits_error_and_close() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let port = unused_loopback_port();
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_net_js(
@@ -450,7 +439,7 @@ return new Promise((resolve) => {{
 #[test]
 fn socket_set_timeout_fires_timeout() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Idle).await;
         run_net_js(
@@ -492,7 +481,7 @@ return new Promise((resolve) => {{
 #[test]
 fn socket_pause_resume_gates_data() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::SendOnConnect(b"paused")).await;
         run_net_js(
@@ -535,7 +524,7 @@ fn socket_pause_inside_data_handler_defers_queued_chunks_until_resume() {
     const TOTAL_BYTES: usize = 512 * 1024;
 
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::SendLargeOnConnect(TOTAL_BYTES)).await;
         run_net_js(
@@ -589,7 +578,7 @@ return new Promise((resolve) => {{
 #[test]
 fn socket_write_backpressure_false_then_drain() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
         run_net_js(
@@ -630,7 +619,7 @@ fn plain_tcp_full_duplex_large_read_while_large_write_completes() {
     const CLIENT_BYTES: usize = 1024 * 1024;
 
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::FullDuplexStress {
             send_bytes: SERVER_BYTES,
@@ -696,7 +685,7 @@ fn closed_sockets_free_native_registry_entries() {
     const SOCKETS: usize = 200;
 
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Idle).await;
         let modules = vec![ModuleEntry {
@@ -757,7 +746,7 @@ return "done";
 #[test]
 fn denied_policy_does_not_resolve_node_net() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_js_module(
             wrap_module(
@@ -797,7 +786,7 @@ return typeof net;
 #[test]
 fn egress_rules_reject_a_non_granted_literal_target_asynchronously() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Idle).await;
         let blocked_port = unused_loopback_port();
@@ -835,7 +824,7 @@ return new Promise((resolve) => {{
 #[test]
 fn ssrf_gate_rejects_link_local_even_for_trusted_policy() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(false, None);
+    let _env = SettingsGuard::set(false, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_net_js(
             r#"
@@ -863,7 +852,7 @@ return new Promise((resolve) => {
 #[test]
 fn per_app_socket_cap_rejects_past_limit() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, None);
+    let _env = SettingsGuard::set(true, None);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Idle).await;
         run_net_js(
@@ -905,7 +894,7 @@ return new Promise((resolve) => {{
 #[test]
 fn global_socket_cap_rejects_past_limit() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true, Some(1));
+    let _env = SettingsGuard::set(true, Some(1));
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Idle).await;
         run_net_js(
@@ -949,7 +938,7 @@ return new Promise((resolve) => {{
 /// These tests target literal addresses, and an IP literal is NOT a
 /// representable `Name` - it must be written as a range, so a reader of a rule
 /// always knows which check decides it. `is_blocked_ip` would refuse loopback
-/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// outright; these tests run with dev mode on, which bypasses the floor
 /// and nothing else.
 fn accept_target(host: &str, port: u16) -> EgressRule {
     let destination = match host.parse::<std::net::IpAddr>() {

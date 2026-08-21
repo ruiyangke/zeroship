@@ -8,7 +8,7 @@
 //! expands it per-(app_id, slot) into the [`AeadKey`] halves:
 //!
 //! ```text
-//! root  = ZEROSHIP_COLUMN_KEY_<KEYID>   (32 bytes, env-sourced)
+//! root  = 32 bytes for <KEYID>          (see "Key sources" below)
 //! salt  = app_id                        (per-tenant isolation)
 //! info  = "zsenc/aead/v1/k_enc"   →  k_enc
 //! info  = "zsenc/aead/v1/k_siv"   →  k_siv
@@ -20,11 +20,30 @@
 //!
 //! ## Key sources
 //!
-//! [`KeySource`] has two variants: env-var lookup, which
-//! covers SQLite (where there's no admin-schema sidecar) and the PG
-//! dev-parity case; and `PgAdminTable`, which reads from
-//! `__zeroship_admin.column_keys` via a SECURITY DEFINER getter so
-//! the raw bytes never reach app code.
+//! Sourcing splits in two. [`LocalKeySource`] resolves a root without
+//! touching a database: either [`LocalKeySource::EnvVar`]
+//! (`ZEROSHIP_COLUMN_KEY_<KEYID>`, which covers SQLite - no
+//! admin-schema sidecar there - and the PG dev-parity case) or
+//! [`LocalKeySource::Supplied`], where the operator hands the process
+//! the root bytes directly instead of exporting them into the
+//! environment. [`KeySource`] wraps that: either the local source
+//! alone, or the PG production path, which reads
+//! `__zeroship_admin.column_keys` through a SECURITY DEFINER getter so
+//! the raw bytes never reach app code and falls back to a local source
+//! when the getter returns NULL.
+//!
+//! The fallback is a `LocalKeySource` by TYPE, not by convention: a PG
+//! lookup can never be the fallback for another PG lookup, so the
+//! chain is at most one round-trip deep and there is no unreachable
+//! arm to write.
+//!
+//! ## Parsing vs. sourcing
+//!
+//! [`parse_root_key`] holds every hex-decode / length / typed-`DbError`
+//! decision and knows nothing about where the string came from. Each
+//! source is then a thin fetch that hands its string to it. That split
+//! is what lets the malformed-input tests below run with no
+//! environment and no store at all.
 //!
 //! ## Cache
 //!
@@ -37,6 +56,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -46,29 +66,188 @@ use zeroship_core::config::DeclaredEnvFamily;
 use super::aead::AeadKey;
 use crate::error::DbError;
 
-/// Source of root key material.
+/// Root key material handed to the process directly, addressed by key id.
 ///
-/// [`Self::EnvVar`] is the SQLite / dev-parity path.
-/// [`Self::PgAdminTable`] is the production PG path:
-///   1. Calls `__zeroship_admin.get_column_key($1)` (SECURITY DEFINER).
-///   2. If the getter returns NULL (table empty / key id missing),
-///      **falls back to the env-var path** so apps that haven't yet
-///      run the column-keys migration still resolve a key.
+/// This is the root-key channel that is NOT the process environment. An
+/// operator who already holds the 32-byte roots (a mounted secret file, a
+/// KMS fetch at boot) installs them here instead of exporting
+/// `ZEROSHIP_COLUMN_KEY_<KEYID>`; `KeyStore` then resolves, derives and
+/// caches through exactly the same path as any other source.
 ///
-/// `PgAdminTable` is instantiated by `PostgresBackend::new`; the
-/// SQLite tier uses `EnvVar`.
+/// Key ids match case-insensitively, mirroring the env source, which
+/// uppercases the suffix before reading.
+///
+/// Interior mutability is deliberate. The supplied set can change after the
+/// [`KeyStore`] holding it was built - a root withdrawn, a root added - and
+/// [`Self::consultations`] records how many times the store actually asked
+/// this source for bytes. That counter is what makes the cache contract
+/// provable: withdraw the key between two `resolve` calls for the same
+/// `(app_id, key_id)` and the second call must still succeed WITHOUT the
+/// count rising.
+///
+/// Single-threaded (`RefCell` / `Cell`) for the same reason the cache is:
+/// one isolate per compio thread, so no `Mutex` / `Arc`.
+#[derive(Default)]
+pub struct SuppliedRootKeys {
+    keys: RefCell<HashMap<String, Zeroizing<[u8; 32]>>>,
+    consultations: Cell<u64>,
+}
+
+impl std::fmt::Debug for SuppliedRootKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The map values are root key bytes - print the shape only, never
+        // the material, so a tracing dump cannot leak a root.
+        f.debug_struct("SuppliedRootKeys")
+            .field("key_ids", &self.keys.borrow().len())
+            .field("consultations", &self.consultations.get())
+            .finish()
+    }
+}
+
+impl SuppliedRootKeys {
+    /// An empty set. Resolving against it yields the same typed
+    /// `column_key_not_configured` error an unset env var does.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builder form of [`Self::insert_hex`], for construction in one
+    /// expression.
+    pub fn with_hex(self, key_id: &str, hex: &str) -> Result<Self, DbError> {
+        self.insert_hex(key_id, hex)?;
+        Ok(self)
+    }
+
+    /// Install a raw 32-byte root under `key_id`, replacing any previous
+    /// value for it.
+    pub fn insert(&self, key_id: &str, root: [u8; 32]) {
+        self.keys
+            .borrow_mut()
+            .insert(normalise_key_id(key_id), Zeroizing::new(root));
+    }
+
+    /// Install a hex-encoded root under `key_id`. The string goes through
+    /// [`parse_root_key`], so a malformed value fails here with the same
+    /// typed error the env path produces rather than at first decrypt.
+    pub fn insert_hex(&self, key_id: &str, hex: &str) -> Result<(), DbError> {
+        let root = parse_root_key(&format!("supplied root key '{key_id}'"), hex)?;
+        self.insert(key_id, root);
+        Ok(())
+    }
+
+    /// Withdraw `key_id`. Returns whether a root was actually removed.
+    pub fn remove(&self, key_id: &str) -> bool {
+        self.keys.borrow_mut().remove(&normalise_key_id(key_id)).is_some()
+    }
+
+    /// How many times a [`KeyStore`] has asked this source for bytes,
+    /// hit or miss. Every [`Self::lookup`] bumps it.
+    #[must_use]
+    pub fn consultations(&self) -> u64 {
+        self.consultations.get()
+    }
+
+    /// Fetch the root for `key_id`, counting the consultation.
+    fn lookup(&self, key_id: &str) -> Result<[u8; 32], DbError> {
+        self.consultations.set(self.consultations.get() + 1);
+        self.keys
+            .borrow()
+            .get(&normalise_key_id(key_id))
+            .map(|root| **root)
+            .ok_or_else(|| DbError::Configuration {
+                code: "column_key_not_configured",
+                message: format!(
+                    "Column key '{key_id}' not configured (no root key was supplied for it)"
+                ),
+                hint: Some("Generate via: openssl rand -hex 32".to_string()),
+            })
+    }
+}
+
+fn normalise_key_id(key_id: &str) -> String {
+    key_id.to_ascii_lowercase()
+}
+
+/// A root-key source that resolves without a database round-trip.
+///
+/// Both variants are complete sources in their own right AND are the only
+/// things that may sit behind [`KeySource::PgAdminTable`]'s NULL fallback.
 #[derive(Debug)]
-#[non_exhaustive] // Future variants (Vault, KMS, …) slot in here.
-pub enum KeySource {
+#[non_exhaustive] // Future local variants (a sealed file, an in-process KMS client) slot in here.
+pub enum LocalKeySource {
     /// Read 32-byte root keys from `ZEROSHIP_COLUMN_KEY_<KEYID>` env
     /// vars (hex-encoded). SQLite tier + PG dev parity.
     EnvVar,
+    /// Read roots handed to the process directly. `Rc` because the
+    /// installer keeps a handle: supplied keys can be added or withdrawn
+    /// after the store was built.
+    Supplied(Rc<SuppliedRootKeys>),
+}
+
+impl LocalKeySource {
+    fn lookup_root(&self, key_id: &str) -> Result<[u8; 32], DbError> {
+        match self {
+            Self::EnvVar => env_lookup_root(key_id),
+            Self::Supplied(keys) => keys.lookup(key_id),
+        }
+    }
+}
+
+/// Source of root key material.
+///
+/// [`Self::Local`] is the SQLite / dev-parity path and the
+/// operator-supplied path. [`Self::PgAdminTable`] is the production PG
+/// path:
+///   1. Calls `__zeroship_admin.get_column_key($1)` (SECURITY DEFINER).
+///   2. If the getter returns NULL (table empty / key id missing),
+///      **falls back to its `fallback` local source** so apps that
+///      haven't yet run the column-keys migration still resolve a key.
+///
+/// `PgAdminTable` is instantiated by `PostgresBackend::new`; the
+/// SQLite tier uses `Local`.
+#[derive(Debug)]
+#[non_exhaustive] // Future variants (Vault, KMS, ...) slot in here.
+pub enum KeySource {
+    /// Resolve locally, with no database round-trip.
+    Local(LocalKeySource),
     /// PG production source. Reads
     /// `__zeroship_admin.column_keys` via the SECURITY DEFINER getter
     /// installed by `crate::auth::bootstrap::ensure_admin_schema`.
-    /// Falls through to `EnvVar` when the getter returns NULL (covers
+    /// Falls through to `fallback` when the getter returns NULL (covers
     /// the pre-migration / dev-parity case).
-    PgAdminTable(std::rc::Rc<compio_postgres::Pool>),
+    PgAdminTable {
+        /// Pool the SECURITY DEFINER getter is called on.
+        pool: Rc<compio_postgres::Pool>,
+        /// Consulted only when the getter returns NULL.
+        fallback: LocalKeySource,
+    },
+}
+
+impl KeySource {
+    /// Roots come from `ZEROSHIP_COLUMN_KEY_<KEYID>`.
+    #[must_use]
+    pub fn env_var() -> Self {
+        Self::Local(LocalKeySource::EnvVar)
+    }
+
+    /// Roots come from bytes the caller already holds.
+    #[must_use]
+    pub fn supplied(keys: Rc<SuppliedRootKeys>) -> Self {
+        Self::Local(LocalKeySource::Supplied(keys))
+    }
+
+    /// Admin table first, `fallback` behind it. There is no
+    /// `pg_admin_table(pool)` shorthand: the PG backend always names the
+    /// fallback it wants, because "which local source is behind the
+    /// getter" is exactly the decision this type exists to make explicit.
+    #[must_use]
+    pub fn pg_admin_table_with_fallback(
+        pool: Rc<compio_postgres::Pool>,
+        fallback: LocalKeySource,
+    ) -> Self {
+        Self::PgAdminTable { pool, fallback }
+    }
 }
 
 /// Per-isolate column-key store. Caches derived `AeadKey` material
@@ -150,18 +329,18 @@ impl KeyStore {
             }
         }
         let root = Zeroizing::new(match &self.sourcing {
-            KeySource::EnvVar => env_lookup_root(key_id)?,
-            KeySource::PgAdminTable(pool) => {
+            KeySource::Local(local) => local.lookup_root(key_id)?,
+            KeySource::PgAdminTable { pool, fallback } => {
                 // PG-prod path: call the SECURITY DEFINER getter. Only a NULL
                 // result (table empty, key id missing, table itself missing) —
-                // i.e. `Ok(None)` — falls back to env-var sourcing, so a
+                // i.e. `Ok(None)` - falls back to the local source, so a
                 // pre-migration app still resolves a key.
                 match pg_admin_lookup_root(pool, key_id).await {
                     Ok(Some(bytes)) => bytes,
-                    Ok(None) => env_lookup_root(key_id)?,
+                    Ok(None) => fallback.lookup_root(key_id)?,
                     // DB-10: a GENUINE getter fault (permission denied, connection
                     // error, SQL failure) must SURFACE — not silently downgrade to
-                    // whatever `ZEROSHIP_COLUMN_KEY_<id>` happens to hold, which
+                    // whatever the fallback source happens to hold, which
                     // could be a stale/test key and would produce wrong-key
                     // encrypt/decrypt with no signal. Propagate it.
                     Err(e) => return Err(e),
@@ -209,16 +388,28 @@ fn env_lookup_root(key_id: &str) -> Result<[u8; 32], DbError> {
             hint: Some("Generate via: openssl rand -hex 32".to_string()),
         })?,
     );
-    let bytes = Zeroizing::new(hex_decode(&hex).map_err(|e| DbError::Configuration {
+    parse_root_key(&env_name, &hex)
+}
+
+/// Decode a hex-encoded 32-byte root key, or say why it is not one.
+///
+/// Pure: no environment, no store, no I/O. `source` names where the string
+/// came from and appears verbatim in the message an operator sees - an env
+/// var name on the env path, a `supplied root key '<id>'` label on the
+/// supplied path. Every malformed-input case carries
+/// `code: "column_key_not_configured"`, the same code a missing key does,
+/// because the operator's fix is the same either way.
+pub(crate) fn parse_root_key(source: &str, hex: &str) -> Result<[u8; 32], DbError> {
+    let bytes = Zeroizing::new(hex_decode(hex).map_err(|e| DbError::Configuration {
         code: "column_key_not_configured",
-        message: format!("{env_name}: hex decode failed: {e}"),
+        message: format!("{source}: hex decode failed: {e}"),
         hint: Some("Value must be 64 hex characters (32 bytes). Generate via: openssl rand -hex 32".to_string()),
     })?);
     if bytes.len() != 32 {
         return Err(DbError::Configuration {
             code: "column_key_not_configured",
             message: format!(
-                "{env_name} must decode to 32 bytes, got {}",
+                "{source} must decode to 32 bytes, got {}",
                 bytes.len()
             ),
             hint: Some("Value must be 64 hex characters (32 bytes). Generate via: openssl rand -hex 32".to_string()),
@@ -310,7 +501,7 @@ async fn pg_admin_lookup_root(
     };
     // `try_get` returns `Err` for NULL (a `WasNull` typed error) and
     // for type mismatches; either way we treat the row as "no key
-    // present" and let the caller fall through to env-var sourcing.
+    // present" and let the caller fall through to the local source.
     // `Row::get` would panic on NULL.
     let decoded = match row.try_get::<_, Vec<u8>>(0) {
         Ok(bytes) => Zeroizing::new(bytes),
@@ -324,30 +515,25 @@ async fn pg_admin_lookup_root(
     Ok(Some(out))
 }
 
+// These tests plant no environment. Malformed-input cases call
+// `parse_root_key` directly, and every case that needs a RESOLVABLE key
+// drives a real `KeyStore` over a `SuppliedRootKeys` source, so the
+// resolve / derive / cache path under test is the production one and the
+// process-global env table is never touched.
 #[cfg(test)]
-#[allow(unsafe_code)] // Tests mutate process-global env via
-                     // `std::env::{set_var, remove_var}` (unsafe in
-                     // 2024-edition stdlib). Each test uses a
-                     // uniquely-named env var so calls don't race with
-                     // each other or with other crates — that unique
-                     // name is what makes the unsafe calls sound here,
-                     // not any ordering guarantee from the harness.
 mod tests {
     use super::*;
 
-    /// Helper: set an env var, run a closure, unset. Each caller uses
-    /// a uniquely-named env var so concurrent tests don't race on the
-    /// process-global env table.
-    fn with_env<F: FnOnce()>(name: &str, value: &str, f: F) {
-        // SAFETY: each test uses a uniquely-named env var; no other
-        // crate touches the `ZEROSHIP_COLUMN_KEY_*` namespace.
-        unsafe {
-            std::env::set_var(name, value);
-        }
-        f();
-        unsafe {
-            std::env::remove_var(name);
-        }
+    /// A store over a single supplied root, plus the handle to that
+    /// source so a test can withdraw the key or read the consultation
+    /// count.
+    fn store_with_root(key_id: &str, hex: &str) -> (KeyStore, Rc<SuppliedRootKeys>) {
+        let keys = Rc::new(
+            SuppliedRootKeys::new()
+                .with_hex(key_id, hex)
+                .expect("fixture root key must parse"),
+        );
+        (KeyStore::new(KeySource::supplied(Rc::clone(&keys))), keys)
     }
 
     /// `derive_key` is deterministic: same `(root, app_id)` always
@@ -413,97 +599,151 @@ mod tests {
     }
 
     /// Malformed hex (odd length) → typed Configuration error.
+    ///
+    /// Malformed-input rejection is a property of `parse_root_key`, not of
+    /// where the string came from, so this drives it directly. The `source`
+    /// argument is the env var name the env path would pass.
     #[test]
     fn malformed_hex_yields_typed_error() {
-        with_env(
-            "ZEROSHIP_COLUMN_KEY_BAD_HEX_TEST",
-            "abc", // odd length
-            || {
-                let err = env_lookup_root("bad_hex_test")
-                    .expect_err("odd-length hex must error");
-                match err {
-                    DbError::Configuration { code, .. } => {
-                        assert_eq!(code, "column_key_not_configured");
-                    }
-                    other => panic!("expected Configuration, got {other:?}"),
-                }
-            },
-        );
+        let err = parse_root_key("ZEROSHIP_COLUMN_KEY_BAD_HEX_TEST", "abc")
+            .expect_err("odd-length hex must error");
+        match err {
+            DbError::Configuration { code, .. } => {
+                assert_eq!(code, "column_key_not_configured");
+            }
+            other => panic!("expected Configuration, got {other:?}"),
+        }
     }
 
     /// Hex with the wrong number of bytes (after decode) → typed
     /// Configuration error.
     #[test]
     fn wrong_length_hex_yields_typed_error() {
-        with_env(
+        let err = parse_root_key(
             "ZEROSHIP_COLUMN_KEY_WRONG_LEN_TEST",
             // 16 hex chars = 8 bytes, not 32.
             "0123456789abcdef",
-            || {
-                let err = env_lookup_root("wrong_len_test")
-                    .expect_err("8-byte hex must error");
-                match err {
-                    DbError::Configuration { code, message, .. } => {
-                        assert_eq!(code, "column_key_not_configured");
-                        assert!(
-                            message.contains("32 bytes"),
-                            "message must name the expected length, got: {message}"
-                        );
-                    }
-                    other => panic!("expected Configuration, got {other:?}"),
-                }
-            },
-        );
+        )
+        .expect_err("8-byte hex must error");
+        match err {
+            DbError::Configuration { code, message, .. } => {
+                assert_eq!(code, "column_key_not_configured");
+                assert!(
+                    message.contains("32 bytes"),
+                    "message must name the expected length, got: {message}"
+                );
+            }
+            other => panic!("expected Configuration, got {other:?}"),
+        }
     }
 
     /// Hex with invalid characters → typed Configuration error.
     #[test]
     fn invalid_hex_chars_yield_typed_error() {
-        with_env(
+        let err = parse_root_key(
             "ZEROSHIP_COLUMN_KEY_BAD_CHARS_TEST",
             "zzzz000000000000000000000000000000000000000000000000000000000000",
-            || {
-                let err = env_lookup_root("bad_chars_test")
-                    .expect_err("non-hex chars must error");
-                match err {
-                    DbError::Configuration { code, .. } => {
-                        assert_eq!(code, "column_key_not_configured");
-                    }
-                    other => panic!("expected Configuration, got {other:?}"),
-                }
-            },
+        )
+        .expect_err("non-hex chars must error");
+        match err {
+            DbError::Configuration { code, .. } => {
+                assert_eq!(code, "column_key_not_configured");
+            }
+            other => panic!("expected Configuration, got {other:?}"),
+        }
+    }
+
+    /// A supplied root that is not 32 hex-decodable bytes is rejected at
+    /// INSTALL time, with the same typed error and a label naming the key
+    /// id. Without this, a bad root would surface as a decrypt failure far
+    /// from the operator's mistake.
+    #[test]
+    fn supplied_root_key_rejects_malformed_hex_on_insert() {
+        let keys = SuppliedRootKeys::new();
+        let err = keys
+            .insert_hex("bad_supplied", "0123456789abcdef")
+            .expect_err("8-byte hex must error");
+        match err {
+            DbError::Configuration { code, message, .. } => {
+                assert_eq!(code, "column_key_not_configured");
+                assert!(
+                    message.contains("bad_supplied"),
+                    "message must name the key id, got: {message}"
+                );
+                assert!(
+                    message.contains("32 bytes"),
+                    "message must name the expected length, got: {message}"
+                );
+            }
+            other => panic!("expected Configuration, got {other:?}"),
+        }
+    }
+
+    /// Resolving a key id no source holds gives the same typed
+    /// `column_key_not_configured` an unset env var produces. Unlike
+    /// `missing_env_var_yields_typed_error` this does not depend on what
+    /// the ambient environment happens to contain: the source is empty by
+    /// construction.
+    #[test]
+    fn missing_supplied_key_yields_typed_error() {
+        let keys = Rc::new(SuppliedRootKeys::new());
+        let store = KeyStore::new(KeySource::supplied(Rc::clone(&keys)));
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
+        let err = rt
+            .block_on(async { store.resolve("app_x", "never_supplied").await })
+            .expect_err("absent supplied key must error");
+        match err {
+            DbError::Configuration { code, hint, .. } => {
+                assert_eq!(code, "column_key_not_configured");
+                assert!(hint.is_some(), "hint must include openssl-rand suggestion");
+            }
+            other => panic!("expected Configuration, got {other:?}"),
+        }
+        assert_eq!(
+            keys.consultations(),
+            1,
+            "a miss must still count as a consultation"
         );
     }
 
     /// KeyStore caches: a second `resolve` for the same `(app_id,
-    /// key_id)` must hit the cache. We test indirectly: insert a
-    /// well-formed env var, resolve once, then UNSET the env var
-    /// and resolve again — the second call still succeeds (proves
-    /// the cache short-circuited the env lookup).
+    /// key_id)` must hit the cache. We test indirectly: supply a
+    /// well-formed root, resolve once, then WITHDRAW the root from the
+    /// source and resolve again - the second call still succeeds (proves
+    /// the cache short-circuited the source lookup).
+    ///
+    /// The consultation counter is the second, independent leg of the
+    /// same claim: "still succeeds" alone would also hold if the source
+    /// had handed the bytes over a second time, so the count must not
+    /// rise across the second resolve.
     #[test]
     fn key_store_caches_derived_key() {
-        let env_name = "ZEROSHIP_COLUMN_KEY_CACHE_TEST";
-        let hex = "0".repeat(64); // 64 hex chars = 32 bytes
-        unsafe {
-            std::env::set_var(env_name, &hex);
-        }
-        let store = KeyStore::new(KeySource::EnvVar);
-        let rt = compio::runtime::Runtime::new().expect("compio runtime");
         let app_id = "app_cache_test";
         let key_id = "cache_test";
+        // 64 hex chars = 32 bytes.
+        let (store, keys) = store_with_root(key_id, &"0".repeat(64));
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
 
         let first = rt.block_on(async { store.resolve(app_id, key_id).await });
         assert!(first.is_ok(), "first resolve must succeed: {first:?}");
+        assert_eq!(
+            keys.consultations(),
+            1,
+            "first resolve must have gone to the source"
+        );
 
-        // Clear the env — second resolve must still succeed via
+        // Withdraw the root - second resolve must still succeed via
         // the cache.
-        unsafe {
-            std::env::remove_var(env_name);
-        }
+        assert!(keys.remove(key_id), "fixture root must have been present");
         let second = rt.block_on(async { store.resolve(app_id, key_id).await });
         assert!(
             second.is_ok(),
-            "second resolve must hit cache (env now empty): {second:?}"
+            "second resolve must hit cache (source now empty): {second:?}"
+        );
+        assert_eq!(
+            keys.consultations(),
+            1,
+            "second resolve must not consult the source at all"
         );
 
         // The returned keys must match byte-for-byte.
@@ -518,20 +758,15 @@ mod tests {
     /// derived keys.
     #[test]
     fn key_store_per_app_isolation() {
-        let env_name = "ZEROSHIP_COLUMN_KEY_MULTI_APP_TEST";
-        let hex = "1".repeat(64);
-        unsafe {
-            std::env::set_var(env_name, &hex);
-        }
-        let store = KeyStore::new(KeySource::EnvVar);
-        let rt = compio::runtime::Runtime::new().expect("compio runtime");
         let key_id = "multi_app_test";
+        let (store, keys) = store_with_root(key_id, &"1".repeat(64));
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
         let k1 = rt.block_on(async { store.resolve("app_a", key_id).await }).unwrap();
         let k2 = rt.block_on(async { store.resolve("app_b", key_id).await }).unwrap();
         assert_ne!(k1.k_enc, k2.k_enc);
-        unsafe {
-            std::env::remove_var(env_name);
-        }
+        // Two distinct cache keys, so the source was asked twice - the
+        // per-app entries did not alias.
+        assert_eq!(keys.consultations(), 2);
     }
 
     /// Local hex_decode round-trips.
@@ -573,7 +808,7 @@ mod tests {
     /// Freshly-constructed `KeyStore` reports zero lookups.
     #[test]
     fn key_store_lookups_count_starts_at_zero() {
-        let store = KeyStore::new(KeySource::EnvVar);
+        let store = KeyStore::new(KeySource::env_var());
         assert_eq!(store.lookups_count(), 0);
     }
 
@@ -583,12 +818,7 @@ mod tests {
     /// can assert `store.lookups_count() == 0` AFTER the SELECT.
     #[test]
     fn key_store_lookups_count_bumps_on_every_resolve() {
-        let env_name = "ZEROSHIP_COLUMN_KEY_LOOKUPS_COUNTER_TEST";
-        let hex = "2".repeat(64);
-        unsafe {
-            std::env::set_var(env_name, &hex);
-        }
-        let store = KeyStore::new(KeySource::EnvVar);
+        let (store, _keys) = store_with_root("lookups_counter_test", &"2".repeat(64));
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
 
         assert_eq!(store.lookups_count(), 0, "fresh store starts at zero");
@@ -620,24 +850,20 @@ mod tests {
             2,
             "cache hit must still bump counter"
         );
-
-        unsafe {
-            std::env::remove_var(env_name);
-        }
     }
 
-    /// Failed `resolve()` calls (env var missing) still bump the
-    /// counter — the gate cares about whether the production code
+    /// Failed `resolve()` calls (no such key in the source) still bump
+    /// the counter - the gate cares about whether the production code
     /// path TRIED to load a key, not whether the load succeeded.
     #[test]
     fn key_store_lookups_count_bumps_on_failed_resolve() {
-        let store = KeyStore::new(KeySource::EnvVar);
+        let store = KeyStore::new(KeySource::supplied(Rc::new(SuppliedRootKeys::new())));
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
 
-        // Use a unique env var name that is guaranteed not to exist.
+        // The source holds no roots at all, so this resolve cannot succeed.
         let err = rt
             .block_on(async { store.resolve("app_x", "absent_for_counter_test").await });
-        assert!(err.is_err(), "absent env var must error");
+        assert!(err.is_err(), "absent root key must error");
         assert_eq!(
             store.lookups_count(),
             1,

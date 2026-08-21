@@ -1,4 +1,12 @@
-//! The workspace gate: no first-party raw environment read outside two files.
+//! The workspace gate: no first-party raw environment read outside two files,
+//! and no environment WRITE anywhere at all.
+//!
+//! The write half has no exempt file. `std::env::set_var` / `remove_var`
+//! mutate state every thread in the process shares, which is why Rust 2024
+//! made them `unsafe`, and nothing here needs to: a test states its
+//! configuration through typed values, and a test that needs a variable to
+//! reach a BINARY gives it to a child process through `Command::env`. That
+//! second form is deliberately untouched by both halves of this gate.
 //!
 //! Section 4.5 of `docs/proposals/2026-08-11-config-name-alignment.md` asks for
 //! two independent lines. Clippy's `disallowed_methods` deny is the first and
@@ -100,8 +108,10 @@ fn no_tracked_first_party_source_reads_the_environment_raw() {
     assert!(
         unexpected.is_empty(),
         "raw environment access outside the central accessor and the sealed \
-         library test modules:\n{}\n\nConvert each to a typed key. See \
-         crates/core/src/config/declared.rs.",
+         library test modules:\n{}\n\nConvert a READ to a typed key (see \
+         crates/core/src/config/declared.rs). A WRITE has no typed form and no \
+         exempt file: state the value as typed configuration, or give it to a \
+         child process with Command::env.",
         violations
             .iter()
             .map(ToString::to_string)

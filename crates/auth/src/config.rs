@@ -905,7 +905,6 @@ fn non_empty_path(value: &Path) -> Option<&Path> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::sync::Mutex;
 
     use clap::CommandFactory;
@@ -914,14 +913,6 @@ mod tests {
 
     fn overlay(toml_text: &str) -> toml::Value {
         toml::from_str(toml_text).expect("fixture overlay")
-    }
-
-    fn restore_env(key: &str, value: Option<OsString>) {
-        if let Some(value) = value {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
-        }
     }
 
     fn test_config() -> AuthConfig {
@@ -1234,19 +1225,20 @@ supabase_anon_key = "anon-file-key"
     }
 
     #[test]
-    fn dev_insecure_env_is_ignored() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let old = zeroship_core::test_env_os!("ZEROSHIP_DEV_INSECURE");
-        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
-
-        // No supply tier turns on for it, so both keys stay unconfigured and
-        // the startup guards still reject them.
+    fn a_bare_parse_supplies_neither_startup_key() {
+        // The half of "the obsolete relaxation variable is ignored" that needs
+        // no environment: no supply tier and no default hands auth either key,
+        // so a bare parse leaves both unconfigured and the startup guards
+        // reject them.
+        //
+        // The ENVIRONMENT half - `ZEROSHIP_DEV_INSECURE=1` reaching no tier -
+        // is in `crates/auth/tests/config_env_tier.rs`, against the real binary
+        // with `Command::env`. It cannot live here: observing an environment
+        // tier in-process means putting the variable in THIS process, where
+        // every other test would then parse against it.
         let cfg = test_config();
         assert!(!cfg.settings.stash_signing_key.is_configured());
         assert!(!cfg.settings.totp_enc_key.is_configured());
-
-        restore_env("ZEROSHIP_DEV_INSECURE", old);
     }
 
     #[test]

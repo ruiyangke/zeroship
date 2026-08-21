@@ -3,7 +3,7 @@
 #![cfg(feature = "runtime_tls")]
 
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use base64::Engine;
 use compio_tls::TlsConnector;
@@ -13,6 +13,32 @@ use rustls::server::ParsedCertificate;
 use rustls::{
     ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
+
+/// Process-level override for the platform trust anchors, as PEM.
+///
+/// `None` (the default, and the only value production ever holds) means the
+/// roots come from `rustls_native_certs::load_native_certs()`, which reads the
+/// host trust store and honours `SSL_CERT_FILE` / `SSL_CERT_DIR` on the
+/// process the operator started.
+static NATIVE_ROOTS_OVERRIDE: RwLock<Option<String>> = RwLock::new(None);
+
+/// State the platform trust anchors explicitly, overriding the host trust
+/// store for the rest of the process. `None` restores the host store.
+///
+/// PRECEDENCE. An override installed here wins over
+/// `rustls_native_certs::load_native_certs()` on every later connector build.
+///
+/// It exists so a caller - notably a test that needs a KNOWN native root, to
+/// tell "the native roots were consulted" from "they were not" - can SAY the
+/// anchors. The alternative is pointing `SSL_CERT_FILE` at a fixture with
+/// `std::env::set_var`, which mutates the process-global environment
+/// underneath every other thread and races libc `getenv`. This narrows trust
+/// to exactly the PEM handed in; it is never a way to ADD to the host store.
+pub fn set_native_roots_pem(pem: Option<String>) {
+    *NATIVE_ROOTS_OVERRIDE
+        .write()
+        .unwrap_or_else(|err| err.into_inner()) = pem;
+}
 
 pub const TLS_PIN_REQUIRED_CODE: &str = "ERR_TLS_PIN_REQUIRED";
 pub const TLS_PIN_REQUIRED_MESSAGE: &str =
@@ -63,9 +89,21 @@ pub fn build_tls_connector(opts: &TlsConnectorOptions) -> io::Result<TlsConnecto
             ));
         }
     } else {
-        let rustls_native_certs::CertificateResult { certs, errors: _errors, .. } =
-            rustls_native_certs::load_native_certs();
-        let _ = root_store.add_parsable_certificates(certs);
+        let override_pem = NATIVE_ROOTS_OVERRIDE
+            .read()
+            .unwrap_or_else(|err| err.into_inner())
+            .clone();
+        match override_pem {
+            Some(pem) => {
+                let certs = parse_ca_certs(&pem)?;
+                let _ = root_store.add_parsable_certificates(certs);
+            }
+            None => {
+                let rustls_native_certs::CertificateResult { certs, errors: _errors, .. } =
+                    rustls_native_certs::load_native_certs();
+                let _ = root_store.add_parsable_certificates(certs);
+            }
+        }
     }
 
     if root_store.is_empty() {

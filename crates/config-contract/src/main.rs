@@ -425,6 +425,7 @@ fn raw_env(args: &[String]) {
             for violation in &violations {
                 let kind = match violation {
                     RawEnvViolation::Read(_) => "read",
+                    RawEnvViolation::Write(_) => "write",
                     RawEnvViolation::Import(_) => "import",
                     RawEnvViolation::CompileTime(_) => "compile-time",
                     RawEnvViolation::UnregisteredRead(_) => "unregistered",
@@ -468,7 +469,13 @@ const PLANTED_VIOLATION_DIR: &str = "crates/config-contract/tests/fixtures/";
 /// A FLOOR, not a ceiling, is the wrong shape here: fewer means the scanner
 /// stopped seeing a rule it is supposed to enforce, and more means someone
 /// added a fixture without saying so. Both are worth a failure.
-const PLANTED_VIOLATIONS: usize = 2;
+///
+/// FOUR, two per fixture: `raw_read_alias.rs` and `raw_write_alias.rs` each
+/// bind a `std::env` function under another name behind a false cfg and then
+/// call it, so each yields one import violation and one use violation. The
+/// write fixture is what keeps the WRITE rule provably alive - without it the
+/// rule could stop firing entirely and this gate would report clean.
+const PLANTED_VIOLATIONS: usize = 4;
 
 /// Decide the gate exit status from a violation set.
 ///

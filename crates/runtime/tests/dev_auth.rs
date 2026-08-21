@@ -2,11 +2,13 @@
 //! identity injection — the `pnpm dev` peer of `env.db`→SQLite / `env.kv`→redb.
 //!
 //! This drives the EXACT seam the dev serve path (`crates/runtime/src/core/
-//! serve.rs::handle_request`) composes: `dev_auth::resolve_dev_user_json(headers)`
+//! serve.rs::handle_request`) composes:
+//! `dev_auth::resolve_dev_user_json(headers, &settings)`
 //! → `Runtime::call_fetch_handler_with_user(..., user_json)`. `handle_request`
 //! itself is `resolve_dev_user_json` followed by `call_fetch_handler_with_user`
 //! with no other logic in between, so exercising those two public functions in
-//! sequence reproduces the real dev request flow — no shim.
+//! sequence reproduces the real dev request flow - no shim. The `settings` are
+//! the ones `run_single_worker` resolves once at startup and hands down.
 //!
 //! The `__zeroship_dev_session` cookie is signed with `dev_auth::sign_dev_session`,
 //! which is byte-compatible with the JS `signDevSession` in
@@ -19,11 +21,6 @@
 //!
 //! Both are fed by the SAME `user_json`, exactly as the gateway header is in
 //! production.
-
-// `std::env::set_var` is `unsafe` (process-global mutation race). These tests
-// run in their own integration binary; the `DevEnvGuard` restores the prior
-// env on drop. Same posture as `fetch_native.rs` / `wpt_fetch_redirect.rs`.
-#![allow(unsafe_code)]
 
 mod common;
 
@@ -41,47 +38,19 @@ const DEV_SECRET: &str = "test-dev-auth-secret-0123456789ab";
 /// provider packs into the cookie payload and to what the gateway emits in prod.
 const DEV_USER_JSON: &str = r#"{"id":"pws_devalice0000000000","email":"alice@localhost","name":"Alice Dev","avatar":null,"email_verified":true,"scopes":["openid","profile","email"]}"#;
 
-/// RAII guard that sets `ZEROSHIP_DEV=1` + the dev-auth secret for the duration
-/// of a test and restores the prior environment on drop. The runtime reads
-/// these via `std::env` in `resolve_dev_user_json`, so they must be live during
-/// the dispatch.
-struct DevEnvGuard {
-    prev_dev: Option<std::ffi::OsString>,
-    prev_secret: Option<std::ffi::OsString>,
-}
-
-impl DevEnvGuard {
-    fn set() -> Self {
-        let prev_dev = zeroship_core::declared_env_os!(
-            dev,
-            "ZEROSHIP_DEV",
-            zeroship_runtime::RuntimeConsumer
-        );
-        let prev_secret = zeroship_core::declared_env_os!(
-            dev,
-            "ZEROSHIP_DEV_AUTH_SECRET",
-            zeroship_runtime::RuntimeConsumer
-        );
-        unsafe {
-            std::env::set_var("ZEROSHIP_DEV", "1");
-            std::env::set_var("ZEROSHIP_DEV_AUTH_SECRET", DEV_SECRET);
-        }
-        DevEnvGuard { prev_dev, prev_secret }
-    }
-}
-
-impl Drop for DevEnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.prev_dev {
-                Some(v) => std::env::set_var("ZEROSHIP_DEV", v),
-                None => std::env::remove_var("ZEROSHIP_DEV"),
-            }
-            match &self.prev_secret {
-                Some(v) => std::env::set_var("ZEROSHIP_DEV_AUTH_SECRET", v),
-                None => std::env::remove_var("ZEROSHIP_DEV_AUTH_SECRET"),
-            }
-        }
+/// The dev-auth settings `serve.rs::run_single_worker` resolves once at
+/// startup and hands to every `resolve_dev_user_json` call. Both conditions
+/// are met here, so a cookie that verifies against `DEV_SECRET` resolves.
+///
+/// These used to be `ZEROSHIP_DEV=1` + `ZEROSHIP_DEV_AUTH_SECRET` in the
+/// process environment, mutated with `std::env::set_var` and restored by an
+/// RAII guard on drop. They are inputs now: nothing in this file touches an
+/// environment, so nothing here races libc `getenv` and no test can leave a
+/// value behind for the next one.
+fn dev_settings() -> dev_auth::DevAuthSettings {
+    dev_auth::DevAuthSettings {
+        dev_mode: true,
+        secret: Some(DEV_SECRET.to_string()),
     }
 }
 
@@ -97,11 +66,24 @@ fn build_runtime(source: &str) -> Runtime {
 /// header via `dev_auth::resolve_dev_user_json`, then dispatch through
 /// `call_fetch_handler_with_user` — exactly as `serve.rs::handle_request` does.
 fn dispatch_dev(runtime: &Runtime, method: &str, url: &str, cookie: Option<&str>, body: &str) -> (u16, String) {
+    dispatch_with(runtime, method, url, cookie, body, &dev_settings())
+}
+
+/// The same path with the dev-auth settings stated explicitly, so a test can
+/// vary ONE of the two conditions and see what the whole dispatch does.
+fn dispatch_with(
+    runtime: &Runtime,
+    method: &str,
+    url: &str,
+    cookie: Option<&str>,
+    body: &str,
+    settings: &dev_auth::DevAuthSettings,
+) -> (u16, String) {
     let headers: Vec<(String, String)> = match cookie {
         Some(c) => vec![("Cookie".to_string(), c.to_string())],
         None => vec![],
     };
-    let user_json = dev_auth::resolve_dev_user_json(&headers);
+    let user_json = dev_auth::resolve_dev_user_json(&headers, settings);
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());
     let outcome =
@@ -132,7 +114,6 @@ fn dev_cookie() -> String {
 /// is present — the server-side identity surface SDK packages read.
 #[test]
 fn env_auth_get_user_resolves_dev_user_from_cookie() {
-    let _guard = DevEnvGuard::set();
     let runtime = build_runtime(
         r#"
         export default {
@@ -164,7 +145,6 @@ fn env_auth_get_user_resolves_dev_user_from_cookie() {
 /// resolves the same dev user, driven through the REAL `/__zeroship/v1/<id>` RPC path.
 #[test]
 fn current_user_resolves_dev_user_via_rpc_ctx() {
-    let _guard = DevEnvGuard::set();
     // A synthetic RPC entry whose handler reads `currentUser()` from the
     // `zeroship` module — the same accessor `@zeroship/server` re-exports.
     let modules = common::wrap_with_synthetic_entry(
@@ -199,7 +179,6 @@ fn current_user_resolves_dev_user_via_rpc_ctx() {
 /// not-signed-in dev request (parity with prod's no-`ZeroShip-User` case).
 #[test]
 fn no_cookie_is_anonymous() {
-    let _guard = DevEnvGuard::set();
     let runtime = build_runtime(
         r#"
         export default {
@@ -219,7 +198,6 @@ fn no_cookie_is_anonymous() {
 /// not merely decoded.
 #[test]
 fn cookie_signed_with_wrong_secret_is_anonymous() {
-    let _guard = DevEnvGuard::set();
     let runtime = build_runtime(
         r#"
         export default {
@@ -234,4 +212,62 @@ fn cookie_signed_with_wrong_secret_is_anonymous() {
     let (status, body) = dispatch_dev(&runtime, "GET", "http://localhost/", Some(&cookie), "");
     assert_eq!(status, 200, "body: {body}");
     assert!(body.contains(r#""isNull":true"#), "forged cookie must not authenticate: {body}");
+}
+
+/// Dev-only by construction, through the WHOLE dispatch rather than only
+/// through `resolve_dev_user_json`: with dev mode off, or with no secret
+/// provisioned, the very cookie that authenticates above leaves
+/// `env.auth.getUser()` null.
+///
+/// The control is `env_auth_get_user_resolves_dev_user_from_cookie` above,
+/// which runs the same cookie and the same module through the same path with
+/// both conditions met - so `isNull` here is attributable to the setting and
+/// not to a cookie that never worked.
+#[test]
+fn dev_mode_off_or_no_secret_is_anonymous() {
+    let runtime = build_runtime(
+        r#"
+        export default {
+            fetch(request, env, ctx) {
+                return Response.json({ isNull: env.auth.getUser() === null });
+            }
+        };
+    "#,
+    );
+    let cookie = dev_cookie();
+    let cases = [
+        (
+            "dev mode off",
+            dev_auth::DevAuthSettings {
+                dev_mode: false,
+                secret: Some(DEV_SECRET.to_string()),
+            },
+        ),
+        (
+            "no secret provisioned",
+            dev_auth::DevAuthSettings { dev_mode: true, secret: None },
+        ),
+        (
+            "empty secret",
+            dev_auth::DevAuthSettings {
+                dev_mode: true,
+                secret: Some(String::new()),
+            },
+        ),
+    ];
+    for (label, settings) in cases {
+        let (status, body) = dispatch_with(
+            &runtime,
+            "GET",
+            "http://localhost/",
+            Some(&cookie),
+            "",
+            &settings,
+        );
+        assert_eq!(status, 200, "{label}: body: {body}");
+        assert!(
+            body.contains(r#""isNull":true"#),
+            "{label} must not authenticate: {body}"
+        );
+    }
 }

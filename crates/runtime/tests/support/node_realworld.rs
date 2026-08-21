@@ -1,9 +1,4 @@
 #![allow(dead_code)]
-// The six `node_*_e2e` modules that share this helper each carried a
-// crate-level `#![allow(unsafe_code)]` when they were their own binaries; that
-// is what covered the `std::env` blocks below. They are modules of
-// `tests/node_realworld.rs` now, so the allow has to sit on the helper itself.
-#![allow(unsafe_code)]
 
 use std::fs;
 use std::net::{TcpStream as StdTcpStream, ToSocketAddrs};
@@ -35,47 +30,45 @@ pub fn lock_env() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|err| err.into_inner())
 }
 
-pub struct EnvGuard {
-    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+/// The two runtime settings these six modules share: dev mode ON (so the SSRF
+/// fast path admits the loopback fixture servers) and the process-wide socket
+/// ceiling at its default (so a cap a sibling test lowered cannot refuse
+/// connections here). Both are runtime cells, so restoring them means storing
+/// back the value read at construction rather than putting an environment
+/// variable back.
+///
+/// The cells are process-wide, which is exactly why [`lock_env`] still exists
+/// and every user of this guard still takes it. What changed is the mechanism:
+/// `std::env::set_var` races concurrent libc `getenv` (undefined behaviour),
+/// an atomic store does not.
+pub struct SettingsGuard {
+    prev_dev: bool,
+    prev_global_max_sockets: u32,
 }
 
-impl EnvGuard {
+impl SettingsGuard {
     pub fn set_dev() -> Self {
-        // Each name is read through a literal macro call (the registering
-        // macros require a literal at the call site), in the same order as
-        // `keys`, rather than looping `var_os` over a runtime `&str`.
-        let prev: Vec<(&'static str, Option<std::ffi::OsString>)> = vec![
-            (
-                "ZEROSHIP_DEV",
-                zeroship_core::declared_env_os!(dev, "ZEROSHIP_DEV", zeroship_runtime::RuntimeConsumer),
-            ),
-            (
-                "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
-                zeroship_core::declared_env_os!(
-                    platform,
-                    "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
-                    zeroship_runtime::RuntimeConsumer
-                ),
-            ),
-        ];
-        unsafe {
-            std::env::set_var("ZEROSHIP_DEV", "1");
-            std::env::remove_var("ZEROSHIP_NET_GLOBAL_MAX_SOCKETS");
+        let prev_dev = zeroship_runtime::dev_mode_enabled();
+        let prev_global_max_sockets = zeroship_runtime::global_max_sockets();
+        zeroship_runtime::set_dev_mode(true);
+        zeroship_runtime::set_global_max_sockets(DEFAULT_GLOBAL_MAX_SOCKETS);
+        Self {
+            prev_dev,
+            prev_global_max_sockets,
         }
-        Self { prev }
     }
 }
 
-impl Drop for EnvGuard {
+/// Mirrors `DEFAULT_GLOBAL_MAX_SOCKETS` in
+/// `crates/runtime/src/transport/net_policy.rs`. These modules want the cap
+/// out of the way, not a specific number; a divergence would only mean a
+/// larger or smaller "effectively unlimited".
+const DEFAULT_GLOBAL_MAX_SOCKETS: u32 = 4096;
+
+impl Drop for SettingsGuard {
     fn drop(&mut self) {
-        unsafe {
-            for (key, value) in &self.prev {
-                match value {
-                    Some(value) => std::env::set_var(key, value),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
+        zeroship_runtime::set_dev_mode(self.prev_dev);
+        zeroship_runtime::set_global_max_sockets(self.prev_global_max_sockets);
     }
 }
 
@@ -590,8 +583,8 @@ fn run_docker(args: &[&str]) -> Result<String, String> {
 /// These tests target literal addresses, and an IP literal is NOT a
 /// representable `Name` - it must be written as a range, so a reader of a rule
 /// always knows which check decides it. `is_blocked_ip` would refuse loopback
-/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
-/// and nothing else.
+/// outright; these tests run with dev mode on (`SettingsGuard::set_dev`),
+/// which bypasses the floor and nothing else.
 fn accept_target(host: &str, port: u16) -> EgressRule {
     let destination = match host.parse::<std::net::IpAddr>() {
         Ok(std::net::IpAddr::V4(v4)) => format!("{v4}/32"),

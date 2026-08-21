@@ -105,6 +105,7 @@ mod account_lockout_test;
 mod audit_retention_test;
 mod check_config_smtp_test;
 mod cli_device_refresh_test;
+mod config_env_tier;
 mod consent_ui_test;
 mod device_grant_test;
 mod e2e_github;
