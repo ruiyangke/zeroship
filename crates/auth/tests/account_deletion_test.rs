@@ -7,6 +7,20 @@
 //!
 //! Each test scopes itself with a random tag and cleans up the rows it
 //! inserted.
+//!
+//! `account_reaper::tick` is a FLEET-WIDE due-scan: it anonymizes or
+//! hard-deletes EVERY past-grace user and returns aggregate counts, so two
+//! tick-driving tests each see the other's due user and the
+//! `report.{anonymized, hard_deleted}` assertions break. That was stated here
+//! and then guarded with a process-wide `Mutex`, which is right about the
+//! mechanism and one boundary short: every run on this migration set is a
+//! different PROCESS against the same database. MEASURED 2026-08-20, six copies
+//! of this file started together against one database - 4 of 6 red, then 2 of
+//! 6, then 0 of 6, every failure on those counts. The lease is a session
+//! advisory lock, so it excludes peer runs too; see [`common::lease_sweep`].
+//! The counts are FLOORS now rather than figures, because a lease excludes a
+//! live peer and not a row a crashed one left past its grace, and the exact
+//! claim - which branch this run's own user took - is the row check under each.
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
@@ -14,12 +28,7 @@ use uuid::Uuid;
 use zeroship_auth::cron::account_reaper;
 use zeroship_auth::store::users;
 
-/// `account_reaper::tick` is a FLEET-WIDE due-scan (it anonymizes/hard-deletes
-/// EVERY past-grace user, returning aggregate counts). Two reaper-tick tests run
-/// concurrently each see the OTHER's due user and the `report.{anonymized,
-/// hard_deleted} == 1` assertions break. Serialize the tick-driving tests with a
-/// process-wide lock (poison-recovered) so each owns the fleet for its tick.
-static REAPER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+use crate::common;
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<Client> {
@@ -333,18 +342,12 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
         .await;
 }
 
-// REAPER_LOCK guards `Mutex<()>` - a pure test-serialization token (see the
-// doc comment above), not shared mutable data accessed across the await.
-// compio::test runs each test on its own single-threaded runtime, so the
-// held guard cannot deadlock another task's poll the way it could under a
-// work-stealing executor.
-#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_hard_deletes_non_billing_user_and_cascades() {
     let Some(mut db) = pg().await else {
         return;
     };
-    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-hard-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Hard Delete", Some("phc")).await.unwrap();
@@ -365,8 +368,12 @@ async fn reaper_hard_deletes_non_billing_user_and_cascades() {
     backdate_schedule(&db, user.id).await;
 
     let report = account_reaper::tick(&mut db).await.expect("reaper tick");
-    assert_eq!(report.hard_deleted, 1, "non-billing user is hard-deleted");
-    assert_eq!(report.anonymized, 0);
+    // A FLOOR, not a figure: the lease keeps a peer run's due user out of this
+    // window, but a user a crashed run left past its grace is durable in a
+    // database nothing drops and this scan is fleet-wide. Which BRANCH this
+    // run's own user took is the row checks below - and they, not a count of
+    // one, are what says it was deleted rather than anonymized.
+    assert!(report.hard_deleted >= 1, "non-billing user is hard-deleted: {report:?}");
 
     let remaining = db
         .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
@@ -385,14 +392,12 @@ async fn reaper_hard_deletes_non_billing_user_and_cascades() {
     cleanup(&db, &[user.id]).await;
 }
 
-// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
     let Some(mut db) = pg().await else {
         return;
     };
-    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-creator-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Creator Person", Some("phc")).await.unwrap();
@@ -421,8 +426,12 @@ async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
     backdate_schedule(&db, user.id).await;
 
     let report = account_reaper::tick(&mut db).await.expect("reaper tick");
-    assert_eq!(report.anonymized, 1, "creator-with-billing is anonymized, not deleted");
-    assert_eq!(report.hard_deleted, 0);
+    // A floor; see `reaper_hard_deletes_non_billing_user_and_cascades`. The
+    // "not deleted" half is the surviving users row asserted just below.
+    assert!(
+        report.anonymized >= 1,
+        "creator-with-billing is anonymized, not deleted: {report:?}"
+    );
 
     // Users row STAYS, PII is gone, anonymized_at stamped.
     let row = db
@@ -466,14 +475,12 @@ async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
     cleanup(&db, &[user.id]).await;
 }
 
-// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
     let Some(mut db) = pg().await else {
         return;
     };
-    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let tag = Uuid::new_v4().simple().to_string();
     // `victim` is being erased; `actor` is a SECOND user whose attribution
     // columns point at `victim`. A naive hard DELETE of `victim` would be
@@ -509,7 +516,7 @@ async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
     backdate_schedule(&db, victim.id).await;
 
     let report = account_reaper::tick(&mut db).await.expect("reaper tick");
-    assert_eq!(report.hard_deleted, 1, "victim hard-deleted (no billing)");
+    assert!(report.hard_deleted >= 1, "victim hard-deleted (no billing): {report:?}");
 
     // victim gone; the bystander's attribution FK was SET NULL, not blocking.
     let victim_rows = db
@@ -533,14 +540,12 @@ async fn reaper_sets_null_attribution_fk_pointing_at_deleted_user() {
     cleanup(&db, &[victim.id, bystander.id]).await;
 }
 
-// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_skips_cancelled_request() {
     let Some(mut db) = pg().await else {
         return;
     };
-    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-skip-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Skip User", Some("phc")).await.unwrap();
@@ -554,9 +559,11 @@ async fn reaper_skips_cancelled_request() {
     // the past, the reaper must not touch a cancelled request.
     users::cancel_deletion(&db, user.id).await.unwrap();
 
-    let report = account_reaper::tick(&mut db).await.expect("reaper tick");
-    assert_eq!(report.hard_deleted, 0, "cancelled request is skipped");
-    assert_eq!(report.anonymized, 0);
+    // No count assertion here, and that is the point rather than an omission:
+    // "the reaper touched nobody" is a claim over the whole database, and this
+    // run owns exactly one user in it. The row check below makes the same claim
+    // about the only row that is this run's to speak for.
+    account_reaper::tick(&mut db).await.expect("reaper tick");
 
     let remaining = db
         .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
@@ -567,16 +574,12 @@ async fn reaper_skips_cancelled_request() {
     cleanup(&db, &[user.id]).await;
 }
 
-// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_ignores_a_schedule_without_a_deletion_request() {
     let Some(mut db) = pg().await else {
         return;
     };
-    let _reaper = REAPER_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(
         &db,
@@ -618,14 +621,12 @@ async fn reaper_ignores_a_schedule_without_a_deletion_request() {
 // creator would be hard-deleted and the CASCADE would reap the invoice.)
 // ---------------------------------------------------------------------------
 
-// See the allow on `reaper_hard_deletes_non_billing_user_and_cascades` above.
-#[allow(clippy::await_holding_lock)]
 #[compio::test]
 async fn reaper_anonymizes_invoiced_creator_with_no_connect_account() {
     let Some(mut db) = pg().await else {
         return;
     };
-    let _reaper = REAPER_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-inv-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Invoiced Creator", Some("phc")).await.unwrap();
@@ -654,11 +655,12 @@ async fn reaper_anonymizes_invoiced_creator_with_no_connect_account() {
     backdate_schedule(&db, user.id).await;
 
     let report = account_reaper::tick(&mut db).await.expect("reaper tick");
-    assert_eq!(
-        report.anonymized, 1,
-        "an invoiced creator (no Connect account) is ANONYMIZED, not hard-deleted",
+    // A floor; see `reaper_hard_deletes_non_billing_user_and_cascades`. The
+    // "not hard-deleted" half is the surviving users row asserted just below.
+    assert!(
+        report.anonymized >= 1,
+        "an invoiced creator (no Connect account) is ANONYMIZED, not hard-deleted: {report:?}",
     );
-    assert_eq!(report.hard_deleted, 0);
 
     // The users row + the invoice (FK target alive) both survive.
     let u = db

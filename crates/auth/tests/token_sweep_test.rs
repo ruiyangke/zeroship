@@ -2,14 +2,27 @@
 //!
 //! Drives [`token_sweep::tick`] directly so the sweep is observable inside
 //! a single test run (the real cron sleeps 1 h between ticks).
+//!
+//! `token_sweep::tick` deletes every eligible row IN THE DATABASE and reports
+//! how many, so its counters belong to the database rather than to a run. This
+//! file used to assert them as exact figures under a process-wide `Mutex`,
+//! which excluded the other threads of this binary and nothing else. MEASURED
+//! 2026-08-20, two copies of it against one database, on
+//! `report.magic_links_deleted`:
+//!     assertion `left == right` failed
+//!       left: 2   right: 1
+//! - the peer run's stale magic link, counted by this run's sweep. Each test
+//! now leases the sweep across processes ([`common::lease_sweep`]) and asserts
+//! a FLOOR on the count plus the fate of its OWN rows, because a row a crashed
+//! peer left behind survives in a database nothing drops and would break an
+//! exact figure on a solo run too.
 
 use compio_postgres::{connect, NoTls};
-use std::sync::Mutex;
 use uuid::Uuid;
 use zeroship_auth::cron::token_sweep;
 use zeroship_auth::store::{users};
 
-static TOKEN_SWEEP_TEST_LOCK: Mutex<()> = Mutex::new(());
+use crate::common;
 
 #[allow(clippy::future_not_send)]
 async fn pg() -> Option<(compio_postgres::Client, String)> {
@@ -24,18 +37,15 @@ async fn pg() -> Option<(compio_postgres::Client, String)> {
     Some((client, dsn))
 }
 
-// TOKEN_SWEEP_TEST_LOCK serializes tests against the shared token-sweep
-// table state; it must stay held for the whole request/tick under test, not
-// just the synchronous setup, so the counts it protects can't be raced by
-// another test's sweep.
-#[allow(clippy::await_holding_lock)]
+// The lease is taken BEFORE the seed and held past the assertions: the window
+// that has to be exclusive starts at the first backdated row, not at the tick.
 #[compio::test]
 async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
     let Some((client, db_url)) = pg().await else {
         zeroship_test_support::skip("skipping token_sweep_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
-    let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");
+    let _lease = common::lease_sweep(common::sweep_lock::TOKEN_SWEEP).await;
 
     let tag = Uuid::new_v4().simple().to_string();
     let login_email = format!("token-sweep-login-{tag}@zeroship.test");
@@ -117,30 +127,38 @@ async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let report = token_sweep::tick(&client, &refresh_pool).await.expect("tick");
 
-    assert_eq!(report.magic_links_deleted, 1);
-    assert_eq!(report.password_resets_deleted, 1);
-    assert_eq!(report.magic_completions_deleted, 1);
-    assert_eq!(report.email_verifications_deleted, 1);
+    // FLOORS, not figures. The lease keeps a peer run out of this window, but
+    // a row a crashed run left behind is durable in a database nothing drops,
+    // and it is eligible for exactly these four deletes. `>= 1` says the
+    // counter is wired to the delete and reported it; WHICH rows went is the
+    // pairs below, and only they can say it about this run's own.
+    assert!(report.magic_links_deleted >= 1, "{report:?}");
+    assert!(report.password_resets_deleted >= 1, "{report:?}");
+    assert!(report.magic_completions_deleted >= 1, "{report:?}");
+    assert!(report.email_verifications_deleted >= 1, "{report:?}");
 
+    // Each count below spans a stale row and a fresh one seeded under the SAME
+    // email / tag / user, so `1` is both halves of the claim: the past-grace
+    // row was deleted and the in-window one was not.
     assert_eq!(
         count_magic_links(&client, &login_email).await,
         1,
-        "fresh login magic link should remain"
+        "the stale login magic link should go and the fresh one remain"
     );
     assert_eq!(
         count_magic_links(&client, &reset_email).await,
         1,
-        "fresh reset token should remain"
+        "the stale reset token should go and the fresh one remain"
     );
     assert_eq!(
         count_magic_completions(&client, &tag).await,
         1,
-        "fresh magic completion should remain"
+        "the stale magic completion should go and the fresh one remain"
     );
     assert_eq!(
         count_email_verifications(&client, user.id).await,
         1,
-        "fresh email verification should remain"
+        "the stale email verification should go and the fresh one remain"
     );
 
     cleanup(&client, &login_email, &reset_email, &tag, user.id).await;
@@ -226,15 +244,17 @@ async fn cleanup(
 /// relay dedup sentinels that share the table) so a forged-IP flood cannot
 /// leave permanent rows. A bucket idle past the 24h grace window is deleted; a
 /// freshly-touched one survives. Live PG — skip when no test database is configured.
-// See the allow on `token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows` above.
-#[allow(clippy::await_holding_lock)]
+///
+/// This one asserts nothing about the whole database - both counts name a
+/// bucket key this run minted - so it takes the lease only because it drives
+/// the same tick as its sibling and would otherwise sweep out from under it.
 #[compio::test]
 async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
     let Some((client, db_url)) = pg().await else {
         zeroship_test_support::skip("skipping token_sweep rate_limits test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
-    let _guard = TOKEN_SWEEP_TEST_LOCK.lock().expect("token sweep test lock");
+    let _lease = common::lease_sweep(common::sweep_lock::TOKEN_SWEEP).await;
 
     let tag = Uuid::new_v4().simple().to_string();
     let stale_key = format!("login:ip:sec3-stale-{tag}");

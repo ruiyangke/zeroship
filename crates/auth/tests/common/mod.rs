@@ -174,6 +174,88 @@ pub async fn dedicated_test_db(db_url: &str) -> compio_postgres::Client {
     client
 }
 
+// --- The fleet-wide sweeps ----------------------------------------------
+
+/// The advisory-lock keys the sweep-driving fixtures serialise on.
+///
+/// THESE ARE DELIBERATELY FIXED, and that is the opposite of every other
+/// per-run identity in this suite. A per-run name is right when two runs must
+/// not touch one object; it is exactly wrong for a MUTEX, whose whole job is
+/// that two runs DO meet on it. Rename these and they stop excluding anything
+/// while still reading like locks.
+///
+/// One key per sweep rather than one for all three: they were three
+/// independent mutexes (`token_sweep_test`, `account_deletion_test` and
+/// `signing_key_retention_test` each held a private `Mutex`), they contend over
+/// different tables, and collapsing them would serialise runs that cannot
+/// affect each other.
+///
+/// Every advisory lock the auth crate takes at RUNTIME is `hashtext(...)`
+/// derived (`crates/auth/src/advisory_lock.rs`), so production keys are spread
+/// over the whole i64 range and no small literal is reserved. What matters is
+/// that these three differ from each other, and from the per-run rendezvous key
+/// `signing_key_retention_test` draws for its own trigger.
+pub mod sweep_lock {
+    /// `zeroship_auth::cron::token_sweep::tick`.
+    pub const TOKEN_SWEEP: i64 = 7_111_000_001;
+    /// `zeroship_auth::cron::account_reaper::tick`.
+    pub const ACCOUNT_REAPER: i64 = 7_111_000_002;
+    /// `zeroship_auth::cron::signing_key_retention::tick`.
+    pub const SIGNING_KEY_RETENTION: i64 = 7_111_000_003;
+}
+
+/// Exclusive use of one fleet-wide sweep, across PROCESSES.
+///
+/// WHY A LOCK AND NOT A PER-RUN NAME. Every other collision this suite has on a
+/// shared database is fixed by giving the object a per-run identity. A sweep
+/// has no identity to give: `token_sweep::tick`, `account_reaper::tick` and
+/// `signing_key_retention::tick` scan the WHOLE database by design - that is
+/// the production behaviour under test - so two runs driving one of them
+/// against one database are contending for the database itself. The only
+/// remedy for a genuinely shared object is to take turns on it.
+///
+/// WHAT IT REPLACES. Each fixture held a process-wide `std::sync::Mutex`, and
+/// `account_deletion_test`'s comment stated the hazard exactly: "Two reaper-tick
+/// tests run concurrently each see the OTHER's due user and the
+/// `report.{anonymized, hard_deleted} == 1` assertions break." That was right
+/// about the mechanism and wrong about the boundary - a `Mutex` excludes the
+/// other THREADS of one process, and every run on this migration set is a
+/// different process against the same database.
+///
+/// MEASURED 2026-08-20 on a private copy of this schema, six copies of
+/// `account_deletion_test` started together: 4 of 6 red, then 2 of 6, then 0 of
+/// 6, every failure on `report.hard_deleted` / `report.anonymized`. Two copies
+/// of the four sweep modules: 2 of 3 pairs red, none against a database each.
+///
+/// RELEASE IS THE SESSION ENDING, NOT AN UNLOCK CALL. The lease owns a
+/// dedicated connection and holds a session-level lock on it; dropping the
+/// lease drops the `Client`, whose `Drop` shuts the socket down synchronously
+/// (`libs/compio-postgres/src/release.rs`), so a test that PANICS mid-window
+/// still releases. An explicit unlock runs only on the success path, which is
+/// the path that never needed one - and a lock wedged on a database nothing
+/// drops would outlast every later run.
+///
+/// WHAT IT DOES NOT COVER: rows a crashed peer left behind. A sweep counts
+/// residue as readily as this run's own rows, so the fixtures assert a FLOOR on
+/// the reported count and name their own rows for the exact claim.
+pub struct SweepLease {
+    /// Held only to be dropped. See the release note above.
+    _session: compio_postgres::Client,
+}
+
+/// Take a [`SweepLease`] on `key`, blocking until any peer run releases it.
+#[allow(clippy::future_not_send)]
+pub async fn lease_sweep(key: i64) -> SweepLease {
+    let db_url = zeroship_core::config::test_database_url_opt()
+        .expect("a sweep lease needs the test database its caller already resolved");
+    let session = dedicated_test_db(&db_url).await;
+    session
+        .execute("SELECT pg_advisory_lock($1)", &[&key])
+        .await
+        .expect("take the fleet sweep lease");
+    SweepLease { _session: session }
+}
+
 // ─── PKCE ────────────────────────────────────────────────────────────────
 //
 // Canonical implementations live in `zeroship_core::pkce` so the gateway
