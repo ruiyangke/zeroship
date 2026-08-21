@@ -100,6 +100,7 @@ pub(crate) mod system_fields_pass;
 #[cfg(feature = "test-helpers")]
 pub mod system_fields_pass;
 
+mod bytes_pass;
 mod introspect_schema;
 mod read_pipeline;
 mod write_pipeline;

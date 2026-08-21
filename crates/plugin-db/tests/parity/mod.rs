@@ -13,6 +13,10 @@ pub struct MatrixSnapshot {
     pub seed: Value,
     pub tx: Value,
     pub typed: Value,
+    /// The table this run wrote to. Carried out so a caller can go BEHIND
+    /// `env.db` and read the stored cells with a direct query - the SDK cannot
+    /// be its own witness for what reached the disk.
+    pub collection: String,
 }
 
 static MATRIX_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -366,7 +370,26 @@ export default { fetch: _zsFetch, rpc: _shimRpc };
 
 const TYPED_DATE_ISO: &str = "2026-05-24T12:34:56.789Z";
 const TYPED_DATE_MS: i64 = 1_779_626_096_789;
-const TYPED_BYTES_B64: &str = "3q2+7w==";
+
+/// The bytes the `t.bytes()` round trip must preserve, stated AS BYTES.
+///
+/// This is the only pinned fact about the byte column, and everything else is
+/// derived from it: the base64 the matrix writes is `typed_bytes_b64()`, the
+/// base64 it must read back is the same string, and the cell psql must show on
+/// disk is these four bytes. It is deliberately not a copied output - the
+/// constant that used to sit here was the literal `"3q2+7w=="` and its sibling
+/// in `integration.rs` was `"M3EyKzd3PT0="`, the base64 OF that base64, pinned
+/// because that is what the code returned. A pin taken from the code under test
+/// cannot fail when the code is wrong.
+pub const TYPED_BYTES_RAW: [u8; 4] = [0xDE, 0xAD, 0xBE, 0xEF];
+
+/// The wire form of [`TYPED_BYTES_RAW`]: `t.bytes()` is exchanged with JS as a
+/// base64 string (`sdks/db/src/types.ts`), so this is what a caller passes in
+/// and what a correct round trip hands back.
+pub fn typed_bytes_b64() -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(TYPED_BYTES_RAW)
+}
 
 pub fn matrix_source(collection: &str) -> String {
     r#"
@@ -528,7 +551,7 @@ const _procedures = { setup, seed, transactionMatrix, typedRoundTrip };
 "#
     .replace("__COLLECTION__", collection)
     .replace("__TYPED_DATE_ISO__", TYPED_DATE_ISO)
-    .replace("__TYPED_BYTES_B64__", TYPED_BYTES_B64)
+    .replace("__TYPED_BYTES_B64__", &typed_bytes_b64())
         + SHIM
 }
 
@@ -604,7 +627,12 @@ pub fn run_matrix(url: &str) -> MatrixSnapshot {
     assert_eq!(status, 200, "typedRoundTrip failed: {body}");
     let typed = extract_json(&body);
 
-    MatrixSnapshot { seed, tx, typed }
+    MatrixSnapshot {
+        seed,
+        tx,
+        typed,
+        collection,
+    }
 }
 
 pub fn extract_json(body: &Value) -> Value {
@@ -687,7 +715,7 @@ pub fn expected_typed_projection() -> Value {
         "flag": true,
         "occurred_at": TYPED_DATE_MS,
         "occurred_at_kind": "number",
-        "payload_bytes": TYPED_BYTES_B64,
+        "payload_bytes": typed_bytes_b64(),
         "payload_json": {
             "nested": { "ok": true },
             "items": [1, "two", false],
