@@ -95,6 +95,46 @@ impl BackendMessages {
     pub(crate) fn first_tag(&self) -> Option<u8> {
         self.0.first().copied()
     }
+
+    /// Clone and decode an error only when this batch actually contains one.
+    /// Successful row batches can be large, so scanning their frame headers
+    /// avoids copying them merely to support a rare cache-recovery path.
+    pub(crate) fn error_response(&self) -> io::Result<Option<backend::ErrorResponseBody>> {
+        let mut offset = 0usize;
+        let mut has_error = false;
+        while let Some(header_end) = offset.checked_add(5) {
+            let Some(header) = self.0.get(offset..header_end) else {
+                break;
+            };
+            let length = u32::from_be_bytes(header[1..5].try_into().unwrap()) as usize;
+            if length < 4 {
+                break;
+            }
+            let Some(next) = offset.checked_add(1).and_then(|value| value.checked_add(length))
+            else {
+                break;
+            };
+            if next > self.0.len() {
+                break;
+            }
+            if header[0] == backend::ERROR_RESPONSE_TAG {
+                has_error = true;
+                break;
+            }
+            offset = next;
+        }
+        if !has_error {
+            return Ok(None);
+        }
+
+        let mut messages = BackendMessages(self.0.clone());
+        while let Some(message) = messages.next()? {
+            if let backend::Message::ErrorResponse(body) = message {
+                return Ok(Some(body));
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl FallibleIterator for BackendMessages {

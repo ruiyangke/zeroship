@@ -20,7 +20,7 @@ pub async fn copy_out(client: &InnerClient, statement: Statement) -> Result<Copy
     debug!("executing copy out statement {}", statement.name());
 
     let buf = query::encode(client, &statement, slice_iter(&[]))?;
-    let responses = match start(client, buf).await {
+    let responses = match start(client, buf, &statement).await {
         Ok(responses) => responses,
         Err(error) => {
             statement.invalidate_cache_on_error(&error);
@@ -30,8 +30,15 @@ pub async fn copy_out(client: &InnerClient, statement: Statement) -> Result<Copy
     Ok(CopyOutStream { responses })
 }
 
-async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+async fn start(
+    client: &InnerClient,
+    buf: Bytes,
+    statement: &Statement,
+) -> Result<Responses, Error> {
+    let mut responses = client.send_statement(
+        RequestMessages::Single(FrontendMessage::Raw(buf)),
+        statement,
+    )?;
 
     match responses.next().await? {
         Message::BindComplete => {}
