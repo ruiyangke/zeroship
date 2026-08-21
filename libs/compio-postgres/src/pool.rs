@@ -36,8 +36,7 @@
 //! returned. It deliberately does not use the driver's thread-wide connection
 //! drain, which would couple one pool's shutdown to unrelated pools.
 //!
-//! Lifecycle callbacks are configured separately through [`PoolHooks`], so
-//! [`PoolConfig`] keeps its original exhaustive shape. `after_connect` and
+//! Lifecycle callbacks are part of [`PoolConfig`]. `after_connect` and
 //! `before_acquire` are asynchronous and run before a candidate becomes active.
 //! `after_release` is a synchronous keep-or-discard predicate because return
 //! happens through `Drop`; a rejected session is closed instead of being made
@@ -45,8 +44,9 @@
 //!
 //! Transport
 //! ---------
-//! The pool has no transport policy of its own. It parses the URL, and every
-//! `sslmode` then means through the pool exactly what it means through
+//! The pool has no transport policy of its own. It accepts the driver's typed
+//! [`Config`] directly (with URL helpers that parse one), and every `sslmode`
+//! then means through the pool exactly what it means through
 //! [`Config::connect`] - see [`SslMode`] for the six, and [`crate::config::SslRootCert`]
 //! for what each verifies. The pool's only jobs here are to build the
 //! connector **once** rather than per connection, and to fail early.
@@ -92,40 +92,6 @@ use crate::{Client, Config, Connection, Error, Socket, TransactionStatus};
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// Pool configuration with HikariCP-inspired defaults.
-#[derive(Debug, Clone)]
-pub struct PoolConfig {
-    /// Maximum number of connections (default: 8).
-    pub max_size: usize,
-    /// Minimum idle connections maintained by the housekeeper (default: 2).
-    pub min_idle: usize,
-    /// Maximum connection lifetime before forced rotation (default: 30 min).
-    /// Prevents silent death from firewalls/PG idle timeouts/DNS failover.
-    /// Each entry gets a ±25% jitter so expiries are staggered.
-    pub max_lifetime: Duration,
-    /// Idle timeout — connections idle longer than this are closed (default: 10 min).
-    /// Only applies when idle count > `min_idle`.
-    pub idle_timeout: Duration,
-    /// How long `get()` waits for a connection before returning error (default: 30s).
-    pub connection_timeout: Duration,
-    /// Skip alive-validation if the connection was used within this window (default: 500ms).
-    /// HikariCP's key optimization: hot connections are assumed alive.
-    pub validation_bypass: Duration,
-}
-
-impl Default for PoolConfig {
-    fn default() -> Self {
-        Self {
-            max_size: 8,
-            min_idle: 2,
-            max_lifetime: Duration::from_secs(1800),
-            idle_timeout: Duration::from_secs(600),
-            connection_timeout: Duration::from_secs(30),
-            validation_bypass: Duration::from_millis(500),
-        }
-    }
-}
-
 /// A boxed, single-threaded future returned by an asynchronous pool hook.
 ///
 /// Pool hooks do not require [`Send`] because [`Pool`] invokes them on its
@@ -139,19 +105,20 @@ type BeforeAcquireHook =
     dyn for<'a> Fn(&'a Client) -> PoolHookFuture<'a, Result<bool, Error>>;
 type AfterReleaseHook = dyn Fn(&Client) -> bool;
 
-/// Optional callbacks for connection creation, checkout, and return.
+/// Pool tuning and lifecycle callbacks with HikariCP-inspired defaults.
 ///
-/// This is separate from [`PoolConfig`] so adding hooks does not break callers
-/// that construct that public, exhaustive configuration struct by listing all
-/// of its fields. Existing pool constructors use no hooks by default.
+/// The setters follow the same mutable-builder style as [`Config::ssl_mode`]
+/// and [`Config::channel_binding`]. Callback futures do not require [`Send`]
+/// because [`Pool`] invokes them on its single-threaded local compio executor.
 ///
-/// # Reentrancy
+/// # Callback reentrancy
 ///
-/// Async hooks may await operations on the supplied [`Client`], but must not
-/// acquire from the same pool or wait for work that needs that pool's capacity.
-/// The candidate connection remains counted and unavailable while its hook is
-/// running, so a recursive checkout can exhaust the pool and deadlock.
-/// A hook that needs to refer to its pool should capture a [`Weak`] handle;
+/// Async callbacks may await operations on the supplied [`Client`], but must
+/// not acquire from the same pool or wait for work that needs that pool's
+/// capacity. The candidate connection remains counted and unavailable while
+/// its callback is running, so a recursive checkout can exhaust the pool and
+/// deadlock.
+/// A callback that needs to refer to its pool should capture a [`Weak`] handle;
 /// capturing a strong [`Rc`] can form a cycle that keeps the pool alive.
 ///
 /// `after_release` is synchronous because it runs from [`PooledClient::drop`].
@@ -159,18 +126,128 @@ type AfterReleaseHook = dyn Fn(&Client) -> bool;
 /// the pool, or panic. Return `false` when asynchronous cleanup would otherwise
 /// be required; the pool discards that session and opens a clean one later. A
 /// panic during another panic's unwind aborts the process, as with any `Drop`.
-#[derive(Clone, Default)]
+///
+/// Holding the hooks as `Rc` makes this type `!Send` even when no hook is set,
+/// so a config cannot be built on one thread and moved to another. That matches
+/// the [`Pool`] it configures, which is `!Send` by construction (`RefCell`,
+/// `Cell`, `Rc` throughout) because every pool is owned by one compio thread.
+/// Build the config on the thread that will own the pool.
+#[derive(Clone)]
 #[must_use]
-pub struct PoolHooks {
+pub struct PoolConfig {
+    max_size: usize,
+    min_idle: usize,
+    max_lifetime: Duration,
+    idle_timeout: Duration,
+    connection_timeout: Duration,
+    validation_bypass: Duration,
     after_connect: Option<Rc<AfterConnectHook>>,
     before_acquire: Option<Rc<BeforeAcquireHook>>,
     after_release: Option<Rc<AfterReleaseHook>>,
 }
 
-impl PoolHooks {
-    /// Create an empty hook set.
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_size: 8,
+            min_idle: 2,
+            max_lifetime: Duration::from_secs(1800),
+            idle_timeout: Duration::from_secs(600),
+            connection_timeout: Duration::from_secs(30),
+            validation_bypass: Duration::from_millis(500),
+            after_connect: None,
+            before_acquire: None,
+            after_release: None,
+        }
+    }
+}
+
+impl PoolConfig {
+    /// Create a pool configuration with the default tuning and no callbacks.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the maximum number of connections (default: 8).
+    pub fn max_size(&mut self, max_size: usize) -> &mut Self {
+        self.max_size = max_size;
+        self
+    }
+
+    /// Get the maximum number of connections.
+    #[must_use]
+    pub fn get_max_size(&self) -> usize {
+        self.max_size
+    }
+
+    /// Set the minimum idle connections maintained by the housekeeper
+    /// (default: 2).
+    pub fn min_idle(&mut self, min_idle: usize) -> &mut Self {
+        self.min_idle = min_idle;
+        self
+    }
+
+    /// Get the minimum idle connections maintained by the housekeeper.
+    #[must_use]
+    pub fn get_min_idle(&self) -> usize {
+        self.min_idle
+    }
+
+    /// Set the maximum connection lifetime before forced rotation
+    /// (default: 30 min).
+    ///
+    /// This prevents silent death from firewalls, PostgreSQL idle timeouts, and
+    /// DNS failover. Each entry gets a +/-25% jitter so expiries are staggered.
+    pub fn max_lifetime(&mut self, max_lifetime: Duration) -> &mut Self {
+        self.max_lifetime = max_lifetime;
+        self
+    }
+
+    /// Get the maximum connection lifetime.
+    #[must_use]
+    pub fn get_max_lifetime(&self) -> Duration {
+        self.max_lifetime
+    }
+
+    /// Set the idle timeout (default: 10 min).
+    ///
+    /// Connections idle longer than this are closed only when the idle count
+    /// exceeds `min_idle`.
+    pub fn idle_timeout(&mut self, idle_timeout: Duration) -> &mut Self {
+        self.idle_timeout = idle_timeout;
+        self
+    }
+
+    /// Get the idle timeout.
+    #[must_use]
+    pub fn get_idle_timeout(&self) -> Duration {
+        self.idle_timeout
+    }
+
+    /// Set how long `get()` waits for a connection (default: 30 s).
+    pub fn connection_timeout(&mut self, connection_timeout: Duration) -> &mut Self {
+        self.connection_timeout = connection_timeout;
+        self
+    }
+
+    /// Get the connection timeout.
+    #[must_use]
+    pub fn get_connection_timeout(&self) -> Duration {
+        self.connection_timeout
+    }
+
+    /// Set the alive-validation bypass window (default: 500 ms).
+    ///
+    /// Hot connections used within this window are assumed alive.
+    pub fn validation_bypass(&mut self, validation_bypass: Duration) -> &mut Self {
+        self.validation_bypass = validation_bypass;
+        self
+    }
+
+    /// Get the alive-validation bypass window.
+    #[must_use]
+    pub fn get_validation_bypass(&self) -> Duration {
+        self.validation_bypass
     }
 
     /// Run an asynchronous callback once after each physical connection opens.
@@ -178,7 +255,7 @@ impl PoolHooks {
     /// The connection is not made visible to a borrower unless the callback
     /// returns `Ok(())`. An error closes that connection and is returned to an
     /// on-demand caller (or aborts pool warm-up).
-    pub fn after_connect<F>(mut self, hook: F) -> Self
+    pub fn after_connect<F>(&mut self, hook: F) -> &mut Self
     where
         F: for<'a> Fn(&'a Client) -> PoolHookFuture<'a, Result<(), Error>> + 'static,
     {
@@ -192,7 +269,7 @@ impl PoolHooks {
     /// `after_connect` callback. `Ok(true)` accepts the connection. `Ok(false)`
     /// discards it and retries checkout with another connection. An error
     /// discards it and fails the checkout.
-    pub fn before_acquire<F>(mut self, hook: F) -> Self
+    pub fn before_acquire<F>(&mut self, hook: F) -> &mut Self
     where
         F: for<'a> Fn(&'a Client) -> PoolHookFuture<'a, Result<bool, Error>> + 'static,
     {
@@ -209,7 +286,7 @@ impl PoolHooks {
     /// or for a return during [`Pool::close`]: shutdown has already chosen to
     /// discard that connection, so a reuse predicate has no decision to make.
     /// On an open pool it runs before the raw-transaction rollback barrier.
-    pub fn after_release<F>(mut self, hook: F) -> Self
+    pub fn after_release<F>(&mut self, hook: F) -> &mut Self
     where
         F: Fn(&Client) -> bool + 'static,
     {
@@ -237,11 +314,40 @@ impl PoolHooks {
         };
         hook(client)
     }
+
+    fn validate(&self) -> Result<(), Error> {
+        // A pool that can hold nothing is not a pool. Refuse this before any
+        // connection attempt; otherwise every checkout waits for capacity that
+        // can never exist and times out.
+        if self.max_size == 0 {
+            return Err(Error::config("pool max_size must be at least 1".into()));
+        }
+
+        // These are contradictory instructions, not a preference the pool can
+        // approximate. Report them rather than silently choosing one value.
+        if self.min_idle > self.max_size {
+            return Err(Error::config(
+                format!(
+                    "pool min_idle ({}) exceeds max_size ({}); set min_idle explicitly",
+                    self.min_idle, self.max_size
+                )
+                .into(),
+            ));
+        }
+
+        Ok(())
+    }
 }
 
-impl std::fmt::Debug for PoolHooks {
+impl std::fmt::Debug for PoolConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PoolHooks")
+        f.debug_struct("PoolConfig")
+            .field("max_size", &self.max_size)
+            .field("min_idle", &self.min_idle)
+            .field("max_lifetime", &self.max_lifetime)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("connection_timeout", &self.connection_timeout)
+            .field("validation_bypass", &self.validation_bypass)
             .field("after_connect", &self.after_connect.is_some())
             .field("before_acquire", &self.before_acquire.is_some())
             .field("after_release", &self.after_release.is_some())
@@ -437,9 +543,9 @@ impl Error {
 /// precisely what [`NoTls`] does.
 ///
 /// Answering here rather than at the socket matters for a second reason: this
-/// pool retries a failed connection three times with backoff, so a URL that
-/// could never have worked would otherwise cost about two seconds before
-/// reporting an error that blames the server.
+/// pool retries a failed connection three times with backoff, so connection
+/// settings that could never have worked would otherwise cost about two
+/// seconds before reporting an error that blames the server.
 #[cfg(not(feature = "tls"))]
 fn reject_tls_without_a_connector(config: &Config) -> Result<(), Error> {
     if !config.get_ssl_mode().permits_plaintext() {
@@ -458,25 +564,24 @@ fn reject_tls_without_a_connector(config: &Config) -> Result<(), Error> {
 // Transport - everything needed to open one connection, resolved once
 // ---------------------------------------------------------------------------
 
-/// The pool's connection recipe, resolved from the URL exactly once.
+/// The pool's connection recipe, resolved from typed configuration exactly once.
 ///
 /// See the `Transport` section of the module docs for why the connector is
 /// built here rather than per attempt. Resolving early also moves a broken
-/// `sslrootcert` to where it belongs: `Pool::connect` fails immediately naming
-/// the file, rather than after the retry loop.
+/// `sslrootcert` to where it belongs: pool construction fails immediately
+/// naming the file, rather than after the retry loop.
 #[derive(Clone)]
 struct Transport {
     config: Config,
-    /// Present whenever the URL's `sslmode` may use TLS - i.e. every mode but
-    /// `disable`. Which of them *verify* anything is the connector's business,
-    /// not the pool's.
+    /// Present whenever the configuration's `sslmode` may use TLS - i.e. every
+    /// mode but `disable`. Which of them *verify* anything is the connector's
+    /// business, not the pool's.
     #[cfg(feature = "tls")]
     tls: Option<crate::tls_rustls::MakeRustlsConnect>,
 }
 
 impl Transport {
-    fn resolve(url: &str) -> Result<Transport, Error> {
-        let config: Config = url.parse()?;
+    fn resolve(config: Config) -> Result<Transport, Error> {
         config.validate_tls_settings()?;
         #[cfg(not(feature = "tls"))]
         reject_tls_without_a_connector(&config)?;
@@ -552,7 +657,6 @@ impl Transport {
 pub struct Pool {
     transport: Transport,
     config: PoolConfig,
-    hooks: PoolHooks,
     /// Idle connections available for checkout.
     idle: RefCell<Vec<PoolEntry>>,
     /// Number of connections currently borrowed (not in `idle`).
@@ -645,15 +749,19 @@ impl Pool {
             min_idle: defaults.min_idle.min(max_size),
             ..defaults
         };
-        Self::connect_with_config(url, config).await
+        Self::connect_with_pool_config(url, config).await
     }
 
-    /// Create a pool with full configuration.
+    /// Create a pool from a URL and full pool configuration.
     ///
-    /// Opens `config.min_idle.max(1)` connections upfront so the first burst
-    /// of traffic does not pay full connect latency. Each connection attempt
-    /// is retried with exponential backoff (3 attempts: 100ms, 400ms, 1.6s)
-    /// to survive Docker ordering, DNS blips, and brief PG restarts.
+    /// The URL is parsed into the driver's typed [`Config`], then construction
+    /// delegates to [`Pool::connect_with_config`].
+    ///
+    /// Opens the configured minimum idle count upfront, or one connection when
+    /// that count is zero, so the first burst of traffic does not pay full
+    /// connect latency. Each connection attempt is retried with exponential
+    /// backoff (3 attempts: 100ms, 400ms, 1.6s) to survive Docker ordering, DNS
+    /// blips, and brief PG restarts.
     ///
     /// # Errors
     ///
@@ -661,71 +769,66 @@ impl Pool {
     /// Both are configurations the pool cannot honour rather than preferences
     /// it can approximate, and both are cheaper to hear about here than as a
     /// checkout that blocks for `connection_timeout`.
-    pub async fn connect_with_config(url: &str, config: PoolConfig) -> Result<Self, Error> {
-        Self::connect_with_config_and_hooks(url, config, PoolHooks::default()).await
+    pub async fn connect_with_pool_config(
+        url: &str,
+        pool_config: PoolConfig,
+    ) -> Result<Self, Error> {
+        // Preserve the URL constructor's error precedence: invalid pool tuning
+        // is reported before parsing or resolving the connection recipe.
+        pool_config.validate()?;
+        let connection_config = url.parse::<Config>()?;
+        Self::connect_with_config(connection_config, pool_config).await
     }
 
-    /// Create a pool with full configuration and lifecycle hooks.
+    /// Create a pool from typed connection and pool configuration.
     ///
     /// `after_connect` runs on every warm-up connection before the pool is
-    /// returned. A hook error closes that connection and every earlier warm-up
-    /// connection, then fails construction.
+    /// returned. A callback error closes that connection and every earlier
+    /// warm-up connection, then fails construction. The connection
+    /// configuration is consumed because the pool retains it for reconnects.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use compio_postgres::config::TargetSessionAttrs;
+    /// use compio_postgres::{Config, Error, Pool, PoolConfig};
+    ///
+    /// async fn connect_pool() -> Result<Pool, Error> {
+    ///     let mut connection_config: Config =
+    ///         "postgres://postgres@localhost/app".parse()?;
+    ///     connection_config.target_session_attrs(TargetSessionAttrs::ReadWrite);
+    ///
+    ///     let mut pool_config = PoolConfig::new();
+    ///     pool_config.max_size(16).min_idle(4);
+    ///
+    ///     Pool::connect_with_config(connection_config, pool_config).await
+    /// }
+    /// ```
     ///
     /// # Errors
     ///
     /// Returns an error for invalid pool or transport configuration, failed
     /// connection warm-up, or a rejected `after_connect` callback.
-    pub async fn connect_with_config_and_hooks(
-        url: &str,
-        config: PoolConfig,
-        hooks: PoolHooks,
+    pub async fn connect_with_config(
+        connection_config: Config,
+        pool_config: PoolConfig,
     ) -> Result<Self, Error> {
-        // A pool that can hold nothing is not a pool. Refused here rather than
-        // constructed, because the alternative is worse than it looks: with
-        // `max_size` 0 there is no idle entry to pop and no capacity to create
-        // one, so `get()` parks on a waiter nothing can ever wake and every
-        // caller pays the full `connection_timeout` before hearing about it.
-        if config.max_size == 0 {
-            return Err(Error::config("pool max_size must be at least 1".into()));
-        }
-
-        // `min_idle` above `max_size` is not a preference the pool can honour,
-        // it is two contradictory instructions, and the pool cannot tell which
-        // number the caller meant. Refused rather than clamped, so the answer
-        // comes from whoever wrote them.
-        //
-        // NOT only reachable from a config spelled out in full, which is what
-        // this comment used to claim. `PoolConfig` has public fields and no
-        // `#[non_exhaustive]`, so `PoolConfig { max_size: 1, ..Default::default() }`
-        // is the ordinary idiom and `Default` supplies `min_idle` behind the
-        // caller's back - see `crates/plugin-db/tests/missing_role.rs`, which
-        // is written exactly that way. A caller who never typed `min_idle` can
-        // therefore land here.
-        if config.min_idle > config.max_size {
-            return Err(Error::config(
-                format!(
-                    "pool min_idle ({}) exceeds max_size ({}); set min_idle explicitly",
-                    config.min_idle, config.max_size
-                )
-                .into(),
-            ));
-        }
-
-        let transport = Transport::resolve(url)?;
+        pool_config.validate()?;
+        let transport = Transport::resolve(connection_config)?;
 
         // `max(1)` keeps a `min_idle` of 0 from making the constructor prove
-        // nothing about the URL - one connection is what verifies it. No
-        // `min(max_size)`: with both guards above in place, `min_idle` is never
-        // greater than `max_size` and `max_size` is never 0, so clamping here
-        // could only ever change the `max_size == 0` case - which is now
-        // refused rather than turned into a pool that deadlocks.
-        let warm = config.min_idle.max(1);
+        // nothing about the connection settings - one connection verifies
+        // them. No `min(max_size)`: with both guards above in place,
+        // `min_idle` is never greater than `max_size` and `max_size` is never
+        // 0, so clamping here could only ever change the `max_size == 0` case,
+        // which is now refused rather than turned into a pool that deadlocks.
+        let warm = pool_config.min_idle.max(1);
         let mut entries: Vec<PoolEntry> = Vec::with_capacity(warm);
         for i in 0..warm {
             match transport.connect_with_retry().await {
                 Ok(client) => {
-                    let entry = PoolEntry::new(client, config.max_lifetime);
-                    if let Err(e) = hooks.run_after_connect(&entry.client).await {
+                    let entry = PoolEntry::new(client, pool_config.max_lifetime);
+                    if let Err(e) = pool_config.run_after_connect(&entry.client).await {
                         // The hook rejected this physical connection before it
                         // entered `entries`; dropping it closes the session.
                         drop(entry);
@@ -759,8 +862,7 @@ impl Pool {
         let total = entries.len();
         let pool = Self {
             transport,
-            config,
-            hooks,
+            config: pool_config,
             idle: RefCell::new(entries),
             active: Cell::new(0),
             total: Cell::new(total),
@@ -991,7 +1093,7 @@ impl Pool {
                     }
                 }
 
-                let before_acquire = self.hooks.run_before_acquire(&entry.client).await;
+                let before_acquire = self.config.run_before_acquire(&entry.client).await;
                 self.ensure_open()?;
                 match before_acquire {
                     Ok(true) => {}
@@ -1043,7 +1145,7 @@ impl Pool {
                 };
                 self.metrics.inc_created();
                 let mut entry = PoolEntry::new(client, self.config.max_lifetime);
-                let after_connect = self.hooks.run_after_connect(&entry.client).await;
+                let after_connect = self.config.run_after_connect(&entry.client).await;
                 self.ensure_open()?;
                 if let Err(e) = after_connect {
                     self.metrics.inc_evictions();
@@ -1051,7 +1153,7 @@ impl Pool {
                     // slot; this connection is never made active or idle.
                     return Err(e);
                 }
-                let before_acquire = self.hooks.run_before_acquire(&entry.client).await;
+                let before_acquire = self.config.run_before_acquire(&entry.client).await;
                 self.ensure_open()?;
                 match before_acquire {
                     Ok(true) => {}
@@ -1134,7 +1236,7 @@ impl Pool {
         // synchronous keep-or-discard predicate, and the entry stays invisible
         // to both `idle` and waiter slots until it returns. False drops the
         // session; closing it also rolls back any open transaction.
-        let keep = self.hooks.run_after_release(&entry.client);
+        let keep = self.config.run_after_release(&entry.client);
         // Re-check after arbitrary hook code. Re-entry is forbidden by the
         // hook contract, but preserving shutdown accounting is cheap and keeps
         // a violating hook from depositing an entry after close linearized.
@@ -1382,7 +1484,7 @@ impl Pool {
             // Re-upgrade only long enough to recheck and reserve capacity and
             // clone the connection recipe. The weak permit accounts for an
             // error or cancellation without retaining the pool.
-            let (transport, hooks, max_lifetime, permit) = {
+            let (transport, pool_config, permit) = {
                 let Some(pool) = weak.upgrade() else {
                     return false;
                 };
@@ -1393,10 +1495,9 @@ impl Pool {
                     break;
                 }
                 let transport = pool.transport.clone();
-                let hooks = pool.hooks.clone();
-                let max_lifetime = pool.config.max_lifetime;
+                let pool_config = pool.config.clone();
                 let permit = WeakPermitGuard::reserve(&pool);
-                (transport, hooks, max_lifetime, permit)
+                (transport, pool_config, permit)
             };
 
             match transport.connect_one().await {
@@ -1410,8 +1511,8 @@ impl Pool {
                     pool.metrics.inc_created();
                     drop(pool);
 
-                    let entry = PoolEntry::new(client, max_lifetime);
-                    let after_connect = hooks.run_after_connect(&entry.client).await;
+                    let entry = PoolEntry::new(client, pool_config.max_lifetime);
+                    let after_connect = pool_config.run_after_connect(&entry.client).await;
                     let Some(pool) = weak.upgrade() else {
                         return false;
                     };
@@ -1683,7 +1784,7 @@ impl Drop for WeakPermitGuard {
 impl std::fmt::Debug for Pool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Pool")
-            .field("url", &"***")
+            .field("connection_config", &"***")
             .field("idle", &self.idle.borrow().len())
             .field("active", &self.active.get())
             .field("total", &self.total.get())
@@ -1692,7 +1793,7 @@ impl std::fmt::Debug for Pool {
             .field("handoffs", &self.handoffs.borrow().len())
             .field("closed", &self.closed.get())
             .field("close_waiters", &self.close_waiters.borrow().len())
-            .field("hooks", &self.hooks)
+            .field("pool_config", &self.config)
             .finish()
     }
 }
@@ -2088,10 +2189,13 @@ mod tests {
 
     fn test_pool(config: PoolConfig, idle: Vec<PoolEntry>, active: usize, total: usize) -> Pool {
         Pool {
-            transport: Transport::resolve("postgres://postgres@127.0.0.1/test?sslmode=disable")
-                .unwrap(),
+            transport: Transport::resolve(
+                "postgres://postgres@127.0.0.1/test?sslmode=disable"
+                    .parse()
+                    .unwrap(),
+            )
+            .unwrap(),
             config,
-            hooks: PoolHooks::default(),
             idle: RefCell::new(idle),
             active: Cell::new(active),
             total: Cell::new(total),
@@ -2219,16 +2323,16 @@ mod tests {
 
     #[test]
     fn after_release_rejection_releases_capacity_to_fifo_head() {
-        let config = PoolConfig {
+        let mut config = PoolConfig {
             max_size: 1,
             min_idle: 0,
             validation_bypass: Duration::from_secs(60),
             ..PoolConfig::default()
         };
+        config.after_release(|_| false);
         let (client, _receiver) = fake_client(34);
         let entry = PoolEntry::new(client, config.max_lifetime);
-        let mut pool = test_pool(config, Vec::new(), 1, 1);
-        pool.hooks = PoolHooks::new().after_release(|_| false);
+        let pool = test_pool(config, Vec::new(), 1, 1);
         let wake_count = Arc::new(AtomicUsize::new(0));
         let waker = counting_waker(&wake_count);
         let mut waiter = Box::pin(Waiter::new(&pool));
@@ -2256,7 +2360,7 @@ mod tests {
 
     #[test]
     fn reentrant_close_from_after_release_cannot_redeposit_after_shutdown() {
-        let config = PoolConfig {
+        let mut config = PoolConfig {
             max_size: 1,
             min_idle: 0,
             validation_bypass: Duration::from_secs(60),
@@ -2264,8 +2368,7 @@ mod tests {
         };
         let pool_slot = Rc::new(RefCell::new(Weak::<Pool>::new()));
         let hook_pool_slot = Rc::clone(&pool_slot);
-        let mut pool = test_pool(config, Vec::new(), 1, 1);
-        pool.hooks = PoolHooks::new().after_release(move |_| {
+        config.after_release(move |_| {
             let pool = hook_pool_slot
                 .borrow()
                 .upgrade()
@@ -2277,6 +2380,7 @@ mod tests {
             );
             true
         });
+        let pool = test_pool(config, Vec::new(), 1, 1);
         let pool = Rc::new(pool);
         *pool_slot.borrow_mut() = Rc::downgrade(&pool);
         let (client, _receiver) = fake_client(341);
@@ -2770,7 +2874,7 @@ mod tests {
     #[compio::test]
     async fn housekeeping_refill_runs_after_connect_before_deposit() {
         let (address, finish_tx, server) = fake_postgres_server();
-        let config = PoolConfig {
+        let mut config = PoolConfig {
             max_size: 1,
             min_idle: 1,
             validation_bypass: Duration::from_secs(60),
@@ -2779,15 +2883,15 @@ mod tests {
         let url = format!("postgres://postgres@{address}/fake?sslmode=disable");
         let calls = Rc::new(Cell::new(0));
         let hook_calls = Rc::clone(&calls);
-        let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(&url).unwrap();
-        pool.hooks = PoolHooks::new().after_connect(move |_client| {
+        config.after_connect(move |_client| {
             let hook_calls = Rc::clone(&hook_calls);
             Box::pin(async move {
                 hook_calls.set(hook_calls.get() + 1);
                 Ok(())
             })
         });
+        let mut pool = test_pool(config, Vec::new(), 0, 0);
+        pool.transport = Transport::resolve(url.parse().unwrap()).unwrap();
         let pool = Rc::new(pool);
         let weak = Rc::downgrade(&pool);
 
@@ -2813,7 +2917,7 @@ mod tests {
         };
         let url = format!("postgres://postgres@{address}/fake?sslmode=disable");
         let mut pool = test_pool(config, Vec::new(), 0, 4);
-        pool.transport = Transport::resolve(&url).unwrap();
+        pool.transport = Transport::resolve(url.parse().unwrap()).unwrap();
         let pool = Rc::new(pool);
         let first_count = Arc::new(AtomicUsize::new(0));
         let second_count = Arc::new(AtomicUsize::new(0));
@@ -2897,7 +3001,7 @@ mod tests {
         };
         let url = format!("postgres://postgres@{address}/blackhole?sslmode=disable");
         let mut pool = test_pool(config, Vec::new(), 0, 0);
-        pool.transport = Transport::resolve(&url).unwrap();
+        pool.transport = Transport::resolve(url.parse().unwrap()).unwrap();
         let pool = Rc::new(pool);
         let weak = Rc::downgrade(&pool);
         pool.start_housekeeper_with_interval(Duration::ZERO);

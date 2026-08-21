@@ -105,13 +105,14 @@ impl RefreshSessionPool {
             return Ok(pool);
         }
 
-        let config = PoolConfig {
-            max_size: self.inner.pool_size,
-            min_idle: 1,
-            connection_timeout: Duration::from_secs(REFRESH_POOL_CONNECTION_TIMEOUT_SECS),
-            ..PoolConfig::default()
-        };
-        let pool = Rc::new(Pool::connect_with_config(&self.inner.db_url, config).await?);
+        let mut pool_config = PoolConfig::new();
+        pool_config
+            .max_size(self.inner.pool_size)
+            .min_idle(1)
+            .connection_timeout(Duration::from_secs(REFRESH_POOL_CONNECTION_TIMEOUT_SECS));
+        let pool = Rc::new(
+            Pool::connect_with_pool_config(&self.inner.db_url, pool_config).await?,
+        );
         pool.start_housekeeper();
         let pool = REFRESH_POOLS.with(|pools| {
             let mut pools = pools.borrow_mut();

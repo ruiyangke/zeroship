@@ -33,12 +33,9 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
     // One connection, so the release and the next acquisition are guaranteed to
     // be the same backend - without that the test can pass by being handed a
     // different, clean connection.
-    let config = PoolConfig {
-        max_size: 1,
-        min_idle: 1,
-        ..PoolConfig::default()
-    };
-    let pool = match Pool::connect_with_config(&url, config).await {
+    let mut config = PoolConfig::new();
+    config.max_size(1).min_idle(1);
+    let pool = match Pool::connect_with_pool_config(&url, config).await {
         Ok(pool) => pool,
         Err(e) => common::postgres_unreachable(&url, &e),
     };
@@ -110,12 +107,9 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
 #[compio::test]
 async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
     let url = test_url();
-    let config = PoolConfig {
-        max_size: 1,
-        min_idle: 1,
-        ..PoolConfig::default()
-    };
-    let pool = match Pool::connect_with_config(&url, config).await {
+    let mut config = PoolConfig::new();
+    config.max_size(1).min_idle(1);
+    let pool = match Pool::connect_with_pool_config(&url, config).await {
         Ok(pool) => pool,
         Err(e) => common::postgres_unreachable(&url, &e),
     };
@@ -160,15 +154,14 @@ async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
 #[compio::test]
 async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
     let url = test_url();
-    let config = PoolConfig {
-        max_size: 1,
-        min_idle: 1,
+    let mut config = PoolConfig::new();
+    config
+        .max_size(1)
+        .min_idle(1)
         // Force the alive-check: without this the pool may skip validation on
         // a connection it saw moments ago, and the test would prove nothing.
-        validation_bypass: std::time::Duration::ZERO,
-        ..PoolConfig::default()
-    };
-    let pool = match Pool::connect_with_config(&url, config).await {
+        .validation_bypass(std::time::Duration::ZERO);
+    let pool = match Pool::connect_with_pool_config(&url, config).await {
         Ok(pool) => pool,
         Err(e) => common::postgres_unreachable(&url, &e),
     };
