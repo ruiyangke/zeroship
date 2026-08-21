@@ -623,9 +623,16 @@ gate exempts untracked overlays deliberately, which is exactly what this is.
 each named the same server, each was read by one crate, and each had to be
 exported by whichever suite remembered it. `GATEWAY_POOL_SMOKE_URL` was set
 NOWHERE in the repository, so its one test had never executed;
-`GATEWAY_ANCHORS_DB_URL` was in the same state until 2026-08-18. All eight are
-DELETED. `PG_TEST_URL` is the single override, and `REDIS_TEST_URL` its Redis
-peer.
+`GATEWAY_ANCHORS_DB_URL` was in the same state until 2026-08-18. `PG_TEST_URL`
+is the single override, and `REDIS_TEST_URL` its Redis peer.
+
+SEVEN of those eight are deleted, not eight. `CONTROL_TEST_DB` is still read at
+`crates/control/tests/workflow_engine_test.rs:59` and still exported at
+`tests/run_billing_suite.sh:181`, which records why: dropping the export before
+converting that file made its 93 tests announce "skip: CONTROL_TEST_DB not set"
+and pass without executing. This paragraph claimed all eight were gone from the
+day the other seven went, so the one that survived was documented as absent -
+the reason `tests/test_only_env_gate.sh` rules on the tree instead.
 
 `KV_REQUIRE_REDIS` is also deleted. Its comment claimed CI set it; nothing in
 the tree ever did, so its panic arm was unreachable and the Redis backend tests
@@ -639,7 +646,14 @@ required now, like Postgres, for the same reason
 `AUTH_TEST_SMTP_SINK`
 `ZEROSHIP_SESSION_SECRET` `ZEROSHIP_SESSION_SECRET_PREV`
 `ZEROSHIP_SESSION_NONCE_CAPACITY` `ZEROSHIP_DW_E2E*`
-`ZEROSHIP_NET_TEST_DNS_HANG_HOST` `ZEROSHIP_NET_TEST_DNS_HANG_MS`
+
+`ZEROSHIP_NET_TEST_DNS_HANG_HOST` and `ZEROSHIP_NET_TEST_DNS_HANG_MS` were on
+that list until 2026-08-20 and NOTHING READ EITHER ONE. They appeared in this
+file and in one comment in `crates/runtime/src/transport/egress.rs` that cites
+the pair as an analogy; no reader, no setter, in any language. A list of live
+names that has stopped being live reads exactly like a correct one, which is
+why `tests/test_only_env_gate.sh` arm 2 now checks this section's claim against
+the tree rather than leaving it to a reader.
 
 CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
 `POSTGRES_USER` `POSTGRES_PASSWORD` `REDPANDA_BROKERS` `ZS_FRESHNESS_STRICT`.
