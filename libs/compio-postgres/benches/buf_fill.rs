@@ -14,6 +14,16 @@ impl Error {
     pub(crate) fn io(error: io::Error) -> Self {
         Self(error)
     }
+
+    /// The real crate carries a `Kind::ReadTimeout`; this stub only has to
+    /// satisfy the call in `buf_stream.rs`, which the bench compiles against
+    /// this `Error` rather than the crate's.
+    pub(crate) fn read_timeout(timeout: Duration) -> Self {
+        Self(io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("socket read made no progress for {timeout:?}"),
+        ))
+    }
 }
 
 #[path = "../src/buf_stream.rs"]
