@@ -6559,6 +6559,37 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
     zeroship_plugin_db::auth::ensure_admin_schema(&pool)
         .await
         .expect("ensure platform role");
+    // Stand in for `db/migrations-ts/20260818000200_worker_database_authority.ts`.
+    // This suite runs against a bare database with no platform migrations
+    // applied, and since 2a44ea8ef nothing in the worker creates this role:
+    // `PgStore::provision` opens with `SET ROLE zeroship_workflow_owner` and
+    // fails outright if it is absent. The attribute list is copied from that
+    // migration, so a test-created role cannot be wider than the deployed one.
+    //
+    // WHAT THIS DOES NOT CATCH: the migration ceasing to create the role, or
+    // creating it wider. Creating it here makes this test green either way.
+    // `platform_migrate.rs` is what rules on the deployed role.
+    pool.execute(
+        &format!(
+            "DO $$ BEGIN \
+               IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{owner}') THEN \
+                 CREATE ROLE \"{owner}\" NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE \
+                                         NOINHERIT NOREPLICATION NOBYPASSRLS; \
+               END IF; \
+             END $$",
+            owner = zeroship_migrated::provisioning::WORKFLOW_OWNER_ROLE,
+        ),
+        &[],
+    )
+    .await
+    .expect("precreate the narrow workflow journal owner role");
+    // The journal SCHEMA is created by the deploy's migration apply, not by the
+    // worker -- `PgStore::provision` holds no CREATE on the database. Call the
+    // migration service's own statement rather than a CREATE SCHEMA of our own,
+    // so the journal below is owned the way production owns it.
+    zeroship_migrated::provisioning::provision_workflow_journal_schema(&client, &app_id)
+        .await
+        .expect("provision the app workflow journal schema");
     zeroship_plugin_workflow::store::pg::PgStore::provision(&client, &app_id)
         .await
         .expect("provision app-local workflow journal");
@@ -6594,7 +6625,22 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
             .await
             .expect("check journal table owner");
         let owner: String = owner_rows[0].get("owner");
-        assert_eq!(owner, "__zeroship_platform_role", "journal owner for {table}");
+        // Bound to `zeroship-migrated`'s copy of the owner-role name while the
+        // writer is `plugin-workflow`'s private copy of it, so the two
+        // duplicated constants disagreeing shows up here rather than as a
+        // journal nobody can reach. Until 2026-08-20 this compared against
+        // `__zeroship_platform_role`, the role the store created for itself
+        // before 2a44ea8ef removed `provision_owner_sql`.
+        assert_eq!(
+            owner,
+            zeroship_migrated::provisioning::WORKFLOW_OWNER_ROLE,
+            "journal owner for {table}"
+        );
+        // The security property the name is a proxy for: no role an app's own
+        // code runs as may own the journal, because an owner can re-GRANT
+        // itself the DML the assertions above just proved it lacks.
+        assert_ne!(owner, schema_role, "journal owner for {table} is an app role");
+        assert_ne!(owner, uuid_role, "journal owner for {table} is an app role");
     }
 
     let _ = pool
