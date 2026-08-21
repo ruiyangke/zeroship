@@ -3911,14 +3911,29 @@ else
   # that was already gone, or a schema that never existed.
   DEL_ROW_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
     "select count(*) from zeroship.apps where id = '$SC_APP_ID'" 2>/dev/null | tr -d ' ')
-  # LIKE, not '=', and that is a correction rather than a flourish. An app gets
-  # TWO schemas -- `<app_id>` for the creator's tables and `<app_id>_migrations`
-  # for the engine's journal. MEASURED on the golden database: 2 tables in the
-  # first and 5 in the second. The '=' this replaced counted only the first, so
-  # the failure below reported a residue of 2 when the real one is 7 across two
-  # schemas.
+  # An app gets THREE schemas, and the pattern has to name all three or the
+  # residue this step reports is smaller than the residue that exists:
+  #   `<app_id>`             the creator's tables (crates/migrated apply)
+  #   `<app_id>_migrations`  the engine journal
+  #                          (third_party/zero-migrate .../conn.rs, `{schema}_migrations`)
+  #   `app_<app_id>`         the workflow journal's 5 __zeroship_workflow_* tables
+  #                          (crates/migrated/src/provisioning.rs:214)
+  # A `like '<app_id>%'` matches the first two and NOT the third, because the
+  # third is PREFIXED. It undercounted for that reason until 2026-08-20.
+  # MEASURED on the golden database: 2 tables in the first and 5 in the second.
+  # MEASURED separately on the test databases at :5440: an `app_<uuid>` journal
+  # holding ZERO runs is 5 tables and 376 kB, so the third schema is never empty
+  # once the app has run one workflow, and is 376 kB even if it never has.
+  #
+  # WHAT THIS COUNT STILL DOES NOT CATCH: the per-app role `app_<uuid>_role`
+  # (cluster-scoped, so it outlives even a DROP DATABASE), the app's env.kv keys
+  # (`{<app_id>}:<key>`), its env.storage prefix, and its rows in
+  # workflow_scheduler_timers / _inflight (app_id with no FK). None of those are
+  # schemas or tables, so no query of this shape can see them. See
+  # docs/proposals/2026-08-20-deleted-app-schema-lifecycle.md section 2.
   DEL_TBL_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from information_schema.tables where table_schema like '$SC_APP_ID%'" 2>/dev/null | tr -d ' ')
+    "select count(*) from information_schema.tables
+      where table_schema like '$SC_APP_ID%' or table_schema = 'app_$SC_APP_ID'" 2>/dev/null | tr -d ' ')
   DEL_SRV_PRE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
     "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
   echo "  before delete: apps_row=$DEL_ROW_PRE per_app_tables=$DEL_TBL_PRE gateway=$DEL_SRV_PRE"
@@ -4038,10 +4053,15 @@ else
   # would hit the second the moment the first is cleared. Giving this step's app
   # a plan change before the delete would put both in play; that is the next
   # increment and it is NOT done here.
+  # Same three-schema pattern as the BEFORE count. The two must stay identical:
+  # a POST query narrower than the PRE query reports residue shrinking when only
+  # the instrument did.
   DEL_TBL_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from information_schema.tables where table_schema like '$SC_APP_ID%'" 2>/dev/null | tr -d ' ')
+    "select count(*) from information_schema.tables
+      where table_schema like '$SC_APP_ID%' or table_schema = 'app_$SC_APP_ID'" 2>/dev/null | tr -d ' ')
   DEL_NSP_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
-    "select count(*) from pg_namespace where nspname like '$SC_APP_ID%'" 2>/dev/null | tr -d ' ')
+    "select count(*) from pg_namespace
+      where nspname like '$SC_APP_ID%' or nspname = 'app_$SC_APP_ID'" 2>/dev/null | tr -d ' ')
   if [ "${DEL_NSP_POST:-1}" = "0" ] && [ "${DEL_TBL_POST:-1}" = "0" ]; then
     pass "the app's per-app Postgres schema was dropped with the app"
   else
@@ -4056,7 +4076,11 @@ else
       apps 1 -> 0) and the schema count stays 2 and the table count stays 7.
       A DB cascade cannot drop a schema -- a schema is not a row - so fixing
       #331 will make the delete succeed and leave this residue exactly as it
-      is. This assertion will still be the last one red."
+      is. This assertion will still be the last one red.
+      AND WIRING drop_namespace WOULD NOT CLEAR IT EITHER: its step 4 is
+      DROP SCHEMA CASCADE on the BARE <app_id> only, so <app_id>_migrations and
+      app_<app_id> would still be here. See
+      docs/proposals/2026-08-20-deleted-app-schema-lifecycle.md section 2."
   fi
 fi
 
