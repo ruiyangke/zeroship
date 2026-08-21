@@ -17,19 +17,19 @@
 //
 // ## Two run-loops (`run` picks one)
 //
-// * `run_multiplexed` — the splittable plain-socket path (always taken by
-//   the connection pool, which uses NoTls). The socket is split into two
-//   owned halves (compio `into_split` clones ONE refcounted shared fd; it
-//   does not `dup`). A DEDICATED read task owns the read half and loops
-//   `read_backend` forever, forwarding frames over a bounded channel; the
-//   cancel-unsafe read lives entirely inside that task's own loop and is
-//   never dropped mid-submission during normal operation. The read task's
-//   JoinHandle is RETAINED (not detached): on a clean close the server's FIN
-//   resolves the parked read to EOF, and on every exit path the teardown
-//   step cancels the task — compio defers the in-flight read's io_uring
-//   buffer reclaim, so cancelling is memory-safe (losing in-flight bytes is
-//   acceptable on a connection that is closing). This closes the half-open
-//   write-error leak (MUX-1).
+// * `run_multiplexed` — the splittable plain-socket path. A pooled connection
+//   takes this path only when its selected transport is plaintext. The socket
+//   is split into two owned halves (compio `into_split` clones ONE refcounted
+//   shared fd; it does not `dup`). A DEDICATED read task owns the read half
+//   and loops `read_backend` forever, forwarding frames over a bounded
+//   channel; the cancel-unsafe read lives entirely inside that task's own
+//   loop and is never dropped mid-submission during normal operation. The
+//   read task's JoinHandle is RETAINED (not detached): on a clean close the
+//   server's FIN resolves the parked read to EOF, and on every exit path the
+//   teardown step cancels the task — compio defers the in-flight read's
+//   io_uring buffer reclaim, so cancelling is memory-safe (losing in-flight
+//   bytes is acceptable on a connection that is closing). This closes the
+//   half-open write-error leak (MUX-1).
 //
 //   The main loop owns the write half and only ever `select`s over CHANNELS
 //   (read channel, request receiver, COPY receiver, a sender's `poll_ready`)
@@ -50,8 +50,8 @@
 //   returns to the dispatch point. This is the original loop, preserved
 //   verbatim. Its documented trade-off stands: an idle connection does
 //   not read (notifications wait for the next request), and a COPY-IN the
-//   server rejects mid-stream can deadlock. TLS is not used by the pool,
-//   so this path carries no real platform traffic.
+//   server rejects mid-stream can deadlock. Pooled connections that negotiate
+//   TLS take this path, so both limitations are reachable in pool traffic.
 //
 // Both paths share `Dispatch` (backend-frame routing) and the
 // `pending_responses` back-pressure stash, so message handling and FIFO
@@ -957,10 +957,10 @@ where
     /// requests have completed, or a fatal I/O error occurs.
     ///
     /// Splits the socket into owned read/write halves and runs the
-    /// [multiplexed loop](Self::run_multiplexed) when possible (always,
-    /// for the plain-socket path the pool uses). TLS streams cannot be
-    /// split, so they fall back to the [serialized
-    /// loop](Self::run_serialized).
+    /// [multiplexed loop](Self::run_multiplexed) when possible (always when the
+    /// selected transport is plaintext). TLS streams, including pooled
+    /// connections that negotiate TLS, cannot be split, so they fall back to
+    /// the [serialized loop](Self::run_serialized).
     pub async fn run(mut self) -> Result<(), Error> {
         // Drain async messages captured during the handshake (e.g.
         // notices from `read_info`) before any socket I/O.

@@ -224,7 +224,7 @@ pub enum ChannelBinding {
     Require,
 }
 
-/// An authentication method understood by PostgreSQL 16's `require_auth`
+/// An authentication method recognized by PostgreSQL 16's `require_auth`
 /// connection parameter.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -233,9 +233,11 @@ pub enum AuthMethod {
     Password,
     /// PostgreSQL's MD5 challenge-response authentication (`md5`).
     Md5,
-    /// GSSAPI authentication (`gss`).
+    /// GSSAPI authentication (`gss`). The driver cannot perform it, so DSNs
+    /// may name it only in a negative policy such as `require_auth=!gss`.
     Gss,
-    /// Windows SSPI authentication (`sspi`).
+    /// Windows SSPI authentication (`sspi`). The driver cannot perform it, so
+    /// DSNs may name it only in a negative policy such as `require_auth=!sspi`.
     Sspi,
     /// SCRAM-SHA-256, with or without channel binding (`scram-sha-256`).
     ScramSha256,
@@ -352,6 +354,12 @@ impl RequireAuth {
             let method = AuthMethod::parse(method_name).ok_or_else(|| {
                 InvalidRequireAuth(format!("unknown authentication method {method_name:?}"))
             })?;
+            if !negated && matches!(method, AuthMethod::Gss | AuthMethod::Sspi) {
+                return Err(InvalidRequireAuth(format!(
+                    "authentication method {method_name:?} cannot be required because it is not \
+                     supported by this driver"
+                )));
+            }
             if methods.contains(&method) {
                 return Err(InvalidRequireAuth(format!(
                     "method {part:?} is specified more than once"
@@ -525,9 +533,10 @@ pub enum Host {
 ///     binding will not be used. If set to `prefer`, channel binding will be used if available, but not used otherwise.
 ///     If set to `require`, the authentication process will fail if channel binding is not used. Defaults to `prefer`.
 /// * `require_auth` - A comma-separated allowlist of authentication methods, or a list in which every method is
-///     prefixed by `!` to reject those methods. PostgreSQL 16 accepts `password`, `md5`, `gss`, `sspi`,
-///     `scram-sha-256`, and `none`. An omitted or empty value accepts any method and permits the server to skip
-///     authentication.
+///     prefixed by `!` to reject those methods. The driver supports positive requirements for `password`, `md5`,
+///     `scram-sha-256`, and `none`. It recognizes PostgreSQL 16's `gss` and `sspi` names only in negative lists,
+///     because it cannot perform those authentication methods. An omitted or empty value accepts any supported
+///     method and permits the server to skip authentication.
 /// * `load_balance_hosts` - Controls the order in which the client tries to connect to the available hosts and
 ///     addresses. Once a connection attempt is successful no other hosts and addresses will be tried. This parameter
 ///     is typically used in combination with multiple host names or a DNS record that returns multiple IPs. If set to
@@ -2120,12 +2129,10 @@ mod tests {
 
         let all_methods = AuthMethods::new(AuthMethod::Password)
             .with(AuthMethod::Md5)
-            .with(AuthMethod::Gss)
-            .with(AuthMethod::Sspi)
             .with(AuthMethod::ScramSha256)
             .with(AuthMethod::None);
         assert_eq!(
-            "host=h require_auth=password,md5,gss,sspi,scram-sha-256,none"
+            "host=h require_auth=password,md5,scram-sha-256,none"
                 .parse::<Config>()
                 .unwrap()
                 .get_require_auth(),
@@ -2138,6 +2145,15 @@ mod tests {
                 .get_require_auth(),
             &RequireAuth::Reject(
                 AuthMethods::new(AuthMethod::Password).with(AuthMethod::None)
+            )
+        );
+        assert_eq!(
+            "host=h require_auth=!gss,!sspi"
+                .parse::<Config>()
+                .unwrap()
+                .get_require_auth(),
+            &RequireAuth::Reject(
+                AuthMethods::new(AuthMethod::Gss).with(AuthMethod::Sspi)
             )
         );
 
@@ -2157,6 +2173,37 @@ mod tests {
             RequireAuth::Require(unique).to_string(),
             "scram-sha-256,none"
         );
+    }
+
+    #[test]
+    fn unsupported_positive_require_auth_methods_are_rejected_during_dsn_parsing() {
+        for (value, unsupported) in [
+            ("gss", "gss"),
+            ("sspi", "sspi"),
+            ("gss,scram-sha-256", "gss"),
+            ("password,sspi", "sspi"),
+        ] {
+            for dsn in [
+                format!("host=h require_auth='{value}'"),
+                format!("postgresql://h/db?require_auth={value}"),
+            ] {
+                let Some(error) = dsn.parse::<Config>().err() else {
+                    panic!("unsupported require_auth={value:?} parsed from {dsn:?}");
+                };
+                let cause = std::error::Error::source(&error)
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                assert_eq!(
+                    cause,
+                    format!(
+                        "invalid value for option `require_auth`: authentication method \
+                         {unsupported:?} cannot be required because it is not supported by this \
+                         driver"
+                    ),
+                    "require_auth={value:?} produced an unclear error"
+                );
+            }
+        }
     }
 
     #[test]
