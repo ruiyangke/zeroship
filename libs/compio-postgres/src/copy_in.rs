@@ -29,6 +29,20 @@ use std::task::{Context, Poll, ready};
 enum CopyInMessage {
     Message(FrontendMessage),
     Done,
+    /// The COPY never entered copy mode, so end the request writing NOTHING
+    /// further.
+    ///
+    /// `CopyFail` is only legal while the server is in COPY mode. If the
+    /// server refused the `Bind`/`Execute` -- a missing table, a permissions
+    /// failure -- it answered the `Sync` that `query::encode` already appended
+    /// and is back at `ReadyForQuery`. Sending `CopyFail` there earns a second
+    /// `ErrorResponse` ("no COPY in progress") and, after our second `Sync`, a
+    /// second `ReadyForQuery`. Both are unowned: the request that would have
+    /// consumed them has already returned its error. The next request on the
+    /// connection reads them instead of its own reply and fails with
+    /// `UnexpectedMessage`, which in a pool means every later borrower of that
+    /// connection fails too.
+    Abort,
 }
 
 /// Stream of frontend messages fed to the connection task for a `COPY FROM
@@ -59,6 +73,10 @@ impl Stream for CopyInReceiver {
 
         match ready!(self.receiver.poll_next_unpin(cx)) {
             Some(CopyInMessage::Message(message)) => Poll::Ready(Some(message)),
+            Some(CopyInMessage::Abort) => {
+                self.done = true;
+                Poll::Ready(None)
+            }
             Some(CopyInMessage::Done) => {
                 self.done = true;
                 let mut buf = BytesMut::new();
@@ -219,14 +237,35 @@ where
         .await
         .map_err(|_| Error::closed())?;
 
-    match responses.next().await? {
-        Message::BindComplete => {}
-        _ => return Err(Error::unexpected_message()),
+    // Until `CopyInResponse` arrives the server is NOT in copy mode, so every
+    // failure below must leave the request silent rather than let the sender's
+    // drop synthesize a `CopyFail`. See [`CopyInMessage::Abort`].
+    async fn abort(sender: &mut mpsc::Sender<CopyInMessage>) {
+        let _ = sender.send(CopyInMessage::Abort).await;
     }
 
-    match responses.next().await? {
-        Message::CopyInResponse(_) => {}
-        _ => return Err(Error::unexpected_message()),
+    match responses.next().await {
+        Ok(Message::BindComplete) => {}
+        Ok(_) => {
+            abort(&mut sender).await;
+            return Err(Error::unexpected_message());
+        }
+        Err(e) => {
+            abort(&mut sender).await;
+            return Err(e);
+        }
+    }
+
+    match responses.next().await {
+        Ok(Message::CopyInResponse(_)) => {}
+        Ok(_) => {
+            abort(&mut sender).await;
+            return Err(Error::unexpected_message());
+        }
+        Err(e) => {
+            abort(&mut sender).await;
+            return Err(e);
+        }
     }
 
     Ok(CopyInSink {

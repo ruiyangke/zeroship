@@ -891,6 +891,203 @@ async fn transaction_rollback_explicit() {
 }
 
 // ---------------------------------------------------------------------------
+// Savepoint identifiers
+// ---------------------------------------------------------------------------
+
+#[compio::test]
+async fn savepoint_name_with_a_space_is_quoted() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    let mut tx = client.transaction().await.unwrap();
+    let result = match tx.savepoint("my savepoint").await {
+        Ok(savepoint) => savepoint.commit().await,
+        Err(error) => Err(error),
+    };
+    tx.rollback().await.unwrap();
+
+    if let Err(error) = result {
+        panic!(
+            "a legal savepoint identifier containing a space was rejected: {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
+#[compio::test]
+async fn mixed_case_savepoint_keeps_its_exact_name_and_rolls_back_rows() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute("CREATE TABLE cpg_tx_mixed_case (n int)")
+        .await
+        .unwrap();
+
+    let exact_rollback = {
+        let mut tx = client.transaction().await.unwrap();
+        let savepoint = tx.savepoint("MyPoint").await.unwrap();
+        savepoint
+            .execute("INSERT INTO cpg_tx_mixed_case VALUES (1)", &[])
+            .await
+            .unwrap();
+
+        let result = savepoint
+            .batch_execute(r#"ROLLBACK TO SAVEPOINT "MyPoint""#)
+            .await;
+        if result.is_ok() {
+            savepoint.commit().await.unwrap();
+        } else {
+            // Recover the transaction on the unfixed implementation so the
+            // deliberate RED run can still drop its table before asserting.
+            savepoint.rollback().await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        result
+    };
+
+    let rows = client
+        .query("SELECT n FROM cpg_tx_mixed_case", &[])
+        .await
+        .unwrap();
+
+    client
+        .batch_execute("DROP TABLE cpg_tx_mixed_case")
+        .await
+        .unwrap();
+
+    assert!(
+        rows.is_empty(),
+        "ROLLBACK TO the exact mixed-case name kept rows: {rows:?}"
+    );
+    if let Err(error) = exact_rollback {
+        panic!(
+            "the savepoint was not created with its exact mixed-case name: {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
+#[compio::test]
+async fn savepoint_name_with_a_double_quote_is_escaped() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    let mut tx = client.transaction().await.unwrap();
+    let result = match tx.savepoint("quoted\"point").await {
+        Ok(savepoint) => {
+            let result = savepoint
+                .batch_execute(r#"ROLLBACK TO SAVEPOINT "quoted""point""#)
+                .await;
+            if result.is_ok() {
+                savepoint.commit().await.unwrap();
+            } else {
+                savepoint.rollback().await.unwrap();
+            }
+            result
+        }
+        Err(error) => Err(error),
+    };
+    tx.rollback().await.unwrap();
+
+    if let Err(error) = result {
+        panic!(
+            "a legal savepoint identifier containing a double quote was rejected: {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
+#[compio::test]
+async fn semicolon_in_savepoint_name_does_not_split_the_simple_query() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute("CREATE TABLE cpg_tx_semicolon (n int)")
+        .await
+        .unwrap();
+
+    let injected_rows = {
+        let mut tx = client.transaction().await.unwrap();
+        let savepoint = tx
+            .savepoint("point; INSERT INTO cpg_tx_semicolon VALUES (99); --")
+            .await
+            .unwrap();
+        savepoint.rollback().await.unwrap();
+        let count: i64 = tx
+            .query_one("SELECT count(*) FROM cpg_tx_semicolon", &[])
+            .await
+            .unwrap()
+            .get(0);
+        tx.rollback().await.unwrap();
+        count
+    };
+
+    client
+        .batch_execute("DROP TABLE cpg_tx_semicolon")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        injected_rows, 0,
+        "the savepoint name was parsed as extra simple-query statements"
+    );
+}
+
+#[compio::test]
+async fn inner_savepoint_rollback_keeps_outer_work() {
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute("CREATE TABLE cpg_tx_nested (n int)")
+        .await
+        .unwrap();
+
+    {
+        let mut tx = client.transaction().await.unwrap();
+        tx.execute("INSERT INTO cpg_tx_nested VALUES (1)", &[])
+            .await
+            .unwrap();
+        {
+            let mut outer = tx.transaction().await.unwrap();
+            outer
+                .execute("INSERT INTO cpg_tx_nested VALUES (2)", &[])
+                .await
+                .unwrap();
+            {
+                let inner = outer.transaction().await.unwrap();
+                inner
+                    .execute("INSERT INTO cpg_tx_nested VALUES (3)", &[])
+                    .await
+                    .unwrap();
+                inner.rollback().await.unwrap();
+            }
+            outer
+                .execute("INSERT INTO cpg_tx_nested VALUES (4)", &[])
+                .await
+                .unwrap();
+            outer.commit().await.unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+
+    let rows = client
+        .query("SELECT n FROM cpg_tx_nested ORDER BY n", &[])
+        .await
+        .unwrap();
+    let kept: Vec<i32> = rows.iter().map(|row| row.get(0)).collect();
+
+    client
+        .batch_execute("DROP TABLE cpg_tx_nested")
+        .await
+        .unwrap();
+
+    assert_eq!(kept, vec![1, 2, 4]);
+}
+
+// ---------------------------------------------------------------------------
 // Savepoint scope: what a rolled-back nested transaction leaves behind
 // ---------------------------------------------------------------------------
 
@@ -1774,11 +1971,10 @@ async fn copy_in_error_does_not_deadlock() {
     let client = connect(&url).await.unwrap();
 
     client
-        .execute("DROP TABLE IF EXISTS copy_deadlock_test", &[])
-        .await
-        .unwrap();
-    client
-        .execute("CREATE TABLE copy_deadlock_test (id int, n int)", &[])
+        .execute(
+            "CREATE TEMPORARY TABLE cpg_copy_rejected (id int, n int)",
+            &[],
+        )
         .await
         .unwrap();
 
@@ -1799,7 +1995,7 @@ async fn copy_in_error_does_not_deadlock() {
     // deadlock it is meant to probe.
     let copy_fut = async {
         let sink = client
-            .copy_in::<_, Bytes>("COPY copy_deadlock_test (id, n) FROM STDIN")
+            .copy_in::<_, Bytes>("COPY cpg_copy_rejected (id, n) FROM STDIN")
             .await?;
         let mut sink = pin!(sink);
 
@@ -1825,31 +2021,392 @@ async fn copy_in_error_does_not_deadlock() {
              with {rows} rows"
         ),
         Ok(Err(e)) => {
-            // GREEN: the error was surfaced (read concurrently with the
-            // writes) rather than deadlocking. Any server DbError proves the
-            // read raced the write.
-            assert!(
-                e.as_db_error().is_some() || e.code().is_some(),
-                "expected a server DbError from the failed COPY, got: {e}"
+            assert_eq!(
+                e.code(),
+                Some(&SqlState::INVALID_TEXT_REPRESENTATION),
+                "the COPY parse error lost its server SQLSTATE: {}",
+                common::error_chain(&e),
             );
         }
     }
 
-    // The connection must remain usable (not wedged) after the failed copy.
-    // Drop the failed client's borrow and run a fresh query on a NEW client to
-    // confirm the server side recovered and the table is intact/empty.
-    let verify = connect(&url).await.unwrap();
-    let rows = verify
-        .query("SELECT count(*)::int8 AS c FROM copy_deadlock_test", &[])
+    // Recovery is a property of this protocol session, not of the server as a
+    // whole. Reuse the exact connection that PostgreSQL rejected mid-COPY.
+    let rows = client
+        .query("SELECT count(*)::int8 AS c FROM cpg_copy_rejected", &[])
         .await
-        .unwrap();
+        .expect("the rejected COPY poisoned its connection");
     assert_eq!(
         rows[0].get::<_, i64>("c"),
         0,
         "a rejected COPY must leave no rows committed"
     );
-    verify
-        .execute("DROP TABLE copy_deadlock_test", &[])
+    client
+        .execute("DROP TABLE cpg_copy_rejected", &[])
+        .await
+        .unwrap();
+}
+
+/// Dropping an unfinished COPY IN must abort that COPY and resynchronize the
+/// same protocol session before the next request is answered.
+#[compio::test]
+async fn dropped_copy_in_sink_recovers_the_same_connection() {
+    use bytes::Bytes;
+    use futures_util::SinkExt;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    client
+        .execute("CREATE TEMPORARY TABLE cpg_copy_drop_in (n int)", &[])
+        .await
+        .unwrap();
+
+    {
+        let sink = client
+            .copy_in::<_, Bytes>("COPY cpg_copy_drop_in (n) FROM STDIN")
+            .await
+            .unwrap();
+        let mut sink = Box::pin(sink);
+        sink.as_mut()
+            .send(Bytes::from_static(b"1\n2\n"))
+            .await
+            .unwrap();
+        // No finish: CopyInReceiver must turn this drop into CopyFail + Sync.
+    }
+
+    let rows = compio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.query("SELECT count(*)::int8 AS n FROM cpg_copy_drop_in", &[]),
+    )
+    .await
+    .expect("the query after dropping CopyInSink timed out")
+    .expect("dropping CopyInSink poisoned its connection");
+    assert_eq!(rows[0].get::<_, i64>("n"), 0);
+
+    client
+        .execute("DROP TABLE cpg_copy_drop_in", &[])
+        .await
+        .unwrap();
+}
+
+/// A caller may stop consuming COPY OUT before PostgreSQL has sent the body.
+/// The driver must keep draining that response so the following request stays
+/// aligned with its own backend messages.
+#[compio::test]
+async fn dropped_copy_out_stream_recovers_the_same_connection() {
+    use futures_util::StreamExt;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    client
+        .batch_execute(
+            "CREATE TEMPORARY TABLE cpg_copy_drop_out AS
+             SELECT i::int AS n, repeat('x', 1024)::text AS payload
+             FROM generate_series(1, 16384) AS i",
+        )
+        .await
+        .unwrap();
+
+    {
+        let stream = client
+            .copy_out("COPY cpg_copy_drop_out TO STDOUT")
+            .await
+            .unwrap();
+        let mut stream = Box::pin(stream);
+        let first = stream
+            .as_mut()
+            .next()
+            .await
+            .expect("COPY OUT ended before yielding data")
+            .unwrap();
+        assert!(!first.is_empty());
+        // Drop with megabytes still queued on the server.
+    }
+
+    let row = compio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.query_one("SELECT 42::int4", &[]),
+    )
+    .await
+    .expect("the query after dropping CopyOutStream timed out")
+    .expect("dropping CopyOutStream poisoned its connection");
+    assert_eq!(row.get::<_, i32>(0), 42);
+
+    client
+        .execute("DROP TABLE cpg_copy_drop_out", &[])
+        .await
+        .unwrap();
+}
+
+/// PostgreSQL can fail after COPY OUT has already yielded data. The stream
+/// must surface that ErrorResponse with its SQLSTATE and the trailing Sync
+/// must still restore the connection.
+#[compio::test]
+async fn copy_out_error_surfaces_and_recovers_the_same_connection() {
+    use futures_util::StreamExt;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    let stream = client
+        .copy_out(
+            "COPY (
+                SELECT 1000 / (1000 - i)
+                FROM generate_series(1, 2000) AS i
+             ) TO STDOUT",
+        )
+        .await
+        .unwrap();
+    let mut stream = Box::pin(stream);
+    let mut chunks = 0usize;
+    let error = loop {
+        match stream.as_mut().next().await {
+            Some(Ok(chunk)) => {
+                assert!(!chunk.is_empty());
+                chunks += 1;
+            }
+            Some(Err(error)) => break error,
+            None => panic!("COPY OUT ended without reporting division by zero"),
+        }
+    };
+    assert!(chunks > 0, "the COPY failed before exercising its data stream");
+    assert_eq!(error.code(), Some(&SqlState::DIVISION_BY_ZERO));
+    drop(stream);
+
+    let row = client
+        .query_one("SELECT 42::int4", &[])
+        .await
+        .expect("failed COPY OUT poisoned its connection");
+    assert_eq!(row.get::<_, i32>(0), 42);
+}
+
+/// Buffers larger than the coalescing threshold become independent CopyData
+/// messages. Enough of them must cross the connection task without loss,
+/// reordering, or an early CopyDone.
+#[compio::test]
+async fn copy_in_spans_many_copy_data_frames() {
+    use bytes::Bytes;
+    use futures_util::SinkExt;
+
+    const FRAMES: i32 = 64;
+    const ROWS_PER_FRAME: i32 = 2000;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+    client
+        .execute("CREATE TEMPORARY TABLE cpg_copy_many_frames (n int)", &[])
+        .await
+        .unwrap();
+
+    let sink = client
+        .copy_in::<_, Bytes>("COPY cpg_copy_many_frames (n) FROM STDIN")
+        .await
+        .unwrap();
+    let mut sink = Box::pin(sink);
+    for frame in 0..FRAMES {
+        let first = frame * ROWS_PER_FRAME;
+        let mut chunk = String::new();
+        for n in first..first + ROWS_PER_FRAME {
+            use std::fmt::Write;
+            writeln!(chunk, "{n}").unwrap();
+        }
+        assert!(chunk.len() > 4096);
+        sink.as_mut().send(Bytes::from(chunk)).await.unwrap();
+    }
+    assert_eq!(
+        sink.as_mut().finish().await.unwrap(),
+        (FRAMES * ROWS_PER_FRAME) as u64
+    );
+    drop(sink);
+
+    let row = client
+        .query_one(
+            "SELECT count(*)::int8, min(n), max(n) FROM cpg_copy_many_frames",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, i64>(0), (FRAMES * ROWS_PER_FRAME) as i64);
+    assert_eq!(row.get::<_, i32>(1), 0);
+    assert_eq!(row.get::<_, i32>(2), FRAMES * ROWS_PER_FRAME - 1);
+
+    client
+        .execute("DROP TABLE cpg_copy_many_frames", &[])
+        .await
+        .unwrap();
+}
+
+/// Binary COPY must distinguish a non-NULL value with a zero-byte encoding
+/// from NULL in both directions.
+#[compio::test]
+async fn binary_copy_round_trips_empty_and_null_fields() {
+    use compio_postgres::binary_copy::{BinaryCopyInWriter, BinaryCopyOutStream};
+    use compio_postgres::types::Type;
+    use futures_util::StreamExt;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+    client
+        .execute(
+            "CREATE TEMPORARY TABLE cpg_copy_binary_fields (
+                id int,
+                empty text NOT NULL,
+                missing text
+            )",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let sink = client
+        .copy_in("COPY cpg_copy_binary_fields FROM STDIN BINARY")
+        .await
+        .unwrap();
+    let mut writer = Box::pin(BinaryCopyInWriter::new(
+        sink,
+        &[Type::INT4, Type::TEXT, Type::TEXT],
+    ));
+    writer
+        .as_mut()
+        .write(&[&1_i32, &"", &None::<&str>])
+        .await
+        .unwrap();
+    assert_eq!(writer.as_mut().finish().await.unwrap(), 1);
+    drop(writer);
+
+    let sql_row = client
+        .query_one(
+            "SELECT octet_length(empty), missing IS NULL FROM cpg_copy_binary_fields",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(sql_row.get::<_, i32>(0), 0);
+    assert!(sql_row.get::<_, bool>(1));
+
+    let stream = client
+        .copy_out("COPY cpg_copy_binary_fields TO STDOUT BINARY")
+        .await
+        .unwrap();
+    let mut rows = Box::pin(BinaryCopyOutStream::new(
+        stream,
+        &[Type::INT4, Type::TEXT, Type::TEXT],
+    ));
+    let row = rows
+        .as_mut()
+        .next()
+        .await
+        .expect("binary COPY OUT returned no row")
+        .unwrap();
+    assert_eq!(row.get::<i32>(0), 1);
+    assert_eq!(row.get::<&str>(1), "");
+    assert_eq!(row.get::<Option<&str>>(2), None);
+    assert!(rows.as_mut().next().await.is_none());
+    drop(rows);
+
+    client
+        .execute("DROP TABLE cpg_copy_binary_fields", &[])
+        .await
+        .unwrap();
+}
+
+/// A successful COPY is still transactional: ROLLBACK must discard its rows
+/// and leave the same connection ready for later work.
+#[compio::test]
+async fn copy_in_inside_transaction_is_rolled_back() {
+    use bytes::Bytes;
+    use futures_util::SinkExt;
+
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+    client
+        .execute("CREATE TEMPORARY TABLE cpg_copy_transaction (n int)", &[])
+        .await
+        .unwrap();
+
+    {
+        let transaction = client.transaction().await.unwrap();
+        let sink = transaction
+            .copy_in::<_, Bytes>("COPY cpg_copy_transaction (n) FROM STDIN")
+            .await
+            .unwrap();
+        let mut sink = Box::pin(sink);
+        sink.as_mut()
+            .send(Bytes::from_static(b"1\n2\n3\n"))
+            .await
+            .unwrap();
+        assert_eq!(sink.as_mut().finish().await.unwrap(), 3);
+        drop(sink);
+
+        let row = transaction
+            .query_one("SELECT count(*)::int8 FROM cpg_copy_transaction", &[])
+            .await
+            .unwrap();
+        assert_eq!(row.get::<_, i64>(0), 3);
+        transaction.rollback().await.unwrap();
+    }
+
+    let row = client
+        .query_one("SELECT count(*)::int8 FROM cpg_copy_transaction", &[])
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, i64>(0), 0);
+    client
+        .execute("DROP TABLE cpg_copy_transaction", &[])
+        .await
+        .unwrap();
+}
+
+/// A COPY error aborts its transaction, but an explicit ROLLBACK must still
+/// consume the failed COPY's ReadyForQuery and recover the session.
+#[compio::test]
+async fn failed_copy_in_transaction_can_be_rolled_back() {
+    use bytes::Bytes;
+    use futures_util::SinkExt;
+
+    let Some(url) = require_pg().await else { return };
+    let mut client = connect(&url).await.unwrap();
+    client
+        .execute(
+            "CREATE TEMPORARY TABLE cpg_copy_failed_transaction (n int PRIMARY KEY)",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    {
+        let transaction = client.transaction().await.unwrap();
+        let sink = transaction
+            .copy_in::<_, Bytes>("COPY cpg_copy_failed_transaction (n) FROM STDIN")
+            .await
+            .unwrap();
+        let mut sink = Box::pin(sink);
+        sink.as_mut()
+            .send(Bytes::from_static(b"1\n1\n"))
+            .await
+            .unwrap();
+        let error = sink
+            .as_mut()
+            .finish()
+            .await
+            .expect_err("duplicate COPY input unexpectedly succeeded");
+        assert_eq!(error.code(), Some(&SqlState::UNIQUE_VIOLATION));
+        drop(sink);
+        transaction.rollback().await.unwrap();
+    }
+
+    let row = client
+        .query_one(
+            "SELECT count(*)::int8 FROM cpg_copy_failed_transaction",
+            &[],
+        )
+        .await
+        .expect("ROLLBACK did not recover the connection after failed COPY");
+    assert_eq!(row.get::<_, i64>(0), 0);
+    client
+        .execute("DROP TABLE cpg_copy_failed_transaction", &[])
         .await
         .unwrap();
 }
@@ -3432,6 +3989,74 @@ async fn dropping_an_unfinished_transaction_and_the_client_closes_without_an_err
     }
 }
 
+/// Forgetting the guard leaves the server transaction open, so closing the
+/// client itself must make PostgreSQL roll its uncommitted row back.
+#[compio::test]
+async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
+    let Some(url) = require_pg().await else { return };
+
+    let observer = connect(&url).await.unwrap();
+    observer
+        .batch_execute("CREATE TABLE cpg_tx_client_drop (n int)")
+        .await
+        .unwrap();
+
+    let (mut client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let task = compio::runtime::spawn(async move { connection.run().await });
+    let backend_pid: i32 = client
+        .query_one_scalar("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap();
+
+    let transaction = client.transaction().await.unwrap();
+    transaction
+        .execute("INSERT INTO cpg_tx_client_drop VALUES (1)", &[])
+        .await
+        .unwrap();
+
+    // Bypass Transaction::drop on purpose: the server still owns the open
+    // transaction when dropping the last client closes the connection.
+    std::mem::forget(transaction);
+    drop(client);
+    let task_outcome = compio::time::timeout(std::time::Duration::from_secs(5), task).await;
+
+    let row_count: i64 = observer
+        .query_one_scalar("SELECT count(*) FROM cpg_tx_client_drop", &[])
+        .await
+        .unwrap();
+
+    observer
+        .batch_execute("SET lock_timeout = '5s'")
+        .await
+        .unwrap();
+    observer
+        .batch_execute("DROP TABLE cpg_tx_client_drop")
+        .await
+        .unwrap();
+    let session_count: i64 = observer
+        .query_one_scalar(
+            "SELECT count(*) FROM pg_stat_activity WHERE pid = $1",
+            &[&backend_pid],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(row_count, 0, "the disconnected transaction committed its row");
+    assert_eq!(
+        session_count, 0,
+        "the client was dropped but its PostgreSQL session stayed open"
+    );
+
+    let join_result = task_outcome.expect("the connection task did not close within 5 seconds");
+    let outcome = join_result.expect("the connection task panicked");
+    if let Err(error) = outcome {
+        panic!(
+            "closing a client with an open transaction failed run(): {}",
+            common::error_chain(&error)
+        );
+    }
+}
+
 /// Portal close is the same discarded-response housekeeping class as
 /// statement close. Dropping it must not turn client shutdown into an error.
 #[compio::test]
@@ -3899,4 +4524,42 @@ async fn custom_multirange_resolves_its_element_type() {
 
     assert_eq!(recovered, 44);
     assert_eq!(actual, Kind::Multirange(Type::INT4));
+}
+
+/// A COPY the server refuses to START must not poison its connection.
+///
+/// `copy_in` on a missing table is rejected before any CopyInResponse: the
+/// server answers the Bind/Execute with `42P01` and never enters COPY mode.
+/// The driver's failure path still has to leave the session synchronized, or
+/// every later request on that connection reads a message it did not expect.
+///
+/// Asserted on the NEXT query over the SAME client, because that is where the
+/// damage shows; the COPY's own error is correct either way.
+#[compio::test]
+async fn rejected_copy_start_does_not_poison_the_connection() {
+    use bytes::Bytes;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+
+    let err = client
+        .copy_in::<_, Bytes>("COPY cpg_copy_no_such_table (n) FROM STDIN")
+        .await
+        .err()
+        .expect("a COPY into a missing table cannot start");
+    assert_eq!(
+        err.code(),
+        Some(&SqlState::UNDEFINED_TABLE),
+        "expected 42P01 from the refused COPY start: {}",
+        common::error_chain(&err)
+    );
+
+    let row = compio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.query_one("SELECT 1::int4 AS n", &[]),
+    )
+    .await
+    .expect("the connection hung after a refused COPY start")
+    .expect("the refused COPY start poisoned its connection");
+    assert_eq!(row.get::<_, i32>("n"), 1);
 }

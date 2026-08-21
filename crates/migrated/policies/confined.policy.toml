@@ -15,6 +15,11 @@
 # Shape (mirrors the engine test ceiling `ZEROSHIP_CONFINED_CEILING_TOML`): the
 # seven system columns + three system indexes + `["id"]` PK + `author_primary_key =
 # "forbid"`, injected mandatorily into every created table.
+#
+# This is the REFERENCE copy: it is the deployed one, so when another copy of the
+# [[inject]] rule disagrees with it, the other copy is by definition wrong about
+# production. `tests/inject_policy_mirror_gate.sh` diffs the other five against
+# this one and refuses on a sixth appearing.
 
 policy_version = 1
 

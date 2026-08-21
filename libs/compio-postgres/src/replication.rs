@@ -1045,9 +1045,21 @@ fn error_from_error_response_frame(header: &WireHeader, payload: &[u8]) -> Error
 fn error_from_error_response_body(mut body: BytesMut) -> Error {
     match Message::parse(&mut body) {
         Ok(Some(Message::ErrorResponse(b))) => Error::db(b),
+        // UNREACHABLE from both call sites, and the arm stays only because the
+        // match must be exhaustive. `read_header` rejects `length < 4` and
+        // fills the whole body before returning, so each caller hands
+        // `error_from_error_response_frame` a payload whose length equals the
+        // declared one; it rebuilds `[E][length][payload]` exactly. Then
+        // `Message::parse` returns `Ok(None)` only when the buffer is SHORT
+        // and `Err` only when `len < 4`, and its `ERROR_RESPONSE_TAG` arm is
+        // lazy (`read_all`, no field validation), so every payload parses.
+        //
+        // The text used to name START_REPLICATION, which was wrong for the
+        // mid-stream caller (`next_inner`) even if it could fire. Naming no
+        // phase is the honest version: nothing here knows which one it is.
         _ => Error::parse(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "START_REPLICATION: malformed ErrorResponse",
+            "malformed ErrorResponse",
         )),
     }
 }

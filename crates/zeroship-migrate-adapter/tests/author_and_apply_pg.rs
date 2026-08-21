@@ -43,6 +43,12 @@ use zeroship_runtime::{ModuleEntry, Runtime};
 
 /// The confined table-shape ceiling composed into an `EffectivePolicy` (the confined
 /// shape is policy data now; the old `PolicyProfile::confined()` is gone).
+///
+/// The `[[inject]]` rule below is the SHIPPED one, byte for byte, and
+/// `tests/inject_policy_mirror_gate.sh` holds it to that. See the longer note on
+/// the same constant in `smoke_apply_pg.rs`: both fixtures missed
+/// `ddf636140`'s system-column defaults and went on calling themselves the
+/// confined ceiling.
 const CONFINED_CEILING_TOML: &str = r#"policy_version = 1
 
 [[grant]]
@@ -72,11 +78,11 @@ primary_key = ["id"]
 author_primary_key = "forbid"
 columns = [
   { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false },
-  { name = "updated_at", type = "timestamptz", nullable = false },
+  { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()" },
+  { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()" },
   { name = "created_by", type = "text",        nullable = true  },
   { name = "updated_by", type = "text",        nullable = true  },
-  { name = "version",    type = "integer",     nullable = false },
+  { name = "version",    type = "integer",     nullable = false, default = "1" },
   { name = "deleted_at", type = "timestamptz", nullable = true  },
 ]
 indexes = [

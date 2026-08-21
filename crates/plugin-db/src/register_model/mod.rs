@@ -36,11 +36,16 @@
 //!   Consequence worth knowing before editing here:
 //!   [`sqlite_engine::run_sqlite_via_engine`] now has **no production call
 //!   site** - every caller in the tree is a `#[cfg(test)]` test in this file
-//!   (verified by enumerating them, 2026-08-10). Its tests therefore exercise a
-//!   path `registerModel` no longer takes, and a charter or engine failure
-//!   reachable only through it cannot break a running dev server. Whether the
-//!   module should be deleted outright under the repo's no-back-compat stance
-//!   is an open call, not settled here.
+//!   or reaches it through
+//!   [`apply_declared_schema_to_dev_sqlite_for_tests`], the `test-helpers`
+//!   seam the SQLite integration suite uses to stand in for the dev server's
+//!   apply-ahead step (re-enumerated 2026-08-20). A charter or engine failure
+//!   reachable only through it still cannot break a running dev server, whose
+//!   apply goes through the addon's `applyIrSqlite` instead. The proposal that
+//!   drove the cutover lists this module under "Retirement"
+//!   (`docs/proposals/2026-08-09-dev-sqlite-migration-apply-ahead-of-runtime.md`,
+//!   risk 5); deleting it means giving the suite an envelope-replay apply
+//!   first, and that is not settled here.
 //!
 //! So the name is wider than either backend's behaviour: on BOTH backends this
 //! registers metadata and creates nothing. Reading it as "this creates my
@@ -248,16 +253,16 @@ async fn exec_register_model(
     // schema is present first; we deliberately do NOT re-add a runtime
     // auto-migrate fallback.
     //
-    // On the SQLite dialect (dev tier) `registerModel` drives the SAME hardened
-    // zeroship-migrate engine the PG deploy path uses: it routes through
-    // `sqlite_engine::run_sqlite_via_engine` (journal / versioning / drift /
-    // 12-step rebuild / baseline adoption / dev auto-approve), NOT a bespoke
-    // runtime auto-migrate — the retired `run_sqlite_pipeline` is gone. The split
-    // is now only in WHEN the engine runs: PG schema is engine-owned at DEPLOY;
-    // SQLite dev applies at first-`registerModel` (cold path) on the developer's
-    // own local file. `installSchema` stays PG-UNUSED for DDL (PG runtime metadata
-    // comes from introspection) but remains SQLite-CONSUMED right here as the
-    // descriptor source the engine diffs against live state.
+    // On the SQLite dialect (dev tier) the same is true, and THIS COMMENT SAID
+    // THE OPPOSITE until 2026-08-20: that `registerModel` "drives the SAME
+    // hardened zeroship-migrate engine", applying at first-register on the
+    // developer's own local file. That described the pre-cutover arm and
+    // contradicted the arm's own comment twenty lines below. Since d84cbbd84
+    // the dev server applies the committed migrations through the addon's
+    // `applyIrSqlite` before it spawns the runtime, so BOTH dialects reach the
+    // arms below with the schema already in place. `installSchema` is PG-UNUSED
+    // and SQLite-UNUSED for DDL; on both it supplies only the declared metadata
+    // the CRUD passes cache.
     match (backend.as_postgres(), backend.as_sqlite()) {
         // PG: NO runtime DDL — the engine (deploy-apply) is the PG schema
         // authority. This path no-ops the apply; the dispatch caller stamps
@@ -455,6 +460,44 @@ pub async fn exec_register_model_via_dispatch_for_tests(
     // multi-collection drop-suppression path call
     // `run_sqlite_via_engine` directly with an explicit declared set.
     exec_register_model(app_id, collection, schema, indexes, &[]).await
+}
+
+/// Apply a declared collection's schema to the dev SQLite app file AHEAD of the
+/// runtime, standing in for what the dev server does before it spawns the worker.
+///
+/// # Why a test needs this at all
+///
+/// Since the 2026-08-10 cutover (d84cbbd84) `registerModel` creates nothing on
+/// EITHER dialect. A test that boots the runtime and calls `env.db.<coll>` must
+/// therefore get its table the way a real app does - from a migration process
+/// that ran first - or it is asserting against a database no creator has. In dev
+/// that process is `applyMigrationsToDevSqlite`
+/// (`sdks/vite-plugin/src/gen-types/dev-apply.ts`), which replays the committed
+/// `migrations/*.ts` envelopes into `<db_dir>/zs-<app_id>.sqlite` through the
+/// addon's `applyIrSqlite` verb before the runtime process exists.
+///
+/// # What this reproduces, and what it does NOT
+///
+/// It drives the SAME engine, on the SAME two files, under the same confined
+/// inject ceiling, and finishes before the caller boots the runtime - so the
+/// table shape (seven system columns, `["id"]` PK, the three system indexes) and
+/// the ordering are the dev tier's.
+///
+/// It does NOT reproduce the dev server's FRONT END. `applyIrSqlite` replays
+/// authored migration-IR envelopes through `deploy_envelopes`; this plans a
+/// declarative diff of the declared schema against live state. So a defect in
+/// envelope lowering, journal versioning of authored migrations, or the recorder
+/// is invisible here. It is the closest apply-ahead available in-process while
+/// the Rust side has no envelope-replay entry point for SQLite.
+#[cfg(feature = "test-helpers")]
+pub async fn apply_declared_schema_to_dev_sqlite_for_tests(
+    backend: &crate::backend::SqliteBackend,
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+    indexes: &Value,
+) -> Result<(), DbError> {
+    sqlite_engine::run_sqlite_via_engine(backend, app_id, collection, schema, indexes, &[]).await
 }
 
 #[cfg(test)]
