@@ -230,7 +230,7 @@ where
 
     let (mut sender, receiver) = mpsc::channel(1);
     let receiver = CopyInReceiver::new(receiver);
-    let mut responses = client.send(RequestMessages::CopyIn(receiver))?;
+    let mut responses = client.send_statement(RequestMessages::CopyIn(receiver), &statement)?;
 
     sender
         .send(CopyInMessage::Message(FrontendMessage::Raw(buf)))
