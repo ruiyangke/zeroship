@@ -286,8 +286,9 @@ pub(crate) async fn prepare_cached(
         return Ok(statement);
     }
 
+    let type_cache_generation = client.type_cache_generation();
     let statement = prepare(client, query, &[]).await?;
-    Ok(client.cache_statement(query, statement))
+    Ok(client.cache_statement(query, statement, type_cache_generation))
 }
 
 /// Build an error describing a cycle in pg_catalog type resolution.
@@ -336,7 +337,7 @@ pub(crate) async fn get_type(client: &Arc<InnerClient>, oid: Oid) -> Result<Type
 /// Resolve a type OID, threading an `in_flight` set through the recursion
 /// to detect cycles. A cycle can occur when a domain type is defined over
 /// itself, or a composite type transitively references its own row type.
-/// Without this guard, resolution recurses forever because `client.type_`
+/// Without this guard, resolution recurses forever because `client.cached_type`
 /// only returns `Some` after `set_type` fires — so any OID currently
 /// being resolved is invisible to nested callers.
 async fn get_type_inner(
@@ -348,7 +349,8 @@ async fn get_type_inner(
         return Ok(type_);
     }
 
-    if let Some(type_) = client.type_(oid) {
+    let (cached, generation) = client.cached_type(oid);
+    if let Some(type_) = cached {
         return Ok(type_);
     }
 
@@ -360,7 +362,7 @@ async fn get_type_inner(
     // later retry (e.g. after the cycle-bearing type is dropped) can
     // succeed. Run the resolution in a nested async block, then always
     // remove before returning.
-    let result = get_type_body(client, oid, in_flight).await;
+    let result = get_type_body(client, oid, in_flight, generation).await;
     in_flight.remove(&oid);
     result
 }
@@ -372,6 +374,7 @@ async fn get_type_body(
     client: &Arc<InnerClient>,
     oid: Oid,
     in_flight: &mut HashSet<Oid>,
+    generation: u64,
 ) -> Result<Type, Error> {
     let stmt = typeinfo_statement(client).await?;
 
@@ -416,7 +419,7 @@ async fn get_type_body(
     };
 
     let type_ = Type::new(name, oid, kind, schema);
-    client.set_type(oid, &type_);
+    client.set_type(oid, &type_, generation);
 
     Ok(type_)
 }
