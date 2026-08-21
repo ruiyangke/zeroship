@@ -870,9 +870,9 @@ main() {
   # `crates/zeroship-gatekit/tests/generated_secret_scrape.rs` runs this exact
   # extraction and asserts it yields PLATFORM_SECRETS exactly. It cannot go
   # blind without that test going red.
-  GENERATED="$(sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' crates/core/src/config/secrets.rs | sort -u)"
+  GENERATED="$(sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' crates/zeroship-secret-policy/src/lib.rs | sort -u)"
   [ -n "$GENERATED" ] || fail "read ZERO generated-secret names out of \
-crates/core/src/config/secrets.rs; the table moved or the pattern rotted. \
+crates/zeroship-secret-policy/src/lib.rs; the table moved or the pattern rotted. \
 Refusing rather than treating every generated secret as operator-supplied."
 
   MISSING=""

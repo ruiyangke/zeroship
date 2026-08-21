@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 zeroship-core = { workspace = true }
+zeroship-secret-policy = { workspace = true }
 uuid = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-plugin-db = { workspace = true }

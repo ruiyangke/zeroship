@@ -284,17 +284,22 @@ FEATURE_ARGS=(--all-features)
 # Deny-level lints still fail, because they are declared deny.
 CARGO_ARGS=(clippy --workspace --all-targets "${FEATURE_ARGS[@]}")
 
-# MEASURED 2026-08-20 on this workspace, each by running the gate and reading
-# the arm line it printed:
+# MEASURED 2026-08-21 on this workspace, each by running the gate and reading
+# the arm line it printed. The previous reading here was 2026-08-20's; three of
+# the five numbers had drifted since, which is why they are dated and why none
+# of them is a floor - every floor below is either derived or set far under.
 #
-#   workspace members            30   (--audit-only, arm workspace_members)
-#   feature-enabled targets     158   (--audit-only, arm expected_targets)
-#                                     148 under the two-feature list this
-#                                     replaced; the 10 new ones are the targets
-#                                     whose required-features that list did not
-#                                     satisfy, listed in the arm-4 comment below
+#   workspace members            31   (--audit-only, arm workspace_members)
+#                                     30 until crates/zeroship-secret-policy
+#   feature-enabled targets     172   (--audit-only, arm expected_targets)
+#                                     158 at the 2026-08-20 reading; that in
+#                                     turn was 148 under the two-feature list
+#                                     the --all-features switch replaced, the 10
+#                                     new ones being the targets whose
+#                                     required-features that list did not
+#                                     satisfy (arm-4 comment below)
 #   declared features            28   (--audit-only, arm declared_features)
-#   include_str! literals       243   (--preflight-only, arm preflight_include_str)
+#   include_str! literals       246   (--preflight-only, arm preflight_include_str)
 #
 # MIN_MEMBERS is a bound on arm 2's DENOMINATOR, not on arm 2: the arm's floor is
 # the member count itself, so a metadata blob that collapsed would satisfy
@@ -554,15 +559,17 @@ jq -r '
 # THE FLOOR IS DERIVED, so this is a COMPLETENESS assertion - every member the
 # metadata declares must have come through the jq join above with a row. It was
 # the constant 3 until 2026-08-20, chosen because clippy_gate_selftest.sh drives
-# every audit case over a three-package fixture; on this workspace's 30 members
+# every audit case over a three-package fixture; on this workspace's members
 # that passed while ruling on a tenth of them, and it would have kept passing at
-# 4 of 30. `.workspace_members | length` is the same number the join selects
+# 4 of 31. `.workspace_members | length` is the same number the join selects
 # against, so a join that stops matching a future cargo's shape shows up here as
-# 0 of 30 rather than as an empty green.
+# 0 of 31 rather than as an empty green.
 #
-# MEASURED 2026-08-20 via --audit-only: 30 members, and the arm line now reads
-# examined=30 floor=30. The denominator is bounded by MIN_MEMBERS, without which
-# a metadata blob that collapsed would satisfy completeness with nothing in it.
+# MEASURED 2026-08-21 via --audit-only: 31 members, and the arm line now reads
+# examined=31 floor=31 (30/30 until crates/zeroship-secret-policy). The floor
+# being DERIVED is what keeps this line from needing an edit per new crate; the
+# denominator is bounded by MIN_MEMBERS, without which a metadata blob that
+# collapsed would satisfy completeness with nothing in it.
 DECLARED_MEMBERS="$(jq -r '(.workspace_members // []) | length' "$META" 2>/dev/null || true)"
 if ! [ "${DECLARED_MEMBERS:-0}" -ge "$MIN_MEMBERS" ] 2>/dev/null; then
   echo "error: the metadata declares ${DECLARED_MEMBERS:-<unreadable>} workspace member(s)," >&2

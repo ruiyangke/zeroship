@@ -3,7 +3,7 @@
 # THIS FILE IS A SHIM. The gate is Rust:
 #   crates/zeroship-gatekit/src/secret_strength.rs   the gate
 #   crates/zeroship-gatekit/src/compose.rs           the shared compose model
-#   crates/core/src/config/secrets.rs                PLATFORM_SECRETS, the rules
+#   crates/zeroship-secret-policy/src/lib.rs         PLATFORM_SECRETS, the rules
 #
 # It stays a shell entry point only so CI (.github/workflows/ci.yml) and any
 # human who knows this path keep working. Everything it used to do - deriving
@@ -11,7 +11,7 @@
 # binary it execs. Read the Rust for the WHY; the short version is:
 #
 #   The rule set used to be derived by regexing the product's own refusal
-#   MESSAGES out of crates/core/src/config/secrets.rs. 2c56e92a3 (2026-08-13)
+#   MESSAGES out of the secret-policy source. 2c56e92a3 (2026-08-13)
 #   replaced the baked-in variable name in those messages with a `{label}`
 #   format parameter - a correct change - and the regex matched nothing from
 #   that day on. The gate's anti-vacuity guard fired, so it went RED rather

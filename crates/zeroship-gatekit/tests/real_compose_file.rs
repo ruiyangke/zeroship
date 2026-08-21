@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use zeroship_core::config::PLATFORM_SECRETS;
+use zeroship_secret_policy::PLATFORM_SECRETS;
 use zeroship_gatekit::compose::ComposeFile;
 use zeroship_gatekit::report::Verdict;
 use zeroship_gatekit::secret_strength::{enforced_rules, run};

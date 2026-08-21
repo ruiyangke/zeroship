@@ -24,7 +24,7 @@
 /// recognised names it already knew could not see the stale one.
 ///
 /// ONE EXCLUSION, and it is not a dictionary creeping back in.
-/// [`crate::config::SERVICE_CREDENTIAL_SENTINEL`] is env-name SHAPED and is the
+/// [`zeroship_secret_policy::SERVICE_CREDENTIAL_SENTINEL`] is env-name SHAPED and is the
 /// opposite of an env name: it is the placeholder VALUE an operator must
 /// replace, and no binary declares or reads a variable spelled that way. A
 /// refusal that quotes it is telling the operator what it found, not what to
@@ -34,7 +34,7 @@
 pub fn env_like_tokens(text: &str) -> Vec<String> {
     text.split(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
         .filter(|token| token.len() >= 4 && token.contains('_'))
-        .filter(|token| *token != crate::config::SERVICE_CREDENTIAL_SENTINEL)
+        .filter(|token| *token != zeroship_secret_policy::SERVICE_CREDENTIAL_SENTINEL)
         .map(str::to_owned)
         .collect()
 }
@@ -76,7 +76,7 @@ mod tests {
     /// as something the operator should set.
     #[test]
     fn the_placeholder_value_is_not_reported_as_a_settable_name() {
-        use crate::config::SERVICE_CREDENTIAL_SENTINEL;
+        use zeroship_secret_policy::SERVICE_CREDENTIAL_SENTINEL;
 
         // The premise: without the exclusion it WOULD match, so this test is
         // ruling on the exclusion and not on the token shape.
