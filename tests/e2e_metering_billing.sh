@@ -35,13 +35,25 @@
 #
 # On-demand reconcile: POST /internal/billing/reconcile?period=<unix> and POST
 # /internal/spend/reconcile force one sweep each (same /internal/* gate) so the
-# billing + spend stages are deterministic instead of waiting on the cron. Usage
-# aggregation is driven by a SHORT --spend-recompute-interval so the recompute
-# consumes the stream into usage_aggregates within a couple seconds.
+# billing + spend stages are deterministic instead of waiting on the cron.
 #
-# DEDICATED port band + DB/dirs + redpanda container. Cleans up on exit.
-# REFUSES (exit 1) when docker is unavailable - a run that asserted nothing
-# is not a passing run.
+# USAGE AGGREGATION HAS NO SUCH SWITCH, and this block used to claim it did: "a
+# SHORT --spend-recompute-interval [makes] aggregation deterministic (the
+# recompute drains the stream every 2s)". Neither half survives measurement.
+# The flag shortens the SLEEP BETWEEN cycles, not a cycle; each cycle rewinds
+# and re-scans the whole retained stream and ends on 3 consecutive empty polls,
+# so with --spend-recompute-interval 2 the observed cadence on 2026-08-21 was
+# ~12s (control.log, "spend_recompute cycle completed"). And no cadence on THIS
+# side can make aggregation deterministic anyway, because the term that
+# dominates is on the other side: the worker's outbox interval is a compile-time
+# constant with no flag and no flush endpoint, so a drain lands mid-traffic
+# whenever the phase says so. Stage 4 therefore waits on the CONDITION - the
+# aggregates settling - and the long comment there is the measurement.
+#
+# PER-RUN ports + container names + DB/dirs + redpanda container; nothing this
+# harness binds or names is shared with another run, including another run of
+# itself. Cleans up on exit. REFUSES (exit 1) when docker is unavailable - a run
+# that asserted nothing is not a passing run.
 #
 # Usage:
 #   ./tests/e2e_metering_billing.sh
@@ -95,20 +107,40 @@ PROBE_ZSHIP="$ROOT/examples/metering-probe/dist/app.zship"
 JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 [ -f "$JOSE_JS" ] || { echo "missing jose at $JOSE_JS"; exit 2; }
 
-# --- DEDICATED ports + containers (distinct from every other harness) ------
-ZEROSHIP_CONTROL_PORT=9171
-ZEROSHIP_WORKER_PORT=8071
-ZEROSHIP_GATEWAY_PORT=8061
-PG_PORT=5471
-MOCK_PORT=9571
-# zeroship-migrated applies the probe's committed migrations to its per-app
-# schema. Without it env.db has no table and every insert fails -- which is
-# exactly the state this harness shipped in until 2026-08-11, undetected
-# because both env.db guards were unfailable (eda51b973).
-ZEROSHIP_MIGRATED_PORT=9071
-REDPANDA_PORT=19171
-PG_CONTAINER="zs-e2e-billing-pg"
-RP_CONTAINER="zs-e2e-billing-redpanda"
+# --- PER-RUN ports + containers ---------------------------------------------
+# The header used to call these "DEDICATED ... distinct from every other
+# harness", and the second half was not true. :5471 was ALSO this Postgres in
+# tests/e2e_s3_large_stream.sh:114 and tests/e2e_project_config.sh:56 (and
+# tests/e2e_gateway_path_backslash.sh:82 already carried a comment saying so);
+# :8071 was tests/e2e_real_app_end_to_end.sh:52's GATEWAY port. A constant is
+# only "dedicated" against the harnesses that were written after it and looked.
+#
+# It also could not be dedicated against the case that actually happens on a
+# shared box: TWO RUNS OF THIS FILE. Both would name `zs-e2e-billing-pg`, and
+# stage 1 opens with `docker rm -f` on it - the container-shaped twin of
+# `DROP DATABASE ... WITH (FORCE)`, with the same effect on a peer fifteen
+# minutes into its own run.
+#
+# So ports come from tests/lib/e2e_ports.sh (claimed, verified free, printed,
+# released on exit) and the container names carry the same per-run token.
+# tests/lib/scratch_db.sh is deliberately NOT used: it names a database on a
+# SHARED server, and this harness's Postgres is its own container, so the
+# container name is the thing that was shared, not the database inside it.
+# shellcheck source=tests/lib/e2e_ports.sh
+source "$ROOT/tests/lib/e2e_ports.sh"
+# ZEROSHIP_MIGRATED_PORT is in this list because zeroship-migrated applies the
+# probe's committed migrations to its per-app schema. Without it env.db has no
+# table and every insert fails -- which is exactly the state this harness
+# shipped in until 2026-08-11, undetected because both env.db guards were
+# unfailable (eda51b973).
+zs_ports_reserve ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT \
+                 ZEROSHIP_MIGRATED_PORT PG_PORT MOCK_PORT REDPANDA_PORT || exit 1
+# pid + nanoseconds, the same token shape tests/lib/scratch_db.sh uses: pid is
+# unique among live processes and the clock separates a reused pid from the run
+# that held it before.
+RUN_TOKEN="$$_$(date +%s%N)"
+PG_CONTAINER="zs-e2e-billing-pg-$RUN_TOKEN"
+RP_CONTAINER="zs-e2e-billing-redpanda-$RUN_TOKEN"
 ZEROSHIP_WORKER_THREADS=2
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
@@ -170,20 +202,29 @@ cleanup() {
     [ -n "${WORK:-}" ] && rm -rf "$WORK"
     echo "  stack down, ephemeral PG + redpanda removed, $WORK cleaned"
   fi
+  # Only this run's claims; never another run's. Last, and it returns 0, so a
+  # trap cannot rewrite the run's exit status.
+  zs_ports_release
+  return 0
 }
 trap cleanup EXIT
 
-# Free the ports (a prior aborted run may have left a listener).
-for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT $MOCK_PORT; do
-  lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
-done
+# NO `lsof -ti :$PORT | xargs kill -9` HERE ANY MORE. It was there to reclaim a
+# CONSTANT from this harness's own leaked previous run, and it cannot tell that
+# corpse from a peer agent's live server on the same number - which, given
+# :8071 was tests/e2e_real_app_end_to_end.sh's gateway, was a real reach. An
+# allocated port was verified free at the moment it was claimed and is held for
+# the life of the run, so there is nothing to reclaim.
 
 # ===========================================================================
 echo ""
 echo "=== Stage 1: ephemeral Postgres + platform migrations + plan seed + mock-Stripe + stack ==="
 # ===========================================================================
 
-docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+# NO pre-run `docker rm -f` on these two names any more, here or below. The name
+# carries a per-run token, so nothing can already hold it and the only container
+# the removal could ever have reached is a PEER RUN's. The cleanup trap still
+# removes both - it owns the names it created.
 docker run --name "$PG_CONTAINER" -d -p "$PG_PORT:5432" \
   -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
   postgres:16 -c max_connections=300 >/dev/null || { fail "docker run postgres failed"; exit 1; }
@@ -229,7 +270,6 @@ fi
 
 # Redpanda — the durable usage-event stream. Needs an explicit advertised
 # listener so the worker producer + control consumers reach it at $RP_BROKERS.
-docker rm -f "$RP_CONTAINER" >/dev/null 2>&1 || true
 docker run --name "$RP_CONTAINER" -d -p "$REDPANDA_PORT:$REDPANDA_PORT" \
   docker.redpanda.com/redpandadata/redpanda:latest \
   redpanda start --overprovisioned --smp 1 --memory 512M --reserve-memory 0M \
@@ -330,9 +370,12 @@ pass "wrote shared config overlay $CFG_TOML ([metering] stream config, not env)"
 # usage stream. `lite` is evaluation-grade (production_ready()=false) so it is
 # boot-gated behind --allow-unsupported-billing. The forwarder + recompute
 # consumers get distinct group ids from the base --stream-config (control injects
-# group.id per role). A SHORT --spend-recompute-interval makes usage aggregation
-# deterministic (the recompute drains the stream every 2s). lite is recompute-fed
-# so no forwarder is spawned for it (Meter::accepts_forwarded_events=false).
+# group.id per role). --spend-recompute-interval 2 shortens the sleep BETWEEN
+# recompute cycles; it does not make aggregation deterministic and the observed
+# cadence is ~12s, because a cycle rewinds and re-scans the whole stream (see
+# the file header and stage 4). It is here to keep the wait short, not to remove
+# it. lite is recompute-fed so no forwarder is spawned for it
+# (Meter::accepts_forwarded_events=false).
 ZEROSHIP_GATEWAY_SIGNING_KEY_FILE="$WORK/signing-key.pem"
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
 # The issuer control verifies the admin bearer against, on the same key the
@@ -340,6 +383,24 @@ ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gateway-broker-secret"
 e2e_platform_op_up "$WORK/signing-key.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
+# CONTROL_USAGE_OUTBOX_WAL_PATH, per run, for the same reason the worker and the
+# gateway below get `--metering-outbox-wal-path`: redb is single-writer. control
+# is a usage PRODUCER too and its WAL had no per-run path, so it fell back to
+# `DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH` (crates/control/src/lib.rs) - the
+# CWD-relative `.zeroship/usage-outbox-zeroship-control.redb`, i.e. one file in
+# the repo working tree shared by every run started from the checkout.
+#
+# MEASURED 2026-08-21, two runs of this harness started 3s apart AFTER the ports
+# and container names were made per-run: the first was green 41/41 and the
+# second died at "control unhealthy" with
+#   control: refusing to start - control usage outbox unavailable
+#   open usage outbox WAL '.zeroship/usage-outbox-zeroship-control.redb':
+#   Database already open. Cannot acquire lock.
+# Per-run ports do not reach this: it is not a socket, it is a path, and it is
+# the LAST shared thing between two runs of this file. Note it is an env prefix
+# on this child and not a flag because control exposes no flag for it - the
+# worker and gateway do, which is an asymmetry worth closing in the product.
+CONTROL_USAGE_OUTBOX_WAL_PATH="$WORK/control-outbox.redb" \
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_e2e_billing" \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --config "$CFG_TOML" \
@@ -509,28 +570,130 @@ echo ""
 echo "=== Stage 4: metering → aggregation (worker → redpanda → recompute → usage_aggregates) ==="
 # ===========================================================================
 # The worker outbox drains the Meter + publishes UsageEvents to redpanda every
-# ~10s; control's spend_recompute consumer drains the stream into
-# usage_aggregates every ~2s (--spend-recompute-interval). Poll the creator usage
-# endpoint until the aggregates appear (bounded wait), then assert the platform
-# counters AND the custom metric — proving the whole stream path, not a POST.
-# The probe drives one env.db write + read per request, so the platform
-# emits `db_writes`/`db_reads` (≥ N_REQ) alongside the five platform counters.
+# ~10s; control's spend_recompute consumer replays the stream into
+# usage_aggregates each cycle. Poll the creator usage endpoint until the
+# aggregates SETTLE (bounded wait), then assert the platform counters AND the
+# custom metric - proving the whole stream path, not a POST. The probe drives
+# one env.db write + read per request, so the platform emits
+# `db_writes`/`db_reads` (>= N_REQ) alongside the five platform counters.
+#
+# WHAT THIS LOOP IS BOUND TO, AND WHAT IT USED TO BE BOUND TO.
+#
+# It used to break on `requests != 0` and then assert `requests >= N_REQ`. Those
+# are different events. `!= 0` is "SOME drain has been aggregated"; the
+# assertions need "the LAST drain has been aggregated". The gap between them is
+# where this harness's flakiness lived, and it is not a tolerance to widen:
+#
+#   * The worker's outbox interval is the CONSTANT
+#     `DEFAULT_OUTBOX_INTERVAL` (10s, crates/metering/src/outbox.rs). There is
+#     no flag, no flush endpoint and no signal - checked 2026-08-21 across
+#     crates/worker/src/config.rs (four --metering-* flags, none an interval)
+#     and the worker's HTTP surface. So a tick that lands mid-traffic is not
+#     something the harness can prevent; it can only decline to read while one
+#     is still outstanding.
+#   * `Meter::drain` is snapshot-AND-ZERO (crates/metering/src/meter.rs,
+#     `swap(0, ...)`), so that tick publishes the counters accumulated so far
+#     and the rest arrives in a LATER event with a different event_id.
+#   * control's recompute rewinds and re-scans the WHOLE retained stream every
+#     cycle and OVERWRITES the period
+#     (crates/control/src/cron/spend_recompute.rs ->
+#     Metering::replace_period_snapshot, which DELETEs the period first). So
+#     /api/apps/:id/usage climbs from a partial toward the full count as later
+#     drains land - and can also fall, because a mid-scan fetch stall reads as
+#     end-of-stream and the period is rewritten from the truncated read.
+#
+# MEASURED 2026-08-21 on this tree, and the load dependence is the point.
+#
+# QUIET BOX: six back-to-back runs at HEAD were green at loadavg 19.4 down to
+# 1.8, every one reading the full {"requests":108,"db_writes":107,...}. The
+# traffic loop started 0.4s AFTER an outbox tick and finished before the next
+# one, so a single drain carried everything. That 0.4s is the entire safety of
+# the old loop, and it is a property of how long stages 1+2 take, not of
+# anything asserted here.
+#
+# LOADED BOX: 24 busy loops held loadavg at 20-45, unmodified HEAD, four runs.
+# THREE WENT RED, reading partial snapshots of requests=39, 39 and 64:
+#   x requests not aggregated (got '39', want >= 100)
+#   x 'db_writes' got '38' (want >= 100) -- the env.db primitive did NOT feed
+#     the meter, so nothing here proves platform-measured billing
+# The same four with this loop: green, at loadavg 44-59 - HIGHER than the loads
+# that broke HEAD. Shifting only the phase, by inserting `sleep 11` between the
+# warmup and the counted loop and touching nothing else, reproduces it on a
+# quiet box 3 times out of 3 (requests=8, the readiness + warmup requests only).
+#
+# Note the SECOND failure line especially: when this fires it does not just go
+# red, it reports a billing-correctness defect that is not there. The primitive
+# fed the meter; the harness read while a drain was still in flight. A wrong
+# accusation against the billing signal is worse than a red.
+#
+# AND NOTE WHAT WOULD NOT HAVE FIXED IT: a longer sleep, or more rounds. The old
+# loop did not time out - it BROKE EARLY, on a partial, and then asserted. More
+# time after an early break buys nothing.
+#
+# So the condition is the CONJUNCTION THE ASSERTIONS BELOW NEED, plus STABILITY:
+# two consecutive identical readings. `>= N_REQ` alone is not enough, because a
+# later drain still raises the total, and stage 5 sizes its Degrade band from
+# $REQS - a mid-absorption read there puts the band in the wrong place. Same
+# shape as tests/e2e_multi_metric_billing.sh, which has polled this way since
+# it was written.
 PRIMARY_METRIC="db_writes"
+# 45 rounds x 2s. The settle needs one outbox interval (<=10s) for the final
+# drain, one recompute cycle to absorb it, and one more round to observe the
+# repeat - about 25s on the measurements above. The rest is headroom for a
+# loaded box; it is a CEILING, not a wait, so a fast run leaves it in ~4s.
+USAGE_POLL_ROUNDS=45
+USAGE_POLL_SECS=$((USAGE_POLL_ROUNDS * 2))
 USAGE_JSON=""
-for _ in $(seq 1 20); do
+REQS=""; DBW=""; WALL=""; EGRESS=""; INGRESS=""
+PREV_REQS="none"; PREV_DBW="none"; SETTLED=0
+for _ in $(seq 1 $USAGE_POLL_ROUNDS); do
   USAGE_JSON="$(curl -s "$CONTROL_URL/api/apps/$APP/usage" -H "Authorization: Bearer $ADMIN_TOKEN")"
   REQS="$(echo "$USAGE_JSON" | jget '.requests')"
-  if [ -n "$REQS" ] && [ "$REQS" != "0" ]; then break; fi
+  DBW="$(echo "$USAGE_JSON" | jget ".$PRIMARY_METRIC")"
+  WALL="$(echo "$USAGE_JSON" | jget '.wall_us')"
+  EGRESS="$(echo "$USAGE_JSON" | jget '.egress_bytes')"
+  INGRESS="$(echo "$USAGE_JSON" | jget '.ingress_bytes')"
+  # One group, one 2>/dev/null: before the first snapshot lands the endpoint
+  # returns `{}` and every one of these is the empty string, which `[ -ge ]`
+  # reports as a usage ERROR (status 2), not as false. The group swallows the
+  # message and `if` reads the non-zero status as "not settled yet".
+  if { [ "$REQS" -ge "$N_REQ" ] && [ "$DBW" -ge "$N_REQ" ] \
+       && [ "$WALL" -gt 0 ] && [ "$EGRESS" -gt 0 ] && [ "$INGRESS" -gt 0 ] \
+       && [ "$REQS" = "$PREV_REQS" ] && [ "$DBW" = "$PREV_DBW" ]; } 2>/dev/null; then
+    SETTLED=1
+    break
+  fi
+  PREV_REQS="$REQS"; PREV_DBW="$DBW"
   sleep 2
 done
 echo "    usage_aggregates (current period): $USAGE_JSON"
+# REFUSE OUT LOUD, naming what did not arrive. The assertions below still run
+# and are still the verdict - this block adds no pass/fail of its own, so the
+# assertion floor at the bottom of this file is unchanged - but without it a
+# timeout is indistinguishable from a product defect, which is exactly how the
+# db_writes line above was misread.
+if [ "$SETTLED" != "1" ]; then
+  echo "  x usage never SETTLED within ${USAGE_POLL_SECS}s of the traffic loop." >&2
+  echo "    Settled means: requests >= $N_REQ, $PRIMARY_METRIC >= $N_REQ, wall_us/egress_bytes/ingress_bytes > 0," >&2
+  echo "    AND two consecutive reads agreeing (so no outbox drain is still in flight)." >&2
+  echo "    Last read: $USAGE_JSON" >&2
+  echo "    Still missing at the ceiling:" >&2
+  [ "$REQS"    -ge "$N_REQ" ] 2>/dev/null || echo "      requests = '$REQS' (want >= $N_REQ)" >&2
+  [ "$DBW"     -ge "$N_REQ" ] 2>/dev/null || echo "      $PRIMARY_METRIC = '$DBW' (want >= $N_REQ)" >&2
+  [ "$WALL"    -gt 0 ]        2>/dev/null || echo "      wall_us = '$WALL' (want > 0)" >&2
+  [ "$EGRESS"  -gt 0 ]        2>/dev/null || echo "      egress_bytes = '$EGRESS' (want > 0)" >&2
+  [ "$INGRESS" -gt 0 ]        2>/dev/null || echo "      ingress_bytes = '$INGRESS' (want > 0)" >&2
+  { [ "$REQS" = "$PREV_REQS" ] && [ "$DBW" = "$PREV_DBW" ]; } 2>/dev/null \
+    || echo "      still moving: requests $PREV_REQS -> $REQS, $PRIMARY_METRIC $PREV_DBW -> $DBW" >&2
+  echo "    control's recompute cycles are in $WORK/control.log ('spend_recompute cycle completed')." >&2
+fi
 
-REQS="$(echo "$USAGE_JSON" | jget '.requests')"
-WALL="$(echo "$USAGE_JSON" | jget '.wall_us')"
-EGRESS="$(echo "$USAGE_JSON" | jget '.egress_bytes')"
-INGRESS="$(echo "$USAGE_JSON" | jget '.ingress_bytes')"
+# REQS/DBW/WALL/EGRESS/INGRESS are already the last read the loop above took;
+# the assertions rule on exactly the values the settle was judged on rather than
+# on a fresh fetch, which could differ. cpu_us is not part of the settle
+# condition (its assertion is `>= 0`, which cannot distinguish a partial from a
+# whole snapshot), so it is read here.
 CPU="$(echo "$USAGE_JSON" | jget '.cpu_us')"
-DBW="$(echo "$USAGE_JSON" | jget ".$PRIMARY_METRIC")"
 
 [ -n "$REQS" ]   && [ "$REQS"   -ge "$N_REQ" ] 2>/dev/null && pass "requests aggregated ($REQS ≥ $N_REQ) for the current period" || fail "requests not aggregated (got '$REQS', want ≥ $N_REQ)"
 [ -n "$WALL" ]   && [ "$WALL"   -gt 0 ]       2>/dev/null && pass "wall_us present and non-zero ($WALL)"        || fail "wall_us missing/zero (got '$WALL')"
@@ -785,13 +948,24 @@ echo "============================================"
 # columns without removing it; only a lost assertion drops the sum. Same
 # invariant as the five dev-vs-deployed harnesses (b41665ea8 and after).
 #
-# NO HEADROOM: 39 is the count this file reaches, fixed by the source, not
+# NO HEADROOM: this is the count this file reaches, fixed by the source, not
 # discovered at run time. Adding an assertion passes untouched; removing one
 # costs a deliberate edit here.
 #
+# IT HAD DRIFTED TO TWO OF HEADROOM, which is a floor that would not have
+# noticed two assertions vanishing - the failure it exists to catch. It said 39
+# and claimed "NO HEADROOM"; assertions landed after df80aee96 hard-coded that
+# number, and nothing re-ran it. MEASURED 2026-08-21, nine runs of this file:
+# six green ones reported "41 passed, 0 failed" and three deliberately-red ones
+# "38 passed, 2 failed, 1 known-fail" = 40 ran. 40 is the floor, not 41: the
+# Degrade staging near the end of stage 5 resolves to `known` rather than
+# pass/fail when the band is not reachable, and `known` counts in neither
+# column. That is the ONLY branch here that can move the total, so any other
+# drop of even one is a lost assertion.
+#
 # WHAT IT DOES NOT CATCH: substitution. Swapping one assertion for an easier
-# one keeps the total at 39. Nothing here can see that; review can.
-BILLING_MIN_RAN=39
+# one keeps the total where it is. Nothing here can see that; review can.
+BILLING_MIN_RAN=40
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
