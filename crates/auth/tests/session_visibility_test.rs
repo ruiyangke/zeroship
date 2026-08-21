@@ -336,8 +336,10 @@ async fn revoke_one_idp_session_succeeds() {
 
     let revoked = sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
         .await
-        .expect("revoke_one_for_user");
-    assert!(revoked, "revoking the user's own idp session returns true");
+        .expect("revoke_one_for_user")
+        .expect("revoking the user's own idp session reports what it ended");
+    assert_eq!(revoked.kind, SessionKind::Idp);
+    assert!(revoked.app_id.is_none(), "an idp session has no app_id");
 
     let list = sessions::list_by_user(&client, user.id)
         .await
@@ -350,7 +352,19 @@ async fn revoke_one_idp_session_succeeds() {
     cleanup(&client, &email).await;
 }
 
-/// revoke_one_for_user revokes the targeted gateway session and returns true.
+/// revoke_one_for_user clears the targeted gateway session's audit row AND
+/// reports the `(app_id, sid)` its caller needs to reach the party that
+/// actually enforces the revocation.
+///
+/// WHAT THIS DOES NOT CATCH, stated because this test asserted only the first
+/// half for months and that is how the defect it now guards survived: nothing
+/// here exercises a request. Delete this row and the gateway's signed cookie
+/// stays valid to its `exp` and its anchor keeps re-signing new ones, because
+/// the request path never reads `gateway_sessions`. The security property,
+/// that a revoked session's request is REJECTED, is asserted end to end by
+/// `app_session_revoke_at_the_op_ends_the_gateway_session` in
+/// `crates/gateway/tests/oidc_rp_e2e.rs`, which runs both services. All this
+/// file can rule on is that the caller is handed what it needs to get there.
 #[compio::test]
 async fn revoke_one_gateway_session_succeeds() {
     let Some(client) = pg().await else {
@@ -366,8 +380,14 @@ async fn revoke_one_gateway_session_succeeds() {
 
     let revoked = sessions::revoke_one_for_user(&client, user.id, gw_id, SessionKind::App)
         .await
-        .expect("revoke_one_for_user gateway");
-    assert!(revoked, "revoking the user's own gateway session returns true");
+        .expect("revoke_one_for_user gateway")
+        .expect("revoking the user's own gateway session reports what it ended");
+    assert_eq!(revoked.kind, SessionKind::App);
+    assert_eq!(
+        revoked.app_id,
+        Some(app_id),
+        "the app arm must report which app to send the back-channel logout to"
+    );
 
     let list = sessions::list_by_user(&client, user.id)
         .await
@@ -428,11 +448,11 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
         .expect("idor gateway attempt");
 
     assert!(
-        !idp_attempt,
+        idp_attempt.is_none(),
         "IDOR: user_a must NOT be able to revoke user_b's idp session"
     );
     assert!(
-        !gw_attempt,
+        gw_attempt.is_none(),
         "IDOR: user_a must NOT be able to revoke user_b's gateway session"
     );
 
@@ -480,26 +500,30 @@ async fn revoke_already_revoked_or_missing_is_noop() {
     // First revoke succeeds.
     assert!(sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
         .await
-        .expect("first revoke"));
+        .expect("first revoke")
+        .is_some());
     // Second revoke of the same (already-revoked) id is a no-op.
     assert!(
-        !sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
+        sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
             .await
-            .expect("second revoke"),
-        "re-revoking an already-revoked session returns false"
+            .expect("second revoke")
+            .is_none(),
+        "re-revoking an already-revoked session reports nothing ended"
     );
     // A totally unknown id is a no-op.
     assert!(
-        !sessions::revoke_one_for_user(&client, user.id, Uuid::new_v4(), SessionKind::Idp)
+        sessions::revoke_one_for_user(&client, user.id, Uuid::new_v4(), SessionKind::Idp)
             .await
-            .expect("missing revoke"),
-        "revoking a nonexistent id returns false"
+            .expect("missing revoke")
+            .is_none(),
+        "revoking a nonexistent id reports nothing ended"
     );
     assert!(
-        !sessions::revoke_one_for_user(&client, user.id, Uuid::new_v4(), SessionKind::App)
+        sessions::revoke_one_for_user(&client, user.id, Uuid::new_v4(), SessionKind::App)
             .await
-            .expect("missing gateway revoke"),
-        "revoking a nonexistent gateway id returns false"
+            .expect("missing gateway revoke")
+            .is_none(),
+        "revoking a nonexistent gateway id reports nothing ended"
     );
 
     cleanup(&client, &email).await;

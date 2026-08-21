@@ -83,6 +83,8 @@ These are also served by `crates/auth` on the auth host.
 | POST | `/verify/redeem` | Consume an email-verification token |
 | GET, POST | `/forgot`, `/reset` | Password reset issue and redeem |
 | GET | `/me` | Signed-in profile page |
+| GET | `/me/sessions` | List the caller's active IdP and per-app sessions |
+| POST | `/me/sessions/{id}/revoke` | Revoke one of the caller's own sessions |
 | POST | `/me/unlink/{provider}` | Unlink a federated identity |
 | POST | `/me/2fa/enroll`, `/me/2fa/confirm`, `/me/2fa/disable` | TOTP self-service |
 | POST | `/webhooks/postmark`, `/webhooks/ses-sns`, `/webhooks/relay-inbound` | Mailer and relay webhooks |
@@ -133,6 +135,22 @@ assertion, not an opaque session id, so its lifetime is the token's own 15-minut
 `exp`. The durable credential is the 30-day server-held
 `__Host-zeroship_app_anchor`, which silently re-signs a fresh session cookie via
 `GET /__zeroship/auth/session` once the short one lapses.
+
+**Ending an app session is therefore not a delete.** The gateway authenticates a
+request from that signed cookie plus the `(client_id, sub)` marker in
+`zeroship.token_revocations`; it does not read `zeroship.gateway_sessions`, which
+is the audit and visibility record. So every surface that ends an app session
+must write the family marker and tear down the anchor. The gateway's own
+`POST /__zeroship/auth/signout` does both directly. The OP cannot (the anchor is
+the gateway's row), so `POST /me/sessions/{id}/revoke` with `kind=app` emits a
+back-channel logout to that app's client and the gateway's BCL receiver runs the
+same teardown. Deleting the audit row alone leaves the cookie valid to its `exp`
+and the anchor re-minting for the next 30 days.
+
+That teardown is keyed on `(client_id, sub)`, which has no per-device dimension,
+so revoking one of a user's sessions at an app ends every session that user
+holds at that app. The logout token names the subject and no `sid` for the same
+reason: the OP session has not ended, only the app session.
 
 The app-origin stash cookies carry HMAC-signed PKCE verifier, state, nonce, and
 return path. They are cleared on successful callback. The federation stash names
