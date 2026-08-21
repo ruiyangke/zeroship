@@ -416,6 +416,14 @@ cargo test -p compio-postgres -- --test-threads=1   # needs DB
 # gate audits cargo's own json stream against `cargo metadata` and names any
 # package or target that went unlinted. CI runs this same script.
 #
+# It lints under `--all-features`, and a fourth arm checks that every feature
+# the manifests declare really came out enabled. That arm exists because the
+# first three audit ONE feature resolution: a target whose `required-features`
+# are unmet is not counted as unlinted, it is filtered out of the expectation,
+# so the gate reported 148 of 148 on a workspace declaring 158. The 10 missing
+# ones included zeroship-migrate-adapter's `platform_migrate`, which held eleven
+# standing deny-level `clippy::await_holding_lock` errors the whole time.
+#
 # It needs `pnpm build` and setup-wpt.sh to have run (crates/runtime
 # `include_str!`s their output); it refuses, naming them, rather than linting a
 # smaller workspace.

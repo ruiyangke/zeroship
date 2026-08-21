@@ -90,14 +90,14 @@ async fn setup(pool: &Pool) {
 async fn exec_query(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -> Vec<Value> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
-    rows.iter().map(|r| row_to_json(r)).collect()
+    rows.iter().map(row_to_json).collect()
 }
 
 /// Helper: build + execute a mutation, return parsed JSON array.
 async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -> Vec<Value> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
-    rows.iter().map(|r| row_to_json(r)).collect()
+    rows.iter().map(row_to_json).collect()
 }
 
 /// Stamp a unique text `id` onto a seed insert document. The platform `id`
@@ -2411,7 +2411,7 @@ async fn pg_has_logical_wal(pool: &Pool) -> bool {
 /// distinct name and only dropped its OWN slot at the start, so over a
 /// long suite run `max_replication_slots` (default 10) would exhaust.
 /// We now drop the app-specific resources AND sweep every `__zs_*` slot
-/// + publication left over from prior tests in the same suite. Integration
+/// and publication left over from prior tests in the same suite. Integration
 /// tests run with `--test-threads=1` so the global sweep is safe.
 async fn c1_cleanup(pool: &Pool, app: &str) {
     let pub_name = zeroship_plugin_db::replication::publication_name(app).unwrap();
@@ -3045,7 +3045,7 @@ async fn b8c_bootstrap_is_idempotent_and_creates_objects() {
     let rows = pool
         .query_text_params(
             "SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = $1",
-            &[&"__zeroship_admin"],
+            &["__zeroship_admin"],
         )
         .await
         .unwrap();
@@ -3196,7 +3196,7 @@ async fn b8c_per_app_role_can_init_session_via_function() {
     // superuser bypasses ACL checks, so this works.
     let client = pool.get().await.unwrap();
     let token = zeroship_plugin_db::auth::mint_session_token(
-        &*client,
+        &client,
         zeroship_plugin_db::auth::SessionInit {
             app_id: "b8c_init_app".into(),
             actor_kind: "platform".into(),
@@ -3206,7 +3206,7 @@ async fn b8c_per_app_role_can_init_session_via_function() {
     )
     .await
     .unwrap();
-    zeroship_plugin_db::auth::init_session(&*client, &token)
+    zeroship_plugin_db::auth::init_session(&client, &token)
         .await
         .unwrap();
 
@@ -3236,7 +3236,7 @@ async fn b8c_init_session_rejects_expired_token() {
     let client = pool.get().await.unwrap();
     // TTL = -1 means expires_at is in the past.
     let res = zeroship_plugin_db::auth::mint_session_token(
-        &*client,
+        &client,
         zeroship_plugin_db::auth::SessionInit {
             app_id: "b8c_expired_app".into(),
             actor_kind: "platform".into(),
@@ -3246,7 +3246,7 @@ async fn b8c_init_session_rejects_expired_token() {
     )
     .await
     .unwrap();
-    let result = zeroship_plugin_db::auth::init_session(&*client, &res).await;
+    let result = zeroship_plugin_db::auth::init_session(&client, &res).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     let body = err.to_string();
@@ -3277,7 +3277,7 @@ async fn b8c_init_session_rejects_replay_nonce() {
 
     let client = pool.get().await.unwrap();
     let token = zeroship_plugin_db::auth::mint_session_token(
-        &*client,
+        &client,
         zeroship_plugin_db::auth::SessionInit {
             app_id: "b8c_replay_app".into(),
             actor_kind: "platform".into(),
@@ -3288,11 +3288,11 @@ async fn b8c_init_session_rejects_replay_nonce() {
     .await
     .unwrap();
     // First init succeeds.
-    zeroship_plugin_db::auth::init_session(&*client, &token)
+    zeroship_plugin_db::auth::init_session(&client, &token)
         .await
         .unwrap();
     // Second init with the SAME nonce must fail.
-    let result = zeroship_plugin_db::auth::init_session(&*client, &token).await;
+    let result = zeroship_plugin_db::auth::init_session(&client, &token).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     let body = err.to_string();
@@ -3322,7 +3322,7 @@ async fn b8c_init_session_rejects_tampered_signature() {
 
     let client = pool.get().await.unwrap();
     let mut token = zeroship_plugin_db::auth::mint_session_token(
-        &*client,
+        &client,
         zeroship_plugin_db::auth::SessionInit {
             app_id: "b8c_tamper_app".into(),
             actor_kind: "platform".into(),
@@ -3334,7 +3334,7 @@ async fn b8c_init_session_rejects_tampered_signature() {
     .unwrap();
     // Flip a byte in the signature.
     token.signature[0] ^= 0xFF;
-    let result = zeroship_plugin_db::auth::init_session(&*client, &token).await;
+    let result = zeroship_plugin_db::auth::init_session(&client, &token).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     let body = err.to_string();
@@ -3371,7 +3371,7 @@ async fn b8c_key_rotation_grace_window_accepts_both() {
 
     let client_a = pool.get().await.unwrap();
     let token_under_previous = zeroship_plugin_db::auth::mint_session_token(
-        &*client_a,
+        &client_a,
         zeroship_plugin_db::auth::SessionInit {
             app_id: "b8c_rot_app".into(),
             actor_kind: "platform".into(),
@@ -3400,7 +3400,7 @@ async fn b8c_key_rotation_grace_window_accepts_both() {
     // direction.
     let client_b = pool.get().await.unwrap();
     let token_under_current = zeroship_plugin_db::auth::mint_session_token(
-        &*client_b,
+        &client_b,
         zeroship_plugin_db::auth::SessionInit {
             app_id: "b8c_rot_app".into(),
             actor_kind: "platform".into(),
@@ -3410,7 +3410,7 @@ async fn b8c_key_rotation_grace_window_accepts_both() {
     )
     .await
     .unwrap();
-    zeroship_plugin_db::auth::init_session(&*client_b, &token_under_current)
+    zeroship_plugin_db::auth::init_session(&client_b, &token_under_current)
         .await
         .unwrap();
 
@@ -3525,7 +3525,7 @@ async fn b8c_per_app_role_can_call_init_session_via_grant() {
     };
     let rc = role_pool.get().await.unwrap();
     let token = zeroship_plugin_db::auth::mint_session_token(
-        &*rc,
+        &rc,
         zeroship_plugin_db::auth::SessionInit {
             app_id: "b8c_grant_app".into(),
             actor_kind: "user".into(),
@@ -3535,7 +3535,7 @@ async fn b8c_per_app_role_can_call_init_session_via_grant() {
     )
     .await
     .unwrap();
-    zeroship_plugin_db::auth::init_session(&*rc, &token)
+    zeroship_plugin_db::auth::init_session(&rc, &token)
         .await
         .unwrap();
 
@@ -3620,7 +3620,7 @@ async fn b8c_init_session_p_pid_null_uses_pg_backend_pid() {
 
     let client = pool.get().await.unwrap();
     let token = zeroship_plugin_db::auth::mint_session_token(
-        &*client,
+        &client,
         zeroship_plugin_db::auth::SessionInit {
             app_id: "b8c_p_pid_null_app".into(),
             actor_kind: "platform".into(),
@@ -3634,7 +3634,7 @@ async fn b8c_init_session_p_pid_null_uses_pg_backend_pid() {
     // Legacy free-fn `init_session` → passes p_pid = NULL → SECURITY
     // DEFINER uses pg_backend_pid() (= token.backend_pid because mint
     // + init share the same Client). Must succeed.
-    zeroship_plugin_db::auth::init_session(&*client, &token)
+    zeroship_plugin_db::auth::init_session(&client, &token)
         .await
         .unwrap();
 
@@ -3717,7 +3717,7 @@ async fn b8c_session_minter_trait_init_succeeds_on_different_pool_client() {
         .query_text_params(
             "SELECT app_id FROM __zeroship_admin.session_ctx
              WHERE app_id = $1",
-            &[&"b8c_minter_app".to_string()],
+            &["b8c_minter_app"],
         )
         .await
         .unwrap();
@@ -3808,7 +3808,7 @@ async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
     let pub_rows = pool
         .query_text_params(
             "SELECT __zeroship_admin.ensure_publication($1)::text AS created",
-            &[&app],
+            &[app],
         )
         .await
         .unwrap();
@@ -3818,7 +3818,7 @@ async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
     let slot_rows = pool
         .query_text_params(
             "SELECT __zeroship_admin.ensure_slot($1)::text AS info",
-            &[&app],
+            &[app],
         )
         .await
         .unwrap();
@@ -3831,7 +3831,7 @@ async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
     let pub_rows2 = pool
         .query_text_params(
             "SELECT __zeroship_admin.ensure_publication($1)::text AS created",
-            &[&app],
+            &[app],
         )
         .await
         .unwrap();
@@ -3840,7 +3840,7 @@ async fn b8c_admin_wrappers_replicate_p8a_setup_semantics() {
     let slot_rows2 = pool
         .query_text_params(
             "SELECT __zeroship_admin.ensure_slot($1)::text AS info",
-            &[&app],
+            &[app],
         )
         .await
         .unwrap();
@@ -4204,11 +4204,11 @@ async fn vector_search_returns_k_nearest() {
     // beyond being unique per row.
     fn mk_unit(i: usize, dims: usize) -> Vec<f32> {
         let mut v = vec![0.0f32; dims];
-        for j in 0..dims {
+        for (j, slot) in v.iter_mut().enumerate() {
             // splitmix-style scramble so adjacent rows don't accidentally
             // collide on the unit sphere.
             let x = (i.wrapping_mul(2654435761)) ^ (j.wrapping_mul(40503));
-            v[j] = ((x & 0xffff) as f32 / 65536.0) - 0.5;
+            *slot = ((x & 0xffff) as f32 / 65536.0) - 0.5;
         }
         // Normalise.
         let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -5079,7 +5079,7 @@ async fn encrypted_column_round_trip_randomised() {
     let rows = pool
         .query_text_params(
             &format!("SELECT encode(ssn, 'hex') AS ssn_hex FROM \"{SCHEMA}\".\"enc_notes\" WHERE id = $1"),
-            &[&"row_a"],
+            &["row_a"],
         )
         .await
         .unwrap();
@@ -5174,7 +5174,7 @@ async fn encrypted_randomised_row_swap_rejected() {
     let rows = pool
         .query_text_params(
             &format!("SELECT encode(ssn, 'hex') AS ssn_hex FROM \"{SCHEMA}\".\"enc_notes\" WHERE id = $1"),
-            &[&"row_b"],
+            &["row_b"],
         )
         .await
         .unwrap();
@@ -5279,7 +5279,7 @@ async fn encrypted_deterministic_equality_lookup() {
     let rows = pool
         .query_text_params(
             &format!("SELECT id FROM \"{SCHEMA}\".\"enc_notes\" WHERE ssn = decode($1, 'base64')::bytea"),
-            &[&b64_shared.as_str()],
+            &[b64_shared.as_str()],
         )
         .await
         .unwrap();
@@ -5411,7 +5411,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
                 "SELECT id, name, encode(ssn, 'base64') AS ssn, \
                  phone_masked AS phone FROM \"{app}\".\"people\" WHERE id = $1"
             ),
-            &[&"psn_round_trip_1"],
+            &["psn_round_trip_1"],
         )
         .await
         .unwrap();
@@ -5472,7 +5472,7 @@ async fn audit_row_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i64> {
     let exists = pool
         .query_text_params(
             "SELECT to_regclass($1) IS NOT NULL AS present",
-            &[&format!("\"{app}\".\"__zeroship_migrations\"").as_str()],
+            &[format!("\"{app}\".\"__zeroship_migrations\"").as_str()],
         )
         .await
         .ok()?;
@@ -5494,7 +5494,7 @@ async fn audit_row_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i64> {
 async fn pg_table_exists(pool: &std::rc::Rc<Pool>, app: &str, table: &str) -> bool {
     pool.query_text_params(
         "SELECT to_regclass($1) IS NOT NULL AS present",
-        &[&format!("\"{app}\".\"{table}\"").as_str()],
+        &[format!("\"{app}\".\"{table}\"").as_str()],
     )
     .await
     .ok()
@@ -5694,7 +5694,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
                 "SELECT id, name, encode(ssn, 'base64') AS ssn, \
                  phone_masked AS phone FROM \"{app}\".\"people\" WHERE id = $1"
             ),
-            &[&"psn_p5_1"],
+            &["psn_p5_1"],
         )
         .await
         .unwrap();
@@ -5943,7 +5943,7 @@ async fn pitr_pg_records_target() {
     let rows = pool
         .query_text_params(
             "SELECT target FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
-            &[&app_id],
+            &[app_id],
         )
         .await
         .unwrap();
@@ -5961,7 +5961,7 @@ async fn pitr_pg_records_target() {
     let rows = pool
         .query_text_params(
             "SELECT target FROM __zeroship_admin.pitr_targets WHERE app_id = $1",
-            &[&app_id],
+            &[app_id],
         )
         .await
         .unwrap();
@@ -6145,7 +6145,7 @@ async fn snapshot_restore_round_trip_pg() {
     let rows = pool
         .query_text_params(
             "SELECT 1 FROM pg_tables WHERE schemaname = $1 AND tablename = 'notes'",
-            &[&app_id],
+            &[app_id],
         )
         .await
         .unwrap();

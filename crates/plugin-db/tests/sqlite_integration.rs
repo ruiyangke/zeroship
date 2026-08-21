@@ -652,7 +652,7 @@ fn introspect_after_create_table_round_trip() {
 
         // No FKs declared → no FK entries.
         assert!(
-            live.foreign_keys.get("items").is_none(),
+            !live.foreign_keys.contains_key("items"),
             "items has no declared FKs"
         );
 
