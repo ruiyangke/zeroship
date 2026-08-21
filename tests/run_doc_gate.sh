@@ -46,18 +46,36 @@
 #    the feature is off. Asserting only one config would silently bless the
 #    other.
 #
-# THE ASYMMETRIC FLOORS ARE DELIBERATE
-# ------------------------------------
-# --all-features must be 0. Default is allowed 1, and that 1 is a known,
-# named residue: crates/plugin-db/src/cross_app_fk.rs cites
+# BOTH CEILINGS ARE 0, AND THE ASYMMETRY IS GONE
+# ----------------------------------------------
+# Default was allowed 1 until 2026-08-20. That 1 was a named residue:
+# crates/plugin-db/src/cross_app_fk.rs cited
 # `register_model::bootstrap::build_ctx`, whose module is
-# `#[cfg(any(test, feature = "test-helpers"))]`. It cannot be edited into
-# correctness - whether it should be a link or a code span depends on which
-# configuration plugin-db's docs are built for, which is an open operator
-# decision (see the note at crates/plugin-db/src/backend/mod.rs and the
-# 2026-08-07 entry in docs/pilot/2026-08-06-pilot-decision-log.md).
+# `#[cfg(any(test, feature = "test-helpers"))]`, so the link resolved under
+# --all-features and not under default. The header here said it "cannot be
+# edited into correctness" because link-vs-span depended on an open decision
+# about which configuration plugin-db's docs are built for.
 #
-# Tighten DOC_MAX_DEFAULT to 0 in the same change that answers it.
+# Two things were wrong with that.
+#
+# First, the decision was not open, it was already made HERE: this gate builds
+# both configurations and demands zero in each, so neither is privileged, and
+# a cfg-gated internal must be a code span because that is the only construct
+# correct in both. The note at crates/plugin-db/src/backend/mod.rs that framed
+# it as undecided predates this file and said so explicitly ("zeroship has no
+# doc gate today, so nothing currently encodes either answer").
+#
+# Second, and worse, the link was FACTUALLY WRONG independent of any of that:
+# `build_ctx` does not call `reject_cross_app_fk` and never did. `bootstrap`
+# does, at bootstrap.rs:133, on the other side of the advisory lock the
+# sentence described. So the allowance was not tolerating an unresolvable
+# link, it was tolerating a false statement about the code - exactly the
+# defect in the two cases above. An allowance sized to fit one known item
+# admits any new item that also fits, and this one had been sitting under it.
+#
+# There is now no standing allowance. If a legitimately unresolvable link ever
+# appears, write it as a code span; if you believe it must be a link, that is a
+# change to what this gate asserts and belongs in this header, not in a number.
 #
 # WHAT THIS DOES NOT CATCH
 # ------------------------
@@ -68,12 +86,19 @@
 # cover `--document-private-items`, which asks a different question and
 # reports much larger numbers.
 #
+# The residue retired above is the worked example of that limit cutting BOTH
+# ways. rustdoc flagged that link, but only because the module was cfg-gated -
+# it had no opinion on the sentence being false. Had `build_ctx` been public,
+# the same false sentence would have resolved cleanly and this gate would have
+# reported zero. So a green run means "every name exists", never "the docs are
+# right", and the surrounding claim still has to be read by a person.
+#
 # USAGE
 #   tests/run_doc_gate.sh
 #
 # THRESHOLDS (constants below, not environment - a bound its caller can move
 # is not a bound)
-#   DOC_MAX_DEFAULT 1   max unresolved links with default features
+#   DOC_MAX_DEFAULT 0   max unresolved links with default features
 #   DOC_MAX_ALL     0   max unresolved links with --all-features
 #   DOC_MIN_CRATES      DERIVED from `cargo metadata`, not written down - see
 #                       below for why the constant that was here went stale
@@ -97,7 +122,7 @@ cd "$ROOT"
 . "$ROOT/tests/lib/gate_arms.sh"
 gate_arms_init run_doc
 
-DOC_MAX_DEFAULT=1
+DOC_MAX_DEFAULT=0
 DOC_MAX_ALL=0
 
 # HOW MANY CRATES A REAL RUN DOCUMENTS, asked of the workspace manifest rather

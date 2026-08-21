@@ -91,8 +91,12 @@ pub(crate) mod context;
 // `tests/sqlite_integration.rs` (SQLite arm) call the validator
 // directly to pin the rejection contract. The function is a pure JSON
 // walk — no DB round-trip — so exposing it has zero runtime impact;
-// the production call site is one line in
-// `register_model/bootstrap.rs::bootstrap`.
+// those integration tests are, as of 2026-08-20, its ONLY reachable
+// callers. This comment claimed a "production call site is one line in
+// `register_model/bootstrap.rs::bootstrap`", and that line is real but
+// sits in a `#[cfg(any(test, feature = "test-helpers"))]` module. See
+// the enumeration in `cross_app_fk`'s own module header, and read the
+// FK-stays-in-app property off `zeroship_schema::query` instead.
 pub mod cross_app_fk;
 // `crud` is crate-private in release builds; `pub`
 // under `test-helpers` so `tests/sqlite_integration.rs` can reach
