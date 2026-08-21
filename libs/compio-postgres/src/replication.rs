@@ -231,6 +231,7 @@ where
         } else {
             None
         },
+        cfg.get_require_peer(),
     )
     .await?;
     // Keep an owned dup before TLS wraps the descriptor. A read timeout may
@@ -242,6 +243,8 @@ where
         .make_tls_connect(hostname.unwrap_or(""))
         .map_err(|e| Error::tls(e.into()))?;
     let has_hostname = hostname.is_some();
+    let encryption = first_encryption_for_addr(&addr, cfg.get_ssl_mode());
+    crate::connect_raw::validate_tls_connector_parameters(&tls_inst, encryption, cfg)?;
 
     // One transport per address, no reconnect: this path opens its own socket
     // rather than going through `connect::connect`, so it does not inherit the
@@ -258,7 +261,7 @@ where
     // a replication one.
     let stream = negotiate_tls(
         socket,
-        first_encryption_for_addr(&addr, cfg.get_ssl_mode()),
+        encryption,
         cfg.get_ssl_mode(),
         cfg.get_ssl_negotiation(),
         tls_inst,
