@@ -1,4 +1,25 @@
 //! Rotated OIDC signing-key retention tests against live PostgreSQL.
+//!
+//! Almost every assertion here names a kid this run minted, which is what makes
+//! them safe on a database every run on this migration set shares. The one
+//! thing that is NOT per-run is the sweep: `signing_key_retention::tick`
+//! retires every past-horizon key in the database, so a peer run's tick can
+//! retire this run's key before this run's tick sees it, and then
+//! `report.retired` names it nowhere. That is not a weaker claim to make - the
+//! whole point of `concurrent_retirement_cannot_be_undone_by_signer_startup` is
+//! that the retirement happened while ITS publisher was paused - so the fix is
+//! to take turns on the sweep rather than to stop asserting.
+//!
+//! MEASURED 2026-08-20, two copies of this file and its three sweep-driving
+//! siblings against one database, three pairs: 2 of 3 red, and the first
+//! failure of each was
+//!     assertion failed: report.retired.iter().any(|retired| retired.kid == kid)
+//! The same two runs against a database EACH were green, which is the control
+//! that says the database and not the fixture is what they were sharing.
+//!
+//! A `Mutex` used to guard this and excluded the other THREADS of one process;
+//! the lease is a session advisory lock and excludes peer runs too. See
+//! [`common::lease_sweep`].
 
 use chrono::{DateTime, Utc};
 use compio_postgres::{connect, Client, NoTls};
@@ -20,7 +41,7 @@ use zeroship_auth::oidc::{
     PrincipalIdTokenMint,
 };
 
-static RETENTION_TEST_LOCK: Mutex<()> = Mutex::new(());
+use crate::common;
 
 #[derive(Default)]
 struct LogVisitor {
@@ -176,14 +197,14 @@ async fn jwks_contains(db: &Client, kid: &str) -> bool {
         .any(|key| key["kid"] == kid)
 }
 
-#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[allow(clippy::future_not_send)]
 #[compio::test]
 async fn retiring_key_inside_horizon_remains_published() {
     let Some(db) = pg().await else {
         zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
-    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+    let _guard = common::lease_sweep(common::sweep_lock::SIGNING_KEY_RETENTION).await;
 
     let kid = format!("retiring-fresh-{}", Uuid::new_v4());
     let inside_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS - 60;
@@ -199,14 +220,14 @@ async fn retiring_key_inside_horizon_remains_published() {
     cleanup_key(&db, &kid).await;
 }
 
-#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[allow(clippy::future_not_send)]
 #[compio::test]
 async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_row() {
     let Some(db) = pg().await else {
         zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
-    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+    let _guard = common::lease_sweep(common::sweep_lock::SIGNING_KEY_RETENTION).await;
 
     let kid = format!("retiring-stale-{}", Uuid::new_v4());
     let past_horizon_secs = signing_key_retention::RETENTION_AFTER_EXPIRY_SECS + 60;
@@ -256,14 +277,14 @@ async fn key_past_horizon_leaves_jwks_with_reason_and_idempotently_keeps_audit_r
     cleanup_key(&db, &kid).await;
 }
 
-#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[allow(clippy::future_not_send)]
 #[compio::test]
 async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
     let Some(db) = pg().await else {
         zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
-    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+    let _guard = common::lease_sweep(common::sweep_lock::SIGNING_KEY_RETENTION).await;
 
     let active_kid = format!("active-old-{}", Uuid::new_v4());
     let next_kid = format!("next-old-{}", Uuid::new_v4());
@@ -284,14 +305,14 @@ async fn active_and_next_keys_are_never_pruned_regardless_of_age() {
     cleanup_key(&db, &next_kid).await;
 }
 
-#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[allow(clippy::future_not_send)]
 #[compio::test]
 async fn missing_watermark_uses_full_horizon_from_retiring_at() {
     let Some(db) = pg().await else {
         zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
-    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+    let _guard = common::lease_sweep(common::sweep_lock::SIGNING_KEY_RETENTION).await;
 
     let inside_kid = format!("retiring-null-fresh-{}", Uuid::new_v4());
     let past_kid = format!("retiring-null-stale-{}", Uuid::new_v4());
@@ -323,7 +344,7 @@ async fn missing_watermark_uses_full_horizon_from_retiring_at() {
     cleanup_key(&db, &past_kid).await;
 }
 
-#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[allow(clippy::future_not_send)]
 #[compio::test]
 async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
     let Some(db) = pg().await else {
@@ -336,7 +357,7 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
     let Some(prune_db) = pg().await else {
         unreachable!("the same test database URL disappeared")
     };
-    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+    let _guard = common::lease_sweep(common::sweep_lock::SIGNING_KEY_RETENTION).await;
 
     let random = *Uuid::new_v4().as_bytes();
     let mut secret = [0u8; 32];
@@ -398,14 +419,14 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
     cleanup_key(&db, &kid).await;
 }
 
-#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[allow(clippy::future_not_send)]
 #[compio::test]
 async fn every_production_token_kind_advances_the_key_watermark() {
     let Some(db) = pg().await else {
         zeroship_test_support::skip("skipping signing_key_retention_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
         return;
     };
-    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+    let _guard = common::lease_sweep(common::sweep_lock::SIGNING_KEY_RETENTION).await;
 
     let random = *Uuid::new_v4().as_bytes();
     let mut secret = [0u8; 32];
@@ -577,7 +598,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
     cleanup_key(&db, &kid).await;
 }
 
-#[allow(clippy::await_holding_lock, clippy::future_not_send)]
+#[allow(clippy::future_not_send)]
 #[compio::test]
 async fn concurrent_retirement_cannot_be_undone_by_signer_startup() {
     let Some(db) = pg().await else {
@@ -590,7 +611,7 @@ async fn concurrent_retirement_cannot_be_undone_by_signer_startup() {
     let Some(prune_db) = pg().await else {
         unreachable!("the same test database URL disappeared")
     };
-    let _guard = RETENTION_TEST_LOCK.lock().expect("retention test lock");
+    let _guard = common::lease_sweep(common::sweep_lock::SIGNING_KEY_RETENTION).await;
 
     let random = *Uuid::new_v4().as_bytes();
     let mut secret = [0u8; 32];
@@ -618,7 +639,21 @@ async fn concurrent_retirement_cannot_be_undone_by_signer_startup() {
     let function_name = format!("test_pause_signing_key_activation_{suffix}");
     let trigger_name = format!("test_pause_signing_key_activation_{suffix}");
     let application_name = format!("retention-publisher-{suffix}");
-    let lock_id = 8_264_731_i64;
+    // A PER-RUN key, and the opposite call to the lease above. That lock is a
+    // mutex and has to be a fixed number; this one is a private rendezvous
+    // between this run's own two sessions - the trigger parks the publisher on
+    // it until the retirement has happened - and a number every run shares
+    // makes two runs block on each other for no reason. Worse than "no reason":
+    // the key was `8_264_731` for every run, and the wait lands squarely
+    // between the peer's seed and the peer's tick, so the peer's past-horizon
+    // key was already retired by THIS run's sweep when it finally got the lock.
+    // That is how the fixed key turned an occasional race into the near-certain
+    // `report.retired ... any(kid)` failure in the module header.
+    let lock_id = i64::from_le_bytes(
+        Uuid::new_v4().as_bytes()[..8]
+            .try_into()
+            .expect("eight bytes of a uuid"),
+    );
     db.query_one("SELECT pg_advisory_lock($1)", &[&lock_id])
         .await
         .expect("hold test activation lock");
