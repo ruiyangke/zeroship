@@ -29,7 +29,10 @@ where
         Ok(buf.split().freeze())
     })?;
 
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let mut responses = client.send_statement(
+        RequestMessages::Single(FrontendMessage::Raw(buf)),
+        &statement,
+    )?;
 
     let message = match responses.next().await {
         Ok(message) => message,

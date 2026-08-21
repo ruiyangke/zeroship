@@ -58,7 +58,7 @@ where
     } else {
         encode(client, &statement, params)?
     };
-    let responses = match start(client, buf).await {
+    let responses = match start(client, buf, &statement).await {
         Ok(responses) => responses,
         Err(error) => {
             statement.invalidate_cache_on_error(&error);
@@ -352,7 +352,10 @@ pub async fn query_portal(
         Ok(buf.split().freeze())
     })?;
 
-    let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let responses = client.send_statement(
+        RequestMessages::Single(FrontendMessage::Raw(buf)),
+        portal.statement(),
+    )?;
 
     Ok(RowStream {
         statement: portal.statement().clone(),
@@ -395,7 +398,7 @@ where
     } else {
         encode(client, &statement, params)?
     };
-    let mut responses = match start(client, buf).await {
+    let mut responses = match start(client, buf, &statement).await {
         Ok(responses) => responses,
         Err(error) => {
             statement.invalidate_cache_on_error(&error);
@@ -417,8 +420,15 @@ where
     }
 }
 
-async fn start(client: &InnerClient, buf: Bytes) -> Result<Responses, Error> {
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+async fn start(
+    client: &InnerClient,
+    buf: Bytes,
+    statement: &Statement,
+) -> Result<Responses, Error> {
+    let mut responses = client.send_statement(
+        RequestMessages::Single(FrontendMessage::Raw(buf)),
+        statement,
+    )?;
 
     match responses.next().await? {
         Message::BindComplete => {}
