@@ -7,7 +7,7 @@ description = "The zero-migrate backend CONTRACT: required DML, schema, DDL, val
 
 [dependencies]
 # The wire contract: the closed `Op` enum, the closed `Expr` AST, `IrScalar`,
-# `SqlDialect`, `DialectId`, `Capability`, `BackendDescriptor` and the
+# `DialectId`, `Capability`, `BackendDescriptor` and the
 # `BackendRegistry` this crate's `VendorSet::descriptors` composes into. Every type
 # the renderer traits name that is not declared here comes from this crate.
 zero-migrate-ir = { workspace = true }

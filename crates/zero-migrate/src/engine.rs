@@ -495,7 +495,7 @@ impl MigrationEngine {
         let mut historical_live = LiveSchema::default();
         let mut cumulative_ops: Vec<Op> = Vec::new();
         let mut effective_registry = registry.clone();
-        let guard = GuardConfig::from_policy(policy.clone(), dialect);
+        let guard = GuardConfig::from_policy(policy.clone(), dialect.id());
         let author = IrAuthor::new(project, app, dialect, policy);
         let mut aggregate = AggregateOutcome::default();
 
@@ -3968,7 +3968,7 @@ mod tests {
     fn guard_cfg() -> GuardConfig {
         GuardConfig::from_policy(
             crate::test_fixtures::no_inject("proj_acme"),
-            crate::SqlDialect::Postgres,
+            crate::SqlDialect::Postgres.id(),
         )
     }
 

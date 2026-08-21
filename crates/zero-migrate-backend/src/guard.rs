@@ -30,7 +30,7 @@
 //!
 //! - `check_ir_data_security_policy` is the ONLY `destructive_ops = forbid`
 //!   enforcement SQLite and MySQL have. Its gate is literally
-//!   `if !matches!(cfg.dialect(), SqlDialect::Postgres)`, and its own comment says
+//!   `if cfg.dialect() != &POSTGRES`, and its own comment says
 //!   why: the descriptor guard those two dialects run is constructed without the
 //!   policy and cannot read the knob at all.
 //! - That same function reaches `pg_query::parse` for `Op::PgRaw` islands, because a
@@ -55,7 +55,7 @@
 //! `Ok(GuardOutcome::default())`, which is a decision a reviewer can see in the diff.
 //!
 //! This is what replaces the old `guard_for(cfg) -> Box<dyn MigrationGuard>` dispatch,
-//! whose `SqlDialect` match handed BOTH descriptor-only dialects one shared
+//! whose closed three-way match handed BOTH descriptor-only dialects one shared
 //! `SqliteDescriptorGuard`. That match was exhaustive, so a fourth dialect broke it —
 //! but a `_ =>` arm added in haste would have granted every future backend the
 //! trusting path silently. The required field removes the arm the mistake could be
@@ -65,7 +65,7 @@
 
 use std::collections::BTreeSet;
 
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, POSTGRES};
 use zero_migrate_ir::policy::DestructiveOps;
 use zero_migrate_ir::policy::SchemaScope;
 use zero_migrate_ir::policy_registry;
@@ -129,15 +129,15 @@ pub enum GuardMode {
 pub struct GuardConfig {
     /// PRIVATE. The target SQL dialect this guard config is for.
     ///
-    /// - `Postgres` (the default) — the `libpg_query` line-1 guard runs
+    /// - `postgres` (the default) — the `libpg_query` line-1 guard runs
     ///   (`SqlGuard::check` parses + deny-walks the SQL). A config keeps this
     ///   dialect unless [`GuardConfig::for_dialect`] selects another.
-    /// - `Sqlite` - the descriptor-diff-only path. `libpg_query` cannot parse
-    ///   SQLite, so there is no line-1 parse guard; the line-2 defense is the
-    ///   backend's runtime authorizer. An untrusted raw SQL string presented to
-    ///   `SqlGuard::check` is refused. Any explicit non-enforced mode is reset to
-    ///   [`GuardMode::Enforced`] by [`GuardConfig::for_dialect`].
-    dialect: SqlDialect,
+    /// - every other id — a vendor-owned guard path. An untrusted raw SQL string
+    ///   presented to PostgreSQL's `SqlGuard::check` is refused. Any explicit
+    ///   non-enforced mode is reset to [`GuardMode::Enforced`] by
+    ///   [`GuardConfig::for_dialect`]. This comparison is deliberately open and
+    ///   fail-closed: a future backend cannot inherit PostgreSQL's belt-off mode.
+    dialect: DialectId,
     /// PRIVATE. The unforgeable [`EffectivePolicy`] — the SINGLE source the guard's
     /// every composable decision queries. The capability gate asks `grants(key,
     /// object)` for the statement's builtin knob key; cross-schema confinement asks
@@ -157,7 +157,7 @@ impl GuardConfig {
     /// the default [`GuardMode::Enforced`] posture (the full belt runs). The effective
     /// policy is the SINGLE source for injection and every composable guard decision.
     #[must_use]
-    pub fn from_policy(effective: EffectivePolicy, dialect: SqlDialect) -> Self {
+    pub fn from_policy(effective: EffectivePolicy, dialect: DialectId) -> Self {
         Self::from_policy_with_mode(effective, dialect, GuardMode::Enforced)
     }
 
@@ -168,7 +168,7 @@ impl GuardConfig {
     #[must_use]
     pub fn from_policy_with_mode(
         effective: EffectivePolicy,
-        dialect: SqlDialect,
+        dialect: DialectId,
         guard_mode: GuardMode,
     ) -> Self {
         Self {
@@ -195,7 +195,7 @@ impl GuardConfig {
         _project_schema: impl Into<String>,
         effective: EffectivePolicy,
     ) -> Self {
-        Self::from_policy(effective, SqlDialect::Postgres)
+        Self::from_policy(effective, POSTGRES)
     }
 
     /// Borrow the composed [`EffectivePolicy`] this config decides against.
@@ -212,22 +212,23 @@ impl GuardConfig {
     }
 
     /// Select a target dialect without changing the caller-composed policy.
-    /// Postgres preserves the selected guard mode. SQLite and MySQL force
-    /// [`GuardMode::Enforced`] because neither dialect has a raw-SQL parser path on
-    /// which the belt-off posture is meaningful.
+    /// PostgreSQL preserves the selected guard mode. Every other id forces
+    /// [`GuardMode::Enforced`]. This must remain an explicit comparison against
+    /// [`POSTGRES`], never a self-declared capability: a future backend must not be
+    /// able to declare its way out of the fail-safe posture.
     #[must_use]
-    pub fn for_dialect(mut self, dialect: SqlDialect) -> Self {
-        self.dialect = dialect;
-        if !matches!(dialect, SqlDialect::Postgres) {
+    pub fn for_dialect(mut self, dialect: DialectId) -> Self {
+        if dialect != POSTGRES {
             self.guard_mode = GuardMode::Enforced;
         }
+        self.dialect = dialect;
         self
     }
 
     /// The target SQL dialect this guard config vets.
     #[must_use]
-    pub const fn dialect(&self) -> SqlDialect {
-        self.dialect
+    pub const fn dialect(&self) -> &DialectId {
+        &self.dialect
     }
 
     /// Whether this config skips the confined deny-list belt entirely (the Trusted
@@ -563,7 +564,7 @@ impl GuardConfig {
 /// ```compile_fail
 /// use zero_migrate_backend::guard::GuardConfig;
 /// let _ = GuardConfig {
-///     dialect: zero_migrate_ir::dialect::SqlDialect::Postgres,
+///     dialect: zero_migrate_ir::dialect::DialectId::new("postgres"),
 ///     effective: unimplemented!(),
 ///     guard_mode: unimplemented!(),
 /// };
@@ -626,27 +627,19 @@ pub enum GuardError {
     /// The SQL could not be parsed (deny-by-default: it never reaches the DB).
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
-    /// A raw SQL string was presented to `SqlGuard::check` on the
-    /// Confined **`SQLite`** path, which accepts ONLY descriptor-diff-generated DDL.
-    /// `libpg_query` cannot vet `SQLite`, so there is no line-1
-    /// parse guard for raw `SQLite` SQL; the only safe `SQLite` DDL comes from the
-    /// engine's descriptor emitter (validated at the author boundary, line-2
-    /// enforced by the `SqliteBackend` authorizer). A hand-written / untrusted
-    /// `SQLite` SQL string is therefore refused fail-closed.
+    /// A raw SQL string was presented to PostgreSQL's parser-backed guard for a
+    /// different backend. `libpg_query` cannot vet another backend's grammar, so
+    /// the text is refused fail-closed instead of being mis-vetted. The open id is
+    /// provenance only: no behaviour dispatches on it, and a future backend gets
+    /// this refusal automatically.
     #[error(
-        "raw SQL is not accepted on the Confined SQLite path: SQLite migrations \
-         must be descriptor-diff-generated (libpg_query cannot vet SQLite; the \
-         SqliteBackend authorizer is the line-2 defense)"
+        "raw SQL is not accepted by the PostgreSQL parser guard for backend {dialect}: \
+         that backend must use its own registered guard"
     )]
-    SqliteRawSqlRejected,
-    /// A raw SQL string was presented to the Postgres guard on the `MySQL` path.
-    /// `MySQL` has no parser/deny-walk in this crate, so raw SQL is refused
-    /// fail-closed instead of being mis-vetted by `libpg_query`.
-    #[error(
-        "raw SQL is not accepted on the MySQL path: MySQL migrations must be \
-         descriptor-generated because no MySQL parser/deny-walk is available"
-    )]
-    MysqlRawSqlRejected,
+    RawSqlRejected {
+        /// The backend whose SQL the PostgreSQL guard refused to mis-vet.
+        dialect: DialectId,
+    },
 }
 
 /// The **dialect-neutral** result of a passing [`MigrationGuard::check`].

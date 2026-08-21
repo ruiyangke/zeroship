@@ -518,7 +518,7 @@ fn non_concurrent_index_suggestion_notes_own_nontransactional_migration() {
 // ---------------------------------------------------------------------------
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject("proj_acme"), SqlDialect::Postgres)
+    GuardConfig::from_policy(support::no_inject("proj_acme"), SqlDialect::Postgres.id())
 }
 
 #[test]

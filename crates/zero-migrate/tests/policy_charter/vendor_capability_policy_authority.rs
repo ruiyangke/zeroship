@@ -129,7 +129,7 @@ fn lower_rls_envelope(
     let resolved =
         resolve_create_table_policy(&authored, policy, SCHEMA).expect("table shape resolves");
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
     let author = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Postgres, policy);
     author.load_and_lower_guarded(
         &resolved_json,
@@ -221,7 +221,7 @@ fn charter_granting_cross_schema_but_not_access_rls_still_refuses_set_rls() {
 #[test]
 fn cross_schema_alone_composes_to_a_scope_that_would_grant_every_capability() {
     let policy = cross_schema_only_charter();
-    let scope = GuardConfig::from_policy(policy, SqlDialect::Postgres)
+    let scope = GuardConfig::from_policy(policy, SqlDialect::Postgres.id())
         .schema_scope()
         .expect("the guard derives a schema scope");
     assert_eq!(

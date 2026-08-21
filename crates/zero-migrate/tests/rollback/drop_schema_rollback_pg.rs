@@ -96,7 +96,7 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
     let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &pol);
-    let guard = GuardConfig::from_policy(pol.clone(), SqlDialect::Postgres);
+    let guard = GuardConfig::from_policy(pol.clone(), SqlDialect::Postgres.id());
     let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &pol)
         .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
@@ -140,7 +140,7 @@ async fn schema_exists(session: &PgDevSession, name: &str) -> Result<bool, Strin
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         policy(&cfg.project_schema),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     ))
 }
 

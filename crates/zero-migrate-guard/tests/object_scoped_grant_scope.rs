@@ -16,7 +16,7 @@ mod support;
 
 use zero_migrate_guard::guard::denylist::rule;
 use zero_migrate_guard::guard::{GuardConfig, GuardError, SqlGuard};
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::POSTGRES;
 
 /// A charter owning the `app` schema, plus whatever grant text an arm supplies.
 fn charter(grant: &str) -> String {
@@ -44,7 +44,7 @@ scope = "all"
 fn guard_for(grant: &str) -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(&charter(grant)),
-        SqlDialect::Postgres,
+        POSTGRES,
     ))
 }
 

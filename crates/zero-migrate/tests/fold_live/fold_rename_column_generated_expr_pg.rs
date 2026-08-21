@@ -179,7 +179,7 @@ async fn apply_create(
     let resolved_source = serde_json::to_string(resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
     let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,

@@ -296,7 +296,7 @@ impl ExecutorConfig {
     pub fn guard_config(&self) -> crate::guard::GuardConfig {
         crate::guard::GuardConfig::from_policy_with_mode(
             self.effective.clone(),
-            crate::SqlDialect::Postgres,
+            crate::SqlDialect::Postgres.id(),
             self.guard_mode,
         )
     }

@@ -94,7 +94,7 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
             SqlDialect::Sqlite,
             &support::confined_charter(),
         );
-        let gc = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite);
+        let gc = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
         if needs_seed {
             let s = format!(r#"{{"ir_version":1,"name":"seed","ops":[{seed}]}}"#);
             let a = author

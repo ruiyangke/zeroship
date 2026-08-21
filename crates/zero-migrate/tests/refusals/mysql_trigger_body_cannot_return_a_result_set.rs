@@ -119,7 +119,7 @@ async fn apply<B: MigrationBackend>(
         Err(error) => return Err(format!("snapshot the live schema: {error}")),
     };
     let author = IrAuthor::new(&cfg.project_schema, OWNER, dialect, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), dialect);
+    let guard = GuardConfig::from_policy(policy.clone(), dialect.id());
     let artifact = author
         .load_and_lower_guarded(&source, OWNER, &registry(), &live, &guard)
         .map_err(|error| format!("lower: {error}"))?;

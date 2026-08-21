@@ -66,7 +66,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
         APP,
         &registry,
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
     )
     .expect("the two-step plan lowers");
     assert_eq!(

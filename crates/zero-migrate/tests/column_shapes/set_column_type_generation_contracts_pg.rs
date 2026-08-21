@@ -223,7 +223,7 @@ impl<'a> Deployment<'a> {
             SqlDialect::Postgres,
             &self.policy,
         );
-        let guard = GuardConfig::from_policy(self.policy.clone(), SqlDialect::Postgres);
+        let guard = GuardConfig::from_policy(self.policy.clone(), SqlDialect::Postgres.id());
         let artifact = author
             .load_and_lower_guarded(&resolved_source, OWNER, registry, &live, &guard)
             .map_err(|error| format!("AUTHORING REFUSED: {error}"))?;

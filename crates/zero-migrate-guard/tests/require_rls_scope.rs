@@ -14,7 +14,7 @@ mod support;
 use zero_migrate_guard::guard::{
     check_ir_data_security_policy, data_security_rule, GuardConfig, GuardError,
 };
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::POSTGRES;
 use zero_migrate_ir::ir::{MigrationIr, Op};
 
 /// A charter granting the `app` schema everything the data-security walk needs, plus
@@ -44,7 +44,7 @@ scope = "all"
 fn cfg_for(default_scope: &str, require: &str) -> GuardConfig {
     GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(&charter(default_scope, require)),
-        SqlDialect::Postgres,
+        POSTGRES,
     )
 }
 
@@ -291,7 +291,7 @@ scope = { include = ["app"] }
 "#;
     let cfg = GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
-        SqlDialect::Postgres,
+        POSTGRES,
     );
     assert_require_rls_refused(&cfg, &ir_with(vec![create_table(None, "users")]), 0);
     // Same charter, same missing pin, reached through raw SQL instead.

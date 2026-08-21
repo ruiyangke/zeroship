@@ -36,12 +36,12 @@
 mod support;
 
 use zero_migrate_guard::guard::{GuardConfig, SqlGuard};
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::POSTGRES;
 
 fn confined() -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("app1"),
-        SqlDialect::Postgres,
+        POSTGRES,
     ))
 }
 

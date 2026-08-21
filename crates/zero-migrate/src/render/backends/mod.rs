@@ -208,7 +208,7 @@ pub(crate) fn ddl_emitter(dialect: &DialectId, project_schema: &str) -> Box<dyn 
 /// impl, so a change to one dialect's posture cannot silently become a change to the
 /// other's.
 pub(crate) fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
-    (vendor(&cfg.dialect().id()).guard)(cfg)
+    (vendor(cfg.dialect()).guard)(cfg)
 }
 
 #[cfg(test)]

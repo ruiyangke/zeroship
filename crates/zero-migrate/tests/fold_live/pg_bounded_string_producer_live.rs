@@ -470,7 +470,7 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
                     SqlDialect::Postgres,
                 ),
                 &[],
-                &GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres),
+                &GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id()),
                 &policy,
             )
             .map_err(|error| format!("plan the re-imported schema declaratively: {error}"))?;

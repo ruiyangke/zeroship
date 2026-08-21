@@ -32,7 +32,7 @@ use crate::analysis::analyze::Advisory;
 use crate::analysis::classify::{classify, DataSecurityClass, DdlKind, ParseError, StatementClass};
 use denylist::rule;
 use serde_json::Value;
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::POSTGRES;
 use zero_migrate_ir::ir::{MigrationIr, Op};
 use zero_migrate_ir::migration::MigrationFlags;
 use zero_migrate_ir::policy::DestructiveOps;
@@ -567,6 +567,15 @@ impl SqlGuard {
         GuardWalker { cfg: &self.cfg }
     }
 
+    fn refuse_non_postgres_raw_sql(&self) -> Result<(), GuardError> {
+        if self.cfg.dialect() != &POSTGRES {
+            return Err(GuardError::RawSqlRejected {
+                dialect: self.cfg.dialect().clone(),
+            });
+        }
+        Ok(())
+    }
+
     /// Check a migration's SQL. Returns a [`GuardReport`] if every statement is
     /// safe (destructive ops flagged, not denied), or a [`GuardError`] on the
     /// first dangerous/cross-tenant/unparseable construct.
@@ -584,22 +593,16 @@ impl SqlGuard {
     /// (malformed SQL has no parse tree to classify), but no `Denied`/`CrossSchema`
     /// can: there is no deny arm on the Trusted path.
     pub fn check(&self, sql: &str) -> Result<GuardReport, GuardError> {
-        // SQLite fail-closed backstop. `SqlGuard` is the **Postgres** line-1
+        // Non-Postgres fail-closed backstop. `SqlGuard` is the **Postgres** line-1
         // (libpg_query below); it is the PG arm of the per-engine
         // [`MigrationGuard`] seam ([`PgGuard`] wraps it). The engine never selects
-        // `SqlGuard` for SQLite OR MySQL — both route through
-        // [`SqliteDescriptorGuard`] (via [`guard_for`]), the trusted descriptor-diff
-        // path, and both reject raw text in the arm just below.
+        // `SqlGuard` for SQLite OR MySQL — each routes through its own registered
+        // descriptor guard, the trusted descriptor-diff path. The arm just below
+        // defends against a wrong caller for either shipping or future backends.
         // This arm is the defensive fail-closed for the *wrong caller*: if a raw,
-        // untrusted SQLite string is ever handed to the PG guard (a SQLite-keyed
-        // `GuardConfig`), `libpg_query` cannot vet it, so we reject rather than
-        // mis-parse. (Trusted SQLite, if it ever exists, is a separate
-        // operator-gated concern; today no SQLite config is Trusted.)
-        match self.cfg.dialect() {
-            SqlDialect::Postgres => {}
-            SqlDialect::Sqlite => return Err(GuardError::SqliteRawSqlRejected),
-            SqlDialect::Mysql => return Err(GuardError::MysqlRawSqlRejected),
-        }
+        // untrusted non-Postgres string is ever handed to the PG guard,
+        // `libpg_query` cannot vet it, so we reject rather than mis-parse.
+        self.refuse_non_postgres_raw_sql()?;
 
         let classes = classify(sql)?;
 
@@ -680,11 +683,7 @@ impl SqlGuard {
     /// # Errors
     /// [`GuardError`] when parsing fails or a deny-listed construct is found.
     pub fn check_raw_island_sql_backstop(&self, sql: &str) -> Result<(), GuardError> {
-        match self.cfg.dialect() {
-            SqlDialect::Postgres => {}
-            SqlDialect::Sqlite => return Err(GuardError::SqliteRawSqlRejected),
-            SqlDialect::Mysql => return Err(GuardError::MysqlRawSqlRejected),
-        }
+        self.refuse_non_postgres_raw_sql()?;
 
         let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
         for raw_stmt in &parsed.protobuf.stmts {
@@ -704,6 +703,7 @@ impl SqlGuard {
     /// scanner: parse what can be parsed, inspect dynamic SQL literals, then token
     /// scan for deny-listed names.
     pub fn check_raw_island_body_backstop(&self, body: &str, raw: &str) -> Result<(), GuardError> {
+        self.refuse_non_postgres_raw_sql()?;
         self.walker().check_body_text(body, raw)
     }
 }
@@ -2355,7 +2355,7 @@ pub fn check_ir_data_security_policy(
         out: &mut Vec<(usize, &'a Op)>,
     ) {
         if let Op::Dialectal { legs } = op {
-            if let Some(leg) = legs.get(&cfg.dialect().id()) {
+            if let Some(leg) = legs.get(cfg.dialect()) {
                 for inner in leg {
                     push_policy_ops(cfg, op_index, inner, out);
                 }
@@ -2409,9 +2409,7 @@ pub fn check_ir_data_security_policy(
                 Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } | Op::PgRaw { .. }
             )
     };
-    if !matches!(cfg.dialect(), SqlDialect::Postgres)
-        && matches!(cfg.destructive_ops(), DestructiveOps::Forbid)
-    {
+    if cfg.dialect() != &POSTGRES && matches!(cfg.destructive_ops(), DestructiveOps::Forbid) {
         if let Some(&(op_index, _)) = policy_ops.iter().find(|(_, op)| posture_denies(op)) {
             return Err(IrDataSecurityError {
                 op_index,

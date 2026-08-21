@@ -192,7 +192,7 @@ async fn apply_envelope(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
     // The AUTHORING gate. Every arm below reaches a plan through it, which is what
     // makes "cleared validate, the guard and the lower" a measurement rather than a
     // claim: a defect caught here would never have been the half-migration.

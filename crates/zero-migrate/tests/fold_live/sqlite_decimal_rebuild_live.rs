@@ -498,7 +498,7 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
             &ownership,
             &DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite),
             &[],
-            &GuardConfig::from_policy(policy.clone(), SqlDialect::Sqlite),
+            &GuardConfig::from_policy(policy.clone(), SqlDialect::Sqlite.id()),
             &policy,
         )
         .expect("the declarative plan is authored");

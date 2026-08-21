@@ -13,19 +13,21 @@ mod support;
 use zero_migrate_guard::guard::{
     check_raw_view_body_text, extract_string_literals, GuardConfig, GuardError, GuardMode, SqlGuard,
 };
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, POSTGRES, SQLITE};
 use zero_migrate_ir::policy::SchemaScope;
+
+const DUCKDB: DialectId = DialectId::new("duckdb");
 
 fn confined() -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("app1"),
-        SqlDialect::Postgres,
+        POSTGRES,
     ))
 }
 
 #[test]
 fn explicit_confined_charter_fixture_composes() {
-    let cfg = GuardConfig::from_policy(support::confined_charter(), SqlDialect::Postgres);
+    let cfg = GuardConfig::from_policy(support::confined_charter(), POSTGRES);
     assert_eq!(
         cfg.schema_scope(),
         Some(SchemaScope::Single("app".to_string()))
@@ -34,25 +36,52 @@ fn explicit_confined_charter_fixture_composes() {
 
 #[test]
 fn dialect_selection_preserves_policy_and_enforces_non_postgres_guard() {
-    let cfg = GuardConfig::from_policy_with_mode(
-        support::no_inject("app1"),
-        SqlDialect::Postgres,
-        GuardMode::Off,
-    );
+    let cfg =
+        GuardConfig::from_policy_with_mode(support::no_inject("app1"), POSTGRES, GuardMode::Off);
 
-    let postgres = cfg.clone().for_dialect(SqlDialect::Postgres);
+    let postgres = cfg.clone().for_dialect(POSTGRES);
     assert_eq!(postgres.guard_mode(), GuardMode::Off);
     assert_eq!(
         postgres.schema_scope(),
         Some(SchemaScope::Single("app1".to_string()))
     );
 
-    let sqlite = cfg.for_dialect(SqlDialect::Sqlite);
+    let sqlite = cfg.for_dialect(SQLITE);
     assert_eq!(sqlite.guard_mode(), GuardMode::Enforced);
     assert_eq!(
         sqlite.schema_scope(),
         Some(SchemaScope::Single("app1".to_string()))
     );
+
+    let future =
+        GuardConfig::from_policy_with_mode(support::no_inject("app1"), POSTGRES, GuardMode::Off)
+            .for_dialect(DUCKDB);
+    assert_eq!(future.dialect(), &DUCKDB);
+    assert_eq!(
+        future.guard_mode(),
+        GuardMode::Enforced,
+        "a future backend must not inherit PostgreSQL's belt-off posture"
+    );
+}
+
+#[test]
+fn postgres_raw_guard_fails_closed_for_a_future_backend_id() {
+    let guard = SqlGuard::new(GuardConfig::from_policy(support::no_inject("app1"), DUCKDB));
+
+    let err = guard
+        .check("CREATE TABLE app1.widgets (id int)")
+        .expect_err("PostgreSQL's parser must not vet a future backend's raw SQL");
+    assert_eq!(err, GuardError::RawSqlRejected { dialect: DUCKDB });
+
+    let err = guard
+        .check_raw_island_sql_backstop("SELECT 1")
+        .expect_err("the raw-island backstop must fail closed for a future backend");
+    assert_eq!(err, GuardError::RawSqlRejected { dialect: DUCKDB });
+
+    let err = guard
+        .check_raw_island_body_backstop("SELECT 1", "future-backend function body")
+        .expect_err("the raw-body backstop must fail closed for a future backend");
+    assert_eq!(err, GuardError::RawSqlRejected { dialect: DUCKDB });
 }
 
 #[test]
@@ -334,7 +363,7 @@ scope = "all"
 "#;
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
-        SqlDialect::Postgres,
+        POSTGRES,
     ));
     for sql in [
         "DROP SCHEMA control CASCADE",

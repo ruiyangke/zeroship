@@ -11457,7 +11457,7 @@ mod tests {
     }
 
     fn platform_guard() -> GuardConfig {
-        GuardConfig::from_policy(platform_policy(), SqlDialect::Postgres)
+        GuardConfig::from_policy(platform_policy(), SqlDialect::Postgres.id())
     }
 
     /// The author composes the SAME charter the Platform guard does: a vendor op's
@@ -13191,7 +13191,8 @@ mod tests {
     fn guarded_forward_fk_keeps_fragment_and_noncontiguous_span_on_child_op() {
         let ir = child_before_parent_composite_ir(true);
         for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
-            let guard = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), dialect);
+            let guard =
+                GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), dialect.id());
             let (steps, fragments, spans) = test_ir_author("app", "app_a", dialect)
                 .lower_guarded_with_op_spans(&ir, &guard, &LiveSchema::default())
                 .unwrap_or_else(|error| panic!("{dialect:?} guarded forward FK lowers: {error}"));
@@ -13313,8 +13314,10 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
-        let guard_cfg =
-            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SqlDialect::Postgres);
+        let guard_cfg = GuardConfig::from_policy(
+            crate::test_fixtures::no_inject("app"),
+            SqlDialect::Postgres.id(),
+        );
         let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("guarded lower of a clean createTable passes");
@@ -13381,7 +13384,7 @@ mod tests {
         // cross-schema reference the Confined guard denies.
         let guard_cfg = GuardConfig::from_policy(
             crate::test_fixtures::no_inject("other"),
-            SqlDialect::Postgres,
+            SqlDialect::Postgres.id(),
         );
         let err = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
@@ -13420,8 +13423,10 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", SqlDialect::Sqlite);
-        let guard_cfg =
-            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SqlDialect::Sqlite);
+        let guard_cfg = GuardConfig::from_policy(
+            crate::test_fixtures::no_inject("app"),
+            SqlDialect::Sqlite.id(),
+        );
         let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("SQLite guarded lower passes (descriptor guard trusts IR DDL)");
@@ -13476,8 +13481,10 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
-        let guard_cfg =
-            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SqlDialect::Postgres);
+        let guard_cfg = GuardConfig::from_policy(
+            crate::test_fixtures::no_inject("app"),
+            SqlDialect::Postgres.id(),
+        );
 
         // The whole-up `lower` is the canonical reference (the parity leg).
         let whole = author
@@ -14579,7 +14586,7 @@ columns = [
         // reference the Confined guard denies, attributed to op #0.
         let guard_cfg = GuardConfig::from_policy(
             crate::test_fixtures::no_inject("other"),
-            SqlDialect::Postgres,
+            SqlDialect::Postgres.id(),
         );
         let err = author
             .load_and_lower_guarded(
@@ -14612,8 +14619,10 @@ columns = [
             {"op":"createTable","name":"fresh","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
-        let guard_cfg =
-            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SqlDialect::Postgres);
+        let guard_cfg = GuardConfig::from_policy(
+            crate::test_fixtures::no_inject("app"),
+            SqlDialect::Postgres.id(),
+        );
         let out = author
             .load_and_lower_guarded(
                 bytes,

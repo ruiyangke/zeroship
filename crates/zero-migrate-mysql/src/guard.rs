@@ -9,14 +9,15 @@
 //! parses PostgreSQL, so valid MySQL DDL would come back as a syntax error and be
 //! denied. That is why `SqlGuard::check` and
 //! `SqlGuard::check_raw_island_sql_backstop` both refuse a non-PostgreSQL dialect
-//! outright (`GuardError::MysqlRawSqlRejected`) rather than mis-vetting the text —
+//! outright (`GuardError::RawSqlRejected`, carrying MySQL's id) rather than
+//! mis-vetting the text —
 //! a backstop for the wrong caller, kept unchanged.
 //!
 //! # This is not the whole of MySQL's data security
 //!
 //! `data_security.destructive_ops = forbid` IS enforced for MySQL, by
 //! `zero_migrate_guard::guard::check_ir_data_security_policy`, over the structured IR.
-//! Its gate reads `if !matches!(cfg.dialect(), SqlDialect::Postgres)` — it exists
+//! Its gate reads `if cfg.dialect() != &POSTGRES` — it exists
 //! because the guard here is empty and is handed no policy. Do not read the empty
 //! outcome below as "MySQL enforces nothing"; read it as "MySQL enforces at the IR,
 //! not at the SQL text".

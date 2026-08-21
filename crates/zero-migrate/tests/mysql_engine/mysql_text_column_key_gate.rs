@@ -172,7 +172,7 @@ async fn apply(
 ) -> Result<(), String> {
     let policy = support::no_inject(&cfg.project_schema);
     let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Mysql, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Mysql);
+    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Mysql.id());
     let artifact = author
         .load_and_lower_guarded(source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;

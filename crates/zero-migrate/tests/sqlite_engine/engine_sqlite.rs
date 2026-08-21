@@ -71,7 +71,7 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite)
+    GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id())
 }
 
 fn effective_policy() -> EffectivePolicy {

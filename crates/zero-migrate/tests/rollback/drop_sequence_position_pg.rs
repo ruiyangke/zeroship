@@ -139,7 +139,7 @@ async fn sequence_exists(session: &PgDevSession, schema: &str) -> Result<bool, S
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     ))
 }
 

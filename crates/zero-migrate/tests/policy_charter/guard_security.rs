@@ -21,7 +21,7 @@ use zero_migrate::SqlDialect;
 fn guard() -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::no_inject_with_extensions("project_acme", &["pgcrypto", "uuid-ossp"]),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     ))
 }
 
@@ -36,12 +36,9 @@ fn assert_denied(sql: &str) {
             | GuardError::NamespacePolicy { .. },
         ) => {}
         Err(GuardError::Parse(e)) => panic!("expected Denied, got Parse({e:?}) for: {sql}"),
-        // The PG `guard()` here is never SQLite, so this is unreachable.
-        Err(GuardError::SqliteRawSqlRejected) => {
-            panic!("PG guard returned SqliteRawSqlRejected for: {sql}")
-        }
-        Err(GuardError::MysqlRawSqlRejected) => {
-            panic!("PG guard returned MysqlRawSqlRejected for: {sql}")
+        // The PG `guard()` here is keyed to PostgreSQL, so this is unreachable.
+        Err(GuardError::RawSqlRejected { dialect }) => {
+            panic!("PG guard returned RawSqlRejected for {dialect}: {sql}")
         }
         Ok(report) => panic!("expected DENY but PASSED for: {sql}\n  report: {report:?}"),
     }
@@ -1847,7 +1844,7 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
     // A guard + report + flags_for, all via root paths.
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("project_x"),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     ));
     let up = "CREATE TABLE project_x.t(id int primary key); DROP TABLE project_x.old;";
     let report = g.check(up).expect("safe migration passes");

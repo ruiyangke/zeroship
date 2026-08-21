@@ -56,7 +56,7 @@ fn lower_create_table(raw: &str, dialect: SqlDialect) -> Result<Vec<String>, Str
             APP,
             &BTreeMap::new(),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), dialect),
+            &GuardConfig::from_policy(support::no_inject(PROJECT), dialect.id()),
         )
         .map_err(|e| format!("{e:?}"))?;
     Ok(artifact
@@ -185,7 +185,7 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
                 APP,
                 &BTreeMap::new(),
                 &LiveSchema::default(),
-                &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite),
+                &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
             )
         .unwrap_or_else(|e| {
             // NOT a `continue`. SQLite is the dialect that ESCAPES these, so a
@@ -293,7 +293,7 @@ async fn an_awkward_identifier_survives_a_real_database_unchanged() {
                 APP,
                 &BTreeMap::new(),
                 &LiveSchema::default(),
-                &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite),
+                &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
             )
             .expect("lower for apply");
 

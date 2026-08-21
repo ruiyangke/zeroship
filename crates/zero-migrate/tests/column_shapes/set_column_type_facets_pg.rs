@@ -160,7 +160,7 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Option<Applied>
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
         let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,
@@ -315,7 +315,7 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> Option<String> {
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
         let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,

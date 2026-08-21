@@ -232,7 +232,7 @@ async fn apply_envelope<B: MigrationBackend>(
             OWNER,
             &registry(),
             live,
-            &GuardConfig::from_policy(policy.clone(), dialect),
+            &GuardConfig::from_policy(policy.clone(), dialect.id()),
         )
         .map_err(|error| format!("{tag}: guarded lower: {error:?}"))?;
     MigrationEngine::new()

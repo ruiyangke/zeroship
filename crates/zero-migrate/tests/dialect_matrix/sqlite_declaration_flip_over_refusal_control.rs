@@ -165,7 +165,7 @@ fn load_and_lower(ir: &MigrationIr, live: &LiveSchema) -> Vec<PlanStep> {
     let policy = effective_policy();
     let source = serde_json::to_string(ir).expect("serialize IR envelope");
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &policy);
-    let guard = GuardConfig::from_policy(effective_policy(), SqlDialect::Sqlite);
+    let guard = GuardConfig::from_policy(effective_policy(), SqlDialect::Sqlite.id());
     author
         .load_and_lower_guarded(&source, APP, &registry(), live, &guard)
         .expect(

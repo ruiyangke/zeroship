@@ -279,7 +279,7 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     // instead of the shared anchor — which diverges from the reference journal
     // (the DB-backed oracle caught exactly this). Guarded here ⇒ the host journal's
     // checksum column is byte-identical to the reference path's.
-    let guard_cfg = GuardConfig::from_policy(effective, dialect);
+    let guard_cfg = GuardConfig::from_policy(effective, dialect.id());
     let artifact = author
         .load_and_lower_guarded(&resolved_bytes, owner_app, &registry, live, &guard_cfg)
         .map_err(|e| e.to_string())?;

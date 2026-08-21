@@ -11,13 +11,13 @@
 mod support;
 
 use zero_migrate_guard::guard::{namespace_rule, GuardConfig, GuardError, SqlGuard};
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::POSTGRES;
 
 /// A confined guard over the composed policy, pinned to project schema `app`.
 fn guard_with(charter_toml: &str) -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter_toml),
-        SqlDialect::Postgres,
+        POSTGRES,
     ))
 }
 
@@ -179,7 +179,7 @@ columns = [ { name = "id", type = "text", nullable = false } ]
 "#;
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
-        SqlDialect::Postgres,
+        POSTGRES,
     ));
     assert_namespace_denied(
         &g,
@@ -495,7 +495,7 @@ scope = { include = ["app"] }
     // violation) but NOT in the create grant (`app`-only) → CreateTableNotGranted.
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
-        SqlDialect::Postgres,
+        POSTGRES,
     ));
     assert_namespace_denied(
         &g,
@@ -627,7 +627,7 @@ scope = { include = ["app.keep_*"] }
 "#;
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
-        SqlDialect::Postgres,
+        POSTGRES,
     ));
     assert_namespace_denied(
         &g,
@@ -666,7 +666,7 @@ columns = [ { name = "id", type = "text", nullable = false } ]
     // into ANY inject scope, because raw text cannot carry the injection.
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
-        SqlDialect::Postgres,
+        POSTGRES,
     ));
     assert_namespace_denied(
         &g,
@@ -694,7 +694,7 @@ scope = { include = ["app"] }
 "#;
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
-        SqlDialect::Postgres,
+        POSTGRES,
     ));
     g.check("CREATE TABLE app.plain (id text)")
         .expect("a granted create outside any inject scope is allowed");
@@ -722,7 +722,7 @@ columns = [ { name = "id", type = "text", nullable = false } ]
 "#;
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
-        SqlDialect::Postgres,
+        POSTGRES,
     ));
     // `app.t` is granted + no inject covers `app.*` (the inject is scoped to `other`).
     g.check("CREATE TABLE app.t (id text)")
@@ -750,7 +750,7 @@ scope = "all"
 "#;
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
-        SqlDialect::Postgres,
+        POSTGRES,
     ));
     // SET search_path is NOT refused under a ⊤ grant.
     match g.check("SET search_path TO app, public") {

@@ -88,7 +88,7 @@ async fn round_trip(
     );
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     );
     let registry: BTreeMap<String, String> =
         [("t".to_string(), OWNER.to_string())].into_iter().collect();

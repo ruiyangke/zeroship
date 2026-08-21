@@ -354,7 +354,7 @@ async fn sqlite_deferred_fk_is_typed_error() {
 fn confined_sqlite_guard_rejects_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
-        SqlDialect::Sqlite,
+        SqlDialect::Sqlite.id(),
     ));
     // A perfectly benign-looking raw string is still refused — the SQLite Confined
     // path is descriptor-diff-only (no untrusted raw SQL).
@@ -362,8 +362,12 @@ fn confined_sqlite_guard_rejects_raw_sql() {
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")
         .expect_err("raw SQL must be refused on the Confined SQLite path");
     assert!(
-        matches!(err, GuardError::SqliteRawSqlRejected),
-        "expected SqliteRawSqlRejected, got: {err:?}"
+        matches!(
+            err,
+            GuardError::RawSqlRejected { ref dialect }
+                if dialect == &zero_migrate::SQLITE
+        ),
+        "expected a SQLite-provenance RawSqlRejected, got: {err:?}"
     );
 }
 
@@ -373,7 +377,7 @@ fn confined_sqlite_guard_rejects_raw_sql() {
 fn confined_pg_guard_still_checks_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     ));
     let report = guard
         .check(r#"CREATE TABLE "prj_demo"."users" (id text primary key)"#)
@@ -389,21 +393,25 @@ fn platform_fails_closed_to_confined_on_sqlite() {
     // SQLite. (The Platform constructor is operator-gated; `for_dialect` is the
     // dialect-selection seam any caller uses, and Confined→Sqlite is the same
     // fail-closed mapping Platform→Sqlite takes.)
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Postgres)
-        .for_dialect(SqlDialect::Sqlite);
+    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Postgres.id())
+        .for_dialect(SqlDialect::Sqlite.id());
     let guard = SqlGuard::new(cfg);
     let err = guard
         .check("SELECT 1")
         .expect_err("SQLite-keyed guard must refuse raw SQL");
     assert!(
-        matches!(err, GuardError::SqliteRawSqlRejected),
+        matches!(
+            err,
+            GuardError::RawSqlRejected { ref dialect }
+                if dialect == &zero_migrate::SQLITE
+        ),
         "got: {err:?}"
     );
 
     // And `for_dialect(Postgres)` is identity — the PG guard still checks raw SQL.
     let pg = SqlGuard::new(
-        GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Postgres)
-            .for_dialect(SqlDialect::Postgres),
+        GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Postgres.id())
+            .for_dialect(SqlDialect::Postgres.id()),
     );
     assert!(pg
         .check(r#"CREATE TABLE "prj_demo"."t" (id text primary key)"#)
@@ -956,7 +964,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 
     // plan_declarative now CARRIES the rebuild (no error) — the fail-close is gone.
     let engine = MigrationEngine::new();
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite);
+    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
     let plan = engine
         .plan_declarative(
             &desired2,

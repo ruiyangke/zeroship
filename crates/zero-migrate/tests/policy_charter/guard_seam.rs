@@ -13,7 +13,7 @@
 //!   `SQLite` feeds it descriptor-generated DDL, which must NOT be rejected.
 //! - The raw-untrusted-SQLite-SQL fail-closed survives on `SqlGuard` itself: a
 //!   SQLite-keyed `SqlGuard` (the PG guard mis-handed a `SQLite` config) still
-//!   refuses with `SqliteRawSqlRejected` rather than mis-parsing — the defensive
+//!   refuses with `RawSqlRejected { dialect: SQLITE }` rather than mis-parsing — the defensive
 //!   property the engine no longer relies on (it routes `SQLite` through
 //!   `SqliteGuard`), kept as a backstop for the wrong caller.
 //! - `guard_for` selects the right per-engine guard by dialect, with no by-name
@@ -37,7 +37,7 @@ use zero_migrate::SqlDialect;
 fn pg_guard() -> Box<dyn MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         support::no_inject_with_extensions("project_acme", &["pgcrypto", "uuid-ossp"]),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     ))
 }
 
@@ -99,7 +99,7 @@ fn sqlite_descriptor_guard_passes_descriptor_create_table() {
     // so the object under test is unchanged by the re-export's removal.
     let guard = guard_for(&GuardConfig::from_policy(
         support::no_inject("project_acme"),
-        SqlDialect::Sqlite,
+        SqlDialect::Sqlite.id(),
     ));
     // Descriptor-generated DDL is trusted by construction (author-boundary line-1 +
     // backend-authorizer line-2). The engine's apply/plan path feeds exactly this.
@@ -127,14 +127,18 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
     // engine no longer relies on (it routes SQLite through SqliteGuard).
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("project_acme"),
-        SqlDialect::Sqlite,
+        SqlDialect::Sqlite.id(),
     ));
     let err = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")
         .expect_err("raw SQLite SQL handed to the PG guard must fail closed");
     assert!(
-        matches!(err, GuardError::SqliteRawSqlRejected),
-        "expected SqliteRawSqlRejected, got: {err:?}"
+        matches!(
+            err,
+            GuardError::RawSqlRejected { ref dialect }
+                if dialect == &zero_migrate::SQLITE
+        ),
+        "expected a SQLite-provenance RawSqlRejected, got: {err:?}"
     );
 }
 
@@ -146,7 +150,7 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
 fn guard_for_pg_runs_the_deny_list() {
     let guard = guard_for(&GuardConfig::from_policy(
         support::no_inject_with_extensions("project_acme", &["pgcrypto"]),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     ));
     // The PG-selected guard denies the deny-list set …
     assert!(matches!(
@@ -165,7 +169,7 @@ fn guard_for_sqlite_trusts_descriptor_ddl() {
     // so apply is NOT broken by a raw-rejection on legitimate descriptor SQL.
     let guard = guard_for(&GuardConfig::from_policy(
         support::no_inject("project_acme"),
-        SqlDialect::Sqlite,
+        SqlDialect::Sqlite.id(),
     ));
     let outcome = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")

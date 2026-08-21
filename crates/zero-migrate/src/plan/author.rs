@@ -422,7 +422,7 @@ impl RawSqlAuthor {
     pub fn wrap(&self, name: &str, up: &str, down: Option<&str>) -> Result<Migration, AuthorError> {
         let guard = SqlGuard::new(GuardConfig::from_policy(
             self.effective.clone(),
-            SqlDialect::Postgres,
+            SqlDialect::Postgres.id(),
         ));
         // Derive flags from a guard pass when it succeeds; on a *denial* keep
         // conservative defaults but err only if UNPARSEABLE (a denial is the

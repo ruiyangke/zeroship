@@ -468,7 +468,7 @@ fn lower(
         }
     };
     let author = IrAuthor::new(schema, OWNER, dialect, policy);
-    let guard = GuardConfig::from_policy(policy.clone(), dialect);
+    let guard = GuardConfig::from_policy(policy.clone(), dialect.id());
     author
         .load_and_lower_guarded(&source, OWNER, &registry(), live, &guard)
         .map_err(|error| classify_lower(&error))

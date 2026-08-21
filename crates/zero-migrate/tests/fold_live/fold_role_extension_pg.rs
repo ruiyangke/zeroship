@@ -172,7 +172,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         .to_string();
 
         let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
         let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
@@ -342,7 +342,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
         .to_string();
 
         let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
         let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
@@ -516,7 +516,7 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
         .to_string();
 
         let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
         let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
@@ -663,7 +663,7 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
                 .to_string();
                 let author =
                     IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-                let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+                let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
                 let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
                     .map_err(|error| format!("fold base: {error}"))?;
                 let live = LiveSchema::from_catalog_snapshot(base, OWNER);
@@ -851,7 +851,7 @@ async fn grant_and_revoke_move_exactly_the_named_privilege() {
                 .to_string();
                 let author =
                     IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-                let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+                let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
                 let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
                     .map_err(|error| format!("fold base: {error}"))?;
                 let live = LiveSchema::from_catalog_snapshot(base, OWNER);

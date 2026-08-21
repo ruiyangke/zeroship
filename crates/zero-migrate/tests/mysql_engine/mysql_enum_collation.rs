@@ -118,7 +118,7 @@ async fn deploy_mysql(
     let resolved_source =
         serde_json::to_string(&resolved).map_err(|e| format!("serialize resolved IR: {e}"))?;
     let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Mysql, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Mysql);
+    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Mysql.id());
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let artifact = author
         .load_and_lower_guarded(
@@ -549,7 +549,7 @@ fn an_ir_enum_column_cannot_declare_case_insensitivity() {
     ]}}"#
     );
     let author = IrAuthor::new("app", OWNER, SqlDialect::Mysql, &policy);
-    let guard = GuardConfig::from_policy(policy, SqlDialect::Mysql);
+    let guard = GuardConfig::from_policy(policy, SqlDialect::Mysql.id());
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let refusal = author
         .load_and_lower_guarded(&src, OWNER, &registry, &LiveSchema::default(), &guard)

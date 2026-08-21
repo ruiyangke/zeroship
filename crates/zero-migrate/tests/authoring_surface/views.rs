@@ -432,7 +432,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     let confined = SchemaScope::Single(SCHEMA.to_string());
     validate_ir_scoped(&structured, Dialect::Postgres, Some(&confined)).unwrap();
 
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(SCHEMA), SqlDialect::Postgres);
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(SCHEMA), SqlDialect::Postgres.id());
     IrAuthor::new(
         SCHEMA,
         "app_a",

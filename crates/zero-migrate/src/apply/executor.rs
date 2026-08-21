@@ -1116,7 +1116,7 @@ async fn apply_locked<B: MigrationBackend>(
     // The non-txn idempotency check still runs through the trait (`validate_non_txn`),
     // which for SQLite rejects `transaction:false` at the dialect boundary.
     let guard =
-        crate::render::backends::guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
+        crate::render::backends::guard_for(&cfg.guard_config().for_dialect(backend.dialect().id()));
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
     // execution. The guard runs per-migration inside the apply loop in the
@@ -1451,7 +1451,7 @@ fn guard_repeatable_batch(
     dialect: crate::schema::query::SqlDialect,
     migrations: &[&Migration],
 ) -> Result<(), ApplyError> {
-    let guard = crate::render::backends::guard_for(&cfg.guard_config().for_dialect(dialect));
+    let guard = crate::render::backends::guard_for(&cfg.guard_config().for_dialect(dialect.id()));
     for migration in migrations {
         guard
             .check(&migration.up)
@@ -3241,7 +3241,9 @@ mod rollback_selection_tests {
     struct DenyingGuard;
     impl crate::guard::MigrationGuard for DenyingGuard {
         fn check(&self, _up: &str) -> Result<crate::guard::GuardOutcome, crate::guard::GuardError> {
-            Err(crate::guard::GuardError::MysqlRawSqlRejected)
+            Err(crate::guard::GuardError::RawSqlRejected {
+                dialect: zero_migrate_ir::dialect::MYSQL,
+            })
         }
     }
 

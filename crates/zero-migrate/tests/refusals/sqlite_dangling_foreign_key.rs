@@ -87,7 +87,7 @@ fn lower_for(dialect: SqlDialect, bytes: &str) -> Result<zero_migrate::LoweredAr
             APP,
             &registry(),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), dialect),
+            &GuardConfig::from_policy(support::no_inject(PROJECT), dialect.id()),
         )
         .map_err(|e| format!("{e:?}"))
 }

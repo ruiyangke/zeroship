@@ -3,7 +3,7 @@ name = "zero-migrate-guard"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The zero-migrate SQL security layer: the pg_query(libpg_query)-backed parse-time deny-list, cross-schema confinement, statement classification, and operational advisories. Owns the ONLY C dependency on the non-SQLite path (libpg_query). Depends on the zero-migrate-ir wire contract (including its SqlDialect deploy-target enum); does NOT depend on the engine."
+description = "The zero-migrate SQL security layer: the pg_query(libpg_query)-backed parse-time deny-list, cross-schema confinement, statement classification, and operational advisories. Owns the ONLY C dependency on the non-SQLite path (libpg_query). Depends on the zero-migrate-ir wire contract and its open backend identity; does NOT depend on the engine."
 
 [dependencies]
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the security
@@ -21,7 +21,7 @@ thiserror = { workspace = true }
 # The wire contract: the closed `Op`/`MigrationIr` types the IR-shape data-security
 # checks read, the policy vocabulary (`TrustProfile`/`SchemaScope`/
 # `VendorCapabilities`/`OperatorCapability`/`DestructiveOps`), and the
-# `SqlDialect` deploy-target enum the guard keys dialect behaviour on.
+# open `DialectId` identity the guard uses for provenance and fail-closed checks.
 zero-migrate-ir = { workspace = true }
 # The backend CONTRACT. `MigrationGuard`, `GuardConfig`, `GuardError`, `GuardOutcome`,
 # `ParseError` and the `Advisory` vocabulary live there rather than here, because a

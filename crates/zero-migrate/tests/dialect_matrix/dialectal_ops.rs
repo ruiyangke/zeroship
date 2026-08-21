@@ -188,7 +188,7 @@ fn authored_create_table_lowers_under_the_charter_that_shaped_it() {
     let resolved =
         resolve_create_table_policy(&authored, &policy, PROJECT).expect("table shape resolves");
     let author = IrAuthor::new(PROJECT, APP, SqlDialect::Postgres, &policy);
-    let guard_cfg = GuardConfig::from_policy(policy, SqlDialect::Postgres);
+    let guard_cfg = GuardConfig::from_policy(policy, SqlDialect::Postgres.id());
     let (steps, _fragments) = author
         .lower_guarded(&resolved, &guard_cfg, &LiveSchema::default())
         .expect("an authored createTable lowers under the charter that shaped it");
@@ -227,7 +227,7 @@ async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
     );
 
     let engine = MigrationEngine::new();
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite);
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),

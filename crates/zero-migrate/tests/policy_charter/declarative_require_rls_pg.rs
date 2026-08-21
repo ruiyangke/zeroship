@@ -149,7 +149,7 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 }
 
 fn guard_cfg(policy: &EffectivePolicy) -> GuardConfig {
-    GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres)
+    GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id())
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {

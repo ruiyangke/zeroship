@@ -16,7 +16,7 @@
 //! It does. `data_security.destructive_ops = forbid` is enforced for SQLite by
 //! `zero_migrate_guard::guard::check_ir_data_security_policy`, over the structured IR
 //! rather than over SQL text, and its gate is written
-//! `if !matches!(cfg.dialect(), SqlDialect::Postgres)` — i.e. it exists precisely
+//! `if cfg.dialect() != &POSTGRES` — i.e. it exists precisely
 //! BECAUSE the guard here is empty and is handed no policy. Enforcement over the IR is
 //! the stronger place for a descriptor-only dialect anyway: there is no text to
 //! misparse, only ops.

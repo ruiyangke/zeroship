@@ -593,7 +593,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     );
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     );
     let artifact = author
         .load_and_lower_guarded(
@@ -2307,7 +2307,7 @@ async fn interrupt_online_rename_deploy(
         "app_test",
         &registry,
         &initial_live,
-        &GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres),
+        &GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id()),
     )
     .expect("lower rename before interruption");
     let rename_plan = authored
@@ -6185,7 +6185,8 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
     assert!(table_exists(&session, &schema, "child").await);
 
     let set = vec![parent.clone(), child.clone()];
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(&schema), SqlDialect::Postgres);
+    let guard_cfg =
+        GuardConfig::from_policy(support::no_inject(&schema), SqlDialect::Postgres.id());
     let guard = zero_migrate::guard_for(&guard_cfg);
     let outcome = zero_migrate::rollback(
         &backend,
@@ -6519,7 +6520,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
     );
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres,
+        SqlDialect::Postgres.id(),
     );
     let schema_artifact = author
         .load_and_lower_guarded(

@@ -50,7 +50,7 @@ fn artifact_created_tables(ops_json: &str) -> Vec<String> {
             APP,
             &BTreeMap::new(),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite),
+            &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
         )
         .expect("the dialectal create lowers under SQLite")
         .created_tables

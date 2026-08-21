@@ -786,7 +786,8 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
         let request = zero_migrate::RollbackRequest::new(target).with_options(options);
         // The guard the engine's own apply sites use. Composing one from the same
         // charter here would drop the config's host-selected mode.
-        let guard = zero_migrate::guard_for(&cfg.guard_config().for_dialect(backend.dialect()));
+        let guard =
+            zero_migrate::guard_for(&cfg.guard_config().for_dialect(backend.dialect().id()));
         let outcome = zero_migrate::rollback_with_lock_and_inverse_plans(
             backend,
             cfg,
