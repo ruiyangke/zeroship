@@ -56,7 +56,15 @@ pub async fn healthz() -> web::HttpResponse {
 /// Readiness. Every endpoint this service exposes reads or writes Postgres, so
 /// an unreachable database means it cannot serve. The probe is bounded,
 /// cached and single-flighted; the body carries no DSN and no driver text.
+///
+/// A process that booted on the credential dev escape is NOT ready, whatever
+/// Postgres says: the seal key it would confine a creator migration with is a
+/// placeholder. That check is short-circuited FIRST so a doomed process does
+/// not also generate database probes.
 pub async fn readyz(state: State<Arc<MigrationServiceState>>) -> web::HttpResponse {
+    if zeroship_core::config::dev_escape_active() {
+        return web::HttpResponse::ServiceUnavailable().json(&json!({"ready": false}));
+    }
     let ready = state
         .readiness
         .ready(|| async {
