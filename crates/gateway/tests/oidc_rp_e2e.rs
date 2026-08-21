@@ -340,6 +340,7 @@ fn build_gateway_state(
     app_id: Uuid,
     client_id: &str,
     worker_url: Option<&str>,
+    db: Option<zeroship_gateway::db::DbConfig>,
 ) -> Arc<GateState> {
     let body = bytes::Bytes::from_static(b"ok");
     let (static_manifest, blob_store) = protected_static_manifest(body);
@@ -388,7 +389,7 @@ fn build_gateway_state(
         disk_cache,
         idempotency_store: Arc::new(idempotency::InMemoryIdempotencyStore::new()),
         oidc_rp: Arc::new(oidc_rp),
-        db: None,
+        db,
         logout_jti_cache: Arc::new(zeroship_core::logout_token::LogoutJtiCache::default()),
         revocation_cache: Arc::new(zeroship_authz::wrapper_revocation::RevocationCache::new()),
         signing_key: Some(Arc::new(signing_key)),
@@ -396,7 +397,15 @@ fn build_gateway_state(
         session_issuer: Some(Arc::new(session_issuer)),
         session_verifier: Some(Arc::new(session_verifier)),
         anchor_enc_key: zeroship_core::crypto::derive_key("gateway-e2e-anchor-key"),
-        pairwise_salt: zeroship_core::crypto::derive_key("gateway-e2e-pairwise-salt"),
+        // THE SAME SALT THE OP RUNS WITH (`Issuer::from_signing_key(.., [9u8; 32], ..)`).
+        // It is one platform-wide secret in production (`AUTH_PAIRWISE_SALT_FILE`),
+        // and the two sides must agree because both write `pws_` into
+        // `zeroship.app_user_identities`: the OP at the code exchange, the gateway
+        // when it signs the session cookie. Its upsert refuses to change an
+        // existing binding, so a fixture with two salts fails the cookie mint with
+        // `app_user_identities pairwise binding changed` (500). Measured here,
+        // and it is real misconfiguration rather than a test artefact.
+        pairwise_salt: [9u8; 32],
         meter: Arc::new(zeroship_metering::Meter::new()),
     });
 
@@ -479,7 +488,21 @@ async fn connect_test_db(db_url: &str) -> Arc<Client> {
     Arc::new(pg_client)
 }
 
-async fn drive_login_to_code(auth_base: &str, auth_url: &str, email: &str) -> String {
+/// What a driven login yields: the authorization code AND the `IdP` session
+/// cookie value. The cookie is what authenticates the caller to `/me/sessions`,
+/// so a test that both signs in to an app and then manages that sign-in from
+/// the OP needs both halves of one login.
+struct DrivenLogin {
+    code: String,
+    idp_session: String,
+}
+
+async fn drive_login_to_code(
+    auth_base: &str,
+    auth_url: &str,
+    email: &str,
+    redirect_uri: &str,
+) -> DrivenLogin {
     let http = cyper::Client::new();
 
     let first = http
@@ -533,9 +556,12 @@ async fn drive_login_to_code(auth_base: &str, auth_url: &str, email: &str) -> St
         .expect("send GET /authorize with session");
     assert_eq!(final_authorize.status().as_u16(), 303);
     let cb_url = location(&final_authorize);
-    assert!(cb_url.starts_with(REDIRECT_URI), "callback: {cb_url}");
+    assert!(cb_url.starts_with(redirect_uri), "callback: {cb_url}");
     assert_eq!(query_param(&cb_url, "iss").as_deref(), Some(ISSUER));
-    query_param(&cb_url, "code").expect("code param")
+    DrivenLogin {
+        code: query_param(&cb_url, "code").expect("code param"),
+        idp_session: session,
+    }
 }
 
 async fn browser_pkce_tokens(rp: &OidcRp, auth_base: &str, client_id: &str, email: &str) -> TokenSet {
@@ -553,8 +579,8 @@ async fn browser_pkce_tokens(rp: &OidcRp, auth_base: &str, client_id: &str, emai
         idp_hint: None,
     };
     let auth_url = rp.build_browser_authorize_url(client_id, &params);
-    let code = drive_login_to_code(auth_base, &auth_url, email).await;
-    rp.exchange_code_public(client_id, &code, &verifier, REDIRECT_URI)
+    let login = drive_login_to_code(auth_base, &auth_url, email, REDIRECT_URI).await;
+    rp.exchange_code_public(client_id, &login.code, &verifier, REDIRECT_URI)
         .await
         .expect("exchange code for token set")
 }
@@ -610,12 +636,22 @@ fn test_auth_config(db_url: &str) -> (AuthConfig, tempfile::TempDir) {
     (config, dir)
 }
 
+/// Seed a user plus the app's brokered `oac_` client.
+///
+/// `redirect_uri` and `backchannel_logout_uri` are explicit because the two
+/// flows this file drives register different ones: a raw token exchange lands
+/// on the loopback callback and needs no logout receiver, while a real gateway
+/// BFF session lands on the app-origin popup callback and MUST name the
+/// gateway's back-channel-logout endpoint. Without that registration the OP
+/// has nowhere to send a revocation and the gateway never hears about one.
 async fn seed_user_client(
     db: &Client,
     user_id: Uuid,
     app_id: Uuid,
     client_id: &str,
     email: &str,
+    redirect_uri: &str,
+    backchannel_logout_uri: Option<&str>,
 ) {
     let phc = password::hash(PASSWORD).expect("password hash");
     db.execute(
@@ -655,9 +691,15 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, redirect_uris, scopes, skip_consent, \
-             token_endpoint_auth_method, brokered, refresh_allowed) \
-         VALUES ($1, 'Gateway OP e2e', $2, $3, TRUE, 'client_secret_basic', TRUE, TRUE)",
-        &[&client_id, &vec![REDIRECT_URI.to_string()], &scopes],
+             token_endpoint_auth_method, brokered, refresh_allowed, \
+             backchannel_logout_uri) \
+         VALUES ($1, 'Gateway OP e2e', $2, $3, TRUE, 'client_secret_basic', TRUE, TRUE, $4)",
+        &[
+            &client_id,
+            &vec![redirect_uri.to_string()],
+            &scopes,
+            &backchannel_logout_uri,
+        ],
     )
     .await
     .expect("seed brokered oauth client");
@@ -719,7 +761,16 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     let app_id = Uuid::new_v4();
     let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
     let email = format!("gw-op-h2-{}@zeroship.test", Uuid::new_v4().simple());
-    seed_user_client(&pg_client, user_id, app_id, &client_id, &email).await;
+    seed_user_client(
+        &pg_client,
+        user_id,
+        app_id,
+        &client_id,
+        &email,
+        REDIRECT_URI,
+        None,
+    )
+    .await;
 
     let srv = start_platform_op(&db_url, pg_client.clone(), issuer).await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
@@ -739,7 +790,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     })
     .await;
     let worker_base = worker.url("").trim_end_matches('/').to_string();
-    let state = build_gateway_state(&auth_base, app_id, &client_id, Some(&worker_base));
+    let state = build_gateway_state(&auth_base, app_id, &client_id, Some(&worker_base), None);
     let app = test::init_service(web::App::new().state(state).service(
         web::resource("/{tail}*")
             .route(web::route().to(zeroship_gateway::router::handle_subdomain)),
@@ -811,7 +862,7 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
     let srv = start_platform_op(&db_url, pg_client, issuer.clone()).await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
-    let state = build_gateway_state(&auth_base, app_id, &client_id, None);
+    let state = build_gateway_state(&auth_base, app_id, &client_id, None, None);
     let app = test::init_service(web::App::new().state(state).service(
         web::resource("/{tail}*")
             .route(web::route().to(zeroship_gateway::router::handle_subdomain)),
@@ -883,7 +934,16 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     let app_id = Uuid::new_v4();
     let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
     let email = format!("gw-op-{}@zeroship.test", Uuid::new_v4().simple());
-    seed_user_client(&pg_client, user_id, app_id, &client_id, &email).await;
+    seed_user_client(
+        &pg_client,
+        user_id,
+        app_id,
+        &client_id,
+        &email,
+        REDIRECT_URI,
+        None,
+    )
+    .await;
 
     let (mut cfg, _auth_secret_files) = test_auth_config(&db_url);
     let key_dir = std::env::temp_dir().join(format!("gateway-op-refresh-{}", Uuid::new_v4()));
@@ -1063,4 +1123,326 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     cleanup(&pg_client, user_id, app_id, &client_id).await;
     compio::time::sleep(Duration::from_millis(50)).await;
     drop(srv);
+}
+
+/// THE APP-SESSION REVOKE SECURITY PROPERTY, end to end across both services.
+///
+/// A user signs in to a hosted app, then revokes THAT app session from the OP
+/// (`POST /me/sessions/{id}/revoke`, `kind=app`). The request that the session
+/// authenticated a moment ago must stop being authenticated, and the 30-day
+/// reload anchor must stop re-minting.
+///
+/// WHY THIS IS ASSERTED HERE AND NOT IN THE AUTH CRATE. The revoke handler runs
+/// in `crates/auth`, but nothing it can observe proves the property: the row it
+/// deletes (`zeroship.gateway_sessions`) is an audit record, and the gateway
+/// authenticates a request from a locally-verified `zeroship-sess+jwt` cookie
+/// plus the `(client_id, sub)` family marker instead. Asserting "the row is
+/// gone" or "the API returned 200" is exactly the shape of assertion that let a
+/// revoke which revoked NOTHING pass as working. So both services run for real
+/// here: the OP emits its back-channel logout over a real HTTP hop to the
+/// gateway's real receiver, and the assertions are made on gateway REQUESTS.
+///
+/// The control is the same request, same cookie, one variable: taken BEFORE the
+/// revoke it must be accepted, and after it must not.
+#[ntex::test]
+#[allow(clippy::future_not_send, clippy::too_many_lines)]
+async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
+    let Some(db_url) = db_url() else {
+        zeroship_test_support::skip("[oidc_rp_e2e] skip (no test database; set PG_TEST_URL)");
+        return;
+    };
+
+    let pg_client = connect_test_db(&db_url).await;
+    let signing = op_signing();
+    let broker = BrokerSecrets::new(BROKER_MASTER.to_vec(), None).expect("auth broker secrets");
+    let issuer = Arc::new(
+        Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string())
+            .expect("issuer")
+            .with_broker_secrets(broker),
+    );
+    publish_op_key_once(&issuer, &pg_client).await;
+
+    let user_id = Uuid::new_v4();
+    let app_id = Uuid::new_v4();
+    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+    let email = format!("gw-revoke-{}@zeroship.test", Uuid::new_v4().simple());
+    // The gateway's BFF default: the SDK lands the code on the app origin.
+    let popup_callback = format!("{SECTOR}/__zeroship/auth/popup-callback");
+    seed_user_client(
+        &pg_client,
+        user_id,
+        app_id,
+        &client_id,
+        &email,
+        &popup_callback,
+        None,
+    )
+    .await;
+
+    let op_srv = start_platform_op(&db_url, pg_client.clone(), issuer).await;
+    let auth_base = op_srv.url("").trim_end_matches('/').to_string();
+
+    let db_cfg = zeroship_gateway::db::DbConfig::new(db_url.clone(), 8);
+    let state = build_gateway_state(&auth_base, app_id, &client_id, None, Some(db_cfg.clone()));
+
+    // The gateway's back-channel-logout receiver on a REAL socket, sharing the
+    // SAME `GateState` as the in-process app below, so the teardown it runs
+    // (family marker + same-node revocation-cache bust + anchor delete) is seen
+    // by the very request path the assertions exercise.
+    let bcl_state = state.clone();
+    let bcl_srv = test::server(move || {
+        let bcl_state = bcl_state.clone();
+        async move {
+            web::App::new().state(bcl_state).service(
+                web::resource("/oidc/backchannel-logout")
+                    .route(web::post().to(zeroship_gateway::backchannel_logout::handle)),
+            )
+        }
+    })
+    .await;
+    let bcl_uri = format!(
+        "{}/oidc/backchannel-logout",
+        bcl_srv.url("").trim_end_matches('/')
+    );
+    // Register it now that the port is known. Without this the OP has no
+    // receiver and the revoke below is unreachable by construction.
+    pg_client
+        .execute(
+            "UPDATE zeroship.oauth_clients SET backchannel_logout_uri = $2 WHERE client_id = $1",
+            &[&client_id, &bcl_uri],
+        )
+        .await
+        .expect("register backchannel_logout_uri");
+
+    let app = test::init_service(
+        web::App::new()
+            .state(state.clone())
+            .service(
+                web::resource("/__zeroship/auth/session")
+                    .route(web::post().to(zeroship_gateway::auth_token::session_post))
+                    .route(web::get().to(zeroship_gateway::auth_token::session)),
+            )
+            .service(
+                web::resource("/{tail}*")
+                    .route(web::route().to(zeroship_gateway::router::handle_subdomain)),
+            ),
+    )
+    .await;
+
+    // 1. Real OP login, real authorization code, real PKCE.
+    let verifier = zeroship_core::pkce::generate_verifier();
+    let challenge = zeroship_core::pkce::s256_challenge(&verifier);
+    let rp = OidcRp::new(
+        auth_base.clone(),
+        BrokerSecret::from_bytes(BROKER_MASTER.to_vec()).expect("gateway broker secret"),
+        b"gateway-e2e-stash-signing-key-32-bytes!".to_vec(),
+    )
+    .with_issuer(ISSUER);
+    let auth_url = rp.build_browser_authorize_url(
+        &client_id,
+        &BrowserAuthorizeParams {
+            code_challenge: &challenge,
+            state: &format!("st-{}", Uuid::new_v4().simple()),
+            nonce: &format!("nonce-{}", Uuid::new_v4().simple()),
+            scope: "openid offline_access email profile",
+            redirect_uri: &popup_callback,
+            prompt: None,
+            idp_hint: None,
+        },
+    );
+    let login = drive_login_to_code(&auth_base, &auth_url, &email, &popup_callback).await;
+
+    // 2. Real gateway BFF session: signed session cookie + reload anchor.
+    let body = form(&[
+        ("grant_type", "authorization_code"),
+        ("code", login.code.as_str()),
+        ("code_verifier", verifier.as_str()),
+        ("redirect_uri", popup_callback.as_str()),
+    ]);
+    let req = test::TestRequest::post()
+        .uri("/__zeroship/auth/session")
+        .header(http::header::HOST, APP_HOST)
+        .header("origin", SECTOR)
+        .header("x-zs-auth", "1")
+        .header(http::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .set_payload(body)
+        .to_request();
+    let resp = test::call_service(&app, req).await;
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "gateway BFF session mint must succeed against the real OP"
+    );
+    let session_cookie =
+        set_cookie_pair(&resp, "__Host-zeroship_app_session=").expect("session cookie");
+    let anchor_cookie =
+        set_cookie_pair(&resp, "__Host-zeroship_app_anchor=").expect("anchor cookie");
+
+    // 3. CONTROL, before the revoke: this exact request is ACCEPTED.
+    let before = test::call_service(&app, protected_request(&session_cookie)).await;
+    assert_eq!(
+        before.status().as_u16(),
+        200,
+        "the freshly minted session must authenticate the protected route"
+    );
+
+    // 4. The OP's own view of that session, and the revoke a user clicks.
+    let gw_session_id: Uuid = pg_client
+        .query_one(
+            "SELECT id FROM zeroship.gateway_sessions \
+             WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
+             ORDER BY issued_at DESC LIMIT 1",
+            &[&user_id, &app_id],
+        )
+        .await
+        .expect("the OP lists the app session it is about to revoke")
+        .get("id");
+
+    let csrf = "revoke-csrf-token-1234";
+    let http = cyper::Client::new();
+    let revoke = http
+        .request(
+            http::Method::POST,
+            format!("{auth_base}/me/sessions/{gw_session_id}/revoke"),
+        )
+        .expect("build POST revoke")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .expect("content-type")
+        .header(
+            "cookie",
+            format!(
+                "__Host-zsidp_session={}; __Host-zsidp_csrf={csrf}",
+                login.idp_session
+            ),
+        )
+        .expect("cookie")
+        .body(form(&[("csrf", csrf), ("kind", "app")]))
+        .send()
+        .await
+        .expect("send POST revoke");
+    assert_eq!(revoke.status().as_u16(), 200, "revoke must be accepted");
+    let revoke_body: serde_json::Value =
+        serde_json::from_slice(&revoke.bytes().await.expect("revoke body")).expect("revoke json");
+    assert_eq!(
+        revoke_body["revoked"],
+        serde_json::json!(true),
+        "the OP must report it revoked the caller's own app session"
+    );
+
+    // 5. THE PROPERTY: the same request, the same cookie, now REJECTED.
+    let after = test::call_service(&app, protected_request(&session_cookie)).await;
+    assert_ne!(
+        after.status().as_u16(),
+        200,
+        "a revoked app session must not authenticate the protected route"
+    );
+
+    // 6. And the DURABLE half: the 30-day anchor must not re-mint a fresh
+    //    cookie. Without this the revoke is merely delayed by the cookie's
+    //    15-minute lifetime and then undone for the next 30 days.
+    let mint = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri("/__zeroship/auth/session?mint=1")
+            .header(http::header::HOST, APP_HOST)
+            .header("origin", SECTOR)
+            .header("x-zs-auth", "1")
+            .header(http::header::COOKIE, anchor_cookie.as_str())
+            .to_request(),
+    )
+    .await;
+    assert_eq!(
+        mint.status().as_u16(),
+        401,
+        "the reload anchor of a revoked app session must require a fresh login"
+    );
+    assert!(
+        set_cookie_pair(&mint, "__Host-zeroship_app_session=").is_none(),
+        "a revoked anchor must not yield a fresh session cookie"
+    );
+
+    let pws = zeroship_core::auth::derive_pairwise(
+        &state.pairwise_salt,
+        &user_id.to_string(),
+        SECTOR,
+    );
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
+            &[&client_id, &pws],
+        )
+        .await;
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.audit_events WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await;
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.app_session_anchors WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await;
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.gateway_sessions WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await;
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.app_user_identities WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await;
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.oidc_session_clients WHERE user_id = $1",
+            &[&user_id],
+        )
+        .await;
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.oauth_refresh_tokens WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await;
+    let _ = pg_client
+        .execute(
+            "DELETE FROM zeroship.app_oauth_clients WHERE app_id = $1",
+            &[&app_id],
+        )
+        .await;
+    cleanup(&pg_client, user_id, app_id, &client_id).await;
+    compio::time::sleep(Duration::from_millis(50)).await;
+    drop(bcl_srv);
+    drop(op_srv);
+}
+
+/// The one request both the control and the property are made on: a GET of the
+/// manifest's `auth: user` resource, carrying only the session cookie.
+fn protected_request(session_cookie: &str) -> ntex::http::Request {
+    test::TestRequest::get()
+        .uri("/private")
+        .header(http::header::HOST, APP_HOST)
+        .header(http::header::COOKIE, session_cookie)
+        .to_request()
+}
+
+/// Extract a `Set-Cookie` value as a `name=value` pair ready to re-send.
+fn set_cookie_pair(resp: &ntex::web::WebResponse, prefix: &str) -> Option<String> {
+    for hv in resp.headers().get_all(http::header::SET_COOKIE) {
+        let Ok(s) = hv.to_str() else { continue };
+        if s.starts_with(prefix) {
+            let pair = s.split(';').next()?.trim();
+            // A clear (`Max-Age=0`) carries an empty value; that is not a cookie
+            // the browser would send back, so it must not read as one here.
+            if pair.ends_with('=') {
+                return None;
+            }
+            return Some(pair.to_string());
+        }
+    }
+    None
 }
