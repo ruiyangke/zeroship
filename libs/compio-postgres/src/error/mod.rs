@@ -378,6 +378,9 @@ enum Kind {
     Config,
     RowCount,
     Connect,
+    /// A post-startup target-session probe failed. This stays distinct from a
+    /// transport failure so `sslmode=allow` does not retry the same endpoint.
+    TargetSessionAttrs,
     Timeout,
 }
 
@@ -425,6 +428,7 @@ impl fmt::Display for Error {
             Kind::Config => fmt.write_str("invalid configuration"),
             Kind::RowCount => fmt.write_str("query returned an unexpected number of rows"),
             Kind::Connect => fmt.write_str("error connecting to server"),
+            Kind::TargetSessionAttrs => fmt.write_str("error checking target session attributes"),
             Kind::Timeout => fmt.write_str("timeout waiting for server"),
         }
     }
@@ -469,6 +473,12 @@ impl Error {
     /// nothing else - see [`Kind::TlsHandshake`].
     pub(crate) fn is_tls_handshake(&self) -> bool {
         self.0.kind == Kind::TlsHandshake
+    }
+
+    /// Whether startup succeeded and the post-startup session-property check
+    /// failed. Transport fallback must not reinterpret this as a TLS failure.
+    pub(crate) fn is_target_session_attrs(&self) -> bool {
+        self.0.kind == Kind::TargetSessionAttrs
     }
 
     /// Returns the SQLSTATE error code associated with the error.
@@ -561,6 +571,10 @@ impl Error {
 
     pub(crate) fn connect(e: io::Error) -> Error {
         Error::new(Kind::Connect, Some(Box::new(e)))
+    }
+
+    pub(crate) fn target_session_attrs(e: Error) -> Error {
+        Error::new(Kind::TargetSessionAttrs, e.into_source())
     }
 
     #[doc(hidden)]
