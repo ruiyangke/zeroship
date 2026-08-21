@@ -1195,16 +1195,19 @@ mod tests {
     /// The one env-name scanner, shared with every other binary's copy of this
     /// test. Local copies would be four things to keep in step.
     use zeroship_core::config::env_like_tokens;
-    use zeroship_core::config::{GeneratedConfig, OriginScheme};
+    use zeroship_core::config::GeneratedConfig;
 
-    static CONFIG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn restore_env_var(key: &str, old: Option<std::ffi::OsString>) {
-        match old {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
+    // WHAT LEFT THIS MODULE. Every test that drove the ENVIRONMENT tier of
+    // `ControlSettings` moved to `crates/control/tests/config_env_tier.rs`.
+    // That tier is clap's `env = "ZEROSHIP_..."` attribute, so exercising it
+    // in-process meant `std::env::set_var` / `remove_var` - which mutates the
+    // environment every other test in this binary parses in, and was measured
+    // failing 1 run in 12 here before a mutex was wrapped around it. They now
+    // run the real `zeroship-control` under `--check-config` with
+    // `Command::env`, so the environment is scoped to the child and the mutex
+    // is gone with the hazard it covered.
+    //
+    // What stayed here is everything that needs no environment at all.
 
     #[test]
     fn control_blob_store_flag_uses_unified_name() {
@@ -1216,75 +1219,19 @@ mod tests {
     }
 
     #[test]
-    fn origin_scheme_cli_overrides_environment_and_environment_overrides_file() {
-        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
-        let old = zeroship_core::test_env_os!("ZEROSHIP_ORIGIN_SCHEME");
-        std::env::set_var("ZEROSHIP_ORIGIN_SCHEME", "http");
-
-        // The environment reaches the same clap carrier the flag does, and the
-        // generated resolver prefers that carrier over the overlay. The
-        // hand-written resolve_origin_scheme helper this used to call is gone.
-        let overlay: toml::Value =
-            toml::from_str("origin_scheme = \"https\"\n").expect("fixture overlay");
-        let env = ControlSettingsSources::try_parse_from(["zeroship-control"]).expect("parse env topology");
-        let resolved =
-            ControlSettings::resolve_config(env, Some(&overlay)).expect("resolve");
-        assert_eq!(resolved.origin_scheme.get(), &OriginScheme::Http);
-
-        let cli = ControlSettingsSources::try_parse_from([
-            "zeroship-control",
-            "--origin-scheme",
-            "https",
-        ])
-        .expect("parse CLI topology");
-        let flagged =
-            ControlSettings::resolve_config(cli, Some(&overlay)).expect("resolve");
-        assert_eq!(flagged.origin_scheme.get(), &OriginScheme::Https);
-
-        restore_env_var("ZEROSHIP_ORIGIN_SCHEME", old);
-    }
-
-    #[test]
-    fn auth_provider_selector_defaults_to_native_and_accepts_supabase() {
-        // Same environment hazard as the retired-spelling test below: clap
-        // reads `ZEROSHIP_AUTH_PROVIDER` into the same carrier the flag uses,
-        // so an ambient value - a sibling test's, or the caller's shell -
-        // makes "defaults to native" assert about the environment rather than
-        // about the compiled default.
-        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
-        let old = zeroship_core::test_env_os!("ZEROSHIP_AUTH_PROVIDER");
-        std::env::remove_var("ZEROSHIP_AUTH_PROVIDER");
-
-        let cli = ControlSettingsSources::try_parse_from(["zeroship-control"]).expect("parse defaults");
-        let resolved = ControlSettings::resolve_config(cli, None).expect("resolve");
-        assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Native);
-
-        let cli = ControlSettingsSources::try_parse_from(["zeroship-control", "--auth-provider", "supabase"])
-            .expect("parse supabase");
-        let resolved = ControlSettings::resolve_config(cli, None).expect("resolve");
-        assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Supabase);
-
-        restore_env_var("ZEROSHIP_AUTH_PROVIDER", old);
-    }
-
-    #[test]
-    fn the_retired_platform_spelling_is_rejected_by_the_flag_and_the_overlay() {
+    fn the_retired_platform_spelling_is_rejected_by_the_flag() {
         // `platform` was control's own word for the state now spelled `native`.
         // Both tiers must refuse it, or the two vocabularies survive the merge
         // in the one place an operator would not look.
         //
-        // THE OVERLAY HALF READS THE PROCESS ENVIRONMENT, so it needs the same
-        // lock the env-mutating tests take AND it needs the variable absent.
-        // The environment tier outranks the overlay, so a sibling test holding
-        // `ZEROSHIP_AUTH_PROVIDER=supabase` makes the retired overlay value
-        // never get parsed and the refusal below never fire. Measured at 1
-        // failure in 12 runs of this binary before the lock was taken; the
-        // variable is unset here as well as locked, so an ambient value in the
-        // caller's shell cannot reproduce it either.
-        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
-        let old = zeroship_core::test_env_os!("ZEROSHIP_AUTH_PROVIDER");
-        std::env::remove_var("ZEROSHIP_AUTH_PROVIDER");
-
+        // ONLY THE FLAG HALF IS HERE. An explicit `--auth-provider platform`
+        // is rejected by clap's value parser without the environment being
+        // consulted at all, so this half is hermetic in-process. The OVERLAY
+        // half is not: the environment tier outranks the overlay, so an
+        // ambient `ZEROSHIP_AUTH_PROVIDER` makes the retired overlay value
+        // never get parsed and the refusal never fire. It lives in
+        // `crates/control/tests/config_env_tier.rs`, against a child process
+        // whose environment is cleared.
         let err = ControlSettingsSources::try_parse_from([
             "zeroship-control",
             "--auth-provider",
@@ -1293,36 +1240,6 @@ mod tests {
         .map(|_| ())
         .expect_err("the retired control spelling must not parse");
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
-
-        let overlay: toml::Value = toml::from_str("[auth]\nprovider = \"platform\"\n")
-            .expect("fixture overlay");
-        let cli = ControlSettingsSources::try_parse_from(["zeroship-control"]).expect("parse defaults");
-        let err = ControlSettings::resolve_config(cli, Some(&overlay))
-            .map(|_| ())
-            .expect_err("the retired control spelling must not resolve from the overlay");
-        assert!(
-            format!("{err}").contains("auth.provider"),
-            "the overlay rejection must name the key: {err}"
-        );
-
-        restore_env_var("ZEROSHIP_AUTH_PROVIDER", old);
-    }
-
-    #[test]
-    fn the_shared_variable_reaches_control_from_the_environment() {
-        // The cross-binary half of this - control and auth resolving the SAME
-        // process variable to the same value - is driven end to end against
-        // both real binaries in `tests/config_check_e2e.sh`, which is the only
-        // vector that can observe two processes at once.
-        let _guard = CONFIG_ENV_LOCK.lock().expect("env lock");
-        let old = zeroship_core::test_env_os!("ZEROSHIP_AUTH_PROVIDER");
-        std::env::set_var("ZEROSHIP_AUTH_PROVIDER", "supabase");
-
-        let cli = ControlSettingsSources::try_parse_from(["zeroship-control"]).expect("parse control");
-        let resolved = ControlSettings::resolve_config(cli, None).expect("resolve");
-        assert_eq!(resolved.auth_provider.get(), &AuthProviderKind::Supabase);
-
-        restore_env_var("ZEROSHIP_AUTH_PROVIDER", old);
     }
 
     #[test]
