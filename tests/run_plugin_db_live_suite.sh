@@ -203,7 +203,19 @@ fi
 # one tests/lib/skip_census.sh draws itself: a gate that has provisioned the
 # backend treats a skip as a break, a gate that has not still prints the census
 # so the gap is visible. This job provisions it, so it is the former.
-if ! zs_skip_census "$SUITE_LOG" "$PLUGIN_DB_SKIP_ALLOWLIST"; then
+#
+# A REFUSAL (status 2) is a third outcome, distinct from both: the log is
+# missing or empty, so no census happened and the diagnosis below - which blames
+# a Postgres started without wal_level=logical - would be a guess about a run
+# that produced no evidence at all.
+census_rc=0
+zs_skip_census "$SUITE_LOG" "$PLUGIN_DB_SKIP_ALLOWLIST" || census_rc=$?
+if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
+  echo "FAIL: the skip census refused ${SUITE_LOG}, so this run proved nothing" >&2
+  echo "      about skips. Do not read the ${passed} passes above as coverage" >&2
+  echo "      until the log the suite tees to is the log censused here." >&2
+  rc=1
+elif [ "$census_rc" -ne 0 ]; then
   echo "FAIL: ${ZS_SKIP_COUNT} test(s) announced they exercised nothing." >&2
   echo "      The likeliest cause is a Postgres that came up WITHOUT" >&2
   echo "      -c wal_level=logical, which makes ten replication tests skip" >&2
