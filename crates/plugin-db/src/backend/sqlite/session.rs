@@ -826,7 +826,7 @@ impl From<Rc<SqliteSession>> for SqliteSessionHandle {
 
 fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, DbError> {
     // The param vector carries an optional encrypted-
-    // column side-channel: a value tagged with [`crate::query::SQLITE_ENC_BLOB_PREFIX`]
+    // column side-channel: a value tagged with [`crate::query::SQLITE_BINARY_BIND_PREFIX`]
     // is base64-decoded to raw bytes and bound as BLOB instead of TEXT.
     // The PG arm never produces this prefix; non-encrypted params
     // travel as plain `String` on both arms.
@@ -850,7 +850,7 @@ fn run_exec_batch(conn: &Connection, sql: &str) -> Result<(), DbError> {
 /// TEXT default - preserves the zero-alloc shape that
 /// `&[String] -> &[&dyn ToSql]` had before this type existed) or an
 /// owned `Vec<u8>` produced by base64-decoding a
-/// [`crate::query::SQLITE_ENC_BLOB_PREFIX`]-tagged param.
+/// [`crate::query::SQLITE_BINARY_BIND_PREFIX`]-tagged param.
 enum BindParam<'a> {
     /// Plain TEXT bind — borrows from the caller's `Vec<String>`.
     Text(&'a str),
@@ -869,11 +869,11 @@ impl BindParam<'_> {
 
 /// Scan the param vector for encrypted-column side-
 /// channel markers and produce a typed bind list. Values prefixed with
-/// [`crate::query::SQLITE_ENC_BLOB_PREFIX`] are base64-decoded to raw bytes and bound
+/// [`crate::query::SQLITE_BINARY_BIND_PREFIX`] are base64-decoded to raw bytes and bound
 /// as BLOB; every other value passes through as TEXT.
 fn decode_blob_params(params: &[String]) -> Result<Vec<BindParam<'_>>, DbError> {
     use base64::Engine as _;
-    let prefix = crate::query::SQLITE_ENC_BLOB_PREFIX;
+    let prefix = crate::query::SQLITE_BINARY_BIND_PREFIX;
     let mut out = Vec::with_capacity(params.len());
     for p in params {
         match p.strip_prefix(prefix) {

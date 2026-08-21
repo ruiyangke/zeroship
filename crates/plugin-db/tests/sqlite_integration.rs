@@ -79,6 +79,69 @@ fn parity_matrix_sqlite_typed_projection_matches_contract() {
     });
 }
 
+/// The dev tier must store a `t.bytes()` value as a BLOB of the caller's bytes.
+///
+/// WHY THIS IS SEPARATE FROM THE PROJECTION TEST ABOVE, and why SQLite needed a
+/// test at all. Before `crud::bytes_pass`, the projection test above was GREEN
+/// while the stored cell was wrong: rusqlite bound the SDK's base64 string as
+/// TEXT into a BLOB-affinity column, read it back as TEXT, and
+/// `read_pipeline::normalize_bytes_value` passes a string through untouched - so
+/// the input reappeared and the round trip looked perfect. `typeof()` is what
+/// separates the two, and it is the reason the SQLite leg is the control that
+/// isolates the layer: the SDK, the read pipeline and the JSON wire shape are
+/// shared with Postgres, so a defect visible on one and hidden on the other has
+/// to live below them, in the bind.
+#[test]
+fn bytes_column_stores_a_raw_blob_on_sqlite() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create parity dir");
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+
+        // A fresh backend has attached nothing: the matrix's app database is a
+        // separate file (`<dir>/zs-default.sqlite`) reached through an ATTACH
+        // alias, so re-attach it before the schema-qualified name resolves.
+        let backend =
+            SqliteBackend::new(PathBuf::from(dir.path())).expect("open the parity backend");
+        backend
+            .ensure_app_schema("default")
+            .await
+            .expect("attach the matrix app database");
+        let client = backend
+            .acquire_dedicated_client()
+            .await
+            .expect("acquire client");
+        // `query` materialises every cell as `Option<String>` and renders a BLOB
+        // as `<N bytes blob>`, so ask SQLite itself for the discriminant and the
+        // hex - the same route `p5_*` uses for ciphertext.
+        let sql = format!(
+            "SELECT typeof(payload_bytes), hex(payload_bytes) FROM \"default\".\"{}\" \
+             WHERE title = 'typed-roundtrip'",
+            snapshot.collection
+        );
+        let rows = client.query(&sql, &[]).await.expect("SELECT");
+        assert_eq!(rows.len(), 1, "the typed round-trip row must exist");
+
+        let kind = rows[0][0].clone().expect("typeof() is never null");
+        let hex = rows[0][1].clone().expect("hex() is never null");
+        let expected_hex: String = parity::TYPED_BYTES_RAW
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect();
+
+        assert_eq!(
+            kind, "blob",
+            "a t.bytes() cell must be a BLOB, not {kind}. 'text' here is the \
+             write path binding the base64 wire string as text into a \
+             BLOB-affinity column, which round-trips through env.db while \
+             storing the wrong thing"
+        );
+        assert_eq!(
+            hex, expected_hex,
+            "the BLOB must hold the caller's bytes"
+        );
+    });
+}
+
 /// Read the value of a single-column scalar PRAGMA back from the
 /// session.
 ///
@@ -5011,13 +5074,13 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 // bind: the SQL builder's encrypted-column placeholder is
 // `decode($N, 'base64')::bytea` on PG and a bare `$N` on SQLite, with
 // the encryption pass tagging the param value with
-// `SQLITE_ENC_BLOB_PREFIX` so the SQLite session actor decodes the
+// `SQLITE_BINARY_BIND_PREFIX` so the SQLite session actor decodes the
 // base64 and binds raw bytes as BLOB.
 //
 // This integration test stitches the layers end-to-end:
 //   1. `encrypt_row_on_write` (the encryption-pass helper) against the
 //      SQLite backend -> row carries the base64 ciphertext +
-//      `__zsenc__<col>` marker.
+//      `__zsbin__<col>` marker.
 //   2. `build_insert_with_dialect(SqlDialect::Sqlite, ...)` -> SQL with
 //      bare `$N` placeholder + sentinel-tagged param.
 //   3. `backend.pool_exec(sql, &params)` -> SQLite session strips the
@@ -5092,12 +5155,12 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         });
 
         // Step 1 — encryption pass swaps ssn into base64 ciphertext +
-        // installs the `__zsenc__ssn` marker.
+        // installs the `__zsbin__ssn` marker.
         encrypt_row_on_write(&backend, "app_demo", "users", &schema, row_pk, &mut doc)
             .await
             .expect("encrypt_row_on_write");
         assert!(
-            doc.get("__zsenc__ssn").and_then(|v| v.as_bool()) == Some(true),
+            doc.get("__zsbin__ssn").and_then(|v| v.as_bool()) == Some(true),
             "encryption pass must install the marker key: {doc:?}",
         );
         // Pull out the base64 ciphertext for a later equality check.
@@ -5109,7 +5172,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
         // Step 2 — dialect-aware SQL build. The output SQL must use a
         // bare `$N` placeholder (no `decode(...)::bytea`); the param
-        // vector must carry the `__zsenc_blob__:` sentinel prefix on
+        // vector must carry the `__zsbin_blob__:` sentinel prefix on
         // the encrypted ssn value.
         let bq = build_insert_with_dialect("app_demo", "users", &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
@@ -5121,7 +5184,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         assert!(
             bq.params
                 .iter()
-                .any(|p| p.starts_with("__zsenc_blob__:")),
+                .any(|p| p.starts_with("__zsbin_blob__:")),
             "SQLite dialect must tag the encrypted param with the sentinel: {:?}",
             bq.params,
         );

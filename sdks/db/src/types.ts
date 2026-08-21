@@ -1594,14 +1594,23 @@ export const t = {
     return new TypeBuilder<string>({ type: "calendarDate" });
   },
   /**
-   * byte-array wrap for `t.encrypted({ wraps: t.bytes() })`.
+   * raw binary column, and the `wraps` argument of
+   * `t.encrypted({ wraps: t.bytes() })`.
    *
    * At the JS layer the field is exchanged as a base64-encoded string;
-   * at the DB layer it becomes a BYTEA column (always — bytes-typed
-   * columns outside an `encrypted` wrap aren't yet supported in
-   * plugin-db). Outside `t.encrypted({ wraps: ... })` a bare
-   * `t.bytes()` schema field is an error at register-model time today;
-   * this builder exists so the encrypted-wrap argument is well-typed.
+   * at the DB layer it becomes a BYTEA (Postgres) / BLOB (SQLite)
+   * column holding the RAW BYTES that string encodes. One encode on
+   * the way in, one decode on the way out: `plugin-db`'s
+   * `crud::bytes_pass` decodes the wire string before the bind and
+   * `crud::read_pipeline` re-encodes what the column returns.
+   *
+   * A bare `t.bytes()` outside `t.encrypted({ wraps: ... })` is
+   * supported. This doc used to say it was "an error at register-model
+   * time today" and that bytes columns outside an encrypted wrap
+   * "aren't yet supported in plugin-db"; both were false by the time
+   * anyone read them - what was actually missing was the write-side
+   * decode, so the column accepted the value and stored the ASCII of
+   * the base64.
    */
   bytes(): TypeBuilder<string> {
     return new TypeBuilder<string>({ type: "bytes" });
