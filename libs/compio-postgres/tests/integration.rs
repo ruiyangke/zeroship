@@ -13,8 +13,9 @@
 //!       cargo test -p compio-postgres --test integration
 
 use compio_postgres::error::SqlState;
+use compio_postgres::types::Type;
 use compio_postgres::{
-    Client, Config, Error, NoTls, Pool, PoolConfig, QueryOutcome, SimpleQueryMessage,
+    Client, Config, Error, NoTls, Pool, PoolConfig, QueryOutcome, Row, SimpleQueryMessage,
     TransactionStatus, Uncached,
 };
 use std::collections::hash_map::DefaultHasher;
@@ -2511,6 +2512,421 @@ async fn concurrent_queries_are_pipelined() {
     .await;
     assert_eq!(a.unwrap()[0].get::<_, &str>("x"), "a");
     assert_eq!(b.unwrap()[0].get::<_, &str>("x"), "b");
+}
+
+// ---------------------------------------------------------------------------
+// Pipelined failure routing
+//
+// Every helper below sends one Parse + Bind + Describe + Execute + Sync batch
+// per future before that future first awaits a response. `join_all` therefore
+// makes every request outstanding on the same Client at once, while the
+// distinct echo values make a response routed to the wrong caller observable.
+// ---------------------------------------------------------------------------
+
+const PIPELINED_FAILURE_WATCHDOG: std::time::Duration =
+    std::time::Duration::from_secs(10);
+const FAILURE_PIPELINE_LEN: usize = 7;
+const MISSING_PIPELINE_VALUE: i32 = i32::MIN;
+const ECHO_SQL: &str = "SELECT $1::int4 AS v";
+
+// A constant `SELECT 1 / 0::int4` is folded while PostgreSQL plans at Bind:
+// its backend response has ParseComplete followed by ErrorResponse, with no
+// BindComplete. Taking the zero from an execution-time row instead produces
+// ParseComplete + BindComplete + RowDescription before 22012, so this really
+// exercises an Execute-stage failure rather than duplicating the Bind case.
+const EXECUTE_DIVISION_BY_ZERO_SQL: &str =
+    "SELECT 1 / n::int4 AS v FROM generate_series(0, 0) AS g(n)";
+
+const PREPARE_SYNTAX_ERROR_SQL: &str = "SELEC 1::int4 AS v";
+const PREPARE_MISSING_RELATION_SQL: &str =
+    "SELECT 1::int4 AS v FROM cpg_pipeline_relation_that_does_not_exist";
+
+#[derive(Clone, Copy, Debug)]
+enum PipelineExpectation {
+    Value(i32),
+    SqlState(&'static SqlState),
+}
+
+fn first_pipeline_value(rows: Vec<Row>) -> i32 {
+    rows.first()
+        .map_or(MISSING_PIPELINE_VALUE, |row| row.get::<_, i32>("v"))
+}
+
+fn assert_pipeline_result(
+    context: &str,
+    actual: Result<i32, Error>,
+    expected: PipelineExpectation,
+) {
+    match (actual, expected) {
+        (Ok(actual), PipelineExpectation::Value(expected)) => {
+            assert_eq!(actual, expected, "{context} received another caller's row")
+        }
+        (Err(actual), PipelineExpectation::SqlState(expected)) => assert_eq!(
+            actual.code(),
+            Some(expected),
+            "{context} received another caller's error: {actual:?}"
+        ),
+        (Ok(actual), PipelineExpectation::SqlState(expected)) => panic!(
+            "{context} returned value {actual} instead of SQLSTATE {}",
+            expected.code()
+        ),
+        (Err(actual), PipelineExpectation::Value(expected)) => panic!(
+            "{context} returned SQLSTATE {} instead of its value {expected}: {actual:?}",
+            actual.code().map_or("<none>", SqlState::code)
+        ),
+    }
+}
+
+async fn execute_failure_pipeline(
+    client: &Client,
+    failure_index: usize,
+    value_base: i32,
+) -> Vec<Result<i32, Error>> {
+    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
+        let client = client;
+        async move {
+            if index == failure_index {
+                client
+                    .query_typed(EXECUTE_DIVISION_BY_ZERO_SQL, &[])
+                    .await
+                    .map(first_pipeline_value)
+            } else {
+                let value = value_base + index as i32;
+                client
+                    .query_typed(ECHO_SQL, &[(&value, Type::INT4)])
+                    .await
+                    .map(first_pipeline_value)
+            }
+        }
+    }))
+    .await
+}
+
+async fn bind_failure_pipeline(
+    client: &Client,
+    failure_index: usize,
+    value_base: i32,
+) -> Vec<Result<i32, Error>> {
+    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
+        let client = client;
+        async move {
+            let value = value_base + index as i32;
+            let encoded = if index == failure_index {
+                "not-an-int4".to_string()
+            } else {
+                value.to_string()
+            };
+            client
+                .query_text_params(ECHO_SQL, &[encoded.as_str()])
+                .await
+                .map(first_pipeline_value)
+        }
+    }))
+    .await
+}
+
+async fn prepare_failure_pipeline(
+    client: &Client,
+    failure_index: usize,
+    value_base: i32,
+) -> Vec<Result<i32, Error>> {
+    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
+        let client = client;
+        async move {
+            if index == failure_index {
+                client
+                    .query_typed(PREPARE_SYNTAX_ERROR_SQL, &[])
+                    .await
+                    .map(first_pipeline_value)
+            } else {
+                let value = value_base + index as i32;
+                client
+                    .query_typed(ECHO_SQL, &[(&value, Type::INT4)])
+                    .await
+                    .map(first_pipeline_value)
+            }
+        }
+    }))
+    .await
+}
+
+async fn multiple_failure_pipeline(
+    client: &Client,
+    value_base: i32,
+) -> Vec<Result<i32, Error>> {
+    futures_util::future::join_all((0..FAILURE_PIPELINE_LEN).map(|index| {
+        let client = client;
+        async move {
+            match index {
+                1 => client
+                    .query_typed(EXECUTE_DIVISION_BY_ZERO_SQL, &[])
+                    .await
+                    .map(first_pipeline_value),
+                3 => client
+                    .query_text_params(ECHO_SQL, &["not-an-int4"])
+                    .await
+                    .map(first_pipeline_value),
+                5 => client
+                    .query_typed(PREPARE_MISSING_RELATION_SQL, &[])
+                    .await
+                    .map(first_pipeline_value),
+                _ => {
+                    let value = value_base + index as i32;
+                    client
+                        .query_typed(ECHO_SQL, &[(&value, Type::INT4)])
+                        .await
+                        .map(first_pipeline_value)
+                }
+            }
+        }
+    }))
+    .await
+}
+
+async fn assert_autocommit_connection_is_reusable(client: &Client, expected: i32) {
+    let actual = client
+        .query_typed(ECHO_SQL, &[(&expected, Type::INT4)])
+        .await
+        .map(first_pipeline_value)
+        .expect("fresh query failed after the pipelined autocommit error");
+    assert_eq!(actual, expected, "fresh query received stale pipeline data");
+    assert_eq!(
+        client.transaction_status(),
+        Some(TransactionStatus::Idle),
+        "autocommit pipeline did not drain to an idle transaction status"
+    );
+}
+
+async fn begin_pipeline_transaction(client: &Client) {
+    client.batch_execute("BEGIN").await.unwrap();
+    assert_eq!(
+        client.transaction_status(),
+        Some(TransactionStatus::InTransaction)
+    );
+}
+
+async fn assert_failed_transaction_then_recover(client: &Client, expected: i32) {
+    // ErrorResponse reaches its caller before the trailing ReadyForQuery has
+    // necessarily updated transaction_status(). This empty query is a FIFO
+    // barrier and is valid even in an aborted transaction block.
+    client.simple_query("").await.unwrap();
+    assert_eq!(
+        client.transaction_status(),
+        Some(TransactionStatus::Failed),
+        "pipelined transaction error did not leave the block failed"
+    );
+
+    let error = client
+        .query_typed(ECHO_SQL, &[(&expected, Type::INT4)])
+        .await
+        .expect_err("a fresh statement unexpectedly ran inside the failed transaction");
+    assert_eq!(error.code(), Some(&SqlState::IN_FAILED_SQL_TRANSACTION));
+
+    client.batch_execute("ROLLBACK").await.unwrap();
+    assert_eq!(client.transaction_status(), Some(TransactionStatus::Idle));
+    assert_autocommit_connection_is_reusable(client, expected).await;
+}
+
+#[compio::test]
+async fn pipelined_execute_failure_routes_by_caller_at_every_position() {
+    compio::time::timeout(PIPELINED_FAILURE_WATCHDOG, async {
+        let Some(url) = require_pg().await else { return };
+        let client = connect(&url).await.unwrap();
+
+        for (round, failure_index) in [0, FAILURE_PIPELINE_LEN / 2, FAILURE_PIPELINE_LEN - 1]
+            .into_iter()
+            .enumerate()
+        {
+            let value_base = 1_000 + round as i32 * 100;
+            let results = execute_failure_pipeline(&client, failure_index, value_base).await;
+            for (index, result) in results.into_iter().enumerate() {
+                let expected = if index == failure_index {
+                    PipelineExpectation::SqlState(&SqlState::DIVISION_BY_ZERO)
+                } else {
+                    PipelineExpectation::Value(value_base + index as i32)
+                };
+                assert_pipeline_result(
+                    &format!("execute pipeline round {round} request {index}"),
+                    result,
+                    expected,
+                );
+            }
+            assert_autocommit_connection_is_reusable(&client, 1_900 + round as i32).await;
+        }
+    })
+    .await
+    .expect("pipelined Execute-stage failure test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn pipelined_bind_failure_routes_by_caller_and_preserves_neighbours() {
+    compio::time::timeout(PIPELINED_FAILURE_WATCHDOG, async {
+        let Some(url) = require_pg().await else { return };
+        let client = connect(&url).await.unwrap();
+        let failure_index = FAILURE_PIPELINE_LEN / 2;
+        let value_base = 2_000;
+
+        let results = bind_failure_pipeline(&client, failure_index, value_base).await;
+        for (index, result) in results.into_iter().enumerate() {
+            let expected = if index == failure_index {
+                PipelineExpectation::SqlState(&SqlState::INVALID_TEXT_REPRESENTATION)
+            } else {
+                PipelineExpectation::Value(value_base + index as i32)
+            };
+            assert_pipeline_result(&format!("bind pipeline request {index}"), result, expected);
+        }
+        assert_autocommit_connection_is_reusable(&client, 2_900).await;
+    })
+    .await
+    .expect("pipelined Bind-stage failure test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn pipelined_prepare_failure_routes_by_caller_and_preserves_neighbours() {
+    compio::time::timeout(PIPELINED_FAILURE_WATCHDOG, async {
+        let Some(url) = require_pg().await else { return };
+        let client = connect(&url).await.unwrap();
+        let failure_index = FAILURE_PIPELINE_LEN / 2;
+        let value_base = 3_000;
+
+        let results = prepare_failure_pipeline(&client, failure_index, value_base).await;
+        for (index, result) in results.into_iter().enumerate() {
+            let expected = if index == failure_index {
+                PipelineExpectation::SqlState(&SqlState::SYNTAX_ERROR)
+            } else {
+                PipelineExpectation::Value(value_base + index as i32)
+            };
+            assert_pipeline_result(
+                &format!("prepare pipeline request {index}"),
+                result,
+                expected,
+            );
+        }
+        assert_autocommit_connection_is_reusable(&client, 3_900).await;
+    })
+    .await
+    .expect("pipelined Parse-stage failure test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn pipelined_multiple_failures_keep_their_own_errors_and_rows() {
+    compio::time::timeout(PIPELINED_FAILURE_WATCHDOG, async {
+        let Some(url) = require_pg().await else { return };
+        let client = connect(&url).await.unwrap();
+        let value_base = 4_000;
+
+        let results = multiple_failure_pipeline(&client, value_base).await;
+        for (index, result) in results.into_iter().enumerate() {
+            let expected = match index {
+                1 => PipelineExpectation::SqlState(&SqlState::DIVISION_BY_ZERO),
+                3 => PipelineExpectation::SqlState(&SqlState::INVALID_TEXT_REPRESENTATION),
+                5 => PipelineExpectation::SqlState(&SqlState::UNDEFINED_TABLE),
+                _ => PipelineExpectation::Value(value_base + index as i32),
+            };
+            assert_pipeline_result(
+                &format!("multiple-failure pipeline request {index}"),
+                result,
+                expected,
+            );
+        }
+        assert_autocommit_connection_is_reusable(&client, 4_900).await;
+    })
+    .await
+    .expect("multiple-failure pipeline test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn pipelined_failures_inside_transactions_abort_only_later_requests() {
+    compio::time::timeout(PIPELINED_FAILURE_WATCHDOG, async {
+        let Some(url) = require_pg().await else { return };
+        let client = connect(&url).await.unwrap();
+
+        // Execute-stage failure at the first, middle, and last position. Rows
+        // before it still belong to their callers; syntactically valid requests
+        // after it are rejected by the failed transaction block with 25P02.
+        for (round, failure_index) in [0, FAILURE_PIPELINE_LEN / 2, FAILURE_PIPELINE_LEN - 1]
+            .into_iter()
+            .enumerate()
+        {
+            begin_pipeline_transaction(&client).await;
+            let value_base = 5_000 + round as i32 * 100;
+            let results = execute_failure_pipeline(&client, failure_index, value_base).await;
+            for (index, result) in results.into_iter().enumerate() {
+                let expected = if index < failure_index {
+                    PipelineExpectation::Value(value_base + index as i32)
+                } else if index == failure_index {
+                    PipelineExpectation::SqlState(&SqlState::DIVISION_BY_ZERO)
+                } else {
+                    PipelineExpectation::SqlState(&SqlState::IN_FAILED_SQL_TRANSACTION)
+                };
+                assert_pipeline_result(
+                    &format!("transaction execute round {round} request {index}"),
+                    result,
+                    expected,
+                );
+            }
+            assert_failed_transaction_then_recover(&client, 5_900 + round as i32).await;
+        }
+
+        begin_pipeline_transaction(&client).await;
+        let failure_index = FAILURE_PIPELINE_LEN / 2;
+        let results = bind_failure_pipeline(&client, failure_index, 6_000).await;
+        for (index, result) in results.into_iter().enumerate() {
+            let expected = if index < failure_index {
+                PipelineExpectation::Value(6_000 + index as i32)
+            } else if index == failure_index {
+                PipelineExpectation::SqlState(&SqlState::INVALID_TEXT_REPRESENTATION)
+            } else {
+                PipelineExpectation::SqlState(&SqlState::IN_FAILED_SQL_TRANSACTION)
+            };
+            assert_pipeline_result(
+                &format!("transaction bind request {index}"),
+                result,
+                expected,
+            );
+        }
+        assert_failed_transaction_then_recover(&client, 6_900).await;
+
+        begin_pipeline_transaction(&client).await;
+        let results = prepare_failure_pipeline(&client, failure_index, 7_000).await;
+        for (index, result) in results.into_iter().enumerate() {
+            let expected = if index < failure_index {
+                PipelineExpectation::Value(7_000 + index as i32)
+            } else if index == failure_index {
+                PipelineExpectation::SqlState(&SqlState::SYNTAX_ERROR)
+            } else {
+                PipelineExpectation::SqlState(&SqlState::IN_FAILED_SQL_TRANSACTION)
+            };
+            assert_pipeline_result(
+                &format!("transaction prepare request {index}"),
+                result,
+                expected,
+            );
+        }
+        assert_failed_transaction_then_recover(&client, 7_900).await;
+
+        // Only the first server error is allowed to run. Every later request
+        // is syntactically valid, including the ones that would otherwise fail
+        // during Bind, Parse analysis, or Execute, so each is rejected with
+        // 25P02 before it can produce its own ordinary result.
+        begin_pipeline_transaction(&client).await;
+        let results = multiple_failure_pipeline(&client, 8_000).await;
+        for (index, result) in results.into_iter().enumerate() {
+            let expected = match index {
+                0 => PipelineExpectation::Value(8_000),
+                1 => PipelineExpectation::SqlState(&SqlState::DIVISION_BY_ZERO),
+                _ => PipelineExpectation::SqlState(&SqlState::IN_FAILED_SQL_TRANSACTION),
+            };
+            assert_pipeline_result(
+                &format!("transaction multiple-failure request {index}"),
+                result,
+                expected,
+            );
+        }
+        assert_failed_transaction_then_recover(&client, 8_900).await;
+    })
+    .await
+    .expect("explicit-transaction pipeline failure test exceeded its watchdog");
 }
 
 // ---------------------------------------------------------------------------
