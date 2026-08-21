@@ -34,10 +34,17 @@ use std::{error, fmt, iter, mem};
 pub enum TargetSessionAttrs {
     /// No special properties are required.
     Any,
-    /// The session must allow writes.
+    /// The session must accept read-write transactions by default.
     ReadWrite,
-    /// The session allow only reads.
+    /// The session must not accept read-write transactions by default.
     ReadOnly,
+    /// The server must not be in recovery.
+    Primary,
+    /// The server must be in recovery.
+    Standby,
+    /// Prefer a server in recovery, falling back to any server only after a
+    /// complete first pass over the configured hosts.
+    PreferStandby,
 }
 
 /// TLS configuration: libpq's `sslmode`, all six values, with libpq's meanings.
@@ -511,8 +518,9 @@ pub enum Host {
 /// * `keepalives_retries` - The maximum number of TCP keepalive probes that will be sent before dropping a connection.
 ///     This option is ignored when connecting with Unix sockets.
 /// * `target_session_attrs` - Specifies requirements of the session. `read-write` requires
-///     `transaction_read_only` to be `off`, while `read-only` requires it to be `on`. This can be used to select a
-///     suitable server from a database cluster. Defaults to `any`.
+///     `transaction_read_only` to be `off`, while `read-only` requires it to be `on`. `primary` requires a server
+///     that is not in recovery, `standby` requires one that is, and `prefer-standby` retries the host list in `any`
+///     mode only if the first pass finds no standby. Defaults to `any`.
 /// * `channel_binding` - Controls usage of channel binding in the authentication process. If set to `disable`, channel
 ///     binding will not be used. If set to `prefer`, channel binding will be used if available, but not used otherwise.
 ///     If set to `require`, the authentication process will fail if channel binding is not used. Defaults to `prefer`.
@@ -958,8 +966,8 @@ impl Config {
 
     /// Sets the requirements of the session.
     ///
-    /// This can be used to connect to the primary server in a clustered database rather than one of the read-only
-    /// secondary servers. Defaults to `Any`.
+    /// This can be used to select a server by transaction writability or
+    /// recovery role. Defaults to `Any`.
     pub fn target_session_attrs(
         &mut self,
         target_session_attrs: TargetSessionAttrs,
@@ -1179,6 +1187,9 @@ impl Config {
                     "any" => TargetSessionAttrs::Any,
                     "read-write" => TargetSessionAttrs::ReadWrite,
                     "read-only" => TargetSessionAttrs::ReadOnly,
+                    "primary" => TargetSessionAttrs::Primary,
+                    "standby" => TargetSessionAttrs::Standby,
+                    "prefer-standby" => TargetSessionAttrs::PreferStandby,
                     _ => {
                         return Err(Error::config_parse(Box::new(InvalidValue(
                             "target_session_attrs",
@@ -1805,8 +1816,41 @@ mod tests {
 
     use crate::config::{
         AuthMethod, AuthMethods, RequireAuth, SslMode, SslNegotiation, SslRootCert,
+        TargetSessionAttrs,
     };
     use crate::{Config, config::Host};
+
+    fn assert_target_session_attrs_parses(value: &str, expected: TargetSessionAttrs) {
+        for dsn in [
+            format!("host=h target_session_attrs={value}"),
+            format!("postgresql://h/db?target_session_attrs={value}"),
+        ] {
+            let config = dsn
+                .parse::<Config>()
+                .unwrap_or_else(|error| {
+                    panic!("target_session_attrs={value} did not parse: {error}")
+                });
+            assert_eq!(config.get_target_session_attrs(), expected, "{dsn}");
+        }
+    }
+
+    #[test]
+    fn target_session_attrs_primary_parses() {
+        assert_target_session_attrs_parses("primary", TargetSessionAttrs::Primary);
+    }
+
+    #[test]
+    fn target_session_attrs_standby_parses() {
+        assert_target_session_attrs_parses("standby", TargetSessionAttrs::Standby);
+    }
+
+    #[test]
+    fn target_session_attrs_prefer_standby_parses() {
+        assert_target_session_attrs_parses(
+            "prefer-standby",
+            TargetSessionAttrs::PreferStandby,
+        );
+    }
 
     /// All six libpq spellings parse, to the six distinct modes.
     ///
