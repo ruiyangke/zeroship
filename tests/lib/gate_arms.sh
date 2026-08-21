@@ -55,9 +55,9 @@
 #     zsgate-arm gate=<gate-id> arm=<arm-id> examined=<n> floor=<m>
 #
 # That line is a WIRE FORMAT, not prose to be scraped. `gate-arm-census`
-# (crates/zeroship-gatekit) consumes it; the compose_secret_strength gate is
-# Rust and emits the same line from `Report`. Changing the shape means changing
-# both consumers in the same patch. The whole reason this is a fixed format is
+# (crates/zeroship-gatekit) consumes it, and a gate written in Rust emits the
+# same line from `zeroship_gatekit::arm_census::Arm`. Changing the shape means
+# changing both spellings in the same patch. The whole reason this is fixed is
 # that the compose-secret failure above was caused by one program regexing
 # another program's human-readable message.
 #
@@ -191,10 +191,12 @@ gate_arm() {
 
 # gate_arms_delegate <command> [args...]
 #
-# For a shell gate that is a SHIM over a gate implemented elsewhere - today
-# tests/compose_secret_strength_gate.sh, which execs a Rust binary. The shim
-# has no counts of its own; the implementation does, and emits the same
-# `zsgate-arm` lines.
+# For a shell gate that is a SHIM over a gate implemented elsewhere - a script
+# that execs a Rust binary. The shim has no counts of its own; the
+# implementation does, and emits the same `zsgate-arm` lines. NO GATE TAKES
+# THIS PATH AS OF 2026-08-21: the five compose_*_gate.sh shims that did were
+# deleted with the gates behind them, so the only exercise this function gets
+# is the three `sh -c` delegates in tests/lib_gate_arms_selftest.sh.
 #
 # This is NOT an exemption from the contract, and the difference matters
 # because an exemption is how skip_marker_gate.sh came to rule on nothing. The

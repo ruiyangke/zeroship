@@ -36,9 +36,11 @@ const COMPOSE_FILE: &str = "deploy/compose/docker-compose.yml";
 /// THE LIST IS NOT KEPT HERE. It is `zeroship_secret_policy::PLATFORM_SECRETS`,
 /// which also carries the strength rule the product enforces on each name and
 /// the validator that applies it. Keeping a second copy here is what let the
-/// generator and the enforcement disagree; the compose secret-strength gate
-/// (`crates/zeroship-gatekit`) reads the same table, so a secret this command
-/// generates and a secret compose ships are judged by one rule set.
+/// generator and the enforcement disagree; the services' boot-time credential
+/// audit reads the same table, so a secret this command generates and a secret
+/// a service is handed are judged by one rule set. What compose SHIPS is
+/// judged by nothing: the gate that read the table against
+/// `deploy/compose/docker-compose.yml` was deleted on 2026-08-21.
 fn env_keys() -> impl Iterator<Item = &'static str> {
     zeroship_secret_policy::PLATFORM_SECRETS
         .iter()

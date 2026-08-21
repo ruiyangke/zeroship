@@ -75,11 +75,12 @@
 # WHY SHELL AND NOT crates/zeroship-gatekit. The whole gate is set arithmetic
 # over `cargo metadata` and `cargo tree`, both of which resolve from the
 # manifests and the lockfile without compiling anything - this runs in about two
-# seconds on a cold target/. Putting it in gatekit would mean COMPILING hyper
-# and tokio in order to notice hyper and tokio, because gatekit links the edge
-# it would be measuring (zeroship-core -> cyper -> hyper; see its Cargo.toml,
-# which says so). Nothing here needs a compiler-checked rule table, which is the
-# reason the compose secret gate is Rust.
+# seconds on a cold target/. Putting it in gatekit would mean COMPILING a crate
+# graph in order to read manifests, and until 2026-08-21 it would have meant
+# compiling hyper and tokio to notice hyper and tokio, because gatekit reached
+# the edge through zeroship-core. Nothing here needs a compiler-checked rule
+# table, which was the reason the compose secret gate was Rust before it was
+# deleted.
 #
 # MEASURED DISCRIMINATION, 2026-08-20, each mutation confirmed present with
 # `git diff` before the red run and absent after, and each followed by a green
