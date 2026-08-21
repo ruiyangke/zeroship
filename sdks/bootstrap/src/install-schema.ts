@@ -522,7 +522,17 @@ export function expandUnionToFlatColumns(def: FieldDef): NormalizedSchema {
  *
  * String-based (not type-based) so it acts as a safety net for
  * `t.ref("x" as any)` escapes that bypass the compile-time
- * `Tables<S>` constraint. Cross-app refs are also blocked.
+ * `Tables<S>` constraint.
+ *
+ * This is a MEMBERSHIP test, not a cross-app rule. A qualified target
+ * such as `"other_app.users"` does fail here, but only because it is
+ * not a key of this app's schema map, and the thrown message says
+ * "not declared in the schema map ... or fix the typo" accordingly.
+ * Nothing here inspects the target for an app prefix, and this check
+ * does not run at all for schema applied by the migration engine at
+ * deploy. What structurally keeps an FK inside one app is the DDL
+ * renderer in `crates/zeroship-schema/src/query.rs` -- see the foreign
+ * keys section of `docs/reference/db.md`.
  */
 export function validateRefTargets(
   schemas: Record<string, unknown>,
