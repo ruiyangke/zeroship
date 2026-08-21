@@ -302,15 +302,25 @@ impl<'a> Transaction<'a> {
         I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
+        let params = params.into_iter();
         // Binding through Transaction can never replay safely after 0A000:
         // PostgreSQL has already poisoned this transaction, so discard only
         // the implicit cache provenance and keep the caller's Statement.
-        let statement = statement
+        let execution = statement
             .__convert()
             .into_statement(self.client.inner())
             .await?
-            .statement;
-        bind::bind(self.client.inner(), statement, params).await
+            // A portal bind is one validated statement use: repeated binds
+            // pay the Parse/Describe cost that promotion is meant to remove.
+            .finalize_probationary(self.client.inner(), params.len())
+            .await?;
+        bind::bind(
+            self.client.inner(),
+            execution.statement,
+            params,
+            execution.unnamed_sql,
+        )
+        .await
     }
 
     /// Continues execution of a portal, returning a stream of the resulting

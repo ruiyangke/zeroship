@@ -19,6 +19,7 @@ mod private {
     pub(crate) struct StatementExecution<'a> {
         pub(crate) statement: Statement,
         pub(crate) cache_sql: Option<&'a str>,
+        pub(crate) unnamed_sql: Option<&'a str>,
     }
 
     impl<'a> ToStatementType<'a> {
@@ -33,19 +34,46 @@ mod private {
                 ToStatementType::Statement(statement) => Ok(StatementExecution {
                     statement: statement.clone(),
                     cache_sql: None,
+                    unnamed_sql: None,
                 }),
                 ToStatementType::Query(sql) => {
                     let cached = prepare::prepare_cached_with_origin(client, sql).await?;
                     Ok(StatementExecution {
                         statement: cached.statement,
                         cache_sql: cached.cache_hit.then_some(sql),
+                        unnamed_sql: cached.unnamed.then_some(sql),
                     })
                 }
                 ToStatementType::Uncached(sql) => Ok(StatementExecution {
                     statement: prepare::prepare(client, sql, &[]).await?,
                     cache_sql: None,
+                    unnamed_sql: None,
                 }),
             }
+        }
+    }
+
+    impl<'a> StatementExecution<'a> {
+        /// Turn discovery-only unnamed metadata into one counted, validated
+        /// cache use. Named/default and caller-owned statements bypass this.
+        pub(crate) async fn finalize_probationary(
+            mut self,
+            client: &Arc<InnerClient>,
+            parameter_count: usize,
+        ) -> Result<Self, Error> {
+            let Some(sql) = self.unnamed_sql else {
+                return Ok(self);
+            };
+            let expected = self.statement.params().len();
+            if parameter_count != expected {
+                return Err(Error::parameters(parameter_count, expected));
+            }
+
+            let finalized = prepare::finalize_probationary(client, sql, self.statement).await?;
+            self.statement = finalized.statement;
+            self.cache_sql = finalized.cache_hit.then_some(sql);
+            self.unnamed_sql = finalized.unnamed.then_some(sql);
+            Ok(self)
         }
     }
 }

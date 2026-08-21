@@ -8,7 +8,7 @@
 // because the recursion between `prepare` ↔ `get_type` ↔ `prepare_rec`
 // cannot be expressed as a plain async fn.
 
-use crate::client::InnerClient;
+use crate::client::{InnerClient, Responses, StatementCacheAdmission};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::error::SqlState;
@@ -230,6 +230,28 @@ pub async fn prepare(
         cleanup,
     )?;
 
+    let (parameters, columns) = read_prepare_response(client, &mut responses).await?;
+    Ok(Statement::new(client, guard.disarm(), parameters, columns))
+}
+
+/// Describe one execution without allocating a session-lived server name.
+/// The operation reparses this SQL immediately before Bind, so this discovery
+/// statement cannot be replaced incorrectly by a concurrent unnamed Parse.
+async fn prepare_unnamed(
+    client: &Arc<InnerClient>,
+    query: &str,
+    types: &[Type],
+) -> Result<Statement, Error> {
+    let buf = encode(client, "", query, types)?;
+    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let (parameters, columns) = read_prepare_response(client, &mut responses).await?;
+    Ok(Statement::unnamed(parameters, columns))
+}
+
+async fn read_prepare_response(
+    client: &Arc<InnerClient>,
+    responses: &mut Responses,
+) -> Result<(Vec<Type>, Vec<Column>), Error> {
     match responses.next().await? {
         Message::ParseComplete => {}
         _ => return Err(Error::unexpected_message()),
@@ -269,7 +291,7 @@ pub async fn prepare(
         }
     }
 
-    Ok(Statement::new(client, guard.disarm(), parameters, columns))
+    Ok((parameters, columns))
 }
 
 /// Prepare an implicit raw-SQL statement through this connection's opt-in
@@ -279,12 +301,19 @@ pub(crate) async fn prepare_cached(
     client: &Arc<InnerClient>,
     query: &str,
 ) -> Result<Statement, Error> {
-    Ok(prepare_cached_with_origin(client, query).await?.statement)
+    if client.statement_cache_capacity() == 0 {
+        return prepare(client, query, &[]).await;
+    }
+    if let Some(statement) = client.cached_statement(query) {
+        return Ok(statement);
+    }
+    Ok(prepare_and_cache(client, query).await?.0)
 }
 
 pub(crate) struct CachedStatement {
     pub(crate) statement: Statement,
     pub(crate) cache_hit: bool,
+    pub(crate) unnamed: bool,
 }
 
 /// Prepare through the implicit cache while retaining whether the returned
@@ -299,23 +328,78 @@ pub(crate) async fn prepare_cached_with_origin(
         return Ok(CachedStatement {
             statement: prepare(client, query, &[]).await?,
             cache_hit: false,
+            unnamed: false,
         });
     }
     if let Some(statement) = client.cached_statement(query) {
         return Ok(CachedStatement {
             statement,
             cache_hit: true,
+            unnamed: false,
+        });
+    }
+    if client.statement_cache_execution_threshold().get() == 1 {
+        let (statement, cache_hit) = prepare_and_cache(client, query).await?;
+        return Ok(CachedStatement {
+            statement,
+            cache_hit,
+            unnamed: false,
         });
     }
 
+    // Discover parameter and result types without earning execution credit.
+    // The operation finalizes admission only after its local arity check, so a
+    // wrong-arity call cannot push SQL toward promotion.
+    Ok(CachedStatement {
+        statement: prepare_unnamed(client, query, &[]).await?,
+        cache_hit: false,
+        unnamed: true,
+    })
+}
+
+/// Count one validated use of a probationary SQL string and choose its final
+/// protocol path. Discovery happens outside the admission lock, so another
+/// operation may have installed a cache winner in the meantime.
+pub(crate) async fn finalize_probationary(
+    client: &Arc<InnerClient>,
+    query: &str,
+    unnamed: Statement,
+) -> Result<CachedStatement, Error> {
+    match client.statement_cache_admission(query) {
+        StatementCacheAdmission::Cached(statement) => Ok(CachedStatement {
+            statement,
+            cache_hit: true,
+            unnamed: false,
+        }),
+        StatementCacheAdmission::PrepareNamed => {
+            let (statement, cache_hit) = prepare_and_cache(client, query).await?;
+            Ok(CachedStatement {
+                statement,
+                cache_hit,
+                unnamed: false,
+            })
+        }
+        StatementCacheAdmission::ExecuteUnnamed => Ok(CachedStatement {
+            statement: unnamed,
+            cache_hit: false,
+            unnamed: true,
+        }),
+    }
+}
+
+/// Prepare an admitted SQL string and elect one cache winner. Stale-plan
+/// recovery calls this path directly because a previously admitted statement
+/// must not return to probation merely because PostgreSQL invalidated it.
+async fn prepare_and_cache(
+    client: &Arc<InnerClient>,
+    query: &str,
+) -> Result<(Statement, bool), Error> {
     let type_cache_generation = client.type_cache_generation();
     let statement = prepare(client, query, &[]).await?;
     let candidate = statement.clone();
     let statement = client.cache_statement(query, statement, type_cache_generation);
-    Ok(CachedStatement {
-        cache_hit: !statement.same_instance(&candidate),
-        statement,
-    })
+    let cache_hit = !statement.same_instance(&candidate);
+    Ok((statement, cache_hit))
 }
 
 /// Build an error describing a cycle in pg_catalog type resolution.
