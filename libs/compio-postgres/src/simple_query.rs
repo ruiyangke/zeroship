@@ -72,6 +72,18 @@ pub(crate) fn start_batch_execute(
     client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))
 }
 
+pub(crate) fn start_batch_execute_with_error_cleanup(
+    client: &InnerClient,
+    query: &str,
+    cleanup: &str,
+) -> Result<Responses, Error> {
+    debug!("executing statement batch: {query}");
+
+    let query = encode(client, query)?;
+    let cleanup = encode(client, cleanup)?;
+    client.send_with_error_cleanup(FrontendMessage::Raw(query), FrontendMessage::Raw(cleanup))
+}
+
 /// Drain the response stream `start_batch_execute` returned.
 pub(crate) async fn finish_batch_execute(mut responses: Responses) -> Result<(), Error> {
     loop {

@@ -13,9 +13,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
-/// Own a portal after `BindComplete` while its refreshed row metadata is still
-/// being decoded. Without this guard, cancellation in those awaits would leave
-/// a named portal alive until the surrounding transaction ended.
+/// Own a portal after its bind is enqueued and until the `Portal` is built.
+/// Without this guard, cancellation in any response await would leave a named
+/// portal alive until the surrounding transaction ended.
 struct PortalCleanup {
     client: Weak<InnerClient>,
     name: Option<String>,
@@ -83,6 +83,7 @@ where
         RequestMessages::Single(FrontendMessage::Raw(buf)),
         &statement,
     )?;
+    let cleanup = PortalCleanup::new(client, &name);
 
     if unnamed_sql.is_some() {
         let message = match responses.next().await {
@@ -109,11 +110,6 @@ where
         _ => return Err(Error::unexpected_message()),
     }
 
-    // BindComplete is the ownership boundary: PostgreSQL has created `name`,
-    // and every error or cancellation from here must close it.
-    let cleanup = unnamed_sql
-        .is_some()
-        .then(|| PortalCleanup::new(client, &name));
     let statement = if unnamed_sql.is_some() {
         let row_description = match responses.next().await? {
             Message::RowDescription(body) => Some(body),
@@ -138,10 +134,7 @@ where
         statement
     };
 
-    let name = match cleanup {
-        Some(cleanup) => cleanup.disarm(),
-        None => name,
-    };
+    let name = cleanup.disarm();
     Ok(Portal::new(client, name, statement))
 }
 
