@@ -58,6 +58,13 @@
 // logic to satisfy a style lint would dilute the "behaviour-identical"
 // guarantee this refactor is judged on). The list is exactly the deny-level
 // lints the verbatim move trips; nothing broader is silenced.
+// `diff::read_live_schema` is a long async fn whose generated future nests
+// deeply enough that computing its layout exceeds rustc's default query depth:
+// on rustc 1.94.0 this crate does not compile at all without the raise, in
+// either profile, and the error names this crate and this function. Six crates
+// here already carry the same line for the same reason (plugin-db, migrated,
+// auth, gateway, and two test targets).
+#![recursion_limit = "256"]
 #![allow(
     clippy::collapsible_if,
     clippy::doc_lazy_continuation,
