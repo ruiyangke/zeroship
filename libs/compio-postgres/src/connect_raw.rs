@@ -19,7 +19,7 @@
 use crate::buf_stream::BufStream;
 use crate::client::Client;
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend};
-use crate::config::{self, Config, ReplicationMode};
+use crate::config::{self, Config, ReplicationMode, TargetSessionAttrs};
 use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::connection::Connection;
 use crate::maybe_tls_stream::MaybeTlsStream;
@@ -32,10 +32,11 @@ use futures_channel::mpsc;
 use postgres_protocol::authentication;
 use postgres_protocol::authentication::sasl;
 use postgres_protocol::authentication::sasl::ScramSha256;
-use postgres_protocol::message::backend::{AuthenticationSaslBody, Message};
+use postgres_protocol::message::backend::{AuthenticationSaslBody, DataRowBody, Message};
 use postgres_protocol::message::frontend;
 use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
+use std::io;
 
 /// How many notices the handshake will retain.
 ///
@@ -53,9 +54,11 @@ const MAX_DELAYED_HANDSHAKE_MESSAGES: usize = 256;
 /// `max_size`. A byte budget alone would let a peer hold a slot open with
 /// unlimited tiny frames. Both, or neither is a bound.
 ///
-/// The window is entirely pre-authentication: on the md5 and SCRAM paths no
+/// The queue starts before authentication: on the md5 and SCRAM paths no
 /// password has been sent yet, and under `sslmode=disable` or a `prefer`
-/// downgrade the peer's identity has not been checked at all.
+/// downgrade the peer's identity has not been checked at all. It remains in
+/// use through the post-authentication target-session probe, so its bounds
+/// must still be safe for that earlier, untrusted window.
 ///
 /// CHARGE THE FRAME, NOT THE PARSED VIEW. `Message::parse` splits the whole
 /// `tag + length + body` off the read buffer and the message owns all of it,
@@ -202,6 +205,33 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
+    connect_raw_with_target_session_attrs(
+        stream,
+        tls,
+        encryption,
+        has_hostname,
+        config,
+        TargetSessionAttrs::Any,
+        release,
+    )
+    .await
+}
+
+/// The normal host-routing connection path, including its session-property
+/// check before the raw stream is packaged into a `Connection`.
+pub(crate) async fn connect_raw_with_target_session_attrs<S, T>(
+    stream: S,
+    tls: T,
+    encryption: Encryption,
+    has_hostname: bool,
+    config: &Config,
+    target_session_attrs: TargetSessionAttrs,
+    release: Option<crate::release::ConnectionRelease>,
+) -> Result<(Client, Connection<S, T::Stream>), Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: TlsConnect<S>,
+{
     let stream = negotiate_tls(
         stream,
         encryption,
@@ -226,7 +256,14 @@ where
 
     startup(&mut handshake, config, &user).await?;
     authenticate(&mut handshake, config, &user).await?;
-    let (process_id, secret_key, parameters) = read_info(&mut handshake).await?;
+    let (process_id, secret_key, mut parameters) = read_info(&mut handshake).await?;
+    probe_target_session_attrs(
+        &mut handshake,
+        target_session_attrs,
+        &mut parameters,
+    )
+    .await
+    .map_err(Error::target_session_attrs)?;
 
     let (sender, receiver) = mpsc::unbounded();
     let client = Client::new(
@@ -247,6 +284,104 @@ where
     );
 
     Ok((client, connection))
+}
+
+/// Check the requested session property while the startup stream is still
+/// undivided, then leave it aligned immediately after `ReadyForQuery` for the
+/// regular connection task.
+async fn probe_target_session_attrs<S, T>(
+    handshake: &mut Handshake<S, T>,
+    target: TargetSessionAttrs,
+    parameters: &mut HashMap<String, String>,
+) -> Result<(), Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    if target == TargetSessionAttrs::Any {
+        return Ok(());
+    }
+
+    let mut buf = BytesMut::new();
+    frontend::query("SHOW transaction_read_only", &mut buf).map_err(Error::encode)?;
+    handshake.send(FrontendMessage::Raw(buf.freeze())).await?;
+
+    let mut saw_row_description = false;
+    let mut read_only = None;
+    let mut saw_command_complete = false;
+
+    loop {
+        match handshake.next().await? {
+            Some(Message::RowDescription(_))
+                if !saw_row_description && read_only.is_none() && !saw_command_complete =>
+            {
+                saw_row_description = true;
+            }
+            Some(Message::DataRow(row))
+                if saw_row_description && read_only.is_none() && !saw_command_complete =>
+            {
+                read_only = Some(parse_transaction_read_only(&row)?);
+            }
+            Some(Message::CommandComplete(_))
+                if saw_row_description && read_only.is_some() && !saw_command_complete =>
+            {
+                saw_command_complete = true;
+            }
+            Some(Message::ParameterStatus(body)) => {
+                parameters.insert(
+                    body.name().map_err(Error::parse)?.to_string(),
+                    body.value().map_err(Error::parse)?.to_string(),
+                );
+            }
+            Some(Message::ReadyForQuery(_))
+                if saw_row_description && saw_command_complete =>
+            {
+                let read_only = read_only.ok_or_else(Error::unexpected_message)?;
+                return require_target_session_attrs(target, read_only);
+            }
+            Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
+            Some(_) => return Err(Error::unexpected_message()),
+            None => return Err(Error::closed()),
+        }
+    }
+}
+
+fn parse_transaction_read_only(row: &DataRowBody) -> Result<bool, Error> {
+    let mut ranges = row.ranges();
+    let Some(Some(range)) = ranges.next().map_err(Error::parse)? else {
+        return Err(Error::unexpected_message());
+    };
+    if ranges.next().map_err(Error::parse)?.is_some() {
+        return Err(Error::unexpected_message());
+    }
+
+    match row.buffer().get(range) {
+        Some(b"on") => Ok(true),
+        Some(b"off") => Ok(false),
+        _ => Err(Error::connect(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "server returned an invalid transaction_read_only value",
+        ))),
+    }
+}
+
+fn require_target_session_attrs(
+    target: TargetSessionAttrs,
+    read_only: bool,
+) -> Result<(), Error> {
+    match (target, read_only) {
+        (TargetSessionAttrs::ReadWrite, true) => Err(Error::connect(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "database does not allow writes",
+        ))),
+        (TargetSessionAttrs::ReadOnly, false) => Err(Error::connect(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "database is not read only",
+        ))),
+        (TargetSessionAttrs::Any, _)
+        | (TargetSessionAttrs::ReadWrite, false)
+        | (TargetSessionAttrs::ReadOnly, true) => Ok(()),
+    }
 }
 
 /// Run the regular startup + auth + parameter-read handshake against
@@ -809,4 +944,3 @@ mod tests {
         assert_eq!(io.to_string(), "connection timed out");
     }
 }
-

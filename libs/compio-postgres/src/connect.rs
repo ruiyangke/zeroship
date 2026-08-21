@@ -13,15 +13,14 @@
 //   `FuturesOrdered` for parallel attempts when `hosts > 1`; that's a
 //   nice-to-have future optimisation and documented as a hand-off in
 //   PHASE3.md.
-// * `target_session_attrs=ReadWrite`/`ReadOnly` post-handshake probe
-//   (the `SHOW transaction_read_only` query) is still deferred: it
-//   requires `Client::simple_query_raw` from the full query surface.
-//   We return an error if a non-default value is set, rather than
-//   silently ignoring it.
+// * `target_session_attrs=ReadWrite`/`ReadOnly` is checked on the raw stream
+//   before `connect_raw` packages it into a `Connection`.
 
 use crate::client::{Addr, Client, SocketConfig};
-use crate::config::{Host, LoadBalanceHosts, SslMode, TargetSessionAttrs};
-use crate::connect_raw::connect_raw;
+use crate::config::{Host, LoadBalanceHosts, SslMode};
+#[cfg(test)]
+use crate::config::TargetSessionAttrs;
+use crate::connect_raw::connect_raw_with_target_session_attrs;
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::Encryption;
 use crate::connection::Connection;
@@ -351,6 +350,13 @@ where
         Err(e) => e,
     };
 
+    // Reaching the target-session probe means this transport completed TLS,
+    // startup, and authentication. A probe failure rejects the endpoint; it is
+    // not a reason for `sslmode=allow` to reopen that same endpoint over TLS.
+    if err.is_target_session_attrs() {
+        return Err(err);
+    }
+
     let retry = match (config.get_ssl_mode(), first) {
         // TLS first, and the handshake is what failed: dial again, in the clear.
         //
@@ -415,25 +421,16 @@ where
     // Taken while the socket is still a `Socket` - `connect_raw` is generic
     // over the stream and the TLS wrapper hides the descriptor.
     let release = socket.release_handle();
-    let (mut client, connection) =
-        connect_raw(socket, tls, encryption, has_hostname, config, release).await?;
-
-    // TargetSessionAttrs post-connect probe. The source interleaves a
-    // `simple_query_raw("SHOW transaction_read_only")` with
-    // `connection.poll_unpin` — fail the probe if the connection dies.
-    // Our `Connection::run` consumes `self`, so the in-place interleave
-    // of the source cannot be expressed directly. Implementing this
-    // properly requires either: (a) a `poll_one_step` method on
-    // Connection; or (b) spawning the connection and re-joining it
-    // after the probe. For now we surface the limitation rather than
-    // silently ignoring a non-default value. This should be revisited
-    // alongside the transaction port.
-    if config.get_target_session_attrs() != TargetSessionAttrs::Any {
-        return Err(Error::config(
-            "target_session_attrs is not yet supported; the post-connect probe is still missing"
-                .into(),
-        ));
-    }
+    let (mut client, connection) = connect_raw_with_target_session_attrs(
+        socket,
+        tls,
+        encryption,
+        has_hostname,
+        config,
+        config.get_target_session_attrs(),
+        release,
+    )
+    .await?;
 
     client.set_socket_config(SocketConfig {
         addr,
@@ -485,6 +482,89 @@ mod tests {
 
     fn refused_handshake() -> Vec<u8> {
         frame(b'E', b"SERROR\0C57P03\0Mscripted refusal\0\0")
+    }
+
+    enum ProbeReply {
+        Close,
+        Stall,
+        Value(&'static str),
+    }
+
+    fn probe_result(value: &str) -> Vec<u8> {
+        let mut row_description = 1u16.to_be_bytes().to_vec();
+        row_description.extend_from_slice(b"transaction_read_only\0");
+        row_description.extend_from_slice(&0u32.to_be_bytes());
+        row_description.extend_from_slice(&0i16.to_be_bytes());
+        row_description.extend_from_slice(&25u32.to_be_bytes());
+        row_description.extend_from_slice(&(-1i16).to_be_bytes());
+        row_description.extend_from_slice(&(-1i32).to_be_bytes());
+        row_description.extend_from_slice(&0i16.to_be_bytes());
+
+        let mut data_row = 1u16.to_be_bytes().to_vec();
+        data_row.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+        data_row.extend_from_slice(value.as_bytes());
+
+        let mut script = frame(b'T', &row_description);
+        script.extend_from_slice(&frame(b'D', &data_row));
+        script.extend_from_slice(&frame(b'C', b"SHOW\0"));
+        script.extend_from_slice(&frame(b'Z', b"I"));
+        script
+    }
+
+    async fn scripted_probe_server(
+        reply: ProbeReply,
+    ) -> (SocketAddr, oneshot::Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (query_seen, query_observed) = oneshot::channel();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            result.unwrap();
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            let compio::BufResult(result, _) =
+                socket.read_exact(vec![0u8; length - 4]).await;
+            result.unwrap();
+
+            let compio::BufResult(result, _) = socket.write_all(successful_handshake()).await;
+            result.unwrap();
+            socket.flush().await.unwrap();
+
+            let compio::BufResult(result, tag) = socket.read_exact(vec![0u8; 1]).await;
+            if result.is_err() {
+                return;
+            }
+            assert_eq!(tag, b"Q");
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            if result.is_err() {
+                return;
+            }
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            let compio::BufResult(result, query) =
+                socket.read_exact(vec![0u8; length - 4]).await;
+            if result.is_err() {
+                return;
+            }
+            let _ = query_seen.send(query);
+
+            match reply {
+                ProbeReply::Close => {}
+                ProbeReply::Stall => {
+                    let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
+                }
+                ProbeReply::Value(value) => {
+                    let compio::BufResult(result, _) = socket.write_all(probe_result(value)).await;
+                    result.unwrap();
+                    socket.flush().await.unwrap();
+                    let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
+                }
+            }
+        })
+        .detach();
+
+        (addr, query_observed)
     }
 
     async fn scripted_server_after_startup(
@@ -747,6 +827,63 @@ mod tests {
             Err(error) => error,
         };
 
+        let io = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("connection timeout must retain its I/O cause");
+        assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(io.to_string(), "connection timed out");
+    }
+
+    #[compio::test]
+    async fn connection_death_during_target_session_attrs_probe_is_an_error() {
+        let (addr, query_observed) = scripted_probe_server(ProbeReply::Close).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .hostaddr(addr.ip())
+            .port(addr.port())
+            .ssl_mode(SslMode::Disable)
+            .target_session_attrs(TargetSessionAttrs::ReadWrite);
+
+        let connect = compio::runtime::spawn(async move { config.connect(NoTls).await });
+        let query = compio::time::timeout(Duration::from_secs(2), query_observed)
+            .await
+            .expect("the target-session probe was never sent")
+            .expect("the connection closed without the target-session probe");
+        assert_eq!(query, b"SHOW transaction_read_only\0");
+
+        let result = compio::time::timeout(Duration::from_secs(2), connect)
+            .await
+            .expect("connection death during the probe hung connect")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        assert!(
+            result.is_err(),
+            "a connection that died without answering the probe was returned"
+        );
+    }
+
+    #[compio::test]
+    async fn connect_timeout_covers_a_stalled_target_session_attrs_probe() {
+        let (addr, query_observed) = scripted_probe_server(ProbeReply::Stall).await;
+        let mut config = config_for(addr, Duration::from_millis(100));
+        config.target_session_attrs(TargetSessionAttrs::ReadWrite);
+        let connect = compio::runtime::spawn(async move { config.connect(NoTls).await });
+
+        let query = compio::time::timeout(Duration::from_secs(2), query_observed)
+            .await
+            .expect("the target-session probe was never sent")
+            .expect("the connection closed without the target-session probe");
+        assert_eq!(query, b"SHOW transaction_read_only\0");
+
+        let result = compio::time::timeout(Duration::from_secs(2), connect)
+            .await
+            .expect("the outer watchdog expired because the probe escaped connect_timeout")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let error = match result {
+            Ok(_) => panic!("a server that never answered the probe produced a connection"),
+            Err(error) => error,
+        };
         let io = error
             .source()
             .and_then(|cause| cause.downcast_ref::<std::io::Error>())
