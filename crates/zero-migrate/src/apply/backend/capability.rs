@@ -98,12 +98,12 @@ pub enum BackfillError {
         /// The cursor component the transform illegally assigns.
         cursor_component: String,
     },
-    /// A SQLite backfill batch failure after the last committed cursor.
-    #[error("sqlite backfill batch failed at cursor {at_cursor:?}: {source_msg}")]
-    SqliteBatchFailed {
+    /// A paged backfill batch failed after the last committed cursor.
+    #[error("backfill batch failed at cursor {at_cursor:?}: {source_msg}")]
+    BatchFailedAtCursor {
         /// The last committed cursor when the failing batch started.
         at_cursor: Option<String>,
-        /// The SQLite error message from the failed batch.
+        /// The backend error message from the failed batch.
         source_msg: String,
     },
     /// The SQLite migration connection can no longer be safely reused.
@@ -226,4 +226,28 @@ pub trait ShadowDryRun {
         shadow_cfg: &'a ShadowConfig,
         applied_by: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BackfillError;
+
+    /// "A paged batch failed after the last committed cursor" is engine-independent
+    /// — PostgreSQL reports the same condition as an unprefixed "batch failed after
+    /// cursor ...". The variant name is compiler-checked, but this operator-facing
+    /// string is not, and nothing else in the tree pins it, so a drift back to a
+    /// vendor spelling would otherwise be silent.
+    #[test]
+    fn batch_failure_message_names_no_engine() {
+        let rendered = BackfillError::BatchFailedAtCursor {
+            at_cursor: Some("[1]".to_string()),
+            source_msg: "disk I/O error".to_string(),
+        }
+        .to_string();
+
+        assert_eq!(
+            rendered,
+            "backfill batch failed at cursor Some(\"[1]\"): disk I/O error"
+        );
+    }
 }
