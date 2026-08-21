@@ -81,7 +81,7 @@
 //! And a DELIBERATE non-defect that looks identical to a neuter: the
 //! `pg_get_constraintdef` normal form (`declarative::quote_ident_if_needed` /
 //! `constraintdef_cols`) is PostgreSQL-spelled ON PURPOSE and is read by the SQLite
-//! and MySQL drift comparators. It has its own door, `dml::pg_canonical_ident`,
+//! and MySQL drift comparators. It has a renderer-independent snapshot codec,
 //! precisely because a red count cannot tell it apart from an unrouted emission.
 //! Re-dialecting it would be a regression.
 

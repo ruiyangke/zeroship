@@ -364,6 +364,7 @@ pub(crate) async fn resolve(
         &stored_create,
         target_columns(action),
         generated_rowid.map(|column| column.name.as_str()),
+        crate::render::backends::schema_renderer(super::SQLITE_DIALECT),
     )
     .map_err(|error| fail(error.to_string()))?;
     let (open, _) = crate::render::declarative::sqlite_create_body_bounds(&rewritten)

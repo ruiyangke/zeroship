@@ -55,81 +55,7 @@ use zero_migrate_backend::ddl::{
     constraint_supports_fk_columns, fk_local_columns, fk_referenced_columns, fk_target_table,
     index_supports_fk_columns, CreateTableRequest, DdlEmitter,
 };
-
-/// The ONE dialect identity of every MySQL-owned render path in this module — the
-/// twin of [`SQLITE_DIALECT`] below, and a const for the same reason: the 21 call
-/// sites of [`mysql_quote_ident`] name no vendor themselves, so when `MysqlEmitter`
-/// and its helpers move into `render::backends::mysql` this const IS that module's
-/// `DIALECT` and the migration is one line.
-const MYSQL_DIALECT: SqlDialect = SqlDialect::Mysql;
-
-/// EMIT an identifier in MySQL's OWN spelling, decided by the MySQL backend.
-///
-/// The twin of [`sqlite_ident`] below, and it got here by the same route with one
-/// difference worth keeping straight. `sqlite_ident`'s predecessor reached NO
-/// renderer at all. This one reached the WRONG WAY DOWN: it forwarded to
-/// `schema::query::mysql_quote_ident`, a `pub` function in CORE that held the
-/// backtick bytes and that `render::backends::mysql` ALSO called to get its own
-/// spelling.
-///
-/// So no vendor was ever unnamed here — this function's name says MySQL, at all 21
-/// sites — and nothing was mis-emitted. What was wrong was the direction of the
-/// dependency, and it only bites at the crate split: `zero-migrate-mysql` cannot
-/// ask `zero-migrate` how to spell an identifier without recreating the cycle the
-/// split exists to break. The bytes now live in the backend, and this is a door to
-/// them like any other.
-fn mysql_quote_ident(ident: &str) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(ident, MYSQL_DIALECT)
-}
-
-fn mysql_qualified(schema: &str, object: &str) -> String {
-    format!(
-        "{}.{}",
-        mysql_quote_ident(schema),
-        mysql_quote_ident(object)
-    )
-}
-
-/// The ONE dialect identity of every SQLite-owned render path in this module.
-///
-/// It is a const rather than a literal at each site so that the ~35 call sites of
-/// [`sqlite_ident`] below name no vendor themselves. When `SqliteEmitter` and its
-/// helpers eventually move into `render::backends::sqlite`, this const IS that
-/// module's `DIALECT` and the migration is one line — the same one-dialect-literal
-/// shape `backends/mod.rs` already requires of a backend module.
-const SQLITE_DIALECT: SqlDialect = SqlDialect::Sqlite;
-
-/// EMIT an identifier in SQLite's OWN spelling, decided by the SQLite backend.
-///
-/// Every SQLite-owned emission in this module goes through here. Before the seam
-/// they went through [`quote_ident`] into a raw `format!` that reached NO renderer
-/// at all: the bytes were right because PostgreSQL and SQLite happen to agree on
-/// `"x"`, and nothing in the suite could tell the agreement apart from a routing.
-/// MEASURED at `8710fe39`: neutering `SqliteDmlRenderer::quote_ident` reddened 51
-/// of the 156 `sqlite_engine` tests while neutering this module's `quote_ident`
-/// reddened 72 — 39 live-SQLite tests whose emitted identifier bytes the SQLite
-/// backend could not influence at all.
-fn sqlite_ident(ident: &str) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(ident, SQLITE_DIALECT)
-}
-
-/// Quote an identifier in PostgreSQL spelling — for this module that is BOTH the
-/// PG emission form and the PG-shaped normal form, which coincide by construction.
-///
-/// Mirrors [`crate::plan::author`]'s quoting so emitted SQL is injection-safe even
-/// past the author-boundary `validate_ident` (defense in depth — the guard is line
-/// two).
-///
-/// NOT A DEFECT WHEN A SQLITE PATH READS IT. [`quote_ident_if_needed`] and
-/// [`constraintdef_cols`] build the `pg_get_constraintdef` normal form on purpose,
-/// and `apply::backend::sqlite::drift_sql` / `apply::backend::mysql::drift_sql`
-/// compare against that form deliberately; MySQL's spelling is derived from it at
-/// the backend's single `mysql_requote_sql` translation point. Re-dialecting those callers
-/// to their own backend would break the round-trip. See
-/// [`crate::render::dml::pg_canonical_ident`] for why that needs its own door.
-fn quote_ident(ident: &str) -> String {
-    crate::render::dml::pg_canonical_ident(ident)
-}
+use zero_migrate_backend::schema::SchemaRenderer;
 
 /// The PG keywords whose category is NOT `UNRESERVED` (i.e. reserved,
 /// type/function-name, or column-name keywords). `quote_identifier` — and thus
@@ -141,7 +67,12 @@ fn quote_ident(ident: &str) -> String {
 /// `order`/`user`/`select` (each passes `validate_collection`/`is_safe_schema_ident`
 /// but is reserved) renders QUOTED in the catalog — and now here too — so the
 /// desired-vs-live FK body re-diffs clean instead of phantom-dropping.
-const PG_NON_UNRESERVED_KEYWORDS: &[&str] = &[
+///
+/// NOT A DEFECT WHEN A SQLITE PATH READS THIS CODEC. [`quote_ident_if_needed`] and
+/// [`constraintdef_cols`] build the `pg_get_constraintdef` comparison form on
+/// purpose. SQLite and MySQL drift normalization compare against that form; this is
+/// comparison text, never an emitted identifier route.
+const CONSTRAINT_DEFINITION_KEYWORDS_REQUIRING_QUOTES: &[&str] = &[
     "all",
     "analyse",
     "analyze",
@@ -303,7 +234,8 @@ const PG_NON_UNRESERVED_KEYWORDS: &[&str] = &[
 /// Quote an identifier ONLY when Postgres' own `quote_identifier` would — i.e.
 /// mirror what `pg_get_constraintdef` emits. An identifier is left BARE iff it is a
 /// "safe" lowercase identifier (starts with `[a-z_]`, all chars `[a-z0-9_]`) AND is
-/// not a non-unreserved keyword ([`PG_NON_UNRESERVED_KEYWORDS`]); otherwise it is
+/// not a keyword requiring quotes
+/// ([`CONSTRAINT_DEFINITION_KEYWORDS_REQUIRING_QUOTES`]); otherwise it is
 /// double-quoted (mixed-case, leading digit, reserved word, …).
 ///
 /// This is the seam the FK referenced-table body uses so the desired snapshot
@@ -319,11 +251,11 @@ pub(crate) fn quote_ident_if_needed(ident: &str) -> String {
         && ident
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        && !PG_NON_UNRESERVED_KEYWORDS.contains(&ident);
+        && !CONSTRAINT_DEFINITION_KEYWORDS_REQUIRING_QUOTES.contains(&ident);
     if safe_bare {
         ident.to_string()
     } else {
-        quote_ident(ident)
+        zero_migrate_backend::snapshot::quote_constraint_definition_ident(ident)
     }
 }
 
@@ -820,6 +752,7 @@ pub(crate) fn rewrite_sqlite_stored_primary_key(
     stored: &str,
     target_columns: Option<&[String]>,
     materialize_not_null: Option<&str>,
+    backend: &dyn SchemaRenderer,
 ) -> Result<String, DeclarativeError> {
     let (open, close) = sqlite_create_body_bounds(stored).ok_or_else(|| {
         DeclarativeError::Invalid(format!(
@@ -877,7 +810,7 @@ pub(crate) fn rewrite_sqlite_stored_primary_key(
     if let Some(columns) = target_columns {
         let columns = columns
             .iter()
-            .map(|column| sqlite_ident(column))
+            .map(|column| backend.quote_ident(column))
             .collect::<Vec<_>>()
             .join(", ");
         rewritten.push(format!("PRIMARY KEY ({columns})"));
@@ -1094,6 +1027,7 @@ fn rewrite_sqlite_stored_foreign_keys(
     stored: &str,
     live: &TableSnapshot,
     desired: &TableSnapshot,
+    backend: &dyn SchemaRenderer,
 ) -> Result<String, DeclarativeError> {
     let (open, close) = sqlite_create_body_bounds(stored).ok_or_else(|| {
         DeclarativeError::Invalid(format!(
@@ -1121,7 +1055,7 @@ fn rewrite_sqlite_stored_foreign_keys(
         if let Some(constraint) = sqlite_constraint_by_name(&desired.constraints, &name) {
             rewritten.push(format!(
                 "CONSTRAINT {} {}",
-                sqlite_ident(&constraint.name),
+                backend.quote_ident(&constraint.name),
                 constraint.definition
             ));
         } else if sqlite_constraint_by_name(&live.constraints, &name).is_none() {
@@ -1155,7 +1089,7 @@ fn rewrite_sqlite_stored_foreign_keys(
             }
             None => rewritten.push(format!(
                 "CONSTRAINT {} {}",
-                sqlite_ident(&desired_fk.name),
+                backend.quote_ident(&desired_fk.name),
                 desired_fk.definition
             )),
         }
@@ -2302,7 +2236,7 @@ fn field_check_constraints(
     dialect: SqlDialect,
 ) -> Vec<ConstraintSnapshot> {
     let mut out = Vec::new();
-    let col = quote_ident(&f.name);
+    let col = zero_migrate_backend::snapshot::quote_constraint_definition_ident(&f.name);
 
     // min/max (numeric only — matches plugin-db's `type == "number"` gate).
     if f.ty == "number" {
@@ -2677,16 +2611,6 @@ pub(crate) fn rename_column_in_generated_columns(
     Ok(())
 }
 
-/// The character `dialect` wraps a column reference in. A DOUBLED occurrence is an
-/// escaped one and does not close the run, which is the whole grammar
-/// [`rename_quoted_column_in_sql`] needs.
-const fn ident_quote_char(dialect: SqlDialect) -> char {
-    match dialect {
-        SqlDialect::Postgres | SqlDialect::Sqlite => '"',
-        SqlDialect::Mysql => '`',
-    }
-}
-
 /// Rewrite every QUOTED IDENTIFIER spelling `from` inside one rendered SQL fragment,
 /// returning `None` to leave the fragment untouched.
 ///
@@ -2717,10 +2641,10 @@ fn rename_quoted_column_in_sql(
     sql: &str,
     from: &str,
     to: &str,
-    dialect: SqlDialect,
+    backend: &dyn SchemaRenderer,
 ) -> Option<String> {
-    let quote = ident_quote_char(dialect);
-    let replacement = crate::render::dml::escape_quote_ident_for_dialect(to, dialect);
+    let quote = backend.ident_quote_char();
+    let replacement = backend.quote_ident(to);
     let mut out = String::with_capacity(sql.len());
     let mut rewrote = false;
     let mut i = 0usize;
@@ -2752,10 +2676,7 @@ fn rename_quoted_column_in_sql(
             return None;
         }
         let raw = &sql[i..j];
-        if ch == quote
-            && decoded == from
-            && crate::render::dml::escape_quote_ident_for_dialect(&decoded, dialect) == raw
-        {
+        if ch == quote && decoded == from && backend.quote_ident(&decoded) == raw {
             out.push_str(&replacement);
             rewrote = true;
         } else {
@@ -2784,7 +2705,7 @@ fn rename_quoted_column_in_sql(
 /// The match is EXACT on the decoded identifier and carries a round-trip guard, and
 /// every body these two fields hold on the fold's side was rendered by
 /// `render::dml::render_expr_inline`, which spells a `ColRef` through
-/// `quote_ident_for_dialect` - the SAME function the guard re-quotes with - over an
+/// the selected schema renderer - the SAME speller the guard re-quotes with - over an
 /// identifier charset restricted to `[A-Za-z_][A-Za-z0-9_]*`. So for a FOLD-produced
 /// body the guard cannot spuriously decline, and a literal cannot spuriously match.
 ///
@@ -2811,18 +2732,18 @@ pub(crate) fn rename_column_in_index_bodies(
     snapshot: &mut TableSnapshot,
     from: &str,
     to: &str,
-    dialect: SqlDialect,
+    backend: &dyn SchemaRenderer,
 ) {
     for index in &mut snapshot.indexes {
         if let Some(predicate) = index.predicate.as_mut() {
-            if let Some(renamed) = rename_quoted_column_in_sql(predicate, from, to, dialect) {
+            if let Some(renamed) = rename_quoted_column_in_sql(predicate, from, to, backend) {
                 *predicate = renamed;
             }
         }
         for element in &mut index.elements {
             match element {
                 IndexElementSnapshot::Expr(expr) => {
-                    if let Some(renamed) = rename_quoted_column_in_sql(expr, from, to, dialect) {
+                    if let Some(renamed) = rename_quoted_column_in_sql(expr, from, to, backend) {
                         *expr = renamed;
                     }
                 }
@@ -2867,14 +2788,14 @@ pub(crate) fn rename_column_in_check_definitions(
     snapshot: &mut TableSnapshot,
     from: &str,
     to: &str,
-    dialect: SqlDialect,
+    backend: &dyn SchemaRenderer,
 ) {
     for constraint in &mut snapshot.constraints {
         if constraint.kind != "CHECK" {
             continue;
         }
         if let Some(renamed) =
-            rename_quoted_column_in_sql(&constraint.definition, from, to, dialect)
+            rename_quoted_column_in_sql(&constraint.definition, from, to, backend)
         {
             constraint.definition = renamed;
         }
@@ -2903,11 +2824,11 @@ pub(crate) fn rename_column_in_inline_checks(
     snapshot: &mut TableSnapshot,
     from: &str,
     to: &str,
-    dialect: SqlDialect,
+    backend: &dyn SchemaRenderer,
 ) {
     for column in &mut snapshot.columns {
         for check in &mut column.inline_checks {
-            if let Some(renamed) = rename_quoted_column_in_sql(check, from, to, dialect) {
+            if let Some(renamed) = rename_quoted_column_in_sql(check, from, to, backend) {
                 *check = renamed;
             }
         }
@@ -4045,7 +3966,11 @@ fn pure_sqlite_column_rename<'a>(
     (renamed_live == *desired).then_some(*rename)
 }
 
-fn retarget_sqlite_fk_definition(definition: &str, target: &str) -> Option<String> {
+fn retarget_sqlite_fk_definition(
+    definition: &str,
+    target: &str,
+    backend: &dyn SchemaRenderer,
+) -> Option<String> {
     let marker = "REFERENCES";
     let marker_start = definition.find(marker)?;
     let after_marker = marker_start + marker.len();
@@ -4056,7 +3981,7 @@ fn retarget_sqlite_fk_definition(definition: &str, target: &str) -> Option<Strin
             .find(|ch: char| ch == '(' || ch.is_whitespace())
             .unwrap_or(definition.len() - target_start);
     let mut rewritten = definition.to_string();
-    rewritten.replace_range(target_start..target_end, &sqlite_ident(target));
+    rewritten.replace_range(target_start..target_end, &backend.quote_ident(target));
     Some(rewritten)
 }
 
@@ -4088,6 +4013,7 @@ fn sqlite_stored_create_for_pure_rename(
     table: &str,
     tmp_table: &str,
     snapshot: &TableSnapshot,
+    backend: &dyn SchemaRenderer,
 ) -> Result<String, DeclarativeError> {
     let stored = snapshot.stored_create_sql.as_deref().ok_or_else(|| {
         DeclarativeError::Invalid(format!(
@@ -4106,6 +4032,7 @@ fn sqlite_stored_create_for_pure_rename(
             constraint.definition = retarget_sqlite_fk_definition(
                 &constraint.definition,
                 tmp_table,
+                backend,
             )
             .ok_or_else(|| {
                 DeclarativeError::Invalid(format!(
@@ -4115,7 +4042,8 @@ fn sqlite_stored_create_for_pure_rename(
             })?;
         }
     }
-    let stored = rewrite_sqlite_stored_foreign_keys(table, stored, snapshot, &temporary_snapshot)?;
+    let stored =
+        rewrite_sqlite_stored_foreign_keys(table, stored, snapshot, &temporary_snapshot, backend)?;
     let (open, _) = sqlite_create_body_bounds(&stored).ok_or_else(|| {
         DeclarativeError::Invalid(format!(
             "SQLite pure-rename rebuild of '{table}' could not parse its stored CREATE TABLE body"
@@ -4123,7 +4051,7 @@ fn sqlite_stored_create_for_pure_rename(
     })?;
     Ok(format!(
         "CREATE TABLE {}{}",
-        sqlite_ident(table),
+        backend.quote_ident(table),
         &stored[open..]
     ))
 }
@@ -4132,6 +4060,7 @@ fn sqlite_authored_primary_key_clause(
     table: &str,
     snapshot: &TableSnapshot,
     inject: &ResolvedInject,
+    backend: &dyn SchemaRenderer,
 ) -> Result<Option<String>, DeclarativeError> {
     let mut primary_keys = snapshot
         .constraints
@@ -4156,7 +4085,7 @@ fn sqlite_authored_primary_key_clause(
     }
     Ok(Some(format!(
         "CONSTRAINT {} {}",
-        sqlite_ident(&primary_key.name),
+        backend.quote_ident(&primary_key.name),
         primary_key.definition
     )))
 }
@@ -5108,52 +5037,25 @@ impl DeclarativeAuthor {
         crate::render::backends::ddl_emitter(self.dialect, &self.project_schema)
     }
 
-    /// Render the POSTGRESQL `<schema>.<object>` reference — both parts spelled by
-    /// [`quote_ident`], and the schema qualifier itself is a PostgreSQL assumption.
+    fn schema_renderer(&self) -> &'static dyn SchemaRenderer {
+        crate::render::backends::schema_renderer(self.dialect)
+    }
+
+    fn quote_ident(&self, ident: &str) -> String {
+        self.schema_renderer().quote_ident(ident)
+    }
+
+    /// Render `<schema>.<object>` with the selected backend's identifier spelling.
     ///
-    /// The name said nothing about a vendor, which is the exact shape the
-    /// identifier-routing audit exists to catch, so the vendor is stated here and
-    /// MEASURED rather than reasoned. Every emission site in this module that names
-    /// no dialect at its own line funnels through here — the rest sit on paths that
-    /// announce themselves (`SqlDialect::Postgres` arms, PostgreSQL-emitter methods,
-    /// `_pg`-suffixed renderers) — which makes this the one choke point worth
-    /// instrumenting.
-    ///
-    /// MEASURED at `7ca23cdc` by asserting the dialect here and running
-    /// `cargo test --workspace --exclude zero-migrate-node` (37 sections, 3372 tests,
-    /// including the live PostgreSQL, MySQL and SQLite legs):
-    ///
-    /// | assertion                | result                                      |
-    /// |--------------------------|---------------------------------------------|
-    /// | dialect is NOT Postgres  | 45 failed — the instrument fires            |
-    /// | dialect IS Postgres      | 3372 passed / 0 failed, byte-identical      |
-    ///
-    /// The first row is the control, and it is the load-bearing one: a green probe
-    /// with no proof the assertion CAN fire measures nothing. So no non-PostgreSQL
-    /// dialect reaches this method on any path the suite exercises.
-    ///
-    /// NOT UNREACHABLE BY CONSTRUCTION, THOUGH — that is a claim about today's
-    /// callers, not about the type, and three `SqlDialect::Sqlite` legs would land
-    /// here if it were not for a capability gate several frames up:
-    ///
-    /// - [`Self::constraint_refs`] — which is what [`Self::lower_add_constraint`]
-    ///   and [`Self::lower_drop_constraint`] now share — spells its table reference
-    ///   `self.qualified(table)` on the SQLite arm;
-    /// - [`Self::render_add_fk`] spells the table with `sqlite_ident` on its SQLite
-    ///   arm but then calls [`Self::fk_clause`], which qualifies the FK's REFERENCES
-    ///   target through here regardless of dialect.
-    ///
-    /// All three are refused upstream because `Capability::AlterTableAddConstraint` /
-    /// `AlterTableDropConstraint` are false for SQLite, which is WHY the probe stays
-    /// green — the gate, not the render. Were one flipped, those legs would emit
-    /// `"schema"."table"`, which on SQLite does not error: it resolves to no table and
-    /// SILENTLY no-ops, the failure mode `SqliteEmitter::drop_index_up` documents at
-    /// length. So read a future capability change as touching this method too.
+    /// PostgreSQL and MySQL both use this on live emission paths. SQLite reaches it
+    /// only through currently refused constraint paths; keeping the qualification
+    /// here preserves those dormant bytes without teaching core how any vendor
+    /// quotes either component.
     fn qualified(&self, object: &str) -> String {
         format!(
             "{}.{}",
-            quote_ident(&self.project_schema),
-            quote_ident(object)
+            self.quote_ident(&self.project_schema),
+            self.quote_ident(object)
         )
     }
 
@@ -6358,7 +6260,12 @@ impl DeclarativeAuthor {
         // Rewriting a constraint for it would desynchronise that body from the rename
         // SQLite is about to perform.
         if preserve_stored_shape {
-            return sqlite_stored_create_for_pure_rename(table, tmp_table, snapshot);
+            return sqlite_stored_create_for_pure_rename(
+                table,
+                tmp_table,
+                snapshot,
+                self.schema_renderer(),
+            );
         }
 
         // The rename-follow the desired snapshot could NOT carry. Renaming
@@ -6388,6 +6295,7 @@ impl DeclarativeAuthor {
                     constraint.definition = retarget_sqlite_fk_definition(
                         &constraint.definition,
                         tmp_table,
+                        self.schema_renderer(),
                     )
                     .ok_or_else(|| {
                         DeclarativeError::Invalid(format!(
@@ -6443,7 +6351,9 @@ impl DeclarativeAuthor {
                     "internal: SQLite rebuild of '{table}' emitted no CREATE TABLE"
                 ))
             })?;
-        if let Some(primary_key) = sqlite_authored_primary_key_clause(table, snapshot, inject)? {
+        if let Some(primary_key) =
+            sqlite_authored_primary_key_clause(table, snapshot, inject, self.schema_renderer())?
+        {
             create = append_sqlite_table_constraint(table, &create, &primary_key)?;
         }
         Ok(create)
@@ -6691,7 +6601,13 @@ impl DeclarativeAuthor {
         }
 
         let create_real = if let Some(stored) = live.stored_create_sql.as_deref() {
-            rewrite_sqlite_stored_foreign_keys(table, stored, live, desired)?
+            rewrite_sqlite_stored_foreign_keys(
+                table,
+                stored,
+                live,
+                desired,
+                self.schema_renderer(),
+            )?
         } else {
             let injected_indexes = injected_index_names(table, desired, Some(inject));
             self.emitter()
@@ -6725,7 +6641,7 @@ impl DeclarativeAuthor {
         // rewritten stored text.
         let new_table_create = format!(
             "CREATE TABLE {} {}",
-            sqlite_ident(&tmp),
+            self.quote_ident(&tmp),
             &create_real[open..]
         );
 
@@ -6825,8 +6741,8 @@ impl DeclarativeAuthor {
             preserve_stored_shape,
             table_renames,
         )?;
-        let real_q = sqlite_ident(table);
-        let tmp_q = sqlite_ident(&tmp);
+        let real_q = self.quote_ident(table);
+        let tmp_q = self.quote_ident(&tmp);
         // The first occurrence of the quoted real table name is the CREATE target.
         let new_table_create = match create_real.find(&real_q) {
             Some(pos) => {
@@ -6953,9 +6869,9 @@ impl DeclarativeAuthor {
             .chain(spec.column_renames.iter().map(|(from, to)| {
                 format!(
                     "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                    sqlite_ident(table),
-                    sqlite_ident(from),
-                    sqlite_ident(to)
+                    self.quote_ident(table),
+                    self.quote_ident(from),
+                    self.quote_ident(to)
                 )
             }))
             .chain(spec.recreate_objects.iter().cloned())
@@ -7099,6 +7015,7 @@ impl DeclarativeAuthor {
         known_live_tables: &BTreeSet<String>,
         effective: &zero_migrate_policy::EffectivePolicy,
     ) -> Result<TableRebuild, DeclarativeError> {
+        let backend = crate::render::backends::schema_renderer(self.dialect);
         // ---- desired snapshot: live with `from`→`to` renamed (type unchanged) ----
         let mut desired_table = live_snapshot.clone();
         let mut found = false;
@@ -7129,7 +7046,7 @@ impl DeclarativeAuthor {
         // `state`. `has_inline_checks` is one of the three facets that route this
         // rebuild through the snapshot renderer at all, so the stale body is not
         // merely carried - it is the reason the renderer was chosen.
-        rename_column_in_inline_checks(&mut desired_table, from, to, self.dialect);
+        rename_column_in_inline_checks(&mut desired_table, from, to, backend);
         // The THIRD carrier, `ConstraintSnapshot::definition`, is DELIBERATELY not
         // rewritten here, and the reason is the whole shape of that fix.
         // `ConstraintSnapshot`'s `PartialEq` COMPARES `definition` (`ColumnSnapshot`'s
@@ -7357,27 +7274,27 @@ impl DeclarativeAuthor {
     ) -> Migration {
         let table_ref = match self.dialect {
             SqlDialect::Postgres => self.qualified(table),
-            SqlDialect::Sqlite => sqlite_ident(table),
-            SqlDialect::Mysql => mysql_qualified(&self.project_schema, table),
+            SqlDialect::Sqlite => self.quote_ident(table),
+            SqlDialect::Mysql => self.qualified(table),
         };
         let up = format!("ALTER TABLE {} ADD {}", table_ref, self.fk_clause(fk));
         let down = match self.dialect {
             SqlDialect::Mysql => format!(
                 "ALTER TABLE {} DROP FOREIGN KEY {}",
                 table_ref,
-                mysql_quote_ident(&fk.name)
+                self.quote_ident(&fk.name)
             ),
             // Split from the PG arm not because the bytes differ — they do not —
             // but so the SQLite leg's identifier is spelled by the SQLite backend.
             SqlDialect::Sqlite => format!(
                 "ALTER TABLE {} DROP CONSTRAINT {}",
                 table_ref,
-                sqlite_ident(&fk.name)
+                self.quote_ident(&fk.name)
             ),
             SqlDialect::Postgres => format!(
                 "ALTER TABLE {} DROP CONSTRAINT {}",
                 table_ref,
-                quote_ident(&fk.name)
+                self.quote_ident(&fk.name)
             ),
         };
         self.make(
@@ -7464,12 +7381,12 @@ impl DeclarativeAuthor {
         let using = if is_engine_computed_column(c) {
             String::new()
         } else {
-            format!(" USING {}::{}", quote_ident(&c.name), ty)
+            format!(" USING {}::{}", self.quote_ident(&c.name), ty)
         };
         let up = format!(
             "ALTER TABLE {} ALTER COLUMN {} TYPE {}{}",
             self.qualified(table),
-            quote_ident(&c.name),
+            self.quote_ident(&c.name),
             ty,
             using,
         );
@@ -7512,13 +7429,13 @@ impl DeclarativeAuthor {
         let up = format!(
             "ALTER TABLE {} ALTER COLUMN {} {}",
             self.qualified(table),
-            quote_ident(col),
+            self.quote_ident(col),
             verb
         );
         let down = format!(
             "ALTER TABLE {} ALTER COLUMN {} {}",
             self.qualified(table),
-            quote_ident(col),
+            self.quote_ident(col),
             reverse
         );
         self.make(
@@ -7582,12 +7499,9 @@ impl DeclarativeAuthor {
         default_sql: Option<&str>,
     ) -> String {
         let (table_ref, col_ref) = match self.dialect {
-            SqlDialect::Mysql => (
-                mysql_qualified(&self.project_schema, table),
-                mysql_quote_ident(col),
-            ),
-            SqlDialect::Postgres => (self.qualified(table), quote_ident(col)),
-            SqlDialect::Sqlite => (sqlite_ident(table), sqlite_ident(col)),
+            SqlDialect::Mysql => (self.qualified(table), self.quote_ident(col)),
+            SqlDialect::Postgres => (self.qualified(table), self.quote_ident(col)),
+            SqlDialect::Sqlite => (self.quote_ident(table), self.quote_ident(col)),
         };
         let action = match default_sql {
             Some(default_sql) => format!("SET DEFAULT {default_sql}"),
@@ -8160,15 +8074,12 @@ impl DeclarativeAuthor {
     /// held it VERBATIM, comments included.
     fn constraint_refs(&self, table: &str, name: &str) -> (String, String) {
         match self.dialect {
-            SqlDialect::Mysql => (
-                mysql_qualified(&self.project_schema, table),
-                mysql_quote_ident(name),
-            ),
+            SqlDialect::Mysql => (self.qualified(table), self.quote_ident(name)),
             // The SQLite leg is split out so its identifier is spelled by the
             // SQLite backend. Byte-identical to the PG leg today; that is the
             // point — agreement is not routing.
-            SqlDialect::Sqlite => (self.qualified(table), sqlite_ident(name)),
-            SqlDialect::Postgres => (self.qualified(table), quote_ident(name)),
+            SqlDialect::Sqlite => (self.qualified(table), self.quote_ident(name)),
+            SqlDialect::Postgres => (self.qualified(table), self.quote_ident(name)),
         }
     }
 
@@ -8253,13 +8164,13 @@ impl DeclarativeAuthor {
         let up = match self.dialect {
             SqlDialect::Mysql => format!(
                 "ALTER TABLE {} DROP FOREIGN KEY {}",
-                mysql_qualified(&self.project_schema, table),
-                mysql_quote_ident(name),
+                self.qualified(table),
+                self.quote_ident(name),
             ),
             SqlDialect::Postgres => format!(
                 "ALTER TABLE {} DROP CONSTRAINT {}",
                 self.qualified(table),
-                quote_ident(name),
+                self.quote_ident(name),
             ),
             SqlDialect::Sqlite => {
                 unreachable!("SQLite foreign-key drops must lower through a table rebuild")
@@ -8286,7 +8197,7 @@ impl DeclarativeAuthor {
         let up = format!(
             "ALTER TABLE {} VALIDATE CONSTRAINT {}",
             self.qualified(table),
-            quote_ident(name),
+            self.quote_ident(name),
         );
         let flags = MigrationFlags {
             requires_approval: true,
@@ -9613,7 +9524,11 @@ mod inline_check_rename_tests {
     //! make text surgery admissible here at all - literal vs identifier, exact vs
     //! prefix, quoted vs bare - and the refusal that keeps a body it cannot read STALE
     //! rather than CORRUPT. Every one of them is a way a plain substring swap is wrong.
-    use super::{rename_quoted_column_in_sql, SqlDialect};
+    use super::{rename_quoted_column_in_sql, SchemaRenderer, SqlDialect};
+
+    fn backend(dialect: SqlDialect) -> &'static dyn SchemaRenderer {
+        crate::render::backends::schema_renderer(dialect)
+    }
 
     #[test]
     fn a_string_literal_spelling_the_column_name_is_not_a_column_reference() {
@@ -9623,7 +9538,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status" IN ('UNCONFIRMED', 'status'))"#,
                 "status",
                 "state",
-                SqlDialect::Sqlite,
+                backend(SqlDialect::Sqlite),
             )
             .as_deref(),
             Some(r#"CHECK ("state" IN ('UNCONFIRMED', 'status'))"#),
@@ -9637,7 +9552,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status_id" IS NOT NULL)"#,
                 "status",
                 "state",
-                SqlDialect::Sqlite,
+                backend(SqlDialect::Sqlite),
             ),
             None,
             "an exact decoded match, not a prefix: no rewrite means the fragment is \
@@ -9652,7 +9567,7 @@ mod inline_check_rename_tests {
                 "CHECK (status IS NOT NULL)",
                 "status",
                 "state",
-                SqlDialect::Sqlite,
+                backend(SqlDialect::Sqlite),
             ),
             None,
             "every producer of these fragments quotes; an unquoted word could as \
@@ -9667,7 +9582,7 @@ mod inline_check_rename_tests {
             r#"CHECK ("ref" IS NULL OR (typeof("ref") = 'text' AND length("ref") = 36))"#,
             "ref",
             "target",
-            SqlDialect::Sqlite,
+            backend(SqlDialect::Sqlite),
         )
         .expect("the body names the column");
         assert_eq!(
@@ -9683,7 +9598,7 @@ mod inline_check_rename_tests {
                 "CHECK (`status` IS NOT NULL)",
                 "status",
                 "state",
-                SqlDialect::Mysql,
+                backend(SqlDialect::Mysql),
             )
             .as_deref(),
             Some("CHECK (`state` IS NOT NULL)"),
@@ -9693,7 +9608,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status" IS NOT NULL)"#,
                 "status",
                 "state",
-                SqlDialect::Mysql,
+                backend(SqlDialect::Mysql),
             ),
             None,
             "a double-quoted token is not an identifier on MySQL, so it is left alone",
@@ -9707,7 +9622,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status" <> 'unclosed)"#,
                 "status",
                 "state",
-                SqlDialect::Sqlite,
+                backend(SqlDialect::Sqlite),
             ),
             None,
             "a body this walk cannot read is left STALE rather than half-rewritten",
@@ -9724,7 +9639,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status" IN ('it''s', 'other'))"#,
                 "status",
                 "state",
-                SqlDialect::Sqlite,
+                backend(SqlDialect::Sqlite),
             )
             .as_deref(),
             Some(r#"CHECK ("state" IN ('it''s', 'other'))"#),

@@ -1,9 +1,8 @@
 //! SQLite schema/DDL spelling. The future `zero-migrate-sqlite`.
 
 use zero_migrate_backend::ddl::sqlite_auto_increment_identity_pk;
-use zero_migrate_backend::schema::{
-    decimal_precision_scale, quote_ident_for_backend, SchemaRenderer,
-};
+use zero_migrate_backend::renderer::DmlRenderer;
+use zero_migrate_backend::schema::{decimal_precision_scale, SchemaRenderer};
 use zero_migrate_backend::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::{DialectId, SqlDialect};
 
@@ -21,8 +20,16 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         DIALECT.id()
     }
 
+    fn quote_ident(&self, ident: &str) -> String {
+        crate::dml::RENDERER.quote_ident(ident)
+    }
+
+    fn ident_quote_char(&self) -> char {
+        '"'
+    }
+
     fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
-        quote_ident_for_backend(target, &crate::dml::RENDERER)
+        self.quote_ident(target)
     }
 
     fn column_type(&self, c: &ColumnSnapshot, inline_pk: bool) -> String {

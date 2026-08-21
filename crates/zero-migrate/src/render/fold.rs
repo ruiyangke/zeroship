@@ -2158,6 +2158,7 @@ impl<'a> CatalogFold<'a> {
             Op::RenameColumn {
                 table, from, to, ..
             } => {
+                let schema_renderer = crate::render::backends::schema_renderer(dialect);
                 let snap = table_mut(tables, table)?;
                 // A pure rename keeps the column's type/nullable/default/sentinels;
                 // only the NAME changes (the IR carries `ty` for the live-rename type
@@ -2225,7 +2226,12 @@ impl<'a> CatalogFold<'a> {
                 // carrying a rename is a broken rebuild source for every LATER
                 // migration in the same history, which the rebuild's own rewrite
                 // cannot repair: it only knows the rename it is lowering.
-                crate::render::declarative::rename_column_in_inline_checks(snap, from, to, dialect);
+                crate::render::declarative::rename_column_in_inline_checks(
+                    snap,
+                    from,
+                    to,
+                    schema_renderer,
+                );
                 // `cascade_columns` names columns, so a rename has to follow it.
                 // PostgreSQL renames the attribute in place and leaves every
                 // constraint's `conkey` pointing at it, so a later drop of the NEW
@@ -2284,7 +2290,10 @@ impl<'a> CatalogFold<'a> {
                 // `render::declarative::rename_column_in_check_definitions` for why the
                 // walk is sound here and what it still leaves stale.
                 crate::render::declarative::rename_column_in_check_definitions(
-                    snap, from, to, dialect,
+                    snap,
+                    from,
+                    to,
+                    schema_renderer,
                 );
                 // An index names columns too, and a rename has to follow it for the
                 // same reason. `pg_index` references the attribute by `attnum`, never
@@ -2352,7 +2361,12 @@ impl<'a> CatalogFold<'a> {
                         expr_cascade_columns.sort();
                     }
                 }
-                crate::render::declarative::rename_column_in_index_bodies(snap, from, to, dialect);
+                crate::render::declarative::rename_column_in_index_bodies(
+                    snap,
+                    from,
+                    to,
+                    schema_renderer,
+                );
                 // The PARTITION KEY names columns, and it is the carrier with the worst
                 // failure mode of the set: `TableSnapshot::eq` COMPARES `partition_by`,
                 // so a stale key is drift the differ REPORTS - on every introspection,
@@ -4065,10 +4079,10 @@ fn apply_fold_named_type_column_metadata(
                     }
                 }
                 if let Some(check) = &def.check {
-                    let value_sql = crate::render::dml::quote_ident_for_dialect(
+                    let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
                         "column",
                         &source.name,
-                        dialect,
+                        crate::render::backends::renderer(dialect),
                     )
                     .map_err(|e| FoldError::NamedTypeRender(e.to_string()))?;
                     let expr = render_domain_check(check, dialect, &value_sql)

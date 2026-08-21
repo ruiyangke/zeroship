@@ -5,7 +5,7 @@ use zero_migrate_backend::ddl::{
     generated_clause, inline_checks_clause, inline_pk_for_column, null_clause, primary_key_clause,
     render_index_order_suffix, should_render_table_pk, CreateTableRequest, DdlEmitter,
 };
-use zero_migrate_backend::schema::{quote_ident_for_backend, SchemaRenderer};
+use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
 };
@@ -15,7 +15,7 @@ use zero_migrate_ir::dialect::{DialectId, SqlDialect};
 const DIALECT: SqlDialect = SqlDialect::Sqlite;
 
 fn sqlite_ident(ident: &str) -> String {
-    quote_ident_for_backend(ident, &crate::dml::RENDERER)
+    crate::schema::RENDERER.quote_ident(ident)
 }
 
 pub(super) fn emitter(project_schema: &str) -> Box<dyn DdlEmitter> {

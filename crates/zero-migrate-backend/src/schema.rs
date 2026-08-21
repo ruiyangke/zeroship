@@ -11,8 +11,8 @@
 //! spelling. What lives here is exactly the neutral contract and the shared
 //! codecs its methods name:
 //!
-//! * the trait itself and the identifier forwarders into [`crate::dml`],
-//!   described below;
+//! * the trait itself, including the required identifier primitives each vendor
+//!   supplies;
 //! * the sentinel builders PostgreSQL's `column_comment_statements` spells
 //!   ([`build_encryption_sentinel_comments`], [`build_mask_sentinel_comments`] and
 //!   the three field-level readers under them).
@@ -21,16 +21,6 @@
 //! type and identifier spellings live in the backend that owns them, which is the
 //! boundary rule stated at length in `zero_migrate::render::backends`.
 //!
-//! # The cross-stack edge, unchanged and still ONE forwarder
-//!
-//! These vendors spell identifiers through `quote_ident_for_backend`, which
-//! forwards to [`crate::dml::escape_quote_ident_for_backend`], which resolves
-//! through the DML registry. That was already true inside the engine and the
-//! crate split did NOT change it: it is one forwarder, and it must stay one. The
-//! alternative — each `SchemaRenderer` spelling its own identifiers — would put a
-//! second physical home of the quoting bytes back in the tree, which is exactly the
-//! defect `render::backends`'s header measured and removed.
-
 use crate::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::DialectId;
 
@@ -81,6 +71,20 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// `DialectId::new` is `const`, so an outsider declares its identity at item
     /// scope and this method hands it back.
     fn dialect(&self) -> DialectId;
+
+    /// Quote one identifier in this backend's emitted SQL spelling.
+    ///
+    /// Required, with no shared default: a backend cannot silently inherit another
+    /// vendor's quoting rules.
+    fn quote_ident(&self, ident: &str) -> String;
+
+    /// The delimiter this vendor's [`quote_ident`](Self::quote_ident) uses.
+    ///
+    /// The rename rewriter needs to recognize quoted identifier runs without
+    /// deriving a vendor spelling in core. Required for the same reason as
+    /// [`Self::quote_ident`].
+    fn ident_quote_char(&self) -> char;
+
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
     fn column_type(&self, c: &ColumnSnapshot, inline_pk: bool) -> String;
 
@@ -120,80 +124,6 @@ pub fn is_schema_metadata_key(key: &str) -> bool {
     matches!(key, "_meta" | "_indexes")
 }
 
-/// EMIT a schema-layer identifier in `dialect`'s own spelling.
-///
-/// THE schema kernel's only identifier-quoting door, and a thin forward to the
-/// crate's single dispatch ([`crate::dml::escape_quote_ident_for_backend`],
-/// which resolves through `render::backends::renderer`). It used to hold its own
-/// three-arm `match` over `SqlDialect` and its own `pub fn quote_ident`, which made
-/// this module a SECOND physical home for the ANSI double-quote spelling that
-/// `render::backends` declares must have exactly one. Both are gone; the bytes are
-/// unchanged and the vendor is now decided by the vendor's own module.
-///
-/// There is deliberately no un-dialected sibling. `quote_ident(name)` existed here,
-/// was `pub`, and spelled `"x"` for a vendor it never named — correct bytes for two
-/// of the three shipping dialects and therefore invisible to every assertion about
-/// emitted SQL. Its call sites are now split between this function (where a
-/// `dialect` is in scope) and `pg_quote_ident` (where the surrounding statement is
-/// PostgreSQL-only syntax).
-///
-/// THE CENSUS, and it is worth stating how it was counted, because the obvious count
-/// is wrong. An anchored `quote_ident\(` scan of this file matched 52; a naive
-/// `grep -o 'quote_ident('` returns 63 because it also matches inside
-/// `mysql_quote_ident(`. Of the 52: one was the definition, one an internal call from
-/// the three-arm dispatch this function used to be, one a prose comment, and 49 were
-/// real call sites (45 emission, 4 in-src tests). `schema::diff` held 6 more through
-/// the `pub` name, and three integration probes imported it as their expected-value
-/// oracle. All 49 + 6 now name a dialect; the probes grew their own local spelling,
-/// which is what an oracle should have been in the first place.
-///
-/// MEASURED at `0b45ea46`, on the 1231-test `--lib` binary, by neutering
-/// `render::backends::ansi_double_quote_ident` — the one home — with a single
-/// appended token:
-///
-/// | tree | red | note |
-/// |------|-----|------|
-/// | before | 125 | exactly ONE of them under `schema::` |
-/// | before, neutering `schema::query::quote_ident` instead | 39 | DISJOINT from the 125 |
-/// | after this change | 164 | 125 + 39, the whole formerly-blind set |
-///
-/// The two before-sets being disjoint is the measurement that matters: those 39
-/// schema-kernel tests could not see the crate's single quoting home at all, which
-/// is what "second physical home" means operationally. No test was lost and no
-/// emitted byte changed — only who decided it.
-pub fn quote_ident_for_backend(name: &str, backend: &dyn crate::renderer::DmlRenderer) -> String {
-    crate::dml::escape_quote_ident_for_backend(name, backend)
-}
-
-/// EMIT an identifier for a statement whose SYNTAX is PostgreSQL-only.
-///
-/// The schema kernel's PG-only builders (`CREATE INDEX CONCURRENTLY`,
-/// `COMMENT ON COLUMN`, `ALTER TABLE … DROP CONSTRAINT IF EXISTS`,
-/// `ADD COLUMN IF NOT EXISTS`, `CREATE SCHEMA`) have no `dialect` parameter because
-/// they have no other dialect to be. They still must not spell an identifier for a
-/// vendor they never named, so the vendor is in this function's NAME — the same
-/// technique as `crate::dml::pg_canonical_ident`, and for the same reason:
-/// a red count cannot tell a deliberate PostgreSQL spelling apart from an unrouted
-/// one, so the door has to carry the intent.
-///
-/// This is EMISSION, not the `pg_get_constraintdef` normal form. Nothing in this
-/// module builds comparison text — `information_schema` appears here only in two doc
-/// comments, and `pg_get_constraintdef` not at all — so
-/// `crate::dml::pg_canonical_ident` is deliberately NOT the door used
-/// here, even though it would produce identical bytes.
-/// THE PIN MOVED, IT DID NOT GO. This used to write `SqlDialect::Postgres` into its
-/// own body and resolve a renderer from it; this crate is below the vendors and has
-/// no PostgreSQL renderer to resolve. The vendor is now supplied by the caller, and
-/// the one place that still writes the literal is
-/// `zero_migrate::schema::query::pg_quote_ident`, one line in the engine, which every
-/// existing engine caller still names.
-pub fn pg_quote_ident_for_backend(
-    name: &str,
-    backend: &dyn crate::renderer::DmlRenderer,
-) -> String {
-    quote_ident_for_backend(name, backend)
-}
-
 /// String-valued enum members from a neutral SDK field definition.
 pub fn string_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
     let values = def.get("enum")?.as_array()?;
@@ -221,7 +151,7 @@ pub fn build_encryption_sentinel_comments(
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
-    backend: &dyn crate::renderer::DmlRenderer,
+    backend: &dyn SchemaRenderer,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let Some(obj) = schema.as_object() else {
@@ -238,9 +168,9 @@ pub fn build_encryption_sentinel_comments(
         let escaped = body.replace('\'', "''");
         out.push(format!(
             "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-            pg_quote_ident_for_backend(app_id, backend),
-            pg_quote_ident_for_backend(collection, backend),
-            pg_quote_ident_for_backend(field, backend),
+            backend.quote_ident(app_id),
+            backend.quote_ident(collection),
+            backend.quote_ident(field),
             escaped,
         ));
     }
@@ -315,7 +245,7 @@ pub fn build_mask_sentinel_comments(
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
-    backend: &dyn crate::renderer::DmlRenderer,
+    backend: &dyn SchemaRenderer,
 ) -> Vec<String> {
     let mut out = Vec::new();
     let Some(obj) = schema.as_object() else {
@@ -337,9 +267,9 @@ pub fn build_mask_sentinel_comments(
         let escaped = sentinel.replace('\'', "''");
         out.push(format!(
             "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-            pg_quote_ident_for_backend(app_id, backend),
-            pg_quote_ident_for_backend(collection, backend),
-            pg_quote_ident_for_backend(&sibling, backend),
+            backend.quote_ident(app_id),
+            backend.quote_ident(collection),
+            backend.quote_ident(&sibling),
             escaped,
         ));
     }

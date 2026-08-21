@@ -1907,8 +1907,12 @@ pub(crate) fn enum_inline_check(
     values: &[String],
     dialect: SqlDialect,
 ) -> Result<String, IrLowerError> {
-    let col = crate::render::dml::quote_ident_for_dialect("column", column, dialect)
-        .map_err(IrLowerError::DmlAssemble)?;
+    let col = zero_migrate_backend::dml::quote_ident_for_backend(
+        "column",
+        column,
+        crate::render::backends::renderer(dialect),
+    )
+    .map_err(IrLowerError::DmlAssemble)?;
     Ok(format!(
         "CHECK ({col} IN ({}))",
         render_enum_values(values, dialect)
@@ -2058,7 +2062,11 @@ pub(crate) fn render_domain_check(
         if name == "VALUE" {
             Ok(value_sql.to_string())
         } else {
-            crate::render::dml::quote_ident_for_dialect("column", name, dialect)
+            zero_migrate_backend::dml::quote_ident_for_backend(
+                "column",
+                name,
+                crate::render::backends::renderer(dialect),
+            )
         }
     })
     .map_err(IrLowerError::DmlAssemble)
@@ -7616,10 +7624,10 @@ impl IrAuthor {
                         }
                     }
                     if let Some(check) = &def.check {
-                        let value_sql = crate::render::dml::quote_ident_for_dialect(
+                        let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
                             "column",
                             &source.name,
-                            self.dialect,
+                            self.backend,
                         )
                         .map_err(IrLowerError::DmlAssemble)?;
                         let expr = render_domain_check(check, self.dialect, &value_sql)?;
@@ -10468,10 +10476,12 @@ fn render_exclusion_element(
     dialect: SqlDialect,
 ) -> Result<String, IrLowerError> {
     let target = match &element.target {
-        ColumnOrExpr::Column { name } => {
-            crate::render::dml::quote_ident_for_dialect("column", name, dialect)
-                .map_err(IrLowerError::DmlAssemble)?
-        }
+        ColumnOrExpr::Column { name } => zero_migrate_backend::dml::quote_ident_for_backend(
+            "column",
+            name,
+            crate::render::backends::renderer(dialect),
+        )
+        .map_err(IrLowerError::DmlAssemble)?,
         ColumnOrExpr::Expr { expr } => {
             let expr = crate::render::dml::render_expr_inline(expr, dialect)
                 .map_err(IrLowerError::DmlAssemble)?;

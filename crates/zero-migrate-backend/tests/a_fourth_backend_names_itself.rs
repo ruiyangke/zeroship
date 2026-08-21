@@ -259,6 +259,14 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         DUCKDB
     }
 
+    fn quote_ident(&self, ident: &str) -> String {
+        DuckDbDmlRenderer.quote_ident(ident)
+    }
+
+    fn ident_quote_char(&self) -> char {
+        '"'
+    }
+
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
         format!("\"{app_id}\".\"{target}\"")
     }

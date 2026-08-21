@@ -10,6 +10,16 @@ use zero_migrate_ir::ir::{
     ValueFormat,
 };
 
+/// Quote one identifier in the canonical constraint-definition normal form.
+///
+/// This codec is deliberately independent of every registered renderer: snapshot
+/// comparison text must not change when any vendor's emission implementation is
+/// replaced or poisoned.
+#[must_use]
+pub fn quote_constraint_definition_ident(ident: &str) -> String {
+    crate::spelling::ansi_double_quote_ident(ident)
+}
+
 /// One column of a table, as introspected from `information_schema.columns`.
 ///
 /// `default` is **DDL-emission metadata, not a blanket drift-comparable

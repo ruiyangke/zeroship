@@ -1,8 +1,9 @@
 //! PostgreSQL schema/DDL spelling. The future `zero-migrate-postgres`.
 
+use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{
     build_encryption_sentinel_comments, build_mask_sentinel_comments, char_len,
-    decimal_precision_scale, max_length, quote_ident_for_backend, SchemaRenderer,
+    decimal_precision_scale, max_length, SchemaRenderer,
 };
 use zero_migrate_backend::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::{DialectId, SqlDialect};
@@ -22,12 +23,16 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         DIALECT.id()
     }
 
+    fn quote_ident(&self, ident: &str) -> String {
+        crate::dml::RENDERER.quote_ident(ident)
+    }
+
+    fn ident_quote_char(&self) -> char {
+        '"'
+    }
+
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
-        format!(
-            "{}.{}",
-            quote_ident_for_backend(app_id, &crate::dml::RENDERER),
-            quote_ident_for_backend(target, &crate::dml::RENDERER)
-        )
+        format!("{}.{}", self.quote_ident(app_id), self.quote_ident(target))
     }
 
     fn column_type(&self, c: &ColumnSnapshot, _inline_pk: bool) -> String {
@@ -75,13 +80,9 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         collection: &str,
         schema: &serde_json::Value,
     ) -> Vec<String> {
-        let mut statements =
-            build_mask_sentinel_comments(app_id, collection, schema, &crate::dml::RENDERER);
+        let mut statements = build_mask_sentinel_comments(app_id, collection, schema, self);
         statements.extend(build_encryption_sentinel_comments(
-            app_id,
-            collection,
-            schema,
-            &crate::dml::RENDERER,
+            app_id, collection, schema, self,
         ));
         statements
     }

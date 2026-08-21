@@ -1,8 +1,9 @@
 //! MySQL schema/DDL spelling. The future `zero-migrate-mysql`.
 
 use crate::collation::{mysql_pin_collation, mysql_type_without_collation};
+use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{
-    char_len, decimal_precision_scale, def_case_sensitive, quote_ident_for_backend, SchemaRenderer,
+    char_len, decimal_precision_scale, def_case_sensitive, SchemaRenderer,
 };
 use zero_migrate_backend::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::{DialectId, SqlDialect};
@@ -21,12 +22,16 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         DIALECT.id()
     }
 
+    fn quote_ident(&self, ident: &str) -> String {
+        crate::dml::RENDERER.quote_ident(ident)
+    }
+
+    fn ident_quote_char(&self) -> char {
+        '`'
+    }
+
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
-        format!(
-            "{}.{}",
-            quote_ident_for_backend(app_id, &crate::dml::RENDERER),
-            quote_ident_for_backend(target, &crate::dml::RENDERER)
-        )
+        format!("{}.{}", self.quote_ident(app_id), self.quote_ident(target))
     }
 
     fn column_type(&self, c: &ColumnSnapshot, _inline_pk: bool) -> String {

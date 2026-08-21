@@ -29,11 +29,10 @@
 /// exactly why the engine must not reach it un-named. An engine caller that spells
 /// these bytes itself is spelling them FOR A VENDOR IT NEVER NAMED, and no assertion
 /// about emitted SQL can see the mistake while the two vendors agree — the bytes are
-/// right, the routing is absent. The engine's doors are
-/// `crate::dml::escape_quote_ident_for_dialect` (to EMIT for a named dialect) and
-/// `crate::dml::pg_canonical_ident` (for the PG-shaped normal form); both resolve
-/// back here through the registry, so the bytes are unchanged and the vendor is on
-/// the record.
+/// right, the routing is absent. Emitted identifiers therefore go through a
+/// registered renderer. The separate constraint-definition snapshot codec calls
+/// this primitive directly because comparison text must be renderer-independent;
+/// its name records that it is a codec, not an emission route.
 ///
 /// This is also why the two `quote_ident` impls that use it call it DIRECTLY rather
 /// than through the `*_for_dialect` seam their sibling methods use: they ARE the

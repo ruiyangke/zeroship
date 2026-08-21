@@ -22,13 +22,11 @@
 //!
 //! # What this buys, beyond compiling
 //!
-//! Every remaining `SqlDialect`-to-vendor resolution in the whole workspace is now in
-//! this file and in `schema::query`'s two siblings. Before the split the same
-//! resolution happened inside `dml.rs` at five points, invisible to a caller, and a
-//! backend module could reach it without either side naming the other. The three
-//! PostgreSQL-PINNED doors below (`quote_ident_checked`, `pg_canonical_ident`, and
-//! the `SqlDialect::Postgres` inside them) are still pins — they just spell the pin
-//! where a reader can see it.
+//! While the closed enum still exists, these compatibility doors resolve it through
+//! the open vendor registry and immediately pass a renderer to the neutral contract.
+//! Vendor implementations never call back through these doors. The final enum-removal
+//! cluster deletes the doors with their callers instead of adding a reverse
+//! `DialectId -> SqlDialect` bridge.
 
 pub use zero_migrate_backend::dml::*;
 
@@ -43,22 +41,13 @@ use crate::schema::query::SqlDialect;
 /// rather than by a `format!` in the engine.
 ///
 /// This is the door for anything that will be sent to a database. The other door,
-/// [`pg_canonical_ident`], is for the normal form that is COMPARED rather than
+/// the snapshot codec is for the normal form that is COMPARED rather than
 /// executed; picking between them is the point of there being two.
 pub(crate) fn escape_quote_ident_for_dialect(ident: &str, dialect: SqlDialect) -> String {
     seam::escape_quote_ident_for_backend(ident, renderer(dialect))
 }
 
-/// Validate an author-supplied bare identifier, then emit it in `dialect`'s spelling.
-pub(crate) fn quote_ident_for_dialect(
-    what: &'static str,
-    ident: &str,
-    dialect: SqlDialect,
-) -> Result<String, DmlError> {
-    seam::quote_ident_for_backend(what, ident, renderer(dialect))
-}
-
-/// The trigger-body sibling of [`quote_ident_for_dialect`], same gate, same spelling.
+/// Validate a trigger-body identifier and emit it in the selected spelling.
 pub(crate) fn quote_bare_ident_for_dialect(
     what: &'static str,
     ident: &str,
@@ -85,50 +74,6 @@ pub(crate) fn quote_ident_checked_for_dialect(
 /// unchanged.
 pub(crate) fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError> {
     seam::quote_ident_checked_for_backend(ident, renderer(SqlDialect::Postgres))
-}
-
-/// The PG-SHAPED NORMAL FORM — which this doc used to call "NOT an emission", and
-/// that claim is MEASURED FALSE.
-///
-/// The intent is real and unchanged: constraint-definition bodies and stored-DDL
-/// fragments are built once in PostgreSQL spelling ON PURPOSE, so a desired snapshot
-/// round-trips byte-for-byte against `pg_get_constraintdef`, and that normal form is
-/// then READ by the SQLite and MySQL drift comparators. Re-dialecting THOSE callers
-/// would be a regression, not a fix, and the door keeps its name for exactly the
-/// reason it always did: a neuter reddens a deliberate PostgreSQL spelling and an
-/// unrouted one identically, so the red count is not a diagnosis and the name has to
-/// carry the intent.
-///
-/// WHAT IS FALSE IS "NOT AN EMISSION". At least one caller EXECUTES this form against
-/// a non-PostgreSQL server. MEASURED by replacing `PostgresDmlRenderer::quote_ident`
-/// with a marker string and running the SQLite-only `sqlite_engine` binary against a
-/// real SQLite database: 154 passed / 2 failed, with the marker coming back inside
-/// SQLite DDL —
-///
-/// ```text
-///   CREATE TABLE "accounts" (…, CONSTRAINT "accounts_legacy_range_chk"
-///                                CHECK (ZMPOISONPOSTGRES >= 0))
-/// ```
-///
-/// The path is `render::declarative::field_check_constraints` → that module's
-/// `quote_ident` → here. The constraint NAME is spelled by SQLite; the column
-/// reference inside the CHECK body is spelled by PostgreSQL, and the whole
-/// `definition` string is emitted verbatim into SQLite's `CREATE TABLE`.
-///
-/// It is correct TODAY only because PostgreSQL and SQLite spell an identifier
-/// identically, which is the precise invisibility this whole apparatus exists to
-/// fight — no assertion about emitted SQL can see it.
-///
-/// IT IS NOT A CRATE CYCLE AND IT IS NOT NEW. The caller is the ENGINE, not
-/// `zero-migrate-sqlite`, so it does not re-create the vendor-to-vendor dependency
-/// the crate split removed. And the identical neuter at `16a7a569` — the commit
-/// BEFORE the split, with the vendors still in-crate modules — gives the identical
-/// result: 154 passed / 2 failed, the same two tests, the same marker count. The
-/// extraction neither caused it nor fixed it; it is recorded here because the
-/// extraction is what made it visible, and because the sentence it replaces asserted
-/// the opposite.
-pub(crate) fn pg_canonical_ident(ident: &str) -> String {
-    seam::pg_canonical_ident_for_backend(ident, renderer(SqlDialect::Postgres))
 }
 
 /// Render an inline string literal in `dialect`'s spelling.
@@ -376,7 +321,8 @@ mod tests {
     /// exactly one sanctioned occurrence: `zero-migrate-mysql::ddl::mysql_requote_sql`, the
     /// documented single translation point from the `pg_get_constraintdef` normal
     /// form into MySQL spelling. That function is a character-stream TRANSLATOR, not
-    /// a spelling primitive — the MySQL counterpart of `pg_canonical_ident`'s
+    /// a spelling primitive — the MySQL counterpart of the constraint-definition
+    /// codec's
     /// normal-form role rather than of `ansi_double_quote_ident`'s spelling role —
     /// and it is now owned by the backend whose constraint DDL it translates. It is
     /// exempted BY FILE rather than left unscanned, so
@@ -579,7 +525,7 @@ mod tests {
             offenders.is_empty(),
             "bare `\"`-escape seam found outside render/backends/mod.rs — route \
              these through dml::escape_quote_ident_for_dialect (to emit) / \
-             dml::pg_canonical_ident (the PG normal form) / \
+             snapshot::quote_constraint_definition_ident (the comparison normal form) / \
              dml::quote_ident_checked (engine identifiers): {offenders:?}"
         );
     }
@@ -601,7 +547,7 @@ mod tests {
     /// private to it — so needles built on the old name would have matched nothing
     /// forever after and this pin would have gone quietly dead while still passing.
     /// The needles now name the two doors that replaced it,
-    /// [`escape_quote_ident_for_dialect`] and [`pg_canonical_ident`], which is
+    /// [`escape_quote_ident_for_dialect`] and the constraint-definition codec, which is
     /// where an engine identifier could actually land today.
     ///
     /// Engine-identifier sites such as `precondition.rs` (project_schema + role),
@@ -614,7 +560,7 @@ mod tests {
     /// only catches the exact call-site *spellings* in `needles` below (the give-away
     /// `(&cfg.…)` / `(role)` argument byte-patterns). A future engine-identifier
     /// seam bound to a *differently-named* variable — e.g.
-    /// `let s = &cfg.confinement.meta_schema; pg_canonical_ident(s)` — would slip past this scan
+    /// an indirect constraint-definition codec call would slip past this scan
     /// undetected. The broader, spelling-independent guarantee that NO bare `"`-escape
     /// seam exists outside `render/backends/mod.rs` is held by
     /// `no_bare_escape_seam_outside_dml` (above); this test complements it by naming

@@ -778,6 +778,8 @@ pub fn compute_diff(
     inject: &ResolvedInject,
 ) -> Vec<DiffOp> {
     let mut ops = Vec::new();
+    let schema_renderer =
+        crate::schema::query::renderer(crate::schema::query::SqlDialect::Postgres);
 
     let live_cols = live.tables.get(collection);
     let live_indexes = live.indexes.get(collection);
@@ -1077,9 +1079,9 @@ pub fn compute_diff(
                     let sibling = format!("{field}_masked");
                     let mut add_stmts = vec![format!(
                         "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
-                        crate::schema::query::pg_quote_ident(app_id),
-                        crate::schema::query::pg_quote_ident(collection),
-                        crate::schema::query::pg_quote_ident(&sibling),
+                        schema_renderer.quote_ident(app_id),
+                        schema_renderer.quote_ident(collection),
+                        schema_renderer.quote_ident(&sibling),
                     )];
                     let sentinel = crate::schema::mask_codec::build_mask_sentinel(
                         new_meta.kind,
@@ -1088,9 +1090,9 @@ pub fn compute_diff(
                     let escaped = sentinel.replace('\'', "''");
                     add_stmts.push(format!(
                         "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-                        crate::schema::query::pg_quote_ident(app_id),
-                        crate::schema::query::pg_quote_ident(collection),
-                        crate::schema::query::pg_quote_ident(&sibling),
+                        schema_renderer.quote_ident(app_id),
+                        schema_renderer.quote_ident(collection),
+                        schema_renderer.quote_ident(&sibling),
                         escaped,
                     ));
                     let add_sql = Some(add_stmts.join(";\n"));

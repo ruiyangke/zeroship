@@ -106,34 +106,6 @@ pub use zero_migrate_backend::schema::{
     string_enum_values, SchemaRenderer,
 };
 
-/// EMIT a schema-layer identifier in `dialect`'s own spelling.
-///
-/// THE schema kernel's only identifier-quoting door. It is one of the three places in
-/// the workspace where a `SqlDialect` still becomes a vendor — see
-/// `render::dml`'s header for why they all had to surface here rather than stay
-/// inside the seam.
-pub(crate) fn quote_ident_for_dialect(name: &str, dialect: SqlDialect) -> String {
-    zero_migrate_backend::schema::quote_ident_for_backend(
-        name,
-        crate::render::backends::renderer(dialect),
-    )
-}
-
-/// EMIT an identifier for a statement whose SYNTAX is PostgreSQL-only.
-///
-/// The schema kernel's PG-only builders (`CREATE INDEX CONCURRENTLY`,
-/// `COMMENT ON COLUMN`, `ALTER TABLE … DROP CONSTRAINT IF EXISTS`,
-/// `ADD COLUMN IF NOT EXISTS`, `CREATE SCHEMA`) have no `dialect` parameter because
-/// they have no other dialect to be. They still must not spell an identifier for a
-/// vendor they never named, so the vendor is in this function's NAME — the same
-/// technique as `crate::render::dml::pg_canonical_ident`, and for the same reason:
-/// a red count cannot tell a deliberate PostgreSQL spelling apart from an unrouted
-/// one, so the door has to carry the intent.
-#[must_use]
-pub fn pg_quote_ident(name: &str) -> String {
-    quote_ident_for_dialect(name, SqlDialect::Postgres)
-}
-
 /// Render the `COMMENT ON COLUMN` statements that attach the encryption sentinel to
 /// every `t.encrypted(...)` column (PostgreSQL only).
 #[must_use]
@@ -146,7 +118,7 @@ pub fn build_encryption_sentinel_comments(
         app_id,
         collection,
         schema,
-        crate::render::backends::renderer(SqlDialect::Postgres),
+        renderer(SqlDialect::Postgres),
     )
 }
 
@@ -162,7 +134,7 @@ pub fn build_mask_sentinel_comments(
         app_id,
         collection,
         schema,
-        crate::render::backends::renderer(SqlDialect::Postgres),
+        renderer(SqlDialect::Postgres),
     )
 }
 
@@ -632,7 +604,7 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
  *
  * The bytes now live in `render::backends::mysql`'s own `quote_ident`, which core
  * cannot name, so this module reaches them the same way it reaches the ANSI ones —
- * through `quote_ident_for_dialect(name, SqlDialect::Mysql)`.
+ * through the registered schema renderer.
  */
 
 /// Render an author string in an expression/default/check position. MySQL gets
@@ -839,12 +811,12 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     let sqlite_table_unqualified =
         matches!(dialect, SqlDialect::Sqlite) && sqlite_scope == SqliteEmitScope::MainUnqualified;
     let table = if sqlite_table_unqualified {
-        quote_ident_for_dialect(collection, dialect)
+        backend.quote_ident(collection)
     } else {
         format!(
             "{}.{}",
-            quote_ident_for_dialect(app_id, dialect),
-            quote_ident_for_dialect(collection, dialect)
+            backend.quote_ident(app_id),
+            backend.quote_ident(collection)
         )
     };
 
@@ -930,7 +902,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                 };
                 columns.push(format!(
                     "{} TEXT{inline_comment}",
-                    quote_ident_for_dialect(&sibling_col, dialect)
+                    backend.quote_ident(&sibling_col)
                 ));
             }
 
@@ -969,8 +941,9 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             // `def_to_constraints`, so we don't repeat the IN-list here.
             if def.get("discriminator").and_then(|v| v.as_str()) == Some("__discriminator__") {
                 if let Some(variants) = def.get("variants").and_then(|v| v.as_array()) {
-                    let constraint_clauses =
-                        emit_union_variant_checks(collection, field, def, variants, dialect);
+                    let constraint_clauses = emit_union_variant_checks(
+                        collection, field, def, variants, dialect, backend,
+                    );
                     union_checks.extend(constraint_clauses);
                 }
             }
@@ -1043,7 +1016,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // Append exactly the policy-injected indexes as structural statements bound
     // 1:1 to the table lifecycle.
     let system_index_stmts =
-        build_injected_indexes(app_id, collection, dialect, sqlite_scope, &inject)?;
+        build_injected_indexes(app_id, collection, dialect, sqlite_scope, &inject, backend)?;
 
     let mut statements: Vec<String> = vec![create_table];
     statements.extend(system_index_stmts);
@@ -1061,8 +1034,8 @@ fn build_injected_columns(
     inject: &ResolvedInject,
     // TAKEN rather than derived from `backend`. It used to read
     // `backend.dialect()`, which returns the OPEN `DialectId` now; every use below
-    // is a core, dialect-PARAMETERIZED helper (`quote_ident_for_dialect`,
-    // `render_ir_default_for_type`) that still names the closed enum, so the enum
+    // is a core, dialect-PARAMETERIZED helper (`render_ir_default_for_type`) that
+    // still names the closed enum, so the enum
     // is threaded from the caller that already has one instead of being recovered
     // from the renderer. No `DialectId -> SqlDialect` conversion exists, and this
     // is why none is needed.
@@ -1105,7 +1078,7 @@ fn build_injected_columns(
             .unwrap_or_default();
         columns.push(format!(
             "{} {data_type}{primary_key_clause}{null_clause}{default_clause}",
-            injected_column_ident(&column.name, dialect),
+            injected_column_ident(&column.name, dialect, backend),
         ));
     }
 
@@ -1122,12 +1095,12 @@ fn build_injected_columns(
         let name = format!("{table}_pkey");
         let rendered_columns = primary_key
             .iter()
-            .map(|column| quote_ident_for_dialect(column, dialect))
+            .map(|column| backend.quote_ident(column))
             .collect::<Vec<_>>()
             .join(", ");
         columns.push(format!(
             "CONSTRAINT {} PRIMARY KEY ({rendered_columns})",
-            quote_ident_for_dialect(&name, dialect)
+            backend.quote_ident(&name)
         ));
     }
     Ok(columns)
@@ -1137,9 +1110,13 @@ fn build_injected_columns(
 /// PostgreSQL/SQLite use the normalized policy identifier directly, while MySQL
 /// uses backticks. The policy is the trusted source of these canonical names;
 /// author-controlled identifiers continue through the regular quoting path.
-fn injected_column_ident(name: &str, dialect: SqlDialect) -> String {
+fn injected_column_ident(
+    name: &str,
+    dialect: SqlDialect,
+    backend: &'static dyn SchemaRenderer,
+) -> String {
     match dialect {
-        SqlDialect::Mysql => quote_ident_for_dialect(name, dialect),
+        SqlDialect::Mysql => backend.quote_ident(name),
         SqlDialect::Postgres | SqlDialect::Sqlite => {
             crate::render::declarative::quote_ident_if_needed(name)
         }
@@ -1200,11 +1177,14 @@ fn build_injected_indexes(
     dialect: SqlDialect,
     sqlite_scope: SqliteEmitScope,
     inject: &ResolvedInject,
+    backend: &'static dyn SchemaRenderer,
 ) -> Result<Vec<String>, QueryError> {
     inject
         .indexes()
         .iter()
-        .map(|index| render_injected_index(app_id, collection, dialect, sqlite_scope, index))
+        .map(|index| {
+            render_injected_index(app_id, collection, dialect, sqlite_scope, index, backend)
+        })
         .collect()
 }
 
@@ -1214,6 +1194,7 @@ fn render_injected_index(
     dialect: SqlDialect,
     sqlite_scope: SqliteEmitScope,
     index: &IrIndex,
+    backend: &'static dyn SchemaRenderer,
 ) -> Result<String, QueryError> {
     if index.using.is_some()
         || index.r#where.is_some()
@@ -1254,32 +1235,32 @@ fn render_injected_index(
     let unique_clause = if unique { "UNIQUE " } else { "" };
     let rendered_columns = columns
         .iter()
-        .map(|column| quote_ident_for_dialect(column, dialect))
+        .map(|column| backend.quote_ident(column))
         .collect::<Vec<_>>()
         .join(", ");
     Ok(match dialect {
         SqlDialect::Postgres => format!(
             "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {}.{} ({rendered_columns})",
-            quote_ident_for_dialect(&index_name, dialect),
-            quote_ident_for_dialect(app_id, dialect),
-            quote_ident_for_dialect(collection, dialect),
+            backend.quote_ident(&index_name),
+            backend.quote_ident(app_id),
+            backend.quote_ident(collection),
         ),
         SqlDialect::Sqlite if sqlite_scope == SqliteEmitScope::MainUnqualified => format!(
             "CREATE {unique_clause}INDEX IF NOT EXISTS {} ON {} ({rendered_columns})",
-            quote_ident_for_dialect(&index_name, dialect),
-            quote_ident_for_dialect(collection, dialect),
+            backend.quote_ident(&index_name),
+            backend.quote_ident(collection),
         ),
         SqlDialect::Sqlite => format!(
             "CREATE {unique_clause}INDEX IF NOT EXISTS {}.{} ON {} ({rendered_columns})",
-            quote_ident_for_dialect(app_id, dialect),
-            quote_ident_for_dialect(&index_name, dialect),
-            quote_ident_for_dialect(collection, dialect),
+            backend.quote_ident(app_id),
+            backend.quote_ident(&index_name),
+            backend.quote_ident(collection),
         ),
         SqlDialect::Mysql => format!(
             "CREATE {unique_clause}INDEX {} ON {}.{} ({rendered_columns})",
-            quote_ident_for_dialect(&index_name, dialect),
-            quote_ident_for_dialect(app_id, dialect),
-            quote_ident_for_dialect(collection, dialect),
+            backend.quote_ident(&index_name),
+            backend.quote_ident(app_id),
+            backend.quote_ident(collection),
         ),
     })
 }
@@ -1298,16 +1279,18 @@ pub fn build_add_foreign_key(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let backend = renderer(SqlDialect::Postgres);
 
     let target = def
         .get("refTarget")
         .and_then(|v| v.as_str())
         .ok_or_else(|| QueryError::InvalidFilter("ref field missing refTarget".to_string()))?;
 
-    let table = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
-    // A CALLER-FIXED TARGET, not a dialect decision: this entry point spells its
-    // table and constraint through `pg_quote_ident` and is PostgreSQL by contract,
-    // so it names the backend it means rather than being handed one.
+    let table = format!(
+        "{}.{}",
+        backend.quote_ident(app_id),
+        backend.quote_ident(collection)
+    );
     let fk_clause = build_fk_clause(
         app_id,
         collection,
@@ -1315,7 +1298,7 @@ pub fn build_add_foreign_key(
         def,
         target,
         SqlDialect::Postgres,
-        renderer(SqlDialect::Postgres),
+        backend,
     )?;
     Ok(format!("ALTER TABLE {table} ADD {fk_clause}"))
 }
@@ -1329,11 +1312,16 @@ pub fn build_drop_foreign_key(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let table = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
+    let backend = renderer(SqlDialect::Postgres);
+    let table = format!(
+        "{}.{}",
+        backend.quote_ident(app_id),
+        backend.quote_ident(collection)
+    );
     Ok(format!(
         "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
         table,
-        pg_quote_ident(constraint_name)
+        backend.quote_ident(constraint_name)
     ))
 }
 
@@ -1390,7 +1378,7 @@ fn build_fk_clause(
     let rendered_target_column = if target_column == "id" {
         "id".to_string()
     } else {
-        quote_ident_for_dialect(target_column, dialect)
+        backend.quote_ident(target_column)
     };
     let deferrable_clause = if deferrable && dialect.supports(Capability::DeferrableConstraint) {
         " DEFERRABLE INITIALLY DEFERRED"
@@ -1400,8 +1388,8 @@ fn build_fk_clause(
 
     let mut clause = format!(
         "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-        quote_ident_for_dialect(&constraint_name, dialect),
-        quote_ident_for_dialect(field, dialect),
+        backend.quote_ident(&constraint_name),
+        backend.quote_ident(field),
         target_qualified,
         rendered_target_column,
     );
@@ -1458,16 +1446,20 @@ pub fn build_add_column(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let backend = renderer(SqlDialect::Postgres);
 
-    let table = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
-    let pg_type =
-        renderer(SqlDialect::Postgres).column_type(&column_snapshot_for_type_def(def), false);
+    let table = format!(
+        "{}.{}",
+        backend.quote_ident(app_id),
+        backend.quote_ident(collection)
+    );
+    let pg_type = backend.column_type(&column_snapshot_for_type_def(def), false);
     let constraints = def_to_constraints(field, def);
 
     let mut sql = format!(
         "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} {}",
         table,
-        pg_quote_ident(field),
+        backend.quote_ident(field),
         pg_type,
         constraints
     )
@@ -1495,7 +1487,7 @@ pub fn build_add_column(
         sql.push_str(&format!(
             ";\nALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
             table,
-            pg_quote_ident(&sibling),
+            backend.quote_ident(&sibling),
         ));
         if let Some(comment) = build_mask_sentinel_comment_for_field(app_id, collection, field, def)
         {
@@ -1609,6 +1601,7 @@ pub fn build_create_indexes(
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let backend = renderer(SqlDialect::Postgres);
 
     let mut out = Vec::new();
 
@@ -1616,7 +1609,11 @@ pub fn build_create_indexes(
         return Ok(out);
     };
 
-    let table_qualified = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
+    let table_qualified = format!(
+        "{}.{}",
+        backend.quote_ident(app_id),
+        backend.quote_ident(collection)
+    );
 
     for (field, def) in obj {
         // Skip top-level metadata keys (`_meta`,
@@ -1718,9 +1715,9 @@ pub fn build_create_indexes(
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
             let sql = format!(
                 "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                pg_quote_ident(&name),
+                backend.quote_ident(&name),
                 table_qualified,
-                pg_quote_ident(field),
+                backend.quote_ident(field),
             );
             out.push(IndexSpec {
                 name,
@@ -1753,10 +1750,10 @@ pub fn build_create_indexes(
         // both would be redundant and waste storage).
         if wants_unique {
             let name = index_name(collection, &[field.as_str()], /* unique = */ true);
-            let col_list = pg_quote_ident(field);
+            let col_list = backend.quote_ident(field);
             let sql = format!(
                 "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                pg_quote_ident(&name),
+                backend.quote_ident(&name),
                 table_qualified,
                 col_list,
             );
@@ -1769,10 +1766,10 @@ pub fn build_create_indexes(
             });
         } else if wants_index {
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
-            let col_list = pg_quote_ident(field);
+            let col_list = backend.quote_ident(field);
             let sql = format!(
                 "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                pg_quote_ident(&name),
+                backend.quote_ident(&name),
                 table_qualified,
                 col_list,
             );
@@ -1800,9 +1797,9 @@ pub fn build_create_indexes(
                 let idx_name = format!("{collection}__{sibling_col}_idx");
                 let sql = format!(
                     "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                    pg_quote_ident(&idx_name),
+                    backend.quote_ident(&idx_name),
                     table_qualified,
-                    pg_quote_ident(&sibling_col),
+                    backend.quote_ident(&sibling_col),
                 );
                 out.push(IndexSpec {
                     name: idx_name,
@@ -1839,6 +1836,7 @@ pub fn build_named_indexes(
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
+    let backend = renderer(SqlDialect::Postgres);
 
     let mut out = Vec::new();
     let Some(arr) = indexes.as_array() else {
@@ -1848,7 +1846,11 @@ pub fn build_named_indexes(
         return Ok(out);
     }
 
-    let table_qualified = format!("{}.{}", pg_quote_ident(app_id), pg_quote_ident(collection));
+    let table_qualified = format!(
+        "{}.{}",
+        backend.quote_ident(app_id),
+        backend.quote_ident(collection)
+    );
 
     for (i, entry) in arr.iter().enumerate() {
         let name = entry
@@ -1893,14 +1895,14 @@ pub fn build_named_indexes(
                 )));
             }
             columns.push(col.to_string());
-            quoted.push(pg_quote_ident(col));
+            quoted.push(backend.quote_ident(col));
         }
 
         let pg_name = named_index_name(collection, name);
         let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };
         let sql = format!(
             "CREATE {kind} CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-            pg_quote_ident(&pg_name),
+            backend.quote_ident(&pg_name),
             table_qualified,
             quoted.join(", "),
         );
@@ -2018,14 +2020,15 @@ pub fn build_mask_sentinel_comment_for_field(
     field: &str,
     def: &serde_json::Value,
 ) -> Option<String> {
+    let backend = renderer(SqlDialect::Postgres);
     let sibling = mask_sibling_column_for_field(field, def)?;
     let sentinel = mask_sentinel_for_field(def)?;
     let escaped = sentinel.replace('\'', "''");
     Some(format!(
         "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-        pg_quote_ident(app_id),
-        pg_quote_ident(collection),
-        pg_quote_ident(&sibling),
+        backend.quote_ident(app_id),
+        backend.quote_ident(collection),
+        backend.quote_ident(&sibling),
         escaped,
     ))
 }
@@ -2154,7 +2157,7 @@ fn field_to_column_for_dialect(
     // `sqlite_master.sql` for the introspector regex.
     Ok(format!(
         "{} {}{} {}",
-        quote_ident_for_dialect(field, dialect),
+        backend.quote_ident(field),
         sql_type,
         enc_comment,
         constraints
@@ -2210,8 +2213,9 @@ fn emit_union_variant_checks(
     disc_def: &serde_json::Value,
     variants: &[serde_json::Value],
     dialect: SqlDialect,
+    backend: &'static dyn SchemaRenderer,
 ) -> Vec<String> {
-    let disc_col = quote_ident_for_dialect(disc_field, dialect);
+    let disc_col = backend.quote_ident(disc_field);
     let disc_primitive = disc_def
         .get("type")
         .and_then(|t| t.as_str())
@@ -2238,7 +2242,7 @@ fn emit_union_variant_checks(
             }
             let is_required = fd.get("required").and_then(serde_json::Value::as_bool) == Some(true);
             if is_required {
-                required_cols.push(quote_ident_for_dialect(field, dialect));
+                required_cols.push(backend.quote_ident(field));
             }
         }
 
@@ -2285,7 +2289,7 @@ fn emit_union_variant_checks(
                 .join(" AND ");
             format!(
                 "CONSTRAINT {} CHECK ({} <> {} OR ({}))",
-                quote_ident_for_dialect(&constraint_name, dialect),
+                backend.quote_ident(&constraint_name),
                 disc_col,
                 lit_sql,
                 null_clause
@@ -2508,8 +2512,7 @@ fn strip_mysql_int_display_width(input: &str) -> String {
 /// Generate column constraints from field definition.
 fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
     // CALLER-FIXED TARGET: the sole caller is `build_add_column`, whose whole
-    // statement is `pg_quote_ident`-spelled. It names PostgreSQL because it means
-    // PostgreSQL, not because it is choosing.
+    // The sole caller is PostgreSQL-only; it supplies that registered renderer.
     def_to_constraints_for_dialect(
         field,
         def,
@@ -2625,7 +2628,7 @@ fn def_to_constraints_for_dialect(
     // there `max` is a LENGTH, read by the MySQL renderer to size a `VARCHAR(N)`
     // (see `MysqlSchemaRenderer::column_type`). Treating it as a value bound would
     // emit `CHECK (name <= 255)` and compare text against an integer.
-    let col = quote_ident_for_dialect(field, dialect);
+    let col = backend.quote_ident(field);
     let ranged = matches!(
         def.get("type").and_then(|t| t.as_str()),
         Some("number" | "int" | "integer" | "smallInt" | "bigInt" | "real")
@@ -4677,7 +4680,7 @@ columns = [
                 );
                 let rendered_columns = refs
                     .iter()
-                    .map(|column| quote_ident_for_dialect(column, dialect))
+                    .map(|column| renderer(dialect).quote_ident(column))
                     .collect::<Vec<_>>()
                     .join(", ");
                 assert!(sql.contains(&format!("({rendered_columns})")), "{sql}");
@@ -5504,7 +5507,7 @@ columns = [
 
 #[cfg(test)]
 mod hostile_identifier_quoting {
-    use super::{quote_ident_for_dialect, SqlDialect};
+    use super::{renderer, SqlDialect};
 
     /// Hostile-input coverage for the two identifier spellings this kernel can
     /// reach. It USED to say the schema kernel carries its own quoting primitives
@@ -5534,17 +5537,17 @@ mod hostile_identifier_quoting {
     #[test]
     fn a_quote_bearing_identifier_is_doubled_not_left_bare() {
         assert_eq!(
-            quote_ident_for_dialect(r#"a"b"#, SqlDialect::Postgres),
+            renderer(SqlDialect::Postgres).quote_ident(r#"a"b"#),
             r#""a""b""#
         );
-        assert_eq!(quote_ident_for_dialect("a`b", SqlDialect::Mysql), "`a``b`");
+        assert_eq!(renderer(SqlDialect::Mysql).quote_ident("a`b"), "`a``b`");
     }
 
     #[test]
     fn an_injecting_identifier_stays_inside_its_quoting() {
         // The payload's own quote is doubled, so the `);` and everything after it
         // remain part of the identifier rather than becoming syntax.
-        let pg = quote_ident_for_dialect(r#"x"); DROP TABLE victim; --"#, SqlDialect::Postgres);
+        let pg = renderer(SqlDialect::Postgres).quote_ident(r#"x"); DROP TABLE victim; --"#);
         assert_eq!(pg, r#""x""); DROP TABLE victim; --""#);
         assert_eq!(
             pg.matches('"').count() % 2,
@@ -5552,7 +5555,7 @@ mod hostile_identifier_quoting {
             "an odd number of quotes means one of them closes the identifier: {pg}"
         );
 
-        let my = quote_ident_for_dialect("x`); DROP TABLE victim; -- ", SqlDialect::Mysql);
+        let my = renderer(SqlDialect::Mysql).quote_ident("x`); DROP TABLE victim; -- ");
         assert_eq!(my, "`x``); DROP TABLE victim; -- `");
         assert_eq!(
             my.matches('`').count() % 2,
@@ -5566,11 +5569,11 @@ mod hostile_identifier_quoting {
         // Each primitive must leave the OTHER dialect's quote alone: doubling it
         // would corrupt the name for no safety gain.
         assert_eq!(
-            quote_ident_for_dialect("a`b", SqlDialect::Postgres),
+            renderer(SqlDialect::Postgres).quote_ident("a`b"),
             r#""a`b""#
         );
         assert_eq!(
-            quote_ident_for_dialect(r#"a"b"#, SqlDialect::Mysql),
+            renderer(SqlDialect::Mysql).quote_ident(r#"a"b"#),
             r#"`a"b`"#
         );
     }

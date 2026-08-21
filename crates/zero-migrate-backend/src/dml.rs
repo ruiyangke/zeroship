@@ -406,7 +406,7 @@ pub fn quote_ident_checked_for_backend(
  * DOOR, and the door records the vendor:
  *
  *   - EMIT for a named dialect  -> `escape_quote_ident_for_backend(x, d)`
- *   - the PG-shaped NORMAL FORM -> `pg_canonical_ident(x)`
+ *   - constraint-definition normal form -> snapshot codec
  *
  * The visibility IS the census. Deleting the old name turned "which sites in this
  * crate spell an identifier without routing" from a grep that cannot see through
@@ -418,41 +418,10 @@ pub fn quote_ident_checked_for_backend(
 /// backend rather than by a `format!` in core.
 ///
 /// This is the door for anything that will be sent to a database. The other door,
-/// `pg_canonical_ident`, is for the normal form that is COMPARED rather than
+/// the snapshot codec is for the normal form that is COMPARED rather than
 /// executed; picking between them is the point of there being two.
 pub fn escape_quote_ident_for_backend(ident: &str, backend: &dyn DmlRenderer) -> String {
     backend.quote_ident(ident)
-}
-
-/// The PG-SHAPED NORMAL FORM, which is NOT an emission — and re-dialecting it
-/// would be a REGRESSION, not a fix.
-///
-/// Constraint-definition bodies and stored-DDL fragments are built once in
-/// PostgreSQL spelling ON PURPOSE, so that a desired snapshot round-trips
-/// byte-for-byte against `pg_get_constraintdef`. That normal form is then consumed
-/// by the SQLite and MySQL drift comparators too — `constraintdef_cols` and
-/// `quote_ident_if_needed` in `render::declarative` are called from
-/// `apply::backend::mysql::drift_sql` and `apply::backend::sqlite::drift_sql` —
-/// and is translated to MySQL's backtick spelling at the ONE emission point,
-/// `declarative::mysql_requote_sql`.
-///
-/// So a SQLite drift comparison that reads PostgreSQL-spelled bytes is CORRECT
-/// here, and pointing these callers at the SQLite renderer would break the
-/// round-trip. It gets its own named door precisely so that the next person
-/// auditing this seam can tell the deliberate PG spelling apart from an
-/// unrouted one: a neuter reddens both identically, so the red count is not a
-/// diagnosis and the door name has to carry the intent.
-///
-/// PostgreSQL EMISSION also lands here, and legitimately: for PostgreSQL the
-/// canonical form and the emitted form are the same function.
-/// THE PIN MOVED, IT DID NOT GO — same as `quote_ident_checked` above. The
-/// PostgreSQL-shaped normal form is still one named door with one production
-/// caller (`render::declarative::quote_ident_if_needed`); the `SqlDialect::Postgres`
-/// that used to be written here is now written once in
-/// `zero_migrate::render::dml::pg_canonical_ident`, where a PostgreSQL renderer can
-/// actually be resolved.
-pub fn pg_canonical_ident_for_backend(ident: &str, backend: &dyn DmlRenderer) -> String {
-    escape_quote_ident_for_backend(ident, backend)
 }
 
 /// Qualify a validated bare table name for the target dialect.

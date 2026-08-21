@@ -8,7 +8,7 @@ use zero_migrate_backend::ddl::{
     inline_pk_for_column, null_clause, primary_key_clause, render_index_order_suffix,
     should_render_table_pk, CreateTableRequest, DdlEmitter, GENERATED_PREFIX,
 };
-use zero_migrate_backend::schema::{quote_ident_for_backend, SchemaRenderer};
+use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexElementSnapshot,
     IndexSnapshot, TableSnapshot,
@@ -20,7 +20,7 @@ use zero_migrate_ir::dialect::{DialectId, SqlDialect};
 const DIALECT: SqlDialect = SqlDialect::Mysql;
 
 fn mysql_quote_ident(ident: &str) -> String {
-    quote_ident_for_backend(ident, &crate::dml::RENDERER)
+    crate::schema::RENDERER.quote_ident(ident)
 }
 
 fn mysql_qualified(schema: &str, object: &str) -> String {

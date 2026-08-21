@@ -25,12 +25,8 @@
 //!
 //! # The cross-stack edge, which the `renderer(` grep cannot see
 //!
-//! These vendors spell identifiers through
-//! `zero_migrate_backend::schema::quote_ident_for_dialect`, which forwards to
-//! `zero_migrate_backend::dml::escape_quote_ident_for_dialect`, which resolves
-//! through the DML registry. So a `SchemaRenderer` vendor reaches its `DmlRenderer`
-//! sibling through a contract forwarder, one layer away from anything a grep of a
-//! vendor crate can show.
+//! Each vendor's schema renderer explicitly delegates identifier spelling to its
+//! own DML renderer sibling. There is no core dialect switch between them.
 //!
 //! That is deliberate and it must STAY one forwarder. The alternative — each vendor
 //! spelling its own identifiers — would put a second physical home of the quoting

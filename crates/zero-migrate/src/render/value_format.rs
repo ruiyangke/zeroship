@@ -11,9 +11,7 @@ use crate::model::ir::{validate_type_id_prefix, IrDefault, IrScalar, SequenceRef
 use crate::model::snapshot::{
     canonical_id_default_expression, ColumnCollationSnapshot, IdDefaultSnapshot,
 };
-use crate::render::dml::{
-    mysql_grammar_string_literal, quote_ident_for_dialect, sql_string_literal,
-};
+use crate::render::dml::{mysql_grammar_string_literal, sql_string_literal};
 use crate::schema::query::SqlDialect;
 
 const TYPE_ID_SUFFIX_LEN: usize = 26;
@@ -1569,8 +1567,12 @@ pub(crate) fn uuid_column_metadata(
     column: &str,
     dialect: SqlDialect,
 ) -> Result<Option<ValueFormatColumnMetadata>, String> {
-    let quoted = quote_ident_for_dialect("UUID column", column, dialect)
-        .map_err(|error| error.to_string())?;
+    let quoted = zero_migrate_backend::dml::quote_ident_for_backend(
+        "UUID column",
+        column,
+        crate::render::backends::renderer(dialect),
+    )
+    .map_err(|error| error.to_string())?;
     let metadata = match dialect {
         SqlDialect::Postgres => return Ok(None),
         SqlDialect::Mysql => {
@@ -1624,8 +1626,12 @@ fn ulid_column_metadata(
     column: &str,
     dialect: SqlDialect,
 ) -> Result<ValueFormatColumnMetadata, String> {
-    let quoted = quote_ident_for_dialect("ULID column", column, dialect)
-        .map_err(|error| error.to_string())?;
+    let quoted = zero_migrate_backend::dml::quote_ident_for_backend(
+        "ULID column",
+        column,
+        crate::render::backends::renderer(dialect),
+    )
+    .map_err(|error| error.to_string())?;
     let regex = ulid_regex();
 
     let (ddl_type, inline_check) = match dialect {
@@ -1676,8 +1682,12 @@ fn type_id_column_metadata(
 ) -> Result<ValueFormatColumnMetadata, String> {
     validate_type_id_prefix(prefix)?;
 
-    let quoted = quote_ident_for_dialect("TypeID column", column, dialect)
-        .map_err(|error| error.to_string())?;
+    let quoted = zero_migrate_backend::dml::quote_ident_for_backend(
+        "TypeID column",
+        column,
+        crate::render::backends::renderer(dialect),
+    )
+    .map_err(|error| error.to_string())?;
     let stored_prefix = if prefix.is_empty() {
         String::new()
     } else {
