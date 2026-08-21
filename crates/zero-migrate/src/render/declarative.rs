@@ -57,7 +57,13 @@ use crate::schema::query::SqlDialect;
 use crate::IndexSortOrder;
 // The per-dialect DDL emission seam. Declared below the engine so the three impls
 // can leave it for the three vendor crates without Cargo seeing a cycle.
-use zero_migrate_backend::ddl::{CreateTableRequest, DdlEmitter};
+// The column-clause spellings moved with it, for the same reason: all three impls
+// call every one of them, so a shared helper cannot stay above the vendors.
+use zero_migrate_backend::ddl::{
+    default_clause, generated_clause, inline_checks_clause, inline_pk_for_column, null_clause,
+    primary_key_clause, should_render_table_pk, sqlite_auto_increment_identity_pk,
+    CreateTableRequest, DdlEmitter, GENERATED_PREFIX,
+};
 
 /// The ONE dialect identity of every MySQL-owned render path in this module — the
 /// twin of [`SQLITE_DIALECT`] below, and a const for the same reason: the 21 call
@@ -1186,40 +1192,10 @@ fn rewrite_sqlite_stored_foreign_keys(
     ))
 }
 
-/// Sentinel prefix on a [`ColumnSnapshot::default`] marking a STORED generated
-/// column (the `__fts` tsvector). When the `default` body starts with this
-/// prefix, the emitter writes `GENERATED ALWAYS AS (<expr>) STORED` instead of a
-/// plain `DEFAULT <expr>` clause. The remainder after the prefix is the
-/// generation expression. Generated-column expressions are emission-only metadata
-/// (excluded from `ColumnSnapshot` equality), so this never participates in drift.
-const GENERATED_PREFIX: &str = "GENERATED:";
-
-/// Render a column's trailing `DEFAULT <expr>` or `GENERATED ALWAYS AS (<expr>)
-/// STORED` clause from its (emission-only) `default` body. Empty string when the
-/// column has no default. A `GENERATED:`-prefixed body becomes the stored
-/// generated-column clause (the `__fts` generated column); any other body is a plain default.
-fn default_clause(default: Option<&str>) -> String {
-    match default {
-        Some(d) => {
-            if let Some(expr) = d.strip_prefix(GENERATED_PREFIX) {
-                format!(" GENERATED ALWAYS AS ({expr}) STORED")
-            } else {
-                format!(" DEFAULT {d}")
-            }
-        }
-        None => String::new(),
-    }
-}
-
-fn generated_clause(generated: Option<&GeneratedColumnSnapshot>) -> String {
-    match generated {
-        Some(g) => {
-            let storage = if g.stored { "STORED" } else { "VIRTUAL" };
-            format!(" GENERATED ALWAYS AS ({}) {storage}", g.expr)
-        }
-        None => String::new(),
-    }
-}
+// `GENERATED_PREFIX`, `default_clause` and `generated_clause` MOVED to
+// `zero_migrate_backend::ddl` — all three `DdlEmitter` impls call them, so they had
+// to go below the vendors with the trait. Imported at the top of this module; the
+// engine's own non-emitter render paths are unchanged callers.
 
 fn mysql_generated_clause(generated: Option<&GeneratedColumnSnapshot>) -> String {
     generated_clause(generated)
@@ -1241,14 +1217,8 @@ fn mysql_identity_clause(c: &ColumnSnapshot) -> &'static str {
     }
 }
 
-fn sqlite_auto_increment_identity_pk(c: &ColumnSnapshot, inline_pk: bool) -> bool {
-    matches!(c.identity, Some(identity) if !identity.always)
-        && inline_pk
-        && matches!(
-            c.data_type.to_ascii_lowercase().as_str(),
-            "integer" | "bigint" | "smallint" | "int" | "int2" | "int4" | "int8"
-        )
-}
+// `sqlite_auto_increment_identity_pk` MOVED to `zero_migrate_backend::ddl`, with
+// the two clause builders that gate on it.
 
 /// Whether `data_type` is one of the three types PostgreSQL lets an IDENTITY
 /// column have.
@@ -1311,13 +1281,7 @@ fn column_type_for_render_uncollated(
     }
 }
 
-fn inline_checks_clause(c: &ColumnSnapshot) -> String {
-    if c.inline_checks.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", c.inline_checks.join(" "))
-    }
-}
+// `inline_checks_clause` MOVED to `zero_migrate_backend::ddl`.
 
 // ── MySQL's `CHARACTER SET` / `COLLATE` spelling MOVED to `zero-migrate-mysql`.
 //
@@ -1589,28 +1553,7 @@ fn sqlite_ddl_type(data_type: &str) -> &'static str {
     }
 }
 
-fn primary_key_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> &'static str {
-    if matches!(dialect, SqlDialect::Sqlite) && sqlite_auto_increment_identity_pk(c, inline_pk) {
-        " PRIMARY KEY AUTOINCREMENT"
-    } else if inline_pk {
-        " PRIMARY KEY"
-    } else {
-        ""
-    }
-}
-
-fn null_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> &'static str {
-    if c.nullable
-        || (matches!(dialect, SqlDialect::Sqlite)
-            && sqlite_auto_increment_identity_pk(c, inline_pk))
-        || (matches!(dialect, SqlDialect::Mysql)
-            && matches!(c.identity, Some(identity) if !identity.always))
-    {
-        ""
-    } else {
-        " NOT NULL"
-    }
-}
+// `primary_key_clause` and `null_clause` MOVED to `zero_migrate_backend::ddl`.
 
 fn render_index_elements_pg(idx: &IndexSnapshot, opclass_suffix: &str) -> String {
     let elements = if idx.elements.is_empty() {
@@ -4482,21 +4425,10 @@ fn is_pk_index(table: &str, index_name: &str) -> bool {
     index_name == format!("{table}_pkey")
 }
 
-fn primary_key_columns<'a>(table: &str, t: &'a TableSnapshot) -> Option<&'a [String]> {
-    t.indexes
-        .iter()
-        .find(|idx| idx.name == format!("{table}_pkey") && idx.unique)
-        .map(|idx| idx.columns.as_slice())
-}
-
-fn inline_pk_for_column(table: &str, t: &TableSnapshot, column: &str) -> bool {
-    matches!(primary_key_columns(table, t), Some(cols) if cols == [column])
-}
-
-fn should_render_table_pk(table: &str, t: &TableSnapshot, constraint: &ConstraintSnapshot) -> bool {
-    constraint.kind == "PRIMARY KEY"
-        && !matches!(primary_key_columns(table, t), Some(cols) if cols.len() == 1)
-}
+// `primary_key_columns`, `inline_pk_for_column` and `should_render_table_pk` MOVED
+// to `zero_migrate_backend::ddl`. They READ the snapshot's implicit `<table>_pkey`
+// index to decide whether a PK is inline or table-level, which every emitter needs
+// on every column clause.
 
 fn is_injected_index(table: &str, index_name: &str, inject: &ResolvedInject) -> bool {
     inject.indexes().iter().any(|index| {
@@ -10087,9 +10019,9 @@ mod snapshot_builder_refactor_safety_tests {
         ResolvedInject::for_table(&effective, schema, table).expect("empty inject shape")
     }
     use super::{
-        build_resolved_table_snapshot, build_table_snapshot, CollectionDescriptor,
-        CreateTableRequest, DdlEmitter, DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
-        ResolvedInject, SqliteEmitter,
+        build_resolved_table_snapshot, build_table_snapshot, injected_index_names,
+        CollectionDescriptor, CreateTableRequest, DdlEmitter, DeclarativeAuthor, FieldDescriptor,
+        IndexDescriptor, ResolvedInject, SqliteEmitter,
     };
     use crate::schema::query::SqlDialect;
 
