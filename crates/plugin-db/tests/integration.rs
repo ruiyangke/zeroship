@@ -5306,7 +5306,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
         .await
         .expect("write pipeline");
 
-    // The write pipeline encrypted `ssn` (base64 blob + `__zsenc__ssn` marker)
+    // The write pipeline encrypted `ssn` (base64 blob + `__zsbin__ssn` marker)
     // and derived the masked sibling `phone_masked` from the plaintext.
     let doc = &docs[0];
     assert!(
@@ -5314,7 +5314,7 @@ async fn p4_round_trip_encrypted_masked_vector_via_introspected_metadata() {
         "ssn must be replaced by ciphertext on write, got {:?}",
         doc["ssn"]
     );
-    assert_eq!(doc["__zsenc__ssn"], json!(true), "encrypt marker set");
+    assert_eq!(doc["__zsbin__ssn"], json!(true), "encrypt marker set");
     assert_eq!(
         doc["phone_masked"], json!("***-***-0142"),
         "mask pass must derive the last4 sibling on write, got {:?}",
@@ -5604,7 +5604,7 @@ async fn p5_pg_crud_works_via_engine_created_schema_no_runtime_ddl() {
         "ssn must be ciphertext on write, got {:?}",
         doc["ssn"]
     );
-    assert_eq!(doc["__zsenc__ssn"], json!(true), "encrypt marker set");
+    assert_eq!(doc["__zsbin__ssn"], json!(true), "encrypt marker set");
     assert_eq!(
         doc["phone_masked"], json!("***-***-0199"),
         "mask pass derives the last4 sibling on write, got {:?}",

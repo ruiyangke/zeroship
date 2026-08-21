@@ -76,7 +76,7 @@ use crate::error::DbError;
 /// ciphertext blob.
 ///
 /// **Marker side-channel**: the function also inserts a sibling
-/// `__zsenc__<col>` marker key (also `Value::Bool(true)`) for each
+/// `__zsbin__<col>` marker key (also `Value::Bool(true)`) for each
 /// encrypted column it processed. The SQL builder uses this marker to
 /// know which placeholders need the `decode($N, 'base64')::bytea`
 /// cast. The marker is stripped before the row leaves the SQL builder.
@@ -215,7 +215,7 @@ where
         // Sibling marker so the SQL builder knows to wrap the
         // placeholder with `decode($N, 'base64')::bytea`. Stripped
         // before the row leaves the build layer.
-        obj.insert(format!("__zsenc__{col}"), Value::Bool(true));
+        obj.insert(format!("__zsbin__{col}"), Value::Bool(true));
     }
     Ok(())
 }
@@ -494,14 +494,14 @@ fn nibble(c: u8) -> Result<u8, DbError> {
     }
 }
 
-/// Strip every `__zsenc__<col>` marker from `row` after the SQL builder
+/// Strip every `__zsbin__<col>` marker from `row` after the SQL builder
 /// has consumed them to position the BYTEA cast at the right
 /// placeholder. The markers must NOT survive to the parameter list (PG
 /// has no such column).
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn strip_encryption_markers(row: &mut Value) {
     if let Some(obj) = row.as_object_mut() {
-        obj.retain(|k, _| !k.starts_with("__zsenc__"));
+        obj.retain(|k, _| !k.starts_with("__zsbin__"));
     }
 }
 
@@ -603,14 +603,14 @@ mod tests {
         assert!(parse_mode(&m).is_err());
     }
 
-    /// `strip_encryption_markers` removes every `__zsenc__*` key,
+    /// `strip_encryption_markers` removes every `__zsbin__*` key,
     /// preserves every other key.
     #[test]
     fn strip_markers_removes_only_marker_keys() {
         let mut row = serde_json::json!({
             "id": "usr_01",
             "ssn": "ciphertext-b64",
-            "__zsenc__ssn": true,
+            "__zsbin__ssn": true,
             "name": "alice",
         });
         strip_encryption_markers(&mut row);
@@ -618,7 +618,7 @@ mod tests {
         assert!(obj.contains_key("id"));
         assert!(obj.contains_key("ssn"));
         assert!(obj.contains_key("name"));
-        assert!(!obj.contains_key("__zsenc__ssn"));
+        assert!(!obj.contains_key("__zsbin__ssn"));
     }
 
     /// `encrypt_row_on_write` + `decrypt_row_on_read` round-trip with a
@@ -667,7 +667,7 @@ mod tests {
         assert!(obj.get("ssn").and_then(|v| v.as_str()).is_some());
         assert_ne!(obj["ssn"].as_str().unwrap(), "123-45-6789");
         assert_eq!(obj.get("name").and_then(|v| v.as_str()), Some("alice"));
-        assert_eq!(obj.get("__zsenc__ssn"), Some(&Value::Bool(true)));
+        assert_eq!(obj.get("__zsbin__ssn"), Some(&Value::Bool(true)));
 
         // Simulate the read path: the SQL bind layer returned BYTEA as
         // PG hex text, and stripped the marker. We mimic that by

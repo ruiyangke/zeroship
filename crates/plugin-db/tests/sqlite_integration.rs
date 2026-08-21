@@ -5011,13 +5011,13 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 // bind: the SQL builder's encrypted-column placeholder is
 // `decode($N, 'base64')::bytea` on PG and a bare `$N` on SQLite, with
 // the encryption pass tagging the param value with
-// `SQLITE_ENC_BLOB_PREFIX` so the SQLite session actor decodes the
+// `SQLITE_BINARY_BIND_PREFIX` so the SQLite session actor decodes the
 // base64 and binds raw bytes as BLOB.
 //
 // This integration test stitches the layers end-to-end:
 //   1. `encrypt_row_on_write` (the encryption-pass helper) against the
 //      SQLite backend -> row carries the base64 ciphertext +
-//      `__zsenc__<col>` marker.
+//      `__zsbin__<col>` marker.
 //   2. `build_insert_with_dialect(SqlDialect::Sqlite, ...)` -> SQL with
 //      bare `$N` placeholder + sentinel-tagged param.
 //   3. `backend.pool_exec(sql, &params)` -> SQLite session strips the
@@ -5092,12 +5092,12 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         });
 
         // Step 1 — encryption pass swaps ssn into base64 ciphertext +
-        // installs the `__zsenc__ssn` marker.
+        // installs the `__zsbin__ssn` marker.
         encrypt_row_on_write(&backend, "app_demo", "users", &schema, row_pk, &mut doc)
             .await
             .expect("encrypt_row_on_write");
         assert!(
-            doc.get("__zsenc__ssn").and_then(|v| v.as_bool()) == Some(true),
+            doc.get("__zsbin__ssn").and_then(|v| v.as_bool()) == Some(true),
             "encryption pass must install the marker key: {doc:?}",
         );
         // Pull out the base64 ciphertext for a later equality check.
@@ -5109,7 +5109,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
         // Step 2 — dialect-aware SQL build. The output SQL must use a
         // bare `$N` placeholder (no `decode(...)::bytea`); the param
-        // vector must carry the `__zsenc_blob__:` sentinel prefix on
+        // vector must carry the `__zsbin_blob__:` sentinel prefix on
         // the encrypted ssn value.
         let bq = build_insert_with_dialect("app_demo", "users", &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
@@ -5121,7 +5121,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
         assert!(
             bq.params
                 .iter()
-                .any(|p| p.starts_with("__zsenc_blob__:")),
+                .any(|p| p.starts_with("__zsbin_blob__:")),
             "SQLite dialect must tag the encrypted param with the sentinel: {:?}",
             bq.params,
         );
