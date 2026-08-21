@@ -1156,7 +1156,8 @@ supabase_anon_key = "anon-file-key"
 
     // ---- secret strength guards (unchanged policy) ---------------------
 
-    use zeroship_core::config::{validate_secret_material, validate_stash_key, SourceKind};
+    use zeroship_core::config::{validate_secret_material, SourceKind};
+    use zeroship_secret_policy::{validate_stash_key};
 
     /// A secret in the shape an in-memory literal (env or TOML) resolves to.
     fn supplied(material: &str) -> Secret<String> {

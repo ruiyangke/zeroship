@@ -42,11 +42,24 @@
 #    ours reaching for the tokio-carrying HTTP client is invisible to both, and
 #    is precisely the drift that grows the edge.
 #
-# WHY THE PINNED SETS ARE NOT THE FULL REACHABILITY CLOSURE. 21 of our 30 crates
+# WHY THE PINNED SETS ARE NOT THE FULL REACHABILITY CLOSURE. 21 of our 31 crates
 # can reach tokio today, purely by depending on zeroship-core. Pinning that set
 # would go red on ordinary internal dependency edits that have nothing to do
 # with tokio, which is the churn that gets a gate deleted. The two sets pinned
 # here move only when someone changes what carries tokio or who touches it.
+#
+# THE PRICE OF THAT CHOICE, stated because it was paid on 2026-08-21.
+# zeroship-gatekit LEFT the reachable set that day - its secret table moved to
+# the crates/zeroship-secret-policy leaf, so the compose gate stopped linking
+# hyper - and this gate was green before the change and green after it, in the
+# same words. Neither pinned set moved, because gatekit never NAMED a carrier;
+# it reached tokio through zeroship-core, and core is still on both lists. So:
+# this gate rules on whether the accepted edge has moved, not on how many crates
+# sit behind it. A crate leaving or joining the reachable closure without
+# touching a carrier directly is invisible here, by design, and the only number
+# that shifts is the "packages reaching tokio ruled on" line, which nothing
+# compares against a pin. Read that line if you want to know the closure size;
+# it went 26 to 25 across that commit.
 #
 # WHY NOT A COUNT-BASED RATCHET ("at most N packages reach tokio"). A count
 # cannot tell "we removed one" from "we added one and removed two". The sets are
@@ -107,7 +120,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 gate_arms_init zero_tokio
 
 # ---------------------------------------------------------------------------
-# THE PINS. Re-measured 2026-08-20 on 050f95508, by the two commands below.
+# THE PINS. Re-measured 2026-08-21 on 916c8d3bd, by the two commands below.
+# Both sets came back IDENTICAL to the 2026-08-20 measurement on 050f95508,
+# across the commit that moved the secret table out of zeroship-core.
 # ---------------------------------------------------------------------------
 #
 # Third-party packages that reach tokio in the built graph. Measured with
@@ -191,7 +206,11 @@ awk '
 manifests_checked=$((members_checked + 1))
 declared_hits=$(( $(wc -l < "$TMP/declared.txt") + $(wc -l < "$TMP/root-declared.txt") ))
 
-echo "manifests ruled on: $manifests_checked (30 workspace members + the virtual root)"
+# DERIVED, not written down. This line read "(30 workspace members + the
+# virtual root)" as a literal until crates/zeroship-secret-policy made it 31,
+# and a parenthetical that disagrees with the number beside it is the census
+# problem AGENTS.md warns about, in miniature.
+echo "manifests ruled on: $manifests_checked ($members_checked workspace members + the virtual root)"
 if [ "$declared_hits" -ne 0 ]; then
   echo "FAIL: a manifest in this workspace declares tokio."
   echo "      AGENTS.md, Key invariants: zero tokio in the stack. The transitive"
@@ -202,7 +221,7 @@ if [ "$declared_hits" -ne 0 ]; then
   sed 's/^/      /' "$TMP/root-declared.txt"
   fail=1
 fi
-# Floor 20 against 31: a query that stops matching the metadata shape returns an
+# Floor 20 against 32: a query that stops matching the metadata shape returns an
 # empty array and this arm would otherwise print the same clean line.
 gate_arm declared "$manifests_checked" 20 || fail=1
 
@@ -275,7 +294,10 @@ if ! LC_ALL=C diff -q "$TMP/carriers-pinned.txt" "$TMP/carriers.txt" >/dev/null;
   echo "      PINNED_CARRIERS here and the AGENTS.md invariant in one commit."
   fail=1
 fi
-# Floor 8 against 26 (4 carriers plus 21 of our crates plus nothing else). This
+# Floor 8 against 25 (4 carriers plus 21 of our crates plus nothing else; the
+# parenthetical said 21 when the total beside it said 26, which cannot both be
+# true - the count was 22 of ours until zeroship-gatekit left on 2026-08-21, and
+# it is 21 now, so only the arithmetic is newly consistent). This
 # arm's real self-check is the pinned comparison - any extractor breakage that
 # changes the set shows up as a diff - but the floor catches the one shape the
 # comparison cannot: a tree that stops being produced at all.

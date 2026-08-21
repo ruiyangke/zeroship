@@ -210,6 +210,10 @@ tempfile = "3"
 
 # Internal crates
 zeroship-core = { path = "crates/core" }
+# The secret table, its strength rules and validators. A LEAF, split out of
+# `zeroship-core` so a consumer of the policy does not link core's HTTP client
+# (cyper -> hyper -> tokio) to read it. See its crate docs.
+zeroship-secret-policy = { path = "crates/zeroship-secret-policy" }
 zeroship-bundle = { path = "crates/bundle" }
 compio-postgres = { path = "libs/compio-postgres" }
 compio-redis = { path = "libs/compio-redis" }

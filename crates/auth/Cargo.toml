@@ -26,6 +26,7 @@ path = "tests/main.rs"
 
 [dependencies]
 zeroship-core = { workspace = true }
+zeroship-secret-policy = { workspace = true }
 zeroship-authz = { workspace = true }
 # Shared mailer crate (extracted from this crate's old `src/mailer/`): the
 # provider-neutral `Mailer` trait + drivers (stdout/SMTP/Resend), the

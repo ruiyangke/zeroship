@@ -6969,6 +6969,7 @@ dependencies = [
  "zeroship-plugin-storage",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
+ "zeroship-secret-policy",
 ]
 
 [[package]]
@@ -7006,6 +7007,7 @@ dependencies = [
  "zeroship-authz",
  "zeroship-core",
  "zeroship-mailer",
+ "zeroship-secret-policy",
  "zeroship-test-support",
 ]
 
@@ -7153,6 +7155,7 @@ dependencies = [
  "zeroship-migrated",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
+ "zeroship-secret-policy",
  "zeroship-stream",
  "zeroship-test-support",
  "zeroship-testkit",
@@ -7198,6 +7201,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-config-contract",
  "zeroship-config-macros",
+ "zeroship-secret-policy",
  "zeroship-test-support",
 ]
 
@@ -7207,7 +7211,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_norway",
- "zeroship-core",
+ "zeroship-secret-policy",
 ]
 
 [[package]]
@@ -7251,6 +7255,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-mailer",
  "zeroship-metering",
+ "zeroship-secret-policy",
  "zeroship-test-support",
 ]
 
@@ -7312,6 +7317,7 @@ dependencies = [
  "zero-migrate-policy",
  "zeroship-core",
  "zeroship-runtime",
+ "zeroship-secret-policy",
  "zeroship-test-support",
 ]
 
@@ -7342,6 +7348,7 @@ dependencies = [
  "zeroship-authz",
  "zeroship-core",
  "zeroship-migrate-adapter",
+ "zeroship-secret-policy",
 ]
 
 [[package]]
@@ -7508,6 +7515,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-secret-policy"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "hex",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
 name = "zeroship-stream"
 version = "0.1.0"
 dependencies = [
@@ -7568,6 +7585,7 @@ dependencies = [
  "zeroship-plugin-storage",
  "zeroship-plugin-workflow",
  "zeroship-runtime",
+ "zeroship-secret-policy",
  "zeroship-stream",
  "zstd",
 ]

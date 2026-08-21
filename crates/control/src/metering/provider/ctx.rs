@@ -35,7 +35,7 @@ impl Clock {
 ///
 /// THIS IS THE PLATFORM'S ONE SECRET GRAMMAR, not a second one for billing. It
 /// is the same input `Secret<T>` takes for `control.stripe_secret_key` and every
-/// other declared secret ([`zeroship_core::config::parse_secret_ref`]), so a
+/// other declared secret ([`zeroship_secret_policy::parse_secret_ref`]), so a
 /// provider secret is written the way every other secret is written and the file
 /// arm gets the same owner-only permission refusal.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -74,7 +74,7 @@ impl SecretResolver for PlatformSecretResolver {
         if raw.is_empty() {
             return Err(ProviderError::Config("empty provider secret".to_string()));
         }
-        zeroship_core::config::resolve_secret(raw)
+        zeroship_secret_policy::resolve_secret(raw)
             .map(SecretString::new)
             .map_err(|e| ProviderError::Config(format!("provider secret: {e}")))
     }

@@ -33,14 +33,14 @@ const COMPOSE_FILE: &str = "deploy/compose/docker-compose.yml";
 /// all. Generating a secret nothing consumes is the set-but-unread shape this
 /// migration exists to remove, and it is not made better by a canonical name.
 ///
-/// THE LIST IS NOT KEPT HERE. It is `zeroship_core::config::PLATFORM_SECRETS`,
+/// THE LIST IS NOT KEPT HERE. It is `zeroship_secret_policy::PLATFORM_SECRETS`,
 /// which also carries the strength rule the product enforces on each name and
 /// the validator that applies it. Keeping a second copy here is what let the
 /// generator and the enforcement disagree; the compose secret-strength gate
 /// (`crates/zeroship-gatekit`) reads the same table, so a secret this command
 /// generates and a secret compose ships are judged by one rule set.
 fn env_keys() -> impl Iterator<Item = &'static str> {
-    zeroship_core::config::PLATFORM_SECRETS
+    zeroship_secret_policy::PLATFORM_SECRETS
         .iter()
         .map(|secret| secret.env)
 }
@@ -525,7 +525,7 @@ fn validate_env_value(name: &str, value: &str) -> Result<(), String> {
     // a fact `crates/core` already owns. It is now one lookup into
     // PLATFORM_SECRETS, so adding a secret to the table is what makes this
     // command generate AND re-validate it.
-    zeroship_core::config::platform_secret(name)
+    zeroship_secret_policy::platform_secret(name)
         .ok_or_else(|| format!("unknown generated environment key {name}"))?
         .validate(value)
 }

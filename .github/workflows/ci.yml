@@ -493,7 +493,7 @@ jobs:
       # green as one that ran.
       - name: edge claimed-host artifact is what caddy makes of the Caddyfile
         run: deploy/ops/caddy-claimed-hosts.sh --check
-      # Derived from crates/core/src/config/secrets.rs: compose shipped a
+      # Derived from crates/zeroship-secret-policy/src/lib.rs: compose shipped a
       # 10-byte WORKER_KEY and a 27-byte STASH_SIGNING_KEY against a 32-byte
       # minimum, so worker and control refused to start. Text-only.
       - name: compose secrets meet the enforced minimum
