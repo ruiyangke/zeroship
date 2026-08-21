@@ -1,4 +1,4 @@
-//! Releasing a connection's socket when the client half goes away.
+//! Releasing a connection's socket when either half goes away first.
 //!
 //! # Why a synchronous shutdown, and not the connection task's own teardown
 //!
@@ -38,8 +38,24 @@
 //! and cost nothing: `SharedFd` is refcounted with `Rc` unless compio's `sync`
 //! feature is on, so a `SharedFd` field would make [`Client`](crate::Client)
 //! `!Send`.
+//!
+//! # Why the connection task also needs the shutdown handle
+//!
+//! The mirror case is a local error that ends the connection task while the
+//! client is still live. Dropping the task's descriptor only removes one
+//! reference; the client's dup keeps the socket and the server backend alive.
+//! `shutdown(Both)` changes the shared socket state reached through every dup,
+//! so a peer blocked writing a frame this process refused observes the end of
+//! the session immediately.
+//!
+//! The connection task holds only a `Weak` view of the client's dup. If the
+//! client goes away first, its drop must still close that descriptor even when
+//! compio never reclaims the parked connection task described above.
 
-use std::net::Shutdown;
+use std::{
+    net::Shutdown,
+    sync::{Arc, Weak},
+};
 
 /// Shuts down the connection's socket when dropped.
 ///
@@ -51,7 +67,13 @@ pub(crate) struct ConnectionRelease {
     /// A dup of the connection's socket. Owned, so dropping this closes it;
     /// `shutdown` on it reaches the same underlying socket the connection task
     /// is using.
-    socket: socket2::Socket,
+    socket: Arc<socket2::Socket>,
+}
+
+/// A non-owning path for a failed connection task to reach the client's dup.
+#[derive(Debug)]
+pub(crate) struct ConnectionErrorRelease {
+    socket: Weak<socket2::Socket>,
 }
 
 /// Duplicates the descriptor behind `handle` and takes ownership of the copy.
@@ -71,7 +93,7 @@ impl ConnectionRelease {
             .try_clone_to_owned()
             .ok()
             .map(|owned| Self {
-                socket: socket2::Socket::from(owned),
+                socket: Arc::new(socket2::Socket::from(owned)),
             })
     }
 }
@@ -84,8 +106,26 @@ impl ConnectionRelease {
             .try_clone_to_owned()
             .ok()
             .map(|owned| Self {
-                socket: socket2::Socket::from(owned),
+                socket: Arc::new(socket2::Socket::from(owned)),
             })
+    }
+}
+
+impl ConnectionRelease {
+    pub(crate) fn error_handle(&self) -> ConnectionErrorRelease {
+        ConnectionErrorRelease {
+            socket: Arc::downgrade(&self.socket),
+        }
+    }
+}
+
+impl ConnectionErrorRelease {
+    pub(crate) fn shutdown(&self) {
+        if let Some(socket) = self.socket.upgrade() {
+            // Preserve the connection's original error: failure here means a
+            // concurrent client drop or peer close already won the teardown.
+            let _ = socket.shutdown(Shutdown::Both);
+        }
     }
 }
 
