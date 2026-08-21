@@ -34,14 +34,15 @@ const USAGE: &str = "usage: gate-arm-census <tests-dir> [--run <gate.sh>...]";
 
 /// How few gate scripts means the enumeration itself broke.
 ///
-/// THE ONLY NUMBER IN THIS BINARY, and it counts FILES, not findings. 22 gate
-/// scripts existed on 2026-08-20 (21, plus `zero_tokio_gate.sh`); gates are
+/// THE ONLY NUMBER IN THIS BINARY, and it counts FILES, not findings. 23 gate
+/// scripts exist as of 2026-08-20 (22, plus `test_only_env_gate.sh`); gates are
 /// added and deleted by hand, so a drop is a decision somebody made and should
 /// record here in the same commit, not an accident to be absorbed. Set at the
 /// observed count on purpose: a slack floor here would let the glob half-break
 /// unnoticed, which is the precise failure this binary exists to catch one
-/// level down.
-const GATE_FILE_FLOOR: usize = 22;
+/// level down. RAISE THIS WHEN YOU ADD A GATE - leaving it behind the real
+/// count is how the floor stops meaning anything without ever going red.
+const GATE_FILE_FLOOR: usize = 23;
 
 fn read_gates(dir: &Path) -> Result<Vec<GateFile>, String> {
     let entries =
