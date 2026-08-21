@@ -54,7 +54,7 @@ mod platform_cli {
         author_and_lower_all, run_platform_migrations, PlatformMigrateConfig, PlatformMigrateError,
         PLATFORM_MIGRATION_LEDGER_TABLE,
     };
-    use zeroship_migrate_adapter::platform::cluster_lock::DEFAULT_CLUSTER_LOCK_DATABASE;
+    use zeroship_migrate_adapter::config::DEFAULT_CLUSTER_LOCK_DATABASE;
     use zeroship_migrate_adapter::CompioPgSession;
 
     /// Serialize the live-PG apply tests. Some provision a scratch DB and create

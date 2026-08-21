@@ -108,7 +108,7 @@ docker exec "$REDIS_CONTAINER" redis-cli ping 2>/dev/null | grep -q PONG || { no
 
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB WITH (FORCE)" >/dev/null 2>&1 || true
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1 || true
-"$BIN/zeroship-platform-migrate" --database-url "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
+zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   || { no "platform migrations failed"; tail -20 "$WORK/migrate.log"; exit 1; }
 

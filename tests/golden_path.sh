@@ -505,8 +505,7 @@ echo "  migrating a fresh $PG_DB ..."
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB WITH (FORCE)" >/dev/null 2>&1 || \
   docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "DROP DATABASE IF EXISTS $PG_DB" >/dev/null 2>&1 || true
 docker exec "$PG_CONTAINER" psql -U "$PG_USER" -c "CREATE DATABASE $PG_DB" >/dev/null 2>&1 || true
-"$BIN/zeroship-platform-migrate" \
-    --database-url "$DB_URL" \
+zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DB_URL" \
     --migrations-dir "$ROOT/db/migrations-ts" \
     --project-schema zeroship \
     --project-id zeroship >/tmp/gp-migrate.log 2>&1 \

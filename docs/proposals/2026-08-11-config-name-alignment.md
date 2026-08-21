@@ -80,6 +80,16 @@ migration one-shot still has a manual argument parser and a raw
 Those processes must be registered before the final gate turns green, even
 though only long-running servers need the full `--check-config` report.
 
+AMENDED 2026-08-21, the one-shot's actual state. `zeroship-platform-migrate` is
+CONVERTED. Its declaration is `crates/zeroship-migrate-adapter/src/config.rs`
+(`#[zeroship_config(binary = "zeroship-platform-migrate", scope =
+"platform_migrate")]`), it links into `crates/config-contract/src/registry.rs`
+as the seventh entry of `DECLARING_BINARIES`, and `tests/real_registry.rs` no
+longer carries a named exemption - the manifests' `platform` set and the linked
+set are now compared for exact equality with nothing in between. The hand-rolled
+parser and its `--database-url` value flag are deleted; the DSN is
+`Secret<String>` and reachable only as `--database-url-file PATH`.
+
 AMENDED 2026-08-12, the scheduler's actual state, so a later step does not
 assume it is done. Step 2 moved its clap definition out of `main.rs` into
 `crates/workflow-scheduler/src/config.rs` so the compiled checker can link it,
@@ -818,9 +828,9 @@ explicitly if this recommendation is taken:
    Check 6c does read argv, but it looks for CREDENTIALS only - userinfo in a
    URL, and a secret's value flag - not for whether a flag names a setting the
    binary declares. So the set-but-unread property has no argv half. This is
-   the blind spot that already hid a live superuser DSN passed as
-   `--database-url <dsn>` on the platform-migrate one-shot, described at
-   `config_name_alignment_gate.sh:164-167`.
+   the blind spot that already hid a live superuser DSN passed through the
+   value form of `--database-url` on the platform-migrate one-shot, described
+   at `config_name_alignment_gate.sh:164-167`.
 
 The honest summary is that the awk substitute is cheaper, is armed, and is
 wider than 4.2 in one respect - and that it trades away an `env_file` rejection

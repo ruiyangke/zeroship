@@ -27,6 +27,10 @@ zeroship-gateway = { workspace = true }
 zeroship-migrated = { workspace = true }
 zeroship-worker = { workspace = true }
 zeroship-workflow-scheduler = { workspace = true }
+# The seventh platform target: the `zeroship-platform-migrate` one-shot. Its
+# declaration lives in the library and is NOT behind `platform-cli`, so linking
+# it here brings in the configuration and not V8.
+zeroship-migrate-adapter = { workspace = true }
 clap = { workspace = true }
 cargo_metadata = { workspace = true }
 # `span-locations` is what gives the inventory a file:LINE column. Resolver 3

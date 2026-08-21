@@ -113,14 +113,6 @@ use zero_migrate::driver::SqlSession;
 use super::PlatformMigrateError;
 use crate::CompioPgSession;
 
-/// The database every concurrent migrate run coordinates through. `postgres` is
-/// the maintenance database `initdb` creates and the official container image
-/// ships; it is the conventional "connect to the cluster, not to a database"
-/// target. Overridable per run because it CAN be dropped on a hardened cluster,
-/// in which case the acquisition fails loudly and names the override rather than
-/// silently skipping the lock.
-pub const DEFAULT_CLUSTER_LOCK_DATABASE: &str = "postgres";
-
 /// How long a run waits for a peer's cluster-global section before giving up.
 ///
 /// The lock is held only across the apply of the cluster-global FILES, not the

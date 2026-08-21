@@ -139,8 +139,8 @@ lago -o /dev/null -w '' -X POST "$LAGO_URL/api/v1/plans" -d "{\"plan\":{\"name\"
 [ -n "$BM_ID" ] && pass "Lago seeded metric + plan" || { fail "lago seed"; exit 1; }
 
 MIG_LOG="$WORK/migrate.log"
-"$BIN/zeroship-platform-migrate" \
-  --database-url "$DBURL" --migrations-dir "$ROOT/db/migrations-ts" \
+zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+  --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1 \
   && pass "zeroship platform migrations applied" || { fail "migrate"; tail -20 "$MIG_LOG"; exit 1; }
 

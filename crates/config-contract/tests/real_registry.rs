@@ -22,17 +22,14 @@ use std::path::{Path, PathBuf};
 use zeroship_config_contract::metadata::{extract_workspace, TargetClass};
 use zeroship_config_contract::registry::{declared_binaries, platform_specs, DECLARING_BINARIES};
 
-/// Targets classified `platform` in Cargo metadata that link no registry here.
-///
-/// Not an escape hatch: it is pinned by exact set equality below, so a NEW
-/// unregistered platform binary fails even though this one is listed. The
-/// entry is the platform-migrate one-shot, which the design puts in scope and
-/// records as unconverted
-/// (`docs/proposals/2026-08-11-config-name-alignment.md:55-82`: "SEVEN targets
-/// classified `platform`", of which six are servers, and "those processes must
-/// be registered before the final gate turns green"). Registering it deletes
-/// the entry; the assertion is what stops that from being forgotten quietly.
-const PLATFORM_TARGETS_WITHOUT_A_REGISTRY: [&str; 1] = ["zeroship-platform-migrate"];
+// There is no list of exempt platform targets here any more, and there is not
+// meant to be one. Until 2026-08-21 this file carried
+// `PLATFORM_TARGETS_WITHOUT_A_REGISTRY = ["zeroship-platform-migrate"]`, the
+// one target the design put in scope and had not converted
+// (`docs/proposals/2026-08-11-config-name-alignment.md:55-82`). Converting it
+// left the constant holding nothing, and an empty allowance is worse than none:
+// it reads as a place to add the next exception. The equality below is now
+// between the manifests and the linked declarations, with nothing in between.
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -62,15 +59,15 @@ fn platform_targets() -> BTreeSet<String> {
 }
 
 #[test]
-fn every_platform_target_is_declaring_or_a_named_unregistered_gap() {
+fn every_platform_target_declares_its_configuration() {
     // Mutation: classify one more bin target `platform` in its Cargo.toml
     // without adding it to DECLARING_BINARIES. This is THE case the module doc
-    // describes - a seventh server whose config nothing in this tool can see.
+    // describes - an eighth platform process whose config nothing in this tool
+    // can see.
     // Does not cover: a new platform process that is never given a bin target
     // or a manifest class at all. `check-metadata` owns that boundary.
     let declared = DECLARING_BINARIES
         .iter()
-        .chain(PLATFORM_TARGETS_WITHOUT_A_REGISTRY.iter())
         .map(|target| (*target).to_owned())
         .collect::<BTreeSet<_>>();
 
@@ -78,9 +75,8 @@ fn every_platform_target_is_declaring_or_a_named_unregistered_gap() {
         platform_targets(),
         declared,
         "the `platform` targets in Cargo metadata and the binaries this tool \
-         links have drifted; a new platform binary must either link its \
-         generated registry into src/registry.rs or be listed as an \
-         unregistered gap"
+         links have drifted; a new platform binary must link its generated \
+         registry into src/registry.rs"
     );
 }
 

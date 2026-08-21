@@ -16,10 +16,12 @@ platform corpus with:
 ```bash
 zeroship-platform-migrate \
   --migrations-dir db/migrations-ts \
-  --database-url "$ZEROSHIP_MIGRATE_DSN" \
+  --database-url-file ./migrate-dsn \
   --project-schema zeroship \
   --project-id zeroship
 ```
+
+The DSN is a path, not a value; the file must be owner-only (0600).
 
 Platform `.ts` migrations are recorded to transient IR at migrate time;
 committed `.ir.json` and the historical raw-SQL fixtures are not the platform

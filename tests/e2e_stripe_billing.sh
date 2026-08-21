@@ -208,8 +208,7 @@ pass "created per-run DB $DB on :$PGPORT (real zeroship + zeroship_billing_test 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"
 MIG_LOG="$WORK/migrate.log"
 # Use the prebuilt release platform migration binary, matching the other billing e2es.
-if "$BIN/zeroship-platform-migrate" \
-    --database-url "$DBURL" \
+if zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
     --migrations-dir "$ROOT/db/migrations-ts" \
     --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1; then
   pass "zeroship-platform-migrate applied the platform set to $DB (incl. 0042 invoicing, 0049 refunds, 0053 disputes)"
