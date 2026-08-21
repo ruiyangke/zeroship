@@ -298,10 +298,10 @@ pub enum Host {
 /// * `sslnegotiation` - TLS negotiation method. If set to `direct`, the client
 ///     will perform direct TLS handshake, this only works for PostgreSQL 17 and
 ///     newer.
-///     Note that you will need to setup ALPN of TLS client configuration to
-///     `postgresql` when using direct TLS. If you are using postgres_openssl
-///     as TLS backend, a `postgres_openssl::set_postgresql_alpn` helper is
-///     provided for that.
+///     PostgreSQL requires the `postgresql` ALPN protocol for direct TLS. This
+///     crate's `MakeRustlsConnect` adds it when the supplied rustls
+///     `ClientConfig` has an empty ALPN list. A nonempty caller-supplied list is
+///     preserved unchanged and must include `postgresql` to support direct TLS.
 ///     If set to `postgres`, the default value, it follows original postgres
 ///     wire protocol to perform the negotiation.
 /// * `hostaddr` - Numeric IP address of host to connect to. This should be in the standard IPv4 address format,
