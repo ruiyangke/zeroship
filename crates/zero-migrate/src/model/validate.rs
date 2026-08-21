@@ -59,9 +59,9 @@ use crate::model::expr::{CaseBranch, Expr, ScalarFn};
 // snapshot value types, whose `canonical_pg_signature_type` is its other caller;
 // re-imported here under its historical name so this module's two call sites and
 // `crate::apply::drift` read unchanged.
-pub(crate) use zero_migrate_backend::snapshot::canonical_pg_arg_type;
 use pg_query::protobuf::node::Node as NodeEnum;
 use std::collections::{BTreeMap, BTreeSet};
+pub(crate) use zero_migrate_backend::snapshot::canonical_pg_arg_type;
 
 // The structural, policy-free validator moved to the `zero-migrate-ir` leaf crate.
 // Re-export its full surface so this policy-bound module (and the engine root)

@@ -4528,7 +4528,11 @@ fn is_injected_index(table: &str, index_name: &str, inject: &ResolvedInject) -> 
 /// name-keyed set therefore admits the same indexes for every input, including two
 /// entries of `t.indexes` sharing a name — where the old predicate was likewise
 /// obliged to answer the same for both.
-fn injected_index_names(table: &str, t: &TableSnapshot, inject: Option<&ResolvedInject>) -> Vec<String> {
+fn injected_index_names(
+    table: &str,
+    t: &TableSnapshot,
+    inject: Option<&ResolvedInject>,
+) -> Vec<String> {
     let Some(inject) = inject else {
         return Vec::new();
     };
@@ -10087,9 +10091,9 @@ mod snapshot_builder_refactor_safety_tests {
         ResolvedInject::for_table(&effective, schema, table).expect("empty inject shape")
     }
     use super::{
-        build_resolved_table_snapshot, build_table_snapshot, CollectionDescriptor,
-        CreateTableRequest, DdlEmitter, DeclarativeAuthor, FieldDescriptor, IndexDescriptor,
-        ResolvedInject, SqliteEmitter,
+        build_resolved_table_snapshot, build_table_snapshot, injected_index_names,
+        CollectionDescriptor, CreateTableRequest, DdlEmitter, DeclarativeAuthor, FieldDescriptor,
+        IndexDescriptor, ResolvedInject, SqliteEmitter,
     };
     use crate::schema::query::SqlDialect;
 
