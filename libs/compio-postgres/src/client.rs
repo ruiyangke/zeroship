@@ -114,7 +114,7 @@ struct QueryObserver(Arc<QueryObserverInner>);
 struct QueryObserverInner {
     sender: mpsc::UnboundedSender<QueryEvent>,
     threshold: Option<Duration>,
-    registry: Mutex<FrontendRegistry>,
+    registry: Arc<Mutex<FrontendRegistry>>,
     active: AtomicBool,
 }
 
@@ -155,10 +155,18 @@ struct QueryObservationState {
 
 impl QueryObserver {
     fn new(sender: mpsc::UnboundedSender<QueryEvent>, threshold: Option<Duration>) -> Self {
+        Self::with_registry(sender, threshold, Arc::default())
+    }
+
+    fn with_registry(
+        sender: mpsc::UnboundedSender<QueryEvent>,
+        threshold: Option<Duration>,
+        registry: Arc<Mutex<FrontendRegistry>>,
+    ) -> Self {
         Self(Arc::new(QueryObserverInner {
             sender,
             threshold,
-            registry: Mutex::default(),
+            registry,
             active: AtomicBool::new(true),
         }))
     }
@@ -1144,11 +1152,10 @@ impl InnerClient {
         }
 
         let observer = {
-            let mut observer = self.query_observer.lock();
+            let observer = self.query_observer.lock();
             let selected = if observer.as_ref().is_some_and(QueryObserver::is_active) {
                 observer.clone()
             } else {
-                *observer = None;
                 self.query_observer_enabled.store(false, Ordering::Release);
                 None
             };
@@ -1168,7 +1175,13 @@ impl InnerClient {
         sender: mpsc::UnboundedSender<QueryEvent>,
         threshold: Option<Duration>,
     ) {
-        *self.query_observer.lock() = Some(QueryObserver::new(sender, threshold));
+        let mut observer = self.query_observer.lock();
+        let registry = observer
+            .as_ref()
+            .map(|observer| Arc::clone(&observer.0.registry))
+            .unwrap_or_default();
+        *observer = Some(QueryObserver::with_registry(sender, threshold, registry));
+        drop(observer);
         self.query_observer_enabled.store(true, Ordering::Release);
     }
 
