@@ -145,6 +145,15 @@ hmac = { workspace = true }
 # plugin-db from writing its own). DEV-only: no production plugin-db path plans a
 # declarative PG diff, and the adapter does not depend on plugin-db, so no cycle.
 zeroship-migrate-adapter = { workspace = true }
+# `workflow_journal_redeploy_grants_do_not_reopen_without_reprovision` needs an
+# app's `app_<uuid>` workflow journal schema to exist before the worker's
+# `PgStore::provision` can put tables in it, and since 2a44ea8ef that schema is
+# created by the deploy's migration apply, not by the worker. The test calls
+# `provisioning::provision_workflow_journal_schema` - the production statement -
+# rather than a CREATE SCHEMA of its own, which would leave the journal owned by
+# whoever the test connected as: a privilege shape production never has.
+# DEV-only, and `zeroship-migrated` does not depend on plugin-db, so no cycle.
+zeroship-migrated = { workspace = true }
 
 [[bench]]
 name = "bench_query_build"
