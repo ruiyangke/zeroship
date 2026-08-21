@@ -77,6 +77,8 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
 /// 2. any mode-specific row-id rewrite required before encryption (`upsert`)
 /// 3. encrypt encrypted columns
 /// 4. derive masked sibling columns from plaintext / sidechannel
+/// 5. lower binary columns to the dialect's bind: SQLite vector/geoPoint blobs,
+///    then plain `t.bytes()` (base64 wire string -> raw bytes) on both dialects
 ///
 /// The SQL builders still own dialect lowering and UPDATE auto-bump
 /// emission. This module centralises the transform stages that were
@@ -184,6 +186,7 @@ struct WriteStages<'a> {
     has_encrypted: bool,
     has_masked: bool,
     has_sqlite_binary: bool,
+    has_plain_bytes: bool,
 }
 
 impl<'a> WriteStages<'a> {
@@ -192,8 +195,16 @@ impl<'a> WriteStages<'a> {
             has_encrypted: schema.is_some_and(super::schema_has_encrypted_columns),
             has_masked: schema.is_some_and(super::schema_has_masked_columns),
             has_sqlite_binary: schema.is_some_and(super::schema_has_sqlite_binary_columns),
+            has_plain_bytes: schema
+                .is_some_and(super::bytes_pass::schema_has_plain_bytes_columns),
             schema,
         }
+    }
+
+    /// Does any stage below have work to do for this collection? A schema with
+    /// none of these facets skips the whole pipeline.
+    fn any(&self) -> bool {
+        self.has_encrypted || self.has_masked || self.has_sqlite_binary || self.has_plain_bytes
     }
 
     async fn apply_to_doc(
@@ -206,7 +217,7 @@ impl<'a> WriteStages<'a> {
         let Some(schema) = self.schema else {
             return Ok(());
         };
-        if !self.has_encrypted && !self.has_masked && !self.has_sqlite_binary {
+        if !self.any() {
             return Ok(());
         }
 
@@ -228,6 +239,17 @@ impl<'a> WriteStages<'a> {
         if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
             super::encode_sqlite_binary_doc_with_schema(schema, row)?;
         }
+        // AFTER encryption: a `t.encrypted({ wraps: t.bytes() })` column is the
+        // encryption pass's, and this pass skips it by construction, but the
+        // ordering also means the ciphertext it deposits is never re-read as a
+        // plain bytes value.
+        if self.has_plain_bytes {
+            super::bytes_pass::encode_bytes_on_write(
+                schema,
+                super::current_sql_dialect(),
+                row,
+            )?;
+        }
         Ok(())
     }
 
@@ -241,7 +263,7 @@ impl<'a> WriteStages<'a> {
         let Some(schema) = self.schema else {
             return Ok(());
         };
-        if !self.has_encrypted && !self.has_masked && !self.has_sqlite_binary {
+        if !self.any() {
             return Ok(());
         }
 
@@ -263,6 +285,13 @@ impl<'a> WriteStages<'a> {
         }
         if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
             super::encode_sqlite_binary_update_with_schema(schema, patch)?;
+        }
+        if self.has_plain_bytes {
+            super::bytes_pass::encode_bytes_on_update(
+                schema,
+                super::current_sql_dialect(),
+                patch,
+            )?;
         }
         Ok(())
     }

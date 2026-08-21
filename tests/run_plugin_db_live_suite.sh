@@ -133,7 +133,13 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 #       that could run it never did, and it sat broken from the 2026-08-10
 #       registerModel cutover until someone read it. Removing the attribute is
 #       what puts it in this count.
-PLUGIN_DB_MIN_PASSED=117
+#   +1  bytes_column_stores_raw_bytes_on_postgres. A genuinely new test in
+#       `integration`, and the only one of the two written for the t.bytes()
+#       double-encode that this script can see: its SQLite twin
+#       (`bytes_column_stores_a_raw_blob_on_sqlite`) lives in
+#       `sqlite_integration`, which is not a target below and contributes
+#       nothing to this floor.
+PLUGIN_DB_MIN_PASSED=118
 
 # Only postgis. An EMPTY allowlist would be wrong in the other direction:
 # `grep -E ''` matches every line, so zs_skip_lines branches on empty rather
