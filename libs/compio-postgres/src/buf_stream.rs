@@ -10,8 +10,14 @@
 
 use crate::Error;
 use bytes::BytesMut;
-use compio::buf::BufResult;
+use compio::buf::{BufResult, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use std::cell::{Cell, RefCell};
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Poll, Waker};
+use std::time::{Duration, Instant};
 
 /// Read-side framing surface used by `codec::read_backend`.
 ///
@@ -60,6 +66,192 @@ const READ_CHUNK: usize = 16 * 1024;
 /// worker.
 pub(crate) const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
 
+/// Shared controller for one physical connection's socket-read inactivity
+/// clock.
+///
+/// Plain sockets keep an owned read submitted even while the connection is
+/// idle so LISTEN/NOTIFY remains prompt. A timer created unconditionally in
+/// that task would therefore retire every healthy idle pool entry. The main
+/// protocol loop registers only responses whose frontend bytes finished
+/// flushing. Waking the reader lets an already-submitted idle read acquire a
+/// deadline without cancelling and resubmitting it.
+#[derive(Clone)]
+pub(crate) struct ReadDeadline {
+    inner: Rc<ReadDeadlineInner>,
+}
+
+struct ReadDeadlineInner {
+    timeout: Duration,
+    /// Successfully-flushed protocol phases for which the server still owes
+    /// bytes. This is a count, not a boolean: pipelined requests must keep the
+    /// clock active until every corresponding `ReadyForQuery` arrives.
+    obligations: Cell<usize>,
+    /// Deadline for the one currently submitted read. `None` while the
+    /// connection is disarmed or while it is processing already-read bytes.
+    deadline: Cell<Option<Instant>>,
+    reader_waker: RefCell<Option<Waker>>,
+}
+
+impl ReadDeadline {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            inner: Rc::new(ReadDeadlineInner {
+                timeout,
+                obligations: Cell::new(0),
+                deadline: Cell::new(None),
+                reader_waker: RefCell::new(None),
+            }),
+        }
+    }
+
+    /// Register a response phase after its frontend bytes finish flushing.
+    /// Only the zero-to-one transition starts the budget; pipelining another
+    /// request cannot buy more time for a read already in flight.
+    pub(crate) fn begin_response(&self) {
+        let obligations = self.inner.obligations.get();
+        self.inner
+            .obligations
+            .set(obligations.checked_add(1).expect("read obligation overflow"));
+        if obligations == 0 {
+            self.inner.deadline.set(self.next_deadline());
+            self.wake_reader();
+        }
+    }
+
+    /// Complete one response phase. The one-to-zero transition disarms an
+    /// already-submitted read without cancelling it; it becomes an ordinary
+    /// idle notification read.
+    pub(crate) fn finish_response(&self) {
+        let obligations = self.inner.obligations.get();
+        debug_assert!(obligations > 0, "finished an unregistered read obligation");
+        if obligations == 0 {
+            return;
+        }
+        self.inner.obligations.set(obligations - 1);
+        if obligations == 1 {
+            self.inner.deadline.set(None);
+            self.wake_reader();
+        }
+    }
+
+    /// Start a fresh budget for an actual underlying read. Time spent parsing
+    /// buffered frames or waiting for response-channel capacity is not a
+    /// stalled socket read and must not consume this clock.
+    fn begin_read(&self) {
+        if self.inner.obligations.get() > 0 {
+            self.inner.deadline.set(self.next_deadline());
+        } else {
+            self.inner.deadline.set(None);
+        }
+    }
+
+    fn finish_read(&self) {
+        self.inner.deadline.set(None);
+    }
+
+    fn current(&self) -> Option<Instant> {
+        self.inner.deadline.get()
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.inner.timeout
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        // A programmatic Duration can exceed Instant's representable range.
+        // Treat that as an effectively unbounded policy instead of panicking
+        // the connection task while it arms a read.
+        Instant::now().checked_add(self.inner.timeout)
+    }
+
+    fn register_reader(&self, waker: &Waker) {
+        let mut slot = self.inner.reader_waker.borrow_mut();
+        if !slot.as_ref().is_some_and(|saved| saved.will_wake(waker)) {
+            *slot = Some(waker.clone());
+        }
+    }
+
+    fn clear_reader(&self) {
+        self.inner.reader_waker.borrow_mut().take();
+    }
+
+    fn wake_reader(&self) {
+        // End the RefCell borrow before invoking an arbitrary waker. A custom
+        // waker may poll immediately and register itself again.
+        let waker = self.inner.reader_waker.borrow_mut().take();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+struct ReaderRegistration<'a>(&'a ReadDeadline);
+
+impl Drop for ReaderRegistration<'_> {
+    fn drop(&mut self) {
+        // Also runs when Connection teardown cancels a parked read task. Do not
+        // leave its task waker retained by the shared controller.
+        self.0.clear_reader();
+    }
+}
+
+/// Drive one owned-buffer read while allowing the protocol loop to arm or
+/// disarm its inactivity deadline around an already-submitted idle read.
+async fn read_with_deadline<R, B>(
+    reader: &mut R,
+    buffer: B,
+    deadline: Option<&ReadDeadline>,
+) -> Result<BufResult<usize, B>, Error>
+where
+    R: AsyncRead + Unpin,
+    B: IoBufMut,
+{
+    let Some(deadline) = deadline else {
+        return Ok(reader.read(buffer).await);
+    };
+
+    deadline.begin_read();
+    let _registration = ReaderRegistration(deadline);
+    let mut read = std::pin::pin!(reader.read(buffer));
+    let mut timer: Option<Pin<Box<dyn Future<Output = ()>>>> = None;
+    let mut timer_for = None;
+
+    poll_fn(|cx| {
+        // Bytes win a same-poll race with the clock, matching
+        // compio::time::timeout and treating real socket progress as progress.
+        if let Poll::Ready(result) = read.as_mut().poll(cx) {
+            deadline.finish_read();
+            return Poll::Ready(Ok(result));
+        }
+
+        // The protocol loop may add an obligation to a read that began while
+        // idle, or finish the last one at ReadyForQuery / CopyInResponse.
+        // Retain the submitted read in both cases: cancelling it merely to
+        // change clocks could discard bytes and desynchronise a connection
+        // that was otherwise healthy.
+        deadline.register_reader(cx.waker());
+        let current = deadline.current();
+        if current != timer_for {
+            timer = current.map(|at| {
+                Box::pin(compio::time::sleep_until(at)) as Pin<Box<dyn Future<Output = ()>>>
+            });
+            timer_for = current;
+        }
+
+        if let Some(timer) = timer.as_mut()
+            && timer.as_mut().poll(cx).is_ready()
+        {
+            // This is the sole intentional cancellation of an in-flight read.
+            // A partial completion cannot be resumed, so the caller receives a
+            // terminal error and Connection::run retires the protocol session.
+            return Poll::Ready(Err(Error::read_timeout(deadline.timeout())));
+        }
+
+        Poll::Pending
+    })
+    .await
+}
+
 /// Buffered read/write stream over any compio `AsyncRead + AsyncWrite`.
 ///
 /// The stream is generic so the same wrapper works for plain sockets
@@ -69,6 +261,7 @@ pub(crate) struct BufStream<S> {
     read_buf: BytesMut,
     read_scratch: Vec<u8>,
     write_buf: BytesMut,
+    read_deadline: Option<ReadDeadline>,
 }
 
 impl<S> BufStream<S>
@@ -82,6 +275,29 @@ where
             read_buf: BytesMut::with_capacity(READ_BUF_CAPACITY),
             read_scratch: vec![0u8; READ_CHUNK],
             write_buf: BytesMut::with_capacity(1024),
+            read_deadline: None,
+        }
+    }
+
+    /// Install a post-startup read deadline. Handshake reads remain owned by
+    /// `connect_timeout`; callers invoke this only after startup completes.
+    pub(crate) fn set_read_timeout(&mut self, timeout: Option<Duration>) {
+        self.read_deadline = timeout.map(ReadDeadline::new);
+    }
+
+    pub(crate) fn read_deadline(&self) -> Option<ReadDeadline> {
+        self.read_deadline.clone()
+    }
+
+    pub(crate) fn begin_read_response(&self) {
+        if let Some(deadline) = &self.read_deadline {
+            deadline.begin_response();
+        }
+    }
+
+    pub(crate) fn finish_read_response(&self) {
+        if let Some(deadline) = &self.read_deadline {
+            deadline.finish_response();
         }
     }
 
@@ -195,7 +411,8 @@ where
 
     /// Low-level read into owned buffer, returning (bytes_read, buffer).
     async fn read_raw(&mut self, buf: Vec<u8>) -> Result<(usize, Vec<u8>), Error> {
-        let BufResult(result, returned) = self.inner.read(buf).await;
+        let BufResult(result, returned) =
+            read_with_deadline(&mut self.inner, buf, self.read_deadline.as_ref()).await?;
         let n = result.map_err(Error::io)?;
         Ok((n, returned))
     }
@@ -277,6 +494,7 @@ pub(crate) struct BufReadHalf<R> {
     inner: R,
     read_buf: BytesMut,
     read_scratch: Vec<u8>,
+    read_deadline: Option<ReadDeadline>,
 }
 
 impl<R> BufReadHalf<R>
@@ -284,7 +502,8 @@ where
     R: AsyncRead + Unpin,
 {
     async fn read_raw(&mut self, buf: Vec<u8>) -> Result<(usize, Vec<u8>), Error> {
-        let BufResult(result, returned) = self.inner.read(buf).await;
+        let BufResult(result, returned) =
+            read_with_deadline(&mut self.inner, buf, self.read_deadline.as_ref()).await?;
         let n = result.map_err(Error::io)?;
         Ok((n, returned))
     }
@@ -420,6 +639,7 @@ where
             read_buf,
             read_scratch,
             write_buf,
+            read_deadline,
         } = self;
         match inner.try_into_split() {
             Ok((r, w)) => Ok((
@@ -427,6 +647,7 @@ where
                     inner: r,
                     read_buf,
                     read_scratch,
+                    read_deadline,
                 },
                 BufWriteHalf {
                     inner: w,
@@ -438,6 +659,7 @@ where
                 read_buf,
                 read_scratch,
                 write_buf,
+                read_deadline,
             }),
         }
     }

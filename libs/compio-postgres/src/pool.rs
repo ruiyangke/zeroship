@@ -248,15 +248,16 @@ impl PoolConfig {
     ///
     /// It is deliberately separate from the other four clocks:
     ///
-    /// - `PostgreSQL`'s server-side `statement_timeout` is a GUC, already
-    ///   reachable with `options=-c statement_timeout=...`.
-    /// - This driver has no socket read deadline. `tcp_user_timeout` limits
-    ///   how long transmitted TCP data may remain unacknowledged; it is not a
-    ///   read deadline.
-    /// - [`Config::connect_timeout`] applies per address to connection setup,
-    ///   including the handshake.
-    /// - [`PoolConfig::connection_timeout`] limits waiting to acquire a pooled
-    ///   connection.
+    /// - Clock (2), `PostgreSQL`'s server-side `statement_timeout`, is a GUC,
+    ///   already reachable with `options=-c statement_timeout=...`.
+    /// - Clock (3), [`Config::read_timeout`], bounds post-startup socket-read
+    ///   inactivity and retires a session rather than trying to cancel it.
+    ///   `tcp_user_timeout` is separate TCP-level unacknowledged-data liveness;
+    ///   it does not detect a healthy peer that simply sends nothing.
+    /// - Clock (4), [`Config::connect_timeout`], applies per address to
+    ///   connection setup, including the handshake.
+    /// - Clock (5), [`PoolConfig::connection_timeout`], limits waiting to
+    ///   acquire a pooled connection.
     ///
     /// This is pool policy, not a libpq connection parameter, and therefore is
     /// not accepted in a `PostgreSQL` connection string. See
@@ -474,6 +475,15 @@ impl PoolEntry {
 
     fn is_idle_too_long(&self, idle_timeout: Duration) -> bool {
         self.last_used.elapsed() > idle_timeout
+    }
+
+    /// Whether the connection's read task published terminal poison before
+    /// its main task had a chance to drop the Client request receiver.
+    fn is_read_retired(&self) -> bool {
+        self.client
+            .tx_status_handle()
+            .load(std::sync::atomic::Ordering::Acquire)
+            == crate::connection::READ_RETIRED_STATUS
     }
 }
 
@@ -1100,7 +1110,7 @@ impl Pool {
 
                 // If the Client's sender is closed (connection task exited
                 // due to I/O error, EOF, etc), we cannot use this entry.
-                if entry.client.is_closed() {
+                if entry.client.is_closed() || entry.is_read_retired() {
                     self.metrics.inc_evictions();
                     continue;
                 }
@@ -1278,7 +1288,9 @@ impl Pool {
         // Eviction criteria:
         //   - expired (max_lifetime reached)
         //   - closed: Client::is_closed() indicates the connection task exited
-        if entry.is_expired() || entry.client.is_closed() {
+        //   - read-retired: the dedicated reader synchronously marked poison
+        //     before its main task could close the Client channel
+        if entry.is_expired() || entry.client.is_closed() || entry.is_read_retired() {
             self.metrics.inc_evictions();
             return;
         }
@@ -2406,6 +2418,31 @@ mod tests {
             housekeeper: RefCell::new(None),
             metrics: PoolMetrics::new(),
         }
+    }
+
+    #[test]
+    fn read_retirement_is_evicted_before_the_client_channel_closes() {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, _receiver) = fake_client(17);
+        assert!(!client.is_closed(), "fixture request channel started closed");
+        client
+            .tx_status_handle()
+            .store(crate::connection::READ_RETIRED_STATUS, Ordering::Release);
+        let held = PooledClient {
+            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
+            pool: &pool,
+        };
+
+        drop(held);
+        assert_eq!(pool.idle_count(), 0, "read-retired entry became idle");
+        assert_eq!(pool.total_count(), 0, "read-retired entry kept its slot");
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.metrics.evictions.get(), 1);
     }
 
     fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
