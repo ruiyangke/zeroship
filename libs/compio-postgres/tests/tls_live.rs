@@ -61,6 +61,10 @@ struct Servers {
     client_key_password: String,
     /// A CRL issued by `ca` that revokes the exact certificate on `tls_url`.
     server_crl: String,
+    /// The same CRL under its OpenSSL issuer-hash lookup name.
+    server_crl_dir: String,
+    /// The same CRL under a syntactically valid but incorrect issuer hash.
+    server_crl_wrong_hash_dir: String,
 }
 
 impl Servers {
@@ -90,6 +94,8 @@ impl Servers {
             client_encrypted_key: field("client_encrypted_key"),
             client_key_password: field("client_key_password"),
             server_crl: field("server_crl"),
+            server_crl_dir: field("server_crl_dir"),
+            server_crl_wrong_hash_dir: field("server_crl_wrong_hash_dir"),
         }
     }
 }
@@ -362,6 +368,50 @@ async fn require_fails_against_a_server_without_tls() {
 }
 
 // ---------------------------------------------------------------------------
+// protocol bounds - handshake enforcement, not parser state
+// ---------------------------------------------------------------------------
+
+/// The server accepts TLS 1.2 only. These two URLs differ solely in the
+/// minimum-version value, so their opposite outcomes prove the bound reaches
+/// the handshake.
+#[compio::test]
+async fn ssl_min_protocol_version_is_enforced_by_the_handshake() {
+    let s = servers();
+    let base = format!("{} sslmode=require ssl_min_protocol_version=", s.tls_url);
+
+    assert!(
+        transport_of(&format!("{base}TLSv1.2"))
+            .await
+            .expect("TLS 1.2 satisfies a TLSv1.2 minimum"),
+        "the TLS-1.2 control was not encrypted"
+    );
+    transport_of(&format!("{base}TLSv1.3"))
+        .await
+        .expect_err("a TLSv1.3 minimum must refuse a TLS-1.2-only server");
+}
+
+/// The server accepts TLS 1.3 only. These two URLs differ solely in the
+/// maximum-version value.
+#[compio::test]
+async fn ssl_max_protocol_version_is_enforced_by_the_handshake() {
+    let s = servers();
+    let base = format!(
+        "{} sslmode=require ssl_max_protocol_version=",
+        s.mismatch_url
+    );
+
+    assert!(
+        transport_of(&format!("{base}TLSv1.3"))
+            .await
+            .expect("TLS 1.3 satisfies a TLSv1.3 maximum"),
+        "the TLS-1.3 control was not encrypted"
+    );
+    transport_of(&format!("{base}TLSv1.2"))
+        .await
+        .expect_err("a TLSv1.2 maximum must refuse a TLS-1.3-only server");
+}
+
+// ---------------------------------------------------------------------------
 // verify-ca and verify-full - THE discriminating pair
 // ---------------------------------------------------------------------------
 
@@ -612,6 +662,59 @@ async fn sslcrl_refuses_the_server_certificate_it_revokes() {
         describe(&revoked).to_ascii_lowercase().contains("revoked"),
         "the refusal must be certificate revocation, not a parse error: {}",
         describe(&revoked)
+    );
+}
+
+/// The directory form enforces the same revocation policy as `sslcrl`: the
+/// certificate and every other connection variable remain identical.
+#[compio::test]
+async fn sslcrldir_refuses_the_server_certificate_it_revokes() {
+    let s = servers();
+    let base = format!("{} sslmode=verify-full sslrootcert={}", s.tls_url, s.ca);
+
+    assert!(
+        transport_of(&base)
+            .await
+            .expect("the server certificate is valid without sslcrldir"),
+        "the no-directory control was not encrypted"
+    );
+
+    let revoked = transport_of(&format!("{base} sslcrldir={}", s.server_crl_dir))
+        .await
+        .expect_err("the hashed CRL directory must refuse the certificate it revokes");
+    assert!(
+        describe(&revoked).to_ascii_lowercase().contains("revoked"),
+        "the refusal must be certificate revocation, not directory loading: {}",
+        describe(&revoked)
+    );
+}
+
+/// OpenSSL selects a CRL by the issuer hash in its filename, not by scanning
+/// every `.rN` file and inspecting its contents. The CRL does not revoke this
+/// second certificate, so the correctly named directory accepts it while the
+/// same CRL under the wrong hash leaves revocation status unknown and refuses.
+#[compio::test]
+async fn sslcrldir_requires_the_crl_issuer_hash_in_the_filename() {
+    let s = servers();
+    let base = format!(
+        "{} sslmode=verify-ca sslrootcert={} sslcrldir=",
+        s.mismatch_url, s.ca
+    );
+
+    assert!(
+        transport_of(&format!("{base}{}", s.server_crl_dir))
+            .await
+            .expect("the correctly hashed non-revoking CRL must be usable"),
+        "the correctly hashed control was not encrypted"
+    );
+
+    let wrong_hash = transport_of(&format!("{base}{}", s.server_crl_wrong_hash_dir))
+        .await
+        .expect_err("a CRL stored under the wrong issuer hash must not be loaded");
+    let text = describe(&wrong_hash);
+    assert!(
+        text.contains("sslcrldir=") && text.contains("issuer hash"),
+        "the refusal must identify the mis-hashed directory entry: {text}"
     );
 }
 

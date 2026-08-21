@@ -38,11 +38,12 @@ tls = [
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:pkcs8",
+    "dep:sha1",
     "dep:sha2",
     "dep:x509-parser",
     "dep:zeroize",
 ]
-# Opt-in for `tests/tls_live.rs`, which needs the four PostgreSQL servers
+# Opt-in for `tests/tls_live.rs`, which needs the five PostgreSQL servers
 # `tests/tls_live_setup.sh` stands up.
 #
 # It is a FEATURE rather than a runtime check because the two states have to be
@@ -136,6 +137,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.sha1]
+workspace = true
+optional = true
+
 [dev-dependencies]
 compio = { workspace = true }
 criterion = { workspace = true }
@@ -145,6 +150,7 @@ criterion = { workspace = true }
 # adds no new crate to the lock — it only makes the surface visible to the
 # `tests/integration.rs` target.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "async-await"] }
+tempfile = { workspace = true }
 
 [[test]]
 name = "tls_live"
