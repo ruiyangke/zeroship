@@ -629,34 +629,6 @@ mod tests {
     };
     use crate::{cache_schema_for_tests, set_sqlite_backend_for_tests};
 
-    struct ScopedEnvVar {
-        name: String,
-        prior: Option<String>,
-    }
-
-    impl ScopedEnvVar {
-        /// `prior` is supplied by the CALLER, already read through a declared
-        /// key. Reading it here from `name: &str` made this an unattributable
-        /// read: the literal lived at the call site and the read lived here.
-        fn set(name: &str, value: &str, prior: Option<String>) -> Self {
-            std::env::set_var(name, value);
-            Self {
-                name: name.to_string(),
-                prior,
-            }
-        }
-    }
-
-    impl Drop for ScopedEnvVar {
-        fn drop(&mut self) {
-            if let Some(prior) = self.prior.as_deref() {
-                std::env::set_var(&self.name, prior);
-            } else {
-                std::env::remove_var(&self.name);
-            }
-        }
-    }
-
     fn run<F: std::future::Future>(f: F) -> F::Output {
         compio::runtime::Runtime::new()
             .expect("compio runtime build")
@@ -737,11 +709,11 @@ mod tests {
     fn write_pipeline_applies_every_stage_across_insert_many_update_and_upsert() {
         run(async {
             let key_id = "write_pipeline_uniform";
-            let _env = ScopedEnvVar::set(
-                "ZEROSHIP_COLUMN_KEY_WRITE_PIPELINE_UNIFORM",
-                &"1".repeat(64),
-                zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_WRITE_PIPELINE_UNIFORM"),
-            );
+            // Hand the root key to the isolate rather than the process
+            // environment. `SqliteBackend::new` below reads this source, so
+            // the encrypt/decrypt legs still run through the real
+            // `KeyStore::resolve` + HKDF derivation.
+            let _keys = crate::supply_root_keys_for_tests(&[(key_id, &"1".repeat(64))]);
             let app_id = "app_write_pipeline";
             let collection = "users";
             let schema = serde_json::json!({

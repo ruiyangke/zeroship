@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 use std::cell::RefCell;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::rc::Rc;
@@ -20,77 +18,68 @@ use zeroship_runtime::{EgressResolver, EgressRule, ResolveFuture, Verdict,
     EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
 };
 
-struct EnvGuard {
-    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+/// Mirrors `DEFAULT_GLOBAL_MAX_SOCKETS` / `RESOLVE_TIMEOUT` in
+/// `crates/runtime/src/transport/{net_policy,egress}.rs`. A test that names
+/// neither wants them out of the way, not a specific number.
+const DEFAULT_GLOBAL_MAX_SOCKETS: u32 = 4096;
+const DEFAULT_RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The four runtime settings the tests in this file vary. `Default` is the
+/// production shape - dev mode OFF, so the SSRF floor is running, and no
+/// bound tightened - which is what several of these tests need in order to
+/// observe a refusal at all.
+#[derive(Default)]
+struct Settings {
+    /// Dev mode. OFF by default, deliberately: with it on, `is_blocked_ip` is
+    /// bypassed and the floor arm of a refusal split is never taken.
+    dev_mode: bool,
+    /// Process-wide socket ceiling. `None` leaves it out of the way.
+    global_max_sockets: Option<u32>,
+    /// PHASE 2 bound. `None` leaves it at the production default.
+    resolve_timeout: Option<Duration>,
+    /// Debug-only hold on the blocking DNS lookup, as `(host, delay)`.
+    resolve_hang: Option<(String, Duration)>,
 }
 
-impl EnvGuard {
-    fn set(vars: &[(&'static str, Option<String>)]) -> Self {
-        let keys = [
-            "ZEROSHIP_DEV",
-            "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
-            "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
-            "ZEROSHIP_NET_TEST_DNS_HANG_HOST",
-            "ZEROSHIP_NET_TEST_DNS_HANG_MS",
-        ];
-        // Each name is read through a literal macro call (the registering
-        // macros require a literal at the call site), in the same order as
-        // `keys`, rather than looping `var_os` over a runtime `&str`.
-        let prev: Vec<(&'static str, Option<std::ffi::OsString>)> = vec![
-            (
-                "ZEROSHIP_DEV",
-                zeroship_core::declared_env_os!(dev, "ZEROSHIP_DEV", zeroship_runtime::RuntimeConsumer),
-            ),
-            (
-                "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
-                zeroship_core::declared_env_os!(
-                    platform,
-                    "ZEROSHIP_NET_GLOBAL_MAX_SOCKETS",
-                    zeroship_runtime::RuntimeConsumer
-                ),
-            ),
-            (
-                "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
-                zeroship_core::declared_env_os!(
-                    platform,
-                    "ZEROSHIP_NET_RESOLVE_TIMEOUT_MS",
-                    zeroship_runtime::RuntimeConsumer
-                ),
-            ),
-            (
-                "ZEROSHIP_NET_TEST_DNS_HANG_HOST",
-                zeroship_core::test_env_os!("ZEROSHIP_NET_TEST_DNS_HANG_HOST"),
-            ),
-            (
-                "ZEROSHIP_NET_TEST_DNS_HANG_MS",
-                zeroship_core::test_env_os!("ZEROSHIP_NET_TEST_DNS_HANG_MS"),
-            ),
-        ];
-        unsafe {
-            for key in keys {
-                std::env::remove_var(key);
-            }
-            for (key, val) in vars {
-                match val {
-                    Some(val) => std::env::set_var(key, val),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
-        Self { prev }
+/// States [`Settings`] on the runtime's process-level cells and restores the
+/// previous values on drop.
+///
+/// The cells are process-wide, so every user still takes [`lock_env`]: two
+/// tests disagreeing about dev mode still disagree. What they are not is
+/// process ENVIRONMENT - the previous shape set `ZEROSHIP_DEV` and friends
+/// with `std::env::set_var`, which races concurrent libc `getenv` and is
+/// undefined behaviour no mutex in this file could have covered.
+struct SettingsGuard {
+    prev_dev: bool,
+    prev_global_max_sockets: u32,
+    prev_resolve_timeout: Duration,
+}
+
+impl SettingsGuard {
+    fn set(settings: Settings) -> Self {
+        let guard = Self {
+            prev_dev: zeroship_runtime::dev_mode_enabled(),
+            prev_global_max_sockets: zeroship_runtime::global_max_sockets(),
+            prev_resolve_timeout: zeroship_runtime::resolve_timeout(),
+        };
+        zeroship_runtime::set_dev_mode(settings.dev_mode);
+        zeroship_runtime::set_global_max_sockets(
+            settings.global_max_sockets.unwrap_or(DEFAULT_GLOBAL_MAX_SOCKETS),
+        );
+        zeroship_runtime::set_resolve_timeout(
+            settings.resolve_timeout.unwrap_or(DEFAULT_RESOLVE_TIMEOUT),
+        );
+        zeroship_runtime::set_resolve_hang(settings.resolve_hang);
+        guard
     }
 }
 
-impl Drop for EnvGuard {
+impl Drop for SettingsGuard {
     fn drop(&mut self) {
-        unsafe {
-            for (key, val) in &self.prev {
-                match val {
-                    Some(val) => std::env::set_var(key, val),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
+        zeroship_runtime::set_dev_mode(self.prev_dev);
+        zeroship_runtime::set_global_max_sockets(self.prev_global_max_sockets);
+        zeroship_runtime::set_resolve_timeout(self.prev_resolve_timeout);
+        zeroship_runtime::set_resolve_hang(None);
     }
 }
 
@@ -452,7 +441,7 @@ fn allowlist(host: &str, port: u16, max_sockets: u32, egress_ceiling_bytes: u64)
 #[test]
 fn the_shipped_connect_path_holds_the_dns_gate() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
         let port = addr.port();
@@ -560,7 +549,7 @@ fn the_shipped_connect_path_holds_the_dns_gate() {
 
 /// 5.7, with the platform floor LIVE.
 ///
-/// Every other `node:net` row sets `ZEROSHIP_DEV=1`, which bypasses
+/// Every other `node:net` row runs with dev mode ON, which bypasses
 /// `is_blocked_ip` - so the floor arm of the refusal split is never taken and
 /// collapsing the two codes into one leaves them all green. These two arms
 /// differ in ONE thing, the address the name resolved to, and must report
@@ -569,8 +558,8 @@ fn the_shipped_connect_path_holds_the_dns_gate() {
 #[test]
 fn the_floor_and_the_creators_rules_refuse_with_different_codes() {
     let _lock = lock_env();
-    // Deliberately NOT ZEROSHIP_DEV=1: the floor has to be running.
-    let _env = EnvGuard::set(&[]);
+    // Deliberately NOT dev mode: the floor has to be running.
+    let _env = SettingsGuard::set(Settings::default());
     compio::runtime::Runtime::new().unwrap().block_on(async {
         // A public range the floor permits, so the creator's own rules are what
         // decide anything outside it.
@@ -625,7 +614,7 @@ fn the_floor_and_the_creators_rules_refuse_with_different_codes() {
 #[test]
 fn ssrf_denies_metadata_cgnat_and_dns_to_private_even_trusted() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[]);
+    let _env = SettingsGuard::set(Settings::default());
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_net_js(
             r#"
@@ -662,14 +651,24 @@ return out.join("|");
     }
 }
 
+/// With dev mode OFF the SSRF floor is running and the metadata address is
+/// refused, even on a `Trusted` policy that skips rule matching.
+///
+/// WHAT THIS DOES NOT CATCH, and where that half went. This used to loop
+/// `ZEROSHIP_DEV` over `"0"` and `""` to prove neither spelling counts as dev.
+/// Dev mode is a cached process-level cell now, so no test in this process can
+/// ask the environment twice; the spelling half is
+/// `only_exactly_one_is_dev_mode` in `crates/runtime/src/transport/ssrf.rs`,
+/// which asks it directly and without an environment. This half asks the other
+/// question - that an off mode really does leave the floor running - which the
+/// spelling test cannot reach.
 #[test]
-fn non_affirmative_dev_env_does_not_relax_ssrf() {
+fn dev_mode_off_does_not_relax_ssrf() {
     let _lock = lock_env();
-    for dev_value in [Some("0".to_string()), Some(String::new())] {
-        let _env = EnvGuard::set(&[("ZEROSHIP_DEV", dev_value)]);
-        let result = compio::runtime::Runtime::new().unwrap().block_on(async {
-            run_net_js(
-                r#"
+    let _env = SettingsGuard::set(Settings::default());
+    let result = compio::runtime::Runtime::new().unwrap().block_on(async {
+        run_net_js(
+            r#"
 return await new Promise((resolve) => {
   const s = new net.Socket();
   s.on("error", (err) => resolve(`${err.code}:${err.message}`));
@@ -678,28 +677,27 @@ return await new Promise((resolve) => {
   setTimeout(() => resolve("timeout"), 1000);
 });
 "#,
-                trusted(4, 1024 * 1024),
-                Duration::from_secs(2),
-            )
-            .await
-        });
-        assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
-        assert!(
-            result.body.contains("ERR_NET_SSRF") || result.body.to_ascii_lowercase().contains("ssrf"),
-            "ZEROSHIP_DEV must not relax SSRF unless it is exactly 1; got: {}",
-            result.body
-        );
-    }
+            trusted(4, 1024 * 1024),
+            Duration::from_secs(2),
+        )
+        .await
+    });
+    assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
+    assert!(
+        result.body.contains("ERR_NET_SSRF") || result.body.to_ascii_lowercase().contains("ssrf"),
+        "dev mode off must not relax SSRF; got: {}",
+        result.body
+    );
 }
 
 #[test]
 fn dns_timeout_fails_closed() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[
-        ("ZEROSHIP_NET_RESOLVE_TIMEOUT_MS", Some("20".to_string())),
-        ("ZEROSHIP_NET_TEST_DNS_HANG_HOST", Some("hang.test".to_string())),
-        ("ZEROSHIP_NET_TEST_DNS_HANG_MS", Some("250".to_string())),
-    ]);
+    let _env = SettingsGuard::set(Settings {
+        resolve_timeout: Some(Duration::from_millis(20)),
+        resolve_hang: Some(("hang.test".to_string(), Duration::from_millis(250))),
+        ..Settings::default()
+    });
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_net_js(
             r#"
@@ -727,7 +725,7 @@ return await new Promise((resolve) => {
 #[test]
 fn denied_policy_cannot_resolve_node_net() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_js_module(
             wrap_module(
@@ -756,7 +754,7 @@ fn denied_policy_cannot_resolve_node_net() {
 #[test]
 fn unconnected_socket_wrappers_are_capped_and_reclaimed() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
         run_net_js(
@@ -821,7 +819,7 @@ return `${{capFailure}}|${{reclaimed}}|${{cycle}}`;
 #[test]
 fn allowlist_denies_miss_and_rejects_broad_entries_at_config_time() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     // Wildcards are not refused by a curated suffix list any more - they are
     // not REPRESENTABLE. The `*.` form is no longer a grammar the rule parser
     // accepts, so `*.workers.dev` cannot be written at all rather than being
@@ -872,7 +870,7 @@ return new Promise((resolve) => {{
 #[test]
 fn kind_transition_globals_are_hidden_and_query_cannot_forge_action() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     let (query, action) = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
         let module = format!(
@@ -952,7 +950,7 @@ export default {{ rpc: {{ attemptQuery, attemptAction }} }};
 #[test]
 fn query_and_mutation_connect_hit_capability_violation_but_action_can_connect() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     let (query, mutation, action) = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
         let module = format!(
@@ -1032,7 +1030,7 @@ export default {{ rpc: {{ queryProc, mutationProc, actionProc }} }};
 #[test]
 fn outbound_hard_cap_destroys_socket() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Idle).await;
         run_net_js(
@@ -1078,7 +1076,7 @@ return await new Promise((resolve) => {{
 #[test]
 fn pre_connect_write_queue_is_bounded_but_small_write_flushes() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let idle = spawn_tcp_server(ServerMode::Idle).await;
         let echo = spawn_tcp_server(ServerMode::Echo).await;
@@ -1142,7 +1140,7 @@ return `writes=${{refused}}|flushed=${{flushed}}`;
 #[test]
 fn egress_ceiling_destroys_socket_and_feeds_spend_meter() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     let app_id = Uuid::new_v4();
     let meter = Arc::new(zeroship_metering::Meter::new());
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
@@ -1196,7 +1194,7 @@ return await new Promise((resolve) => {{
 #[test]
 fn socket_reads_feed_net_ingress_meter() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     let app_id = Uuid::new_v4();
     let meter = Arc::new(zeroship_metering::Meter::new());
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
@@ -1247,7 +1245,7 @@ return await new Promise((resolve) => {{
 #[test]
 fn egress_ceiling_resets_between_dispatches() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+    let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
     let (first, second) = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Echo).await;
         let modules = vec![ModuleEntry {
@@ -1346,10 +1344,11 @@ export default {{
 #[test]
 fn global_socket_ceiling_rejects_past_process_cap() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(&[
-        ("ZEROSHIP_DEV", Some("1".to_string())),
-        ("ZEROSHIP_NET_GLOBAL_MAX_SOCKETS", Some("1".to_string())),
-    ]);
+    let _env = SettingsGuard::set(Settings {
+        dev_mode: true,
+        global_max_sockets: Some(1),
+        ..Settings::default()
+    });
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let addr = spawn_tcp_server(ServerMode::Idle).await;
         run_net_js(
@@ -1388,11 +1387,21 @@ return await new Promise((resolve) => {{
     );
 }
 
+/// `rejectUnauthorized: false` is admitted ONLY in dev mode, and the control
+/// below proves the same call succeeds once the mode is on - so the refusal is
+/// attributable to the mode and not to the call being broken.
+///
+/// WHAT THIS DOES NOT CATCH, and where that half went. This used to loop
+/// `ZEROSHIP_DEV` over `"0"` and `""` to prove neither spelling counts as dev.
+/// That question is `only_exactly_one_is_dev_mode` in
+/// `crates/runtime/src/transport/ssrf.rs` now; dev mode is a cached
+/// process-level cell, so no test in this process can ask the environment
+/// twice.
 #[test]
-fn reject_unauthorized_false_requires_affirmative_dev_env() {
+fn reject_unauthorized_false_requires_dev_mode() {
     let _lock = lock_env();
-    for dev_value in [Some("0".to_string()), Some(String::new())] {
-        let _env = EnvGuard::set(&[("ZEROSHIP_DEV", dev_value)]);
+    {
+        let _env = SettingsGuard::set(Settings::default());
         let denied = compio::runtime::Runtime::new().unwrap().block_on(async {
             run_js_module(
                 wrap_module(
@@ -1422,13 +1431,13 @@ try {
             denied
                 .body
                 .contains("ERR_TLS_REJECT_UNAUTHORIZED_DISABLED"),
-            "rejectUnauthorized:false must fail closed for non-affirmative dev env, got: {}",
+            "rejectUnauthorized:false must fail closed outside dev mode, got: {}",
             denied.body
         );
     }
 
     let allowed = compio::runtime::Runtime::new().unwrap().block_on(async {
-        let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+        let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
         let addr = spawn_self_signed_tls_server().await;
         run_js_module(
             wrap_module(
@@ -1464,7 +1473,7 @@ return await new Promise((resolve) => {{
 fn tls_verify_defaults_secure_and_verify_disable_is_not_trusted_escape() {
     let _lock = lock_env();
     let default_result = compio::runtime::Runtime::new().unwrap().block_on(async {
-        let _env = EnvGuard::set(&[("ZEROSHIP_DEV", Some("1".to_string()))]);
+        let _env = SettingsGuard::set(Settings { dev_mode: true, ..Settings::default() });
         let addr = spawn_self_signed_tls_server().await;
         run_js_module(
             wrap_module(
@@ -1503,7 +1512,7 @@ return await new Promise((resolve) => {{
     );
 
     let denied = compio::runtime::Runtime::new().unwrap().block_on(async {
-        let _env = EnvGuard::set(&[]);
+        let _env = SettingsGuard::set(Settings::default());
         run_js_module(
             wrap_module(
                 r#"import tls from "node:tls";"#,
@@ -1537,7 +1546,7 @@ try {
     );
 
     let trusted_denied = compio::runtime::Runtime::new().unwrap().block_on(async {
-        let _env = EnvGuard::set(&[]);
+        let _env = SettingsGuard::set(Settings::default());
         run_js_module(
             wrap_module(
                 r#"import tls from "node:tls";"#,
@@ -1580,7 +1589,7 @@ try {
 /// These tests target literal addresses, and an IP literal is NOT a
 /// representable `Name` - it must be written as a range, so a reader of a rule
 /// always knows which check decides it. `is_blocked_ip` would refuse loopback
-/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// outright; these tests run with dev mode on, which bypasses the floor
 /// and nothing else.
 fn accept_target(host: &str, port: u16) -> EgressRule {
     let destination = match host.parse::<std::net::IpAddr>() {

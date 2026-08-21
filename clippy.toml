@@ -1,5 +1,21 @@
 # The compiler half of the raw-environment gate.
 #
+# TWO POPULATIONS, one lint. The READ side (`var`, `var_os`, `vars`,
+# `vars_os`) is gated because an undeclared read is invisible; the WRITE side
+# (`set_var`, `remove_var`) is gated for a different reason, and it is not
+# about enumerability. `set_var` mutates the process-global environment, so a
+# value one test sets is read by every other test in the same binary and by
+# any thread already running. Rust 2024 made both functions `unsafe` for
+# exactly that reason: they race with concurrent `getenv` in libc and the race
+# is undefined behaviour, not a flaky assertion. A suite that sets environment
+# variables is not hermetic and its failures are not reproducible.
+#
+# What the write half deliberately does NOT gate: giving an environment to a
+# CHILD process. `Command::new(..).env("K", "v")` and the shell's `VAR=x cmd`
+# are explicit arguments at the call site, scoped to the child, and are the
+# sanctioned way to test that a variable reaches a binary. Neither is a method
+# on `std::env`, so neither is named here.
+#
 # Section 4.5 of docs/proposals/2026-08-11-config-name-alignment.md: every
 # first-party environment read goes through a typed key and a consumer, so the
 # population of reads is enumerable. These four methods take a `&str` and are
@@ -19,4 +35,6 @@ disallowed-methods = [
     { path = "std::env::var_os", reason = "use a typed key: zeroship_core::declared_env_os!" },
     { path = "std::env::vars", reason = "use zeroship_core::read_process_env_snapshot!" },
     { path = "std::env::vars_os", reason = "use zeroship_core::read_process_env_snapshot!" },
+    { path = "std::env::set_var", reason = "process-global and racy; pass typed config or Command::env for a child" },
+    { path = "std::env::remove_var", reason = "process-global and racy; pass typed config or Command::env for a child" },
 ]

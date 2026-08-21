@@ -15,7 +15,6 @@
 //!   - graceful close (code=1000)
 
 #![cfg(feature = "runtime_native_websocket")]
-#![allow(unsafe_code)]
 
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -194,9 +193,10 @@ fn run_js_with_runtime(
     max_wait: Duration,
     policy: zeroship_runtime::NetPolicy,
 ) -> String {
-    unsafe {
-        std::env::set_var("ZEROSHIP_DEV", "1");
-    }
+    // Dev mode on, so the SSRF fast path does not block the loopback
+    // fixture server. Every test in this binary wants it on and none turns
+    // it off, so the process-level cell needs no mutual exclusion.
+    zeroship_runtime::set_dev_mode(true);
     use zeroship_runtime::modules::ModuleEntry;
     use zeroship_runtime::Runtime;
 

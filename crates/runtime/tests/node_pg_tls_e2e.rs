@@ -1,19 +1,17 @@
-#![allow(unsafe_code)]
-
 use crate::node_realworld;
 
 use std::time::Duration;
 
 use serde_json::json;
 
-use node_realworld::{allowlist, ensure_tls_postgres, lock_env, module, run_js, EnvGuard};
+use node_realworld::{allowlist, ensure_tls_postgres, lock_env, module, run_js, SettingsGuard};
 
 const PG_BUNDLE: &str = include_str!("fixtures/pg/pg-8.16.3.bundle.mjs");
 
 #[test]
 fn unmodified_pg_driver_uses_real_tls_with_ca_pin_against_live_postgres() {
     let _lock = lock_env();
-    let _env = EnvGuard::set_dev();
+    let _env = SettingsGuard::set_dev();
     let server = ensure_tls_postgres();
     let host = "localhost";
     let ca_pem = serde_json::to_string(&server.ca_pem).unwrap();

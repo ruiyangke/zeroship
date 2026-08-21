@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 use crate::node_realworld;
 
 use std::time::Duration;
@@ -7,7 +5,7 @@ use std::time::Duration;
 use serde_json::json;
 
 use node_realworld::{
-    EnvGuard, allowlist, ensure_redis, lock_env, module, run_js,
+    SettingsGuard, allowlist, ensure_redis, lock_env, module, run_js,
 };
 
 const IOREDIS_BUNDLE: &str = include_str!("fixtures/ioredis/ioredis-5.6.1.bundle.mjs");
@@ -15,7 +13,7 @@ const IOREDIS_BUNDLE: &str = include_str!("fixtures/ioredis/ioredis-5.6.1.bundle
 #[test]
 fn unmodified_ioredis_driver_pipeline_and_pubsub_live_redis() {
     let _lock = lock_env();
-    let _env = EnvGuard::set_dev();
+    let _env = SettingsGuard::set_dev();
     let server = ensure_redis();
 
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {

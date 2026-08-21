@@ -32,8 +32,8 @@
 //!
 //! ## Dev-only by construction
 //!
-//! [`resolve_dev_user_json`] is a no-op unless `ZEROSHIP_DEV=1` (the Vite
-//! plugin sets it on the spawned child; see
+//! [`resolve_dev_user_json`] is a no-op unless dev mode is on, which for a
+//! process the Vite plugin spawned means `ZEROSHIP_DEV=1` (see
 //! `sdks/vite-plugin/src/constants.ts` `ENV_DEV`). The cookie format is NOT the
 //! production `__Host-zeroship_app_session` cookie, carries a dev-only HMAC, and is
 //! never read by the gateway. There is no untrusted gateway in front of the dev
@@ -50,38 +50,76 @@ use zeroship_core::config::DeclaredEnvKey;
 /// stray prod cookie is ignored by the dev decoder (and vice-versa).
 pub const DEV_SESSION_COOKIE: &str = "__zeroship_dev_session";
 
-/// Env var the Vite plugin sets to `1` on the spawned dev runtime child.
-/// Mirrors `ENV_DEV` in `sdks/vite-plugin/src/constants.ts`.
-const ENV_DEV: DeclaredEnvKey<String, crate::RuntimeConsumer> = DeclaredEnvKey::dev("ZEROSHIP_DEV");
-
 /// Env var carrying the per-dev-server HMAC secret the JS dev-auth layer uses
 /// to sign the `__zeroship_dev_session` cookie. Generated fresh by the Vite plugin
 /// for each dev server and passed to the child via the spawn env.
 const ENV_DEV_AUTH_SECRET: DeclaredEnvKey<String, crate::RuntimeConsumer> =
     DeclaredEnvKey::dev("ZEROSHIP_DEV_AUTH_SECRET");
 
+/// The two dev-auth conditions, resolved once where the process starts and
+/// then passed down.
+///
+/// They are INPUTS rather than environment reads inside
+/// [`resolve_dev_user_json`] so the resolver is a pure function of the request
+/// plus a stated configuration: a caller that wants dev auth on says so, and a
+/// test proving a condition is load-bearing flips a field instead of mutating
+/// the process-global environment (which races libc `getenv`).
+#[derive(Debug, Clone, Default)]
+pub struct DevAuthSettings {
+    /// Dev mode. False in every production runtime, and the outer of the two
+    /// conditions: with it false no cookie resolves, whatever the secret.
+    pub dev_mode: bool,
+    /// The per-dev-server HMAC secret the JS dev-auth layer signs with.
+    /// `None` (or empty) means the Vite plugin provisioned none, and no cookie
+    /// resolves however valid it looks.
+    pub secret: Option<String>,
+}
+
+impl DevAuthSettings {
+    /// Resolve both conditions from the process the operator (or the Vite
+    /// plugin) started. Dev mode comes from
+    /// [`crate::transport::ssrf::dev_mode_enabled`], the single reader of
+    /// `ZEROSHIP_DEV`; the secret comes from `ZEROSHIP_DEV_AUTH_SECRET`.
+    ///
+    /// Call this ONCE at startup. Every later request reuses the answer, so a
+    /// mid-flight environment change is not consulted; the Vite plugin sets
+    /// both on the child before `exec`, so there is none to consult.
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self {
+            dev_mode: crate::transport::ssrf::dev_mode_enabled(),
+            secret: zeroship_core::read_declared_env!(ENV_DEV_AUTH_SECRET, crate::RuntimeConsumer)
+                .ok()
+                .flatten(),
+        }
+    }
+}
+
 /// Resolve the dev user identity JSON for a request from its `Cookie` header.
 ///
 /// Returns `Some(user_json)` only when:
-///   1. `ZEROSHIP_DEV=1` (the dev runtime; structurally absent otherwise), and
-///   2. `ZEROSHIP_DEV_AUTH_SECRET` is set (the Vite plugin provisioned it), and
+///   1. `settings.dev_mode` is true (the dev runtime; false otherwise), and
+///   2. `settings.secret` is a non-empty secret (the Vite plugin provisioned
+///      it), and
 ///   3. a `__zeroship_dev_session` cookie is present and its dev HMAC verifies.
+///
+/// All three are load-bearing and independently tested below: dropping any one
+/// of them would let an identity into the runtime that the dev-auth layer
+/// never minted.
 ///
 /// The returned string is the canonical `ZeroShip-User` JSON body
 /// (`{id,email,name,avatar?,email_verified,scopes}`) — handed verbatim to
 /// [`crate::Runtime::call_fetch_handler_with_user`], exactly as the worker hands the
 /// gateway-verified header body in production.
 #[must_use]
-pub fn resolve_dev_user_json(request_headers: &[(String, String)]) -> Option<String> {
-    let dev = zeroship_core::read_declared_env!(ENV_DEV, crate::RuntimeConsumer)
-        .ok()
-        .flatten();
-    if !zeroship_core::config::env_is_exact(dev.as_deref(), "1") {
+pub fn resolve_dev_user_json(
+    request_headers: &[(String, String)],
+    settings: &DevAuthSettings,
+) -> Option<String> {
+    if !settings.dev_mode {
         return None;
     }
-    let secret = zeroship_core::read_declared_env!(ENV_DEV_AUTH_SECRET, crate::RuntimeConsumer)
-        .ok()
-        .flatten()?;
+    let secret = settings.secret.as_deref()?;
     if secret.is_empty() {
         return None;
     }
@@ -196,38 +234,61 @@ mod tests {
         assert_eq!(extract_cookie("only=here", DEV_SESSION_COOKIE), None);
     }
 
-    /// `resolve_dev_user_json` is a no-op when `ZEROSHIP_DEV` is unset —
-    /// dev-only-by-construction even if a cookie + secret somehow appear.
-    /// (Serial-ish: mutates process env; restores afterward.)
-    #[test]
-    fn resolve_is_noop_without_dev_flag() {
-        const ENV_DEV_OS: DeclaredEnvKey<std::ffi::OsString, crate::RuntimeConsumer> =
-            DeclaredEnvKey::dev("ZEROSHIP_DEV");
-        const ENV_DEV_AUTH_SECRET_OS: DeclaredEnvKey<std::ffi::OsString, crate::RuntimeConsumer> =
-            DeclaredEnvKey::dev("ZEROSHIP_DEV_AUTH_SECRET");
-
-        let prev_dev = zeroship_core::read_declared_env_os!(ENV_DEV_OS, crate::RuntimeConsumer);
-        let prev_secret =
-            zeroship_core::read_declared_env_os!(ENV_DEV_AUTH_SECRET_OS, crate::RuntimeConsumer);
-        unsafe {
-            std::env::remove_var(ENV_DEV.name());
-            std::env::set_var(ENV_DEV_AUTH_SECRET.name(), "dev-secret-abc");
-        }
+    /// A `Cookie` header carrying a token this secret really did sign.
+    /// Everything below varies exactly one of the two settings around it, so a
+    /// `None` is attributable to that setting and not to a bad cookie.
+    fn valid_cookie_headers() -> Vec<(String, String)> {
         let token = sign_dev_session(SECRET, USER_JSON);
-        let headers = vec![(
+        vec![(
             "Cookie".to_string(),
             format!("{DEV_SESSION_COOKIE}={token}"),
-        )];
-        assert_eq!(resolve_dev_user_json(&headers), None);
-        unsafe {
-            match prev_dev {
-                Some(v) => std::env::set_var(ENV_DEV.name(), v),
-                None => std::env::remove_var(ENV_DEV.name()),
-            }
-            match prev_secret {
-                Some(v) => std::env::set_var(ENV_DEV_AUTH_SECRET.name(), v),
-                None => std::env::remove_var(ENV_DEV_AUTH_SECRET.name()),
-            }
+        )]
+    }
+
+    /// The control for the two negatives below: with BOTH conditions met, the
+    /// same cookie resolves. Without this, "returned None" would not
+    /// distinguish a load-bearing condition from a cookie that never worked.
+    #[test]
+    fn resolve_returns_user_with_dev_mode_and_secret() {
+        let settings = DevAuthSettings {
+            dev_mode: true,
+            secret: Some(String::from_utf8(SECRET.to_vec()).unwrap()),
+        };
+        assert_eq!(
+            resolve_dev_user_json(&valid_cookie_headers(), &settings).as_deref(),
+            Some(USER_JSON)
+        );
+    }
+
+    /// `resolve_dev_user_json` is a no-op when dev mode is off,
+    /// dev-only-by-construction even if a cookie + secret somehow appear.
+    #[test]
+    fn resolve_is_noop_without_dev_mode() {
+        let settings = DevAuthSettings {
+            dev_mode: false,
+            secret: Some(String::from_utf8(SECRET.to_vec()).unwrap()),
+        };
+        assert_eq!(resolve_dev_user_json(&valid_cookie_headers(), &settings), None);
+    }
+
+    /// Also a no-op when no secret was provisioned, or an empty one was, even
+    /// in dev mode. Without a secret there is nothing the cookie could have
+    /// been bound to, so it must not be trusted.
+    #[test]
+    fn resolve_is_noop_without_secret() {
+        for secret in [None, Some(String::new())] {
+            let settings = DevAuthSettings { dev_mode: true, secret };
+            assert_eq!(resolve_dev_user_json(&valid_cookie_headers(), &settings), None);
         }
+    }
+
+    /// The default is both conditions unmet - a `DevAuthSettings` nobody
+    /// configured resolves nobody.
+    #[test]
+    fn default_settings_resolve_nobody() {
+        let settings = DevAuthSettings::default();
+        assert!(!settings.dev_mode);
+        assert_eq!(settings.secret, None);
+        assert_eq!(resolve_dev_user_json(&valid_cookie_headers(), &settings), None);
     }
 }

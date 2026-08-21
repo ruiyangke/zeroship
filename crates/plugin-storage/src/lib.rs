@@ -56,7 +56,7 @@ zeroship_core::declare_env_consumer!(
 
 pub use backend::{Backend, LocalFs};
 #[cfg(feature = "s3")]
-pub use backend::S3;
+pub use backend::{S3UploadTuning, S3};
 pub use config::{build_backend, StorageBackendConfig, StorageConfigError};
 
 // ---------------------------------------------------------------------------

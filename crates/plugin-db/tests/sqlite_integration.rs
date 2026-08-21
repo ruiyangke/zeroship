@@ -3318,45 +3318,27 @@ fn near_returns_within_radius() {
 // rusqlite's typed BLOB binding, decrypt-on-read. Mirrors the PG suite's
 // `EncryptedColumn` impl tests in `tests/integration.rs`.
 
-/// Helper: set a synthetic root key in `ZEROSHIP_COLUMN_KEY_<KEY>`
-/// for the duration of a test, restoring the previous value on drop.
-/// Same shape as the PG-side `WithEnv` in `tests/integration.rs`.
-struct EncEnv {
-    name: String,
-    prev: Option<String>,
-}
-
-#[allow(unsafe_code)]
-impl EncEnv {
-    /// `prev` is supplied by the CALLER, already read through a declared key.
-    /// Reading it here from `name: &str` made this an unattributable read: the
-    /// literal lived at the call site and the read lived here.
-    fn set(name: &str, value: &str, prev: Option<String>) -> Self {
-        // SAFETY: each SQLite test uses a uniquely-named env var
-        // (suffix carries the test fn name) so concurrent test runs
-        // don't race on the process-global env table. The
-        // `ZEROSHIP_COLUMN_KEY_*` namespace is plugin-db-owned.
-        unsafe {
-            std::env::set_var(name, value);
-        }
-        Self {
-            name: name.to_string(),
-            prev,
-        }
-    }
-}
-
-#[allow(unsafe_code)]
-impl Drop for EncEnv {
-    fn drop(&mut self) {
-        // SAFETY: same justification as `set` above.
-        unsafe {
-            match &self.prev {
-                Some(p) => std::env::set_var(&self.name, p),
-                None => std::env::remove_var(&self.name),
-            }
-        }
-    }
+/// Helper: hand this isolate a synthetic root key for `key_id`, for the
+/// duration of a test. Same shape as the PG-side `with_root_key` in
+/// `tests/integration.rs`.
+///
+/// This REPLACES a `set_var("ZEROSHIP_COLUMN_KEY_<KEYID>", ...)` guard.
+/// The env var was the only channel that reached the `SqliteBackend`
+/// these tests never construct themselves - the one `init_pool_async`
+/// builds behind a `dispatch_zs` V8 call - and mutating it is
+/// process-global, racy with any concurrent `getenv`, and `unsafe`. The
+/// isolate context is per-thread and typed, so none of the three apply,
+/// and `SqliteBackend::{new, open}` read it wherever they are called
+/// from.
+///
+/// Install it BEFORE the backend is constructed: a backend captures the
+/// source at construction, so a key supplied afterwards will not reach
+/// it.
+///
+/// The returned guard withdraws the key on drop; keep it alive for the
+/// test body.
+fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_plugin_db::SuppliedRootKeysGuard {
+    zeroship_plugin_db::supply_root_keys_for_tests(&[(key_id, root_hex)])
 }
 
 /// Bind a raw byte slice as a SQLite BLOB literal using the `X'...'`
@@ -3521,11 +3503,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         };
 
         let key_id = "c1_insert_many";
-        let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_C1_INSERT_MANY",
-        &"d".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_C1_INSERT_MANY"),
-    );
+        let _keys = with_root_key("c1_insert_many", &"d".repeat(64));
         let app_id = "app_demo";
         let collection = "bulk_people";
         let schema = serde_json::json!({
@@ -3673,11 +3651,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
 #[test]
 fn upsert_insert_branch_auto_mints_id_sqlite_runtime() {
     let key_id = "c2_upsert_runtime_insert";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_C2_UPSERT_RUNTIME_INSERT",
-        &"e".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_C2_UPSERT_RUNTIME_INSERT"),
-    );
+    let _keys = with_root_key("c2_upsert_runtime_insert", &"e".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3744,11 +3718,7 @@ const _procedures = { setup, upsertInsert };
 #[test]
 fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runtime() {
     let key_id = "c2_upsert_runtime_conflict";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_C2_UPSERT_RUNTIME_CONFLICT",
-        &"f".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_C2_UPSERT_RUNTIME_CONFLICT"),
-    );
+    let _keys = with_root_key("c2_upsert_runtime_conflict", &"f".repeat(64));
 
     run(async {
         use zeroship_plugin_db::backend::sqlite::session::TypedCell;
@@ -3896,11 +3866,7 @@ const _procedures = { setup, upsertConflict };
 #[test]
 fn upsert_conflict_with_deterministic_key_keeps_randomised_ciphertext_readable_sqlite_runtime() {
     let key_id = "c2_upsert_det_conflict_runtime";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_C2_UPSERT_DET_CONFLICT_RUNTIME",
-        &"6".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_C2_UPSERT_DET_CONFLICT_RUNTIME"),
-    );
+    let _keys = with_root_key("c2_upsert_det_conflict_runtime", &"6".repeat(64));
 
     run(async {
         use zeroship_plugin_db::backend::sqlite::session::TypedCell;
@@ -4020,11 +3986,7 @@ const _procedures = { setup, upsertConflict };
 #[test]
 fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
     let key_id = "c1_update_non_id_runtime";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_C1_UPDATE_NON_ID_RUNTIME",
-        &"7".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_C1_UPDATE_NON_ID_RUNTIME"),
-    );
+    let _keys = with_root_key("c1_update_non_id_runtime", &"7".repeat(64));
 
     run(async {
         use zeroship_plugin_db::backend::sqlite::session::TypedCell;
@@ -4128,11 +4090,7 @@ const _procedures = { setup, seed, updateByEmail };
 #[test]
 fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
     let key_id = "c1_update_many_non_id_runtime";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_C1_UPDATE_MANY_NON_ID_RUNTIME",
-        &"8".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_C1_UPDATE_MANY_NON_ID_RUNTIME"),
-    );
+    let _keys = with_root_key("c1_update_many_non_id_runtime", &"8".repeat(64));
 
     run(async {
         use zeroship_plugin_db::backend::sqlite::session::TypedCell;
@@ -4260,11 +4218,7 @@ const _procedures = { setup, seed, updateManyByName };
 #[test]
 fn plain_updates_on_encrypted_collection_stay_on_fast_path_sqlite_runtime() {
     let key_id = "perf_plain_update_fast_path_runtime";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_PERF_PLAIN_UPDATE_FAST_PATH_RUNTIME",
-        &"9".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_PERF_PLAIN_UPDATE_FAST_PATH_RUNTIME"),
-    );
+    let _keys = with_root_key("perf_plain_update_fast_path_runtime", &"9".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4343,11 +4297,7 @@ const _procedures = { setup, seed, updatePlain, updateManyPlain };
 #[test]
 fn plain_upsert_on_encrypted_collection_skips_conflict_probe_sqlite_runtime() {
     let key_id = "perf_plain_upsert_fast_path_runtime";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_PERF_PLAIN_UPSERT_FAST_PATH_RUNTIME",
-        &"a".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_PERF_PLAIN_UPSERT_FAST_PATH_RUNTIME"),
-    );
+    let _keys = with_root_key("perf_plain_upsert_fast_path_runtime", &"a".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4425,11 +4375,7 @@ const _procedures = { setup, seed, upsertPlainConflict };
 #[test]
 fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
     let key_id = "i5_update_nested_version";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_I5_UPDATE_NESTED_VERSION",
-        &"1".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_I5_UPDATE_NESTED_VERSION"),
-    );
+    let _keys = with_root_key("i5_update_nested_version", &"1".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4518,11 +4464,7 @@ const _procedures = { setup, seed, nestedCasUpdate };
 #[test]
 fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
     let key_id = "i5_update_many_nested_version";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_I5_UPDATE_MANY_NESTED_VERSION",
-        &"2".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_I5_UPDATE_MANY_NESTED_VERSION"),
-    );
+    let _keys = with_root_key("i5_update_many_nested_version", &"2".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4617,11 +4559,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
     use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_rt_rand";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P5_SQLITE_RT_RAND",
-        &"a".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P5_SQLITE_RT_RAND"),
-    );
+    let _keys = with_root_key("p5_sqlite_rt_rand", &"a".repeat(64));
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -4701,11 +4639,7 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
     use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_rt_det";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P5_SQLITE_RT_DET",
-        &"b".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P5_SQLITE_RT_DET"),
-    );
+    let _keys = with_root_key("p5_sqlite_rt_det", &"b".repeat(64));
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -4786,11 +4720,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
     use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_det_eq";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P5_SQLITE_DET_EQ",
-        &"c".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P5_SQLITE_DET_EQ"),
-    );
+    let _keys = with_root_key("p5_sqlite_det_eq", &"c".repeat(64));
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -4904,11 +4834,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
     use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_row_swap";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P5_SQLITE_ROW_SWAP",
-        &"d".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P5_SQLITE_ROW_SWAP"),
-    );
+    let _keys = with_root_key("p5_sqlite_row_swap", &"d".repeat(64));
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -5004,11 +4930,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
     use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_cross";
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P5_SQLITE_CROSS",
-        &"e".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P5_SQLITE_CROSS"),
-    );
+    let _keys = with_root_key("p5_sqlite_cross", &"e".repeat(64));
     run(async {
         // Two separate backends rooted at separate temp dirs.
         let (backend_a, _dir_a) = fresh_backend();
@@ -5089,11 +5011,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
     use zeroship_plugin_db::crud::encryption_pass::{decrypt_row_on_read, encrypt_row_on_write};
     use zeroship_plugin_db::query::{build_insert_with_dialect, SqlDialect};
 
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P5_E2E_CRUD",
-        &"c".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P5_E2E_CRUD"),
-    );
+    let _keys = with_root_key("p5_e2e_crud", &"c".repeat(64));
     run(async {
         let (backend, _dir) = fresh_backend();
         backend
@@ -6201,11 +6119,7 @@ async fn read_audit_rows(
 /// emitted with the right classification.
 #[test]
 fn unmask_with_auto_actor_returns_plaintext() {
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P55_PR4_AUTO",
-        &"a".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P55_PR4_AUTO"),
-    );
+    let _keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
     let schema = serde_json::json!({
         "id": { "type": "string" },
         "ssn": {
@@ -6296,11 +6210,7 @@ fn unmask_with_auto_actor_returns_plaintext() {
 /// error `unmask_not_permitted` reaches the caller.
 #[test]
 fn unmask_with_user_actor_returns_forbidden_audit_logged() {
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P55_PR4_USER",
-        &"b".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P55_PR4_USER"),
-    );
+    let _keys = with_root_key("p55_pr4_user", &"b".repeat(64));
     let schema = serde_json::json!({
         "id": { "type": "string" },
         "ssn": {
@@ -6481,11 +6391,7 @@ async fn policy_setup(
 /// allows a user-role actor to unmask a pii-classified column.
 #[test]
 fn unmask_with_user_role_in_policy_returns_plaintext() {
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P55_PR5_GRANT",
-        &"c".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P55_PR5_GRANT"),
-    );
+    let _keys = with_root_key("p55_pr5_grant", &"c".repeat(64));
     let schema = serde_json::json!({
         "id": { "type": "string" },
         "email": {
@@ -7409,11 +7315,7 @@ fn drift_check_handles_plaintext_column() {
 /// the same key and re-applies the mask).
 #[test]
 fn drift_check_handles_encrypted_column() {
-    let _env = EncEnv::set(
-        "ZEROSHIP_COLUMN_KEY_P55_PR7_DRIFT",
-        &"7".repeat(64),
-        zeroship_core::test_env!("ZEROSHIP_COLUMN_KEY_P55_PR7_DRIFT"),
-    );
+    let _keys = with_root_key("p55_pr7_drift", &"7".repeat(64));
     let schema = serde_json::json!({
         "id": { "type": "string" },
         "ssn": {

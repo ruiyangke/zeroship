@@ -1,7 +1,4 @@
-#![allow(unsafe_code)]
-
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
-use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
@@ -21,59 +18,42 @@ use zeroship_runtime::{EgressRule, Verdict,
     EnvSnapshot, FetchOutcome, ModuleEntry, NetPolicy, RequestCtx, Runtime, SettledFetch,
 };
 
-struct EnvGuard {
-    prev: Vec<(&'static str, Option<std::ffi::OsString>)>,
+/// States the two runtime settings the tests in this file vary - dev mode, and
+/// the platform trust anchors - and restores the previous values on drop.
+///
+/// The trust anchors used to be stated by pointing `SSL_CERT_FILE` at a
+/// fixture and clearing `SSL_CERT_DIR`, which took effect only because
+/// `rustls_native_certs` happens to read those names. It is a runtime setting
+/// now, so the fixture PEM goes straight in and no temp file is needed. What
+/// the tests below assert is unchanged: whether the NATIVE root path was
+/// consulted, not which environment variable feeds it.
+///
+/// Both settings are process-wide, so every user still takes [`lock_env`].
+/// Neither is process ENVIRONMENT any more, so nothing here races libc
+/// `getenv`.
+struct SettingsGuard {
+    prev_dev: bool,
 }
 
-impl EnvGuard {
+impl SettingsGuard {
     fn set(dev: bool) -> Self {
         Self::set_with_native_roots(dev, None)
     }
 
-    fn set_with_native_roots(dev: bool, cert_file: Option<&Path>) -> Self {
-        // Each name is read through a literal macro call (the registering
-        // macros require a literal at the call site), in the same order as
-        // `keys`, rather than looping `var_os` over a runtime `&str`.
-        let prev: Vec<(&'static str, Option<std::ffi::OsString>)> = vec![
-            (
-                "ZEROSHIP_DEV",
-                zeroship_core::declared_env_os!(dev, "ZEROSHIP_DEV", zeroship_runtime::RuntimeConsumer),
-            ),
-            (
-                "SSL_CERT_FILE",
-                zeroship_core::declared_env_os!(external, "SSL_CERT_FILE", zeroship_runtime::RuntimeConsumer),
-            ),
-            (
-                "SSL_CERT_DIR",
-                zeroship_core::declared_env_os!(external, "SSL_CERT_DIR", zeroship_runtime::RuntimeConsumer),
-            ),
-        ];
-        unsafe {
-            if dev {
-                std::env::set_var("ZEROSHIP_DEV", "1");
-            } else {
-                std::env::remove_var("ZEROSHIP_DEV");
-            }
-            match cert_file {
-                Some(path) => std::env::set_var("SSL_CERT_FILE", path),
-                None => std::env::remove_var("SSL_CERT_FILE"),
-            }
-            std::env::remove_var("SSL_CERT_DIR");
-        }
-        Self { prev }
+    fn set_with_native_roots(dev: bool, native_roots_pem: Option<String>) -> Self {
+        let prev_dev = zeroship_runtime::dev_mode_enabled();
+        zeroship_runtime::set_dev_mode(dev);
+        zeroship_runtime::set_native_roots_pem(native_roots_pem);
+        Self { prev_dev }
     }
 }
 
-impl Drop for EnvGuard {
+impl Drop for SettingsGuard {
     fn drop(&mut self) {
-        unsafe {
-            for (key, val) in &self.prev {
-                match val {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-        }
+        zeroship_runtime::set_dev_mode(self.prev_dev);
+        // Back to the host trust store: no test in this file wants a fixture
+        // root to survive into the next one.
+        zeroship_runtime::set_native_roots_pem(None);
     }
 }
 
@@ -424,7 +404,7 @@ fn tls_module(body: &str) -> String {
 #[test]
 fn tls_connect_admission_errors_match_plain_net() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true);
+    let _env = SettingsGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let cert = test_cert();
         let allowed = spawn_tls_server(cert, TlsServerMode::DirectEcho).await;
@@ -489,7 +469,7 @@ return results.join("|");
 #[test]
 fn tls_rejects_non_pem_ca_and_client_auth_options_synchronously() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true);
+    let _env = SettingsGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_js_module(
             tls_module(
@@ -544,7 +524,7 @@ return [
 #[test]
 fn tls_encrypted_reflects_native_handshake_state() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true);
+    let _env = SettingsGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let cert = test_cert();
         let ca_json = serde_json::to_string(&cert.ca_pem).unwrap();
@@ -584,7 +564,7 @@ return new Promise((resolve) => {{
 #[test]
 fn direct_tls_connect_ca_echo_and_sni() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true);
+    let _env = SettingsGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let cert = test_cert();
         let ca_json = serde_json::to_string(&cert.ca_pem).unwrap();
@@ -632,15 +612,12 @@ return new Promise((resolve) => {{
 fn tls_chain_only_without_pinned_ca_is_rejected() {
     let _lock = lock_env();
     let cert = ca_signed_test_cert();
-    let native_roots_path = std::env::temp_dir().join(format!(
-        "zeroship-chain-only-native-roots-{}-{}.pem",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("node_tls")
-    ));
-    std::fs::write(&native_roots_path, cert.ca_pem.as_bytes()).unwrap();
+    // A KNOWN native root: without one, "the native roots were not consulted"
+    // is indistinguishable from "the host store happens not to trust this".
+    let native_roots_pem = cert.ca_pem.clone();
 
     let result = {
-        let _env = EnvGuard::set_with_native_roots(true, Some(&native_roots_path));
+        let _env = SettingsGuard::set_with_native_roots(true, Some(native_roots_pem));
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let addr = spawn_tls_server(cert, TlsServerMode::DirectEcho).await;
             run_js_module(
@@ -668,7 +645,6 @@ return new Promise((resolve) => {{
             .await
         })
     };
-    let _ = std::fs::remove_file(&native_roots_path);
 
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
     assert!(
@@ -686,15 +662,12 @@ return new Promise((resolve) => {{
 fn native_roots_with_hostname_verification_still_work() {
     let _lock = lock_env();
     let cert = ca_signed_test_cert();
-    let native_roots_path = std::env::temp_dir().join(format!(
-        "zeroship-public-tls-native-roots-{}-{}.pem",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("node_tls")
-    ));
-    std::fs::write(&native_roots_path, cert.ca_pem.as_bytes()).unwrap();
+    // A KNOWN native root, so "authorized" below can only mean the native root
+    // path ran - the host trust store never signed this leaf.
+    let native_roots_pem = cert.ca_pem.clone();
 
     let result = {
-        let _env = EnvGuard::set_with_native_roots(true, Some(&native_roots_path));
+        let _env = SettingsGuard::set_with_native_roots(true, Some(native_roots_pem));
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let addr = spawn_tls_server(cert.clone(), TlsServerMode::DirectEcho).await;
             let result = run_js_module(
@@ -727,7 +700,6 @@ return new Promise((resolve) => {{
             result
         })
     };
-    let _ = std::fs::remove_file(&native_roots_path);
 
     assert_eq!(result.status, 200, "unexpected status/body: {}", result.body);
     assert_eq!(result.body, "authorized=true;data=native");
@@ -737,18 +709,16 @@ return new Promise((resolve) => {{
 fn custom_ca_replaces_native_roots_instead_of_augmenting_them() {
     let _lock = lock_env();
     let cert = ca_signed_test_cert();
-    let native_roots_path = std::env::temp_dir().join(format!(
-        "zeroship-native-roots-{}-{}.pem",
-        std::process::id(),
-        std::thread::current().name().unwrap_or("node_tls")
-    ));
-    std::fs::write(&native_roots_path, cert.ca_pem.as_bytes()).unwrap();
+    // The server's own CA IS a native root here. So a `ca:` that replaces the
+    // native roots must still reject it, and one that includes it must accept:
+    // the pair is what shows `ca:` replaces rather than augments.
+    let native_roots_pem = cert.ca_pem.clone();
 
     let wrong_ca_json = serde_json::to_string(&ca_pem_only("zeroship wrong test root")).unwrap();
     let good_ca_json = serde_json::to_string(&cert.ca_pem).unwrap();
 
     let (wrong, good) = {
-        let _env = EnvGuard::set_with_native_roots(true, Some(&native_roots_path));
+        let _env = SettingsGuard::set_with_native_roots(true, Some(native_roots_pem));
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let addr = spawn_tls_server(cert.clone(), TlsServerMode::DirectEcho).await;
             let wrong = run_js_module(
@@ -805,7 +775,6 @@ return new Promise((resolve) => {{
             (wrong, good)
         })
     };
-    let _ = std::fs::remove_file(&native_roots_path);
 
     assert_eq!(wrong.status, 200, "unexpected wrong status/body: {}", wrong.body);
     assert!(
@@ -820,7 +789,7 @@ return new Promise((resolve) => {{
 #[test]
 fn starttls_socket_upgrade_ca_echo() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true);
+    let _env = SettingsGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let cert = test_cert();
         let ca_json = serde_json::to_string(&cert.ca_pem).unwrap();
@@ -874,7 +843,7 @@ return new Promise((resolve) => {{
 #[test]
 fn starttls_socket_upgrade_buffers_immediate_write_until_secure() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true);
+    let _env = SettingsGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let cert = test_cert();
         let ca_json = serde_json::to_string(&cert.ca_pem).unwrap();
@@ -928,7 +897,7 @@ return new Promise((resolve) => {{
 #[test]
 fn default_rejects_self_signed_without_ca() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true);
+    let _env = SettingsGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let cert = test_cert();
         let addr = spawn_tls_server(cert, TlsServerMode::DirectEcho).await;
@@ -966,7 +935,7 @@ return new Promise((resolve) => {{
 #[test]
 fn reject_unauthorized_false_denied_for_non_trusted() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(false);
+    let _env = SettingsGuard::set(false);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         run_js_module(
             tls_module(
@@ -1003,7 +972,7 @@ try {
 #[test]
 fn reject_unauthorized_false_dev_only_permitted() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true);
+    let _env = SettingsGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let cert = test_cert();
         let addr = spawn_tls_server(cert, TlsServerMode::DirectEcho).await;
@@ -1049,7 +1018,7 @@ return new Promise((resolve) => {{
 #[test]
 fn starttls_pre_upgrade_plaintext_fails_closed() {
     let _lock = lock_env();
-    let _env = EnvGuard::set(true);
+    let _env = SettingsGuard::set(true);
     let result = compio::runtime::Runtime::new().unwrap().block_on(async {
         let cert = test_cert();
         let ca_json = serde_json::to_string(&cert.ca_pem).unwrap();
@@ -1101,7 +1070,7 @@ return new Promise((resolve) => {{
 /// These tests target literal addresses, and an IP literal is NOT a
 /// representable `Name` - it must be written as a range, so a reader of a rule
 /// always knows which check decides it. `is_blocked_ip` would refuse loopback
-/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// outright; these tests run with dev mode on, which bypasses the floor
 /// and nothing else.
 fn accept_target(host: &str, port: u16) -> EgressRule {
     let destination = match host.parse::<std::net::IpAddr>() {

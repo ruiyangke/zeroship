@@ -30,7 +30,7 @@ pub use local::LocalFs;
 #[cfg(feature = "s3")]
 pub mod s3;
 #[cfg(feature = "s3")]
-pub use s3::S3;
+pub use s3::{S3UploadTuning, S3};
 
 /// Buffer cap for an `env.storage.putStream` upload stream — 2× the S3
 /// `PART_SIZE` (8 MiB) so the V8 producer can generate a full *next* part while

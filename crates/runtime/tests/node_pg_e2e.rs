@@ -1,5 +1,3 @@
-#![allow(unsafe_code)]
-
 use std::net::TcpStream as StdTcpStream;
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -18,32 +16,27 @@ const PG_USER: &str = "postgres";
 const PG_PASSWORD: &str = "zeroship";
 const PG_DATABASE: &str = "postgres";
 
-struct EnvGuard {
-    prev_dev: Option<std::ffi::OsString>,
+/// Restores the runtime's process-level dev-mode cell to whatever it held
+/// before the test, so a test that needs dev mode does not decide it for the
+/// rest of the binary. The cell is process-wide, so `lock_env()` still has to
+/// serialise the tests that touch it - what changed is that the mode is a
+/// stated setting rather than a mutation of the process environment, which
+/// races libc `getenv`.
+struct DevModeGuard {
+    prev_dev: bool,
 }
 
-impl EnvGuard {
+impl DevModeGuard {
     fn set_dev() -> Self {
-        let prev_dev = zeroship_core::declared_env_os!(
-            dev,
-            "ZEROSHIP_DEV",
-            zeroship_runtime::RuntimeConsumer
-        );
-        unsafe {
-            std::env::set_var("ZEROSHIP_DEV", "1");
-        }
+        let prev_dev = zeroship_runtime::dev_mode_enabled();
+        zeroship_runtime::set_dev_mode(true);
         Self { prev_dev }
     }
 }
 
-impl Drop for EnvGuard {
+impl Drop for DevModeGuard {
     fn drop(&mut self) {
-        unsafe {
-            match &self.prev_dev {
-                Some(v) => std::env::set_var("ZEROSHIP_DEV", v),
-                None => std::env::remove_var("ZEROSHIP_DEV"),
-            }
-        }
+        zeroship_runtime::set_dev_mode(self.prev_dev);
     }
 }
 
@@ -191,7 +184,7 @@ fn require_pg_port() {
 #[test]
 fn unmodified_pg_client_and_pool_return_live_rows() {
     let _lock = lock_env();
-    let _env = EnvGuard::set_dev();
+    let _env = DevModeGuard::set_dev();
     require_pg_port();
 
     // The shared migrate Postgres answers "N" to the PostgreSQL SSLRequest
@@ -376,7 +369,7 @@ export default {{
 /// These tests target literal addresses, and an IP literal is NOT a
 /// representable `Name` - it must be written as a range, so a reader of a rule
 /// always knows which check decides it. `is_blocked_ip` would refuse loopback
-/// outright; these tests run with `ZEROSHIP_DEV=1`, which bypasses the floor
+/// outright; these tests run with dev mode on, which bypasses the floor
 /// and nothing else.
 fn accept_target(host: &str, port: u16) -> EgressRule {
     let destination = match host.parse::<std::net::IpAddr>() {
