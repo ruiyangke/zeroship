@@ -32,30 +32,30 @@ pub fn is_vendor(op: &Op) -> bool {
 /// and feature refusals before lowering.
 #[must_use]
 pub fn support(op: &Op) -> crate::model::support::Support {
-    use crate::model::support::Support;
+    use crate::model::support::{Dialect, Support};
 
     let (kind, variant) = op_kind_and_variant(op);
     let row = crate::model::dialect_table::lookup(kind, variant)
         .unwrap_or_else(|| panic!("dialect table has no row for op {kind}/{variant}"));
+    // The row is keyed by `DialectId`, so the cell is looked UP by id rather than
+    // read off a field named after a vendor. `DialectSupport` is still a
+    // three-field struct (`model::support`), which is why the three calls are
+    // spelled out here rather than folded into a loop — that struct is the next
+    // instance of this same shape, and it is not this change's to remove.
     let dialects = crate::model::support::DialectSupport::new(
         support_cell(
             op,
-            row.postgres,
-            crate::model::support::Dialect::Postgres,
+            row.disposition(Dialect::Postgres),
+            Dialect::Postgres,
             variant,
         ),
         support_cell(
             op,
-            row.sqlite,
-            crate::model::support::Dialect::Sqlite,
+            row.disposition(Dialect::Sqlite),
+            Dialect::Sqlite,
             variant,
         ),
-        support_cell(
-            op,
-            row.mysql,
-            crate::model::support::Dialect::Mysql,
-            variant,
-        ),
+        support_cell(op, row.disposition(Dialect::Mysql), Dialect::Mysql, variant),
     );
     Support::new(support_tier(op), dialects, support_features(op))
 }

@@ -3,7 +3,14 @@
 // Reads the hand-authored sidecar
 // `crates/zero-migrate/dialect-support.toml` — one row per (op-kind,
 // variant) with a per-dialect disposition — and emits BOTH downstream artifacts
-// from that one source:
+// from that one source.
+//
+// NOTHING HERE NAMES A DIALECT. `kind` and `variant` are the row's two structural
+// keys; every other key is a DIALECT ID, carried through to both artifacts as a
+// map key rather than a field named after a vendor. That is the whole point: a
+// fourth backend adds a column to the sidecar and this script does not change.
+//
+// The artifacts:
 //   (a) crates/zero-migrate/src/model/dialect_table.rs - a const lookup the
 //       engine reads through `model::op_support`'s `dialect_table::lookup`.
 //   (b) packages/zero-migrate/src/generated/dialect-table.ts - the TS mirror,
@@ -17,17 +24,30 @@
 //
 // then commit the regenerated dialect_table.rs + dialect-table.ts.
 //
-// The faithfulness of the sidecar itself (that it mirrors the engine's live
-// `Support::decision()`) is proven by the Rust test
-// `crates/zero-migrate/tests/dialect_table_faithfulness.rs`; this script only
-// transcribes the sidecar into the two typed artifacts.
+// This script only transcribes the sidecar into the two typed artifacts. What
+// proves the sidecar itself is split across three tests, and naming one of them
+// for all three is how a gap hides:
+//   * `crates/zero-migrate/tests/dialect_matrix/dialect_table_faithfulness.rs` —
+//     corpus ⟷ table bijection and sidecar ⟷ table transcription. It CANNOT prove
+//     agreement with `Op::support()`: `Op::support()` reads the generated table, so
+//     that comparison is tautological (its own header says so).
+//   * `op_support_matrix.rs` — the behavioural gate (a decision matches what
+//     validate/lower actually do).
+//   * `dialect_conformance_live.rs` — the same, against real servers.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const sidecarPath = resolve(here, "../../../crates/zero-migrate/dialect-support.toml");
+// The sidecar path is overridable for the SAME reason the outputs are: the
+// open-dialect gate in `tests/dialect-table-drift.test.ts` drives a synthetic
+// sidecar naming a dialect this script has never heard of through this script
+// UNEDITED. Without the override that gate could only be written by editing the
+// generator it is supposed to be testing.
+const sidecarPath = process.env.GEN_DIALECT_SIDECAR
+  ? resolve(process.env.GEN_DIALECT_SIDECAR)
+  : resolve(here, "../../../crates/zero-migrate/dialect-support.toml");
 
 // Output paths default to the committed artifacts; the drift test overrides them
 // via env vars to regenerate into temp files and byte-compare (the "regenerate +
@@ -80,27 +100,60 @@ function parseSidecar(text) {
   return rows;
 }
 
+/** The two STRUCTURAL keys of a row. EVERY other key is a dialect id. */
+const STRUCTURAL_KEYS = ["kind", "variant"];
+
+/** The `DialectId` rule from `zero_migrate_ir::dialect`: lowercase `[a-z][a-z0-9_]*`. */
+const DIALECT_ID = /^[a-z][a-z0-9_]*$/;
+
+/** The dialect ids a row declares, sorted by code unit. */
+function dialectIdsOf(row) {
+  return Object.keys(row)
+    .filter((k) => !STRUCTURAL_KEYS.includes(k))
+    .sort(compareCodeUnits);
+}
+
 function validateRows(rows) {
   if (rows.length === 0) throw new Error("dialect-support.toml: no rows parsed");
   const seen = new Set();
+  // The dialect census is DISCOVERED from the first row, then every other row is
+  // required to match it. Nothing here names a vendor: a fourth backend adds its
+  // column to every row and this function learns the id from the data.
+  //
+  // Requiring all rows to agree is the CENSUS FLOOR. Per-row discovery alone would
+  // fail open — a row that lost a cell would simply declare fewer dialects and
+  // generate cleanly, and the artifact would silently make no claim where it used
+  // to make one. The old three hard-coded keys prevented that by construction; this
+  // is what replaces them.
+  let census = null;
   for (const row of rows) {
-    for (const key of ["kind", "variant", "pg", "sqlite", "mysql"]) {
+    for (const key of STRUCTURAL_KEYS) {
       if (typeof row[key] !== "string") {
         throw new Error(`dialect-support.toml: row missing "${key}": ${JSON.stringify(row)}`);
       }
     }
-    const extra = Object.keys(row).filter(
-      (k) => !["kind", "variant", "pg", "sqlite", "mysql"].includes(k),
-    );
-    if (extra.length) {
-      throw new Error(`dialect-support.toml: row ${row.kind}/${row.variant} has unknown keys ${extra.join(",")}`);
+    const dialects = dialectIdsOf(row);
+    if (dialects.length === 0) {
+      throw new Error(`dialect-support.toml: row ${row.kind}/${row.variant} declares no dialects`);
     }
-    for (const dialect of ["pg", "sqlite", "mysql"]) {
+    for (const dialect of dialects) {
+      if (!DIALECT_ID.test(dialect)) {
+        throw new Error(
+          `dialect-support.toml: row ${row.kind}/${row.variant} key "${dialect}" is not a well-formed DialectId ([a-z][a-z0-9_]*)`,
+        );
+      }
       if (!DISPOSITIONS.includes(row[dialect])) {
         throw new Error(
           `dialect-support.toml: row ${row.kind}/${row.variant} has invalid ${dialect} disposition "${row[dialect]}"`,
         );
       }
+    }
+    if (census === null) {
+      census = dialects;
+    } else if (census.join("\0") !== dialects.join("\0")) {
+      throw new Error(
+        `dialect-support.toml: row ${row.kind}/${row.variant} declares dialects [${dialects.join(",")}] but the table's census is [${census.join(",")}] — every row must declare every dialect`,
+      );
     }
     const id = `${row.kind}\0${row.variant}`;
     if (seen.has(id)) {
@@ -143,24 +196,40 @@ function emitRust(rows) {
 //!   pnpm --filter zero-migrate gen:dialect-table
 //!
 //! One [\`DispositionRow\`] per (op-kind, variant) recording the token's
-//! disposition on each dialect. Faithfulness to the engine's live
-//! \`Support::decision()\` is proven by
-//! \`tests/dialect_table_faithfulness.rs\`. Engine code DOES read this table:
-//! \`crate::model::op_support\` calls \`dialect_table::lookup(kind, variant)\`.
-//! The TypeScript mirror has no reader outside its own file; state the two
-//! sides separately, because they have already drifted apart once.
+//! disposition on each dialect, KEYED BY [\`DialectId\`] rather than by one struct
+//! field per vendor. That keying is the point: a fourth backend adds a column to
+//! the sidecar and nothing here, in the generator, or in core changes shape.
+//!
+//! Which test proves what: \`tests/dialect_table_faithfulness.rs\` proves the
+//! corpus ⟷ table bijection and the sidecar ⟷ table transcription (it CANNOT
+//! prove agreement with \`Op::support()\` — \`Op::support()\` reads this table, so
+//! that check would be tautological). \`op_support_matrix.rs\` is the behavioural
+//! gate; \`dialect_conformance_live.rs\` is the live one.
+//!
+//! Engine code DOES read this table: \`crate::model::op_support\` calls
+//! \`dialect_table::lookup(kind, variant)\`. The TypeScript mirror has no reader
+//! outside its own file; state the two sides separately, because they have
+//! already drifted apart once.
 `;
 
   const body = `
 use crate::model::support::Dialect;
+use zero_migrate_ir::dialect::DialectId;
 
 /// The disposition of one (op-kind, variant) token on one dialect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     /// Core construct that renders/validates on this dialect.
     Portable,
-    /// Native where supported, absence-tolerable elsewhere. Reserved; no current
-    /// row uses it.
+    /// Native where supported, absence-tolerable elsewhere.
+    ///
+    /// LIVE, not reserved. This doc used to end "Reserved; no current row uses
+    /// it" and both halves were false: \`createPartition/base\` and
+    /// \`createTable/partitionedCollapse\` carry it on both non-PostgreSQL
+    /// dialects, \`op_support\` groups it with portable and vendor as SUPPORTED,
+    /// and lowering acts on it by collapsing a partition child into its parent
+    /// behind a mirror guard. The sidecar's own legend carried the same error
+    /// until it was measured; this is the last copy of it.
     TransparentDegradable,
     /// Vendor-tier construct admitted on this dialect.
     Vendor,
@@ -170,6 +239,13 @@ pub enum Disposition {
 
 /// One row of the generated dialect table: an (op-kind, variant) token and its
 /// per-dialect disposition.
+///
+/// The dispositions are an ASSOCIATION LIST keyed by [\`DialectId\`], not one field
+/// per vendor. The previous shape put every dialect this engine ships in the type
+/// itself, so a fourth backend could not declare its dispositions without editing
+/// a struct in a crate it does not own — the same closed-set problem
+/// [\`DialectId\`] exists to remove, in a shape that is not an enum and so was not
+/// removed by deleting one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DispositionRow {
     /// The op-kind wire token (e.g. \`"createTable"\`).
@@ -177,23 +253,49 @@ pub struct DispositionRow {
     /// The variant token distinguishing payload-dependent branches; \`"base"\`
     /// for payload-independent ops.
     pub variant: &'static str,
-    /// Disposition on PostgreSQL.
-    pub postgres: Disposition,
-    /// Disposition on SQLite.
-    pub sqlite: Disposition,
-    /// Disposition on MySQL.
-    pub mysql: Disposition,
+    /// This token's disposition per dialect, sorted by [\`DialectId\`] and
+    /// deduplicated — the same sorted-slice discipline
+    /// [\`zero_migrate_ir::dialect::DialectSet\`] uses — so lookup is a binary
+    /// search and the emitted order is stable.
+    pub dispositions: &'static [(DialectId, Disposition)],
 }
 
 impl DispositionRow {
-    /// The disposition of this row on the given dialect.
+    /// The disposition this row declares for \`id\`, or \`None\` if it declares none.
+    ///
+    /// \`None\` means THE TABLE MAKES NO CLAIM, which is not the same as
+    /// \`Unsupported\` (an explicit refusal). Callers that need a verdict must
+    /// decide which they mean; [\`Self::disposition\`] panics rather than pick one
+    /// silently.
     #[must_use]
-    pub const fn disposition(&self, dialect: Dialect) -> Disposition {
-        match dialect {
-            Dialect::Postgres => self.postgres,
-            Dialect::Sqlite => self.sqlite,
-            Dialect::Mysql => self.mysql,
-        }
+    pub fn disposition_for(&self, id: DialectId) -> Option<Disposition> {
+        self.dispositions
+            .binary_search_by_key(&id, |(dialect, _)| *dialect)
+            .ok()
+            .map(|i| self.dispositions[i].1)
+    }
+
+    /// The disposition of this row on the given dialect.
+    ///
+    /// Panics if the row declares no cell for it. That is deliberate and matches
+    /// the existing contract of [\`lookup\`]'s caller, which already panics on a
+    /// missing ROW: a missing cell is a generation defect, and both of the other
+    /// answers hide it — treating it as supported fails open, and treating it as
+    /// \`Unsupported\` invents a refusal the sidecar never authored.
+    #[must_use]
+    pub fn disposition(&self, dialect: Dialect) -> Disposition {
+        let id = dialect.id();
+        self.disposition_for(id).unwrap_or_else(|| {
+            panic!(
+                "dialect table row {}/{} declares no disposition for {id}",
+                self.kind, self.variant
+            )
+        })
+    }
+
+    /// The dialects this row declares a disposition for, in ascending id order.
+    pub fn dialects(&self) -> impl Iterator<Item = DialectId> + '_ {
+        self.dispositions.iter().map(|(id, _)| *id)
     }
 }
 
@@ -208,7 +310,11 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
 ${rows
   .map(
     (r) =>
-      `    DispositionRow { kind: "${esc(r.kind)}", variant: "${esc(r.variant)}", postgres: Disposition::${DISPOSITION_RUST[r.pg]}, sqlite: Disposition::${DISPOSITION_RUST[r.sqlite]}, mysql: Disposition::${DISPOSITION_RUST[r.mysql]} },`,
+      `    DispositionRow { kind: "${esc(r.kind)}", variant: "${esc(r.variant)}", dispositions: &[${dialectIdsOf(
+        r,
+      )
+        .map((d) => `(DialectId::new("${esc(d)}"), Disposition::${DISPOSITION_RUST[r[d]]})`)
+        .join(", ")}] },`,
   )
   .join("\n")}
 ];
@@ -232,30 +338,41 @@ function emitTs(rows) {
 //   pnpm --filter zero-migrate gen:dialect-table
 //
 // One row per (op-kind, variant) recording the token's disposition on each
-// dialect — the TS mirror of crates/zero-migrate/src/model/dialect_table.rs.
-// Faithfulness to the engine's live Support::decision() is proven Rust-side by
-// tests/dialect_table_faithfulness.rs; the TS drift test pins this file (and the
-// Rust one) against the sidecar. NOTHING outside this file reads the TS mirror;
-// the Rust table, by contrast, is read by the engine's op_support lookup.
+// dialect, KEYED BY DIALECT ID — the TS mirror of
+// crates/zero-migrate/src/model/dialect_table.rs.
+//
+// There is deliberately NO \`Dialect\` union here. A closed union of the shipping
+// dialect names is the same "core enumerates the vendors" shape as a struct field
+// per vendor: it would have to be widened by hand for a fourth backend, and every
+// consumer narrowing on it would silently not cover the new one. The key type is
+// \`string\` (a dialect id) and the census lives in the DATA.
+//
+// The TS drift test pins this file (and the Rust one) against the sidecar, and
+// carries the census floor that a keyed-by-data scan needs. NOTHING outside this
+// file reads the TS mirror; the Rust table, by contrast, is read by the engine's
+// op_support lookup.
 `;
 
   const body = `
 export type Disposition = "portable" | "transparentDegradable" | "vendor" | "unsupported";
-export type Dialect = "postgres" | "sqlite" | "mysql";
 
 export interface DispositionRow {
   readonly kind: string;
   readonly variant: string;
-  readonly postgres: Disposition;
-  readonly sqlite: Disposition;
-  readonly mysql: Disposition;
+  /** Disposition per dialect id (e.g. \`"postgres"\`), the id being the same
+   *  canonical spelling \`DialectId\` uses Rust-side. */
+  readonly dispositions: Readonly<Record<string, Disposition>>;
 }
 
 export const DIALECT_TABLE: readonly DispositionRow[] = [
 ${rows
   .map(
     (r) =>
-      `  { kind: "${esc(r.kind)}", variant: "${esc(r.variant)}", postgres: "${r.pg}", sqlite: "${r.sqlite}", mysql: "${r.mysql}" },`,
+      `  { kind: "${esc(r.kind)}", variant: "${esc(r.variant)}", dispositions: { ${dialectIdsOf(
+        r,
+      )
+        .map((d) => `${d}: "${r[d]}"`)
+        .join(", ")} } },`,
   )
   .join("\n")}
 ] as const;
