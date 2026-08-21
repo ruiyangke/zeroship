@@ -98,14 +98,13 @@ const VENDOR_CRATES: &[&str] = &[
     "zero-migrate-mysql",
 ];
 
-/// The walk's floor across all three vendor crates. They held 14 `.rs` files under
-/// `src` when this was written (5 + 4 + 5). The floor sits under that with room for
+/// The walk's floor across all three vendor crates. They hold 17 `.rs` files under
+/// `src` after the DDL move (6 + 5 + 6). The floor sits under that with room for
 /// churn but nowhere near zero, so a walk that lost its root cannot pass.
 ///
-/// Raise it deliberately as the vendors grow — and they are about to, because the
-/// three `DdlEmitter` bodies are moving into them. NEVER lower it to get green: a
+/// Raise it deliberately as the vendors grow. NEVER lower it to get green: a
 /// drop means the walk stopped seeing files, which is the failure this defends.
-const VENDOR_FILE_FLOOR: usize = 10;
+const VENDOR_FILE_FLOOR: usize = 13;
 
 /// The positive control's floor: how many engine source lines must still call one of
 /// these. The engine had well over this when the move landed; the number only has to

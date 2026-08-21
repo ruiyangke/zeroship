@@ -13,7 +13,7 @@
 //! So there are two registries and they answer different questions. The descriptor
 //! registry answers "what can this vendor do", and `-ir` owns it. This one answers
 //! "who spells this vendor's SQL, and who refuses to run it", and it pairs each
-//! descriptor with the two renderers and the one guard that go with it.
+//! descriptor with the three renderers and the one guard that go with it.
 //! [`VendorSet::descriptors`] derives the first from the second, so the two cannot
 //! drift: a vendor that ships a renderer ships exactly one descriptor, and the id rule
 //! is enforced by `-ir`'s builder rather than restated here.
@@ -34,15 +34,13 @@
 //!
 //! # What did NOT change
 //!
-//! The engine's dispatch is still EXHAUSTIVE over the closed `SqlDialect`, and that
-//! is deliberate. [`VendorSet`] is a fixed-size array, not a growable map, so the
-//! shipping set is still resolved at compile time and a fourth `SqlDialect` variant
-//! still breaks the engine's `for_dialect` match until its vendor is wired. The
-//! alternative — a lazily-populated global the host fills at startup — would turn
-//! "no backend for this dialect" from a compile error into a runtime one, and would
-//! make every one of the engine's ~1200 in-crate render tests depend on registration
-//! order.
+//! [`VendorSet`] remains a compile-time shipping slice, not a lazily populated
+//! global. Dispatch now looks up the open [`DialectId`](zero_migrate_ir::dialect::DialectId)
+//! filed by each descriptor, so the contract contains no enum match and a fourth
+//! backend requires no contract edit. The engine's temporary `SqlDialect` callers
+//! still convert their target to that id until the enum is deleted.
 
+use crate::ddl::DdlEmitter;
 use crate::guard::{GuardConfig, MigrationGuard};
 use crate::renderer::DmlRenderer;
 use crate::schema::SchemaRenderer;
@@ -57,8 +55,17 @@ use zero_migrate_ir::backend::{BackendDescriptor, BackendRegistry, RegistryError
 /// owns the dispatch.
 pub type GuardFactory = fn(&GuardConfig) -> Box<dyn MigrationGuard>;
 
-/// Everything one backend crate exports: its capability row, its two renderers, and
-/// its line-1 guard.
+/// Build this vendor's DDL emitter for one project schema.
+///
+/// PostgreSQL and MySQL retain the schema for ordinary qualification. SQLite emits
+/// ordinary table DDL into unqualified `main`, but retains the schema too so its
+/// capability-gated dormant FK-clause answer stays byte-identical to the former
+/// core route. A function pointer keeps the registered vendor static while each
+/// author receives an owned, schema-bound emitter.
+pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
+
+/// Everything one backend crate exports: its capability row, its three renderers,
+/// and its line-1 guard.
 ///
 /// A vendor crate declares exactly one of these as a `pub static` and the engine
 /// names it. Nothing else of a vendor crate's surface is public API — the renderer
@@ -68,10 +75,10 @@ pub type GuardFactory = fn(&GuardConfig) -> Box<dyn MigrationGuard>;
 /// # Every field is REQUIRED, and `guard` is why that matters
 ///
 /// This struct derives no `Default`, has no `Default` impl, and is not
-/// `#[non_exhaustive]`. All four fields must be written out in a struct literal at the
-/// vendor's own definition site. A new backend that ships no guard therefore fails to
-/// compile **in its own crate, named** — E0063, missing field `guard` — rather than
-/// picking one up by omission.
+/// `#[non_exhaustive]`. All five fields must be written out in a struct literal at the
+/// vendor's own definition site. A new backend that ships no DDL emitter or no guard
+/// therefore fails to compile **in its own crate, named** — E0063 for the missing
+/// field — rather than picking one up by omission.
 ///
 /// That is the whole point of the field. It replaced a `guard_for(cfg)` function whose
 /// `SqlDialect` match handed both descriptor-only dialects one shared trusting guard.
@@ -90,6 +97,11 @@ pub struct BackendVendor {
     pub dml: &'static dyn DmlRenderer,
     /// How this vendor spells columns and DDL.
     pub schema: &'static dyn SchemaRenderer,
+    /// How this vendor spells schema-changing statements.
+    ///
+    /// Required, never defaulted. A vendor cannot silently inherit another backend's
+    /// DDL or disappear behind a catch-all registry arm.
+    pub ddl: DdlFactory,
     /// What this vendor REFUSES to run — its line-1 defense.
     ///
     /// Required, never defaulted. A vendor that trusts its input must say so by
@@ -129,13 +141,19 @@ pub struct BackendVendor {
 ///
 /// ```compile_fail
 /// use zero_migrate_backend::registry::BackendVendor;
+/// use zero_migrate_backend::registry::DdlFactory;
 /// use zero_migrate_backend::renderer::DmlRenderer;
 /// use zero_migrate_backend::schema::SchemaRenderer;
-/// fn vendor(dml: &'static dyn DmlRenderer, schema: &'static dyn SchemaRenderer) -> BackendVendor {
+/// fn vendor(
+///     dml: &'static dyn DmlRenderer,
+///     schema: &'static dyn SchemaRenderer,
+///     ddl: DdlFactory,
+/// ) -> BackendVendor {
 ///     BackendVendor {
 ///         descriptor: &zero_migrate_ir::backend::POSTGRES_DESCRIPTOR,
 ///         dml,
 ///         schema,
+///         ddl,
 ///     }
 /// }
 /// ```

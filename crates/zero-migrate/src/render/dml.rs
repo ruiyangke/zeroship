@@ -350,10 +350,9 @@ mod tests {
     /// different homes on purpose.
     ///
     /// MySQL's backtick-doubling escape must live in EXACTLY one physical home,
-    /// `render/backends/mysql.rs`, and nowhere else in the crate source. That home
-    /// is inside the backend module, so — like
-    /// [`crate::render::backends::ansi_double_quote_ident`] — core cannot name it
-    /// and must pick a door in this module that records the vendor.
+    /// `zero-migrate-mysql/src/dml.rs`, and nowhere else in production crate source.
+    /// The DDL character-stream translator has one separately named exemption for
+    /// the doubled-backtick literal, but not for the primitive escape call.
     ///
     /// WHY THIS TEST EXISTS AT ALL, given that nothing was mis-emitted before it.
     /// The backtick spelling used to live in `schema::query::mysql_quote_ident`,
@@ -374,13 +373,13 @@ mod tests {
     /// TWO NEEDLES, AND THE SECOND ONE HAS AN EXEMPTION THAT IS ITSELF THE POINT.
     /// Needle 1 is the escape CALL. Needle 2 is the doubled-backtick string literal
     /// that a hand-rolled re-quoter emits without ever calling `replace`, and it has
-    /// exactly one sanctioned occurrence: `declarative::mysql_requote_sql`, the
+    /// exactly one sanctioned occurrence: `zero-migrate-mysql::ddl::mysql_requote_sql`, the
     /// documented single translation point from the `pg_get_constraintdef` normal
     /// form into MySQL spelling. That function is a character-stream TRANSLATOR, not
     /// a spelling primitive — the MySQL counterpart of `pg_canonical_ident`'s
     /// normal-form role rather than of `ansi_double_quote_ident`'s spelling role —
-    /// and it is reached from core, never from a backend, so it creates no
-    /// core-to-backend cycle. It is exempted BY NAME rather than left unscanned, so
+    /// and it is now owned by the backend whose constraint DDL it translates. It is
+    /// exempted BY FILE rather than left unscanned, so
     /// a second hand-rolled re-quoter appearing anywhere else goes red.
     ///
     /// WHAT NEITHER NEEDLE CATCHES, and the limitation is the same shape as the ANSI
@@ -403,9 +402,19 @@ mod tests {
             .collect::<String>()
             + "('`', \"``\")";
         let doubled_literal = "\"``\"";
-        let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let crates_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("zero-migrate lives under crates");
         let mut offenders: Vec<String> = Vec::new();
-        let mut stack = vec![src_root.clone()];
+        let mut escape_home_hits = 0;
+        let mut escape_literal_hits = 0;
+        let mut requote_home_hits = 0;
+        let mut stack = std::fs::read_dir(crates_root)
+            .expect("read crates root")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path().join("src"))
+            .filter(|src| src.is_dir())
+            .collect::<Vec<_>>();
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).expect("read_dir src") {
                 let path = entry.expect("dir entry").path();
@@ -416,30 +425,57 @@ mod tests {
                 if path.extension().and_then(|e| e.to_str()) != Some("rs") {
                     continue;
                 }
-                let rel = path.strip_prefix(&src_root).unwrap().display().to_string();
-                if rel == "render/dml.rs" {
+                let rel = path
+                    .strip_prefix(crates_root)
+                    .unwrap()
+                    .display()
+                    .to_string();
+                if rel == "zero-migrate/src/render/dml.rs" {
                     continue;
                 }
                 let body = std::fs::read_to_string(&path).expect("read src file");
                 // The single sanctioned home of the escape CALL is the MySQL
                 // backend module itself.
-                if rel != "render/backends/mysql.rs" && body.contains(&escape_call) {
-                    offenders.push(format!("{rel} (escape call)"));
+                if body.contains(&escape_call) {
+                    if rel == "zero-migrate-mysql/src/dml.rs" {
+                        escape_home_hits += body.matches(&escape_call).count();
+                    } else {
+                        offenders.push(format!("{rel} (escape call)"));
+                    }
                 }
                 // The single sanctioned emitter of the doubled literal is the
                 // normal-form translator; see this test's header.
-                if rel != "render/backends/mysql.rs"
-                    && rel != "render/declarative.rs"
-                    && body.contains(doubled_literal)
-                {
-                    offenders.push(format!("{rel} (doubled literal)"));
+                if body.contains(doubled_literal) {
+                    if rel == "zero-migrate-mysql/src/dml.rs" {
+                        // The primitive's one escape call necessarily contains it.
+                        escape_literal_hits += body.matches(doubled_literal).count();
+                    } else if rel == "zero-migrate-mysql/src/ddl.rs" {
+                        requote_home_hits += body.matches(doubled_literal).count();
+                    } else {
+                        offenders.push(format!("{rel} (doubled literal)"));
+                    }
                 }
             }
         }
         offenders.sort();
+        assert_eq!(
+            escape_home_hits, 1,
+            "the scan's positive control expected exactly one backtick escape call \
+             in zero-migrate-mysql/src/dml.rs, found {escape_home_hits}"
+        );
+        assert_eq!(
+            escape_literal_hits, 1,
+            "the primitive home must contain exactly the one doubled literal its \
+             escape call needs, found {escape_literal_hits}"
+        );
+        assert_eq!(
+            requote_home_hits, 1,
+            "the scan's positive control expected exactly one hand-rolled doubled \
+             literal in zero-migrate-mysql/src/ddl.rs, found {requote_home_hits}"
+        );
         assert!(
             offenders.is_empty(),
-            "bare backtick spelling found outside render/backends/mysql.rs — route \
+            "bare backtick spelling found outside zero-migrate-mysql — route \
              these through dml::escape_quote_ident_for_dialect(.., SqlDialect::Mysql) \
              so the MySQL backend decides its own spelling: {offenders:?}"
         );

@@ -1,9 +1,8 @@
 //! The one-dialect-literal rule of the backend module directories, enforced rather
 //! than documented.
 //!
-//! There are TWO of them, because there are two renderer registries: the DML
-//! spelling of `src/render/backends/` and the schema/DDL spelling of
-//! `src/schema/backends/`. Both are covered here. The second directory came later
+//! There are THREE renderer module families: DML, schema typing, and DDL emission.
+//! All are covered here. The schema family came later
 //! — `SchemaRenderer`'s three vendors lived as bare structs and `impl` blocks in
 //! the middle of `schema/query.rs` long after the DML vendors had modules — and it
 //! is guarded from its first commit precisely because the rule is invisible to
@@ -22,12 +21,12 @@
 //! rule gets its own check or it has none, which is what it had.
 //!
 //! WHY THIS FILE AND NOT A `#[cfg(test)] mod tests` IN `backends/mod.rs`. The check
-//! reads the six modules as TEXT, which a unit test could do with `include_str!`
+//! reads the nine modules as TEXT, which a unit test could do with `include_str!`
 //! just as well. It lives out here because it is a fact about the two layers'
 //! SHAPE rather than about their behaviour, and because this theme binary is where
 //! the other "what does each dialect declare" checks already are. It still reads the
 //! real files, so it tracks them: `include_str!` is a compile-time dependency, and
-//! editing any of the six rebuilds this binary.
+//! editing any of the nine rebuilds this binary.
 
 /// The rule, as a test: one dialect literal per backend module, its own, and it is
 /// the `DIALECT` const.
@@ -123,6 +122,21 @@ fn a_backend_module_names_only_its_own_dialect_and_only_once() {
         (
             "zero-migrate-mysql/src/schema.rs",
             include_str!("../../../zero-migrate-mysql/src/schema.rs"),
+            "Mysql",
+        ),
+        (
+            "zero-migrate-postgres/src/ddl.rs",
+            include_str!("../../../zero-migrate-postgres/src/ddl.rs"),
+            "Postgres",
+        ),
+        (
+            "zero-migrate-sqlite/src/ddl.rs",
+            include_str!("../../../zero-migrate-sqlite/src/ddl.rs"),
+            "Sqlite",
+        ),
+        (
+            "zero-migrate-mysql/src/ddl.rs",
+            include_str!("../../../zero-migrate-mysql/src/ddl.rs"),
             "Mysql",
         ),
     ];

@@ -23,6 +23,7 @@
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
 pub mod collation;
+mod ddl;
 mod dml;
 pub mod guard;
 mod schema;
@@ -31,7 +32,7 @@ pub use guard::MysqlGuard;
 
 use zero_migrate_backend::registry::BackendVendor;
 
-/// Everything the engine needs from this crate: the capability descriptor, the two
+/// Everything the engine needs from this crate: the capability descriptor, the three
 /// renderers, and the line-1 guard.
 ///
 /// The renderer structs themselves are deliberately private. A caller reaches this
@@ -39,12 +40,14 @@ use zero_migrate_backend::registry::BackendVendor;
 /// in-crate `match` used to give for free and which `pub` statics would have thrown
 /// away at exactly the moment the vendor became separately linkable.
 ///
-/// `guard` is REQUIRED. Delete that line and this literal stops compiling, here, with
-/// this crate named — which is the point: a backend cannot acquire a trusting guard by
-/// omitting one. See `zero_migrate_backend::registry::BackendVendor`.
+/// `ddl` and `guard` are REQUIRED. Delete either line and this literal stops
+/// compiling, here, with this crate named — which is the point: a backend cannot
+/// inherit another backend's DDL or acquire a trusting guard by omission. See
+/// `zero_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
     descriptor: &zero_migrate_ir::backend::MYSQL_DESCRIPTOR,
     dml: &dml::RENDERER,
     schema: &schema::RENDERER,
+    ddl: ddl::emitter,
     guard: guard::guard,
 };

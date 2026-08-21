@@ -21,9 +21,10 @@
 //! qualification — so `DeclarativeAuthor`'s render methods are thin callers and the
 //! dialect choice is made ONCE (via `DeclarativeAuthor::emitter`).
 //!
-//! Two impls — `PgEmitter` (schema-qualified PG DDL: access methods, WITH storage
-//! params, `COMMENT ON COLUMN` sentinels) and `SqliteEmitter` (unqualified `main`
-//! DDL: inline `/* … */` sentinels, plain B-tree indexes). Each method body is
+//! Three impls — PostgreSQL (schema-qualified DDL: access methods, WITH storage
+//! params, `COMMENT ON COLUMN` sentinels), SQLite (unqualified `main` DDL: inline
+//! `/* … */` sentinels, plain B-tree indexes), and MySQL (backtick-qualified DDL,
+//! native enum folding, and inline foreign-key-supporting indexes). Each method body is
 //! the EXACT former `if is_sqlite { … } else { … }` arm, moved VERBATIM — code
 //! motion, not a rewrite, so the bytes are unchanged (the goldens prove
 //! it). The ROUTING branches (FK inline-vs-defer, rebuild-vs-ALTER, policy-injected
@@ -43,9 +44,11 @@
 //! and the `lower_create_table` site shows what that bought — one request, built
 
 use crate::snapshot::{
-    ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, IndexSnapshot, TableSnapshot,
+    canonical_index_sort_order, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
+    IndexElementSnapshot, IndexSnapshot, TableSnapshot,
 };
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, SqlDialect};
+use zero_migrate_ir::ir::IndexSortOrder;
 
 // once, handed to whichever emitter the dialect selects.
 
@@ -59,7 +62,7 @@ use zero_migrate_ir::dialect::SqlDialect;
 /// CORE already made before any vendor is consulted (which foreign keys inline
 /// rather than defer to an `ALTER TABLE ADD CONSTRAINT`; which indexes the active
 /// policy injected). Carrying both and letting each backend read the fields its
-/// dialect uses costs one `Option` and removes the divergence.
+/// dialect uses removes the divergence.
 // `#[derive(Debug)]` is the one addition the crate boundary forced. The struct was
 // module-private in the engine, where `missing_debug_implementations` does not
 // apply; it is public API here, where it does. It carries no behaviour.
@@ -112,9 +115,34 @@ pub struct CreateTableRequest<'a> {
     /// `snapshot.indexes` sharing a name, where a name-keyed predicate necessarily
     /// returns the same answer for both.
     pub injected_indexes: &'a [String],
+
+    /// The deterministic enum-CHECK name for every element of
+    /// [`TableSnapshot::columns`], in the same order and with the same length.
+    /// Core derives these names because the naming authority
+    /// (`plan::author::cap_ident_name`) lives above this contract and must not be
+    /// copied into a vendor.
+    ///
+    /// # Exactness of the precompute
+    ///
+    /// The former MySQL emitter computed
+    /// `check_constraint_name(table, column.name, "enum")` inside its column loop.
+    /// Within one create, `table` and the literal kind `"enum"` are invariant; the
+    /// result is therefore a pure function of that loop element's `column.name`.
+    /// Core maps that same function over the same ordered `columns` slice, so element
+    /// `i` is byte-identical to the old call for column `i`. Duplicate column names
+    /// retain duplicate entries and receive the same answer just as before; long-name
+    /// truncation and hashing also run through the same function before the vendor is
+    /// called.
+    pub enum_check_names: Vec<String>,
 }
 
 pub trait DdlEmitter {
+    /// Which backend owns this emitter.
+    ///
+    /// Required, with no default: registry wiring can assert that a vendor did not
+    /// pair its descriptor with another backend's DDL factory.
+    fn dialect(&self) -> DialectId;
+
     /// Render a `CREATE TABLE` as its STRUCTURAL statement list — the create
     /// itself plus whatever the dialect attaches to it. `join(";\n")` over the
     /// list is the canonical `up`, and the list (not the joined string) is what
@@ -125,6 +153,21 @@ pub trait DdlEmitter {
     /// appends one `COMMENT ON COLUMN` per sentinel-carrying column, SQLite appends
     /// the policy-injected `CREATE INDEX`es, MySQL appends nothing.
     fn create_table(&self, req: &CreateTableRequest<'_>) -> Vec<String>;
+
+    /// Render this vendor's inline / stand-alone foreign-key clause.
+    ///
+    /// Required, with no shared fallback. Even a backend whose capability set makes
+    /// stand-alone `ADD CONSTRAINT` unreachable must state its own clause spelling.
+    fn fk_clause(&self, fk: &ConstraintSnapshot) -> String;
+
+    /// Names of snapshot indexes this vendor emits inside [`Self::create_table`]
+    /// rather than as follow-on `CREATE INDEX` units.
+    ///
+    /// Required, with no default: PostgreSQL explicitly returns none, SQLite returns
+    /// the policy-injected names carried by the request, and MySQL applies its own
+    /// foreign-key-supporting-index rule. Core consumes only this answer; it does not
+    /// encode any vendor's rule.
+    fn indexes_inlined_by_create(&self, req: &CreateTableRequest<'_>) -> Vec<String>;
 
     /// Render an `ALTER TABLE … ADD COLUMN …` as `(up_statements, down)`. The mask
     /// / encrypted sentinel spelling differs by dialect: PG appends a trailing
@@ -158,6 +201,189 @@ pub trait DdlEmitter {
     /// must emit it unqualified (a qualified `DROP INDEX "schema"."ix"` silently
     /// no-ops on `SQLite` — the dangerous silent-drift mode).
     fn drop_index_up(&self, table: Option<&str>, idx_name: &str) -> String;
+}
+
+/// Render an index element's canonical order suffix.
+///
+/// This helper is shared by all three DDL emitters and lives once in the contract so
+/// vendor crates do not duplicate the bytes or call the snapshot comparison helper
+/// directly.
+#[must_use]
+pub fn render_index_order_suffix(order: Option<IndexSortOrder>) -> &'static str {
+    match canonical_index_sort_order(order) {
+        Some(IndexSortOrder::Desc) => " DESC",
+        Some(IndexSortOrder::Asc) | None => "",
+    }
+}
+
+/// Whether a physical b-tree index supports `columns` as its leading key.
+///
+/// This is structural snapshot comparison, shared by core validation and the
+/// MySQL create emitter; it contains no vendor spelling or routing decision.
+#[must_use]
+pub fn index_supports_fk_columns(index: &IndexSnapshot, columns: &[String]) -> bool {
+    index.predicate.is_none()
+        && !index.only
+        && index.access_method.eq_ignore_ascii_case("btree")
+        && index.columns.starts_with(columns)
+        && index.elements.len() >= columns.len()
+        && index
+            .elements
+            .iter()
+            .take(columns.len())
+            .zip(columns)
+            .all(|(element, column)| {
+                matches!(
+                    element,
+                    IndexElementSnapshot::Column {
+                        name,
+                        opclass: None,
+                        collation: None,
+                        ..
+                    } if name == column
+                )
+            })
+}
+
+/// Whether a primary-key or unique constraint supports `columns` as its leading
+/// canonical key. This is shared structural comparison, not DDL spelling.
+#[must_use]
+pub fn constraint_supports_fk_columns(constraint: &ConstraintSnapshot, columns: &[String]) -> bool {
+    matches!(constraint.kind.as_str(), "PRIMARY KEY" | "UNIQUE")
+        && fk_definition_column_group(&constraint.definition, 0)
+            .is_some_and(|(key, _)| key.starts_with(columns))
+}
+
+fn split_constraintdef_column_list(list: &str) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut chars = list.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                current.push(ch);
+                if matches!(chars.peek(), Some('"')) {
+                    current.push(chars.next().unwrap());
+                } else {
+                    in_quote = !in_quote;
+                }
+            }
+            ',' if !in_quote => {
+                let col = unquote_constraintdef_column(&current);
+                if !col.is_empty() {
+                    cols.push(col);
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    let col = unquote_constraintdef_column(&current);
+    if !col.is_empty() {
+        cols.push(col);
+    }
+    cols
+}
+
+fn unquote_constraintdef_column(token: &str) -> String {
+    let trimmed = token.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed[1..trimmed.len() - 1].replace("\"\"", "\"")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Read one parenthesized column group from the canonical constraint-definition
+/// form, beginning the search at `offset`.
+#[must_use]
+pub fn fk_definition_column_group(definition: &str, offset: usize) -> Option<(Vec<String>, usize)> {
+    let open = definition[offset..].find('(')? + offset;
+    let mut in_quote = false;
+    let mut chars = definition[open + 1..].char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        match ch {
+            '"' => {
+                if matches!(chars.peek(), Some((_, '"'))) {
+                    let _ = chars.next();
+                } else {
+                    in_quote = !in_quote;
+                }
+            }
+            ')' if !in_quote => {
+                let close = open + 1 + idx;
+                return Some((
+                    split_constraintdef_column_list(&definition[open + 1..close]),
+                    close + 1,
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Extract the bare referenced table from a canonical foreign-key definition.
+#[must_use]
+pub fn fk_target_table(definition: &str) -> Option<String> {
+    let after = definition.split("REFERENCES").nth(1)?.trim_start();
+    // The target token is up to the first '(' or whitespace (e.g. `prj.authors`).
+    let end = after
+        .find(|c: char| c == '(' || c.is_whitespace())
+        .unwrap_or(after.len());
+    let qualified = after[..end].trim();
+    // Strip a `<schema>.` prefix to get the bare table. The table part may be
+    // quoted (`"My Table"`) even when the schema is not; handle a quoted tail.
+    let bare = match qualified.rsplit_once('.') {
+        Some((_schema, table)) => table,
+        None => qualified,
+    };
+    let target = bare.trim().trim_matches('"');
+    if target.is_empty() {
+        None
+    } else {
+        Some(target.to_string())
+    }
+}
+
+/// Extract the policy tail following the referenced-column group in a canonical
+/// foreign-key definition.
+#[must_use]
+pub fn fk_policy_tail(definition: &str) -> String {
+    let Some(after_ref) = definition.split_once("REFERENCES") else {
+        return String::new();
+    };
+    let offset = definition.len() - after_ref.1.len();
+    fk_definition_column_group(definition, offset)
+        .map(|(_, end)| definition[end..].to_string())
+        .unwrap_or_default()
+}
+
+/// Extract the local columns from a canonical foreign-key definition.
+#[must_use]
+pub fn fk_local_columns(definition: &str) -> Vec<String> {
+    fk_definition_column_group(definition, 0)
+        .map(|(cols, _)| cols)
+        .unwrap_or_default()
+}
+
+/// Extract the referenced columns from a canonical foreign-key definition.
+#[must_use]
+pub fn fk_referenced_columns(definition: &str) -> Vec<String> {
+    let Some(after_ref) = definition.split_once("REFERENCES") else {
+        return vec!["id".to_string()];
+    };
+    let offset = definition.len() - after_ref.1.len();
+    fk_definition_column_group(definition, offset)
+        .map(|(cols, _)| {
+            if cols.is_empty() {
+                vec!["id".to_string()]
+            } else {
+                cols
+            }
+        })
+        .unwrap_or_else(|| vec!["id".to_string()])
 }
 
 // ===========================================================================

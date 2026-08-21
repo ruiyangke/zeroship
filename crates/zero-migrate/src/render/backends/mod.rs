@@ -37,7 +37,7 @@
 //! A backend module names its own dialect exactly ONCE, as its `DIALECT` const, and
 //! names no other dialect at all. Everything else reads `DIALECT`. That rule is what
 //! made this step mechanical, and it is still ENFORCED:
-//! `tests/dialect_matrix/backend_modules_name_one_dialect.rs` reads all six vendor
+//! `tests/dialect_matrix/backend_modules_name_one_dialect.rs` reads all nine vendor
 //! modules with `include_str!` and asserts both halves — own dialect exactly once, as
 //! the `const DIALECT` line, and no other dialect at all. It was repointed at the new
 //! crate paths in the commit that moved them; a re-export shim at the old path would
@@ -85,6 +85,7 @@
 //! precisely because a red count cannot tell it apart from an unrouted emission.
 //! Re-dialecting it would be a regression.
 
+use zero_migrate_backend::ddl::DdlEmitter;
 use zero_migrate_backend::guard::{GuardConfig, MigrationGuard};
 use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_backend::renderer::DmlRenderer;
@@ -112,16 +113,13 @@ pub(crate) const VENDORS: VendorSet = VendorSet::new(&SHIPPING);
 
 /// The vendor for a dialect.
 ///
-/// Still EXHAUSTIVE over the closed `SqlDialect`, so a fourth variant breaks here at
-/// compile time until its crate is wired — the property the old `match` had and the
-/// one worth keeping. What changed is that the arms now name a CRATE's registered
-/// vendor rather than a module-private static, so the vendor is deletable.
+/// Resolved by the open [`DialectId`](zero_migrate_ir::dialect::DialectId) filed in
+/// each [`BackendVendor`], never by an enum match in core. The shipping list above is
+/// the one composition point that names backend crates.
 fn vendor(dialect: SqlDialect) -> &'static BackendVendor {
-    match dialect {
-        SqlDialect::Postgres => &zero_migrate_postgres::VENDOR,
-        SqlDialect::Sqlite => &zero_migrate_sqlite::VENDOR,
-        SqlDialect::Mysql => &zero_migrate_mysql::VENDOR,
-    }
+    VENDORS
+        .get(dialect.id())
+        .unwrap_or_else(|| panic!("no registered backend vendor for {}", dialect.id()))
 }
 
 /// The DML renderer for a dialect.
@@ -136,6 +134,11 @@ pub(crate) fn schema_renderer(
     vendor(dialect).schema
 }
 
+/// The schema-bound DDL emitter registered by a dialect's vendor crate.
+pub(crate) fn ddl_emitter(dialect: SqlDialect, project_schema: &str) -> Box<dyn DdlEmitter> {
+    (vendor(dialect).ddl)(project_schema)
+}
+
 /// The LINE-1 guard for a config's dialect — this vendor's, built by this vendor.
 ///
 /// This replaced `zero_migrate_guard::guard::guard_for`, which was a second
@@ -143,9 +146,9 @@ pub(crate) fn schema_renderer(
 /// descriptor-only dialects onto one shared `SqliteDescriptorGuard`. Two consequences
 /// of folding it into the vendor registry are worth stating:
 ///
-/// - There is now exactly ONE exhaustive `SqlDialect` match for backend selection in
-///   the engine — [`vendor`] — instead of two that could disagree. A fourth dialect
-///   breaks it in one place.
+/// - Every backend surface now resolves through the same [`VendorSet`] lookup, keyed
+///   by the vendor's open id; there is no enum dispatch here for a fourth backend to
+///   be omitted from.
 /// - "This vendor ships no guard" became a compile error at the vendor's own
 ///   definition site rather than something a `_ =>` arm here could paper over. See
 ///   `zero_migrate_backend::registry::BackendVendor`.
@@ -196,7 +199,7 @@ mod tests {
         }
     }
 
-    /// Each vendor's two renderers agree with the descriptor they are filed under.
+    /// Each vendor's three renderers agree with the descriptor they are filed under.
     ///
     /// A `BackendVendor` is a hand-written struct literal in each vendor crate, so
     /// nothing but this stops a crate from pairing PostgreSQL's descriptor with
@@ -223,6 +226,34 @@ mod tests {
                 "{} registered a DmlRenderer carrying a different descriptor",
                 v.descriptor.display_name
             );
+            let ddl = (v.ddl)("registry_identity_probe");
+            assert_eq!(
+                ddl.dialect(),
+                v.descriptor.id,
+                "{} registered a DdlEmitter for a different dialect",
+                v.descriptor.display_name
+            );
         }
+    }
+
+    /// SQLite cannot reach a deferred `ALTER TABLE … ADD CONSTRAINT` through the
+    /// current capability gate, but the old core router still selected the
+    /// PostgreSQL FK-clause body for that arm. Moving the body must preserve that
+    /// dormant answer too: unreachable is not permission to reimplement it.
+    #[test]
+    fn sqlite_deferred_fk_clause_keeps_the_former_postgres_bytes() {
+        let fk = zero_migrate_backend::snapshot::ConstraintSnapshot {
+            name: "fk\"child".to_string(),
+            kind: "FOREIGN KEY".to_string(),
+            definition: "FOREIGN KEY (\"child\"\"col\") REFERENCES old.parents(id, \"parent\"\"col\") ON DELETE CASCADE".to_string(),
+            comment: None,
+            cascade_columns: None,
+        };
+        let expected = "CONSTRAINT \"fk\"\"child\" FOREIGN KEY (\"child\"\"col\") REFERENCES \"project\"\"schema\".\"parents\" (id, \"parent\"\"col\") ON DELETE CASCADE";
+
+        let sqlite = ddl_emitter(SqlDialect::Sqlite, "project\"schema").fk_clause(&fk);
+        let postgres = ddl_emitter(SqlDialect::Postgres, "project\"schema").fk_clause(&fk);
+        assert_eq!(sqlite, expected);
+        assert_eq!(sqlite, postgres);
     }
 }

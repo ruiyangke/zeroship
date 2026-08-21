@@ -13,9 +13,9 @@
 //! fourth backend a `[dependencies]` line plus one entry.
 //!
 //! So the target is not zero. It is ONE FILE: `render/backends/mod.rs`, which IS the
-//! registry composition. Six lines there — three in the `SHIPPING` array, three in
-//! the exhaustive `vendor()` match — are the engine naming its vendors once, on
-//! purpose, in the place designed to hold that knowledge.
+//! registry composition. Three lines there — the three entries in the `SHIPPING`
+//! array — are the engine naming its vendors once, on purpose, in the place designed
+//! to hold that knowledge. Dispatch itself is now a `VendorSet` lookup by open id.
 //!
 //! # Why a ratchet and not an assertion of the target
 //!
@@ -25,7 +25,7 @@
 //!
 //! | file | lines | what it was | closed by |
 //! |------|-------|-------------|-----------|
-//! | `render/backends/mod.rs` | 6 | the registry — the PERMANENT entry | never |
+//! | `render/backends/mod.rs` | 3 | the registry — the PERMANENT entry | never |
 //! | `lib.rs` | 3 | `pub use {Mysql,Pg,Sqlite}Guard` at the crate root | closed |
 //! | `render/vendor.rs` | 1 | `pub use zero_migrate_postgres::render_vendor_op` | closed |
 //! | `render/declarative.rs` | 1 | `use zero_migrate_mysql::collation::{…}` | closed |
@@ -35,7 +35,8 @@
 //! is private in `zero-migrate-postgres` and the crate-root `pub use` is gone, so
 //! naming it is an E0603 rather than a finding here. Where a rule can be a privacy it
 //! should be; this census is the backstop for the ones that cannot, which is why its
-//! entry came off rather than being kept as a duplicate.
+//! entry came off rather than being kept as a duplicate. The registry entry fell
+//! from six to three when its exhaustive enum match became a `VendorSet` lookup.
 //!
 //! `render/declarative.rs` closed when collation pinning and stripping became two
 //! required primitive methods on `SchemaRenderer`. The stripping body moved
@@ -73,7 +74,7 @@
 //! needle and it reads every file and still finds nothing. Those are two different
 //! blindnesses with the same green, so there are two floors: [`SRC_FILE_FLOOR`] for
 //! the walk and the `render/backends/mod.rs` entry in [`ALLOWED`] for the needle —
-//! the registry's six lines are a positive control that must keep matching.
+//! the registry's three lines are a positive control that must keep matching.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -95,10 +96,9 @@ const VENDOR_CRATES: &[&str] = &[
 /// Paths are relative to `crates/zero-migrate/src`. See the module header for what
 /// each entry is and which of them is permanent.
 const ALLOWED: &[(&str, usize)] = &[
-    // PERMANENT. The registry composition: three `SHIPPING` entries and three arms of
-    // the exhaustive `vendor()` match. This is the engine naming its vendors on
-    // purpose, once, in the one place that is supposed to know they exist.
-    ("render/backends/mod.rs", 6),
+    // PERMANENT. The registry composition's three `SHIPPING` entries. Dispatch is a
+    // `VendorSet` lookup and names no vendor crate itself.
+    ("render/backends/mod.rs", 3),
 ];
 
 /// The walk's floor. `crates/zero-migrate/src` held 87 `.rs` files when this was
@@ -180,13 +180,13 @@ fn core_names_no_vendor_crate_outside_the_registry() {
     let allowed: BTreeMap<&str, usize> = ALLOWED.iter().copied().collect();
 
     // FLOOR TWO — the NEEDLE. The registry is a positive control: it names all three
-    // vendor crates twice each, and it is not going to stop. If this stops matching,
+    // vendor crates once each, and it is not going to stop. If this stops matching,
     // the census has gone blind and every other zero below it is meaningless.
     let registry = found.get("render/backends/mod.rs").copied().unwrap_or(0);
     assert_eq!(
-        registry, 6,
+        registry, 3,
         "the needle found {registry} vendor-crate names in render/backends/mod.rs, \
-         expected 6 (three `SHIPPING` entries + three `vendor()` arms). Either the \
+         expected 3 (the three `SHIPPING` entries). Either the \
          registry was restructured — update this control deliberately — or \
          `VENDOR_CRATES` stopped matching, in which case the whole census is blind."
     );
