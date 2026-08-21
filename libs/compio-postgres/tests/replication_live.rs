@@ -255,29 +255,59 @@ async fn identify_system_returns_the_servers_real_identity() {
     );
 }
 
-/// The control for `replication_connect_rejects_system_roots_with_weak_sslmode`
-/// (a unit test in `src/replication.rs`): a config that is NOT contradictory
-/// must get past TLS validation and fail at the socket instead.
+/// `connect_replication`'s TLS refusal is keyed to the CONTRADICTION, not to
+/// the endpoint.
 ///
-/// That test proves a bad config is refused; it does not prove the refusal is
-/// keyed to the contradiction. Without this pairing, `connect_replication`
-/// could refuse every config for an unrelated reason and still look correct.
-/// The one variable that differs here is `sslmode`.
+/// A matched pair built from ONE config, differing in exactly one call:
+/// `ssl_mode`. `sslrootcert=system` is a contradiction under `Prefer` and is
+/// fine under `VerifyFull`, so the same endpoint must be refused in the first
+/// case and dialled in the second. Both arms are constructed here rather than
+/// leaning on the unit test in `src/replication.rs`, which differs from this
+/// one in host form, listener, timeout and credentials -- pairing against it
+/// would have varied five things at once and proved nothing about which one
+/// mattered.
 #[compio::test]
-async fn replication_tls_validation_is_keyed_to_the_contradiction_not_the_address() {
-    let mut config = credentials_only(&test_url());
-    config.host("127.0.0.1");
-    config.port(closed_port().await);
-    config.ssl_mode(compio_postgres::config::SslMode::VerifyFull);
-    config.ssl_root_cert(compio_postgres::config::SslRootCert::System);
+async fn replication_tls_refusal_is_keyed_to_the_contradiction_not_the_endpoint() {
+    // One dead port for both arms: the endpoint is held fixed by construction.
+    let port = closed_port().await;
+    let config_with = |mode| {
+        let mut config = credentials_only(&test_url());
+        config.host("127.0.0.1");
+        config.port(port);
+        config.ssl_mode(mode);
+        config.ssl_root_cert(compio_postgres::config::SslRootCert::System);
+        config
+    };
 
-    let err = compio_postgres::replication::connect_replication(NoTls, &config)
-        .await
-        .err()
-        .expect("nothing is listening on a closed port");
-    let chain = common::error_chain(&err);
+    let refused = compio_postgres::replication::connect_replication(
+        NoTls,
+        &config_with(compio_postgres::config::SslMode::Prefer),
+    )
+    .await
+    .err()
+    .expect("a weak sslmode with sslrootcert=system is a contradiction");
+    let refused_chain = common::error_chain(&refused);
     assert!(
-        !chain.contains("sslrootcert=system"),
-        "verify-full is not a contradiction, so validation must let it through: {chain}"
+        refused_chain.contains("sslrootcert=system"),
+        "the contradiction must be named by the refusal, got: {refused_chain}"
+    );
+
+    let dialled = compio_postgres::replication::connect_replication(
+        NoTls,
+        &config_with(compio_postgres::config::SslMode::VerifyFull),
+    )
+    .await
+    .err()
+    .expect("nothing is listening on that port, so this cannot succeed");
+    let dialled_chain = common::error_chain(&dialled);
+    assert!(
+        !dialled_chain.contains("sslrootcert=system"),
+        "verify-full is not a contradiction, so validation must let it through: {dialled_chain}"
+    );
+    // Asserted POSITIVELY: without this, any unrelated early failure that
+    // merely lacks the literal would satisfy the check above.
+    assert!(
+        !common::server_answered(&dialled),
+        "the second arm must reach the socket and be refused there: {dialled_chain}"
     );
 }
