@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use ntex::web::{self, test};
 use uuid::Uuid;
+use zeroship_mailer::Mailer;
 
 use common::test_auth_config;
 use zeroship_auth::config::AuthConfig;
@@ -132,10 +133,17 @@ impl EnrollFixture {
     /// and a valid CSRF double-submit, plus whatever re-auth proof is supplied.
     #[allow(clippy::future_not_send)]
     async fn post_enroll(&self, code: Option<&str>, pw: Option<&str>) -> (u16, serde_json::Value) {
+        // An enroll that replaces a CONFIRMED credential mails the account
+        // holder, so the route resolves `State<Arc<dyn Mailer>>` and a bare
+        // `web::App` without one 500s on the path this file is about. What the
+        // notice SAYS is pinned in `totp_removal_notice_test`; here the mailer
+        // only has to exist.
+        let mailer: Arc<dyn Mailer> = Arc::new(common::CapturingMailer::default());
         let svc = test::init_service(
             web::App::new()
                 .state(self.cfg.clone())
                 .state(self.pg.clone())
+                .state(mailer)
                 .service(
                     web::resource("/me/2fa/enroll")
                         .route(web::post().to(zeroship_auth::ui::totp::enroll)),

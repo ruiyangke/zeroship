@@ -90,6 +90,16 @@ These are also served by `crates/auth` on the auth host.
 | POST | `/webhooks/postmark`, `/webhooks/ses-sns`, `/webhooks/relay-inbound` | Mailer and relay webhooks |
 | GET | `/healthz`, `/readyz`, `/static/style.css` | Health checks and static CSS |
 
+Turning the second factor off takes more than the session cookie.
+`/me/2fa/disable`, and `/me/2fa/enroll` when it replaces a confirmed credential,
+both require a re-auth proof: a current TOTP code or the account password.
+Neither revokes anything, on purpose - whoever supplies that proof can sign back
+in through `/login` the moment 2FA is off, so a teardown would evict only the
+account holder. Both instead mail the registered address a second-factor-removed
+notice whose call to action is a password reset, the flow that does revoke
+everything. To end other sessions deliberately, use `/me/sessions` and
+`/me/sessions/{id}/revoke`.
+
 ### Gateway BFF endpoints
 
 Per hosted-app host, the gateway serves the same-origin browser BFF endpoints
