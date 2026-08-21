@@ -5,11 +5,10 @@
 //! `zeroship.app_spend_state` + `zeroship.spend_state_history`), not the pure
 //! `derive_state` (that is unit-tested in `src/spend.rs`).
 //!
-//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
-//! run `tests/provision_test_backends.sh` to provision one) to run; tests
-//! silently skip otherwise. The DB must have changeset 0039 applied
-//! (drop+recreate `zeroship_billing_test`, re-run `deploy/ops/db-migrate.sh
-//! update`).
+//! The database comes from `common::require_control_db`, which refuses the run
+//! rather than skipping it or substituting one: the whole target shares one
+//! database, and an unmigrated one used to present as forty-one named tests
+//! failing with `42P01`. Provision it with `tests/provision_test_backends.sh`.
 
 use crate::common;
 

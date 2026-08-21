@@ -10,7 +10,8 @@
 //! and the JSON parse are all exercised end to end.
 //!
 //! Real Postgres via a configured test database
-//! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
+//! (`common::require_control_db`); an absent or unmigrated one REFUSES
+//! the run.
 //! The DB must have changeset 0040 applied.
 
 use crate::common;

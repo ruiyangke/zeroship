@@ -7,7 +7,7 @@
 //! `proration::record_plan_change` — NO shims. The plan-change write path is the
 //! exact server-side code `api.rs::set_plan` runs (`record_plan_change` in a
 //! per-creator-advisory-locked txn). Real Postgres via a configured test
-//! database (`zeroship_core::config::test_database_url_opt`); silent skip
+//! database (`zeroship_core::config::test_database_url_opt`); a refusal
 //! otherwise. The DB must have changesets 0050 + 0051 applied.
 
 use crate::common;

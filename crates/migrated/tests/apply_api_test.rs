@@ -21,12 +21,16 @@ use zeroship_migrated::auth::{
 use zeroship_migrated::policy::{ManagedPolicyConfig, MIGRATE_POLICY_FILENAME};
 use zeroship_migrated::MigrationServiceState;
 
-const DEFAULT_DSN: &str =
-    "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_control_test";
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated integration policy seal key";
 
+/// The database this target dials, or a panic naming the provisioner.
+///
+/// It used to fall back to `dbname=zeroship_control_test` on :5440, a database
+/// no other part of the workspace creates. On a box that happened to have one
+/// the run went green against it; on a box that did not, the connect failed
+/// with an address nothing in the tree had chosen.
 fn dsn() -> String {
-    zeroship_core::config::test_database_url_opt().unwrap_or_else(|| DEFAULT_DSN.to_string())
+    zeroship_core::config::test_database_url()
 }
 
 fn tmpdir(label: &str) -> PathBuf {

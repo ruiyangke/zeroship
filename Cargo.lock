@@ -7143,6 +7143,7 @@ dependencies = [
  "zeroship-runtime",
  "zeroship-stream",
  "zeroship-test-support",
+ "zeroship-testkit",
  "zeroship-workflow-scheduler",
  "zstd",
 ]

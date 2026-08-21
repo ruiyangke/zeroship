@@ -553,13 +553,17 @@ fn hex_bytes(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    const DEFAULT_TEST_DSN: &str =
-        "host=localhost port=5440 user=postgres password=zeroship dbname=zeroship_control_test";
     const INVALID_TRANSITION_ERROR: &str =
         "invalid migration transition: expected approved status";
 
+    /// The database these tests dial, or a panic naming the provisioner.
+    ///
+    /// It used to fall back to `dbname=zeroship_control_test` on :5440 -- and
+    /// `assert_platform_schema_present` below then had to explain, at length,
+    /// that the fallback "on a normal dev box does NOT carry these tables".
+    /// That paragraph existed only because the fallback did.
     fn test_dsn() -> String {
-        zeroship_core::config::test_database_url_opt().unwrap_or_else(|| DEFAULT_TEST_DSN.to_string())
+        zeroship_core::config::test_database_url()
     }
 
     async fn test_client() -> Client {
@@ -650,11 +654,9 @@ mod tests {
              Point it at one, e.g. run `tests/provision_test_backends.sh` to provision \
              a migrated test database and generate the TOML overlay, then:\n  \
              cargo test -p zeroship-migrated --features live-db-tests\n\
-             The DSN is resolved by `zeroship_core::config::test_database_url_opt()`, \
-             which falls back to the built-in default ({}) when nothing is configured - \
-             NOT migrated on a stock dev box.",
+             The DSN comes from `zeroship_core::config::test_database_url()`, which \
+             panics naming that command when nothing is configured.",
             missing.join(", zeroship."),
-            DEFAULT_TEST_DSN,
         );
     }
 

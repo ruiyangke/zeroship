@@ -1,8 +1,8 @@
 //! Integration tests for `StripeStore` against a live Postgres.
 //!
-//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
-//! run `tests/provision_test_backends.sh` to provision one) to run; tests
-//! silently skip otherwise.
+//! The database comes from `common::require_control_db`, which REFUSES the run
+//! when there is no migrated one; provision it with
+//! `tests/provision_test_backends.sh`.
 
 use crate::common;
 

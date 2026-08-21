@@ -15,7 +15,8 @@
 //!   * `out_of_order_paid_then_failed_does_not_resuspend`   (critic #1 regression)
 //!
 //! Gated on a configured test database
-//! (`zeroship_core::config::test_database_url_opt`); silent skip otherwise.
+//! (`common::require_control_db`); an absent or unmigrated one REFUSES
+//! the run.
 //! The DB must have changeset 0045 applied.
 
 use crate::common;

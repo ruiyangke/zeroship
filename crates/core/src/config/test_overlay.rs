@@ -116,11 +116,27 @@ fn load_opt() -> Option<FileConfig> {
 ///
 /// THIS IS THE DROP-IN for the eight `test_env!("...")` chains it replaced, and
 /// it returns an `Option` for exactly that reason: those call sites decide for
-/// themselves what an absent database means - most announce a skip, a few
-/// panic, `crates/plugin-db/tests/distributed_live.rs` substitutes a default.
-/// Collapsing eight names into one is a naming change; deciding on their behalf
-/// what happens when there is no database is not, and belongs to whoever owns
-/// each test.
+/// themselves what an absent database means. Collapsing eight names into one is
+/// a naming change; deciding on their behalf what happens when there is no
+/// database is not, and belongs to whoever owns each test.
+///
+/// WHAT THE CALLERS ACTUALLY DECIDED, and why the answer is no longer "some of
+/// them substitute a default". This doc used to say that most announce a skip,
+/// a few panic, and `crates/plugin-db/tests/distributed_live.rs` substitutes a
+/// default. The census on 2026-08-21 found 26 substituting a default, not one:
+/// eighteen in `crates/control` alone, all naming `zeroship_billing_test`
+/// regardless of what the file was about, and four in `crates/plugin-db`
+/// naming a DIFFERENT SERVER (`localhost:5434`, password `test`). Every one of
+/// them is gone. A caller that cannot proceed without a database now takes
+/// [`database_url`] (which panics naming the provisioner) or
+/// `zeroship_testkit::live_db::require_configured` (which refuses the whole run
+/// and is what a multi-module target wants); an `_opt` caller that still wants
+/// to skip still skips.
+///
+/// The 12 remaining are all in `libs/`, which by the `libs/` boundary cannot
+/// see this module at all - they read `PG_TEST_URL` and nothing else, and their
+/// compiled default is the shared `zeroship` database. That is how 84 `cpg_*`
+/// schemas came to be sitting in it.
 ///
 /// `PG_TEST_URL` wins over the overlay. That is how a suite hands its per-run
 /// scratch database name down (`tests/lib/scratch_db.sh`) and how two

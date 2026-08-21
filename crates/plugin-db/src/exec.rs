@@ -1426,9 +1426,13 @@ mod tests {
     // cancelled query.
     // -------------------------------------------------------------------
     //
-    // PG-REQUIRED. Connects to `PG_TEST_URL` (default `postgres://postgres:
-    // test@localhost:5434/postgres`) and PANICS, naming the address it
-    // dialled, when no Postgres is reachable there. The leak window this
+    // PG-REQUIRED. Connects to the database the overlay names (or
+    // `PG_TEST_URL`) and PANICS, naming the provisioning command, when there
+    // is none. It used to fall back to `postgres://postgres:test@localhost:
+    // 5434/postgres` - a different server with different credentials - so a
+    // run with no overlay measured whatever was listening there.
+    //
+    // The leak window this
     // test guards can only be observed against a real backend, so a run
     // that quietly returned on a connect failure would let the leak go
     // unchecked while the suite still reported green.
@@ -1446,8 +1450,7 @@ mod tests {
     // default timeout.
 
     fn pg_test_url() -> String {
-        zeroship_core::config::test_database_url_opt()
-            .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
+        zeroship_core::config::test_database_url()
     }
 
     #[test]

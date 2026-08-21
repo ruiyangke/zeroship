@@ -1,9 +1,8 @@
 //! Integration tests for `EnvStore` against a real Postgres.
 //!
-//! Configure a test database (`zeroship_core::config::test_database_url_opt`;
-//! the docker-compose in this repo boots one on 127.0.0.1:5440 for local
-//! dev), or run `tests/provision_test_backends.sh` to provision one. Tests
-//! are silently skipped otherwise so this file doesn't gate CI without a DB.
+//! The database comes from `common::require_control_db`, which REFUSES the run
+//! when there is no migrated one; provision it with
+//! `tests/provision_test_backends.sh`.
 //!
 //! Each test uses a unique app row so parallel runs don't collide.
 
@@ -15,11 +14,7 @@ use zeroship_control::{EnvStore, Registry};
 use crate::common;
 
 fn db_url() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .filter(|u| !u.trim().is_empty())
-        .unwrap_or_else(|| {
-            "postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test".to_string()
-        })
+    crate::common::require_control_db()
 }
 
 async fn create_test_app(registry: &Registry) -> Uuid {

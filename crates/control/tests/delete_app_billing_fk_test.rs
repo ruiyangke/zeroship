@@ -12,7 +12,8 @@
 //!
 //! FAITHFUL: drives the REAL `Registry::create_app` / `Registry::delete_app`
 //! against a live, migrated Postgres. Gated on a configured test database
-//! (`zeroship_core::config::test_database_url_opt`); silent skip.
+//! (`common::require_control_db`); an absent or unmigrated one REFUSES
+//! the run.
 
 use crate::common;
 
