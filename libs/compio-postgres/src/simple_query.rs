@@ -50,11 +50,30 @@ pub async fn simple_query(client: &InnerClient, query: &str) -> Result<SimpleQue
 }
 
 pub async fn batch_execute(client: &InnerClient, query: &str) -> Result<(), Error> {
+    let responses = start_batch_execute(client, query)?;
+    finish_batch_execute(responses).await
+}
+
+/// Enqueue the batch and hand back its response stream, without awaiting it.
+///
+/// Split out of `batch_execute` so a caller can arm a cleanup guard around
+/// exactly the window where one is owed: after the request reaches the
+/// connection, and before its response has been consumed. Everything this
+/// function does before `send` - logging, encoding - can fail or unwind while
+/// the session is still untouched, and a guard armed across it would undo work
+/// the caller never did.
+pub(crate) fn start_batch_execute(
+    client: &InnerClient,
+    query: &str,
+) -> Result<Responses, Error> {
     debug!("executing statement batch: {query}");
 
     let buf = encode(client, query)?;
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))
+}
 
+/// Drain the response stream `start_batch_execute` returned.
+pub(crate) async fn finish_batch_execute(mut responses: Responses) -> Result<(), Error> {
     loop {
         match responses.next().await? {
             Message::ReadyForQuery(_) => return Ok(()),
