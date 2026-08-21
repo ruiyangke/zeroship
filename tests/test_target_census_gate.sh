@@ -66,10 +66,28 @@
 # <cargo-json> is the output of
 #   cargo test --workspace --no-run --message-format=json
 #
-# Env overrides exist for the selftest only:
-#   ZS_CENSUS_FILE          path to the expected-package list
-#   ZS_CENSUS_METADATA      pre-captured `cargo metadata` json (skips cargo)
-#   ZS_CENSUS_NAME_FLOOR    override the test-name floor
+# REDIRECTING THE CORPUS, and why it is all-or-nothing.
+#
+#   --census <file>       the expected-package list
+#   --metadata <file>     pre-captured `cargo metadata` json (skips cargo)
+#   --name-floor <n>      the floor arm 2's test-name total must clear
+#   --min-packages <n>    the floor the CENSUS FILE's own row count must clear
+#
+# These were three ambient `ZS_CENSUS_*` environment variables until 2026-08-20.
+# They are argv now, and the four must be given together or not at all, because
+# of the bug that prompted this: arm 1 carried `floor 15`, measured against the
+# real ~30-package workspace, while the self-test drove the same arm over a
+# TWO-package fixture where 2 is the correct and complete answer. A floor is a
+# claim about a corpus; hand the gate a different corpus and the claim is not
+# just wrong, it is unrelated. So whoever supplies the corpus supplies its
+# bounds, in the same invocation, where both are visible together.
+#
+# An ambient env var is exactly the wrong channel for this. It can be set by
+# something that is not the invocation - an exported shell, a CI env: block -
+# and then the real run silently gates against a fixture's numbers with nothing
+# in the command line to show it. Argv cannot leak that way, and requiring all
+# four together means a half-redirected corpus is a refusal instead of a corpus
+# measured against somebody else's floor.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -116,14 +134,88 @@ gate_arms_init test_target_census
 # been observed because no CI run of this job has ever reported its own number.
 NAME_FLOOR_DEFAULT=5413
 
-CENSUS_FILE="${ZS_CENSUS_FILE:-$ROOT/tests/test_target_packages.txt}"
-NAME_FLOOR="${ZS_CENSUS_NAME_FLOOR:-$NAME_FLOOR_DEFAULT}"
+# THE FLOOR ON THE CENSUS FILE ITSELF, which is a different kind of number from
+# every other floor in this gate and the distinction is the whole repair.
+#
+# Arm 1's floor is DERIVED below from the census file's row count, so it is a
+# completeness assertion - every package the census demands must have been
+# observed to build a test binary - and it scales with whatever corpus the gate
+# was handed. That is strictly stronger than the constant 15 it replaces, which
+# passed while ruling on 15 of 30 packages, and it is simultaneously correct for
+# a two-row fixture where 2 is the whole truth.
+#
+# But a completeness check has its own vacuity: examined == offered == 0 passes.
+# So the DENOMINATOR needs a bound, and this is it. It can be an absolute number
+# where arm 1's cannot, because the two sides fail differently. The census file
+# is committed text: it shrinks only in a diff somebody wrote. OBSERVED_PKGS
+# comes from a jq filter over cargo's json and goes to zero the moment
+# `profile.test == true` stops matching a future cargo's output, with nothing to
+# show for it. Guard the side that can collapse silently by comparing it to the
+# side that cannot; guard the side that cannot with a constant.
+#
+# 15 against the 30 rows counted 2026-08-20 in tests/test_target_packages.txt.
+# Half, because packages are added and removed in ones and this must survive a
+# real consolidation. The same shape as run_doc_gate.sh's `>= 10` guard on the
+# workspace member count it derives its own floor from.
+MIN_PACKAGES_DEFAULT=15
 
-JSON="${1:-}"
-MODE="${2:-check}"
+CENSUS_FILE=""
+META=""
+NAME_FLOOR=""
+MIN_PACKAGES=""
+JSON=""
+MODE="check"
+SUPPLIED=0
+
+usage() {
+  echo "usage: $0 <cargo-test-no-run-message-format-json> [--print-census]" >&2
+  echo "       $0 <json> --census F --metadata M --name-floor N --min-packages P" >&2
+}
+
+need_value() {
+  if [ "$2" -lt 2 ]; then
+    echo "error: $1 needs a value" >&2
+    usage
+    exit 2
+  fi
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --print-census) MODE="--print-census"; shift ;;
+    --census)       need_value "$1" "$#"; CENSUS_FILE="$2";  SUPPLIED=$((SUPPLIED + 1)); shift 2 ;;
+    --metadata)     need_value "$1" "$#"; META="$2";         SUPPLIED=$((SUPPLIED + 1)); shift 2 ;;
+    --name-floor)   need_value "$1" "$#"; NAME_FLOOR="$2";   SUPPLIED=$((SUPPLIED + 1)); shift 2 ;;
+    --min-packages) need_value "$1" "$#"; MIN_PACKAGES="$2"; SUPPLIED=$((SUPPLIED + 1)); shift 2 ;;
+    -*) echo "error: unknown option '$1'" >&2; usage; exit 2 ;;
+    *)
+      if [ -n "$JSON" ]; then
+        echo "error: more than one cargo json given ('$JSON' then '$1')" >&2
+        usage
+        exit 2
+      fi
+      JSON="$1"; shift ;;
+  esac
+done
+
+# All four or none. A corpus half-redirected is a corpus measured against
+# somebody else's floor, which is the bug this gate was carrying.
+if [ "$SUPPLIED" -ne 0 ] && [ "$SUPPLIED" -ne 4 ]; then
+  echo "error: --census, --metadata, --name-floor and --min-packages must be given" >&2
+  echo "       together ($SUPPLIED of 4 present). Redirecting the corpus without" >&2
+  echo "       redeclaring its bounds leaves the arms gating a fixture against the" >&2
+  echo "       real workspace's numbers, which is exactly backwards." >&2
+  exit 2
+fi
+
+if [ "$SUPPLIED" -eq 0 ]; then
+  CENSUS_FILE="$ROOT/tests/test_target_packages.txt"
+  NAME_FLOOR="$NAME_FLOOR_DEFAULT"
+  MIN_PACKAGES="$MIN_PACKAGES_DEFAULT"
+fi
 
 if [ -z "$JSON" ] || [ ! -f "$JSON" ]; then
-  echo "usage: $0 <cargo-test-no-run-message-format-json> [--print-census]" >&2
+  usage
   echo "error: no readable cargo json at '${JSON:-<none>}'" >&2
   exit 2
 fi
@@ -149,7 +241,6 @@ fi
 # A splitter written against the first form returns "0.1.0" for the second and
 # the census then guards a package called "0.1.0" while compio-postgres goes
 # unwatched. `cargo metadata` states the mapping instead of inferring it.
-META="${ZS_CENSUS_METADATA:-}"
 if [ -z "$META" ]; then
   META="$(mktemp)"
   trap 'rm -f "$META"' EXIT
@@ -224,6 +315,18 @@ if [ -z "$EXPECTED_PKGS" ]; then
   exit 2
 fi
 
+# The corpus arm 1 rules against, and the guard on it. See MIN_PACKAGES_DEFAULT.
+CENSUS_ROWS="$(printf '%s\n' "$EXPECTED_PKGS" | grep -c .)"
+if ! [ "$CENSUS_ROWS" -ge "$MIN_PACKAGES" ] 2>/dev/null; then
+  echo "error: $CENSUS_FILE offers $CENSUS_ROWS package(s), below the declared" >&2
+  echo "       minimum of $MIN_PACKAGES. Arm 1's floor IS this number, so a census" >&2
+  echo "       that shrank would quietly shrink the arm with it: a gate demanding" >&2
+  echo "       all of two packages passes as loudly as one demanding all of thirty." >&2
+  echo "       Either the file was truncated, or packages were removed on purpose -" >&2
+  echo "       in which case lower the minimum in the same commit that removes them." >&2
+  exit 2
+fi
+
 rc=0
 
 # --- arm 1: per-package existence, both directions ------------------------
@@ -237,17 +340,28 @@ rc=0
 # MISSING - loud - but a later edit that softened the MISSING arm would leave a
 # gate comparing two empty sets and printing nothing.
 #
-# FLOOR 15 against 30 census rows (counted 2026-08-20 in
-# tests/test_target_packages.txt). Half, because packages are added and removed
-# in ones and this must survive a real consolidation; a jq filter that stops
-# matching does not land on 14.
+# THE FLOOR IS THE CENSUS ROW COUNT, DERIVED, NOT A CONSTANT. This arm carried
+# `floor 15` until 2026-08-20, measured against the real ~30-package workspace,
+# and it was wrong in both directions at once:
 #
-# NOT MEASURED BY RUNNING: this gate takes a cargo `--message-format json`
-# capture as argv, which means a full workspace `cargo test --no-run`. The 30
-# is counted from the census file, which is what the floor is expressed
-# against; the observed count on a healthy build equals it or exceeds it by the
-# EXTRA arm's definition.
-gate_arm package_census "$PKG_COUNT" 15 || rc=1
+#   on the real tree   15 of 30 packages passed. An arm ruling on half the
+#                      corpus is the vacuity the contract exists to catch, and
+#                      the number only ever loosens as crates land.
+#   on a fixture       tests/test_target_census_selftest.sh drives this same arm
+#                      over a TWO-package fixture, where 2 is the correct and
+#                      complete answer. Five of the gate's own good tests went
+#                      red against a number that had nothing to do with them.
+#
+# Both symptoms are one defect: the floor was bound to a corpus the arm does not
+# always run against. Deriving it from the census file binds it to the corpus
+# actually in hand, and turns the arm from "at least some" into "all of them" -
+# which catches 14-of-30, that the old floor passed. Same idiom as
+# run_doc_gate.sh, which derives its crate floor from `cargo metadata` rather
+# than writing one down, for the same reason.
+#
+# The denominator is guarded above, where MIN_PACKAGES is explained; without
+# that, an empty corpus would satisfy completeness with nothing in it.
+gate_arm package_census "$PKG_COUNT" "$CENSUS_ROWS" || rc=1
 
 MISSING="$(comm -23 <(printf '%s\n' "$EXPECTED_PKGS") <(printf '%s\n' "$OBSERVED_PKGS"))"
 EXTRA="$(comm -13 <(printf '%s\n' "$EXPECTED_PKGS") <(printf '%s\n' "$OBSERVED_PKGS"))"

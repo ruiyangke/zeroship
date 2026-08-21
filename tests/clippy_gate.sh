@@ -163,9 +163,31 @@
 #   1  a lint failed, or a target went unlinted
 #   2  the gate could not run, or could not be trusted to have measured anything
 #
-# Env overrides exist for tests/clippy_gate_selftest.sh:
-#   ZS_CLIPPY_METADATA   pre-captured `cargo metadata` json (skips cargo)
-#   ZS_CLIPPY_SRC_ROOTS  directories the include_str! preflight scans
+# REDIRECTING THE CORPUS, and why each group is all-or-nothing.
+#
+#   --metadata <file> --min-members <n> --min-targets <n>
+#                        pre-captured `cargo metadata` json (skips cargo), plus
+#                        the bounds that json's own arms are held to
+#   --src-roots "<dirs>" --min-literals <n>
+#                        directories the include_str! preflight scans, plus the
+#                        bound its arm is held to
+#
+# These were ambient `ZS_CLIPPY_*` environment variables until 2026-08-20, and
+# the floors that went with them were constants. That pairing was the bug: a
+# floor is a claim about a corpus, and tests/clippy_gate_selftest.sh drives every
+# arm below over deliberately tiny fixtures - a three-package metadata blob, a
+# two-literal source root - through this same code path. The floors had
+# therefore been set to the FIXTURE's size (3 members, 4 targets, 1 literal)
+# while the real workspace offers 30, 146 and 239. Each arm passed on the real
+# tree having ruled on a tenth to a two-hundredth of it, which is the vacuity
+# the arm contract exists to catch, arrived at by the exact repair the contract
+# warns against: lower the floor until it stops firing.
+#
+# So the caller that supplies a corpus supplies its bounds too, in the same
+# invocation, and a group given in part is a refusal. Argv rather than the
+# environment because an ambient variable can be set by something that is not
+# the invocation, and then the real run gates against a fixture's numbers with
+# nothing in the command line to show it.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -174,12 +196,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # instrument read nothing" is expressed through it below, so a refusal names
 # WHICH enumeration collapsed instead of only which gate did.
 #
-# THE FLOORS HERE ARE ALL LOW, AND THE REASON IS NOT MODESTY. Every arm below
-# is also driven by tests/clippy_gate_selftest.sh against deliberately tiny
-# fixtures - a two-literal source root, a three-package metadata blob - through
-# the SAME code path, so a floor set anywhere near this workspace's real numbers
-# would fail the self-test rather than a broken tree. Each arm records its real
-# count next to its floor so the gap is visible.
+# EVERY FLOOR BELOW IS A FUNCTION OF THE CORPUS, NOT A CONSTANT. Arm 2's is
+# DERIVED from the metadata in hand - it asserts that every workspace member the
+# metadata declares got a verdict, which scales to whatever corpus arrives and
+# is strictly stronger than any fixed number. The other two cannot be derived
+# (nothing in the input states how many include_str! literals or feature-enabled
+# targets there ought to be), so their bounds are declared by whoever supplies
+# the corpus, defaulting to this workspace's measured numbers. See the header.
 # shellcheck source=tests/lib/gate_arms.sh
 . "$ROOT/tests/lib/gate_arms.sh"
 gate_arms_init clippy
@@ -207,26 +230,84 @@ FEATURES="zeroship-control/live-db-tests,zeroship-migrated/live-db-tests"
 # Deny-level lints still fail, because they are declared deny.
 CARGO_ARGS=(clippy --workspace --all-targets --features "$FEATURES")
 
+# MEASURED 2026-08-20 on this workspace, each by running the gate and reading
+# the arm line it printed:
+#
+#   workspace members            30   (--audit-only, arm workspace_members)
+#   feature-enabled targets     146   (--audit-only, arm expected_targets)
+#   include_str! literals       239   (--preflight-only, arm preflight_include_str)
+#
+# MIN_MEMBERS is a bound on arm 2's DENOMINATOR, not on arm 2: the arm's floor is
+# the member count itself, so a metadata blob that collapsed would satisfy
+# completeness with nothing in it. The other two are floors on the arm directly,
+# set well under today's number - far enough that ordinary editing does not reach
+# them, close enough that a collapse does.
+MIN_MEMBERS_DEFAULT=20
+MIN_TARGETS_DEFAULT=100
+MIN_LITERALS_DEFAULT=150
+
 MODE="run"
 CAPTURED=""
-case "${1:-}" in
-  --audit-only)
-    MODE="audit"
-    CAPTURED="${2:-}"
-    if [ -z "$CAPTURED" ] || [ ! -f "$CAPTURED" ]; then
-      echo "error: --audit-only needs a readable cargo json stream" >&2
-      exit 2
-    fi
-    ;;
-  --preflight-only)
-    MODE="preflight"
-    ;;
-  "") ;;
-  *)
-    echo "usage: $0 [--audit-only <cargo-json> | --preflight-only]" >&2
+META=""
+SRC_ROOTS=""
+MIN_MEMBERS=""
+MIN_TARGETS=""
+MIN_LITERALS=""
+meta_group=0
+roots_group=0
+
+usage() {
+  echo "usage: $0 [--audit-only <cargo-json> | --preflight-only]" >&2
+  echo "          [--metadata F --min-members N --min-targets N]" >&2
+  echo "          [--src-roots \"DIRS\" --min-literals N]" >&2
+}
+
+need_value() {
+  if [ "$2" -lt 2 ]; then
+    echo "error: $1 needs a value" >&2
+    usage
     exit 2
-    ;;
-esac
+  fi
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --audit-only)
+      MODE="audit"
+      need_value "$1" "$#"
+      CAPTURED="$2"
+      shift 2
+      ;;
+    --preflight-only) MODE="preflight"; shift ;;
+    --metadata)     need_value "$1" "$#"; META="$2";         meta_group=$((meta_group + 1));  shift 2 ;;
+    --min-members)  need_value "$1" "$#"; MIN_MEMBERS="$2";  meta_group=$((meta_group + 1));  shift 2 ;;
+    --min-targets)  need_value "$1" "$#"; MIN_TARGETS="$2";  meta_group=$((meta_group + 1));  shift 2 ;;
+    --src-roots)    need_value "$1" "$#"; SRC_ROOTS="$2";    roots_group=$((roots_group + 1)); shift 2 ;;
+    --min-literals) need_value "$1" "$#"; MIN_LITERALS="$2"; roots_group=$((roots_group + 1)); shift 2 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+
+# A corpus half-redirected is a corpus measured against somebody else's floor.
+if [ "$meta_group" -ne 0 ] && [ "$meta_group" -ne 3 ]; then
+  echo "error: --metadata, --min-members and --min-targets must be given together" >&2
+  echo "       ($meta_group of 3 present). A supplied metadata corpus gated against" >&2
+  echo "       this workspace's numbers is the defect these flags replaced." >&2
+  exit 2
+fi
+if [ "$roots_group" -ne 0 ] && [ "$roots_group" -ne 2 ]; then
+  echo "error: --src-roots and --min-literals must be given together" >&2
+  echo "       ($roots_group of 2 present)." >&2
+  exit 2
+fi
+
+[ "$meta_group" -eq 3 ] || { MIN_MEMBERS="$MIN_MEMBERS_DEFAULT"; MIN_TARGETS="$MIN_TARGETS_DEFAULT"; }
+[ "$roots_group" -eq 2 ] || { SRC_ROOTS="crates libs"; MIN_LITERALS="$MIN_LITERALS_DEFAULT"; }
+
+if [ "$MODE" = "audit" ] && { [ -z "$CAPTURED" ] || [ ! -f "$CAPTURED" ]; }; then
+  echo "error: --audit-only needs a readable cargo json stream" >&2
+  exit 2
+fi
 
 # jq is not optional, and its absence must not read as a clean tree. Every
 # extraction below would yield nothing without it, and "no packages built any
@@ -279,7 +360,8 @@ trap 'rm -rf "$TMP"' EXIT
 # It can also over-refuse: an `include_str!` inside a cfg this build disables is
 # never expanded, so a missing file there is not really an error. None exists
 # today, and the failure is a refusal to measure rather than a wrong verdict.
-SRC_ROOTS="${ZS_CLIPPY_SRC_ROOTS:-crates libs}"
+#
+# SRC_ROOTS and MIN_LITERALS arrive together from argv; see the header.
 
 INC_AWK="$TMP/include_str.awk"
 cat > "$INC_AWK" <<'AWKEOF'
@@ -314,12 +396,17 @@ if [ "$MODE" = "run" ] || [ "$MODE" = "preflight" ]; then
   #
   # The count is every literal the scan resolved and then checked for existence,
   # which is exactly the set this arm rules on - there is no filter between the
-  # two. MEASURED in this worktree 2026-08-20: 238, of which 194 were missing
-  # (no WPT tree, no pnpm build). The floor stays at the 1 the hand-rolled check
-  # enforced, and CANNOT be raised towards 238: clippy_gate_selftest.sh case 10
-  # drives this same block over a fixture holding exactly two literals, and case
-  # 11 drives it over one holding none and requires the refusal below verbatim.
-  if ! gate_arm preflight_include_str "$scanned" 1; then
+  # two. MEASURED in this worktree 2026-08-20: 239, of which 194 were missing
+  # (no WPT tree, no pnpm build).
+  #
+  # The floor was 1 until 2026-08-20, with a comment saying it "CANNOT be raised
+  # towards 238" because clippy_gate_selftest.sh drives this same block over a
+  # two-literal fixture. That was true of a CONSTANT and it is the reason the
+  # constant had to go: a floor of 1 against 239 lets this whole scan collapse to
+  # a single literal and still print what a healthy tree prints. MIN_LITERALS
+  # comes from whoever supplies SRC_ROOTS, so the self-test's fixture declares 2
+  # and this workspace declares 150, and neither is measured against the other.
+  if ! gate_arm preflight_include_str "$scanned" "$MIN_LITERALS"; then
     echo "error: the include_str! preflight found no literals at all under: $SRC_ROOTS" >&2
     echo "       That is a broken scan, not a clean tree; refusing to lint on it." >&2
     exit 2
@@ -380,7 +467,6 @@ fi
 # the SAME --features as the lint run, so `.resolve.nodes[].features` is the
 # feature set the run actually had, and the required-features filter below is
 # exact rather than a guess.
-META="${ZS_CLIPPY_METADATA:-}"
 if [ -z "$META" ]; then
   META="$TMP/metadata.json"
   if ! (cd "$ROOT" && cargo metadata --format-version 1 --features "$FEATURES") > "$META" 2>"$TMP/meta.err"; then
@@ -398,13 +484,27 @@ jq -r '
 ' "$META" | sort -u > "$TMP/members.tsv"
 
 # Arm 2's expectation, and the thing it rules on: one verdict per member.
-# MEASURED 2026-08-20 on this workspace, via --audit-only: 30 members. The floor
-# is 3 because clippy_gate_selftest.sh runs every audit case below against a
-# three-package metadata fixture, so 3 is the highest number that does not make
-# a broken tree and a passing self-test indistinguishable. It still separates
-# "cargo metadata answered" from "cargo metadata answered with nothing", which
-# is what the `! -s` test it replaces did.
-if ! gate_arm workspace_members "$(grep -c . "$TMP/members.tsv" || true)" 3; then
+#
+# THE FLOOR IS DERIVED, so this is a COMPLETENESS assertion - every member the
+# metadata declares must have come through the jq join above with a row. It was
+# the constant 3 until 2026-08-20, chosen because clippy_gate_selftest.sh drives
+# every audit case over a three-package fixture; on this workspace's 30 members
+# that passed while ruling on a tenth of them, and it would have kept passing at
+# 4 of 30. `.workspace_members | length` is the same number the join selects
+# against, so a join that stops matching a future cargo's shape shows up here as
+# 0 of 30 rather than as an empty green.
+#
+# MEASURED 2026-08-20 via --audit-only: 30 members, and the arm line now reads
+# examined=30 floor=30. The denominator is bounded by MIN_MEMBERS, without which
+# a metadata blob that collapsed would satisfy completeness with nothing in it.
+DECLARED_MEMBERS="$(jq -r '(.workspace_members // []) | length' "$META" 2>/dev/null || true)"
+if ! [ "${DECLARED_MEMBERS:-0}" -ge "$MIN_MEMBERS" ] 2>/dev/null; then
+  echo "error: the metadata declares ${DECLARED_MEMBERS:-<unreadable>} workspace member(s)," >&2
+  echo "       below the declared minimum of $MIN_MEMBERS. That number IS arm 2's floor," >&2
+  echo "       so a metadata blob that shrank would shrink the arm with it." >&2
+  exit 2
+fi
+if ! gate_arm workspace_members "$(grep -c . "$TMP/members.tsv" || true)" "$DECLARED_MEMBERS"; then
   echo "error: cargo metadata listed no usable set of workspace members" >&2
   exit 2
 fi
@@ -425,13 +525,17 @@ jq -r '
 
 # Arm 3's expectation. This is the POST-FILTER number: the `select` above drops
 # every target whose required-features this run did not enable, and those are
-# out of scope rather than unlinted. MEASURED 2026-08-20, via --audit-only: 143
-# targets across the 30 members. The floor is 4 for the same reason as above -
-# clippy_gate_selftest.sh case 6 resolves its fixture down to FIVE expected
-# targets on purpose, to prove a feature-gated target is not demanded, and a
-# floor of 5 would leave that case one deletion from failing for the wrong
-# reason.
-if ! gate_arm expected_targets "$(grep -c . "$TMP/expected.tsv" || true)" 4; then
+# out of scope rather than unlinted. MEASURED 2026-08-20, via --audit-only: 146
+# targets across the 30 members.
+#
+# It cannot be derived the way arm 2's floor is - nothing in the metadata states
+# how many targets OUGHT to survive the filter, and the pre-filter total is a
+# different set - so the bound is declared by whoever supplies the metadata. It
+# was the constant 4, sized to clippy_gate_selftest.sh case 6, which resolves its
+# fixture down to five expected targets on purpose. That case now declares 5 for
+# itself and this workspace declares 100, so the self-test no longer sets the
+# bound the real tree is held to.
+if ! gate_arm expected_targets "$(grep -c . "$TMP/expected.tsv" || true)" "$MIN_TARGETS"; then
   echo "error: too few expected targets derived from cargo metadata" >&2
   exit 2
 fi
