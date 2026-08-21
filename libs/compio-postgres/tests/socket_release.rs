@@ -1,6 +1,9 @@
-//! Regression coverage for the socket release handle's failure path.
+//! Regression coverage for every connection-side socket release path.
 
 use compio_postgres::{Client, Error, NoTls};
+use log::{Level, LevelFilter, Log, Metadata, Record};
+use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 mod common;
@@ -39,6 +42,175 @@ async fn wait_until_backend_is_gone(observer: &Client, pid: i32) {
         }
         compio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn assert_backend_dies_before_client_drop(
+    observer: &Client,
+    pid: i32,
+    client: Client,
+    teardown: &str,
+) {
+    let gone_while_client_lives = compio::time::timeout(
+        Duration::from_secs(2),
+        wait_until_backend_is_gone(observer, pid),
+    )
+    .await
+    .is_ok();
+
+    if !gone_while_client_lives {
+        assert!(
+            backend_exists(observer, pid).await,
+            "backend disappeared between the bounded wait and diagnosis",
+        );
+
+        // This control also cleans up the deliberately stranded backend before
+        // failing: the duplicate really is the descriptor keeping it alive.
+        drop(client);
+        compio::time::timeout(
+            Duration::from_secs(5),
+            wait_until_backend_is_gone(observer, pid),
+        )
+        .await
+        .expect("dropping the client did not release its duplicated socket");
+
+        panic!(
+            "backend {pid} survived after {teardown}; only dropping the still-live Client \
+             released it"
+        );
+    }
+
+    drop(client);
+}
+
+const PANIC_NOTICE: &str = "cpg_connection_run_panic";
+
+struct PanicOnTaggedNotice {
+    armed: AtomicBool,
+}
+
+impl Log for PanicOnTaggedNotice {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if self.enabled(record.metadata())
+            && self.armed.load(Ordering::SeqCst)
+            && record.args().to_string().contains(PANIC_NOTICE)
+        {
+            // Disarm before unwinding so later tests cannot trip over the
+            // process-global logger after this connection has been isolated.
+            self.armed.store(false, Ordering::SeqCst);
+            panic!("panic requested while Connection::run routed a notice");
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static PANIC_LOGGER: PanicOnTaggedNotice = PanicOnTaggedNotice {
+    armed: AtomicBool::new(false),
+};
+static INSTALL_PANIC_LOGGER: Once = Once::new();
+
+fn arm_notice_panic() {
+    INSTALL_PANIC_LOGGER.call_once(|| {
+        log::set_logger(&PANIC_LOGGER).expect("install the socket-release test logger");
+        log::set_max_level(LevelFilter::Info);
+    });
+    PANIC_LOGGER.armed.store(true, Ordering::SeqCst);
+}
+
+/// Discarding the connection half before its driver starts must release the
+/// server session even while its client half remains available to the caller.
+#[compio::test]
+async fn dropping_an_unrun_connection_does_not_leave_the_backend_alive() {
+    let url = test_url();
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    let pid = client.process_id();
+    let observer = connect(&url)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+
+    drop(connection);
+
+    assert_backend_dies_before_client_drop(
+        &observer,
+        pid,
+        client,
+        "an unrun Connection was dropped",
+    )
+    .await;
+}
+
+/// A caller timeout drops a pending `run()` future without giving its async
+/// teardown another poll, so the connection-side release must be synchronous.
+#[compio::test]
+async fn cancelling_the_run_future_does_not_leave_the_backend_alive() {
+    let url = test_url();
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    let pid = client.process_id();
+    let observer = connect(&url)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+
+    let timed_out = compio::time::timeout(Duration::from_millis(50), connection.run()).await;
+    assert!(timed_out.is_err(), "an idle Connection::run returned before cancellation");
+
+    assert_backend_dies_before_client_drop(
+        &observer,
+        pid,
+        client,
+        "the pending Connection::run future was cancelled",
+    )
+    .await;
+}
+
+/// Logging is user-installed process code and can panic. A PostgreSQL notice
+/// reaches that code from inside `run()`, making unwind teardown observable
+/// without adding a test-only panic arm to the driver.
+#[compio::test]
+async fn panicking_run_does_not_leave_the_backend_alive() {
+    let url = test_url();
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    let pid = client.process_id();
+    let observer = connect(&url)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    arm_notice_panic();
+    let query = compio::time::timeout(
+        Duration::from_secs(5),
+        client.batch_execute(&format!(
+            "DO $$ BEGIN RAISE NOTICE '{PANIC_NOTICE}'; END $$"
+        )),
+    )
+    .await
+    .expect("the notice query stayed blocked after its connection task panicked");
+    assert!(query.is_err(), "the notice did not panic inside Connection::run");
+
+    let driver_result = compio::time::timeout(Duration::from_secs(5), driver)
+        .await
+        .expect("the connection task did not unwind after the notice panic");
+    assert!(
+        driver_result.is_err(),
+        "Connection::run returned instead of unwinding through the notice logger"
+    );
+
+    assert_backend_dies_before_client_drop(
+        &observer,
+        pid,
+        client,
+        "Connection::run panicked",
+    )
+    .await;
 }
 
 /// A local framing refusal ends the connection task, so its server backend
@@ -86,34 +258,11 @@ async fn a_local_protocol_failure_does_not_leave_the_backend_alive() {
         common::error_chain(&driver_error),
     );
 
-    let gone_while_client_lives = compio::time::timeout(
-        Duration::from_secs(2),
-        wait_until_backend_is_gone(&observer, broken_pid),
+    assert_backend_dies_before_client_drop(
+        &observer,
+        broken_pid,
+        broken_client,
+        "Connection::run returned its local framing error",
     )
-    .await
-    .is_ok();
-
-    if !gone_while_client_lives {
-        assert!(
-            backend_exists(&observer, broken_pid).await,
-            "backend disappeared between the bounded wait and diagnosis",
-        );
-
-        // This control also cleans up the deliberately wedged backend before
-        // failing: the duplicate really is the descriptor keeping it alive.
-        drop(broken_client);
-        compio::time::timeout(
-            Duration::from_secs(5),
-            wait_until_backend_is_gone(&observer, broken_pid),
-        )
-        .await
-        .expect("dropping the client did not release its duplicated socket");
-
-        panic!(
-            "backend {broken_pid} survived after Connection::run returned its local framing \
-             error; only dropping the still-live Client released it"
-        );
-    }
-
-    drop(broken_client);
+    .await;
 }
