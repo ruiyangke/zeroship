@@ -85,6 +85,7 @@
 //! precisely because a red count cannot tell it apart from an unrouted emission.
 //! Re-dialecting it would be a regression.
 
+use zero_migrate_backend::guard::{GuardConfig, MigrationGuard};
 use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_backend::renderer::DmlRenderer;
 
@@ -133,6 +134,27 @@ pub(crate) fn schema_renderer(
     dialect: SqlDialect,
 ) -> &'static dyn zero_migrate_backend::schema::SchemaRenderer {
     vendor(dialect).schema
+}
+
+/// The LINE-1 guard for a config's dialect — this vendor's, built by this vendor.
+///
+/// This replaced `zero_migrate_guard::guard::guard_for`, which was a second
+/// `match` over `SqlDialect` living in the guard crate and mapping BOTH
+/// descriptor-only dialects onto one shared `SqliteDescriptorGuard`. Two consequences
+/// of folding it into the vendor registry are worth stating:
+///
+/// - There is now exactly ONE exhaustive `SqlDialect` match for backend selection in
+///   the engine — [`vendor`] — instead of two that could disagree. A fourth dialect
+///   breaks it in one place.
+/// - "This vendor ships no guard" became a compile error at the vendor's own
+///   definition site rather than something a `_ =>` arm here could paper over. See
+///   `zero_migrate_backend::registry::BackendVendor`.
+///
+/// SQLite and MySQL no longer share a guard TYPE either; each writes its own trusting
+/// impl, so a change to one dialect's posture cannot silently become a change to the
+/// other's.
+pub(crate) fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
+    (vendor(cfg.dialect()).guard)(cfg)
 }
 
 #[cfg(test)]

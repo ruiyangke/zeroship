@@ -661,13 +661,13 @@ impl MigrationEngine {
         // Multi-engine — run the **per-engine**
         // line-1 guard for `cfg`'s dialect through the [`MigrationGuard`] seam, NOT
         // an `if dialect == Sqlite` branch. Postgres → [`PgGuard`] (libpg_query
-        // deny-list); SQLite → [`SqliteDescriptorGuard`] (the trusted
+        // deny-list); SQLite → `SqliteGuard` (the trusted
         // descriptor-diff path: `libpg_query` cannot vet SQLite, so its `check`
         // returns the empty clean outcome — the line-1 vet is the descriptor emitter
         // at the author boundary, the line-2 defense the `SqliteBackend` authorizer
         // at apply). The destructive / approval combination with the migration's OWN
         // author flags stays here (engine logic), identical for both dialects.
-        let guard = crate::guard::guard_for(cfg);
+        let guard = crate::render::backends::guard_for(cfg);
         let mut items = Vec::new();
         let mut denied = Vec::new();
         let mut destructive = false;

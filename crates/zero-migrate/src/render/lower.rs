@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::analyze::Advisory;
-use crate::guard::{guard_for, GuardConfig, GuardError, MigrationGuard, SqlGuard};
+use crate::guard::{GuardConfig, GuardError, MigrationGuard, SqlGuard};
 use crate::model::backfill::{
     CursorColumnContract, CursorComparison, CursorContract, CursorScalarType,
 };
@@ -49,6 +49,7 @@ use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
     MysqlTextStorageSnapshot, PartitionSnapshot, TableSnapshot,
 };
+use crate::render::backends::guard_for;
 use crate::render::declarative::{
     build_resolved_table_snapshot, json_value_default_expr_for_col_type,
     json_value_default_expr_for_data_type, push_primary_key_snapshot, CollectionDescriptor,
@@ -6636,7 +6637,7 @@ impl IrAuthor {
     /// trusted descriptor-/intent-driven producers (no untrusted raw SQL), exactly
     /// like the declarative path that emits the same shapes, and `apply_plan`
     /// re-runs the Confined guard on every rendered statement at execution time.
-    /// The SQLite leg's guard ([`crate::guard::SqliteDescriptorGuard`]) trusts
+    /// The SQLite leg's guard ([`crate::SqliteGuard`], supplied by `zero-migrate-sqlite`) trusts
     /// descriptor-/IR-generated DDL (no string deny-list), so it never denies — but
     /// the fragment split + reassembly invariant still runs, so the `up`↔fragment
     /// correspondence holds on both dialects.

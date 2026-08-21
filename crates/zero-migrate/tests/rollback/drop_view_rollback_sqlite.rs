@@ -247,7 +247,7 @@ async fn rolling_back_a_dropped_view_restores_it() {
         &migrations,
         Approval::Approved,
         APP,
-        &zero_migrate::SqliteDescriptorGuard::new(),
+        &zero_migrate::SqliteGuard::new(),
     )
     .await
     .expect("rolling back the dropped view must succeed");
@@ -312,7 +312,7 @@ async fn a_guarded_drop_keeps_no_inverse() {
         &migrations,
         Approval::Approved,
         APP,
-        &zero_migrate::SqliteDescriptorGuard::new(),
+        &zero_migrate::SqliteGuard::new(),
     )
     .await
     .expect_err("a guarded drop must not be reversible");

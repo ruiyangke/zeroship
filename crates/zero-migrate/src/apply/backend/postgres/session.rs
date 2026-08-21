@@ -1455,12 +1455,14 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     //
     // Guarding engine-synthesized SQL is not novel: the apply path already runs this
     // guard over `up`, which is equally synthesized on the IR path.
-    crate::guard::guard_for(&cfg.guard_config().for_dialect(crate::SqlDialect::Postgres))
-        .check(down)
-        .map_err(|source| RollbackError::Guard {
-            version: m.version.as_str().to_string(),
-            source,
-        })?;
+    crate::render::backends::guard_for(
+        &cfg.guard_config().for_dialect(crate::SqlDialect::Postgres),
+    )
+    .check(down)
+    .map_err(|source| RollbackError::Guard {
+        version: m.version.as_str().to_string(),
+        source,
+    })?;
 
     let started = Instant::now();
     // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`,

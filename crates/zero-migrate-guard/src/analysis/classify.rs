@@ -13,13 +13,11 @@ use serde_json::Value;
 
 use crate::analysis::tree_walk::first_matching_node;
 
-/// Error parsing SQL for classification.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ParseError {
-    /// `libpg_query` rejected the SQL (syntax error, etc.).
-    #[error("failed to parse SQL: {0}")]
-    Syntax(String),
-}
+// `ParseError` moved to `zero-migrate-backend` because
+// `zero_migrate_backend::guard::GuardError::Parse` carries it, and `GuardError` is the
+// vocabulary every vendor's guard reports in. The PARSER that raises it stayed here.
+// Re-exported so `zero_migrate_guard::analysis::classify::ParseError` keeps resolving.
+pub use zero_migrate_backend::guard::ParseError;
 
 /// The kind of statement, at the granularity the migration engine cares about.
 #[derive(Debug, Clone, PartialEq, Eq)]

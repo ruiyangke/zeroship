@@ -45,8 +45,9 @@ use crate::apply::backend::MigrationBackend;
 use crate::apply::executor::ApplyError;
 use crate::apply::journal::{JournalError, Phase};
 use crate::conn::ExecutorConfig;
-use crate::guard::{guard_for, GuardError};
+use crate::guard::GuardError;
 use crate::model::migration::Migration;
+use crate::render::backends::guard_for;
 
 /// What [`squash`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,7 +162,7 @@ pub enum SquashError {
 /// [`release_project_lock`](MigrationBackend::release_project_lock)), the journal
 /// reads ([`ensure_journal`](MigrationBackend::ensure_journal) /
 /// [`applied`](MigrationBackend::applied)), the parse-time guard
-/// ([`guard_for`], dialect-selected from the backend),
+/// (`crate::guard_for`, which asks the backend registry for THIS dialect's vendor guard),
 /// and the supersession write
 /// ([`record_squash`](MigrationBackend::record_squash)) all route through the
 /// trait. No concrete driver client / `pg_advisory_lock` / `pg_query` appears

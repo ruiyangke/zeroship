@@ -4,10 +4,20 @@
 //! have both called "the future `zero-migrate-backend`" in their headers since the
 //! in-crate backend modules were written. This is it.
 //!
-//! It holds the two renderer TRAITS, the vocabulary their signatures name, and the
-//! registry shape a vendor crate hands back. It deliberately holds no vendor: nothing
-//! here spells a keyword, quotes an identifier or names a dialect except
+//! It holds the three per-vendor TRAITS, the vocabulary their signatures name, and
+//! the registry shape a vendor crate hands back. It deliberately holds no vendor:
+//! nothing here spells a keyword, quotes an identifier or names a dialect except
 //! `SqlDialect`, which is a wire-level target descriptor from `zero-migrate-ir`.
+//!
+//! | trait | question it answers |
+//! |---|---|
+//! | [`renderer::DmlRenderer`] | how does this vendor spell DML, views and triggers |
+//! | [`schema::SchemaRenderer`] | how does this vendor spell columns and DDL |
+//! | [`guard::MigrationGuard`] | what does this vendor REFUSE to run |
+//!
+//! The third arrived last, for the same reason as the first two: a guard declared in
+//! the engine would force every vendor to depend on the engine, which already depends
+//! on every vendor. See [`guard`] for what moved with it and what measurably did not.
 //!
 //! ```text
 //!   zero-migrate-policy ─┐
@@ -59,9 +69,11 @@
 //! — spelling is the engine ASKING a vendor how to write something; semantics is the
 //! engine DECIDING something about a vendor.
 
+pub mod advisory;
 pub mod descriptors;
 pub mod dml;
 pub mod error;
+pub mod guard;
 pub mod mask_codec;
 pub mod mask_meta;
 pub mod registry;

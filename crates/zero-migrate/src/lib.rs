@@ -196,9 +196,36 @@ pub use apply::executor::apply;
 // the offline companion of `snapshot_schema`. The type-generation path emits the
 // `env.db` types + runtime descriptor from this. See `fold.rs`.
 pub use guard::{
-    flags_for, guard_for, GuardConfig, GuardError, GuardMode, GuardOutcome, GuardReport,
-    MigrationGuard, PgGuard, SqlGuard, SqliteDescriptorGuard,
+    flags_for, GuardConfig, GuardError, GuardMode, GuardOutcome, GuardReport, MigrationGuard,
+    SqlGuard,
 };
+/// Each vendor's LINE-1 guard, named from the crate that ships it.
+///
+/// These used to be three types in `zero-migrate-guard`, two of which were the SAME
+/// type: `SqliteDescriptorGuard` served MySQL as well, and its own doc had to say so.
+/// Each backend crate now supplies its own, which is what makes
+/// `zero_migrate_backend::registry::BackendVendor::guard` a required field rather than
+/// a dispatch someone could add a `_ =>` arm to.
+pub use zero_migrate_mysql::MysqlGuard;
+pub use zero_migrate_postgres::PgGuard;
+pub use zero_migrate_sqlite::SqliteGuard;
+
+/// Select the LINE-1 guard for a config's dialect, from that dialect's own vendor
+/// crate.
+///
+/// Kept as a crate-root function because it is public API: the napi addon calls
+/// `zero_migrate::guard_for` across the crate boundary, and the vendor registry it now
+/// delegates to is `pub(crate)`. What changed is not the signature but the OWNER of
+/// the dispatch — it is no longer a second `SqlDialect` match inside the guard crate,
+/// able to disagree with the renderer registry, and it is no longer able to hand a
+/// dialect a guard that dialect did not write.
+///
+/// # Errors
+/// None; selection is total over the closed `SqlDialect`.
+#[must_use]
+pub fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
+    render::backends::guard_for(cfg)
+}
 pub use model::policy::{DestructiveOps, SchemaScope, TrustProfile};
 // The policy PDP seal primitives: an HMAC over a composed `EffectivePolicy`, bound
 // to the registry digest, the scope-matcher semantics, and the charter revision, so
