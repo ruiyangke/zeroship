@@ -32,32 +32,57 @@ pub fn is_vendor(op: &Op) -> bool {
 /// and feature refusals before lowering.
 #[must_use]
 pub fn support(op: &Op) -> crate::model::support::Support {
-    use crate::model::support::{Dialect, Support};
+    use crate::model::support::Support;
 
     let (kind, variant) = op_kind_and_variant(op);
     let row = crate::model::dialect_table::lookup(kind, variant)
         .unwrap_or_else(|| panic!("dialect table has no row for op {kind}/{variant}"));
-    // The row is keyed by `DialectId`, so the cell is looked UP by id rather than
-    // read off a field named after a vendor. `DialectSupport` is still a
-    // three-field struct (`model::support`), which is why the three calls are
-    // spelled out here rather than folded into a loop — that struct is the next
-    // instance of this same shape, and it is not this change's to remove.
-    let dialects = crate::model::support::DialectSupport::new(
-        support_cell(
-            op,
-            row.disposition(Dialect::Postgres),
-            Dialect::Postgres,
-            variant,
-        ),
-        support_cell(
-            op,
-            row.disposition(Dialect::Sqlite),
-            Dialect::Sqlite,
-            variant,
-        ),
-        support_cell(op, row.disposition(Dialect::Mysql), Dialect::Mysql, variant),
-    );
+    // Both sides are now keyed by `DialectId`, so this is a LOOP over the row's
+    // own cells rather than three calls in vendor order. Nothing here names a
+    // dialect: the row states which ids it covers, and the op-level declaration
+    // states a decision for exactly those. That is what makes a fourth backend a
+    // sidecar edit and nothing else — it used to need a fourth argument here and
+    // a fourth field on `DialectSupport`.
+    //
+    // `support_cell` still needs the closed `Dialect` for its per-dialect refusal
+    // prose, so the ids are walked through the enum; `dialect_for_id` is the one
+    // place that conversion happens, and it panics rather than guess.
+    let dialects = crate::model::support::DialectSupport::from_cells(row.dispositions.iter().map(
+        |&(id, disposition)| {
+            let dialect = dialect_for_id(id, kind, variant);
+            (id, support_cell(op, disposition, dialect, variant))
+        },
+    ));
     Support::new(support_tier(op), dialects, support_features(op))
+}
+
+/// The closed [`Dialect`] variant an id denotes, for the ONE step that still
+/// needs it.
+///
+/// [`zero_migrate_ir::dialect`] refuses this direction on purpose — an id has no
+/// variant to map to once a backend ships from a crate core does not own — and
+/// this is not a general escape from that. [`unsupported_reason`] is a match over
+/// `Dialect` carrying per-dialect refusal PROSE, so a cell can only be filled in
+/// for a dialect this engine has written prose for. Panicking names the row and
+/// the id; the alternatives are worse in the way the rest of this area already
+/// decided: dropping the cell would silently narrow the declaration (the exact
+/// fail-open the census floor in `model::support` exists to catch), and
+/// synthesizing a refusal would invent a verdict with no reason to show anyone.
+fn dialect_for_id(
+    id: zero_migrate_ir::dialect::DialectId,
+    kind: &str,
+    variant: &str,
+) -> crate::model::support::Dialect {
+    use crate::model::support::Dialect;
+    for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+        if dialect.id() == id {
+            return dialect;
+        }
+    }
+    panic!(
+        "dialect table row {kind}/{variant} states a disposition for {id}, which this \
+         engine has no refusal prose for"
+    )
 }
 
 /// The placeholder returned when a cell is declared `unsupported` and NOBODY
