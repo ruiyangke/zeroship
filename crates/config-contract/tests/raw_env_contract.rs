@@ -297,3 +297,146 @@ fn describe(path: &str) -> bool {
 "#;
     check_rust_source(mention).expect("mentioning the spelling is not reading");
 }
+
+// ---------------------------------------------------------------------------
+// The WRITE half. A mutation of the process environment is permitted in no
+// role, which is the one way these differ from the read cases above.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_direct_environment_mutation_is_rejected() {
+    // Mutation: the plainest spelling of the thing the gate exists to stop.
+    // Does not cover: a mutation inside a dependency, or one produced by a
+    // macro this scanner cannot expand.
+    let source = r#"
+fn plant() {
+    std::env::set_var("ZEROSHIP_DEV", "1");
+    std::env::remove_var("ZEROSHIP_DEV");
+}
+"#;
+    let errors = check_rust_source(source).expect_err("an environment write must fail");
+
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            RawEnvViolation::Write(detail) if detail.ends_with("std::env::set_var")
+        )),
+        "set_var must be reported: {errors:?}"
+    );
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            RawEnvViolation::Write(detail) if detail.ends_with("std::env::remove_var")
+        )),
+        "remove_var must be reported: {errors:?}"
+    );
+}
+
+#[test]
+fn giving_a_child_process_an_environment_is_not_a_mutation() {
+    // THE ONE-VARIABLE CONTROL for the case above, and the distinction the
+    // whole gate turns on. This code sets the same variable to the same value
+    // for a process; it differs only in WHOSE environment it touches. A gate
+    // that flagged this would be bound to "the code mentions an environment
+    // variable" rather than to "the code mutates THIS process".
+    // Does not cover: a child spawned through a shell string, where the
+    // assignment is inside an opaque argument.
+    let source = r#"
+fn spawn() {
+    let mut command = std::process::Command::new("zeroship-gate");
+    command.env("ZEROSHIP_DEV", "1");
+    command.env_remove("ZEROSHIP_DEV");
+    command.env_clear();
+}
+"#;
+
+    check_rust_source(source).expect("Command::env is an argument, not a mutation");
+}
+
+#[test]
+fn an_unrelated_set_var_method_is_not_a_mutation() {
+    // The second control, and the one a naive text search fails. The control
+    // plane owns `EnvStore::set_var`, which writes a creator app's variables
+    // to PostgreSQL and has nothing to do with the process environment. It is
+    // a METHOD, so it is unreachable from the path-based write check; asserting
+    // that here is what stops a later "just grep for set_var" simplification.
+    let source = r#"
+async fn store_one(store: &EnvStore) {
+    store.set_var(app, "FOO", "bar").await.unwrap();
+    let cleared = store.remove_var(app, "FOO").await;
+}
+"#;
+
+    check_rust_source(source).expect("a method named set_var is not std::env::set_var");
+}
+
+#[test]
+fn an_aliased_environment_mutation_is_rejected() {
+    // Mutation: the two evasions a literal `std::env::set_var` search misses -
+    // importing the function under another name, and aliasing the module. Both
+    // are behind a cfg that is false in this build, which is the whole reason
+    // this source gate exists beside the Clippy one.
+    let aliased_function = r#"
+#[cfg(feature = "never-enabled")]
+use std::env::set_var as plant;
+
+#[cfg(feature = "never-enabled")]
+fn go() {
+    plant("ZEROSHIP_DEV", "1");
+}
+"#;
+    let errors =
+        check_rust_source(aliased_function).expect_err("an aliased write must fail");
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error, RawEnvViolation::Write(_))),
+        "an aliased import must be reported as a write: {errors:?}"
+    );
+
+    let aliased_module = r#"
+use std::env as sys;
+
+fn go() {
+    sys::set_var("ZEROSHIP_DEV", "1");
+}
+"#;
+    let errors = check_rust_source(aliased_module).expect_err("a module-aliased write must fail");
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            RawEnvViolation::Write(detail) if detail.ends_with("sys::set_var")
+        )),
+        "a module alias must be reported as a write: {errors:?}"
+    );
+}
+
+#[test]
+fn no_role_is_exempt_from_the_write_rule() {
+    // The read rule has two exempt roles; the write rule has none, and this is
+    // the assertion that keeps them apart. `crates/core/src/config/env.rs` is
+    // the one file permitted to READ raw, and it still may not write - it has
+    // no reason to, and an exemption there would be the one place a mutation
+    // could hide from both halves of the gate.
+    let source = r#"
+fn raw_set(key: &str, value: &str) {
+    std::env::set_var(key, value);
+}
+"#;
+    for role in [
+        FileRole::Ordinary,
+        FileRole::CentralAccessor,
+        FileRole::SealedLibraryTest,
+        FileRole::BuildScript,
+    ] {
+        let errors = check_rust_source_with_role(source, role)
+            .err()
+            .unwrap_or_else(|| panic!("{role:?} must not permit an environment write"));
+        assert!(
+            errors
+                .iter()
+                .any(|error| matches!(error, RawEnvViolation::Write(_))),
+            "{role:?} reported no Write violation: {errors:?}"
+        );
+    }
+}
