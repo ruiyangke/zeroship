@@ -1,3 +1,8 @@
+// compio-postgres gained per-connection deadline state, which deepens the
+// generated future here past rustc's default layout-query depth. The depth
+// is in the async body, not in anything this file can restructure.
+#![recursion_limit = "256"]
+
 //! Distributed `db.live` regression against the compose Postgres.
 //!
 //! This target deliberately owns three V8 runtimes on three concurrently
