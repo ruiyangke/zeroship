@@ -1045,7 +1045,7 @@ impl InnerClient {
         messages: RequestMessages,
         statement: &Statement,
     ) -> Result<Responses, Error> {
-        let statement = (self.statement_cache_capacity() != 0).then(|| statement.clone());
+        let statement = Some(statement.clone());
         self.send_inner(
             messages,
             RequestDisposition::Awaited,
