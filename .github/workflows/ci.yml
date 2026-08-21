@@ -1354,21 +1354,66 @@ jobs:
   # which is the class of defect a crate suite cannot see by construction: both
   # backends read correctly alone.
   #
-  # WHAT THIS JOB DOES NOT GATE, and it is worth knowing before trusting it.
-  # golden_path.sh runs `zeroship deploy` only when ZEROSHIP_TOKEN is set; with
-  # it unset (the case here) step 3 takes the `dev-provision` arm instead, which
-  # writes to the database and blob store directly and whose own header says it
-  # "deliberately bypasses the PAT/OAuth flow". So the deploy CLI - the command
-  # the golden path is named after - is NOT exercised here.
+  # STEP 3 NOW SHIPS THE ARTIFACT WITH `zeroship deploy`, and the two notes this
+  # replaces said otherwise for two different reasons - both worth keeping,
+  # because the second is how the gap survived.
   #
-  # THE STATED BLOCKER IS GONE, and the gap is not. This note used to say minting
-  # a PAT needs zeroship-control started with `--signing-key-file`, "which
-  # golden_path.sh does not do (it runs under ZEROSHIP_DEV_INSECURE with an
-  # ephemeral key nothing can sign against)". Both halves stopped being true when
-  # the relaxation flag was deleted: every zeroship-control the harness starts now
-  # passes `--signing-key-file "$GP_SIGNING_KEY"`. What still gates the PAT arm is
-  # only that nothing in CI sets ZEROSHIP_TOKEN. Closing it remains a change to
-  # the harness, not to this file.
+  # FIRST, CORRECT WHAT THOSE NOTES CLAIMED. They said "the deploy CLI - the
+  # command the golden path is named after - is NOT exercised here", and that
+  # sentence was too strong. MEASURED 2026-08-21 by running the harness on the
+  # arm CI was taking: `zeroship deploy` already ran at three sites - step 10f's
+  # policy-flip redeploy, step 12's second app for the pairwise-sector check, and
+  # step 14's - of which the last never reached the CLI in CI at all because its
+  # artifact was missing. So the binary ran, twice, and exactly ONE assertion
+  # rested on it ("second app registered through the deploy API"), which checks
+  # the CLI's exit status and nothing about what reached the control plane. Each
+  # of the three is SETUP for a step measuring something else, and each sits
+  # behind a guard belonging to that other step. What was missing was not the
+  # command; it was step 3 - the one named "Create app + deploy", whose APP_ID
+  # every serve, RPC, body-cap, dev-diff and log assertion below hangs off - and
+  # any assertion about the deploy itself.
+  #
+  # The FIRST note said minting a token needs zeroship-control started with
+  # `--signing-key-file`, "which golden_path.sh does not do (it runs under
+  # ZEROSHIP_DEV_INSECURE with an ephemeral key nothing can sign against)". Both
+  # halves stopped being true when the relaxation flag was deleted, and nothing
+  # re-read the note. The SECOND note corrected that and stated the real gate -
+  # "only that nothing in CI sets ZEROSHIP_TOKEN" - and then left it open,
+  # because closing it looked like a change to the harness rather than to this
+  # file. It was; that change has now been made.
+  #
+  # golden_path.sh takes `--provision=deploy|dev-provision`, defaulting to
+  # deploy, and does not read ZEROSHIP_TOKEN at all. The deploy arm seeds a
+  # `zeroship.users` row, mints an `at+jwt` against the harness's own OP (the
+  # one `e2e_platform_op_up` already stands up so control has an issuer to
+  # verify against), creates the app through POST /api/apps and ships the .zship
+  # with `zeroship deploy --app=... --token=...`. It then checks that the hash
+  # the CLI printed is the hash control wrote to `zeroship.apps` and
+  # `zeroship.app_deploys`, and that the same deploy with a bad bearer is
+  # REFUSED - so the arm cannot pass by talking to nothing.
+  #
+  # WHAT THIS STILL DOES NOT GATE, and it is worth knowing before trusting it:
+  #
+  #   the credential ACQUISITION path. The bearer is minted by the harness
+  #   against its own JWKS, not obtained the way a creator obtains one. So
+  #   `zeroship login` (the device flow, and the on-disk credential it writes)
+  #   and the ZEROSHIP_TOKEN input are both uncovered; only `--token=` is
+  #   driven. tests/e2e_device_login.sh is the harness that runs a real OP.
+  #
+  #   the deploy CLI's RESOLUTION surface. The invocation passes an explicit
+  #   `--app` uuid and `--control` url, so auto-create, `--no-create`,
+  #   name-to-id lookup, `--env=`, declared secrets and every zeroship.jsonc
+  #   precedence rule in docs/reference/project-config.md are untouched here.
+  #   tests/e2e_project_config.sh covers the config half.
+  #
+  #   the TRANSPORT. Loopback HTTP to a control plane on the same box: no TLS,
+  #   no DNS, no edge, no proxy, and an artifact small enough that nothing about
+  #   chunking or timeouts is under load.
+  #
+  #   which arm ran, IF SOMEONE CHANGES IT. That is the one thing this file no
+  #   longer has to be trusted about: the bypass arm announces itself with the
+  #   repo's ZEROSHIP-TEST-SKIPPED marker and the census step below turns that
+  #   announcement into a red tick.
   golden-path:
     runs-on: ubuntu-latest
     # A bound, because one of the seven local runs taken while wiring this up
@@ -1433,10 +1478,28 @@ jobs:
       # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
       # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
+      # THE ONE EXAMPLE THE HARNESS DOES NOT BUILD ITSELF, and until now nothing
+      # built it here either. golden_path.sh builds starter, db-todos, the
+      # scaffold and wall-probe inside the run; step 14 deliberately consumes a
+      # PREBUILT examples/auth-notes-db/dist/app.zship (its own comment says so,
+      # and it asserts the artifact is newer than its sources so that a
+      # forgotten rebuild cannot pass). Root `pnpm build` filters to ./sdks/*,
+      # and `dist` is gitignored, so on a fresh checkout that file is absent.
+      #
+      # MEASURED on a clean worktree 2026-08-21: step 14 produced ONE outcome -
+      # `14: missing .../examples/auth-notes-db/dist/app.zship` - instead of its
+      # twelve, a red that is NOT in GOLDEN_EXPECTED_FAILURES, so the run also
+      # reported `1 unexpected` and sat well under its own floor. That was true
+      # before this commit and has nothing to do with the deploy arm: the whole
+      # of step 14 (two identities, one row, no cross-tenant leak) has never run
+      # in CI, and the floor has been unreachable here for as long.
+      - run: pnpm --filter auth-notes-db build
       # Exactly the prereq list in golden_path.sh's own header (lines 14-18).
-      # `-p zeroship-control --bins` is what produces `dev-provision`, which step
-      # 3 uses; `-p zeroship` produces the `zeroship` binary that `pnpm dev`
-      # spawns as the dev runtime in steps 6, 7 and 9.
+      # `-p zeroship-control --bins` is what produces `dev-provision`, which
+      # steps 9, 10, 11 and 12w use to stand up their own apps (step 3 uses it
+      # only on the `--provision=dev-provision` arm this job does not take);
+      # `-p zeroship` produces the `zeroship` binary - the deploy CLI step 3 now
+      # drives, and the dev runtime `pnpm dev` spawns in steps 6, 7 and 9.
       - name: Build the release binaries the harness starts
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
@@ -1479,14 +1542,45 @@ jobs:
       # rotted by a factor of three as steps landed; the floor was 81 by then.
       # A stale number here is worse than none, because someone auditing whether
       # this gate means anything reads 24 and concludes it is nearly hollow.
+      #
+      # `--provision=deploy` is PASSED EXPLICITLY even though it is the harness's
+      # default. The gap this closes was an arm selected by an absent environment
+      # variable, and a job that relies on a default is one edit to that default
+      # away from silently taking the other arm again. Written here, the arm this
+      # job gates is visible in the job, and a change to it is a diff in this
+      # file.
       - name: Golden path (build locally -> deploy -> serve, dev vs deployed)
         run: |
           set -o pipefail
-          tests/golden_path.sh 2>&1 | tee "$RUNNER_TEMP/golden-path.log"
+          tests/golden_path.sh --provision=deploy 2>&1 | tee "$RUNNER_TEMP/golden-path.log"
         env:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
+      # THE ARM IS ENFORCED, not merely printed. golden_path.sh's bypass arm
+      # announces itself with the repo's ZEROSHIP-TEST-SKIPPED marker - the same
+      # token `zeroship_test_support::skip` writes and `tests/lib/skip_census.sh`
+      # counts - and this step turns that announcement into a red tick. So a
+      # future edit that puts CI back on the arm which does not run `zeroship
+      # deploy` fails here instead of printing the same green as a covered run.
+      #
+      # The allowlist is EMPTY on purpose: this harness starts every backend it
+      # needs, so it has no legitimate reason to announce a skip at all. An empty
+      # allowlist is handled explicitly by zs_skip_census (an empty ERE would
+      # otherwise match every line and tolerate everything).
+      #
+      # `if: always()` because the harness is red at HEAD by design; a step
+      # without it would never run.
+      - name: Golden path skip census (the deploy arm must not have been bypassed)
+        if: always()
+        run: |
+          . tests/lib/skip_census.sh
+          zs_skip_census "$RUNNER_TEMP/golden-path.log" || {
+            echo "FAIL: the golden path announced a skipped arm. The line above names it." >&2
+            echo "      A run that did not exercise \`zeroship deploy\` must not report as" >&2
+            echo "      one that did; that is the whole reason the arm is an argument." >&2
+            exit 1
+          }
       # The .zship artifact contract, run over whatever the step above just
       # built. This job is the only one in the workflow that produces an
       # `examples/*/dist/app.zship`, which is why the check lives here rather

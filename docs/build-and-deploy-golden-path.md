@@ -94,23 +94,41 @@ the only route a creator has to it (`deploy/compose/docker-compose.yml`, the
 
 Run `nix develop --command bash tests/golden_path.sh` (needs the release binaries
 + a Postgres on :5440). It proves the **load-bearing half** end-to-end with a
-REAL vite-built `.zship` (not a hand-packed fixture):
+REAL vite-built `.zship` (not a hand-packed fixture).
+
+It takes one argument, `--provision=deploy` (the default) or
+`--provision=dev-provision`, and it decides whether step 3 ships the artifact
+with the real `zeroship deploy` CLI or writes the registry row directly. The
+bypass arm announces itself with the repo's skip marker, so a run that did not
+exercise the deploy command cannot read like one that did. It does **not** read
+`ZEROSHIP_TOKEN`: the deploy arm mints its own creator bearer against the
+harness's platform OP and passes it on `--token=`.
 
 1. ✅ `examples/starter` builds to `dist/app.zship` via the real vite-plugin pipeline.
 2. ✅ A fresh DB is migrated + the platform stack (control + worker + gateway)
    comes up healthy on the current HEAD binaries.
-3. ✅ The app is provisioned + deployed (`dev-provision`, dev-only) and the
-   **gateway serves it**: `GET /apps/<name>/` returns the app's `index.html` + JS
-   asset, and the **RPC server function executes** in the worker
-   (`/__zeroship/v1/getMessages`).
+3. ✅ The app is created through `POST /api/apps` and deployed with
+   `zeroship deploy --app=... --token=...` against the running control plane -
+   the CLI a creator runs - and the **gateway serves it**: `GET /apps/<name>/`
+   returns the app's `index.html` + JS asset, and the **RPC server function
+   executes** in the worker (`/__zeroship/v1/getMessages`). The step checks that
+   the `deploy_hash` the CLI printed is the one control wrote to
+   `zeroship.apps` and `zeroship.app_deploys`, and that the same deploy with a
+   bad bearer is refused. Under `--provision=dev-provision` none of that runs:
+   the registry row and blob store are written directly and the step says so.
 
-   **The chain as a whole does NOT pass, deliberately.** Measured 2026-08-11 on a
-   four-service run at HEAD: **67 passed, 8 failed, exit 1** over twelve steps
-   (1-11 plus `9b`), 75 outcomes. The eight are the by-design reds the harness
-   names on every run: step 10's six scaffold comparisons (#260) and step 11's two
-   collation reds (#255). The "9/9" this line carried was the count when only the
-   first three steps existed, and it survived every step added since - stating
-   "passes" about a script that exits non-zero.
+   **The chain as a whole does NOT pass, deliberately.** Measured 2026-08-21 on a
+   four-service run at HEAD: **126 passed, 15 failed, exit 1** over nineteen steps,
+   141 outcomes, with `--provision=deploy`. The fifteen are the by-design reds the
+   harness names on every run and classifies against a declared set: step 10's six
+   scaffold comparisons (#260), step 11's two collation reds (#255), step 13's
+   three log-visibility reds (#332/#333) and step 12's four app-delete reds (#331).
+   The same tree with `--provision=dev-provision` scores **122 passed, 15 failed**;
+   the four are step 3's deploy assertions, and the reds are identical.
+   The "9/9" this line carried was the count when only the first three steps
+   existed, and it survived every step added since - stating "passes" about a
+   script that exits non-zero. The 2026-08-11 figure that replaced it (67/8, twelve
+   steps) had rotted the same way by 2026-08-21.
 
    WHAT STEP 3 DOES NOT SHOW. `getMessages` is `query(async () => messages)` over
    a module-level array literal seeded in `examples/starter/src/server.ts`, and
