@@ -5550,3 +5550,66 @@ async fn fallback_application_name_names_the_session() {
         "the fallback displaced an application_name the caller set"
     );
 }
+
+/// The same abandonment as `dropped_copy_in_sink_recovers_the_same_connection`,
+/// but through a pool, because that is where this class of damage has actually
+/// cost us: a refused COPY start once left two unowned messages on the wire and
+/// the entry went back to the pool to break every later borrower.
+///
+/// Asserted by reacquiring and checking the backend PID is unchanged, so the
+/// test fails if the pool silently replaced a broken session instead of
+/// returning a healthy one.
+#[compio::test]
+async fn an_abandoned_copy_in_returns_a_usable_entry_to_the_pool() {
+    use bytes::Bytes;
+    use futures_util::SinkExt;
+
+    let Some(url) = require_pg().await else { return };
+    let mut pool_config = PoolConfig::new();
+    pool_config.max_size(1).min_idle(1);
+    let pool = Pool::connect_with_pool_config(&url, pool_config)
+        .await
+        .unwrap();
+
+    let borrowed_pid = {
+        let client = pool.get().await.unwrap();
+        let pid = client.process_id();
+        client
+            .batch_execute("CREATE TABLE IF NOT EXISTS cpg_pooled_abandoned_copy (n int4)")
+            .await
+            .unwrap();
+        {
+            let mut sink = std::pin::pin!(
+                client
+                    .copy_in::<_, Bytes>("COPY cpg_pooled_abandoned_copy (n) FROM STDIN")
+                    .await
+                    .expect("the COPY must start")
+            );
+            sink.send(Bytes::from_static(b"1\n"))
+                .await
+                .expect("stream one row so the COPY is in flight");
+            // Dropped without finish, then the pooled client is returned below.
+        }
+        pid
+    };
+
+    let client = compio::time::timeout(std::time::Duration::from_secs(5), pool.get())
+        .await
+        .expect("reacquiring after an abandoned COPY hung")
+        .expect("the pool refused to hand back an entry");
+    assert_eq!(
+        client.process_id(),
+        borrowed_pid,
+        "the pool replaced the session instead of returning the one under test"
+    );
+    let row = client
+        .query_one("SELECT 1::int4 AS n", &[])
+        .await
+        .expect("the abandoned COPY poisoned the pooled entry");
+    assert_eq!(row.get::<_, i32>("n"), 1);
+
+    client
+        .batch_execute("DROP TABLE IF EXISTS cpg_pooled_abandoned_copy")
+        .await
+        .unwrap();
+}
