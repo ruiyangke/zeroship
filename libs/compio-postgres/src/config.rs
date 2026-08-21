@@ -5,7 +5,7 @@
 #![allow(clippy::doc_overindented_list_items)]
 
 use crate::Socket;
-use crate::connect::connect;
+use crate::connect::{connect, with_connect_timeout};
 use crate::connect_raw::connect_raw;
 use crate::connect_tls::Encryption;
 #[cfg(not(target_arch = "wasm32"))]
@@ -298,10 +298,10 @@ pub enum Host {
 /// * `sslnegotiation` - TLS negotiation method. If set to `direct`, the client
 ///     will perform direct TLS handshake, this only works for PostgreSQL 17 and
 ///     newer.
-///     Note that you will need to setup ALPN of TLS client configuration to
-///     `postgresql` when using direct TLS. If you are using postgres_openssl
-///     as TLS backend, a `postgres_openssl::set_postgresql_alpn` helper is
-///     provided for that.
+///     PostgreSQL requires the `postgresql` ALPN protocol for direct TLS. This
+///     crate's `MakeRustlsConnect` adds it when the supplied rustls
+///     `ClientConfig` has an empty ALPN list. A nonempty caller-supplied list is
+///     preserved unchanged and must include `postgresql` to support direct TLS.
 ///     If set to `postgres`, the default value, it follows original postgres
 ///     wire protocol to perform the negotiation.
 /// * `hostaddr` - Numeric IP address of host to connect to. This should be in the standard IPv4 address format,
@@ -320,8 +320,9 @@ pub enum Host {
 /// * `port` - The port to connect to. Multiple ports can be specified, separated by commas. The number of ports must be
 ///     either 1, in which case it will be used for all hosts, or the same as the number of hosts. Defaults to 5432 if
 ///     omitted or the empty string.
-/// * `connect_timeout` - The time limit in seconds applied to each socket-level connection attempt. Note that hostnames
-///     can resolve to multiple IP addresses, and this limit is applied to each address. Defaults to no timeout.
+/// * `connect_timeout` - The time limit in seconds applied to each address tried, covering TLS negotiation, startup,
+///     and authentication, and applied once more to each host entry's name resolution. Hostnames can resolve to
+///     multiple IP addresses, and the limit restarts for each, as libpq's does. Defaults to no timeout.
 /// * `tcp_user_timeout` - The time limit that transmitted data may remain unacknowledged before a connection is forcibly closed.
 ///     This is ignored for Unix domain socket connections. It is only supported on systems where TCP_USER_TIMEOUT is available
 ///     and will default to the system default if omitted or set to 0; on other systems, it has no effect.
@@ -648,10 +649,13 @@ impl Config {
         &self.port
     }
 
-    /// Sets the timeout applied to socket-level connection attempts.
+    /// Sets the timeout applied to each address tried, covering TLS
+    /// negotiation, startup, and authentication.
     ///
-    /// Note that hostnames can resolve to multiple IP addresses, and this timeout will apply to each address of each
-    /// host separately. Defaults to no limit.
+    /// Hostnames can resolve to multiple IP addresses, and this timeout
+    /// restarts for each one, as libpq's does. It is also applied once to each
+    /// host entry's name resolution, which libpq leaves unbounded. Defaults to
+    /// no limit.
     pub fn connect_timeout(&mut self, connect_timeout: Duration) -> &mut Config {
         self.connect_timeout = Some(connect_timeout);
         self
@@ -1056,7 +1060,10 @@ impl Config {
 
     /// Connects to a PostgreSQL database over an arbitrary stream.
     ///
-    /// All of the settings other than `user`, `password`, `dbname`, `options`, and `application_name` name are ignored.
+    /// Uses `user`, `password`, `dbname`, `options`, `application_name`, and
+    /// `connect_timeout`; all other settings are ignored. The timeout starts
+    /// with TLS negotiation on the supplied stream and covers startup and
+    /// authentication. It cannot cover the caller's work to open that stream.
     ///
     /// One exception, and it is the reason this is not simply "sslmode is
     /// ignored": the caller owns the stream, so this entry point cannot open a
@@ -1077,13 +1084,16 @@ impl Config {
         // and a stream that is not a socket has no descriptor to shut down.
         // Such a connection keeps the pre-existing behaviour - it is released
         // when its connection task is next polled.
-        connect_raw(
-            stream,
-            tls,
-            Encryption::first_for(self.ssl_mode),
-            true,
-            self,
-            None,
+        with_connect_timeout(
+            self.get_connect_timeout().copied(),
+            connect_raw(
+                stream,
+                tls,
+                Encryption::first_for(self.ssl_mode),
+                true,
+                self,
+                None,
+            ),
         )
         .await
     }

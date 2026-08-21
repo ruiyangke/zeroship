@@ -49,7 +49,17 @@ pub enum BackendMessage {
     /// An out-of-band async notification / notice / parameter status
     /// update — must be routed to the dedicated async channel, not the
     /// in-flight request.
-    Async(backend::Message),
+    ///
+    /// `frame_len` is the whole frame the message OWNS: `Message::parse`
+    /// splits `tag + length + body` off the read buffer and the resulting
+    /// body keeps all of it. Nothing derived from the parsed view can stand
+    /// in for it - a `NotificationResponse` whose two strings are followed by
+    /// megabytes of padding parses fine and its fields sum to a handful of
+    /// bytes. Anything that retains one of these must charge this number.
+    Async {
+        message: backend::Message,
+        frame_len: usize,
+    },
 }
 
 /// A lazily-parsed iterator of backend messages sharing a single
@@ -63,6 +73,18 @@ impl BackendMessages {
     #[allow(dead_code)]
     pub fn empty() -> BackendMessages {
         BackendMessages(BytesMut::new())
+    }
+
+    /// Return the status byte from a trailing `ReadyForQuery` frame without
+    /// consuming the messages that still belong to the response stream.
+    pub(crate) fn ready_for_query_status(&self) -> Option<u8> {
+        const FRAME_LEN: usize = 6;
+        let frame = self.0.get(self.0.len().checked_sub(FRAME_LEN)?..)?;
+        if frame[0] == backend::READY_FOR_QUERY_TAG && frame[1..5] == [0, 0, 0, 5] {
+            Some(frame[5])
+        } else {
+            None
+        }
     }
 }
 
@@ -144,10 +166,13 @@ where
                 | backend::PARAMETER_STATUS_TAG => {
                     if idx == 0 {
                         // Async message sits at the head — return it alone.
+                        // Measured BEFORE the parse consumes it: `header.len()` counts
+                        // itself but not the tag, so the frame is one more.
+                        let frame_len = header.len() as usize + 1;
                         let message = backend::Message::parse(stream.buf())
                             .map_err(Error::io)?
                             .expect("async header implies full message is buffered");
-                        return Ok(BackendMessage::Async(message));
+                        return Ok(BackendMessage::Async { message, frame_len });
                     } else {
                         // Normal batch terminates at this async boundary;
                         // caller will see the async message on the next call.
