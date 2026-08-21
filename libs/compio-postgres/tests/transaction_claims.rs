@@ -17,12 +17,14 @@ mod common;
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PANIC_COMMIT_LOG: &str = "executing statement batch: COMMIT";
+const PANIC_ROLLBACK_LOG: &str = "executing statement batch: ROLLBACK";
 const PANIC_START_LOG: &str = "executing statement batch: START TRANSACTION";
 
 struct PanicOnTransactionLog;
 
 thread_local! {
     static PANIC_COMMIT_ARMED: Cell<bool> = const { Cell::new(false) };
+    static PANIC_ROLLBACK_ARMED: Cell<bool> = const { Cell::new(false) };
     static PANIC_START_ARMED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -37,6 +39,12 @@ impl Log for PanicOnTransactionLog {
             && PANIC_COMMIT_ARMED.with(|armed| armed.replace(false))
         {
             panic!("panic requested before COMMIT was encoded");
+        }
+        if self.enabled(record.metadata())
+            && record.args().to_string().contains(PANIC_ROLLBACK_LOG)
+            && PANIC_ROLLBACK_ARMED.with(|armed| armed.replace(false))
+        {
+            panic!("panic requested before ROLLBACK was encoded");
         }
         if self.enabled(record.metadata())
             && record.args().to_string().contains(PANIC_START_LOG)
@@ -62,6 +70,11 @@ fn install_transaction_panic_logger() {
 fn arm_commit_log_panic() {
     install_transaction_panic_logger();
     PANIC_COMMIT_ARMED.with(|armed| armed.set(true));
+}
+
+fn arm_rollback_log_panic() {
+    install_transaction_panic_logger();
+    PANIC_ROLLBACK_ARMED.with(|armed| armed.set(true));
 }
 
 fn arm_start_log_panic() {
@@ -275,6 +288,47 @@ async fn panicking_commit_setup_rolls_back_before_the_next_operation() {
     })
     .await
     .expect("panicking commit cleanup test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn panicking_rollback_setup_rolls_back_before_the_next_operation() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let table = common::test_object_name("cpg_panicking_rollback");
+        client
+            .batch_execute(&format!("CREATE TEMP TABLE {table} (value int NOT NULL)"))
+            .await
+            .unwrap();
+
+        let transaction = client.transaction().await.unwrap();
+        transaction
+            .execute(&format!("INSERT INTO {table} VALUES (1)"), &[])
+            .await
+            .unwrap();
+
+        arm_rollback_log_panic();
+        let panic = AssertUnwindSafe(transaction.rollback())
+            .catch_unwind()
+            .await;
+        assert!(panic.is_err(), "the ROLLBACK setup logger did not panic");
+
+        client.simple_query("").await.unwrap();
+        let count: i64 = client
+            .query_one_scalar(&format!("SELECT count(*)::int8 FROM {table}"), &[])
+            .await
+            .expect("the operation after the panicking rollback was unusable");
+        assert_eq!(count, 0, "the panicking rollback left its writes live");
+        assert_eq!(
+            client.transaction_status(),
+            Some(compio_postgres::TransactionStatus::Idle),
+            "the panicking rollback left the next operation inside its transaction"
+        );
+    })
+    .await
+    .expect("panicking rollback cleanup test exceeded its watchdog");
 }
 
 #[compio::test]
