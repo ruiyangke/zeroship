@@ -254,3 +254,30 @@ async fn identify_system_returns_the_servers_real_identity() {
         identity.xlogpos
     );
 }
+
+/// The control for `replication_connect_rejects_system_roots_with_weak_sslmode`
+/// (a unit test in `src/replication.rs`): a config that is NOT contradictory
+/// must get past TLS validation and fail at the socket instead.
+///
+/// That test proves a bad config is refused; it does not prove the refusal is
+/// keyed to the contradiction. Without this pairing, `connect_replication`
+/// could refuse every config for an unrelated reason and still look correct.
+/// The one variable that differs here is `sslmode`.
+#[compio::test]
+async fn replication_tls_validation_is_keyed_to_the_contradiction_not_the_address() {
+    let mut config = credentials_only(&test_url());
+    config.host("127.0.0.1");
+    config.port(closed_port().await);
+    config.ssl_mode(compio_postgres::config::SslMode::VerifyFull);
+    config.ssl_root_cert(compio_postgres::config::SslRootCert::System);
+
+    let err = compio_postgres::replication::connect_replication(NoTls, &config)
+        .await
+        .err()
+        .expect("nothing is listening on a closed port");
+    let chain = common::error_chain(&err);
+    assert!(
+        !chain.contains("sslrootcert=system"),
+        "verify-full is not a contradiction, so validation must let it through: {chain}"
+    );
+}
