@@ -49,7 +49,7 @@
 //! `-file` one, so the old spelling is unreachable from the declaration.
 //!
 //! The DSN reader ENFORCES OWNER-ONLY PERMISSIONS, and it refuses rather than
-//! warns. `read_secret_file` (crates/zeroship-secret-policy/src/lib.rs) calls
+//! warns. `read_secret_file` (crates/core/src/config/secrets.rs) calls
 //! `enforce_owner_only`, which rejects any file with a bit set in 0o077.
 //! MEASURED 2026-08-19 against the deployed image, one variable between the
 //! arms: a 0644 DSN file gives

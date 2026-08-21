@@ -9,13 +9,10 @@ target = "gate-arm-census"
 class = "test-dev-tool"
 reason = "The meta-gate. It reads the repository's own gate scripts; it is not a deployed service and has no configuration overlay."
 
-[dev-dependencies]
-# Only `tests/generated_secret_scrape.rs` needs it: that test pins
-# deploy-remote.sh's sed extraction of the platform secret table to the table
-# itself. Nothing this crate SHIPS depends on a zeroship crate, and keeping it
-# that way is what stops `cargo tree -p zeroship-gatekit -i tokio -e normal`
-# from finding the cyper -> hyper edge again.
-zeroship-secret-policy = { workspace = true }
+# NO DEPENDENCIES, and that is the point: this crate reads shell scripts. It
+# links no product crate, so `cargo tree -p zeroship-gatekit -i tokio -e normal`
+# finds nothing and no import added for convenience can drag it onto the
+# cyper -> hyper edge.
 
 [lints]
 workspace = true

@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 use clap::Parser;
 use compio_postgres::{connect, NoTls};
-use zeroship_core::config::{bootstrap_or_exit, validate_secret_material, CheckConfigReport, CheckValue};
-use zeroship_secret_policy::{validate_master_key_material, validate_stash_key};
+use zeroship_core::config::{
+    bootstrap_or_exit, validate_master_key_material,
+    validate_secret_material, validate_stash_key, CheckConfigReport, CheckValue,
+};
 use zeroship_core::oidc_verify::JwksCache;
 
 /// Operator-facing spelling of auth's stash signing key.

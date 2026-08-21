@@ -5,7 +5,10 @@ use std::process::{Command, Output};
 use base64::Engine as _;
 use ed25519_dalek::pkcs8::DecodePrivateKey as _;
 use ed25519_dalek::SigningKey;
-use zeroship_secret_policy::{validate_master_key_material, validate_pairwise_salt, validate_stash_key, validate_worker_key};
+use zeroship_core::config::{
+    validate_master_key_material, validate_pairwise_salt,
+    validate_stash_key, validate_worker_key,
+};
 
 // `migrate-dsn` is the one entry that is NOT generated key material: it is the
 // compose `migrate` one-shot's privileged DSN, provisioned rather than randomly
@@ -110,7 +113,7 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
     // Does NOT cover: that the credential is correct for any real database, or
     // that the mode survives past the moment dev init writes it. It no longer
     // has to be the only protection, though: since the owner-only policy landed
-    // in crates/zeroship-secret-policy/src/lib.rs `read_secret_file`, a later chmod is
+    // in crates/core/src/config/secrets.rs `read_secret_file`, a later chmod is
     // caught at the next read rather than passing silently, and
     // `zeroship-platform-migrate` reads this exact file through that function.
     let migrate_dsn =

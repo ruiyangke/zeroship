@@ -9,8 +9,11 @@ use zeroship_core::auth_provider::{
     AuthProvider, ConfiguredProvider, PlatformConfig, PlatformProvider, SupabaseConfig,
     SupabaseProvider,
 };
-use zeroship_core::config::{audit_credentials, bootstrap_or_exit, mark_dev_escape_active, AuthProviderKind, BuildProfile, CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential};
-use zeroship_secret_policy::{require_nonempty, validate_master_key_material};
+use zeroship_core::config::{
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
+    validate_master_key_material, AuthProviderKind, BuildProfile, CheckConfigReport, CheckValue,
+    CredentialPosture, CredentialVerdict, SubsystemCredential,
+};
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
 };
@@ -140,7 +143,7 @@ fn control_credentials(settings: &ControlSettings) -> Vec<SubsystemCredential<'_
             enabled: true,
             label: WORKER_KEY_LABEL,
             secret: &settings.worker_key,
-            validate: zeroship_secret_policy::validate_worker_key,
+            validate: zeroship_core::config::validate_worker_key,
         },
         SubsystemCredential {
             subsystem: "app-env-encryption",
@@ -154,7 +157,7 @@ fn control_credentials(settings: &ControlSettings) -> Vec<SubsystemCredential<'_
             enabled: true,
             label: PAIRWISE_SALT_LABEL,
             secret: &settings.pairwise_salt,
-            validate: zeroship_secret_policy::validate_pairwise_salt,
+            validate: zeroship_core::config::validate_pairwise_salt,
         },
     ]
 }
@@ -1507,11 +1510,11 @@ mod tests {
             supabase_config_error("https://p.supabase.co", None, Some(""), "https://i.test"),
             // Secret strength. The shared validators used to interpolate a bare
             // `WORKER_KEY` / `PAIRWISE_SALT`; they now carry control's label.
-            zeroship_secret_policy::validate_worker_key(WORKER_KEY_LABEL, "")
+            zeroship_core::config::validate_worker_key(WORKER_KEY_LABEL, "")
                 .expect_err("an unset worker key must fail closed"),
-            zeroship_secret_policy::validate_worker_key(WORKER_KEY_LABEL, "short")
+            zeroship_core::config::validate_worker_key(WORKER_KEY_LABEL, "short")
                 .expect_err("a weak worker key must fail closed"),
-            zeroship_secret_policy::validate_pairwise_salt(PAIRWISE_SALT_LABEL, "")
+            zeroship_core::config::validate_pairwise_salt(PAIRWISE_SALT_LABEL, "")
                 .expect_err("an unset pairwise salt must fail closed"),
             validate_master_key_material(MASTER_KEY_LABEL, "YWJj")
                 .expect_err("a short master key must fail closed"),
@@ -1643,7 +1646,7 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
     }
 
-    // Master-key strength logic lives in `zeroship_secret_policy`.
+    // Master-key strength logic lives in `zeroship_core::config::secrets`.
     // This asserts control still calls through to the shared validator.
     #[test]
     fn master_key_accepts_32_byte_hex() {

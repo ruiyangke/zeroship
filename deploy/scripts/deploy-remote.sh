@@ -394,7 +394,7 @@ edge_claimed_labels() {
 # RESERVED_APP_NAMES, read out of the const that IS the contract.
 #
 # A shell script scraping Rust source is allowed here for exactly the reason
-# crates/zeroship-gatekit/tests/generated_secret_scrape.rs gives for the
+# crates/core/tests/generated_secret_scrape.rs gives for the
 # generated-secret table: this path has no Rust toolchain requirement today,
 # and adding `cargo run` to a deploy to read four strings is a worse trade than
 # a pinned pattern. PINNED IT IS --
@@ -867,12 +867,12 @@ main() {
   # A field-anchored pattern over a const table is a narrower coupling than
   # "any quoted uppercase word in a 900-line file", but it is STILL text
   # matching source, so it is not left to chance:
-  # `crates/zeroship-gatekit/tests/generated_secret_scrape.rs` runs this exact
+  # `crates/core/tests/generated_secret_scrape.rs` runs this exact
   # extraction and asserts it yields PLATFORM_SECRETS exactly. It cannot go
   # blind without that test going red.
-  GENERATED="$(sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' crates/zeroship-secret-policy/src/lib.rs | sort -u)"
+  GENERATED="$(sed -n 's/^ *env: "\([A-Z_]*\)",$/\1/p' crates/core/src/config/secrets.rs | sort -u)"
   [ -n "$GENERATED" ] || fail "read ZERO generated-secret names out of \
-crates/zeroship-secret-policy/src/lib.rs; the table moved or the pattern rotted. \
+crates/core/src/config/secrets.rs; the table moved or the pattern rotted. \
 Refusing rather than treating every generated secret as operator-supplied."
 
   MISSING=""
