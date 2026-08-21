@@ -779,7 +779,7 @@ pub fn compute_diff(
 ) -> Vec<DiffOp> {
     let mut ops = Vec::new();
     let schema_renderer =
-        crate::schema::query::renderer(crate::schema::query::SqlDialect::Postgres);
+        crate::schema::query::renderer(&crate::schema::query::SqlDialect::Postgres.id());
 
     let live_cols = live.tables.get(collection);
     let live_indexes = live.indexes.get(collection);

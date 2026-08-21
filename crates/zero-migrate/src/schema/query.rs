@@ -118,7 +118,7 @@ pub fn build_encryption_sentinel_comments(
         app_id,
         collection,
         schema,
-        renderer(SqlDialect::Postgres),
+        renderer(&SqlDialect::Postgres.id()),
     )
 }
 
@@ -134,7 +134,7 @@ pub fn build_mask_sentinel_comments(
         app_id,
         collection,
         schema,
-        renderer(SqlDialect::Postgres),
+        renderer(&SqlDialect::Postgres.id()),
     )
 }
 
@@ -185,15 +185,15 @@ mod schema_renderer_tests {
         // comparing variants. A `DialectId -> SqlDialect` direction would make this
         // read more naturally and is exactly what must not exist.
         assert_eq!(
-            renderer(SqlDialect::Postgres).dialect(),
+            renderer(&SqlDialect::Postgres.id()).dialect(),
             SqlDialect::Postgres.id()
         );
         assert_eq!(
-            renderer(SqlDialect::Sqlite).dialect(),
+            renderer(&SqlDialect::Sqlite.id()).dialect(),
             SqlDialect::Sqlite.id()
         );
         assert_eq!(
-            renderer(SqlDialect::Mysql).dialect(),
+            renderer(&SqlDialect::Mysql.id()).dialect(),
             SqlDialect::Mysql.id()
         );
     }
@@ -205,8 +205,8 @@ mod schema_renderer_tests {
         // float, contradicting the documented exact-decimal-text guarantee and
         // diverging from the `t.numeric()` SQLite override (also TEXT).
         let def = serde_json::json!({ "type": "literal", "literalValue": 2.5 });
-        let render = |dialect, def: &serde_json::Value| {
-            renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
+        let render = |dialect: SqlDialect, def: &serde_json::Value| {
+            renderer(&dialect.id()).column_type(&column_snapshot_for_type_def(def), false)
         };
         assert_eq!(render(SqlDialect::Sqlite, &def), "TEXT");
         // MySQL keeps exact fixed-precision; PG keeps `numeric`.
@@ -242,8 +242,8 @@ mod schema_renderer_tests {
     /// token changed.
     #[test]
     fn a_number_field_carrying_precision_renders_as_a_decimal_on_every_dialect() {
-        let render = |dialect, def: &serde_json::Value| {
-            renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
+        let render = |dialect: SqlDialect, def: &serde_json::Value| {
+            renderer(&dialect.id()).column_type(&column_snapshot_for_type_def(def), false)
         };
         let decimal = serde_json::json!({ "type": "number", "precision": 20, "scale": 4 });
         assert_eq!(render(SqlDialect::Postgres, &decimal), "numeric(20, 4)");
@@ -798,7 +798,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // the registry again. `dialect` stays in scope because core still needs it as
     // a normalization key (identifier quoting, FK-action folding, the SQLite
     // scope test) — parameterized semantics, not a vendor lookup.
-    let backend = renderer(dialect);
+    let backend = renderer(&dialect.id());
     let inject = ResolvedInject::for_table(effective, app_id, collection).map_err(|error| {
         QueryError::InvalidFilter(format!(
             "active table injection for {app_id}.{collection} is not renderable: {error}"
@@ -1279,7 +1279,7 @@ pub fn build_add_foreign_key(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(SqlDialect::Postgres);
+    let backend = renderer(&SqlDialect::Postgres.id());
 
     let target = def
         .get("refTarget")
@@ -1312,7 +1312,7 @@ pub fn build_drop_foreign_key(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(SqlDialect::Postgres);
+    let backend = renderer(&SqlDialect::Postgres.id());
     let table = format!(
         "{}.{}",
         backend.quote_ident(app_id),
@@ -1446,7 +1446,7 @@ pub fn build_add_column(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(SqlDialect::Postgres);
+    let backend = renderer(&SqlDialect::Postgres.id());
 
     let table = format!(
         "{}.{}",
@@ -1601,7 +1601,7 @@ pub fn build_create_indexes(
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(SqlDialect::Postgres);
+    let backend = renderer(&SqlDialect::Postgres.id());
 
     let mut out = Vec::new();
 
@@ -1836,7 +1836,7 @@ pub fn build_named_indexes(
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(SqlDialect::Postgres);
+    let backend = renderer(&SqlDialect::Postgres.id());
 
     let mut out = Vec::new();
     let Some(arr) = indexes.as_array() else {
@@ -2020,7 +2020,7 @@ pub fn build_mask_sentinel_comment_for_field(
     field: &str,
     def: &serde_json::Value,
 ) -> Option<String> {
-    let backend = renderer(SqlDialect::Postgres);
+    let backend = renderer(&SqlDialect::Postgres.id());
     let sibling = mask_sibling_column_for_field(field, def)?;
     let sentinel = mask_sentinel_for_field(def)?;
     let escaped = sentinel.replace('\'', "''");
@@ -2178,7 +2178,7 @@ fn field_to_column_for_dialect(
 /// `DOUBLE PRECISION`, `TIMESTAMPTZ`, …); callers that need the
 /// `information_schema.data_type` spelling translate it themselves.
 pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDialect) -> String {
-    renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
+    renderer(&dialect.id()).column_type(&column_snapshot_for_type_def(def), false)
 }
 
 fn parse_character_type_len(data_type: &str) -> Option<u64> {
@@ -2517,7 +2517,7 @@ fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
         field,
         def,
         SqlDialect::Postgres,
-        renderer(SqlDialect::Postgres),
+        renderer(&SqlDialect::Postgres.id()),
     )
 }
 
@@ -2835,7 +2835,7 @@ columns = [
             field,
             def,
             dialect,
-            renderer(dialect),
+            renderer(&dialect.id()),
             &confined_inject("posts"),
         )
     }
@@ -3552,7 +3552,7 @@ columns = [
     #[test]
     fn fk_ref_field_emits_text_column_type_pg() {
         let def = json!({"type": "ref", "refTarget": "users"});
-        let pg_type = renderer(SqlDialect::Postgres)
+        let pg_type = renderer(&SqlDialect::Postgres.id())
             .column_type(&super::column_snapshot_for_type_def(&def), false);
         assert_eq!(
             pg_type, "TEXT",
@@ -4680,7 +4680,7 @@ columns = [
                 );
                 let rendered_columns = refs
                     .iter()
-                    .map(|column| renderer(dialect).quote_ident(column))
+                    .map(|column| renderer(&dialect.id()).quote_ident(column))
                     .collect::<Vec<_>>()
                     .join(", ");
                 assert!(sql.contains(&format!("({rendered_columns})")), "{sql}");
@@ -5537,17 +5537,20 @@ mod hostile_identifier_quoting {
     #[test]
     fn a_quote_bearing_identifier_is_doubled_not_left_bare() {
         assert_eq!(
-            renderer(SqlDialect::Postgres).quote_ident(r#"a"b"#),
+            renderer(&SqlDialect::Postgres.id()).quote_ident(r#"a"b"#),
             r#""a""b""#
         );
-        assert_eq!(renderer(SqlDialect::Mysql).quote_ident("a`b"), "`a``b`");
+        assert_eq!(
+            renderer(&SqlDialect::Mysql.id()).quote_ident("a`b"),
+            "`a``b`"
+        );
     }
 
     #[test]
     fn an_injecting_identifier_stays_inside_its_quoting() {
         // The payload's own quote is doubled, so the `);` and everything after it
         // remain part of the identifier rather than becoming syntax.
-        let pg = renderer(SqlDialect::Postgres).quote_ident(r#"x"); DROP TABLE victim; --"#);
+        let pg = renderer(&SqlDialect::Postgres.id()).quote_ident(r#"x"); DROP TABLE victim; --"#);
         assert_eq!(pg, r#""x""); DROP TABLE victim; --""#);
         assert_eq!(
             pg.matches('"').count() % 2,
@@ -5555,7 +5558,7 @@ mod hostile_identifier_quoting {
             "an odd number of quotes means one of them closes the identifier: {pg}"
         );
 
-        let my = renderer(SqlDialect::Mysql).quote_ident("x`); DROP TABLE victim; -- ");
+        let my = renderer(&SqlDialect::Mysql.id()).quote_ident("x`); DROP TABLE victim; -- ");
         assert_eq!(my, "`x``); DROP TABLE victim; -- `");
         assert_eq!(
             my.matches('`').count() % 2,
@@ -5569,11 +5572,11 @@ mod hostile_identifier_quoting {
         // Each primitive must leave the OTHER dialect's quote alone: doubling it
         // would corrupt the name for no safety gain.
         assert_eq!(
-            renderer(SqlDialect::Postgres).quote_ident("a`b"),
+            renderer(&SqlDialect::Postgres.id()).quote_ident("a`b"),
             r#""a`b""#
         );
         assert_eq!(
-            renderer(SqlDialect::Mysql).quote_ident(r#"a"b"#),
+            renderer(&SqlDialect::Mysql.id()).quote_ident(r#"a"b"#),
             r#"`a"b`"#
         );
     }

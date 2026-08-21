@@ -28,7 +28,7 @@ pub(crate) fn authored_id_default(
     dialect: SqlDialect,
     default_schema: Option<&str>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(&dialect.id());
     match default {
         None => IdDefaultSnapshot::Absent,
         Some(IrDefault::Literal {
@@ -94,7 +94,7 @@ pub(crate) fn authored_uuid_id_default(
     dialect: SqlDialect,
     default_schema: Option<&str>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(&dialect.id());
     let snapshot = authored_storage_literal_snapshot(
         authored_id_default(default, rendered, dialect, default_schema),
         rendered,
@@ -115,7 +115,7 @@ pub(crate) fn authored_text_id_default(
     dialect: SqlDialect,
     default_schema: Option<&str>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(&dialect.id());
     let snapshot = authored_storage_literal_snapshot(
         authored_id_default(default, rendered, dialect, default_schema),
         rendered,
@@ -155,7 +155,7 @@ pub(crate) fn catalog_id_default(
         return IdDefaultSnapshot::Absent;
     };
 
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(&dialect.id());
     if backend.catalog_default_is_unquoted_literal(expression_default) {
         return IdDefaultSnapshot::Literal(
             serde_json::to_string(default).expect("string serialization is infallible"),
@@ -178,7 +178,7 @@ pub(crate) fn catalog_uuid_id_default(
     dialect: SqlDialect,
     expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(&dialect.id());
     let snapshot = catalog_id_default(default, dialect, expression_default);
     let snapshot = backend.normalize_text_literal_snapshot(snapshot);
     backend.normalize_uuid_literal_snapshot(snapshot)
@@ -189,7 +189,7 @@ pub(crate) fn catalog_text_id_default(
     dialect: SqlDialect,
     expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(&dialect.id());
     let snapshot = catalog_id_default(default, dialect, expression_default);
     backend.normalize_text_literal_snapshot(snapshot)
 }
@@ -216,7 +216,7 @@ pub(crate) fn catalog_id_default_for_expected(
         return catalog_uuid_id_default(Some(default), dialect, expression_default);
     }
     if let Some(dialect) = dialect {
-        if crate::render::backends::value_format_renderer(dialect)
+        if crate::render::backends::value_format_renderer(&dialect.id())
             .catalog_default_marker_is_authoritative()
         {
             if let Some(expression_default) = expression_default {
@@ -249,8 +249,8 @@ pub(crate) fn catalog_id_default_for_expected(
 }
 
 fn default_matches_uuid(default: &str, dialect: SqlDialect, v7: bool) -> bool {
-    let dml = crate::render::backends::renderer(dialect);
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let dml = crate::render::backends::renderer(&dialect.id());
+    let backend = crate::render::backends::value_format_renderer(&dialect.id());
     let rendered = if v7 {
         dml.uuid_v7().ok()
     } else {
@@ -280,7 +280,7 @@ fn authored_storage_literal_snapshot(
     rendered: Option<&str>,
     dialect: SqlDialect,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(&dialect.id());
     if !backend.authored_storage_uses_rendered_literal()
         || !matches!(snapshot, IdDefaultSnapshot::Literal(_))
     {
@@ -323,7 +323,9 @@ fn sql_literal_fingerprint(expression: &str) -> Option<String> {
 fn sql_literal_fingerprint_in_dialect(expression: &str, dialect: SqlDialect) -> Option<String> {
     sql_literal_fingerprint_with_backend(
         expression,
-        Some(crate::render::backends::value_format_renderer(dialect)),
+        Some(crate::render::backends::value_format_renderer(
+            &dialect.id(),
+        )),
     )
 }
 
@@ -530,7 +532,7 @@ pub(crate) fn recover_format_check(
     check_sql: &str,
     dialect: SqlDialect,
 ) -> Option<RecoveredFormatCheck> {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(&dialect.id());
     if let Ok(Some(uuid)) = uuid_column_metadata(column, dialect) {
         if canonical_check_sql(column, check_sql) == canonical_check_sql(column, &uuid.inline_check)
         {
@@ -873,7 +875,9 @@ pub(crate) fn catalog_expression_fingerprint(sql: &str) -> String {
 pub(crate) fn catalog_expression_fingerprint_in_dialect(sql: &str, dialect: SqlDialect) -> String {
     catalog_expression_fingerprint_with_backend(
         sql,
-        Some(crate::render::backends::value_format_renderer(dialect)),
+        Some(crate::render::backends::value_format_renderer(
+            &dialect.id(),
+        )),
     )
 }
 
@@ -1188,10 +1192,10 @@ pub(crate) fn uuid_column_metadata(
     let quoted = zero_migrate_backend::dml::quote_ident_for_backend(
         "UUID column",
         column,
-        crate::render::backends::renderer(dialect),
+        crate::render::backends::renderer(&dialect.id()),
     )
     .map_err(|error| error.to_string())?;
-    Ok(crate::render::backends::value_format_renderer(dialect).uuid_column_metadata(&quoted))
+    Ok(crate::render::backends::value_format_renderer(&dialect.id()).uuid_column_metadata(&quoted))
 }
 
 /// Lower one logical value format to its dialect-specific text representation.
@@ -1217,12 +1221,14 @@ fn ulid_column_metadata(
     let quoted = zero_migrate_backend::dml::quote_ident_for_backend(
         "ULID column",
         column,
-        crate::render::backends::renderer(dialect),
+        crate::render::backends::renderer(&dialect.id()),
     )
     .map_err(|error| error.to_string())?;
     let regex = ulid_regex();
-    Ok(crate::render::backends::value_format_renderer(dialect)
-        .ulid_column_metadata(&quoted, &regex, ULID_LEN))
+    Ok(
+        crate::render::backends::value_format_renderer(&dialect.id())
+            .ulid_column_metadata(&quoted, &regex, ULID_LEN),
+    )
 }
 
 fn type_id_column_metadata(
@@ -1235,7 +1241,7 @@ fn type_id_column_metadata(
     let quoted = zero_migrate_backend::dml::quote_ident_for_backend(
         "TypeID column",
         column,
-        crate::render::backends::renderer(dialect),
+        crate::render::backends::renderer(&dialect.id()),
     )
     .map_err(|error| error.to_string())?;
     let stored_prefix = if prefix.is_empty() {
@@ -1250,7 +1256,7 @@ fn type_id_column_metadata(
         TYPE_ID_SUFFIX_LEN - 1
     );
     Ok(
-        crate::render::backends::value_format_renderer(dialect).type_id_column_metadata(
+        crate::render::backends::value_format_renderer(&dialect.id()).type_id_column_metadata(
             &quoted,
             &stored_prefix,
             suffix_start,
@@ -1291,7 +1297,8 @@ pub(crate) fn bytewise_column_metadata(
     rendered_type: &str,
     dialect: SqlDialect,
 ) -> (String, Option<ColumnCollationSnapshot>) {
-    crate::render::backends::value_format_renderer(dialect).bytewise_column_metadata(rendered_type)
+    crate::render::backends::value_format_renderer(&dialect.id())
+        .bytewise_column_metadata(rendered_type)
 }
 
 #[cfg(test)]

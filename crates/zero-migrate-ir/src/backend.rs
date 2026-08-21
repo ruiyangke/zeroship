@@ -24,7 +24,7 @@
 
 use core::fmt;
 
-use crate::dialect::{DialectId, DialectSet, SqlDialect, MYSQL, POSTGRES, SQLITE};
+use crate::dialect::{DialectId, DialectSet};
 
 // ---------------------------------------------------------------------------
 // Capability
@@ -266,112 +266,6 @@ pub struct BackendDescriptor {
     pub limits: Limits,
 }
 
-/// PostgreSQL's capability answers.
-pub const POSTGRES_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
-    .with(Capability::NonPkIdentity)
-    .with(Capability::CrossSchemaDdl)
-    .with(Capability::TableLevelForeignKey)
-    .with(Capability::TableLevelUnique)
-    .with(Capability::NonBtreeIndexMethod)
-    .with(Capability::PartialIndexPredicate)
-    .with(Capability::NativeAlterColumn)
-    .with(Capability::AlterTableAddConstraint)
-    .with(Capability::AlterTableDropConstraint)
-    .with(Capability::AlterTableValidateConstraint)
-    .with(Capability::InsertOnConflictClause)
-    .with(Capability::PostgresVendorPrimitives)
-    .with(Capability::MaterializedView)
-    .with(Capability::CreateOrReplaceView)
-    .with(Capability::TriggerTruncateEvent)
-    .with(Capability::TriggerStatementForEach)
-    .with(Capability::TriggerExecuteFunction)
-    .with(Capability::MaterializedEnumType)
-    .with(Capability::MaterializedDomainType)
-    .with(Capability::Sequence)
-    .with(Capability::ExclusionConstraint)
-    .with(Capability::CommentOn)
-    .with(Capability::SchemaWideIndexNames)
-    .with(Capability::TransactionalDdl)
-    .with(Capability::DeferrableConstraint)
-    .with(Capability::UniqueConstraintDistinctFromIndex);
-
-/// `SQLite`'s capability answers.
-pub const SQLITE_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
-    .with(Capability::VirtualGeneratedColumn)
-    .with(Capability::TableLevelForeignKey)
-    .with(Capability::PartialIndexPredicate)
-    .with(Capability::InsertOnConflictClause)
-    .with(Capability::TriggerBody)
-    .with(Capability::SchemaWideIndexNames)
-    .with(Capability::TransactionalDdl)
-    .with(Capability::DeferrableConstraint)
-    .with(Capability::UniqueConstraintDistinctFromIndex)
-    .with(Capability::IntegerPrimaryKeyRowidAlias);
-
-/// `MySQL`'s capability answers.
-pub const MYSQL_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
-    .with(Capability::VirtualGeneratedColumn)
-    .with(Capability::CrossSchemaDdl)
-    .with(Capability::TableLevelForeignKey)
-    .with(Capability::TableLevelUnique)
-    .with(Capability::NativeAlterColumn)
-    .with(Capability::AlterTableAddConstraint)
-    .with(Capability::AlterTableDropConstraint)
-    .with(Capability::InsertOnConflictClause)
-    .with(Capability::CreateOrReplaceView)
-    .with(Capability::TriggerBody);
-
-/// The PostgreSQL backend descriptor.
-pub static POSTGRES_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
-    id: POSTGRES,
-    display_name: "PostgreSQL",
-    capabilities: POSTGRES_CAPABILITIES,
-    limits: Limits {
-        // `NAMEDATALEN - 1`. Anything longer is truncated with only a NOTICE.
-        identifier: IdentifierLimit::Bytes(63),
-    },
-};
-
-/// The `SQLite` backend descriptor.
-pub static SQLITE_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
-    id: SQLITE,
-    display_name: "SQLite",
-    capabilities: SQLITE_CAPABILITIES,
-    limits: Limits {
-        identifier: IdentifierLimit::Unbounded,
-    },
-};
-
-/// The `MySQL` backend descriptor.
-pub static MYSQL_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
-    id: MYSQL,
-    display_name: "MySQL",
-    capabilities: MYSQL_CAPABILITIES,
-    limits: Limits {
-        identifier: IdentifierLimit::Characters(64),
-    },
-};
-
-/// Every backend this build ships, in registration order.
-pub static SHIPPING_DESCRIPTORS: &[&BackendDescriptor] =
-    &[&POSTGRES_DESCRIPTOR, &SQLITE_DESCRIPTOR, &MYSQL_DESCRIPTOR];
-
-impl SqlDialect {
-    /// The descriptor for this closed variant.
-    ///
-    /// The bridge that lets engine code still holding a `SqlDialect` ask a
-    /// capability QUESTION instead of matching on a vendor. Once the backend
-    /// crates exist this direction disappears with the enum.
-    #[must_use]
-    pub const fn descriptor(self) -> &'static BackendDescriptor {
-        match self {
-            Self::Postgres => &POSTGRES_DESCRIPTOR,
-            Self::Sqlite => &SQLITE_DESCRIPTOR,
-            Self::Mysql => &MYSQL_DESCRIPTOR,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -485,19 +379,6 @@ impl BackendRegistry {
         Ok(Self {
             entries: descriptors.to_vec(),
         })
-    }
-
-    /// The registry of every backend this build ships.
-    ///
-    /// # Panics
-    ///
-    /// Never in a shipped build: the shipping descriptors are constants and the
-    /// `shipping_registry_builds` test proves they satisfy the rule. The
-    /// `expect` is here so a future backend added with a bad or colliding id
-    /// fails loudly at first use rather than being silently dropped.
-    #[must_use]
-    pub fn shipping() -> Self {
-        Self::build(SHIPPING_DESCRIPTORS).expect("the shipping descriptors satisfy the id rule")
     }
 
     /// The descriptor filed under `id`, if this build has one.

@@ -6,7 +6,7 @@
 
 use zero_migrate_backend::dml::{self, DmlError};
 use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::renderer::{Capability, DialectSupports, DmlRenderer};
+use zero_migrate_backend::renderer::{Capability, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::SqlDialect;
@@ -33,7 +33,7 @@ pub(super) static RENDERER: MysqlDmlRenderer = MysqlDmlRenderer;
 
 impl DmlRenderer for MysqlDmlRenderer {
     fn descriptor(&self) -> &'static BackendDescriptor {
-        &zero_migrate_ir::backend::MYSQL_DESCRIPTOR
+        &crate::descriptor::MYSQL_DESCRIPTOR
     }
 
     /// THE single physical home of MySQL's backtick identifier spelling: double
@@ -257,14 +257,14 @@ impl DmlRenderer for MysqlDmlRenderer {
         // recorded view's own `materialized`, which core never validated. A
         // backend asking its own `DIALECT` a capability question is legal here in
         // a way that core asking it through a registry was not.
-        if materialized && !DIALECT.supports(Capability::MaterializedView) {
+        if materialized && !self.supports(Capability::MaterializedView) {
             return Err(IrLowerError::ViewUnsupported {
                 kind: "materializedView",
                 dialect: DIALECT,
             });
         }
         let mut create = String::from("CREATE ");
-        if replace && DIALECT.supports(Capability::CreateOrReplaceView) {
+        if replace && self.supports(Capability::CreateOrReplaceView) {
             create.push_str("OR REPLACE VIEW ");
         } else {
             create.push_str("VIEW ");

@@ -11,7 +11,7 @@
 
 use zero_migrate_backend::dml::{self, DmlError};
 use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::renderer::{Capability, DialectSupports, DmlRenderer};
+use zero_migrate_backend::renderer::{Capability, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::SqlDialect;
@@ -56,7 +56,7 @@ pub(super) static RENDERER: SqliteDmlRenderer = SqliteDmlRenderer;
 
 impl DmlRenderer for SqliteDmlRenderer {
     fn descriptor(&self) -> &'static BackendDescriptor {
-        &zero_migrate_ir::backend::SQLITE_DESCRIPTOR
+        &crate::descriptor::SQLITE_DESCRIPTOR
     }
 
     fn quote_ident(&self, ident: &str) -> String {
@@ -269,7 +269,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn view_replace_prelude(&self, qname: &str, replace: bool) -> Vec<String> {
-        if replace && !DIALECT.supports(Capability::CreateOrReplaceView) {
+        if replace && !self.supports(Capability::CreateOrReplaceView) {
             vec![format!("DROP VIEW IF EXISTS {qname}")]
         } else {
             Vec::new()
@@ -375,7 +375,7 @@ fn render_sqlite_trigger_op(
                 ));
             }
             if events.iter().any(|e| matches!(e, TriggerEvent::Truncate))
-                && !DIALECT.supports(Capability::TriggerTruncateEvent)
+                && !RENDERER.supports(Capability::TriggerTruncateEvent)
             {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerEventTruncate",
@@ -383,7 +383,7 @@ fn render_sqlite_trigger_op(
                 });
             }
             if matches!(for_each, ForEach::Statement)
-                && !DIALECT.supports(Capability::TriggerStatementForEach)
+                && !RENDERER.supports(Capability::TriggerStatementForEach)
             {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "forEachStatement",
@@ -391,7 +391,7 @@ fn render_sqlite_trigger_op(
                 });
             }
             let TriggerAction::Body { statements } = action else {
-                if !DIALECT.supports(Capability::TriggerExecuteFunction) {
+                if !RENDERER.supports(Capability::TriggerExecuteFunction) {
                     return Err(IrLowerError::TriggerUnsupported {
                         kind: "executeFunction",
                         dialect: DIALECT,
@@ -401,7 +401,7 @@ fn render_sqlite_trigger_op(
                     "SQLite trigger action routed past capability check",
                 ));
             };
-            if !DIALECT.supports(Capability::TriggerBody) {
+            if !RENDERER.supports(Capability::TriggerBody) {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerBody",
                     dialect: DIALECT,

@@ -366,7 +366,7 @@ pub(crate) async fn resolve(
             &stored_create,
             target_columns(action),
             generated_rowid.map(|column| column.name.as_str()),
-            crate::render::backends::schema_renderer(super::SQLITE_DIALECT),
+            crate::render::backends::schema_renderer(&super::SQLITE_DIALECT.id()),
         )
         .map_err(|error| fail(error.to_string()))?;
     let (open, _) = stored_ddl

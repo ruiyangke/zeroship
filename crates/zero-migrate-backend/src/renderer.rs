@@ -2,14 +2,7 @@
 //!
 //! This module holds the vocabulary and the traits, and it deliberately holds no
 //! SQL. Nothing here names a vendor, spells a keyword, or quotes an identifier;
-//! the three shipping implementations live in `crate::render::backends`, one
-//! module per dialect, and the dispatch table lives there too.
-//!
-//! `renderer()` is re-exported from here so the crate's existing
-//! `render::renderer::renderer(dialect)` call sites — in `lower`, `dml` and
-//! `value_format` — keep resolving unchanged. The re-export is a compatibility
-//! path, not a dependency on the backends' internals: this module's own code
-//! cannot see them.
+//! the shipping implementations and their dispatch table live above this crate.
 //!
 //! # SPELLING vs SEMANTICS
 //!
@@ -24,10 +17,10 @@
 //! A method that emits no bytes and whose three impls differ only by their own
 //! `DIALECT` const is not a vendor decision at all. `validate_view_materialized`
 //! was one: every impl read
-//! `DIALECT.supports(Capability::MaterializedView)` and built a CORE error type
+//! its own descriptor's `MaterializedView` answer and built a CORE error type
 //! from it, so resolving a renderer only to ask the vendor about ITSELF put a
 //! dispatch between a question core could already answer — core holds the
-//! dialect, and [`DialectSupports`] reads the same descriptor the vendor read.
+//! resolved vendor and reads the same descriptor the vendor read.
 //!
 //! It now lives in `render::lower` as a plain dialect-parameterized fn. The
 //! distinction matters for `docs/proposals/pluggable-backends.md` step 4 because
@@ -48,7 +41,7 @@
 use crate::dml::DmlError;
 use crate::error::IrLowerError;
 use crate::step::BindValue;
-use zero_migrate_ir::dialect::{DialectId, SqlDialect};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{IrScalar, Op, TableRef};
 
@@ -60,28 +53,12 @@ use zero_migrate_ir::ir::{IrScalar, Op, TableRef};
 /// keep naming it through `render::renderer`.
 pub use zero_migrate_ir::backend::Capability;
 
-/// Ask a dialect a capability QUESTION.
-///
-/// The answer no longer lives in an exhaustive `match` on the vendor: it is read
-/// off the vendor's [`BackendDescriptor`](zero_migrate_ir::backend::BackendDescriptor),
-/// which is the whole point of promoting the matrix. A fourth backend answers by
-/// declaring a descriptor in its own crate, not by editing an arm here.
-pub trait DialectSupports {
-    fn supports(self, cap: Capability) -> bool;
-}
-
-impl DialectSupports for SqlDialect {
-    fn supports(self, cap: Capability) -> bool {
-        self.descriptor().capabilities.contains(cap)
-    }
-}
-
 /// Dialect-specific DML/view/trigger rendering.
 ///
 /// No SPELLING method has a default body: adding a dialect requires an explicit
-/// impl for every render decision. The single exhaustive dispatch match lives in
-/// `crate::render::backends`, so a third `SqlDialect` variant breaks there at
-/// compile time until its renderer is implemented and wired.
+/// impl for every render decision. Registration is keyed by an open [`DialectId`],
+/// so adding a backend requires its own complete implementation and one registry
+/// entry rather than another arm in this contract.
 ///
 /// The two exceptions are [`dialect`](Self::dialect) and
 /// [`supports`](Self::supports), and they are exceptions because neither is a
@@ -114,7 +91,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     ///
     /// # Why the OPEN id and not the closed enum
     ///
-    /// It returned [`SqlDialect`] until now, and that single return type was what
+    /// It returned `SqlDialect` until now, and that single return type was what
     /// stopped a fourth backend from lowering a migration. A vendor crate cannot
     /// produce a value of a closed enum it does not own, so the only body that
     /// type-checked outside this workspace's three vendors was `todo!()`: the crate
@@ -130,7 +107,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// a `match` the compiler would have completed for them.
     ///
     /// The direction stays one-way: an id does not convert back to a variant. See
-    /// [`SqlDialect::id`].
+    /// `SqlDialect::id`.
     fn dialect(&self) -> DialectId {
         self.descriptor().id.clone()
     }
@@ -153,8 +130,8 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
 
     /// Ask THIS backend a capability question.
     ///
-    /// The [`DialectSupports`] shape one line at a time: `supports` never branched
-    /// on the vendor, it read the vendor's descriptor, so it belongs on the vendor.
+    /// `supports` never branches on the vendor: it reads this vendor's descriptor,
+    /// so the answer remains owned by the vendor that declared it.
     fn supports(&self, cap: Capability) -> bool {
         self.descriptor().capabilities.contains(cap)
     }
@@ -282,187 +259,4 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
         op: &Op,
         eff_schema: &str,
     ) -> Result<Vec<crate::vendor::VendorStatement>, crate::vendor::VendorError>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn dialect_capability_matrix_is_explicit() {
-        // This matrix pins the feature surface for every shipping dialect, so a
-        // descriptor that flips an answer fails HERE rather than in whichever
-        // render path happened to read it.
-        //
-        // The exhaustiveness check at the bottom used to compare this table
-        // against a hand-written `ALL_CAPABILITIES` list, which had drifted:
-        // `MaterializedEnumType`, `MaterializedDomainType` and
-        // `SchemaWideIndexNames` were in the enum and in the dispatch matrix but
-        // in neither the pinned table nor the "all" list, so three predicates
-        // times three dialects were unpinned and the completeness assertion
-        // could not notice. It now compares against `Capability::ALL`, the one
-        // vocabulary list, which cannot drift from the enum without the set's
-        // own tests failing.
-        let expected = [
-            (
-                SqlDialect::Postgres,
-                [
-                    (Capability::NonPkIdentity, true),
-                    (Capability::VirtualGeneratedColumn, false),
-                    (Capability::CrossSchemaDdl, true),
-                    (Capability::TableLevelForeignKey, true),
-                    (Capability::TableLevelUnique, true),
-                    (Capability::NonBtreeIndexMethod, true),
-                    (Capability::PartialIndexPredicate, true),
-                    (Capability::NativeAlterColumn, true),
-                    (Capability::AlterTableAddConstraint, true),
-                    (Capability::AlterTableDropConstraint, true),
-                    (Capability::AlterTableValidateConstraint, true),
-                    (Capability::InsertOnConflictClause, true),
-                    (Capability::PostgresVendorPrimitives, true),
-                    (Capability::MaterializedView, true),
-                    (Capability::CreateOrReplaceView, true),
-                    (Capability::TriggerTruncateEvent, true),
-                    (Capability::TriggerStatementForEach, true),
-                    (Capability::TriggerExecuteFunction, true),
-                    (Capability::TriggerBody, false),
-                    (Capability::MaterializedEnumType, true),
-                    (Capability::MaterializedDomainType, true),
-                    (Capability::Sequence, true),
-                    (Capability::ExclusionConstraint, true),
-                    (Capability::CommentOn, true),
-                    (Capability::SchemaWideIndexNames, true),
-                    (Capability::TransactionalDdl, true),
-                    (Capability::DeferrableConstraint, true),
-                    (Capability::UniqueConstraintDistinctFromIndex, true),
-                    (Capability::IntegerPrimaryKeyRowidAlias, false),
-                ],
-            ),
-            (
-                SqlDialect::Sqlite,
-                [
-                    (Capability::NonPkIdentity, false),
-                    (Capability::VirtualGeneratedColumn, true),
-                    (Capability::CrossSchemaDdl, false),
-                    (Capability::TableLevelForeignKey, true),
-                    (Capability::TableLevelUnique, false),
-                    (Capability::NonBtreeIndexMethod, false),
-                    (Capability::PartialIndexPredicate, true),
-                    (Capability::NativeAlterColumn, false),
-                    (Capability::AlterTableAddConstraint, false),
-                    (Capability::AlterTableDropConstraint, false),
-                    (Capability::AlterTableValidateConstraint, false),
-                    (Capability::InsertOnConflictClause, true),
-                    (Capability::PostgresVendorPrimitives, false),
-                    (Capability::MaterializedView, false),
-                    (Capability::CreateOrReplaceView, false),
-                    (Capability::TriggerTruncateEvent, false),
-                    (Capability::TriggerStatementForEach, false),
-                    (Capability::TriggerExecuteFunction, false),
-                    (Capability::TriggerBody, true),
-                    (Capability::MaterializedEnumType, false),
-                    (Capability::MaterializedDomainType, false),
-                    (Capability::Sequence, false),
-                    (Capability::ExclusionConstraint, false),
-                    (Capability::CommentOn, false),
-                    (Capability::SchemaWideIndexNames, true),
-                    (Capability::TransactionalDdl, true),
-                    (Capability::DeferrableConstraint, true),
-                    (Capability::UniqueConstraintDistinctFromIndex, true),
-                    (Capability::IntegerPrimaryKeyRowidAlias, true),
-                ],
-            ),
-            (
-                SqlDialect::Mysql,
-                [
-                    (Capability::NonPkIdentity, false),
-                    (Capability::VirtualGeneratedColumn, true),
-                    (Capability::CrossSchemaDdl, true),
-                    (Capability::TableLevelForeignKey, true),
-                    (Capability::TableLevelUnique, true),
-                    (Capability::NonBtreeIndexMethod, false),
-                    (Capability::PartialIndexPredicate, false),
-                    (Capability::NativeAlterColumn, true),
-                    (Capability::AlterTableAddConstraint, true),
-                    (Capability::AlterTableDropConstraint, true),
-                    (Capability::AlterTableValidateConstraint, false),
-                    (Capability::InsertOnConflictClause, true),
-                    (Capability::PostgresVendorPrimitives, false),
-                    (Capability::MaterializedView, false),
-                    (Capability::CreateOrReplaceView, true),
-                    (Capability::TriggerTruncateEvent, false),
-                    (Capability::TriggerStatementForEach, false),
-                    (Capability::TriggerExecuteFunction, false),
-                    (Capability::TriggerBody, true),
-                    (Capability::MaterializedEnumType, false),
-                    (Capability::MaterializedDomainType, false),
-                    (Capability::Sequence, false),
-                    (Capability::ExclusionConstraint, false),
-                    (Capability::CommentOn, false),
-                    (Capability::SchemaWideIndexNames, false),
-                    (Capability::TransactionalDdl, false),
-                    (Capability::DeferrableConstraint, false),
-                    (Capability::UniqueConstraintDistinctFromIndex, false),
-                    (Capability::IntegerPrimaryKeyRowidAlias, false),
-                ],
-            ),
-        ];
-
-        for (dialect, capabilities) in expected {
-            for (cap, supported) in capabilities {
-                assert_eq!(
-                    dialect.supports(cap),
-                    supported,
-                    "{dialect:?} support for {cap:?}"
-                );
-                assert_eq!(
-                    dialect.descriptor().capabilities.contains(cap),
-                    supported,
-                    "{dialect:?} descriptor answer for {cap:?}"
-                );
-            }
-        }
-
-        // Exhaustiveness against the ONE vocabulary list, not a second
-        // hand-written copy of it.
-        for (dialect, capabilities) in expected {
-            let pinned: Vec<Capability> = capabilities.iter().map(|(cap, _)| *cap).collect();
-            for cap in Capability::ALL {
-                assert!(
-                    pinned.contains(cap),
-                    "{dialect:?}: {cap:?} is in the vocabulary but unpinned by this matrix"
-                );
-            }
-            assert_eq!(
-                pinned.len(),
-                Capability::ALL.len(),
-                "{dialect:?}: the pinned matrix must be exactly the vocabulary"
-            );
-        }
-    }
-
-    /// Every shipping descriptor must answer the whole vocabulary, and the
-    /// answers must be a real per-dialect matrix rather than one shared row.
-    #[test]
-    fn every_shipping_descriptor_answers_the_whole_vocabulary() {
-        let dialects = [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql];
-        for cap in Capability::ALL {
-            let answers: Vec<bool> = dialects.iter().map(|d| d.supports(*cap)).collect();
-            assert_eq!(answers.len(), 3, "{cap:?} must be answered by all three");
-        }
-        // The three shipping capability sets are pairwise distinct; a bug that
-        // pointed every descriptor at one set would otherwise pass silently.
-        assert_ne!(
-            SqlDialect::Postgres.descriptor().capabilities,
-            SqlDialect::Sqlite.descriptor().capabilities
-        );
-        assert_ne!(
-            SqlDialect::Postgres.descriptor().capabilities,
-            SqlDialect::Mysql.descriptor().capabilities
-        );
-        assert_ne!(
-            SqlDialect::Sqlite.descriptor().capabilities,
-            SqlDialect::Mysql.descriptor().capabilities
-        );
-    }
 }

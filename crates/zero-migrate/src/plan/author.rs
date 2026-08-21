@@ -152,17 +152,8 @@ fn column_def(c: &Column) -> Result<String, AuthorError> {
 /// number the backend DECLARES cannot drift apart. The `Bytes` arm is not
 /// incidental: MySQL's cap is 64 CHARACTERS and SQLite has none, which is why
 /// this bound is PostgreSQL's and not everyone's.
-pub(crate) const PG_MAX_IDENT_BYTES: usize = match zero_migrate_ir::dialect::SqlDialect::Postgres
-    .descriptor()
-    .limits
-    .identifier
-{
-    zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
-    zero_migrate_ir::backend::IdentifierLimit::Unbounded
-    | zero_migrate_ir::backend::IdentifierLimit::Characters(_) => {
-        panic!("PostgreSQL declares a BYTE identifier cap")
-    }
-};
+pub(crate) const PG_MAX_IDENT_BYTES: usize =
+    crate::render::backends::POSTGRES_IDENTIFIER_LIMIT_BYTES;
 
 /// Cap an arbitrary generated identifier to ≤ `PG_MAX_IDENT_BYTES` (63 bytes),
 /// deterministically: when `natural` fits, return it verbatim; when it would

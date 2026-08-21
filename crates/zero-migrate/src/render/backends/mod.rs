@@ -88,7 +88,9 @@ use zero_migrate_backend::ddl::DdlEmitter;
 use zero_migrate_backend::guard::{GuardConfig, MigrationGuard};
 use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_backend::renderer::DmlRenderer;
+use zero_migrate_ir::dialect::DialectId;
 
+#[cfg(test)]
 use crate::schema::query::SqlDialect;
 
 /// The shipping backends, named ONCE for the whole engine.
@@ -110,32 +112,43 @@ static SHIPPING: [&BackendVendor; 3] = [
 
 pub(crate) const VENDORS: VendorSet = VendorSet::new(&SHIPPING);
 
+/// PostgreSQL's registered byte limit, exposed for the existing deterministic
+/// identifier-name precomputation until that PostgreSQL-named surface moves.
+pub(crate) const POSTGRES_IDENTIFIER_LIMIT_BYTES: usize =
+    match zero_migrate_postgres::VENDOR.descriptor.limits.identifier {
+        zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
+        zero_migrate_ir::backend::IdentifierLimit::Unbounded
+        | zero_migrate_ir::backend::IdentifierLimit::Characters(_) => {
+            panic!("PostgreSQL declares a BYTE identifier cap")
+        }
+    };
+
 /// The vendor for a dialect.
 ///
 /// Resolved by the open [`DialectId`](zero_migrate_ir::dialect::DialectId) filed in
 /// each [`BackendVendor`], never by an enum match in core. The shipping list above is
 /// the one composition point that names backend crates.
-fn vendor(dialect: SqlDialect) -> &'static BackendVendor {
+pub(crate) fn vendor(dialect: &DialectId) -> &'static BackendVendor {
     VENDORS
-        .get(dialect.id())
-        .unwrap_or_else(|| panic!("no registered backend vendor for {}", dialect.id()))
+        .get(dialect)
+        .unwrap_or_else(|| panic!("no registered backend vendor for {dialect}"))
 }
 
 /// The DML renderer for a dialect.
-pub(crate) fn renderer(dialect: SqlDialect) -> &'static dyn DmlRenderer {
+pub(crate) fn renderer(dialect: &DialectId) -> &'static dyn DmlRenderer {
     vendor(dialect).dml
 }
 
 /// The schema renderer for a dialect. Re-exported as `schema::query::renderer`.
 pub(crate) fn schema_renderer(
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> &'static dyn zero_migrate_backend::schema::SchemaRenderer {
     vendor(dialect).schema
 }
 
 /// The value-format renderer and catalog normalizer registered by a dialect's vendor.
 pub(crate) fn value_format_renderer(
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> &'static dyn zero_migrate_backend::value_format::ValueFormatRenderer {
     vendor(dialect).value_format
 }
@@ -151,13 +164,13 @@ pub(crate) fn value_format_renderers(
 /// The vendor-owned parser for catalog-stored table DDL, when this backend
 /// explicitly provides one.
 pub(crate) fn stored_ddl(
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
     vendor(dialect).schema.stored_ddl()
 }
 
 /// The schema-bound DDL emitter registered by a dialect's vendor crate.
-pub(crate) fn ddl_emitter(dialect: SqlDialect, project_schema: &str) -> Box<dyn DdlEmitter> {
+pub(crate) fn ddl_emitter(dialect: &DialectId, project_schema: &str) -> Box<dyn DdlEmitter> {
     (vendor(dialect).ddl)(project_schema)
 }
 
@@ -179,7 +192,7 @@ pub(crate) fn ddl_emitter(dialect: SqlDialect, project_schema: &str) -> Box<dyn 
 /// impl, so a change to one dialect's posture cannot silently become a change to the
 /// other's.
 pub(crate) fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
-    (vendor(cfg.dialect()).guard)(cfg)
+    (vendor(&cfg.dialect().id()).guard)(cfg)
 }
 
 #[cfg(test)]
@@ -188,13 +201,13 @@ mod tests {
 
     #[test]
     fn dispatch_returns_expected_dml_renderer() {
-        assert_eq!(renderer(SqlDialect::Postgres).synth_now(), "now()");
+        assert_eq!(renderer(&SqlDialect::Postgres.id()).synth_now(), "now()");
         assert_eq!(
-            renderer(SqlDialect::Sqlite).synth_now(),
+            renderer(&SqlDialect::Sqlite.id()).synth_now(),
             "CURRENT_TIMESTAMP"
         );
         assert_eq!(
-            renderer(SqlDialect::Mysql).synth_now(),
+            renderer(&SqlDialect::Mysql.id()).synth_now(),
             "CURRENT_TIMESTAMP(6)"
         );
     }
@@ -279,8 +292,8 @@ mod tests {
         };
         let expected = "CONSTRAINT \"fk\"\"child\" FOREIGN KEY (\"child\"\"col\") REFERENCES \"project\"\"schema\".\"parents\" (id, \"parent\"\"col\") ON DELETE CASCADE";
 
-        let sqlite = ddl_emitter(SqlDialect::Sqlite, "project\"schema").fk_clause(&fk);
-        let postgres = ddl_emitter(SqlDialect::Postgres, "project\"schema").fk_clause(&fk);
+        let sqlite = ddl_emitter(&SqlDialect::Sqlite.id(), "project\"schema").fk_clause(&fk);
+        let postgres = ddl_emitter(&SqlDialect::Postgres.id(), "project\"schema").fk_clause(&fk);
         assert_eq!(sqlite, expected);
         assert_eq!(sqlite, postgres);
     }

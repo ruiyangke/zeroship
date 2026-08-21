@@ -966,7 +966,7 @@ fn sqlite_folded_rowid_generation(
     if !sqlite_integer_storage_for_rowid(snap, &folded.data_type) {
         return false;
     }
-    let stored_ddl = crate::render::backends::stored_ddl(SqlDialect::Sqlite)
+    let stored_ddl = crate::render::backends::stored_ddl(&SqlDialect::Sqlite.id())
         .expect("the SQLite renderer must provide stored-DDL analysis");
     snap.stored_create_sql.as_deref().is_none_or(|stored| {
         !stored_ddl.create_is_without_rowid(stored)
@@ -1072,7 +1072,7 @@ fn apply_fold_alter_primary_key(
                 .find(|column| column.name == target[0])
                 .is_some_and(|column| sqlite_integer_storage_for_rowid(snap, &column.data_type))
             && snap.stored_create_sql.as_deref().is_none_or(|stored| {
-                !crate::render::backends::stored_ddl(SqlDialect::Sqlite)
+                !crate::render::backends::stored_ddl(&SqlDialect::Sqlite.id())
                     .expect("the SQLite renderer must provide stored-DDL analysis")
                     .create_is_without_rowid(stored)
             })
@@ -2162,7 +2162,7 @@ impl<'a> CatalogFold<'a> {
             Op::RenameColumn {
                 table, from, to, ..
             } => {
-                let schema_renderer = crate::render::backends::schema_renderer(dialect);
+                let schema_renderer = crate::render::backends::schema_renderer(&dialect.id());
                 let snap = table_mut(tables, table)?;
                 // A pure rename keeps the column's type/nullable/default/sentinels;
                 // only the NAME changes (the IR carries `ty` for the live-rename type
@@ -3473,7 +3473,7 @@ fn apply_fold_sqlite_rowid_metadata(snap: &mut TableSnapshot) -> Result<(), Fold
     let storage_generates =
         sqlite_integer_storage_for_rowid(snap, &snap.columns[column_index].data_type)
             || matches!(snap.columns[column_index].identity, Some(identity) if !identity.always);
-    let stored_ddl = crate::render::backends::stored_ddl(SqlDialect::Sqlite)
+    let stored_ddl = crate::render::backends::stored_ddl(&SqlDialect::Sqlite.id())
         .expect("the SQLite renderer must provide stored-DDL analysis");
     let stored_shape_allows_rowid = snap.stored_create_sql.as_deref().is_none_or(|stored| {
         !stored_ddl.create_is_without_rowid(stored)
@@ -3853,7 +3853,8 @@ fn apply_fold_collation_metadata(
             .ok_or(FoldError::Unsupported("collated column folded away"))?;
         // The type spelling the renderer would have used, so the override REPLACES
         // that decision rather than guessing beside it.
-        let rendered = crate::render::backends::schema_renderer(dialect).column_type(col, false);
+        let rendered =
+            crate::render::backends::schema_renderer(&dialect.id()).column_type(col, false);
         let (ddl_type, collation) =
             crate::render::value_format::bytewise_column_metadata(&rendered, dialect);
         col.ddl_type_override = Some(ddl_type);
@@ -4088,7 +4089,7 @@ fn apply_fold_named_type_column_metadata(
                     let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
                         "column",
                         &source.name,
-                        crate::render::backends::renderer(dialect),
+                        crate::render::backends::renderer(&dialect.id()),
                     )
                     .map_err(|e| FoldError::NamedTypeRender(e.to_string()))?;
                     let expr = render_domain_check(check, dialect, &value_sql)

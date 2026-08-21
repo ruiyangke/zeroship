@@ -24,6 +24,7 @@
 
 pub mod collation;
 mod ddl;
+mod descriptor;
 mod dml;
 pub mod guard;
 mod schema;
@@ -46,7 +47,7 @@ use zero_migrate_backend::registry::BackendVendor;
 /// inherit another backend's DDL or acquire a trusting guard by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
-    descriptor: &zero_migrate_ir::backend::MYSQL_DESCRIPTOR,
+    descriptor: &descriptor::MYSQL_DESCRIPTOR,
     dml: &dml::RENDERER,
     schema: &schema::RENDERER,
     value_format: &value_format::RENDERER,

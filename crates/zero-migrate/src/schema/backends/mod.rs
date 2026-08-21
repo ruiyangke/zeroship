@@ -46,7 +46,8 @@
 //! are the contract; leave both. Now that the two spellings live in the SAME vendor
 //! crate, one file apart, this warning matters more than it did.
 
-use crate::schema::query::{SchemaRenderer, SqlDialect};
+use crate::schema::query::SchemaRenderer;
+use zero_migrate_ir::dialect::DialectId;
 
 /// The schema renderer for a dialect.
 ///
@@ -70,6 +71,6 @@ use crate::schema::query::{SchemaRenderer, SqlDialect};
 /// composition, while a point-of-use lookup could not — it is the engine reaching for
 /// a vendor list it no longer has. Adding one back inside an emitter re-creates the
 /// blocker.
-pub fn renderer(dialect: SqlDialect) -> &'static dyn SchemaRenderer {
+pub fn renderer(dialect: &DialectId) -> &'static dyn SchemaRenderer {
     crate::render::backends::schema_renderer(dialect)
 }

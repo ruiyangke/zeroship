@@ -44,7 +44,7 @@ use crate::schema::query::SqlDialect;
 /// the snapshot codec is for the normal form that is COMPARED rather than
 /// executed; picking between them is the point of there being two.
 pub(crate) fn escape_quote_ident_for_dialect(ident: &str, dialect: SqlDialect) -> String {
-    seam::escape_quote_ident_for_backend(ident, renderer(dialect))
+    seam::escape_quote_ident_for_backend(ident, renderer(&dialect.id()))
 }
 
 /// Validate a trigger-body identifier and emit it in the selected spelling.
@@ -53,7 +53,7 @@ pub(crate) fn quote_bare_ident_for_dialect(
     ident: &str,
     dialect: SqlDialect,
 ) -> Result<String, DmlError> {
-    seam::quote_bare_ident_for_backend(what, ident, renderer(dialect))
+    seam::quote_bare_ident_for_backend(what, ident, renderer(&dialect.id()))
 }
 
 /// The fail-closed gate for an ENGINE-supplied identifier, emitted in `dialect`'s
@@ -62,7 +62,7 @@ pub(crate) fn quote_ident_checked_for_dialect(
     ident: &str,
     dialect: SqlDialect,
 ) -> Result<String, IdentQuoteError> {
-    seam::quote_ident_checked_for_backend(ident, renderer(dialect))
+    seam::quote_ident_checked_for_backend(ident, renderer(&dialect.id()))
 }
 
 /// The ONE canonical render seam for an ENGINE-supplied identifier — the project
@@ -73,22 +73,22 @@ pub(crate) fn quote_ident_checked_for_dialect(
 /// the vendors and has no PostgreSQL renderer to resolve. Its thirty call sites are
 /// unchanged.
 pub(crate) fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError> {
-    seam::quote_ident_checked_for_backend(ident, renderer(SqlDialect::Postgres))
+    seam::quote_ident_checked_for_backend(ident, renderer(&SqlDialect::Postgres.id()))
 }
 
 /// Render an inline string literal in `dialect`'s spelling.
 pub(crate) fn inline_string_literal(s: &str, dialect: SqlDialect) -> String {
-    seam::inline_string_literal_for_backend(s, renderer(dialect))
+    seam::inline_string_literal_for_backend(s, renderer(&dialect.id()))
 }
 
 /// Render an inline scalar literal in `dialect`'s spelling.
 pub(crate) fn inline_literal(s: &IrScalar, dialect: SqlDialect) -> Result<String, DmlError> {
-    seam::inline_literal_for_backend(s, renderer(dialect))
+    seam::inline_literal_for_backend(s, renderer(&dialect.id()))
 }
 
 /// Render a closed-AST expression to inline SQL for `dialect`.
 pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlError> {
-    seam::render_expr_inline_for_backend(expr, renderer(dialect))
+    seam::render_expr_inline_for_backend(expr, renderer(&dialect.id()))
 }
 
 /// [`render_expr_inline`] with a caller-supplied column-reference spelling.
@@ -100,12 +100,12 @@ pub(crate) fn render_expr_inline_with_col<F>(
 where
     F: Fn(&str) -> Result<String, DmlError>,
 {
-    seam::render_expr_inline_with_col_for_backend(expr, renderer(dialect), col_ref)
+    seam::render_expr_inline_with_col_for_backend(expr, renderer(&dialect.id()), col_ref)
 }
 
 /// The columns a closed-AST expression reads, spelled for `dialect`.
 pub(crate) fn expr_column_refs(expr: &Expr, dialect: SqlDialect) -> Result<Vec<String>, DmlError> {
-    seam::expr_column_refs_for_backend(expr, renderer(dialect))
+    seam::expr_column_refs_for_backend(expr, renderer(&dialect.id()))
 }
 
 /// Assemble an `insert` into a template + binds for `dialect`.
@@ -119,7 +119,7 @@ pub fn assemble_insert(
 ) -> Result<AssembledDml, DmlError> {
     seam::assemble_insert_for_backend(
         project_schema,
-        renderer(dialect),
+        renderer(&dialect.id()),
         table,
         columns,
         rows,
@@ -135,7 +135,7 @@ pub fn assemble_update(
     set: &std::collections::BTreeMap<String, IrValue>,
     r#where: Option<&Expr>,
 ) -> Result<AssembledDml, DmlError> {
-    seam::assemble_update_for_backend(project_schema, renderer(dialect), table, set, r#where)
+    seam::assemble_update_for_backend(project_schema, renderer(&dialect.id()), table, set, r#where)
 }
 
 /// Assemble a `delete` into a template + binds for `dialect`.
@@ -146,7 +146,13 @@ pub fn assemble_delete(
     r#where: &Expr,
     limit: Option<u64>,
 ) -> Result<AssembledDml, DmlError> {
-    seam::assemble_delete_for_backend(project_schema, renderer(dialect), table, r#where, limit)
+    seam::assemble_delete_for_backend(
+        project_schema,
+        renderer(&dialect.id()),
+        table,
+        r#where,
+        limit,
+    )
 }
 
 /// [`assemble_delete`], with the catalog-proven SQLite identity a limited delete
@@ -161,7 +167,7 @@ pub(crate) fn assemble_delete_with_sqlite_identity(
 ) -> Result<AssembledDml, DmlError> {
     seam::assemble_delete_with_sqlite_identity_for_backend(
         project_schema,
-        renderer(dialect),
+        renderer(&dialect.id()),
         table,
         r#where,
         limit,
@@ -176,7 +182,7 @@ pub fn assemble_backfill_clauses(
     set: &std::collections::BTreeMap<String, IrValue>,
     filter: Option<&Expr>,
 ) -> Result<BackfillClauses, DmlError> {
-    seam::assemble_backfill_clauses_for_backend(renderer(dialect), table, set, filter)
+    seam::assemble_backfill_clauses_for_backend(renderer(&dialect.id()), table, set, filter)
 }
 
 /// [`assemble_backfill_clauses`], admitting an empty `set`.
@@ -186,7 +192,12 @@ pub(crate) fn assemble_backfill_clauses_allow_empty(
     set: &std::collections::BTreeMap<String, IrValue>,
     filter: Option<&Expr>,
 ) -> Result<BackfillClauses, DmlError> {
-    seam::assemble_backfill_clauses_allow_empty_for_backend(renderer(dialect), table, set, filter)
+    seam::assemble_backfill_clauses_allow_empty_for_backend(
+        renderer(&dialect.id()),
+        table,
+        set,
+        filter,
+    )
 }
 #[cfg(test)]
 mod tests {
@@ -213,10 +224,10 @@ mod tests {
     #[test]
     fn bind_ctx_resolves_its_backend_once_from_its_dialect() {
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
-            let ctx = BindCtx::new(renderer(dialect));
+            let ctx = BindCtx::new(renderer(&dialect.id()));
             let carried = std::ptr::from_ref(ctx.backend).cast::<u8>();
             let registry =
-                std::ptr::from_ref(crate::render::backends::renderer(dialect)).cast::<u8>();
+                std::ptr::from_ref(crate::render::backends::renderer(&dialect.id())).cast::<u8>();
             assert_eq!(
                 carried, registry,
                 "BindCtx::new({dialect:?}) must carry the registry's backend for that dialect"
@@ -775,17 +786,25 @@ mod tests {
         assert_eq!(
             render_expr_bound(
                 &qualified,
-                &mut BindCtx::new(renderer(SqlDialect::Postgres))
+                &mut BindCtx::new(renderer(&SqlDialect::Postgres.id()))
             )
             .unwrap(),
             "\"users\".\"id\""
         );
         assert_eq!(
-            render_expr_bound(&qualified, &mut BindCtx::new(renderer(SqlDialect::Mysql))).unwrap(),
+            render_expr_bound(
+                &qualified,
+                &mut BindCtx::new(renderer(&SqlDialect::Mysql.id())),
+            )
+            .unwrap(),
             "`users`.`id`"
         );
         assert_eq!(
-            render_expr_bound(&plain, &mut BindCtx::new(renderer(SqlDialect::Postgres))).unwrap(),
+            render_expr_bound(
+                &plain,
+                &mut BindCtx::new(renderer(&SqlDialect::Postgres.id())),
+            )
+            .unwrap(),
             "\"id\""
         );
     }
@@ -1030,7 +1049,11 @@ mod tests {
         );
         // The bound (parameterized) path lowers identically (operator form).
         assert_eq!(
-            render_expr_bound(&expr, &mut BindCtx::new(renderer(SqlDialect::Postgres))).unwrap(),
+            render_expr_bound(
+                &expr,
+                &mut BindCtx::new(renderer(&SqlDialect::Postgres.id())),
+            )
+            .unwrap(),
             "(\"n\" % $1)"
         );
     }
@@ -1124,7 +1147,7 @@ mod tests {
             (SqlDialect::Sqlite, "\"age\""),
             (SqlDialect::Mysql, "`age`"),
         ] {
-            let mut ctx = BindCtx::new(renderer(dialect));
+            let mut ctx = BindCtx::new(renderer(&dialect.id()));
             let sql = render_expr_bound(&expr, &mut ctx).unwrap();
             assert!(
                 sql.starts_with(&format!("({ident} BETWEEN ")) && sql.contains(" AND "),
@@ -1254,11 +1277,13 @@ mod tests {
                 "TRUE"
             );
             assert_eq!(
-                render_expr_bound(&includes_empty, &mut BindCtx::new(renderer(dialect))).unwrap(),
+                render_expr_bound(&includes_empty, &mut BindCtx::new(renderer(&dialect.id())))
+                    .unwrap(),
                 "FALSE"
             );
             assert_eq!(
-                render_expr_bound(&excludes_empty, &mut BindCtx::new(renderer(dialect))).unwrap(),
+                render_expr_bound(&excludes_empty, &mut BindCtx::new(renderer(&dialect.id())))
+                    .unwrap(),
                 "TRUE"
             );
         }
@@ -1303,7 +1328,7 @@ mod tests {
 
         for expr in expressions {
             let inline = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
-            let mut ctx = BindCtx::new(renderer(SqlDialect::Mysql));
+            let mut ctx = BindCtx::new(renderer(&SqlDialect::Mysql.id()));
             let bound = render_expr_bound(&expr, &mut ctx).unwrap();
             for sql in [&inline, &bound] {
                 assert!(
@@ -1371,11 +1396,16 @@ mod tests {
 
         // Bound path renders the same divergent spellings.
         assert_eq!(
-            render_expr_bound(&expr, &mut BindCtx::new(renderer(SqlDialect::Postgres))).unwrap(),
+            render_expr_bound(
+                &expr,
+                &mut BindCtx::new(renderer(&SqlDialect::Postgres.id())),
+            )
+            .unwrap(),
             "(\"a\" IS DISTINCT FROM \"b\")"
         );
         assert_eq!(
-            render_expr_bound(&expr, &mut BindCtx::new(renderer(SqlDialect::Mysql))).unwrap(),
+            render_expr_bound(&expr, &mut BindCtx::new(renderer(&SqlDialect::Mysql.id())),)
+                .unwrap(),
             "(NOT (`a` <=> `b`))"
         );
     }
@@ -1416,7 +1446,7 @@ mod tests {
             (SqlDialect::Sqlite, "?1"),
             (SqlDialect::Mysql, "?"),
         ] {
-            let mut ctx = BindCtx::new(renderer(dialect));
+            let mut ctx = BindCtx::new(renderer(&dialect.id()));
             let sql = render_expr_bound(&expr, &mut ctx).unwrap();
             assert_eq!(sql, ph, "dialect() binds its chosen leg on {dialect:?}");
             assert_eq!(
@@ -1544,14 +1574,18 @@ mod tests {
 
         // The bound path renders the aggregate identically and binds no placeholders
         // (a ColRef arg is an identifier, not a bind).
-        let mut ctx = BindCtx::new(renderer(SqlDialect::Postgres));
+        let mut ctx = BindCtx::new(renderer(&SqlDialect::Postgres.id()));
         assert_eq!(
             render_expr_bound(&count_distinct, &mut ctx).unwrap(),
             "count(DISTINCT \"x\")"
         );
         assert_eq!(ctx.binds.len(), 0, "a ColRef aggregate arg is not a bind");
         assert_eq!(
-            render_expr_bound(&count_star, &mut BindCtx::new(renderer(SqlDialect::Mysql))).unwrap(),
+            render_expr_bound(
+                &count_star,
+                &mut BindCtx::new(renderer(&SqlDialect::Mysql.id())),
+            )
+            .unwrap(),
             "count(*)"
         );
     }

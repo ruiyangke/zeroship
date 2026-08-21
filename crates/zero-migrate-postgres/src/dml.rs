@@ -2,7 +2,7 @@
 
 use zero_migrate_backend::dml::{self, DmlError};
 use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::renderer::{Capability, DialectSupports, DmlRenderer};
+use zero_migrate_backend::renderer::{Capability, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::SqlDialect;
@@ -32,7 +32,7 @@ fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, 
 
 impl DmlRenderer for PostgresDmlRenderer {
     fn descriptor(&self) -> &'static BackendDescriptor {
-        &zero_migrate_ir::backend::POSTGRES_DESCRIPTOR
+        &crate::descriptor::POSTGRES_DESCRIPTOR
     }
 
     fn quote_ident(&self, ident: &str) -> String {
@@ -177,7 +177,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         let mut create = String::from("CREATE ");
         if materialized {
             create.push_str("MATERIALIZED VIEW ");
-        } else if replace && DIALECT.supports(Capability::CreateOrReplaceView) {
+        } else if replace && self.supports(Capability::CreateOrReplaceView) {
             create.push_str("OR REPLACE VIEW ");
         } else {
             create.push_str("VIEW ");
@@ -245,7 +245,7 @@ impl DmlRenderer for PostgresDmlRenderer {
             ..
         } = op
         {
-            if !DIALECT.supports(Capability::TriggerBody) {
+            if !self.supports(Capability::TriggerBody) {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerBody",
                     dialect: DIALECT,

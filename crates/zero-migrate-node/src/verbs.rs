@@ -15,7 +15,7 @@ use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStatusManifest};
 use zero_migrate::{
-    BackendRegistry, DialectId, LiveSchema, MigrationEngine, SqlDialect, MYSQL, POSTGRES,
+    shipping_backends, DialectId, LiveSchema, MigrationEngine, SqlDialect, MYSQL, POSTGRES,
 };
 
 use crate::wire::{
@@ -56,7 +56,7 @@ impl ApplyDialect {
     /// and is still refused, because it runs in-process via rusqlite — that is a
     /// posture, not an unknown dialect, and the two get different diagnostics.
     pub fn parse(s: &str) -> std::result::Result<Self, String> {
-        let registry = BackendRegistry::shipping();
+        let registry = shipping_backends();
         let descriptor = registry
             .iter()
             .find(|descriptor| descriptor.id.as_str() == s)
@@ -1243,7 +1243,7 @@ mod status_projection_tests {
                 ApplyDialect::parse(target.id().as_str()).expect("a host-apply id round-trips");
             assert_eq!(parsed.id(), target.id());
             assert!(
-                BackendRegistry::shipping().get(&target.id()).is_some(),
+                shipping_backends().get(&target.id()).is_some(),
                 "{} must be a registered backend",
                 target.id()
             );

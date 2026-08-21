@@ -2117,7 +2117,8 @@ pub(crate) fn stamp_mysql_physical_type(column: &mut ColumnSnapshot, dialect: Sq
     if !matches!(dialect, SqlDialect::Mysql) {
         return;
     }
-    let rendered = crate::render::backends::schema_renderer(dialect).column_type(column, false);
+    let rendered =
+        crate::render::backends::schema_renderer(&dialect.id()).column_type(column, false);
     column.mysql_physical_type = Some(MysqlPhysicalType::parse(&rendered));
 }
 
@@ -4087,11 +4088,11 @@ impl DeclarativeAuthor {
     /// made once by the [`VendorSet`](zero_migrate_backend::registry::VendorSet)
     /// lookup; core has no enum dispatch over vendor implementations.
     fn emitter(&self) -> Box<dyn DdlEmitter> {
-        crate::render::backends::ddl_emitter(self.dialect, &self.project_schema)
+        crate::render::backends::ddl_emitter(&self.dialect.id(), &self.project_schema)
     }
 
     fn schema_renderer(&self) -> &'static dyn SchemaRenderer {
-        crate::render::backends::schema_renderer(self.dialect)
+        crate::render::backends::schema_renderer(&self.dialect.id())
     }
 
     fn quote_ident(&self, ident: &str) -> String {
@@ -4544,7 +4545,7 @@ impl DeclarativeAuthor {
                     table: table.clone(),
                     from: r.from.clone(),
                     to: r.to.clone(),
-                    ty: crate::render::backends::schema_renderer(SqlDialect::Postgres)
+                    ty: crate::render::backends::schema_renderer(&SqlDialect::Postgres.id())
                         .column_type(&rename_column, false),
                 })?;
                 renames.push(plan);
@@ -4640,8 +4641,10 @@ impl DeclarativeAuthor {
                                 return Err(DeclarativeError::IdentityColumnTypeUnsupported {
                                     table: table.clone(),
                                     column: c.name.clone(),
-                                    to_type: crate::render::backends::schema_renderer(self.dialect)
-                                        .column_type(c, false),
+                                    to_type: crate::render::backends::schema_renderer(
+                                        &self.dialect.id(),
+                                    )
+                                    .column_type(c, false),
                                 });
                             }
                             out.push(self.render_alter_column_type(table, c));
@@ -6020,7 +6023,7 @@ impl DeclarativeAuthor {
         known_live_tables: &BTreeSet<String>,
         effective: &zero_migrate_policy::EffectivePolicy,
     ) -> Result<TableRebuild, DeclarativeError> {
-        let backend = crate::render::backends::schema_renderer(self.dialect);
+        let backend = crate::render::backends::schema_renderer(&self.dialect.id());
         // ---- desired snapshot: live with `from`→`to` renamed (type unchanged) ----
         let mut desired_table = live_snapshot.clone();
         let mut found = false;
@@ -6382,7 +6385,7 @@ impl DeclarativeAuthor {
     /// and the fold) and the structural kind (`generated_kind`, from the fold and
     /// the PostgreSQL catalog read).
     fn render_alter_column_type(&self, table: &str, c: &ColumnSnapshot) -> Migration {
-        let ty = crate::render::backends::schema_renderer(self.dialect).column_type(c, false);
+        let ty = crate::render::backends::schema_renderer(&self.dialect.id()).column_type(c, false);
         let using = if is_engine_computed_column(c) {
             String::new()
         } else {
@@ -8368,7 +8371,7 @@ mod mysql_storage_agreement_tests {
         for (f, expected) in cases {
             let snapshot = column_snapshot_for_field(&f, SqlDialect::Mysql, false)
                 .unwrap_or_else(|error| panic!("{:?} snapshots: {error}", f.name));
-            let rendered = crate::render::backends::schema_renderer(SqlDialect::Mysql)
+            let rendered = crate::render::backends::schema_renderer(&SqlDialect::Mysql.id())
                 .column_type(&snapshot, false);
             assert_eq!(
                 MysqlStorage::of(&rendered),
@@ -8503,7 +8506,7 @@ mod inline_check_rename_tests {
     use super::{rename_quoted_column_in_sql, SchemaRenderer, SqlDialect};
 
     fn backend(dialect: SqlDialect) -> &'static dyn SchemaRenderer {
-        crate::render::backends::schema_renderer(dialect)
+        crate::render::backends::schema_renderer(&dialect.id())
     }
 
     #[test]

@@ -151,14 +151,16 @@ pub struct BackendVendor {
 /// use zero_migrate_backend::renderer::DmlRenderer;
 /// use zero_migrate_backend::schema::SchemaRenderer;
 /// use zero_migrate_backend::value_format::ValueFormatRenderer;
+/// use zero_migrate_ir::backend::BackendDescriptor;
 /// fn vendor(
+///     descriptor: &'static BackendDescriptor,
 ///     dml: &'static dyn DmlRenderer,
 ///     schema: &'static dyn SchemaRenderer,
 ///     value_format: &'static dyn ValueFormatRenderer,
 ///     ddl: DdlFactory,
 /// ) -> BackendVendor {
 ///     BackendVendor {
-///         descriptor: &zero_migrate_ir::backend::POSTGRES_DESCRIPTOR,
+///         descriptor,
 ///         dml,
 ///         schema,
 ///         value_format,
@@ -216,8 +218,11 @@ impl VendorSet {
 
     /// The vendor filed under `descriptor.id`, if this build has one.
     #[must_use]
-    pub fn get(self, id: zero_migrate_ir::dialect::DialectId) -> Option<&'static BackendVendor> {
-        self.vendors.iter().copied().find(|v| v.descriptor.id == id)
+    pub fn get(self, id: &zero_migrate_ir::dialect::DialectId) -> Option<&'static BackendVendor> {
+        self.vendors
+            .iter()
+            .copied()
+            .find(|v| &v.descriptor.id == id)
     }
 
     /// Validate this set's descriptors into `-ir`'s [`BackendRegistry`].

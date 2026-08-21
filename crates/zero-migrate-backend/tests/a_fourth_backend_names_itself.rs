@@ -13,10 +13,10 @@
 //! migration.
 //!
 //! Both methods return [`DialectId`] now. This file is the proof: `DuckDb` below
-//! is a complete outsider. It is declared in a test binary, `zero-migrate-ir`
-//! has never heard of it, `SHIPPING_DESCRIPTORS` does not list it, and the whole
-//! file contains no mention of `SqlDialect` at all — the assertion at the bottom
-//! of the module enforces that by reading this source file back.
+//! is a complete outsider. It is declared in a test binary, while the contract
+//! crate owns no shipping-descriptor list at all, and the whole file contains no
+//! mention of `SqlDialect` — the assertion at the bottom of the module enforces
+//! that by reading this source file back.
 //!
 //! The spelling bodies are deliberately thin. The claim under test is IDENTITY,
 //! not fidelity: a fourth backend's `dialect()` has a real body, and everything
@@ -479,13 +479,8 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     assert!(!dml.supports(Capability::PostgresVendorPrimitives));
     assert!(!dml.supports(Capability::MaterializedView));
 
-    // And it is a genuine outsider: none of the three shipping ids is this one.
-    for shipped in zero_migrate_ir::backend::SHIPPING_DESCRIPTORS {
-        assert_ne!(
-            shipped.id, DUCKDB,
-            "the stub is supposed to be a backend the core does not ship"
-        );
-    }
+    // And the leaf contract has no shipping list to edit: declaring this row is
+    // sufficient for an outsider to answer its own identity and capabilities.
 }
 
 /// The stub is only a proof if it never touches the closed enum.

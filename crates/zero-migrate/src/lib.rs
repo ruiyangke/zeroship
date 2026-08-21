@@ -282,7 +282,7 @@ pub use schema::query::SqlDialect;
 // picking a winner. Re-exported so an embedding host names one vocabulary.
 pub use zero_migrate_ir::backend::{
     BackendDescriptor, BackendRegistry, Capability, CapabilitySet, IdentifierLimit, Limits,
-    RegistryError, MYSQL_DESCRIPTOR, POSTGRES_DESCRIPTOR, SHIPPING_DESCRIPTORS, SQLITE_DESCRIPTOR,
+    RegistryError,
 };
 pub use zero_migrate_ir::dialect::{DialectId, DialectSet, MYSQL, POSTGRES, SQLITE};
 
@@ -296,11 +296,8 @@ pub use zero_migrate_ir::dialect::{DialectId, DialectSet, MYSQL, POSTGRES, SQLIT
 /// [`BackendRegistry::build`] over the shipping descriptors rather than by restating
 /// the id rule here.
 ///
-/// It differs from [`SHIPPING_DESCRIPTORS`] in what it PROVES: that list is a
-/// constant in `zero-migrate-ir` and would still name three backends in a build that
-/// linked none of them. This one is derived from the vendors actually compiled in,
-/// so the two agreeing is a fact rather than a coincidence — `render::backends`'s
-/// `the_shipping_vendor_set_composes_into_a_registry` pins it.
+/// It is derived from the vendors actually compiled in, so the contract crate owns
+/// no parallel shipping list that can drift from the build's composition.
 ///
 /// # Panics
 ///

@@ -12,14 +12,12 @@
 //!    last-one-wins: two backends silently sharing capability rows is worse than
 //!    the closed enum this replaces.
 //! 3. **The over-refusal control.** Every distinct, well-formed id must still
-//!    register, and the three shipping backends must still be a registry. A
-//!    refusal that also refuses the working case is a regression.
+//!    register. A refusal that also refuses the working case is a regression.
 
 use zero_migrate_ir::backend::{
     BackendDescriptor, BackendRegistry, CapabilitySet, IdentifierLimit, Limits, RegistryError,
-    MYSQL_DESCRIPTOR, POSTGRES_DESCRIPTOR, SHIPPING_DESCRIPTORS, SQLITE_DESCRIPTOR,
 };
-use zero_migrate_ir::dialect::{DialectId, SqlDialect, MYSQL, POSTGRES, SQLITE};
+use zero_migrate_ir::dialect::DialectId;
 
 const NEUTRAL_LIMITS: Limits = Limits {
     identifier: IdentifierLimit::Unbounded,
@@ -180,36 +178,4 @@ fn every_distinct_well_formed_id_still_registers() {
         .expect("distinct ids that share a prefix are distinct backends");
     assert_eq!(registry.len(), 4);
     assert_eq!(registry.ids().len(), 4);
-}
-
-/// OVER-REFUSAL CONTROL. Every currently-shipping dialect must still register.
-#[test]
-fn the_shipping_registry_builds() {
-    let registry = BackendRegistry::shipping();
-    assert_eq!(registry.len(), 3);
-    assert_eq!(registry.ids().len(), 3);
-
-    for (dialect, id, display_name) in [
-        (SqlDialect::Postgres, POSTGRES, "PostgreSQL"),
-        (SqlDialect::Sqlite, SQLITE, "SQLite"),
-        (SqlDialect::Mysql, MYSQL, "MySQL"),
-    ] {
-        assert_eq!(dialect.id(), id);
-        let descriptor = registry.get(&id).expect("a shipping dialect resolves");
-        assert_eq!(descriptor.display_name, display_name);
-        assert_eq!(
-            descriptor,
-            dialect.descriptor(),
-            "the registry and the closed-enum bridge must resolve to ONE descriptor"
-        );
-    }
-}
-
-#[test]
-fn shipping_descriptors_are_the_three_shipping_dialects() {
-    let ids: Vec<&str> = SHIPPING_DESCRIPTORS.iter().map(|d| d.id.as_str()).collect();
-    assert_eq!(ids, vec!["postgres", "sqlite", "mysql"]);
-    assert_eq!(POSTGRES_DESCRIPTOR.id, POSTGRES);
-    assert_eq!(SQLITE_DESCRIPTOR.id, SQLITE);
-    assert_eq!(MYSQL_DESCRIPTOR.id, MYSQL);
 }

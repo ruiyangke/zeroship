@@ -1910,7 +1910,7 @@ pub(crate) fn enum_inline_check(
     let col = zero_migrate_backend::dml::quote_ident_for_backend(
         "column",
         column,
-        crate::render::backends::renderer(dialect),
+        crate::render::backends::renderer(&dialect.id()),
     )
     .map_err(IrLowerError::DmlAssemble)?;
     Ok(format!(
@@ -2065,7 +2065,7 @@ pub(crate) fn render_domain_check(
             zero_migrate_backend::dml::quote_ident_for_backend(
                 "column",
                 name,
-                crate::render::backends::renderer(dialect),
+                crate::render::backends::renderer(&dialect.id()),
             )
         }
     })
@@ -2687,7 +2687,7 @@ impl IrAuthor {
             scope: crate::model::policy::SchemaScope::Single(project_schema.clone()),
             project_schema,
             dialect,
-            backend: crate::render::backends::renderer(dialect),
+            backend: crate::render::backends::renderer(&dialect.id()),
             effective: effective.clone(),
             default_schema: None,
         }
@@ -5166,7 +5166,7 @@ impl IrAuthor {
                     return Err(IrLowerError::IdentityColumnTypeUnsupported {
                         table: table.clone(),
                         column: column.clone(),
-                        to_type: crate::render::backends::schema_renderer(self.dialect)
+                        to_type: crate::render::backends::schema_renderer(&self.dialect.id())
                             .column_type(&col, false),
                     });
                 }
@@ -5212,7 +5212,7 @@ impl IrAuthor {
                     // own `CHARACTER SET … COLLATE …` choice, which is right when the
                     // engine creates a column and wrong when it retypes one. The
                     // renderer strips exactly the pin it owns.
-                    let renderer = crate::render::backends::schema_renderer(self.dialect);
+                    let renderer = crate::render::backends::schema_renderer(&self.dialect.id());
                     let rendered = renderer.column_type(&col, false);
                     let ddl_type = renderer.strip_collation(&rendered).to_string();
                     let owner_app = self.decl.owner_app().to_string();
@@ -7432,8 +7432,8 @@ impl IrAuthor {
             let Some(col) = snap.columns.iter_mut().find(|col| col.name == source.name) else {
                 return Err(IrLowerError::UnsupportedOp("collated column folded away"));
             };
-            let rendered =
-                crate::render::backends::schema_renderer(self.dialect).column_type(col, false);
+            let rendered = crate::render::backends::schema_renderer(&self.dialect.id())
+                .column_type(col, false);
             let (ddl_type, collation) =
                 crate::render::value_format::bytewise_column_metadata(&rendered, self.dialect);
             col.ddl_type_override = Some(ddl_type);
@@ -7676,7 +7676,7 @@ impl IrAuthor {
                 // the PostgreSQL renderer to spell that canonical token.
                 col.ddl_type_override = None;
                 Ok(
-                    crate::render::backends::schema_renderer(SqlDialect::Postgres)
+                    crate::render::backends::schema_renderer(&SqlDialect::Postgres.id())
                         .column_type(&col, false),
                 )
             }
@@ -7856,7 +7856,7 @@ impl IrAuthor {
                 } else {
                     let mut render_column = live_from_column.clone();
                     render_column.data_type = ir_data_type;
-                    crate::render::backends::schema_renderer(SqlDialect::Postgres)
+                    crate::render::backends::schema_renderer(&SqlDialect::Postgres.id())
                         .column_type(&render_column, false)
                 };
                 // The PG expand-contract author derives the dual-write from
@@ -8952,7 +8952,7 @@ pub(crate) fn render_view_query(
             select,
             eff_schema,
             dialect,
-            crate::render::backends::renderer(dialect),
+            crate::render::backends::renderer(&dialect.id()),
         ),
         ViewQuery::Raw { sql } => {
             let target = match dialect {
@@ -10023,8 +10023,8 @@ pub(crate) fn mysql_storage_for_column_facets(
         unbounded_text: field.unbounded_text,
         ..Default::default()
     };
-    let rendered =
-        crate::render::backends::schema_renderer(SqlDialect::Mysql).column_type(&snapshot, false);
+    let rendered = crate::render::backends::schema_renderer(&SqlDialect::Mysql.id())
+        .column_type(&snapshot, false);
     Some(crate::render::declarative::MysqlStorage::of(&rendered))
 }
 
@@ -10479,7 +10479,7 @@ fn render_exclusion_element(
         ColumnOrExpr::Column { name } => zero_migrate_backend::dml::quote_ident_for_backend(
             "column",
             name,
-            crate::render::backends::renderer(dialect),
+            crate::render::backends::renderer(&dialect.id()),
         )
         .map_err(IrLowerError::DmlAssemble)?,
         ColumnOrExpr::Expr { expr } => {
@@ -10743,7 +10743,7 @@ mod tests {
             let author = test_ir_author("app", "app_a", dialect);
             let carried = std::ptr::from_ref(author.backend).cast::<u8>();
             let registry =
-                std::ptr::from_ref(crate::render::backends::renderer(dialect)).cast::<u8>();
+                std::ptr::from_ref(crate::render::backends::renderer(&dialect.id())).cast::<u8>();
             assert_eq!(
                 carried, registry,
                 "IrAuthor::new(.., {dialect:?}, ..) must carry the registry's backend"
