@@ -4354,6 +4354,80 @@ async fn statement_cache_reuses_identical_sql() {
 }
 
 #[compio::test]
+async fn clear_type_cache_refreshes_implicitly_cached_statement_metadata() {
+    use compio_postgres::types::Kind;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+
+    client
+        .batch_execute("CREATE TYPE cpg_cache_enum AS ENUM ('before')")
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT 'before'::cpg_cache_enum AS value";
+    let before_rows = client.query(SQL, &[]).await.unwrap();
+    let before = before_rows[0].columns()[0].type_().clone();
+
+    client
+        .batch_execute("ALTER TYPE cpg_cache_enum ADD VALUE 'after'")
+        .await
+        .unwrap();
+    let catalog_variants: String = client
+        .query_one_scalar(
+            "SELECT enum_range(NULL::cpg_cache_enum)::text",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let stale_rows = client.query(SQL, &[]).await.unwrap();
+    let stale = stale_rows[0].columns()[0].type_().clone();
+
+    const BUILTIN_SQL: &str = "SELECT 71::int4 AS cache_survivor";
+    let builtin_rows = client.query(BUILTIN_SQL, &[]).await.unwrap();
+    assert_eq!(builtin_rows[0].get::<_, i32>(0), 71);
+
+    drop((before_rows, stale_rows));
+    client.clear_type_cache();
+    client.simple_query("").await.unwrap();
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+    assert_eq!(prepared_statement_names(&client, BUILTIN_SQL).await.len(), 1);
+
+    let cleared_rows = client.query(SQL, &[]).await.unwrap();
+    let cleared = cleared_rows[0].columns()[0].type_().clone();
+
+    // The one-shot path must agree with the cache repopulated after the clear,
+    // or the two raw-SQL preparation paths have diverged.
+    let fresh_rows = client.query(&Uncached::new(SQL), &[]).await.unwrap();
+    let fresh = fresh_rows[0].columns()[0].type_().clone();
+
+    eprintln!(
+        "catalog={catalog_variants}; before oid={} kind={:?}; after ALTER oid={} kind={:?}; after clear oid={} kind={:?}; uncached oid={} kind={:?}",
+        before.oid(),
+        before.kind(),
+        stale.oid(),
+        stale.kind(),
+        cleared.oid(),
+        cleared.kind(),
+        fresh.oid(),
+        fresh.kind(),
+    );
+
+    assert_eq!(catalog_variants, "{before,after}");
+    assert_eq!(stale.oid(), before.oid());
+    assert_eq!(cleared.oid(), before.oid());
+    assert_eq!(fresh.oid(), before.oid());
+    assert_eq!(stale.kind(), &Kind::Enum(vec!["before".to_string()]));
+    let expected = Kind::Enum(vec!["before".to_string(), "after".to_string()]);
+    assert_eq!(cleared.kind(), &expected);
+    assert_eq!(fresh.kind(), &expected);
+
+    drop((builtin_rows, cleared_rows, fresh_rows));
+    client.batch_execute("DROP TYPE cpg_cache_enum").await.unwrap();
+}
+
+#[compio::test]
 async fn statement_cache_is_per_connection() {
     let url = test_url();
     let first = connect_with_statement_cache(&url, 1).await.unwrap();

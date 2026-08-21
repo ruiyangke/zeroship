@@ -527,6 +527,9 @@ pub(crate) struct CachedTypeInfo {
     pub(crate) typeinfo_enum: Option<Statement>,
     /// Cache of types already looked up.
     pub(crate) types: HashMap<Oid, Type>,
+    /// Separates lookups which began before a clear from the cache state that
+    /// the clear established.
+    generation: u64,
 }
 
 /// Exact-SQL LRU for statements prepared implicitly by raw-string operations.
@@ -536,6 +539,86 @@ pub(crate) struct CachedTypeInfo {
 struct StatementCache {
     statements: HashMap<Arc<str>, Statement>,
     lru: VecDeque<Arc<str>>,
+}
+
+fn statement_uses_cached_typeinfo(statement: &Statement) -> bool {
+    statement
+        .params()
+        .iter()
+        .chain(statement.columns().iter().map(|column| column.type_()))
+        // Built-in OIDs bypass CachedTypeInfo, so only a custom descriptor can
+        // retain one of the immutable Type snapshots being invalidated.
+        .any(|type_| Type::from_oid(type_.oid()).is_none())
+}
+
+#[cfg(test)]
+mod type_cache_tests {
+    use super::{Client, statement_uses_cached_typeinfo};
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::Statement;
+    use crate::types::{Kind, Type};
+    use futures_channel::mpsc;
+
+    fn custom_type() -> Type {
+        Type::new(
+            "cache_enum".to_string(),
+            900_001,
+            Kind::Enum(vec!["before".to_string()]),
+            "test".to_string(),
+        )
+    }
+
+    fn client_with_statement_cache() -> Client {
+        let (sender, _receiver) = mpsc::unbounded();
+        Client::new_with_statement_cache_capacity(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            0,
+            None,
+            1,
+        )
+    }
+
+    #[test]
+    fn custom_parameter_marks_an_implicit_statement_for_eviction() {
+        let statement = Statement::unnamed(vec![custom_type()], Vec::new());
+
+        assert!(statement_uses_cached_typeinfo(&statement));
+    }
+
+    #[test]
+    fn builtin_descriptors_do_not_mark_an_implicit_statement_for_eviction() {
+        let statement = Statement::unnamed(vec![Type::INT4, Type::TEXT], Vec::new());
+
+        assert!(!statement_uses_cached_typeinfo(&statement));
+    }
+
+    #[test]
+    fn clear_rejects_type_and_statement_insertions_from_its_old_generation() {
+        let client = client_with_statement_cache();
+        let generation = client.inner().type_cache_generation();
+        let custom = custom_type();
+        let statement = Statement::new(
+            client.inner(),
+            "stale".to_string(),
+            vec![custom.clone()],
+            Vec::new(),
+        );
+
+        client.clear_type_cache();
+        client
+            .inner()
+            .set_type(custom.oid(), &custom, generation);
+        let returned = client
+            .inner()
+            .cache_statement("SELECT $1", statement, generation);
+
+        assert!(client.inner().cached_type(custom.oid()).0.is_none());
+        assert!(client.inner().cached_statement("SELECT $1").is_none());
+        drop(returned);
+    }
 }
 
 /// Shared inner state of a `Client`. Lives behind an `Arc` so helpers
@@ -776,16 +859,52 @@ impl InnerClient {
         self.cached_typeinfo.lock().typeinfo_enum = Some(statement.clone());
     }
 
-    pub(crate) fn type_(&self, oid: Oid) -> Option<Type> {
-        self.cached_typeinfo.lock().types.get(&oid).cloned()
+    pub(crate) fn cached_type(&self, oid: Oid) -> (Option<Type>, u64) {
+        let cache = self.cached_typeinfo.lock();
+        (cache.types.get(&oid).cloned(), cache.generation)
     }
 
-    pub(crate) fn set_type(&self, oid: Oid, type_: &Type) {
-        self.cached_typeinfo.lock().types.insert(oid, type_.clone());
+    pub(crate) fn set_type(&self, oid: Oid, type_: &Type, generation: u64) {
+        let mut cache = self.cached_typeinfo.lock();
+        if cache.generation == generation {
+            cache.types.insert(oid, type_.clone());
+        }
+    }
+
+    pub(crate) fn type_cache_generation(&self) -> u64 {
+        self.cached_typeinfo.lock().generation
     }
 
     pub(crate) fn clear_type_cache(&self) {
-        self.cached_typeinfo.lock().types.clear();
+        let removed = {
+            let mut typeinfo = self.cached_typeinfo.lock();
+            typeinfo.types.clear();
+            typeinfo.generation = typeinfo.generation.wrapping_add(1);
+
+            // Keeping the generation change and statement scan under one lock
+            // order makes an in-flight prepare either precede this eviction or
+            // observe the new generation and decline to populate the cache.
+            let mut statements = self.statement_cache.lock();
+            let keys = statements
+                .statements
+                .iter()
+                .filter(|(_, statement)| statement_uses_cached_typeinfo(statement))
+                .map(|(key, _)| Arc::clone(key))
+                .collect::<Vec<_>>();
+
+            statements.lru.retain(|key| !keys.contains(key));
+            let removed = keys
+                .into_iter()
+                .filter_map(|key| statements.statements.remove(&key))
+                .collect::<Vec<_>>();
+            drop(statements);
+            drop(typeinfo);
+            removed
+        };
+
+        // Statement teardown takes the encoding buffer and enqueues protocol
+        // work, neither of which belongs inside the cache's critical section.
+        drop(removed);
     }
 
     pub(crate) const fn statement_cache_capacity(&self) -> usize {
@@ -815,12 +934,23 @@ impl InnerClient {
     /// case this returns the winner and drops the losing statement only after
     /// releasing the cache lock. Its existing Drop implementation closes the
     /// losing server-side name.
-    pub(crate) fn cache_statement(&self, query: &str, statement: Statement) -> Statement {
+    pub(crate) fn cache_statement(
+        &self,
+        query: &str,
+        statement: Statement,
+        type_cache_generation: u64,
+    ) -> Statement {
         let mut candidate = Some(statement);
         let capacity = self.statement_cache_capacity();
         if capacity == 0 {
             return candidate.take().expect("the candidate is present");
         }
+
+        let typeinfo = self.cached_typeinfo.lock();
+        if typeinfo.generation != type_cache_generation {
+            return candidate.take().expect("the candidate is present");
+        }
+
         let (winner, evicted) = {
             let mut cache = self.statement_cache.lock();
             let outcome = if let Some((key, winner)) = cache
@@ -853,6 +983,7 @@ impl InnerClient {
             drop(cache);
             outcome
         };
+        drop(typeinfo);
 
         // Both Drop paths can lock the encoding buffer and enqueue Close +
         // Sync, so neither is allowed to run while the cache mutex is held.
@@ -1467,7 +1598,12 @@ impl Client {
     ///
     /// When user-defined types are used in a query, the client loads their definitions from the database and caches
     /// them for the lifetime of the client. If those definitions are changed in the database, this method can be used
-    /// to flush the local cache and allow the new, updated definitions to be loaded.
+    /// to flush the local cache and allow the new, updated definitions to be loaded. Implicitly cached statements
+    /// which contain user-defined parameter or result types are also evicted so later raw-SQL operations reprepare
+    /// them with the updated definitions.
+    ///
+    /// Statements returned by [`Client::prepare`] own their type information. Callers must prepare those statements
+    /// again after clearing the cache; existing statements and rows are not changed in place.
     pub fn clear_type_cache(&self) {
         self.inner().clear_type_cache();
     }
