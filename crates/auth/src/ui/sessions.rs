@@ -22,6 +22,16 @@
 //! scoped to `user_id = <authenticated caller>` in SQL, so a caller can only
 //! ever revoke their OWN session — passing another user's session id revokes
 //! nothing (`store::sessions::revoke_one_for_user`).
+//!
+//! Clearing the row is only half of either arm. The OP does not hold the
+//! credential an RP presents, so both kinds emit an OIDC back-channel logout:
+//! `emit_for_session` for an IdP session (every RP that session reached), and
+//! `emit_for_app_session` for an app session (the one client serving that app).
+//! For the app arm this is the whole of the revocation: `gateway_sessions` is
+//! an audit record the gateway does not consult when authenticating a request,
+//! so without the emission the signed cookie stays valid to its `exp` and the
+//! 30-day anchor keeps re-signing fresh ones. `{"revoked": true}` claims the
+//! session ended; the emission is what makes that true.
 
 use std::sync::Arc;
 
@@ -141,16 +151,44 @@ pub async fn revoke(
     // 4. Revoke — scoped to `user_id = caller` in SQL (the IDOR guard).
     match sessions::revoke_one_for_user(db.as_ref(), caller.user_id, session_id, kind).await {
         Ok(revoked) => {
-            if revoked && kind == SessionKind::Idp {
-                match oidc::backchannel_logout::emit_for_session(
-                    db.as_ref(),
-                    issuer.as_ref(),
-                    session_id,
-                )
-                .await
-                {
+            // 5. Carry the revocation to whoever enforces it. Deleting the row
+            //    above is bookkeeping on BOTH arms: an IdP session's RPs hold
+            //    their own sessions, and an app session's live credential is a
+            //    gateway-signed cookie plus a 30-day anchor that the gateway
+            //    checks without ever reading the row we just removed. Both arms
+            //    therefore emit a back-channel logout; only the scope differs.
+            if let Some(revoked) = revoked.as_ref() {
+                let emitted = match revoked.kind {
+                    SessionKind::Idp => {
+                        oidc::backchannel_logout::emit_for_session(
+                            db.as_ref(),
+                            issuer.as_ref(),
+                            session_id,
+                        )
+                        .await
+                    }
+                    SessionKind::App => match revoked.app_id {
+                        Some(app_id) => {
+                            oidc::backchannel_logout::emit_for_app_session(
+                                db.as_ref(),
+                                issuer.as_ref(),
+                                app_id,
+                                caller.user_id,
+                            )
+                            .await
+                        }
+                        // `gateway_sessions.app_id` is NOT NULL, so this arm is
+                        // unreachable; it is an error rather than a silent skip
+                        // because a skip here is a revoke that does not revoke.
+                        None => Err(crate::error::AuthError::Internal(
+                            "revoked app session has no app_id".into(),
+                        )),
+                    },
+                };
+                match emitted {
                     Ok(report) => tracing::info!(
                         session_id = %session_id,
+                        kind = ?revoked.kind,
                         attempted = report.attempted,
                         delivered = report.delivered,
                         "sessions revoke: emitted OIDC back-channel logout tokens"
@@ -158,11 +196,12 @@ pub async fn revoke(
                     Err(e) => tracing::error!(
                         error = %e,
                         session_id = %session_id,
+                        kind = ?revoked.kind,
                         "sessions revoke: BCL emission failed"
                     ),
                 }
             }
-            HttpResponse::Ok().json(&json!({ "revoked": revoked }))
+            HttpResponse::Ok().json(&json!({ "revoked": revoked.is_some() }))
         }
         Err(e) => {
             tracing::error!(error = %e, "sessions::revoke_one_for_user failed");

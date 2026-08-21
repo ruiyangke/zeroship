@@ -234,13 +234,35 @@ pub async fn list_by_user(conn: &Client, user_id: uuid::Uuid) -> Result<Vec<Sess
         .collect())
 }
 
+/// What a successful [`revoke_one_for_user`] ended, so the caller can carry the
+/// revocation to whoever actually enforces it.
+///
+/// For [`SessionKind::App`] that is NOT this process: the row deleted here is
+/// the gateway's audit record, and the gateway authenticates requests against a
+/// signed cookie plus a token-family marker instead. The `app_id` below is what
+/// the caller needs to emit the back-channel logout that reaches the gateway's
+/// own teardown.
+#[derive(Debug, Clone)]
+pub struct RevokedSession {
+    pub kind: SessionKind,
+    /// The hosted app whose session ended. [`SessionKind::App`] only.
+    pub app_id: Option<uuid::Uuid>,
+}
+
 /// Revoke ONE session belonging to `user_id` (ISS-10 single-session revoke).
 ///
 /// SECURITY — the IDOR guard: every statement filters on BOTH
 /// `id = $session_id AND user_id = $user_id`. Passing a `session_id` that
 /// belongs to a different user matches zero rows and revokes nothing, so a
-/// caller can never revoke another user's session. Returns `true` iff exactly
+/// caller can never revoke another user's session. Returns `Some` iff exactly
 /// the caller's own (still-live) session was revoked.
+///
+/// **Returning `Some` is not, by itself, the end of the session.** For an app
+/// session this call only clears the OP-side audit row; the credential the
+/// gateway checks lives elsewhere and outlives this statement. Callers MUST
+/// carry the returned [`RevokedSession`] to
+/// [`crate::oidc::backchannel_logout::emit_for_app_session`], which is what
+/// reaches the enforcing party. `ui::sessions::revoke` is the one caller.
 ///
 /// Table mechanics differ by kind because the `zeroship_auth` role's grants
 /// differ (changeset 0025):
@@ -266,26 +288,38 @@ pub async fn revoke_one_for_user(
     user_id: uuid::Uuid,
     session_id: uuid::Uuid,
     kind: SessionKind,
-) -> Result<bool> {
-    let affected = match kind {
-        SessionKind::Idp => conn
-            .execute(
-                "UPDATE zeroship.idp_sessions SET revoked_at = NOW() \
-                 WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
-                &[&session_id, &user_id],
-            )
-            .await
-            .map_err(|e| AuthError::Db(format!("sessions revoke_one_for_user idp: {e}")))?,
-        SessionKind::App => conn
-            .execute(
-                "DELETE FROM zeroship.gateway_sessions \
-                 WHERE id = $1 AND user_id = $2",
-                &[&session_id, &user_id],
-            )
-            .await
-            .map_err(|e| AuthError::Db(format!("sessions revoke_one_for_user app: {e}")))?,
-    };
-    Ok(affected > 0)
+) -> Result<Option<RevokedSession>> {
+    match kind {
+        SessionKind::Idp => {
+            let affected = conn
+                .execute(
+                    "UPDATE zeroship.idp_sessions SET revoked_at = NOW() \
+                     WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+                    &[&session_id, &user_id],
+                )
+                .await
+                .map_err(|e| AuthError::Db(format!("sessions revoke_one_for_user idp: {e}")))?;
+            Ok((affected > 0).then_some(RevokedSession {
+                kind: SessionKind::Idp,
+                app_id: None,
+            }))
+        }
+        SessionKind::App => {
+            let rows = conn
+                .query(
+                    "DELETE FROM zeroship.gateway_sessions \
+                     WHERE id = $1 AND user_id = $2 \
+                     RETURNING app_id",
+                    &[&session_id, &user_id],
+                )
+                .await
+                .map_err(|e| AuthError::Db(format!("sessions revoke_one_for_user app: {e}")))?;
+            Ok(rows.first().map(|row| RevokedSession {
+                kind: SessionKind::App,
+                app_id: row.try_get("app_id").ok(),
+            }))
+        }
+    }
 }
 
 /// Revoke a session (set `revoked_at = NOW()`).

@@ -25,7 +25,11 @@ pub struct LogoutEmissionReport {
 struct RelyingPartySession {
     client_id: String,
     backchannel_logout_uri: String,
-    sid: String,
+    /// The OP session id to scope the logout to. `None` when the RP-local
+    /// session carries no recorded `sid`; the logout token then names only the
+    /// subject and the RP falls back to revoking every session that subject
+    /// holds at this client.
+    sid: Option<String>,
     sub: String,
 }
 
@@ -84,6 +88,82 @@ pub async fn emit_for_session(
     emit_to_rps(db, issuer, rps).await
 }
 
+/// Emit a BCL logout token to the ONE relying party that serves `app_id`.
+///
+/// This is the per-app peer of [`emit_for_session`], and the reason it exists
+/// is that an app session is not stored where its validity is decided. The OP
+/// side of an app session is a `zeroship.gateway_sessions` row, which the
+/// gateway keeps as an audit record and does NOT read when authenticating a
+/// request: the request path verifies a locally-signed 15-minute cookie against
+/// the `(client_id, sub)` family marker, and a 30-day server-held anchor
+/// silently re-signs that cookie when it lapses. Deleting the OP-side row
+/// therefore ends nothing. The RP's back-channel-logout receiver is what writes
+/// the family marker and tears the anchor down, so a per-app revoke has to
+/// reach it, exactly as an IdP-session revoke already does.
+///
+/// The `sub` is rebuilt with the same rule the token endpoint used when it
+/// recorded the RP's participation (`user_id` for a brokered client, the
+/// sector-pairwise subject otherwise), so the RP sees the subject it knows.
+///
+/// **The logout token names a subject and NOT a `sid`, and that is exact rather
+/// than lossy.** A `sid` would assert that an OP session ended, and none has:
+/// the user is still signed in at the OP; only their session at this one app was
+/// revoked. It would also promise a narrowing the platform cannot deliver: the
+/// RP enforces revocation through a `(client_id, sub)` family marker, which has
+/// no per-device dimension, so ending one of a subject's app sessions at a
+/// client ends all of them. Say the scope that actually applies.
+///
+/// # Errors
+///
+/// `AuthError::Db` on PG failure. A client with no registered
+/// `backchannel_logout_uri` is not an error: it reports zero attempts.
+pub async fn emit_for_app_session(
+    db: &Client,
+    issuer: &Issuer,
+    app_id: Uuid,
+    user_id: Uuid,
+) -> Result<LogoutEmissionReport> {
+    let rows = db
+        .query(
+            "SELECT oc.client_id, oc.backchannel_logout_uri, oc.brokered, \
+                    COALESCE(aoc.sector_identifier, oc.client_id) AS sector_identifier \
+             FROM zeroship.app_oauth_clients aoc \
+             JOIN zeroship.oauth_clients oc ON oc.client_id = aoc.client_id \
+             WHERE aoc.app_id = $1 \
+               AND oc.backchannel_logout_uri IS NOT NULL",
+            &[&app_id],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("load BCL RP for app: {e}")))?;
+
+    let subject = user_id.to_string();
+    let rps: Vec<RelyingPartySession> = rows
+        .iter()
+        .filter_map(|row| {
+            let uri: Option<String> = row.try_get("backchannel_logout_uri").ok().flatten();
+            let uri = uri?.trim().to_string();
+            if uri.is_empty() {
+                return None;
+            }
+            let brokered: bool = row.try_get("brokered").unwrap_or(false);
+            let sector: String = row.get("sector_identifier");
+            let sub = if brokered {
+                subject.clone()
+            } else {
+                issuer.pairwise_subject(&subject, &sector)
+            };
+            Some(RelyingPartySession {
+                client_id: row.get("client_id"),
+                backchannel_logout_uri: uri,
+                sid: None,
+                sub,
+            })
+        })
+        .collect();
+
+    emit_to_rps(db, issuer, rps).await
+}
+
 /// Emit BCL logout tokens for every RP remembered for all sessions of a user.
 pub async fn emit_for_user(
     db: &Client,
@@ -139,7 +219,7 @@ fn row_to_rp(row: &compio_postgres::Row) -> Option<RelyingPartySession> {
     Some(RelyingPartySession {
         client_id: row.get("client_id"),
         backchannel_logout_uri: uri,
-        sid: row.get("sid"),
+        sid: Some(row.get("sid")),
         sub: row.get("sub"),
     })
 }
@@ -162,7 +242,7 @@ async fn emit_to_rps(
                 &LogoutTokenMint {
                     client_id: &rp.client_id,
                     sub: Some(&rp.sub),
-                    sid: Some(&rp.sid),
+                    sid: rp.sid.as_deref(),
                     ttl_secs: None,
                 },
             )
