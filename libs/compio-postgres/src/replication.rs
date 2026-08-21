@@ -510,8 +510,9 @@ where
                     // format byte). The CopyBoth channel is open after
                     // this.
                     let _ = self.stream.buf().split_to(header.body_len()).freeze();
-                    // Streaming reads arm their own budget in `next`; an idle
-                    // stream must not inherit the command's old deadline.
+                    // A started streaming frame arms its own completion budget
+                    // in `next`; an idle stream must not inherit this command's
+                    // old deadline.
                     self.stream.finish_read_response();
                     return Ok(ReplicationStream {
                         stream: self.stream,
@@ -692,11 +693,13 @@ where
     /// later call on the stream then fails. See [`InFlight`]. To read with a
     /// timeout, hold ONE future across the wait rather than starting a new
     /// one each time round.
+    ///
+    /// A configured socket-read timeout is disarmed while no CopyBoth frame
+    /// has begun. Once the first byte arrives, it bounds completion of that
+    /// frame; indefinite WAL silence at a frame boundary remains healthy.
     pub async fn next(&mut self) -> Result<Option<ReplicationMessage>, Error> {
         self.in_flight.enter()?;
-        self.stream.begin_read_response();
         let result = self.next_inner().await;
-        self.stream.finish_read_response();
         if result.as_ref().is_err_and(Error::is_read_timeout) {
             self.in_flight.poison();
             if let Some(release) = &self.release {
@@ -709,8 +712,25 @@ where
 
     async fn next_inner(&mut self) -> Result<Option<ReplicationMessage>, Error> {
         loop {
-            // A header this call could not read is a lost frame boundary, so
-            // the stream is retired rather than left re-readable.
+            // A walsender owes no bytes at a frame boundary: an unchanged
+            // primary can remain quiet indefinitely. Wait for byte one with
+            // no response obligation, then bound only completion of the frame
+            // that byte started. `read_header` fills the entire declared body,
+            // so finishing immediately after it returns also disarms the wait
+            // after a NoticeResponse that this loop skips.
+            let frame = match self.stream.fill(1).await {
+                Ok(()) => {
+                    self.stream.begin_read_response();
+                    let result = read_header(&mut self.stream).await;
+                    self.stream.finish_read_response();
+                    result
+                }
+                Err(error) => Err(error),
+            };
+
+            // Any failure while acquiring or completing the next frame is
+            // terminal. Before byte one it means the socket itself failed;
+            // after byte one the next frame boundary may already be lost.
             //
             // The test is ALIGNMENT, not where the error came from.
             //
@@ -727,10 +747,15 @@ where
             // A server-sent `ErrorResponse` is the case that does NOT poison: it
             // is a complete message, its arm consumes the body, and the wire is
             // exactly where it should be, so a caller may reasonably carry on.
-            let header = match read_header(&mut self.stream).await {
+            let header = match frame {
                 Ok(header) => header,
                 Err(e) => {
-                    self.in_flight.poison();
+                    // `next` owns the timeout path so logical poisoning and
+                    // physical shutdown cannot drift apart. Other framing I/O
+                    // failures still retire the stream here.
+                    if !e.is_read_timeout() {
+                        self.in_flight.poison();
+                    }
                     return Err(e);
                 }
             };
@@ -1737,7 +1762,6 @@ mod tests {
     use pgoutput::{PgOutputMessage, TupleColumn};
     use std::error::Error as _;
     use std::future;
-    use std::time::Duration;
 
     fn startup_frame(tag: u8, body: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + body.len());
@@ -3007,56 +3031,6 @@ mod tests {
         assert!(
             err.is_cancelled(),
             "the refusal must be reported as a cancellation, got: {err}"
-        );
-    }
-
-    /// A configured socket-read deadline is terminal for CopyBoth framing.
-    /// The first call must retain its specific timeout classification; every
-    /// later call must refuse rather than try to resume the possibly partial
-    /// frame.
-    #[compio::test]
-    async fn a_read_timeout_poisons_the_replication_stream() {
-        let (mut stream, mut peer) = silent_peer().await;
-        stream
-            .stream
-            .set_read_timeout(Some(Duration::from_millis(75)));
-
-        let first = compio::time::timeout(Duration::from_secs(2), stream.next())
-            .await
-            .expect("replication read exceeded its outer watchdog")
-            .expect_err("silent replication peer produced a frame");
-        assert!(
-            first.is_read_timeout(),
-            "replication lost the socket-read timeout classification: {first}"
-        );
-
-        let disconnected = compio::time::timeout(Duration::from_secs(2), async {
-            let compio::buf::BufResult(result, _) = peer.read(vec![0u8; 1]).await;
-            result
-        })
-        .await
-        .expect("timed-out replication socket remained open past its watchdog");
-        assert!(
-            matches!(disconnected, Ok(0))
-                || disconnected.as_ref().is_err_and(|error| {
-                    matches!(
-                        error.kind(),
-                        std::io::ErrorKind::ConnectionReset
-                            | std::io::ErrorKind::ConnectionAborted
-                            | std::io::ErrorKind::BrokenPipe
-                            | std::io::ErrorKind::NotConnected
-                    )
-                }),
-            "replication timeout did not physically retire the socket: {disconnected:?}"
-        );
-
-        let second = stream
-            .next()
-            .await
-            .expect_err("timed-out replication framing was reused");
-        assert!(
-            second.is_cancelled(),
-            "timed-out replication stream did not refuse reuse: {second}"
         );
     }
 
