@@ -19,7 +19,7 @@
 use crate::buf_stream::BufStream;
 use crate::client::Client;
 use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend};
-use crate::config::{self, Config, ReplicationMode, TargetSessionAttrs};
+use crate::config::{self, AuthMethod, Config, ReplicationMode, TargetSessionAttrs};
 use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::connection::Connection;
 use crate::maybe_tls_stream::MaybeTlsStream;
@@ -481,10 +481,12 @@ where
 {
     match handshake.next().await? {
         Some(Message::AuthenticationOk) => {
+            check_require_auth(config, AuthMethod::None)?;
             can_skip_channel_binding(config)?;
             return Ok(());
         }
         Some(Message::AuthenticationCleartextPassword) => {
+            check_require_auth(config, AuthMethod::Password)?;
             can_skip_channel_binding(config)?;
 
             let pass = config
@@ -494,6 +496,7 @@ where
             authenticate_password(handshake, pass).await?;
         }
         Some(Message::AuthenticationMd5Password(body)) => {
+            check_require_auth(config, AuthMethod::Md5)?;
             can_skip_channel_binding(config)?;
 
             let pass = config
@@ -504,12 +507,25 @@ where
             authenticate_password(handshake, output.as_bytes()).await?;
         }
         Some(Message::AuthenticationSasl(body)) => {
+            // PostgreSQL 16's only SASL authentication family is SCRAM; both
+            // SCRAM-SHA-256 and SCRAM-SHA-256-PLUS map to this policy name.
+            // Check before constructing or writing the client-first message.
+            check_require_auth(config, AuthMethod::ScramSha256)?;
             authenticate_sasl(handshake, body, config).await?;
         }
-        Some(Message::AuthenticationKerberosV5)
-        | Some(Message::AuthenticationScmCredential)
-        | Some(Message::AuthenticationGss)
-        | Some(Message::AuthenticationSspi) => {
+        Some(Message::AuthenticationGss) => {
+            check_require_auth(config, AuthMethod::Gss)?;
+            return Err(Error::authentication(
+                "unsupported authentication method".into(),
+            ));
+        }
+        Some(Message::AuthenticationSspi) => {
+            check_require_auth(config, AuthMethod::Sspi)?;
+            return Err(Error::authentication(
+                "unsupported authentication method".into(),
+            ));
+        }
+        Some(Message::AuthenticationKerberosV5 | Message::AuthenticationScmCredential) => {
             return Err(Error::authentication(
                 "unsupported authentication method".into(),
             ));
@@ -526,6 +542,28 @@ where
         Some(_) => Err(Error::unexpected_message()),
         None => Err(Error::closed()),
     }
+}
+
+fn check_require_auth(config: &Config, method: AuthMethod) -> Result<(), Error> {
+    let policy = config.get_require_auth();
+    if policy.allows(method) {
+        return Ok(());
+    }
+
+    let reason = match method {
+        AuthMethod::Password => "server requested a cleartext password",
+        AuthMethod::Md5 => "server requested a hashed password",
+        AuthMethod::Gss => "server requested GSSAPI authentication",
+        AuthMethod::Sspi => "server requested SSPI authentication",
+        AuthMethod::ScramSha256 => "server requested SASL authentication",
+        AuthMethod::None => "server did not complete authentication",
+    };
+    Err(Error::authentication(
+        format!(
+            "authentication method requirement \"{policy}\" failed: {reason}"
+        )
+        .into(),
+    ))
 }
 
 fn can_skip_channel_binding(config: &Config) -> Result<(), Error> {
@@ -655,6 +693,9 @@ where
 
     let body = match handshake.next().await? {
         Some(Message::AuthenticationSaslContinue(body)) => body,
+        Some(Message::AuthenticationOk) => {
+            return Err(incomplete_authentication_exchange(config));
+        }
         Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
         Some(_) => return Err(Error::unexpected_message()),
         None => return Err(Error::closed()),
@@ -670,6 +711,9 @@ where
 
     let body = match handshake.next().await? {
         Some(Message::AuthenticationSaslFinal(body)) => body,
+        Some(Message::AuthenticationOk) => {
+            return Err(incomplete_authentication_exchange(config));
+        }
         Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
         Some(_) => return Err(Error::unexpected_message()),
         None => return Err(Error::closed()),
@@ -680,6 +724,22 @@ where
         .map_err(|e| Error::authentication(e.into()))?;
 
     Ok(())
+}
+
+fn incomplete_authentication_exchange(config: &Config) -> Error {
+    let policy = config.get_require_auth();
+    if matches!(policy, config::RequireAuth::Any) {
+        // Preserve the default policy's pre-require_auth behavior for a
+        // malformed SCRAM exchange.
+        return Error::unexpected_message();
+    }
+
+    Error::authentication(
+        format!(
+            "authentication method requirement \"{policy}\" failed: server did not complete authentication"
+        )
+        .into(),
+    )
 }
 
 async fn read_info<S, T>(
@@ -725,7 +785,7 @@ where
 mod tests {
     use super::*;
     use crate::AsyncMessage;
-    use crate::config::SslMode;
+    use crate::config::{AuthMethod, AuthMethods, RequireAuth, SslMode};
     use crate::tls::NoTls;
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use compio::net::{TcpListener, TcpStream};
@@ -802,6 +862,263 @@ mod tests {
         )
     }
 
+    async fn scripted_password_auth_server(
+        auth_request: Vec<u8>,
+        complete_after_response: bool,
+    ) -> (
+        crate::Socket,
+        oneshot::Receiver<Result<Vec<u8>, String>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client_bytes_tx, client_bytes_rx) = oneshot::channel();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            if let Err(error) = result {
+                let _ = client_bytes_tx.send(Err(error.to_string()));
+                return;
+            }
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            let compio::BufResult(result, _) =
+                socket.read_exact(vec![0u8; length - 4]).await;
+            if let Err(error) = result {
+                let _ = client_bytes_tx.send(Err(error.to_string()));
+                return;
+            }
+
+            let compio::BufResult(result, _) = socket.write_all(frame(b'R', &auth_request)).await;
+            if let Err(error) = result {
+                let _ = client_bytes_tx.send(Err(error.to_string()));
+                return;
+            }
+            if let Err(error) = socket.flush().await {
+                let _ = client_bytes_tx.send(Err(error.to_string()));
+                return;
+            }
+
+            let client_bytes = if complete_after_response {
+                // TCP reads may be partial. Observe one complete frontend
+                // frame before allowing the scripted authentication to
+                // finish, so the permitted-path assertion never relies on
+                // packet boundaries.
+                let compio::BufResult(result, tag) = socket.read_exact(vec![0u8; 1]).await;
+                if let Err(error) = result {
+                    let _ = client_bytes_tx.send(Err(error.to_string()));
+                    return;
+                }
+                let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+                if let Err(error) = result {
+                    let _ = client_bytes_tx.send(Err(error.to_string()));
+                    return;
+                }
+                let frame_length =
+                    u32::from_be_bytes(length.as_slice().try_into().unwrap()) as usize;
+                if frame_length < 4 {
+                    let _ = client_bytes_tx.send(Err(format!(
+                        "invalid frontend frame length {frame_length}"
+                    )));
+                    return;
+                }
+                let compio::BufResult(result, body) =
+                    socket.read_exact(vec![0u8; frame_length - 4]).await;
+                if let Err(error) = result {
+                    let _ = client_bytes_tx.send(Err(error.to_string()));
+                    return;
+                }
+                let mut frame = Vec::with_capacity(1 + frame_length);
+                frame.extend_from_slice(&tag);
+                frame.extend_from_slice(&length);
+                frame.extend_from_slice(&body);
+                frame
+            } else {
+                // A policy rejection closes the client side before writing a
+                // PasswordMessage, so this ordinary read returns zero bytes.
+                // If the implementation leaks any credential bytes first,
+                // retain them for the assertion below.
+                let compio::BufResult(result, mut client_bytes) =
+                    socket.read(vec![0u8; 1024]).await;
+                let read = match result {
+                    Ok(read) => read,
+                    Err(error) => {
+                        let _ = client_bytes_tx.send(Err(error.to_string()));
+                        return;
+                    }
+                };
+                client_bytes.truncate(read);
+                client_bytes
+            };
+
+            if complete_after_response {
+                let compio::BufResult(result, _) = socket
+                    .write_all(successful_handshake(std::iter::empty()))
+                    .await;
+                if let Err(error) = result {
+                    let _ = client_bytes_tx.send(Err(error.to_string()));
+                    return;
+                }
+                if let Err(error) = socket.flush().await {
+                    let _ = client_bytes_tx.send(Err(error.to_string()));
+                    return;
+                }
+            }
+
+            let _ = client_bytes_tx.send(Ok(client_bytes));
+        })
+        .detach();
+
+        (
+            crate::Socket::new_tcp(TcpStream::connect(addr).await.unwrap()),
+            client_bytes_rx,
+        )
+    }
+
+    fn authentication_error_chain(error: Error) -> String {
+        let message = error.to_string();
+        let cause = error
+            .into_source()
+            .map(|cause| cause.to_string())
+            .unwrap_or_default();
+        format!("{message}: {cause}")
+    }
+
+    fn sha256(input: &[u8]) -> [u8; 32] {
+        const K: [u32; 64] = [
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+            0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+            0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+            0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+            0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+            0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+            0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+            0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+            0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        ];
+
+        let mut state = [
+            0x6a09e667u32,
+            0xbb67ae85,
+            0x3c6ef372,
+            0xa54ff53a,
+            0x510e527f,
+            0x9b05688c,
+            0x1f83d9ab,
+            0x5be0cd19,
+        ];
+        let mut padded = input.to_vec();
+        padded.push(0x80);
+        while padded.len() % 64 != 56 {
+            padded.push(0);
+        }
+        padded.extend_from_slice(&(input.len() as u64 * 8).to_be_bytes());
+
+        for chunk in padded.chunks_exact(64) {
+            let mut words = [0u32; 64];
+            for (word, bytes) in words.iter_mut().zip(chunk.chunks_exact(4)) {
+                *word = u32::from_be_bytes(bytes.try_into().unwrap());
+            }
+            for index in 16..64 {
+                let s0 = words[index - 15].rotate_right(7)
+                    ^ words[index - 15].rotate_right(18)
+                    ^ (words[index - 15] >> 3);
+                let s1 = words[index - 2].rotate_right(17)
+                    ^ words[index - 2].rotate_right(19)
+                    ^ (words[index - 2] >> 10);
+                words[index] = words[index - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(words[index - 7])
+                    .wrapping_add(s1);
+            }
+
+            let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
+            for index in 0..64 {
+                let sum1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+                let choice = (e & f) ^ (!e & g);
+                let temp1 = h
+                    .wrapping_add(sum1)
+                    .wrapping_add(choice)
+                    .wrapping_add(K[index])
+                    .wrapping_add(words[index]);
+                let sum0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+                let majority = (a & b) ^ (a & c) ^ (b & c);
+                let temp2 = sum0.wrapping_add(majority);
+
+                h = g;
+                g = f;
+                f = e;
+                e = d.wrapping_add(temp1);
+                d = c;
+                c = b;
+                b = a;
+                a = temp1.wrapping_add(temp2);
+            }
+
+            for (current, compressed) in state
+                .iter_mut()
+                .zip([a, b, c, d, e, f, g, h])
+            {
+                *current = current.wrapping_add(compressed);
+            }
+        }
+
+        let mut digest = [0u8; 32];
+        for (output, word) in digest.chunks_exact_mut(4).zip(state) {
+            output.copy_from_slice(&word.to_be_bytes());
+        }
+        digest
+    }
+
+    fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+        let mut key_block = [0u8; 64];
+        if key.len() > key_block.len() {
+            key_block[..32].copy_from_slice(&sha256(key));
+        } else {
+            key_block[..key.len()].copy_from_slice(key);
+        }
+
+        let mut inner = Vec::with_capacity(64 + message.len());
+        inner.extend(key_block.iter().map(|byte| byte ^ 0x36));
+        inner.extend_from_slice(message);
+        let inner = sha256(&inner);
+
+        let mut outer = Vec::with_capacity(64 + inner.len());
+        outer.extend(key_block.iter().map(|byte| byte ^ 0x5c));
+        outer.extend_from_slice(&inner);
+        sha256(&outer)
+    }
+
+    fn base64(input: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut encoded = String::with_capacity(input.len().div_ceil(3) * 4);
+
+        for chunk in input.chunks(3) {
+            let first = chunk[0];
+            let second = chunk.get(1).copied().unwrap_or(0);
+            let third = chunk.get(2).copied().unwrap_or(0);
+            encoded.push(ALPHABET[(first >> 2) as usize] as char);
+            encoded.push(ALPHABET[(((first & 0x03) << 4) | (second >> 4)) as usize] as char);
+            if chunk.len() > 1 {
+                encoded.push(
+                    ALPHABET[(((second & 0x0f) << 2) | (third >> 6)) as usize] as char,
+                );
+            } else {
+                encoded.push('=');
+            }
+            if chunk.len() > 2 {
+                encoded.push(ALPHABET[(third & 0x3f) as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+        }
+
+        encoded
+    }
+
     fn plaintext_config() -> Config {
         let mut config = Config::new();
         config
@@ -819,6 +1136,384 @@ mod tests {
             .ssl_mode(SslMode::Disable)
             .connect_timeout(Duration::from_secs(5));
         config
+    }
+
+    async fn scripted_successful_scram_server() -> (
+        crate::Socket,
+        oneshot::Receiver<Result<(), String>>,
+    ) {
+        // PBKDF2-HMAC-SHA-256("scripted-password", "salt", 1), followed by
+        // HMAC-SHA-256(salted_password, "Server Key"). Keeping the derived
+        // verifier here lets the scripted peer compute its nonce-dependent
+        // server signature without adding a test-only crypto dependency.
+        const SERVER_KEY: [u8; 32] = [
+            0xf1, 0x83, 0x92, 0xfc, 0x94, 0x37, 0xe6, 0x33, 0x43, 0x42, 0x26, 0x63,
+            0x9a, 0xba, 0x84, 0x91, 0x32, 0xa6, 0x3e, 0x12, 0x47, 0xbf, 0x0f, 0x07,
+            0x58, 0x71, 0x43, 0xa4, 0x57, 0x01, 0x2d, 0xc7,
+        ];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (server_done_tx, server_done_rx) = oneshot::channel();
+
+        compio::runtime::spawn(async move {
+            let outcome: Result<(), String> = async {
+                let (mut socket, _) = listener.accept().await.map_err(|e| e.to_string())?;
+
+                let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+                result.map_err(|e| e.to_string())?;
+                let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+                let compio::BufResult(result, _) =
+                    socket.read_exact(vec![0u8; length - 4]).await;
+                result.map_err(|e| e.to_string())?;
+
+                let mut auth_sasl = 10i32.to_be_bytes().to_vec();
+                auth_sasl.extend_from_slice(b"SCRAM-SHA-256\0\0");
+                let compio::BufResult(result, _) =
+                    socket.write_all(frame(b'R', &auth_sasl)).await;
+                result.map_err(|e| e.to_string())?;
+                socket.flush().await.map_err(|e| e.to_string())?;
+
+                let compio::BufResult(result, tag) = socket.read_exact(vec![0u8; 1]).await;
+                result.map_err(|e| e.to_string())?;
+                if tag != [b'p'] {
+                    return Err(format!("expected SASLInitialResponse, got tag {tag:?}"));
+                }
+                let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+                result.map_err(|e| e.to_string())?;
+                let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+                let compio::BufResult(result, initial) =
+                    socket.read_exact(vec![0u8; length - 4]).await;
+                result.map_err(|e| e.to_string())?;
+                let mechanism_end = initial
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .ok_or_else(|| "SASL mechanism was not terminated".to_string())?;
+                if &initial[..mechanism_end] != b"SCRAM-SHA-256" {
+                    return Err(format!(
+                        "client chose an unexpected SASL mechanism: {:?}",
+                        &initial[..mechanism_end]
+                    ));
+                }
+                let response_length_start = mechanism_end + 1;
+                let response_start = response_length_start + 4;
+                if initial.len() < response_start {
+                    return Err("SASL initial response was truncated".to_string());
+                }
+                let response_length = i32::from_be_bytes(
+                    initial[response_length_start..response_start]
+                        .try_into()
+                        .unwrap(),
+                );
+                if response_length < 0
+                    || response_length as usize != initial.len() - response_start
+                {
+                    return Err("SASL initial response length was invalid".to_string());
+                }
+                let client_first = std::str::from_utf8(&initial[response_start..])
+                    .map_err(|e| e.to_string())?;
+                let client_first_bare = client_first
+                    .strip_prefix("n,,")
+                    .ok_or_else(|| format!("unexpected client-first message: {client_first}"))?;
+                let client_nonce = client_first_bare
+                    .strip_prefix("n=,r=")
+                    .ok_or_else(|| format!("unexpected client-first-bare: {client_first_bare}"))?;
+
+                let server_first = format!("r={client_nonce}scripted-server,s=c2FsdA==,i=1");
+                let mut auth_continue = 11i32.to_be_bytes().to_vec();
+                auth_continue.extend_from_slice(server_first.as_bytes());
+                let compio::BufResult(result, _) =
+                    socket.write_all(frame(b'R', &auth_continue)).await;
+                result.map_err(|e| e.to_string())?;
+                socket.flush().await.map_err(|e| e.to_string())?;
+
+                let compio::BufResult(result, tag) = socket.read_exact(vec![0u8; 1]).await;
+                result.map_err(|e| e.to_string())?;
+                if tag != [b'p'] {
+                    return Err(format!("expected SASLResponse, got tag {tag:?}"));
+                }
+                let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+                result.map_err(|e| e.to_string())?;
+                let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+                let compio::BufResult(result, client_final) =
+                    socket.read_exact(vec![0u8; length - 4]).await;
+                result.map_err(|e| e.to_string())?;
+                let client_final =
+                    std::str::from_utf8(&client_final).map_err(|e| e.to_string())?;
+                let proof_start = client_final
+                    .rfind(",p=")
+                    .ok_or_else(|| format!("client-final message had no proof: {client_final}"))?;
+                let client_final_without_proof = &client_final[..proof_start];
+                let auth_message = format!(
+                    "{client_first_bare},{server_first},{client_final_without_proof}"
+                );
+                let server_signature = hmac_sha256(&SERVER_KEY, auth_message.as_bytes());
+                let mut auth_final = 12i32.to_be_bytes().to_vec();
+                auth_final.extend_from_slice(format!("v={}", base64(&server_signature)).as_bytes());
+                let compio::BufResult(result, _) =
+                    socket.write_all(frame(b'R', &auth_final)).await;
+                result.map_err(|e| e.to_string())?;
+                let compio::BufResult(result, _) = socket
+                    .write_all(successful_handshake(std::iter::empty()))
+                    .await;
+                result.map_err(|e| e.to_string())?;
+                socket.flush().await.map_err(|e| e.to_string())?;
+                Ok(())
+            }
+            .await;
+
+            let _ = server_done_tx.send(outcome);
+        })
+        .detach();
+
+        (
+            crate::Socket::new_tcp(TcpStream::connect(addr).await.unwrap()),
+            server_done_rx,
+        )
+    }
+
+    async fn scripted_scram_server_sending_early_ok() -> crate::Socket {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            result.unwrap();
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
+            result.unwrap();
+
+            let mut auth_sasl = 10i32.to_be_bytes().to_vec();
+            auth_sasl.extend_from_slice(b"SCRAM-SHA-256\0\0");
+            let compio::BufResult(result, _) = socket.write_all(frame(b'R', &auth_sasl)).await;
+            result.unwrap();
+            socket.flush().await.unwrap();
+
+            // Wait for the client-first message so AuthenticationOk is
+            // demonstrably ending a started, incomplete SCRAM exchange.
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; 1]).await;
+            result.unwrap();
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            result.unwrap();
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
+            result.unwrap();
+
+            let compio::BufResult(result, _) = socket
+                .write_all(successful_handshake(std::iter::empty()))
+                .await;
+            result.unwrap();
+            socket.flush().await.unwrap();
+        })
+        .detach();
+
+        crate::Socket::new_tcp(TcpStream::connect(addr).await.unwrap())
+    }
+
+    #[compio::test]
+    async fn require_scram_refuses_cleartext_without_sending_the_password() {
+        let auth_request = 3i32.to_be_bytes().to_vec();
+        let (stream, client_bytes) =
+            scripted_password_auth_server(auth_request, false).await;
+        let mut config = scram_config();
+        config.require_auth(RequireAuth::Require(AuthMethods::new(
+            AuthMethod::ScramSha256,
+        )));
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("require_auth=scram-sha-256 accepted cleartext password auth"),
+            Err(error) => error,
+        };
+        let client_bytes = compio::time::timeout(Duration::from_secs(5), client_bytes)
+            .await
+            .expect("scripted cleartext server did not finish")
+            .expect("scripted cleartext server dropped its observation")
+            .expect("scripted cleartext server failed");
+        let chain = authentication_error_chain(error);
+
+        assert!(
+            client_bytes.is_empty(),
+            "the password reached the rejected server: {client_bytes:?}"
+        );
+        assert!(
+            chain.contains("scram-sha-256") && chain.contains("cleartext password"),
+            "the refusal must name the requirement and server request: {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn require_scram_refuses_authentication_ok_without_an_exchange() {
+        let (stream, _) =
+            scripted_server_after_startup(Some(successful_handshake(std::iter::empty()))).await;
+        let mut config = scram_config();
+        config.require_auth(RequireAuth::Require(AuthMethods::new(
+            AuthMethod::ScramSha256,
+        )));
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("require_auth=scram-sha-256 accepted an unauthenticated connection"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("scram-sha-256")
+                && chain.contains("did not complete authentication"),
+            "the refusal must name the requirement and incomplete exchange: {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn require_scram_names_an_authentication_ok_that_ends_scram_early() {
+        let stream = scripted_scram_server_sending_early_ok().await;
+        let mut config = scram_config();
+        config.require_auth(RequireAuth::Require(AuthMethods::new(
+            AuthMethod::ScramSha256,
+        )));
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("require_auth=scram-sha-256 accepted partial SCRAM"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("scram-sha-256")
+                && chain.contains("did not complete authentication"),
+            "the refusal must name the requirement and incomplete exchange: {chain}"
+        );
+    }
+
+    #[compio::test]
+    async fn require_scram_accepts_a_completed_scram_exchange() {
+        let (stream, server_done) = scripted_successful_scram_server().await;
+        let mut config = scram_config();
+        config.require_auth(RequireAuth::Require(AuthMethods::new(
+            AuthMethod::ScramSha256,
+        )));
+
+        let (client, connection) = config
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("require_auth=scram-sha-256 rejected a completed SCRAM exchange");
+        compio::time::timeout(Duration::from_secs(5), server_done)
+            .await
+            .expect("scripted SCRAM server did not finish")
+            .expect("scripted SCRAM server dropped its completion signal")
+            .expect("scripted SCRAM server failed");
+        drop(client);
+        drop(connection);
+    }
+
+    #[compio::test]
+    async fn a_negated_list_rejects_the_named_method_and_permits_another() {
+        let mut md5_request = 5i32.to_be_bytes().to_vec();
+        md5_request.extend_from_slice(&[1, 2, 3, 4]);
+        let (md5_stream, md5_client_bytes) =
+            scripted_password_auth_server(md5_request, false).await;
+        let mut config = scram_config();
+        config.require_auth(RequireAuth::Reject(AuthMethods::new(AuthMethod::Md5)));
+
+        let error = match config.connect_raw(md5_stream, NoTls).await {
+            Ok(_) => panic!("require_auth=!md5 accepted MD5 authentication"),
+            Err(error) => error,
+        };
+        let md5_client_bytes = compio::time::timeout(Duration::from_secs(5), md5_client_bytes)
+            .await
+            .expect("scripted MD5 server did not finish")
+            .expect("scripted MD5 server dropped its observation")
+            .expect("scripted MD5 server failed");
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("!md5") && chain.contains("hashed password"),
+            "the refusal must name the requirement and server request: {chain}"
+        );
+        assert!(
+            md5_client_bytes.is_empty(),
+            "an MD5 response reached the rejected server: {md5_client_bytes:?}"
+        );
+
+        let cleartext_request = 3i32.to_be_bytes().to_vec();
+        let (cleartext_stream, cleartext_client_bytes) =
+            scripted_password_auth_server(cleartext_request, true).await;
+        let (client, connection) = config
+            .connect_raw(cleartext_stream, NoTls)
+            .await
+            .expect("require_auth=!md5 must permit cleartext password authentication");
+        let cleartext_client_bytes =
+            compio::time::timeout(Duration::from_secs(5), cleartext_client_bytes)
+                .await
+                .expect("scripted cleartext server did not finish")
+                .expect("scripted cleartext server dropped its observation")
+                .expect("scripted cleartext server failed");
+        assert_eq!(cleartext_client_bytes.first(), Some(&b'p'));
+        assert!(
+            cleartext_client_bytes
+                .windows(b"scripted-password".len())
+                .any(|window| window == b"scripted-password"),
+            "the permitted cleartext exchange did not carry the configured password"
+        );
+        drop(client);
+        drop(connection);
+    }
+
+    #[compio::test]
+    async fn none_and_negated_none_control_whether_authentication_may_be_skipped() {
+        let mut none = scram_config();
+        none.require_auth(RequireAuth::Require(AuthMethods::new(AuthMethod::None)));
+        let (no_auth_stream, _) =
+            scripted_server_after_startup(Some(successful_handshake(std::iter::empty()))).await;
+        let (client, connection) = none
+            .connect_raw(no_auth_stream, NoTls)
+            .await
+            .expect("require_auth=none must permit an authentication-free connection");
+        drop(client);
+        drop(connection);
+
+        let (cleartext_stream, cleartext_client_bytes) =
+            scripted_password_auth_server(3i32.to_be_bytes().to_vec(), false).await;
+        let error = match none.connect_raw(cleartext_stream, NoTls).await {
+            Ok(_) => panic!("require_auth=none accepted a password challenge"),
+            Err(error) => error,
+        };
+        let cleartext_client_bytes =
+            compio::time::timeout(Duration::from_secs(5), cleartext_client_bytes)
+                .await
+                .expect("scripted cleartext server did not finish")
+                .expect("scripted cleartext server dropped its observation")
+                .expect("scripted cleartext server failed");
+        assert!(
+            cleartext_client_bytes.is_empty(),
+            "require_auth=none answered a password challenge: {cleartext_client_bytes:?}"
+        );
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("none") && chain.contains("cleartext password"),
+            "require_auth=none produced an unclear refusal: {chain}"
+        );
+
+        let mut not_none = scram_config();
+        not_none.require_auth(RequireAuth::Reject(AuthMethods::new(AuthMethod::None)));
+        let (no_auth_stream, _) =
+            scripted_server_after_startup(Some(successful_handshake(std::iter::empty()))).await;
+        let error = match not_none.connect_raw(no_auth_stream, NoTls).await {
+            Ok(_) => panic!("require_auth=!none accepted an authentication-free connection"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("!none") && chain.contains("did not complete authentication"),
+            "require_auth=!none produced an unclear refusal: {chain}"
+        );
+
+        let (cleartext_stream, _) =
+            scripted_password_auth_server(3i32.to_be_bytes().to_vec(), true).await;
+        let (client, connection) = not_none
+            .connect_raw(cleartext_stream, NoTls)
+            .await
+            .expect("require_auth=!none must permit a completed password exchange");
+        drop(client);
+        drop(connection);
     }
 
     /// A server that offers SCRAM and then names `iteration_count` in its
