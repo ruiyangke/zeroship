@@ -199,16 +199,29 @@ pub use guard::{
     flags_for, GuardConfig, GuardError, GuardMode, GuardOutcome, GuardReport, MigrationGuard,
     SqlGuard,
 };
-/// Each vendor's LINE-1 guard, named from the crate that ships it.
-///
-/// These used to be three types in `zero-migrate-guard`, two of which were the SAME
-/// type: `SqliteDescriptorGuard` served MySQL as well, and its own doc had to say so.
-/// Each backend crate now supplies its own, which is what makes
-/// `zero_migrate_backend::registry::BackendVendor::guard` a required field rather than
-/// a dispatch someone could add a `_ =>` arm to.
-pub use zero_migrate_mysql::MysqlGuard;
-pub use zero_migrate_postgres::PgGuard;
-pub use zero_migrate_sqlite::SqliteGuard;
+// ── The three per-vendor guard TYPES are NOT re-exported here any more.
+//
+// `MysqlGuard`, `PgGuard` and `SqliteGuard` were `pub use`d at this crate root, and
+// that made the engine's PUBLIC API name three vendor crates by name — the widest
+// possible form of the coupling, because a re-export is reachable by every downstream
+// caller and nothing tells that caller it is holding a vendor's type.
+//
+// Nothing moved and nothing was reimplemented: each guard still lives in its own
+// backend crate and is still built by that crate's `BackendVendor::guard` factory.
+// What went away is the SECOND door. [`guard_for`] below is the first, it selects
+// through the vendor registry, and it was already the door the napi addon and the
+// engine's own apply path used.
+//
+// The re-exports had no non-test caller in `crates/`, `sdks/` or `packages/`
+// (measured, not assumed): `MysqlGuard` had zero callers anywhere, and the eight
+// `PgGuard`/`SqliteGuard` sites were all in this crate's own integration tests,
+// which now build the same guard the same way the engine does. So no behaviour left
+// with the lines — the tests assert on the same guards, selected through the
+// registry instead of constructed by name.
+//
+// The property is pinned by `tests/dialect_matrix/core_names_no_vendor_crate.rs`,
+// which is a ratchet rather than prose: `lib.rs` is on its DENY side, so putting a
+// vendor crate back at the crate root is a red test, not a review question.
 
 /// Select the LINE-1 guard for a config's dialect, from that dialect's own vendor
 /// crate.

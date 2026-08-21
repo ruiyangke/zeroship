@@ -350,7 +350,7 @@ async fn rollback_unwinds_every_selected_migration_in_reverse_order() {
         &set,
         zero_migrate::Approval::Approved,
         "operator",
-        &zero_migrate::SqliteGuard::new(),
+        &*support::sqlite_line1_guard(),
     )
     .await
     .expect("orchestrated rollback of both migrations");
@@ -393,7 +393,7 @@ async fn rollback_refuses_while_another_holder_has_the_project_lock() {
         &[],
         zero_migrate::Approval::Approved,
         "operator",
-        &zero_migrate::SqliteGuard::new(),
+        &*support::sqlite_line1_guard(),
     )
     .await
     .expect_err("rollback must not proceed while the project lock is held");

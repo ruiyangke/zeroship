@@ -6637,7 +6637,8 @@ impl IrAuthor {
     /// trusted descriptor-/intent-driven producers (no untrusted raw SQL), exactly
     /// like the declarative path that emits the same shapes, and `apply_plan`
     /// re-runs the Confined guard on every rendered statement at execution time.
-    /// The SQLite leg's guard ([`crate::SqliteGuard`], supplied by `zero-migrate-sqlite`) trusts
+    /// The SQLite leg's guard (`SqliteGuard`, supplied by `zero-migrate-sqlite` and
+    /// selected through [`crate::guard_for`]) trusts
     /// descriptor-/IR-generated DDL (no string deny-list), so it never denies — but
     /// the fragment split + reassembly invariant still runs, so the `up`↔fragment
     /// correspondence holds on both dialects.

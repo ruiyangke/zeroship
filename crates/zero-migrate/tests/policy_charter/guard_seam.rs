@@ -22,13 +22,20 @@
 use crate::support;
 
 use zero_migrate::guard::{GuardConfig, GuardError, MigrationGuard, SqlGuard};
+use zero_migrate::guard_for;
 use zero_migrate::SqlDialect;
-use zero_migrate::{guard_for, PgGuard, SqliteGuard};
 
 /// A realistic PG project guard: project schema `project_acme`, extension
 /// allowlist = `pgcrypto` + `uuid-ossp` (mirrors the `guard_security` matrix).
-fn pg_guard() -> PgGuard {
-    PgGuard::from_config(GuardConfig::from_policy(
+///
+/// Built through [`guard_for`] rather than by naming `PgGuard`. The engine's crate
+/// root no longer re-exports the three vendor guard TYPES, so a test cannot name one
+/// — which is the point: the only way to reach a vendor's line-1 is the registry the
+/// engine itself goes through. `zero-migrate-postgres`'s `BackendVendor::guard` is
+/// `PgGuard::from_config(cfg.clone())`, so this is the same guard the deleted
+/// constructor built, from the same config.
+fn pg_guard() -> Box<dyn MigrationGuard> {
+    guard_for(&GuardConfig::from_policy(
         support::no_inject_with_extensions("project_acme", &["pgcrypto", "uuid-ossp"]),
         SqlDialect::Postgres,
     ))
@@ -87,7 +94,13 @@ fn pg_guard_flags_destructive_through_seam() {
 
 #[test]
 fn sqlite_descriptor_guard_passes_descriptor_create_table() {
-    let guard = SqliteGuard::new();
+    // Same guard, reached through the registry: `zero-migrate-sqlite`'s
+    // `BackendVendor::guard` is `Box::new(SqliteGuard::new())` and ignores the config,
+    // so the object under test is unchanged by the re-export's removal.
+    let guard = guard_for(&GuardConfig::from_policy(
+        support::no_inject("project_acme"),
+        SqlDialect::Sqlite,
+    ));
     // Descriptor-generated DDL is trusted by construction (author-boundary line-1 +
     // backend-authorizer line-2). The engine's apply/plan path feeds exactly this.
     let outcome = guard
