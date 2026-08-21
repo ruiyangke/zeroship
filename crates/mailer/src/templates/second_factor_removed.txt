@@ -1,0 +1,10 @@
+Hi {{ name }},
+
+The authenticator app on your zeroship account was removed at {{ time }}.
+Signing in now needs only your password.
+
+If you did this, no action is needed. If you did not, reset your password
+now -- that signs every device out of your account and out of every app you
+signed into with it -- and then turn two-factor authentication back on.
+
+Reset your password: {{ reset_link }}
