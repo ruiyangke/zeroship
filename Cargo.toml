@@ -258,6 +258,11 @@ zeroship-mailer = { path = "crates/mailer" }
 # Dev-dependency only. Owns the one skip announcer every gated test calls, so
 # that `tests/run_auth_suite.sh` has a single token to search for.
 zeroship-test-support = { path = "crates/test-support" }
+# Dev-dependency only. The test harness's own logic; `live_db` is the preflight
+# a live-database target runs before its first assertion. NOT test-support -
+# that crate deliberately has no dependencies at all, and this one links a
+# PostgreSQL driver.
+zeroship-testkit = { path = "crates/zeroship-testkit" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

@@ -4,7 +4,7 @@
 //!
 //! FAITHFUL by construction: every assertion runs against a LIVE, migrated Postgres
 //! (a configured test database, `zeroship_core::config::test_database_url_opt`;
-//! silent skip otherwise) and exercises the REAL paths —
+//! the run refuses otherwise) and exercises the REAL paths --
 //!   * the REAL `account_status::AccountStatusStore` (mints the `cbh_…` surrogate id);
 //!   * the REAL `cron::billing_notify::{tick, sweep}` (advisory lock, claim-before-send,
 //!     scan → send → flip, the `NOTIFY_REDRIVE_HORIZON` re-drive);

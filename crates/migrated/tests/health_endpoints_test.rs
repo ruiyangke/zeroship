@@ -19,12 +19,6 @@ use zeroship_migrated::auth::{AuthError, Authenticator, VerifiedCaller};
 use zeroship_migrated::policy::ManagedPolicyConfig;
 use zeroship_migrated::MigrationServiceState;
 
-/// The up-case asserts CONNECTIVITY, not schema: `AppPolicyStore::probe` is a
-/// connect plus a protocol sync and reads no table. So the default names the
-/// always-present `postgres` database on the shared test server rather than
-/// `zeroship_control_test`, which the other migrated tests create and this one
-/// does not need. The env chain below still wins where CI sets one.
-const DEFAULT_DSN: &str = "host=localhost port=5440 user=postgres password=zeroship dbname=postgres";
 const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated health probe policy seal key";
 
 /// A DSN whose host:port nothing listens on. The connect fails fast rather
@@ -32,8 +26,18 @@ const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated health probe policy seal key";
 const DEAD_DSN: &str =
     "host=127.0.0.1 port=9199 user=postgres password=zeroship dbname=zeroship connect_timeout=2";
 
+/// The up-case asserts CONNECTIVITY, not schema: `AppPolicyStore::probe` is a
+/// connect plus a protocol sync and reads no table, so any reachable database
+/// will do.
+///
+/// It used to say so by carrying its own DSN -- `dbname=postgres` on the shared
+/// :5440 server -- and using it whenever the overlay was absent. "Any reachable
+/// database will do" is a statement about what the test NEEDS; it is not a
+/// licence to pick one. A run with no configuration measured a server this file
+/// named and nothing else in the workspace agreed on. The accessor below panics
+/// instead, naming the provisioning command.
 fn live_dsn() -> String {
-    zeroship_core::config::test_database_url_opt().unwrap_or_else(|| DEFAULT_DSN.to_string())
+    zeroship_core::config::test_database_url()
 }
 
 /// Readiness never consults the authenticator, so the stub only has to exist.

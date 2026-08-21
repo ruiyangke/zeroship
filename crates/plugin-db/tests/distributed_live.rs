@@ -38,10 +38,14 @@ use zeroship_runtime::{
 
 const PROBE: &str = "distributed-live-cross-isolate-probe";
 
+/// The database this target dials, or a panic naming the provisioner.
+///
+/// It used to fall back to `127.0.0.1:5440/zeroship` -- the SHARED platform
+/// database on the dev cluster, named here and nowhere the harness could see.
+/// `crates/core/src/config/test_overlay.rs` cited this file by name as the one
+/// call site that "substitutes a default"; it no longer does.
 fn pg_url() -> String {
-    zeroship_core::config::test_database_url_opt().unwrap_or_else(|| {
-        "postgres://postgres:zeroship@127.0.0.1:5440/zeroship".to_string()
-    })
+    zeroship_core::config::test_database_url()
 }
 
 fn runtime_for(

@@ -51,6 +51,35 @@ pub mod workflow_instance_api;
 pub(crate) mod workflow_limits;
 pub(crate) mod workflow_rollout;
 
+/// The live-database preflight for this crate's LIB test binary.
+///
+/// A twin of `tests/common/mod.rs::require_control_db`, and it has to be a twin
+/// rather than a call: `cargo test --lib` and `cargo test --test live_db` are
+/// two processes, and `tests/common` is compiled into the second one only. Both
+/// dial the same database, so both need the same refusal - the `#[cfg(test)]`
+/// modules under `src/` were the half that kept the silent fallback when the
+/// integration targets lost theirs.
+#[cfg(test)]
+pub(crate) mod test_live_db {
+    use std::sync::OnceLock;
+
+    /// The database this crate's lib tests dial, or a refusal that ends the run.
+    ///
+    /// See `tests/common/mod.rs::require_control_db` for what the preflight is
+    /// for and why it exits rather than panicking.
+    pub(crate) fn require() -> String {
+        static CHECKED: OnceLock<String> = OnceLock::new();
+        CHECKED
+            .get_or_init(|| {
+                zeroship_testkit::live_db::require_configured(
+                    zeroship_core::config::test_database_url_opt(),
+                    &["zeroship", "zeroship_migrations"],
+                )
+            })
+            .clone()
+    }
+}
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

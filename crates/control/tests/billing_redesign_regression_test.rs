@@ -15,7 +15,7 @@
 //! Postgres (the REAL `invoices`/`invoice_lines`/`billing_provider_refs` tables +
 //! the REAL immutability triggers + the REAL `charge_cents`). Gated on a
 //! configured test database (`zeroship_core::config::test_database_url_opt`);
-//! silent skip otherwise.
+//! the run refuses otherwise.
 
 use crate::common;
 

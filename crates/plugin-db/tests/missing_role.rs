@@ -13,7 +13,12 @@
 //! error. Only a live server produces it. That also makes this the test that
 //! fails if the contextual session-setup arm is deleted.
 //!
-//! Requires: PostgreSQL at `PG_TEST_URL` (default port 5434).
+//! Requires: the test PostgreSQL named by the overlay
+//! (`deploy/ops/zeroship.test.toml`, written by
+//! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
+//! compiled default: this file used to fall back to `localhost:5434`, a
+//! DIFFERENT server with different credentials, so a run with no overlay
+//! silently measured whatever happened to be listening there.
 //! Run: `cargo test -p zeroship-plugin-db --test missing_role \
 //!       --features test-helpers -- --test-threads=1`
 //!
@@ -35,8 +40,7 @@ use compio_postgres::NoTls;
 use zeroship_plugin_db::error::DbError;
 
 fn test_url() -> String {
-    zeroship_core::config::test_database_url_opt()
-        .unwrap_or_else(|| "postgres://postgres:test@localhost:5434/postgres".to_string())
+    zeroship_core::config::test_database_url()
 }
 
 async fn connect_test_client() -> compio_postgres::Client {

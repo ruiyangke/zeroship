@@ -6,7 +6,7 @@
 //! (the REAL `invoices` partial unique index + the REAL `invoice_payments` table /
 //! immutability trigger + the REAL `cash_collected` Rust helper). Gated on a
 //! configured test database (`zeroship_core::config::test_database_url_opt`);
-//! silent skip otherwise.
+//! the run refuses otherwise.
 //!
 //! These FAIL against the pre-reshape schema:
 //!   (a) `invoice_payments` UPDATE/DELETE is rejected by the immutability trigger

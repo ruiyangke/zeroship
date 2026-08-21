@@ -18,6 +18,13 @@
 //!   [`suite_db`]     was `tests/lib/suite_db.sh`
 //!   [`sweep`]        was `tests/lib/sweep_db.sh`
 //!
+//! [`live_db`] is the one module here that was never shell. It is the preflight
+//! a Rust live-database target runs before its first assertion, and it exists
+//! because the shell gates already refuse when their inputs are missing while
+//! the cargo targets did not -- they connected to whatever the overlay named
+//! and reported `42P01` from inside a named test. Read its header for the run
+//! that cost two people an evening.
+//!
 //! HOW IT IS INVOKED. One binary, `zs-testkit`, with subcommands (see
 //! `src/main.rs`). The three `tests/lib/*.sh` files still exist and still
 //! export the same shell function names, but their bodies are now one call to
@@ -30,6 +37,7 @@
 
 pub mod admin;
 pub mod fingerprint;
+pub mod live_db;
 pub mod lock;
 pub mod overlay;
 pub mod suite_db;
