@@ -41,6 +41,18 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         }
     }
 
+    /// SQLite's `column_type` owns its `text COLLATE NOCASE` spelling directly;
+    /// there is no separate character-set/collation suffix for this hook to add.
+    fn pin_collation(&self, rendered: &str, _case_sensitive: Option<bool>) -> String {
+        rendered.to_string()
+    }
+
+    /// SQLite rebuilds carry the complete type spelling selected above, so there is
+    /// no MySQL-style engine pin to strip before a retype.
+    fn strip_collation<'a>(&self, rendered: &'a str) -> &'a str {
+        rendered
+    }
+
     fn json_object_default(&self) -> String {
         "DEFAULT '{}'".to_string()
     }
@@ -132,6 +144,13 @@ fn sqlite_ddl_type(data_type: &str) -> &'static str {
 mod tests {
     use super::{SchemaRenderer, RENDERER};
     use zero_migrate_backend::snapshot::ColumnSnapshot;
+
+    #[test]
+    fn collation_hooks_are_explicit_sqlite_pass_throughs() {
+        let rendered = "  text COLLATE NOCASE  ";
+        assert_eq!(RENDERER.pin_collation(rendered, Some(false)), rendered);
+        assert_eq!(RENDERER.strip_collation(rendered), rendered);
+    }
 
     #[test]
     fn every_supported_snapshot_type_has_sqlite_owned_add_column_spelling() {

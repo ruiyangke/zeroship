@@ -64,6 +64,12 @@ use zero_migrate_ir::dialect::DialectId;
 /// already delegated to, and that is what let `render::existence_probe` — the only
 /// caller of this trait outside this module — stop resolving a renderer at all.
 /// 8 methods to 7.
+///
+/// It then gained TWO required collation spellings. Pinning an engine-selected
+/// collation when a column is created and stripping that pin when a retype must
+/// preserve the live column's collation are inverse-looking but distinct vendor
+/// operations. Keeping both required makes a new backend state each position in
+/// its own crate instead of inheriting another engine's answer.
 pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// Which vendor this is, as the OPEN [`DialectId`] rather than the closed
     /// [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect).
@@ -77,6 +83,18 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     fn dialect(&self) -> DialectId;
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
     fn column_type(&self, c: &ColumnSnapshot, inline_pk: bool) -> String;
+
+    /// Pin this vendor's explicit collation spelling onto a rendered type when the
+    /// type can carry one.
+    fn pin_collation(&self, rendered: &str, case_sensitive: Option<bool>) -> String;
+
+    /// Remove only the explicit collation spelling this vendor's renderer pins.
+    ///
+    /// The borrowed result makes this a primitive spelling operation: a backend
+    /// may return either the whole input or a prefix of it without inventing a
+    /// shared collation carrier in the contract crate.
+    fn strip_collation<'a>(&self, rendered: &'a str) -> &'a str;
+
     fn json_object_default(&self) -> String;
     fn json_array_default(&self) -> String;
     fn current_timestamp_expr(&self) -> &'static str;

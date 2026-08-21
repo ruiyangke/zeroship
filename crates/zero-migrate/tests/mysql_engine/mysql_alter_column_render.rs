@@ -126,6 +126,17 @@ fn set_column_type_op() -> Op {
     }
 }
 
+fn set_bounded_string_column_type_op() -> Op {
+    Op::SetColumnType {
+        table: "accounts".to_string(),
+        column: "nickname".to_string(),
+        to_type: ColType::String { length: 128 },
+        using: None,
+        schema: None,
+        existence_guard: None,
+    }
+}
+
 fn set_column_not_null_op() -> Op {
     Op::SetColumnNotNull {
         table: "accounts".to_string(),
@@ -169,6 +180,26 @@ fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postg
     // satisfy the assertions above while breaking the dialect that has the statement.
     lower_for(SqlDialect::Postgres, set_column_type_op())
         .expect("PostgreSQL still lowers a column type change");
+}
+
+/// Creating a MySQL character column pins the engine's explicit collation, but a
+/// retype restates the LIVE column definition and must not replace the collation the
+/// author did not mention. The structured step therefore carries only the bare type.
+#[test]
+fn a_mysql_bounded_string_retype_strips_only_the_renderer_owned_collation() {
+    let steps = lower_steps_for(SqlDialect::Mysql, set_bounded_string_column_type_op())
+        .expect("MySQL lowers a bounded-string retype");
+    let restate = steps
+        .iter()
+        .find_map(|step| match step {
+            PlanStep::AlterColumnType(step) => Some(step),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected one MySQL restate step, got {steps:?}"));
+
+    assert_eq!(restate.ddl_type, "VARCHAR(128)");
+    assert!(!restate.ddl_type.contains("CHARACTER SET"));
+    assert!(!restate.ddl_type.contains("COLLATE"));
 }
 
 #[test]

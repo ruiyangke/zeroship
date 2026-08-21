@@ -5202,13 +5202,11 @@ impl IrAuthor {
                     }
                     // The BARE type. The rendered MySQL spelling carries the engine's
                     // own `CHARACTER SET … COLLATE …` choice, which is right when the
-                    // engine creates a column and wrong when it retypes one — see
-                    // `mysql_type_without_collation`.
-                    let ddl_type = crate::render::declarative::mysql_type_without_collation(
-                        &crate::render::backends::schema_renderer(self.dialect)
-                            .column_type(&col, false),
-                    )
-                    .to_string();
+                    // engine creates a column and wrong when it retypes one. The
+                    // renderer strips exactly the pin it owns.
+                    let renderer = crate::render::backends::schema_renderer(self.dialect);
+                    let rendered = renderer.column_type(&col, false);
+                    let ddl_type = renderer.strip_collation(&rendered).to_string();
                     let owner_app = self.decl.owner_app().to_string();
                     let up = format!(
                         "-- zero-migrate: restate {eff_schema}.{table}.{column} as {ddl_type}"

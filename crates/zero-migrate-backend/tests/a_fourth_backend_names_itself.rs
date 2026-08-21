@@ -271,6 +271,17 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         }
     }
 
+    /// This stub deliberately supports no collation spelling. The required method
+    /// makes that refusal-to-transform explicit in the outsider's own crate.
+    fn pin_collation(&self, rendered: &str, _case_sensitive: Option<bool>) -> String {
+        rendered.to_string()
+    }
+
+    /// With no pin of its own, DuckDB has no suffix of its own to strip.
+    fn strip_collation<'a>(&self, rendered: &'a str) -> &'a str {
+        rendered
+    }
+
     fn json_object_default(&self) -> String {
         "'{}'".to_string()
     }
@@ -307,6 +318,12 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     assert_eq!(schema.dialect(), DUCKDB);
     assert_eq!(dml.dialect().as_str(), "duckdb");
     assert!(dml.dialect().is_well_formed());
+    assert_eq!(
+        schema.pin_collation("VARCHAR", Some(false)),
+        "VARCHAR",
+        "the outsider writes its own pass-through instead of inheriting one"
+    );
+    assert_eq!(schema.strip_collation("VARCHAR"), "VARCHAR");
 
     // Capabilities come off the outsider's OWN descriptor, so the answers are the
     // ones it declared — not the "no to everything" a core-owned id->capability

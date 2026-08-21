@@ -1,6 +1,6 @@
 //! MySQL schema/DDL spelling. The future `zero-migrate-mysql`.
 
-use crate::collation::mysql_pin_collation;
+use crate::collation::{mysql_pin_collation, mysql_type_without_collation};
 use zero_migrate_backend::schema::{
     char_len, decimal_precision_scale, def_case_sensitive, quote_ident_for_backend, SchemaRenderer,
 };
@@ -52,10 +52,18 @@ impl SchemaRenderer for MysqlSchemaRenderer {
                 .as_ref()
                 .and_then(def_case_sensitive)
                 .or(c.case_sensitive);
-            mysql_pin_collation(&rendered, case_sensitive)
+            self.pin_collation(&rendered, case_sensitive)
         } else {
             mysql_pin_native_enum_collation(&rendered, c.case_sensitive)
         }
+    }
+
+    fn pin_collation(&self, rendered: &str, case_sensitive: Option<bool>) -> String {
+        mysql_pin_collation(rendered, case_sensitive)
+    }
+
+    fn strip_collation<'a>(&self, rendered: &'a str) -> &'a str {
+        mysql_type_without_collation(rendered)
     }
 
     fn json_object_default(&self) -> String {
@@ -278,6 +286,23 @@ mod tests {
             RENDERER.column_type(&bounded, false),
             format!("VARCHAR(64) {PIN}")
         );
+    }
+
+    #[test]
+    fn collation_contract_pins_and_strips_the_vendor_suffix() {
+        let case_sensitive = RENDERER.pin_collation("VARCHAR(128)", None);
+        assert_eq!(case_sensitive, format!("VARCHAR(128) {PIN}"));
+        assert_eq!(RENDERER.strip_collation(&case_sensitive), "VARCHAR(128)");
+
+        let case_insensitive = RENDERER.pin_collation("TEXT", Some(false));
+        assert_eq!(
+            case_insensitive,
+            "TEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
+        );
+        assert_eq!(RENDERER.strip_collation(&case_insensitive), "TEXT");
+
+        assert_eq!(RENDERER.pin_collation("JSON", None), "JSON");
+        assert_eq!(RENDERER.strip_collation("JSON"), "JSON");
     }
 
     #[test]

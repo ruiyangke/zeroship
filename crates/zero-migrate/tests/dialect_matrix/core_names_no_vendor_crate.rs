@@ -28,7 +28,7 @@
 //! | `render/backends/mod.rs` | 6 | the registry — the PERMANENT entry | never |
 //! | `lib.rs` | 3 | `pub use {Mysql,Pg,Sqlite}Guard` at the crate root | closed |
 //! | `render/vendor.rs` | 1 | `pub use zero_migrate_postgres::render_vendor_op` | closed |
-//! | `render/declarative.rs` | 1 | `use zero_migrate_mysql::collation::{…}` | |
+//! | `render/declarative.rs` | 1 | `use zero_migrate_mysql::collation::{…}` | closed |
 //!
 //! `render/vendor.rs` closed by putting the vendor-op surface behind
 //! `DmlRenderer::render_vendor_op`. That one is now ALSO a privacy rule — `mod vendor`
@@ -36,6 +36,11 @@
 //! naming it is an E0603 rather than a finding here. Where a rule can be a privacy it
 //! should be; this census is the backstop for the ones that cannot, which is why its
 //! entry came off rather than being kept as a duplicate.
+//!
+//! `render/declarative.rs` closed when collation pinning and stripping became two
+//! required primitive methods on `SchemaRenderer`. The stripping body moved
+//! verbatim into the MySQL backend; core now asks the resolved renderer and names no
+//! vendor crate.
 //!
 //! [`ALLOWED`] is that table. A file listed there names a vendor crate EXACTLY the
 //! recorded number of times: one more is a red, and one FEWER is also a red, because
@@ -94,10 +99,6 @@ const ALLOWED: &[(&str, usize)] = &[
     // the exhaustive `vendor()` match. This is the engine naming its vendors on
     // purpose, once, in the one place that is supposed to know they exist.
     ("render/backends/mod.rs", 6),
-    // `use zero_migrate_mysql::collation::{…}` — the declarative differ's MySQL leg
-    // reaching that vendor's `CHARACTER SET` / `COLLATE` spelling by name. The last
-    // one outside the registry.
-    ("render/declarative.rs", 1),
 ];
 
 /// The walk's floor. `crates/zero-migrate/src` held 87 `.rs` files when this was

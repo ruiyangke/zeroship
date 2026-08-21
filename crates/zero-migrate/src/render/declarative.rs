@@ -1229,40 +1229,6 @@ pub(crate) fn pg_identity_type(data_type: &str) -> bool {
 
 // `inline_checks_clause` MOVED to `zero_migrate_backend::ddl`.
 
-// ── MySQL's `CHARACTER SET` / `COLLATE` spelling MOVED to `zero-migrate-mysql`.
-//
-// It had to. `MysqlSchemaRenderer::column_type` called `mysql_pin_collation` from
-// here, so the vendor depended on the engine — the edge the crate split removes, and
-// the one Cargo reported rather than leaving to taste. `utf8mb4_0900_as_cs` versus
-// `utf8mb4_0900_ai_ci` is how MySQL WRITES case sensitivity, so by this crate's own
-// boundary rule it is spelling and belongs in the vendor.
-//
-use zero_migrate_mysql::collation::mysql_collation_clause;
-
-/// The rendered MySQL type with any engine-chosen `CHARACTER SET … COLLATE …`
-/// suffix removed — the spelling a RETYPE restates.
-///
-/// The two are different questions and conflating them is a real bug. When the
-/// engine CREATES a column it also chooses that column's collation, so
-/// [`mysql_collation_clause`] belongs in the rendered type. When it RETYPES one, the
-/// op carries a type and nothing else: `setColumnType` says `string(128)`, it does
-/// not say `utf8mb4_0900_as_cs`. Restating the engine's collation there would
-/// silently re-collate a column the author never mentioned — measured, because a
-/// live `utf8mb4_bin` column retyped with the collated spelling emits two
-/// `CHARACTER SET` clauses and MySQL rejects the statement outright.
-///
-/// Derived from [`mysql_collation_clause`] rather than from its own copy of those
-/// strings, so a change to the engine's collation choice cannot leave this behind.
-pub(crate) fn mysql_type_without_collation(rendered: &str) -> &str {
-    for case_sensitive in [Some(false), None] {
-        let clause = mysql_collation_clause(case_sensitive);
-        if let Some(base) = rendered.strip_suffix(clause) {
-            return base.trim_end();
-        }
-    }
-    rendered
-}
-
 /// The MySQL storage families whose DDL rules differ from every other column.
 ///
 /// MySQL 8 refuses a bare literal `DEFAULT` on all four, and refuses a key over

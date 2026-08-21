@@ -44,6 +44,19 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         }
     }
 
+    /// PostgreSQL represents the portable case-insensitive choice as the `citext`
+    /// TYPE in `column_type`; named catalog collations are separate column facets.
+    /// There is therefore no engine-added type suffix to pin here.
+    fn pin_collation(&self, rendered: &str, _case_sensitive: Option<bool>) -> String {
+        rendered.to_string()
+    }
+
+    /// For the same reason, a PostgreSQL retype has no renderer-added collation
+    /// suffix to remove from its type spelling.
+    fn strip_collation<'a>(&self, rendered: &'a str) -> &'a str {
+        rendered
+    }
+
     fn json_object_default(&self) -> String {
         "DEFAULT '{}'::jsonb".to_string()
     }
@@ -202,5 +215,17 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
             _ => "TEXT",
         },
         _ => "TEXT",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SchemaRenderer, RENDERER};
+
+    #[test]
+    fn collation_hooks_are_explicit_postgres_pass_throughs() {
+        let rendered = "  public.citext COLLATE custom  ";
+        assert_eq!(RENDERER.pin_collation(rendered, Some(false)), rendered);
+        assert_eq!(RENDERER.strip_collation(rendered), rendered);
     }
 }
