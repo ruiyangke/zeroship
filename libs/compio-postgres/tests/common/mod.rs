@@ -13,6 +13,49 @@
 
 pub mod env;
 
+/// Longest identifier `PostgreSQL` stores (`NAMEDATALEN - 1`).
+const MAX_POSTGRES_IDENTIFIER_LEN: usize = 63;
+
+/// Build an unquoted `PostgreSQL` identifier private to this test process.
+///
+/// The readable prefix is normalised to `[a-z0-9_]`, while the PID makes two
+/// concurrent test binaries choose different server-side namespaces. The hash
+/// covers the original logical name and the PID, so truncating a long readable
+/// prefix cannot merge two logical names. The result is ASCII, begins with a
+/// legal unquoted-identifier character, and never exceeds `PostgreSQL`'s
+/// 63-byte identifier limit.
+pub fn test_object_name(logical: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let pid = std::process::id();
+    let mut hasher = DefaultHasher::new();
+    logical.hash(&mut hasher);
+    pid.hash(&mut hasher);
+    let digest = hasher.finish();
+
+    let mut readable: String = logical
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if readable.is_empty() {
+        readable.push_str("object");
+    } else if readable.as_bytes()[0].is_ascii_digit() {
+        readable.insert(0, '_');
+    }
+
+    let suffix = format!("_{pid}_{digest:016x}");
+    let readable_budget = MAX_POSTGRES_IDENTIFIER_LEN - suffix.len();
+    readable.truncate(readable_budget);
+    format!("{readable}{suffix}")
+}
+
 /// Hide the password in a `postgres://user:pass@host/db` DSN.
 ///
 /// The whole point of the message below is that it prints the address that was
@@ -161,7 +204,39 @@ pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)
 
 #[cfg(test)]
 mod tests {
-    use super::redact_dsn;
+    use super::{MAX_POSTGRES_IDENTIFIER_LEN, redact_dsn, test_object_name};
+
+    #[test]
+    fn test_object_names_are_safe_bounded_and_process_scoped() {
+        let name = test_object_name("9-MiXeD/fixture");
+        let pid_marker = format!("_{}_", std::process::id());
+
+        assert!(name.len() <= MAX_POSTGRES_IDENTIFIER_LEN);
+        assert!(name.starts_with('_'));
+        assert!(name.contains(&pid_marker));
+        assert!(
+            name.bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        );
+    }
+
+    #[test]
+    fn test_object_name_hash_keeps_truncated_or_normalised_names_distinct() {
+        let common_prefix = "a".repeat(200);
+        let first = test_object_name(&format!("{common_prefix}first"));
+        let second = test_object_name(&format!("{common_prefix}second"));
+        let punctuation = test_object_name("fixture-name");
+        let underscore = test_object_name("fixture_name");
+        let pid_marker = format!("_{}_", std::process::id());
+
+        assert_eq!(first.len(), MAX_POSTGRES_IDENTIFIER_LEN);
+        assert_eq!(second.len(), MAX_POSTGRES_IDENTIFIER_LEN);
+        assert!(first.contains(&pid_marker));
+        assert!(second.contains(&pid_marker));
+        assert_ne!(first, second);
+        assert_ne!(punctuation, underscore);
+        assert_eq!(first, test_object_name(&format!("{common_prefix}first")));
+    }
 
     #[test]
     fn redaction_removes_the_password_and_keeps_everything_else() {

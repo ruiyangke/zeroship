@@ -18,8 +18,10 @@ use compio_postgres::{
     Client, Config, Error, NoTls, Pool, PoolConfig, QueryOutcome, Row, SimpleQueryMessage,
     TransactionStatus, Uncached,
 };
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::fmt;
+use std::ops::Deref;
+use std::sync::mpsc;
+use std::time::Duration;
 
 mod common;
 
@@ -27,13 +29,6 @@ fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
         .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
-
-/// Longest identifier PostgreSQL stores (NAMEDATALEN - 1). It truncates
-/// anything longer without failing, which would quietly map two long test
-/// names onto one schema.
-const MAX_IDENT_LEN: usize = 63;
-
-const SCHEMA_PREFIX: &str = "cpg_";
 
 /// Names the private schema belonging to the calling test.
 ///
@@ -44,32 +39,226 @@ const SCHEMA_PREFIX: &str = "cpg_";
 /// spawned itself; such a thread shares the schema of whichever test is
 /// running, so open connections from the test's own thread.
 ///
-/// The name is sanitised to `[a-z0-9_]` so it needs no quoting, and carries a
-/// hash of the full test name so that cutting the readable part down to
-/// `MAX_IDENT_LEN` cannot make two schemas collide.
+/// [`common::test_object_name`] adds the process discriminator and owns all
+/// sanitising, hashing, and PostgreSQL identifier-length budgeting. Keeping
+/// that rule in one place matters: appending a PID here after filling all 63
+/// bytes would let PostgreSQL silently truncate the unique part away.
 fn test_schema() -> String {
-    let name = std::thread::current().name().unwrap_or("unnamed").to_owned();
+    let thread = std::thread::current();
+    let name = thread.name().unwrap_or("unnamed");
+    common::test_object_name(&format!("cpg_{name}"))
+}
 
-    let mut hasher = DefaultHasher::new();
-    name.hash(&mut hasher);
-    let digest = hasher.finish();
+const ADMIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const ADMIN_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+const ADMIN_BATCH_TIMEOUT: Duration = Duration::from_secs(20);
+const ADMIN_DRIVER_TIMEOUT: Duration = Duration::from_secs(5);
+const ADMIN_CLEANUP_WAIT: Duration = Duration::from_secs(25);
 
-    // Fixed cost of the wrapper: prefix, the separator before the digest, and
-    // the digest's 16 hex characters.
-    let budget = MAX_IDENT_LEN - SCHEMA_PREFIX.len() - 1 - 16;
-    let readable: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
+#[derive(Debug)]
+struct AdminSqlError {
+    detail: String,
+    sqlstate: Option<String>,
+}
+
+impl AdminSqlError {
+    fn plain(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+            sqlstate: None,
+        }
+    }
+
+    fn database(context: &str, error: &Error) -> Self {
+        Self {
+            detail: format!("{context}: {}", common::error_chain(error)),
+            sqlstate: error.code().map(|code| code.code().to_owned()),
+        }
+    }
+}
+
+impl fmt::Display for AdminSqlError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.detail.fmt(formatter)
+    }
+}
+
+/// Executes administrative SQL with a bound at every layer which can wait.
+///
+/// Database DDL is deliberately outside a transaction. `lock_timeout` turns
+/// another session's object lock into an error, `statement_timeout` bounds the
+/// server operation as a whole, the compio timeout also covers protocol stalls,
+/// and callers which run this on a cleanup thread have their own receive bound.
+fn execute_admin_sql_bounded(
+    url: &str,
+    statements: &[String],
+    continue_after_error: bool,
+) -> Result<(), AdminSqlError> {
+    let mut config: Config = url
+        .parse()
+        .map_err(|error: Error| AdminSqlError::database("parse admin URL", &error))?;
+    config.connect_timeout(ADMIN_CONNECT_TIMEOUT);
+
+    let runtime = compio::runtime::Runtime::new()
+        .map_err(|error| AdminSqlError::plain(format!("create cleanup runtime: {error}")))?;
+    let outcome = runtime.block_on(compio::time::timeout(ADMIN_BATCH_TIMEOUT, async move {
+        let (client, connection) = config
+            .connect(NoTls)
+            .await
+            .map_err(|error| AdminSqlError::database("connect admin client", &error))?;
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let timeout_ms = ADMIN_STATEMENT_TIMEOUT.as_millis();
+        let mut failures = Vec::new();
+        let mut sqlstate = None;
+        if let Err(error) = client
+            .batch_execute(&format!(
+                "SET lock_timeout = '{timeout_ms}ms'; \
+                 SET statement_timeout = '{timeout_ms}ms'"
+            ))
+            .await
+        {
+            sqlstate = error.code().map(|code| code.code().to_owned());
+            failures.push(format!(
+                "install administrative SQL timeouts: {}",
+                common::error_chain(&error)
+            ));
+        } else {
+            for statement in statements {
+                if let Err(error) = client.execute(statement, &[]).await {
+                    if sqlstate.is_none() {
+                        sqlstate = error.code().map(|code| code.code().to_owned());
+                    }
+                    failures.push(format!(
+                        "{statement}: {}",
+                        common::error_chain(&error)
+                    ));
+                    if !continue_after_error {
+                        break;
+                    }
+                }
             }
-        })
-        .take(budget)
-        .collect();
+        }
 
-    format!("{SCHEMA_PREFIX}{readable}_{digest:016x}")
+        drop(client);
+        if compio::time::timeout(ADMIN_DRIVER_TIMEOUT, driver)
+            .await
+            .is_err()
+        {
+            failures.push("admin connection driver exceeded its shutdown timeout".to_string());
+        }
+
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(AdminSqlError {
+                detail: failures.join("; "),
+                sqlstate,
+            })
+        }
+    }));
+
+    outcome.map_err(|_| {
+        AdminSqlError::plain(format!(
+            "administrative SQL exceeded its {} second outer timeout",
+            ADMIN_BATCH_TIMEOUT.as_secs()
+        ))
+    })?
+}
+
+/// Runs object cleanup even when the owning test unwinds.
+///
+/// `Drop` cannot await, so the async client lives on a fresh OS thread and the
+/// test thread waits only on a bounded channel receive. A cleanup failure makes
+/// an otherwise-green test red; while another panic is already unwinding it is
+/// printed instead, avoiding a double-panic abort that would hide the original
+/// assertion.
+struct BoundedSqlCleanup {
+    label: String,
+    url: String,
+    statements: Vec<String>,
+}
+
+impl BoundedSqlCleanup {
+    fn new(label: impl Into<String>, url: String, statements: Vec<String>) -> Self {
+        Self {
+            label: label.into(),
+            url,
+            statements,
+        }
+    }
+
+    fn report_failure(label: &str, detail: String) {
+        let message = format!("failed to clean up {label}: {detail}");
+        if std::thread::panicking() {
+            eprintln!("{message}");
+        } else {
+            panic!("{message}");
+        }
+    }
+}
+
+impl Drop for BoundedSqlCleanup {
+    fn drop(&mut self) {
+        let label = self.label.clone();
+        let url = std::mem::take(&mut self.url);
+        let statements = std::mem::take(&mut self.statements);
+        let (sender, receiver) = mpsc::sync_channel(1);
+
+        let cleanup_thread = std::thread::Builder::new()
+            .name("cpg-object-cleanup".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute_admin_sql_bounded(&url, &statements, true)
+                }))
+                .unwrap_or_else(|payload| {
+                    let detail = payload
+                        .downcast_ref::<&str>()
+                        .map(|message| (*message).to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "cleanup thread panicked".to_string());
+                    Err(AdminSqlError::plain(detail))
+                });
+                let _ = sender.send(result);
+            });
+
+        if let Err(error) = cleanup_thread {
+            Self::report_failure(&label, format!("spawn cleanup thread: {error}"));
+            return;
+        }
+
+        match receiver.recv_timeout(ADMIN_CLEANUP_WAIT) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => Self::report_failure(&label, error.to_string()),
+            Err(error) => Self::report_failure(
+                &label,
+                format!(
+                    "cleanup did not finish within {} seconds: {error}",
+                    ADMIN_CLEANUP_WAIT.as_secs()
+                ),
+            ),
+        }
+    }
+}
+
+/// A schema-scoped connection URL whose schema is removed at test teardown.
+struct TestUrl {
+    scoped: String,
+    _cleanup: BoundedSqlCleanup,
+}
+
+impl Deref for TestUrl {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.scoped
+    }
+}
+
+impl fmt::Display for TestUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.scoped.fmt(formatter)
+    }
 }
 
 /// Confines every connection opened from `url` to `schema`.
@@ -140,14 +329,12 @@ async fn connect_with_statement_cache_threshold(
 /// rows land in another's result set. A schema per test keeps the names but
 /// removes the sharing.
 ///
-/// The schema is reset here rather than dropped when the test ends: a test
-/// that panics never reaches its own teardown, and reclaiming at the start
-/// makes each run self-healing. The set of schemas is bounded by the set of
-/// test names, so they do not accumulate across runs.
-///
-/// Because the schema name depends only on the test name, two `cargo test`
-/// processes pointed at one database would reset each other's schemas
-/// mid-run. Give each concurrent run its own database via `PG_TEST_URL`.
+/// The schema name includes the process identity, so two `cargo test`
+/// processes pointed at one database cannot reset or use each other's schema.
+/// [`TestUrl`] owns bounded teardown rather than relying on the next run's
+/// pre-test `DROP`: PID-unique leftovers would otherwise accumulate forever.
+/// The initial drop remains only as recovery for a killed test whose PID was
+/// later reused.
 ///
 /// A schema does not isolate everything: LISTEN/NOTIFY channels, advisory
 /// locks and replication slots are database-wide. A test using one of those
@@ -155,35 +342,67 @@ async fn connect_with_statement_cache_threshold(
 /// `notify_delivered_on_idle_listener`.
 ///
 /// THE `None` ARM IS NOW UNREACHABLE. A database this crate cannot reach panics
-/// here rather than announcing a skip, so the 38 callers keep their
+/// here rather than announcing a skip, so callers keep their
 /// `let Some(url) = require_pg().await else { return; }` and never take the
 /// else. The shape is left alone deliberately: this change is about whether the
-/// tests RUN, and rewriting 38 call sites would put what they ASSERT in the
+/// tests RUN, and rewriting every call site would put what they ASSERT in the
 /// same diff.
-async fn require_pg() -> Option<String> {
+async fn require_pg() -> Option<TestUrl> {
     let url = test_url();
-    let client = match connect(&url).await {
-        Ok(client) => client,
+    let client = match compio::time::timeout(ADMIN_CONNECT_TIMEOUT, connect(&url)).await {
+        Ok(Ok(client)) => client,
         // `process::exit(0)` would have ended the WHOLE binary with a success
         // status the moment one test could not reach Postgres, discarding every
         // result already produced. A panic ends only this test, so its siblings
         // and any failure already reported still stand - and unlike the skip
         // that used to be here, the run goes red.
-        Err(e) => common::postgres_unreachable(&url, &e),
+        Ok(Err(error)) => common::postgres_unreachable(&url, &error),
+        Err(_) => panic!(
+            "PostgreSQL connection exceeded the {} second test-fixture timeout",
+            ADMIN_CONNECT_TIMEOUT.as_secs()
+        ),
     };
 
     let schema = test_schema();
-    client
-        .execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"), &[])
-        .await
-        .unwrap();
-    client
-        .execute(&format!("CREATE SCHEMA {schema}"), &[])
-        .await
-        .unwrap();
+    let drop_schema = format!("DROP SCHEMA IF EXISTS {schema} CASCADE");
+    let cleanup = BoundedSqlCleanup::new(
+        format!("test schema {schema}"),
+        url.clone(),
+        vec![drop_schema.clone()],
+    );
+
+    compio::time::timeout(
+        ADMIN_STATEMENT_TIMEOUT,
+        client.batch_execute(&format!(
+            "SET lock_timeout = '{}ms'; SET statement_timeout = '{}ms'",
+            ADMIN_STATEMENT_TIMEOUT.as_millis(),
+            ADMIN_STATEMENT_TIMEOUT.as_millis()
+        )),
+    )
+    .await
+    .expect("installing fixture timeouts exceeded its outer timeout")
+    .unwrap();
+    compio::time::timeout(
+        ADMIN_STATEMENT_TIMEOUT,
+        client.execute(&drop_schema, &[]),
+    )
+    .await
+    .expect("stale-schema cleanup exceeded its fixture timeout")
+    .unwrap();
+    compio::time::timeout(
+        ADMIN_STATEMENT_TIMEOUT,
+        client.execute(&format!("CREATE SCHEMA {schema}"), &[]),
+    )
+    .await
+    .expect("schema creation exceeded its fixture timeout")
+    .unwrap();
 
     // Client dropped -> driver task exits.
-    Some(schema_scoped_url(&url, &schema))
+    drop(client);
+    Some(TestUrl {
+        scoped: schema_scoped_url(&url, &schema),
+        _cleanup: cleanup,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1954,8 +2173,9 @@ async fn notify_delivered_on_idle_listener() {
     })
     .detach();
 
-    // Unique channel name so concurrent test runs don't cross-deliver.
-    let chan = format!("zs_notify_test_{}", std::process::id());
+    // Unique channel name so concurrent test runs don't cross-deliver. The
+    // shared helper owns the process suffix and identifier-length rule.
+    let chan = common::test_object_name("zs_notify_test");
     client_a
         .batch_execute(&format!("LISTEN {chan}"))
         .await
@@ -3111,7 +3331,7 @@ async fn multiplexed_clean_shutdown_completes_without_hang() {
 async fn cancelled_prepare_does_not_leak_a_server_statement() {
     use std::future::Future;
     use std::pin::pin;
-    use std::task::{Context, Poll, Waker};
+    use std::task::{Context, Waker};
     use std::time::Duration;
 
     async fn count(client: &Client) -> i64 {
@@ -3805,7 +4025,7 @@ fn open_fds() -> usize {
 #[test]
 fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
     let url = test_url();
-    let tag = "cpg_runtime_lifetime";
+    let tag = common::test_object_name("cpg_runtime_lifetime");
     let sep = if url.contains('?') { '&' } else { '?' };
     let tagged = format!("{url}{sep}application_name={tag}");
 
@@ -3822,7 +4042,7 @@ fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
             assert_eq!(rows[0].get::<_, i32>("one"), 1);
         });
         drop(rt);
-        backends.push(tagged_backends(&url, tag));
+        backends.push(tagged_backends(&url, &tag));
         fds.push(open_fds());
     }
 
@@ -4087,7 +4307,8 @@ enum Teardown {
 /// something this should name, not absorb.
 fn fd_series(url: &str, connections: usize, teardown: Teardown) -> Vec<usize> {
     let sep = if url.contains('?') { '&' } else { '?' };
-    let tagged = format!("{url}{sep}application_name=cpg_fd_probe");
+    let tag = common::test_object_name("cpg_fd_probe");
+    let tagged = format!("{url}{sep}application_name={tag}");
 
     let mut fds = Vec::with_capacity(FD_PROBE_ITERATIONS + 1);
     fds.push(open_fds());
@@ -4132,7 +4353,7 @@ fn report_fd_series(arm: &str, fds: &[usize]) {
 #[test]
 fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
     let url = test_url();
-    let tag = "cpg_runtime_lifetime_live";
+    let tag = common::test_object_name("cpg_runtime_lifetime_live");
     let sep = if url.contains('?') { '&' } else { '?' };
     let tagged = format!("{url}{sep}application_name={tag}");
 
@@ -4145,7 +4366,7 @@ fn a_connection_is_visible_to_the_server_while_its_runtime_runs() {
         let rows = client
             .query(
                 "SELECT count(*)::int8 AS n FROM pg_stat_activity WHERE application_name = $1",
-                &[&tag],
+                &[&tag.as_str()],
             )
             .await
             .unwrap();
@@ -4251,75 +4472,67 @@ async fn nothing_listening_is_not_reported_as_a_server_answer() {
 fn a_template_clone_is_not_blocked_by_the_previous_runtime() {
     let url = test_url();
     let (base, _) = url.rsplit_once('/').expect("a database in the DSN");
-    let template = "cpg_template_lifetime_src";
-    let clone = "cpg_template_lifetime_clone";
+    let template = common::test_object_name("cpg_template_lifetime_src");
+    let clone = common::test_object_name("cpg_template_lifetime_clone");
     // The session issuing the clone must not itself be ON the template, or it
     // would be the one other session and this would fail on its own connection.
     let admin_url = format!("{base}/postgres");
     let template_url = format!("{base}/{template}");
 
-    let admin_sql = |stmts: Vec<String>| {
-        let admin_url = admin_url.clone();
-        let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
-        rt.block_on(async move {
-            let admin = match connect(&admin_url).await {
-                Ok(admin) => admin,
-                Err(e) => common::postgres_unreachable(&admin_url, &e),
-            };
-            let mut last = Ok(0);
-            for stmt in stmts {
-                last = admin.execute(&stmt, &[]).await;
-                if last.is_err() {
-                    break;
-                }
-            }
-            last
-        })
-    };
+    let cleanup_statements = vec![
+        format!("DROP DATABASE IF EXISTS {clone} WITH (FORCE)"),
+        format!("DROP DATABASE IF EXISTS {template} WITH (FORCE)"),
+    ];
+    // Armed before provisioning, so every panic path attempts both drops.
+    let cleanup = BoundedSqlCleanup::new(
+        format!("template databases {template} and {clone}"),
+        admin_url.clone(),
+        cleanup_statements.clone(),
+    );
 
     // Fresh both ways: a leftover clone from an earlier run would make the
     // CREATE fail, and a leftover template would make it pass without this
-    // test's own connection ever having been on it.
-    admin_sql(vec![
-        format!("DROP DATABASE IF EXISTS {clone} WITH (FORCE)"),
-        format!("DROP DATABASE IF EXISTS {template} WITH (FORCE)"),
-        format!("CREATE DATABASE {template}"),
-    ])
+    // test's own connection ever having been on it. This is recovery for a
+    // killed process whose PID was reused, not the normal cleanup path.
+    execute_admin_sql_bounded(&admin_url, &cleanup_statements, true)
+        .expect("removing stale template fixtures");
+    execute_admin_sql_bounded(
+        &admin_url,
+        &[format!("CREATE DATABASE {template}")],
+        false,
+    )
     .expect("provisioning the template");
 
     // One test's shape: open a connection on the template, use it, end the
     // runtime.
     let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
-    rt.block_on(async {
-        let client = connect(&template_url).await.expect("connect to the template");
+    rt.block_on(compio::time::timeout(ADMIN_BATCH_TIMEOUT, async {
+        let client = connect(&template_url)
+            .await
+            .expect("connect to the template");
         client.execute("SELECT 1", &[]).await.unwrap();
-    });
+    }))
+    .expect("template connection exceeded its outer timeout");
     drop(rt);
 
     // The next test's fixture.
-    let result = admin_sql(vec![format!(
-        "CREATE DATABASE {clone} WITH TEMPLATE {template}"
-    )]);
+    let result = execute_admin_sql_bounded(
+        &admin_url,
+        &[format!(
+            "CREATE DATABASE {clone} WITH TEMPLATE {template}"
+        )],
+        false,
+    );
 
-    // Clean up before asserting, so a failure does not also leave two databases.
-    let _ = admin_sql(vec![
-        format!("DROP DATABASE IF EXISTS {clone} WITH (FORCE)"),
-        format!("DROP DATABASE IF EXISTS {template} WITH (FORCE)"),
-    ]);
+    // Explicit on the ordinary path; the guard's Drop also covers every panic
+    // above. Both database drops are attempted even if the first one fails.
+    drop(cleanup);
 
-    if let Err(e) = result {
-        // The crate's `Display` for a server error is the bare "db error"; the
-        // SQLSTATE and the server's sentence are in the source. Without it this
-        // failure cannot be told apart from a permissions problem or a typo in
-        // the database name, which is the whole difference between a regression
-        // test and a red light.
-        let cause = std::error::Error::source(&e)
-            .map(ToString::to_string)
-            .unwrap_or_default();
+    if let Err(cause) = result {
         assert_eq!(
-            e.code(),
-            Some(&SqlState::OBJECT_IN_USE),
-            "expected 55006 from the template clone, got: {e}: {cause}"
+            cause.sqlstate.as_deref(),
+            Some(SqlState::OBJECT_IN_USE.code()),
+            "expected 55006 from the template clone, got: {cause}"
         );
         panic!(
             "the previous runtime's connection still holds the template open, \
@@ -5439,23 +5652,24 @@ async fn statement_cache_propagates_a_second_consecutive_26000() {
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
     let mut events = client.query_events();
 
-    const SQL: &str = "EXECUTE cpg_cache_retry_target";
     const BARRIER_SQL: &str = "SELECT 69::int4 AS cpg_cache_retry_barrier";
+    let target = common::test_object_name("cpg_cache_retry_target");
+    let sql = format!("EXECUTE {target}");
     client
-        .batch_execute("PREPARE cpg_cache_retry_target AS SELECT 66::int4")
+        .batch_execute(&format!("PREPARE {target} AS SELECT 66::int4"))
         .await
         .unwrap();
-    let warm_rows = client.query(SQL, &[]).await.unwrap();
+    let warm_rows = client.query(&sql, &[]).await.unwrap();
     assert_eq!(warm_rows[0].get::<_, i32>(0), 66);
 
     client
-        .batch_execute("DEALLOCATE cpg_cache_retry_target")
+        .batch_execute(&format!("DEALLOCATE {target}"))
         .await
         .unwrap();
 
     let second = compio::time::timeout(
         Duration::from_secs(5),
-        client.query_raw(SQL, std::iter::empty::<&i32>()),
+        client.query_raw(sql.as_str(), std::iter::empty::<&i32>()),
     )
     .await
     .expect("a cached-statement retry loop did not stop after one replacement");
@@ -5475,7 +5689,7 @@ async fn statement_cache_propagates_a_second_consecutive_26000() {
             .await
             .expect("query observer did not reach the retry barrier")
             .expect("query observer closed before the retry barrier");
-        if event.sql() == SQL
+        if event.sql() == sql
             && matches!(
                 event.outcome(),
                 QueryOutcome::DatabaseError { code: Some(code) }
