@@ -148,6 +148,24 @@ pub enum PlatformMigrateError {
         applied_checksum: String,
         current_checksum: String,
     },
+    /// A migration file this database has NEVER applied would claim journal
+    /// versions the database already recorded for a DIFFERENT file: the
+    /// signature of a file inserted mid-corpus.
+    ///
+    /// Raised BEFORE the engine call. Left to the engine the same corpus aborts
+    /// with `ChecksumDrift` naming an opaque `mig_...` version, wrapped in
+    /// [`PlatformMigrateError::Apply`] under the filename BEING APPLIED: the
+    /// file that moved into the slot, never the one that owns it.
+    VersionCollision {
+        /// The undeployed file being applied.
+        file: String,
+        /// The already-applied file whose journal versions it would claim.
+        owner: String,
+        /// The lowest colliding journal version.
+        version: String,
+        /// How many of this file's versions collide in total.
+        collisions: usize,
+    },
     /// V8 authoring a `.ts` into a v1 envelope failed.
     Author { file: String, message: String },
     /// Folding the confined table-shape / resolving policy failed.
@@ -177,6 +195,21 @@ impl std::fmt::Display for PlatformMigrateError {
                 f,
                 "migration file {file} was edited after it was applied: source checksum \
                  mismatch (applied {applied_checksum}, current {current_checksum})"
+            ),
+            Self::VersionCollision {
+                file,
+                owner,
+                version,
+                collisions,
+            } => write!(
+                f,
+                "migration file {file} has never been applied to this database, but the \
+                 journal version it would claim ({version}) is already recorded for \
+                 {owner} ({collisions} of its versions collide). A file's journal \
+                 versions come from its ORDINAL in sorted-filename order, so {file} was \
+                 inserted BEFORE {owner}, which this database has already applied. \
+                 RENAME {file} so it sorts after every applied migration; it is in no \
+                 journal yet, so the rename costs nothing and needs no new migration."
             ),
             Self::Author { file, message } => write!(f, "author {file}: {message}"),
             Self::Shape { file, message } => write!(f, "table-shape {file}: {message}"),
@@ -888,11 +921,45 @@ pub async fn run_platform_migrations(
             .await
             .map_err(|e| PlatformMigrateError::Ledger(format!("read engine journal: {e}")))?;
         let journal = journal_state_by_file(&journal_entries, files.len())?;
-        if !completion_ledger_exists(&session, &exec_cfg.pg.meta_schema).await? {
+        let ledger_existed = completion_ledger_exists(&session, &exec_cfg.pg.meta_schema).await?;
+        if !ledger_existed {
             initialize_completion_ledger(&session, &exec_cfg.pg.meta_schema, &files, &journal)
                 .await?;
         }
         let mut ledger = load_completion_ledger(&session, &exec_cfg.pg.meta_schema).await?;
+
+        // -- journal ordinal -> the file that stamped it ----------------------
+        //
+        // Nothing else can do this. A journal row records an opaque `mig_...` id
+        // and a checksum; no column names a file. The mapping is recoverable
+        // only because the runner applies files in sorted-filename order,
+        // versions each file's steps from its ORDINAL in that order, and writes
+        // exactly one ledger row per file it completes. So the i-th ledger row,
+        // filename-ordered, is the file that owns
+        // `[i * FILE_VERSION_STRIDE, +steps)`.
+        //
+        // Snapshotted HERE, before the loop, because the loop inserts into
+        // `ledger` as files apply and that would slide the mapping mid-run.
+        //
+        // EMPTY, deliberately, when this run had to CREATE the ledger.
+        // `initialize_completion_ledger` backfills it from the journal and skips
+        // any file whose recorded range is not a complete legacy range, so a
+        // pre-ledger database interrupted mid-file gets a ledger with a HOLE.
+        // Every name after that hole shifts by one and the refusal below would
+        // blame an innocent file for the slot -- on a run that is a legitimate
+        // resume. A database that already carries the ledger cannot have an
+        // interior hole: a crash between the engine apply and
+        // `insert_completion_ledger_row` leaves the gap at the END, where
+        // `ordinal_owners.get(index)` is `None` and this check stands down.
+        let ordinal_owners: Vec<String> = if ledger_existed {
+            ledger.keys().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        let journal_versions: std::collections::HashSet<&str> = journal_entries
+            .iter()
+            .map(|entry| entry.version.as_str())
+            .collect();
 
         let mut state = seed_state(&session, &cfg.project_schema, owner_app).await?;
         let mut report = PlatformMigrateReport {
@@ -948,6 +1015,49 @@ pub async fn run_platform_migrations(
                     _ => None,
                 })
                 .collect();
+
+            // REFUSE a mid-corpus insert HERE, by name, before the engine runs.
+            //
+            // Reaching this branch means the ledger has NO row for this file, so
+            // at most `index` files can have been applied ahead of it and
+            // `ordinal_owners` should stop short of `index`. An entry AT `index`
+            // therefore means an already-applied file stamped the versions this
+            // one is about to claim, which happens exactly when a new file was
+            // inserted mid-corpus and shifted every ordinal after it.
+            //
+            // Left to the engine, that surfaces as `ChecksumDrift` on an opaque
+            // `mig_...` id wrapped under the filename being applied -- the file
+            // that moved INTO the slot, never the one that owns it. It happened
+            // for real on 2026-08-20 (`20260819000000_app_egress_rules.ts`),
+            // which is why the version derivation is worth keeping:
+            // `docs/decisions/2026-08-20-migration-version-derivation.md` keeps
+            // it precisely BECAUSE it is the only scheme that detects this at
+            // all, so the detection must be deliberate rather than incidental.
+            //
+            // WHAT THIS DOES NOT CATCH. It is keyed to the database being
+            // migrated, so unlike the two pre-flight guards
+            // (`unreleased_migrations_sort_after_every_released_one` and
+            // `released_ledger_misordered`) it has no snapshot to go stale and
+            // no second cluster it cannot see. What it misses is an owner that
+            // lowered to ZERO journal steps: the ordinal is then unoccupied,
+            // nothing collides, and the insert applies. It also cannot rule at
+            // all on the run that creates the ledger (see `ordinal_owners`).
+            if let Some(owner) = ordinal_owners.get(index) {
+                let mut collisions: Vec<&str> = file_versions
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|version| journal_versions.contains(version))
+                    .collect();
+                if !collisions.is_empty() {
+                    collisions.sort_unstable();
+                    return Err(PlatformMigrateError::VersionCollision {
+                        file,
+                        owner: owner.clone(),
+                        version: collisions[0].to_string(),
+                        collisions: collisions.len(),
+                    });
+                }
+            }
 
             // ── the CLUSTER-GLOBAL bracket ──────────────────────────────────
             //

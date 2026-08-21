@@ -1732,6 +1732,230 @@ export function down() {}
         Ok(())
     }
 
+    const COLLIDE_FIRST_FILENAME: &str = "20260101000000_collision_first.ts";
+    const COLLIDE_FIRST_SOURCE: &str = r#"
+import { raw } from "@zeroship/migrate";
+
+export const name = "collision_first";
+
+export function up() {
+  raw({
+    reason: "Create the first ordinal-collision probe.",
+    sql: "CREATE TABLE zeroship.collision_first_probe (id bigint PRIMARY KEY)",
+  });
+}
+
+export function down() {}
+"#;
+
+    const COLLIDE_LAST_FILENAME: &str = "20260103000000_collision_last.ts";
+    const COLLIDE_LAST_SOURCE: &str = r#"
+import { raw } from "@zeroship/migrate";
+
+export const name = "collision_last";
+
+export function up() {
+  raw({
+    reason: "Create the second ordinal-collision probe.",
+    sql: "CREATE TABLE zeroship.collision_last_probe (id bigint PRIMARY KEY)",
+  });
+}
+
+export function down() {}
+"#;
+
+    /// The ONE variable this test moves. Both names carry
+    /// [`COLLIDE_INSERT_SOURCE`] byte for byte; only the sort position differs.
+    const COLLIDE_MIDDLE_FILENAME: &str = "20260102000000_collision_insert.ts";
+    const COLLIDE_APPENDED_FILENAME: &str = "20260104000000_collision_insert.ts";
+    const COLLIDE_INSERT_SOURCE: &str = r#"
+import { raw } from "@zeroship/migrate";
+
+export const name = "collision_insert";
+
+export function up() {
+  raw({
+    reason: "Create the inserted-file probe.",
+    sql: "CREATE TABLE zeroship.collision_insert_probe (id bigint PRIMARY KEY)",
+  });
+}
+
+export function down() {}
+"#;
+
+    /// A migration inserted MID-CORPUS is refused by NAME, and the refusal names
+    /// the applied file whose journal versions it would have taken.
+    ///
+    /// WHY THIS IS NOT COVERED ELSEWHERE. Two guards already police the same
+    /// mistake before a deploy -- `unreleased_migrations_sort_after_every_
+    /// released_one` here in this file, and `released_ledger_misordered` in
+    /// `deploy/scripts/deploy-remote.sh`. Both compare filenames against ONE
+    /// deployment's journal snapshot, so neither can rule on a second cluster
+    /// further behind, on a run that does not go through `deploy-remote.sh`, or
+    /// on a developer's own database. This one is keyed to the database being
+    /// migrated and reads its live journal, so it has no snapshot to go stale.
+    ///
+    /// WHAT WAS WRONG BEFORE. The runner still aborted -- the ordinal derivation
+    /// makes a mid-corpus insert claim a version the journal holds -- but it
+    /// aborted with the engine's `ChecksumDrift` on an opaque `mig_...` id,
+    /// wrapped in `Apply { file }` naming the file BEING APPLIED. That is the
+    /// file that moved into the slot, not the one that owns it, so the operator
+    /// was pointed at the wrong migration and told nothing about ordering.
+    /// `20260819000000_app_egress_rules.ts` hit this for real on 2026-08-20.
+    ///
+    /// THE CONTROL IS PART OF THE TEST. The third run re-writes the SAME source
+    /// bytes under a filename that sorts LAST and requires it to apply. Without
+    /// it a refusal that fired on every new file would pass just as well.
+    #[compio::test]
+    async fn platform_migrate_refuses_a_mid_corpus_migration_by_name() {
+        let Some(url) = pg_url() else {
+            zeroship_test_support::skip(
+                "skipping mid-corpus insert proof: no test database (set PG_TEST_URL \
+                 to a DSN on :5440 to run)"
+            );
+            return;
+        };
+        let _serial = DB_APPLY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let corpus = tempfile::tempdir().expect("create temporary migration corpus");
+        write_migration(corpus.path(), COLLIDE_FIRST_FILENAME, COLLIDE_FIRST_SOURCE)
+            .expect("write first collision migration");
+        write_migration(corpus.path(), COLLIDE_LAST_FILENAME, COLLIDE_LAST_SOURCE)
+            .expect("write last collision migration");
+        let scratch = create_scratch_database(&url, "zs_ledger_collide")
+            .await
+            .expect("create mid-corpus scratch database");
+
+        let result = run_mid_corpus_assertions(&scratch.dsn, corpus.path()).await;
+        drop_scratch_database(&url, &scratch)
+            .await
+            .expect("drop mid-corpus scratch database");
+        result.expect("a mid-corpus migration must be refused by name, and the same file renamed to sort last must apply");
+    }
+
+    async fn run_mid_corpus_assertions(scratch_dsn: &str, corpus: &Path) -> Result<(), String> {
+        let cfg = test_config(scratch_dsn, corpus);
+        let run1 = run_platform_migrations(&cfg)
+            .await
+            .map_err(|e| format!("initial two-file apply failed: {e}"))?;
+        if run1.files != 2 || run1.applied.len() != 2 {
+            return Err(format!(
+                "initial two-file apply reported files={}, applied={}",
+                run1.files,
+                run1.applied.len()
+            ));
+        }
+
+        let probe = CompioPgSession::connect(scratch_dsn)
+            .await
+            .map_err(|e| format!("connect mid-corpus probe: {e}"))?;
+        let journal_before = journal_completed_count(&probe).await;
+        let ledger_before = ledger_row_count(&probe).await;
+
+        // ---- the refusal: the SAME source, inserted mid-corpus ----
+        let inserted = write_migration(corpus, COLLIDE_MIDDLE_FILENAME, COLLIDE_INSERT_SOURCE)?;
+        if !inserted.is_file() {
+            return Err(format!("staged file {} is not present", inserted.display()));
+        }
+        if !(COLLIDE_FIRST_FILENAME < COLLIDE_MIDDLE_FILENAME
+            && COLLIDE_MIDDLE_FILENAME < COLLIDE_LAST_FILENAME)
+        {
+            return Err(format!(
+                "{COLLIDE_MIDDLE_FILENAME} no longer sorts between {COLLIDE_FIRST_FILENAME} \
+                 and {COLLIDE_LAST_FILENAME}, so this run is not testing an insert"
+            ));
+        }
+
+        let error = run_platform_migrations(&cfg)
+            .await
+            .expect_err("a mid-corpus migration must be refused");
+        match &error {
+            PlatformMigrateError::VersionCollision {
+                file,
+                owner,
+                version,
+                collisions,
+            } => {
+                if file != COLLIDE_MIDDLE_FILENAME {
+                    return Err(format!(
+                        "refusal named {file} as the inserted file, expected \
+                         {COLLIDE_MIDDLE_FILENAME}"
+                    ));
+                }
+                if owner != COLLIDE_LAST_FILENAME {
+                    return Err(format!(
+                        "refusal named {owner} as the slot's owner, expected \
+                         {COLLIDE_LAST_FILENAME} -- naming the wrong file is the whole \
+                         defect this refusal exists to fix"
+                    ));
+                }
+                if !version.starts_with("mig_") || *collisions == 0 {
+                    return Err(format!(
+                        "refusal carried version={version}, collisions={collisions}"
+                    ));
+                }
+            }
+            other => {
+                return Err(format!(
+                    "mid-corpus insert failed through the wrong error path: {other}"
+                ));
+            }
+        }
+        let message = error.to_string();
+        for needle in [
+            COLLIDE_MIDDLE_FILENAME,
+            COLLIDE_LAST_FILENAME,
+            "sorts after every applied migration",
+        ] {
+            if !message.contains(needle) {
+                return Err(format!("refusal message omits {needle:?}: {message}"));
+            }
+        }
+        if journal_completed_count(&probe).await != journal_before {
+            return Err("the refusal ran engine work: the journal grew".to_string());
+        }
+        if ledger_row_count(&probe).await != ledger_before {
+            return Err("the refusal wrote a ledger row".to_string());
+        }
+        if table_exists(&probe, "collision_insert_probe").await {
+            return Err("the refused migration created its table anyway".to_string());
+        }
+
+        // ---- the control: ONE variable changes, the filename ----
+        std::fs::remove_file(&inserted)
+            .map_err(|e| format!("remove the mid-corpus file: {e}"))?;
+        if inserted.exists() {
+            return Err(format!(
+                "staged file {} survived removal, so the control run is not a control",
+                inserted.display()
+            ));
+        }
+        write_migration(corpus, COLLIDE_APPENDED_FILENAME, COLLIDE_INSERT_SOURCE)?;
+        if COLLIDE_APPENDED_FILENAME < COLLIDE_LAST_FILENAME {
+            return Err(format!(
+                "{COLLIDE_APPENDED_FILENAME} no longer sorts last, so the control is not \
+                 an append"
+            ));
+        }
+
+        let run3 = run_platform_migrations(&cfg).await.map_err(|e| {
+            format!("the same source renamed to sort last must apply, but failed: {e}")
+        })?;
+        if run3.files != 3 || run3.applied.len() != 1 {
+            return Err(format!(
+                "control run reported files={}, applied={}",
+                run3.files,
+                run3.applied.len()
+            ));
+        }
+        if !table_exists(&probe, "collision_insert_probe").await {
+            return Err("the renamed migration did not create its table".to_string());
+        }
+        if ledger_row_count(&probe).await != ledger_before + 1 {
+            return Err("the renamed migration did not record a ledger row".to_string());
+        }
+        Ok(())
+    }
+
     // ── the cluster-global concurrency regression ───────────────────────────
 
     /// TWO migrate runs, TWO fresh databases, ONE cluster, at the same time.
