@@ -221,6 +221,68 @@ else
 fi
 
 echo
+echo "=== the verdict: an empty answer and an absent check are not the same ==="
+# THE CASE THIS LIBRARY GOT WRONG. Every check above answers with a SET, and an
+# empty set has two unrelated causes - nothing is alive, or the check could not
+# look. Those printed the same table and the same exit 0, and the second one
+# dropped a peer agent's database. The pair below is what separates them, and it
+# is a PAIR on purpose: the green case is the control, because a sweeper that
+# refuses when it successfully found nothing is a sweeper nobody runs.
+#
+# The `/proc` half is STATED here rather than taken from the live scan above.
+# What is under test below is the DECISION; the scan that produces these
+# numbers is covered by its own cases and by `cargo test -p zeroship-testkit`.
+# Reading them from a real pass would make every case here a function of what
+# else happens to be running on the box.
+ZS_SWEEP_PROC_UNLISTABLE=0
+ZS_SWEEP_PROC_HIDDEN=0
+ZS_SWEEP_PROC_EXAMINED=495
+ZS_SWEEP_PROC_PEER_ENV_READ=77
+ZS_SWEEP_PROC_UNEXPLAINED=""
+
+decide_green() { zs_sweep_decide "$1" 1 1 1 9 9; }
+
+decide_green 3 >"$TMP/decide.out" 2>&1
+check "a complete scan with 3 to drop proceeds" "0" "$?"
+if [ ! -s "$TMP/decide.out" ]; then ok "and says nothing"; else bad "printed '$(cat "$TMP/decide.out")'"; fi
+
+# CONTROL: one variable against every red case below - the population is empty
+# rather than the evidence incomplete. This must stay 0, or the tool becomes one
+# nobody runs and the leak it was built for comes back.
+decide_green 0 >"$TMP/decide.out" 2>&1
+check "a complete scan with nothing to drop also proceeds" "0" "$?"
+
+# One variable each, all with the same 3 on the drop list.
+zs_sweep_decide 3 0 1 1 9 9 >"$TMP/decide.out" 2>&1
+check "a /proc scan that did not run REFUSES" "3" "$?"
+if grep -q 'proc_scan' "$TMP/decide.out"; then ok "and names the scan"; else bad "did not name it: $(cat "$TMP/decide.out")"; fi
+
+zs_sweep_decide 3 1 0 1 9 9 >"$TMP/decide.out" 2>&1
+check "a pg_stat_activity query that did not return REFUSES" "3" "$?"
+if grep -q 'sessions' "$TMP/decide.out"; then ok "and names the query"; else bad "did not name it: $(cat "$TMP/decide.out")"; fi
+
+zs_sweep_decide 3 1 1 1 9 8 >"$TMP/decide.out" 2>&1
+check "a working tree with no fingerprint REFUSES" "3" "$?"
+if grep -q 'worktrees' "$TMP/decide.out"; then ok "and names the trees"; else bad "did not name it: $(cat "$TMP/decide.out")"; fi
+
+# Incomplete evidence with an EMPTY drop list warns and proceeds: every gap can
+# only ADD to that list, so an empty one is a conclusion no further evidence
+# could overturn. It is still said out loud - a silent count is the defect.
+zs_sweep_decide 0 1 0 1 9 9 >"$TMP/decide.out" 2>&1
+check "a gap with nothing to drop proceeds" "0" "$?"
+if grep -q 'WARNING' "$TMP/decide.out"; then ok "and warns out loud"; else bad "said nothing: $(cat "$TMP/decide.out")"; fi
+
+# The environment half of the scan going dead is its own case, and it is the one
+# the scan exists for: a peer's suite sitting in cargo holds no backend and
+# appears only in PG_TEST_URL.
+ZS_SWEEP_PROC_PEER_ENV_READ=0
+zs_sweep_decide 3 1 1 1 9 9 >"$TMP/decide.out" 2>&1
+env_blind_status=$?
+ZS_SWEEP_PROC_PEER_ENV_READ=77
+check "no peer environment read REFUSES" "3" "$env_blind_status"
+if grep -q 'env_blind' "$TMP/decide.out"; then ok "and names the environment half"; else bad "did not name it: $(cat "$TMP/decide.out")"; fi
+
+echo
 echo "=================================================================="
 echo "sweep db selftest: ${pass} passed, ${fail} failed"
 [ "$fail" -eq 0 ] || exit 1

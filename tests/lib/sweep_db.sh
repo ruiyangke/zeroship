@@ -86,7 +86,7 @@ zs_pid_is_ours() {
 
 # Scan /proc ONCE for every name in the file `$1`, filling `ZS_SWEEP_HELD_BY`
 # with `<name> <pid>` lines for the names something on this box is holding, and
-# setting `ZS_SWEEP_PROC_UNREADABLE` to the number of entries it could not read.
+# setting the `ZS_SWEEP_PROC_*` variables with the pass's account of ITSELF.
 #
 # The ENVIRONMENT is the half that earns this scan its place. A suite run
 # exports PG_TEST_URL=postgres://.../<db>, so the name sits in
@@ -94,6 +94,25 @@ zs_pid_is_ours() {
 # the minutes it spends in cargo with no backend attached at all, which is
 # exactly when pg_stat_activity sees nothing and a sweeper would call the
 # database dead.
+#
+# AND THE PASS SAYS WHAT IT COULD NOT SEE. `ZS_SWEEP_PROC_UNREADABLE` used to
+# be one number covering four unrelated situations; it read 406 of 495 on an
+# ordinary run and was printed and ignored. The variables below separate the
+# entries with an explanation - the process exited, or the kernel protects its
+# environment - from the ones without, and `zs_sweep_decide` rules on them:
+#
+#   ZS_SWEEP_PROC_EXAMINED      entries this pass ruled on
+#   ZS_SWEEP_PROC_VANISHED      entries whose process had already exited
+#   ZS_SWEEP_PROC_ENV_DENIED    entries whose argv was read and environ was not
+#   ZS_SWEEP_PROC_PEER_ENV_READ environments read for processes not ours; ZERO
+#                               means the environment half of the scan is dead
+#   ZS_SWEEP_PROC_UNEXPLAINED   live entries with no readable argv - the gap
+#   ZS_SWEEP_PROC_UNLISTABLE    /proc could not be listed at all
+#   ZS_SWEEP_PROC_HIDDEN        /proc did not list pid 1
+#
+# A NON-ZERO RETURN MUST REACH THE CALLER. It sets the variables to a state
+# that reads as "nothing is holding anything", which is precisely the answer a
+# failed scan must not be allowed to give quietly.
 zs_sweep_scan_holders() {
   local assignments status
   assignments="$(zs_testkit sweep scan \
@@ -101,7 +120,13 @@ zs_sweep_scan_holders() {
   status=$?
   if [ "$status" -ne 0 ]; then
     ZS_SWEEP_HELD_BY=""
-    ZS_SWEEP_PROC_UNREADABLE=0
+    ZS_SWEEP_PROC_EXAMINED=0
+    ZS_SWEEP_PROC_VANISHED=0
+    ZS_SWEEP_PROC_ENV_DENIED=0
+    ZS_SWEEP_PROC_PEER_ENV_READ=0
+    ZS_SWEEP_PROC_UNEXPLAINED=""
+    ZS_SWEEP_PROC_UNLISTABLE=0
+    ZS_SWEEP_PROC_HIDDEN=0
     return "$status"
   fi
   eval "$assignments"
@@ -110,4 +135,32 @@ zs_sweep_scan_holders() {
 # The pids holding `$1`, or the empty string.
 zs_sweep_holders_of() {
   printf '%s' "${ZS_SWEEP_HELD_BY:-}" | zs_testkit sweep holders-of --name "$1"
+}
+
+# May this run drop what it planned to drop?
+#
+# Usage: zs_sweep_decide <doomed> <scan-ok 0|1> <sessions-ok 0|1> \
+#                        <git-ok 0|1> <worktrees-seen> <worktrees-fingerprinted>
+#
+# Exit 0 to proceed, 3 to REFUSE. The `/proc` half comes from the variables
+# zs_sweep_scan_holders set; everything else is the caller's, because it is a
+# question about a server and a repository rather than about a process table.
+#
+# THE POINT IS THE EXIT CODE. "Scanned everything, nothing is dead" and "could
+# not scan, so nothing looked alive" were both 0, and the second one dropped
+# databases. There is no flag that turns this off and no variable that steers
+# it: an ambient opt-out is how gates get silently disabled.
+zs_sweep_decide() {
+  zs_testkit sweep decide \
+    --doomed "$1" \
+    --proc-scan-ok "$2" \
+    --sessions-ok "$3" \
+    --git-listing-ok "$4" \
+    --worktrees-seen "$5" \
+    --worktrees-fingerprinted "$6" \
+    --proc-unlistable "${ZS_SWEEP_PROC_UNLISTABLE:-0}" \
+    --proc-hidden "${ZS_SWEEP_PROC_HIDDEN:-0}" \
+    --proc-examined "${ZS_SWEEP_PROC_EXAMINED:-0}" \
+    --proc-peer-env-read "${ZS_SWEEP_PROC_PEER_ENV_READ:-0}" \
+    --proc-unexplained "${ZS_SWEEP_PROC_UNEXPLAINED:-}"
 }
