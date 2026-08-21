@@ -34,11 +34,12 @@
 # divergence the older harness flagged is FIXED here, which is what lets the pay
 # leg settle a real, non-$0, CLEAN invoice.
 #
-# DO NO HARM: a DEDICATED DB `zeroship_invoice_demo` on :5440 — never touches the
-# real `zeroship` DB, nor `zeroship_billing_test` / `zeroship_metering_load` /
-# `zeroship_stripe_e2e`. Boots control on a dedicated port. Cleans up the control
-# process + the local DB on exit (the DB is dropped; the Stripe invoices are
-# LEFT for the operator to view).
+# DO NO HARM: a PER-RUN dedicated DB on :5440 and a PER-RUN control port. Never
+# the real `zeroship` DB, never `zeroship_billing_test` /
+# `zeroship_metering_load`, never a Stripe harness's database, and never another
+# run of this script. Cleans up the control process on exit, and the local DB on
+# SUCCESS (a failed run's rows are the thing worth reading); the Stripe invoices
+# are LEFT for the operator to view.
 #
 # Usage:
 #   source /home/ruiyang/.config/zeroship-stripe-test.env   # sets the TEST keys
@@ -79,7 +80,19 @@ if [ -z "$PSQL" ]; then
   fi
 fi
 PGHOST=localhost; PGPORT=5440; PGUSER=postgres; PGPW=zeroship
-DB=zeroship_invoice_demo
+
+# Per-run database name and per-run control port. Both were fixed constants -
+# `zeroship_invoice_demo` and 9182, the latter shared verbatim with
+# tests/e2e_stripe_webhooks_live.sh - and this script both DROPPED the database
+# and terminated every backend on it at start-up. Two runs on one box, or one
+# run beside that harness, meant one destroying the other.
+run_psql() { PGPASSWORD="$PGPW" "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" "$@"; }
+# shellcheck source=tests/lib/scratch_db.sh
+source "$ROOT/tests/lib/scratch_db.sh"
+zs_scratch_db_resolve zeroship_invoice_demo || exit $?
+DB="$TEST_DB"
+# shellcheck source=tests/lib/e2e_ports.sh
+source "$ROOT/tests/lib/e2e_ports.sh"
 
 if [ -z "${STRIPE_TEST_SECRET_KEY:-}" ]; then
   echo "  ⚠ ABORT: STRIPE_TEST_SECRET_KEY not set. source /home/ruiyang/.config/zeroship-stripe-test.env first."
@@ -113,7 +126,7 @@ sget()  { curl -s "$SAPI/$1" -u "$SK:"; }
 spost() { curl -s -X POST "$SAPI/$1" -u "$SK:" "${@:2}"; }
 jget()  { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);let v=o;for(const k of process.argv[1].split('.').filter(Boolean)){v=v==null?undefined:(k.match(/^[0-9]+$/)?v[+k]:v[k]);}console.log(v==null?'':v)}catch(e){console.log('')}})" "$1"; }
 
-ZEROSHIP_CONTROL_PORT=9182
+zs_ports_reserve ZEROSHIP_CONTROL_PORT || exit 1
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 WEBHOOK_SECRET="whsec_demo_$(openssl rand -hex 16)"   # throwaway, per-run
 WORK="$(mktemp -d -t zs-demo-inv-XXXXXX)"
@@ -121,34 +134,40 @@ mkdir -p "$WORK/blobs"
 PIDFILE="$WORK/pids"; : > "$PIDFILE"
 
 cleanup() {
+  local rc=$?
   echo ""
   echo "=== Cleanup ==="
   if [ -f "$PIDFILE" ]; then
     while read -r pid; do [ -n "$pid" ] && kill "$pid" 2>/dev/null || true; done < "$PIDFILE"
   fi
   wait 2>/dev/null || true
-  # Drop the local demo DB (do NOT touch the Stripe invoices — operator views them).
-  "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc \
-    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid(); DROP DATABASE IF EXISTS $DB;" >/dev/null 2>&1 || true
+  # Drop the local demo DB on SUCCESS only (never the Stripe invoices - the
+  # operator views those). The `pg_terminate_backend ... WHERE datname='$DB'`
+  # this used to run first is `WITH (FORCE)` spelled out by hand: over a fixed
+  # name it terminated a PEER's backends. A per-run name has none but this
+  # run's own, and zs_scratch_db_cleanup_on_success's FORCE covers those.
+  zs_scratch_db_cleanup_on_success "$rc"
+  zs_ports_release
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
-  echo "  control down; local DB $DB dropped; $WORK cleaned."
+  echo "  control down; $WORK cleaned."
   echo "  The REAL Stripe TEST invoices are LEFT in the account for you to view (see links above)."
+  return 0
 }
 trap cleanup EXIT
 
-lsof -ti :"$ZEROSHIP_CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+# NO `lsof -ti :$PORT | xargs kill -9` HERE ANY MORE: the port is allocated, so
+# there is nothing to reclaim, and that line could not tell a leaked corpse from
+# a peer's live control plane.
 
 # ===========================================================================
 echo ""
 echo "=== Stage 1: dedicated DB ($DB) + full platform migration set + control at REAL Stripe ==="
 # ===========================================================================
-"$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
-DROP DATABASE IF EXISTS $DB;
+"$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not create $DB"; exit 1; }
 CREATE DATABASE $DB;
 ALTER DATABASE $DB SET search_path = zeroship, public;
 SQL
-pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + the other demo DBs untouched)"
+pass "created per-run DB $DB on :$PGPORT (real zeroship + the other demo DBs untouched)"
 
 MIG_LOG="$WORK/migrate.log"
 if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" > "$MIG_LOG" 2>&1; then

@@ -61,9 +61,17 @@
 # self-skip without creds. It is SAFE to commit + run anytime; it runs for real
 # the moment Connect is enabled at dashboard.stripe.com/connect.
 #
-# DO NO HARM: dedicated DB `zeroship_stripe_e2e` on the :5440 server — never the
-# real `zeroship` DB nor the concurrent agent's `zeroship_billing_test`. Boots
-# control on a dedicated port. Self-managed up/down; cleans up on exit.
+# DO NO HARM: a PER-RUN dedicated DB on the :5440 server and a PER-RUN control
+# port. Never the real `zeroship` DB, never the concurrent agent's
+# `zeroship_billing_test`, and never a peer Stripe harness's database.
+# Self-managed up/down; cleans up on exit.
+#
+# THE DATABASE NAME USED TO BE THE FIXED LITERAL `zeroship_stripe_e2e`, shared
+# verbatim with tests/e2e_stripe_billing.sh and
+# tests/e2e_stripe_webhooks_live.sh, and Stage 1 opened by terminating every
+# backend on it and dropping it. Two of the three running together on one box
+# meant one destroying the other's run mid-flight. See tests/lib/scratch_db.sh
+# and tests/lib/e2e_ports.sh.
 #
 # Skips CLEANLY (exit 0) when prereqs are absent (no PG :5440, no docker for the
 # migrate, the Stripe TEST env not sourced) OR when Connect is not enabled.
@@ -111,7 +119,16 @@ if [ -z "$PSQL" ]; then
   fi
 fi
 PGHOST=localhost; PGPORT=5440; PGUSER=postgres; PGPW=zeroship
-DB=zeroship_stripe_e2e
+
+# Per-run database name. `run_psql` is the seam tests/lib/scratch_db.sh reaches
+# the server through, so it is defined before the resolve.
+run_psql() { PGPASSWORD="$PGPW" "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" "$@"; }
+# shellcheck source=tests/lib/scratch_db.sh
+source "$ROOT/tests/lib/scratch_db.sh"
+zs_scratch_db_resolve zeroship_stripe_e2e || exit $?
+DB="$TEST_DB"
+# shellcheck source=tests/lib/e2e_ports.sh
+source "$ROOT/tests/lib/e2e_ports.sh"
 
 if [ -z "${STRIPE_TEST_SECRET_KEY:-}" ]; then
   echo "  ⚠ SKIP: STRIPE_TEST_SECRET_KEY not set."
@@ -239,7 +256,9 @@ esac
 # ===========================================================================
 # From here on Connect IS enabled — run the full live money flow.
 # ===========================================================================
-ZEROSHIP_CONTROL_PORT=19099
+# Allocated rather than the constant 19099: two runs of THIS harness on one box
+# is the case a per-harness constant can never separate.
+zs_ports_reserve ZEROSHIP_CONTROL_PORT || exit 1
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 WEBHOOK_SECRET="whsec_e2e_$(openssl rand -hex 16)"   # throwaway, per-run
 WORK="$(mktemp -d -t zs-e2e-connect-XXXXXX)"
@@ -248,6 +267,7 @@ PIDFILE="$WORK/pids"; : > "$PIDFILE"
 CREATED_ACCTS="$WORK/accts"; : > "$CREATED_ACCTS"
 
 cleanup() {
+  local rc=$?
   echo ""
   echo "=== Cleanup ==="
   if [ -f "$PIDFILE" ]; then
@@ -264,11 +284,18 @@ cleanup() {
     [ -f "$CREATED_ACCTS" ] && while read -r a; do [ -n "$a" ] && echo "    connected account: $a"; done < "$CREATED_ACCTS"
   fi
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
-  echo "  (DB $DB left for inspection; the real zeroship DB + zeroship_billing_test were NEVER touched.)"
+  # Drop on SUCCESS only: on a red run the creator_accounts / payout rows control
+  # wrote ARE the finding.
+  zs_scratch_db_cleanup_on_success "$rc"
+  zs_ports_release
+  echo "  (The real zeroship DB + zeroship_billing_test were NEVER touched.)"
+  return 0
 }
 trap cleanup EXIT
 
-lsof -ti :"$ZEROSHIP_CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+# NO `lsof -ti :$PORT | xargs kill -9` HERE ANY MORE - see the header. An
+# allocated port has no leaked previous run to reclaim it from, and that line
+# could not tell one from a peer agent's live control plane.
 
 # Poll the control DB until a query returns the expected value.
 wait_for_db() {
@@ -286,13 +313,15 @@ wait_for_db() {
 echo ""
 echo "=== Stage 1: dedicated DB ($DB) + platform migrations + control booted at REAL Stripe ==="
 # ===========================================================================
-"$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
-DROP DATABASE IF EXISTS $DB;
+# NO `pg_terminate_backend` AND NO PRE-DROP: the name carries a per-run token,
+# so nothing can already hold it, and both statements were only ever able to hit
+# a PEER's database. `pg_terminate_backend` over `datname=` is `WITH (FORCE)`
+# spelled out by hand.
+"$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not create $DB"; exit 1; }
 CREATE DATABASE $DB;
 ALTER DATABASE $DB SET search_path = zeroship, public;
 SQL
-pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + zeroship_billing_test untouched)"
+pass "created per-run DB $DB on :$PGPORT (real zeroship + zeroship_billing_test untouched)"
 
 MIG_LOG="$WORK/migrate.log"
 if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" > "$MIG_LOG" 2>&1; then

@@ -30,17 +30,29 @@
 # FAITHFUL by construction — NOTHING under test is stubbed:
 #   * Real zeroship-control binary, pointed at REAL https://api.stripe.com with
 #     the operator's Stripe TEST secret key.
-#   * Real ephemeral-but-dedicated zeroship Postgres DB `zeroship_stripe_e2e` on
-#     the :5440 server + the full platform migration set.
+#   * Real ephemeral-but-dedicated zeroship Postgres DB `zeroship_stripe_e2e_<run>`
+#     on the :5440 server + the full platform migration set.
 #   * Real Stripe objects (cus_/in_/ii_/pi_/ch_/re_/du_), created over the wire.
 #   * The REAL webhook signature path: events are constructed from the REAL
 #     fetched Stripe objects and HMAC-SHA256-signed with the secret the control
 #     instance is configured with — only the DELIVERY is self-driven (no Stripe
 #     CLI on PATH). The object SHAPES + the signature verification are real.
 #
-# DO NO HARM: uses a DEDICATED DB (`zeroship_stripe_e2e`) — never touches the
-# real `zeroship` DB nor the concurrent agent's `zeroship_billing_test`. Boots
-# control on a dedicated port. Self-managed up/down; cleans up on exit.
+# DO NO HARM: uses a DEDICATED, PER-RUN DB and a PER-RUN control port. Never
+# touches the real `zeroship` DB, the concurrent agent's `zeroship_billing_test`,
+# or another Stripe harness's database. Self-managed up/down; cleans up on exit.
+#
+# THAT CLAIM USED TO BE FALSE IN THE ONE DIRECTION IT MATTERED, and it read as a
+# guarantee the whole time. The name was the fixed constant `zeroship_stripe_e2e`
+# and so were tests/e2e_stripe_webhooks_live.sh:90 and
+# tests/e2e_stripe_connect_live.sh:114. All three then opened Stage 1 with
+# `pg_terminate_backend(...) WHERE datname='$DB'; DROP DATABASE IF EXISTS $DB;`
+# against that one name. Two of them running together on this box meant one
+# harness terminating the other's backends and dropping the database out from
+# under it mid-run: not a lost cleanup, a lost run, reported as ordinary test
+# failures. The name now carries a per-run token (tests/lib/scratch_db.sh) and
+# the control port is allocated per run (tests/lib/e2e_ports.sh), so the
+# sentence above is true by construction rather than by nobody having tried.
 #
 # Skips CLEANLY (exit 0) when prereqs are absent (no PG :5440, no docker for the
 # DB migrate, or the Stripe TEST env not sourced).
@@ -96,7 +108,17 @@ if [ -z "$PSQL" ]; then
   fi
 fi
 PGHOST=localhost; PGPORT=5440; PGUSER=postgres; PGPW=zeroship
-DB=zeroship_stripe_e2e
+
+# Per-run database name. `run_psql` is the seam tests/lib/scratch_db.sh reaches
+# the server through, so it is defined before the resolve rather than beside the
+# other psql helpers below.
+run_psql() { PGPASSWORD="$PGPW" "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" "$@"; }
+# shellcheck source=tests/lib/scratch_db.sh
+source "$ROOT/tests/lib/scratch_db.sh"
+zs_scratch_db_resolve zeroship_stripe_e2e || exit $?
+DB="$TEST_DB"
+# shellcheck source=tests/lib/e2e_ports.sh
+source "$ROOT/tests/lib/e2e_ports.sh"
 
 if [ -z "${STRIPE_TEST_SECRET_KEY:-}" ] || [ -z "${STRIPE_TEST_PUBLISHABLE_KEY:-}" ]; then
   echo "  ⚠ SKIP: STRIPE_TEST_SECRET_KEY / STRIPE_TEST_PUBLISHABLE_KEY not set."
@@ -134,7 +156,10 @@ sget()  { curl -s "$SAPI/$1" -u "$SK:"; }
 spost() { curl -s -X POST "$SAPI/$1" -u "$SK:" "${@:2}"; }
 jget()  { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);let v=o;for(const k of process.argv[1].split('.').filter(Boolean)){v=v==null?undefined:(k.match(/^\d+$/)?v[+k]:v[k]);}console.log(v==null?'':v)}catch(e){console.log('')}})" "$1"; }
 
-ZEROSHIP_CONTROL_PORT=9181
+# Allocated, not the constant 9181 this harness used to share with
+# tests/e2e_real_app_end_to_end.sh:52. The allocation is printed, so the
+# transcript records which socket this run used.
+zs_ports_reserve ZEROSHIP_CONTROL_PORT || exit 1
 CONTROL_URL="http://localhost:$ZEROSHIP_CONTROL_PORT"
 WEBHOOK_SECRET="whsec_e2e_$(openssl rand -hex 16)"   # throwaway, per-run
 WORK="$(mktemp -d -t zs-e2e-stripe-XXXXXX)"
@@ -142,6 +167,7 @@ mkdir -p "$WORK/blobs"
 PIDFILE="$WORK/pids"; : > "$PIDFILE"
 
 cleanup() {
+  local rc=$?
   echo ""
   echo "=== Cleanup ==="
   if [ -f "$PIDFILE" ]; then
@@ -149,25 +175,35 @@ cleanup() {
   fi
   wait 2>/dev/null || true
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
-  echo "  control down; $WORK cleaned. (DB $DB left intact for inspection; the real zeroship DB + zeroship_billing_test were NEVER touched.)"
+  # Drop on SUCCESS only: on a red run the rows control wrote ARE the finding,
+  # and this harness is one a human runs and then investigates.
+  zs_scratch_db_cleanup_on_success "$rc"
+  zs_ports_release
+  echo "  control down; $WORK cleaned. (The real zeroship DB + zeroship_billing_test were NEVER touched.)"
   echo "  NOTE: Stripe TEST-mode objects (cus_/in_/re_/du_) created by this run are harmless test artifacts."
+  return 0
 }
 trap cleanup EXIT
 
-lsof -ti :"$ZEROSHIP_CONTROL_PORT" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+# NO `lsof -ti :$PORT | xargs kill -9` HERE ANY MORE. It was there because the
+# port was a constant this harness had to reclaim from its own leaked previous
+# run, and it cannot tell that corpse from a peer agent's live control plane.
+# An allocated port has nothing to reclaim.
 
 # ===========================================================================
 echo ""
 echo "=== Stage 1: dedicated DB ($DB) + zeroship-platform-migrate + control booted at REAL Stripe ==="
 # ===========================================================================
-# (Re)create the dedicated DB clean so the run is deterministic.
-"$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not (re)create $DB"; exit 1; }
-SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB' AND pid<>pg_backend_pid();
-DROP DATABASE IF EXISTS $DB;
+# Create the dedicated DB. NO `pg_terminate_backend` AND NO PRE-DROP: the name
+# carries a per-run token, so nothing can already hold it, and both statements
+# were only ever able to hit a PEER's database. `pg_terminate_backend` over
+# `datname=` is `WITH (FORCE)` spelled out by hand, with the same effect on a
+# harness fifteen minutes into its own run.
+"$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not create $DB"; exit 1; }
 CREATE DATABASE $DB;
 ALTER DATABASE $DB SET search_path = zeroship, public;
 SQL
-pass "(re)created dedicated DB $DB on :$PGPORT (real zeroship + zeroship_billing_test untouched)"
+pass "created per-run DB $DB on :$PGPORT (real zeroship + zeroship_billing_test untouched)"
 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"
 MIG_LOG="$WORK/migrate.log"
