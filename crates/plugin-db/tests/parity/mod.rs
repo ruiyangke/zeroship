@@ -21,6 +21,71 @@ pub fn sqlite_url(root: &tempfile::TempDir) -> String {
     format!("sqlite:{}", root.path().join("parity.sqlite").display())
 }
 
+/// The app id the runtime derives when `EnvSnapshot::empty()` carries no
+/// `APP_ID` (`crates/runtime/src/core/plugin.rs`), which is what `dispatch_zs`
+/// boots with. It is also the dev app id, so the matrix runs on the same
+/// `<db_dir>/zs-default.sqlite` a `pnpm dev` app does.
+const MATRIX_APP_ID: &str = "default";
+
+/// The declared shape `matrix_source`'s `setup` registers. Kept beside the JS so
+/// the two cannot drift: the pre-apply below must create exactly the columns the
+/// procedures then read, and `registerModel` no longer reconciles them.
+fn matrix_schema() -> Value {
+    json!({
+        "_meta": {"strictness": "lenient"},
+        "title": {"type": "string", "required": true},
+        "flag": {"type": "boolean", "required": true},
+        "meta": {"type": "object", "required": true},
+        "optional": {"type": "string"},
+        "rank": {"type": "int", "required": true},
+        "occurred_at": {"type": "date"},
+        "payload_bytes": {"type": "bytes"},
+        "payload_json": {"type": "json"}
+    })
+}
+
+/// Create the matrix collection's table BEFORE the runtime boots.
+///
+/// `registerModel` applies no DDL on either dialect since the 2026-08-10
+/// cutover, so a migration process has to have run first - on the dev tier the
+/// vite dev-server's apply-ahead, on Postgres the `migrated` service at deploy.
+/// Without this the `setup` dispatch still returns 200 (it registers metadata)
+/// and every later dispatch fails with `no such table`, which is exactly how
+/// these three tests broke.
+fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
+    let Some(path) = url.strip_prefix("sqlite:") else {
+        // The Postgres leg (`parity_matrix_pg_matches_sqlite_projection`, which
+        // is `#[ignore]`d and needs a live server) has no in-process apply-ahead
+        // here: plugin-db does not depend on `zeroship-migrate-adapter`, the only
+        // compio-postgres bridge to the engine. Refuse loudly rather than boot a
+        // runtime against a schema-less database and report `column does not
+        // exist` from three layers down.
+        panic!(
+            "parity matrix has no apply-ahead for the non-SQLite url {url}; \
+             wire the Postgres leg through zeroship-migrate-adapter before running it"
+        );
+    };
+    let db_dir = std::path::Path::new(path)
+        .parent()
+        .expect("the sqlite parity url names a file inside a directory")
+        .to_path_buf();
+    let backend = zeroship_plugin_db::backend::SqliteBackend::new(db_dir)
+        .expect("open a SQLite backend on the matrix db_dir");
+    compio::runtime::Runtime::new()
+        .expect("compio runtime build")
+        .block_on(async {
+            zeroship_plugin_db::register_model::apply_declared_schema_to_dev_sqlite_for_tests(
+                &backend,
+                MATRIX_APP_ID,
+                collection,
+                &matrix_schema(),
+                &json!([]),
+            )
+            .await
+            .expect("apply the matrix schema ahead of the runtime")
+        });
+}
+
 #[allow(
     dead_code,
     reason = "the Postgres parity target uses this helper; sqlite_integration compiles the shared module without calling it"
@@ -301,6 +366,8 @@ pub fn run_matrix(url: &str) -> MatrixSnapshot {
         MATRIX_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
     let source = matrix_source(&collection);
+
+    apply_matrix_schema_ahead_of_runtime(url, &collection);
 
     let (status, body) = dispatch_zs(url, &source, "setup");
     assert_eq!(status, 200, "setup failed: {body}");
