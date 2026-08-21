@@ -55,6 +55,9 @@ use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::schema::query::SqlDialect;
 use crate::IndexSortOrder;
+// The per-dialect DDL emission seam. Declared below the engine so the three impls
+// can leave it for the three vendor crates without Cargo seeing a cycle.
+use zero_migrate_backend::ddl::{CreateTableRequest, DdlEmitter};
 
 /// The ONE dialect identity of every MySQL-owned render path in this module — the
 /// twin of [`SQLITE_DIALECT`] below, and a const for the same reason: the 21 call
@@ -4511,6 +4514,31 @@ fn is_injected_index(table: &str, index_name: &str, inject: &ResolvedInject) -> 
     })
 }
 
+/// Which of `t`'s indexes the active policy INJECTED, by name — the answer
+/// [`CreateTableRequest::injected_indexes`] carries to a backend.
+///
+/// [`is_injected_index`] cannot leave the engine: it resolves an inject spec's
+/// columns through [`crate::schema::query::index_name`], the engine's own
+/// index-naming convention, which is a decision core makes rather than a spelling
+/// a vendor is asked for. So core answers it once, here, and hands over the answer.
+///
+/// EXACTLY equivalent to the per-index predicate the SQLite emitter used to run
+/// itself, not merely close to it: within one `create_table` both `table` and
+/// `inject` are fixed, so the predicate is a pure function of the index NAME. A
+/// name-keyed set therefore admits the same indexes for every input, including two
+/// entries of `t.indexes` sharing a name — where the old predicate was likewise
+/// obliged to answer the same for both.
+fn injected_index_names(table: &str, t: &TableSnapshot, inject: Option<&ResolvedInject>) -> Vec<String> {
+    let Some(inject) = inject else {
+        return Vec::new();
+    };
+    t.indexes
+        .iter()
+        .filter(|idx| is_injected_index(table, &idx.name, inject))
+        .map(|idx| idx.name.clone())
+        .collect()
+}
+
 fn has_generated_or_identity(table: &TableSnapshot) -> bool {
     table
         .columns
@@ -5981,7 +6009,7 @@ impl DeclarativeAuthor {
                         table,
                         snapshot: t,
                         inline_fks: &inline_fks,
-                        inject: None,
+                        injected_indexes: &[],
                     })
                     .join(";\n"),
                 SqlDialect::Postgres => self.render_create_table(table, t, &inline_fks),
@@ -6754,12 +6782,13 @@ impl DeclarativeAuthor {
                 "internal: no resolved inject for SQLite table '{table}'"
             ))
         })?;
+        let injected_indexes = injected_index_names(table, snapshot, Some(inject));
         Ok(SqliteEmitter
             .create_table(&CreateTableRequest {
                 table,
                 snapshot,
                 inline_fks: &[],
-                inject: Some(inject),
+                injected_indexes: &injected_indexes,
             })
             .join(";\n"))
     }
@@ -6844,12 +6873,13 @@ impl DeclarativeAuthor {
                     })?;
                 }
             }
+            let injected_indexes = injected_index_names(table, snapshot, Some(inject));
             return SqliteEmitter
                 .create_table(&CreateTableRequest {
                     table,
                     snapshot,
                     inline_fks: &[],
-                    inject: Some(inject),
+                    injected_indexes: &injected_indexes,
                 })
                 .into_iter()
                 .next()
@@ -7137,12 +7167,13 @@ impl DeclarativeAuthor {
         let create_real = if let Some(stored) = live.stored_create_sql.as_deref() {
             rewrite_sqlite_stored_foreign_keys(table, stored, live, desired)?
         } else {
+            let injected_indexes = injected_index_names(table, desired, Some(inject));
             SqliteEmitter
                 .create_table(&CreateTableRequest {
                     table,
                     snapshot: desired,
                     inline_fks: &[],
-                    inject: Some(inject),
+                    injected_indexes: &injected_indexes,
                 })
                 .into_iter()
                 .next()
@@ -7770,7 +7801,7 @@ impl DeclarativeAuthor {
                 table,
                 snapshot: t,
                 inline_fks,
-                inject: None,
+                injected_indexes: &[],
             })
             .join(";\n")
     }
@@ -8357,11 +8388,12 @@ impl DeclarativeAuthor {
         // [`DdlEmitter::drop_table_up`], not a fourth place that knows how three
         // vendors qualify a table.
         let down = self.emitter().drop_table_up(table);
+        let injected_indexes = injected_index_names(table, snapshot, Some(inject));
         let req = CreateTableRequest {
             table,
             snapshot,
             inline_fks: &inline_fks,
-            inject: Some(inject),
+            injected_indexes: &injected_indexes,
         };
         let statements = match self.dialect {
             SqlDialect::Sqlite => SqliteEmitter.create_table(&req),
@@ -8825,118 +8857,11 @@ impl DeclarativeAuthor {
 }
 
 // ===========================================================================
-// DdlEmitter — the per-dialect EMISSION seam.
-//
-// The differ's diff-COMPARISON is dialect-neutral; only the final DDL spelling
-// differs by dialect. This trait isolates exactly those emission concerns — the
-// ADD COLUMN statement (incl. mask/encrypted sentinel spelling), the CREATE INDEX
-// up/down (access-method + WITH + qualification), and the DROP table/column/index
-// qualification — so `DeclarativeAuthor`'s render methods are thin callers and the
-// dialect choice is made ONCE (via `DeclarativeAuthor::emitter`).
-//
-// Two impls — `PgEmitter` (schema-qualified PG DDL: access methods, WITH storage
-// params, `COMMENT ON COLUMN` sentinels) and `SqliteEmitter` (unqualified `main`
-// DDL: inline `/* … */` sentinels, plain B-tree indexes). Each method body is
-// the EXACT former `if is_sqlite { … } else { … }` arm, moved VERBATIM — code
-// motion, not a rewrite, so the bytes are unchanged (the goldens prove
-// it). The ROUTING branches (FK inline-vs-defer, rebuild-vs-ALTER, policy-injected
-// index skip, the unreachable guard) stay in `diff()` — they are diff-logic.
-//
-// The CREATE TABLE renderers ARE extracted, as of [`DdlEmitter::create_table`].
-// The header used to say they were not, on the grounds that "column/constraint
-// spelling is large enough to remain dialect-specific" — which is true of the
-// BODIES and says nothing about the seam. What actually blocked it was that the
-// three renderers took three DIFFERENT parameter lists; see
-// [`CreateTableRequest`] for why that divergence was apparent rather than real.
-//
-// The three per-dialect ADAPTERS that briefly stood between the call sites and
-// that method are gone: every caller now builds its own [`CreateTableRequest`]
-// and asks an emitter directly. The adapters had been the last place where a
-// caller's dialect was inferred from WHICH function it called rather than stated,
-// and the `lower_create_table` site shows what that bought — one request, built
-// once, handed to whichever emitter the dialect selects.
-
-/// Everything a backend needs to spell ONE `CREATE TABLE`, and nothing about which
-/// backend is spelling it.
-///
-/// The three renderers this unifies did not differ in what they NEEDED — they
-/// differed in what each had been handed. PostgreSQL and MySQL took an
-/// `inline_fks` slice; SQLite took a `&ResolvedInject` and no FK slice at all.
-/// That reads like three incompatible contracts and is not: BOTH are decisions
-/// CORE already made before any vendor is consulted (which foreign keys inline
-/// rather than defer to an `ALTER TABLE ADD CONSTRAINT`; which indexes the active
-/// policy injected). Carrying both and letting each backend read the fields its
-/// dialect uses costs one `Option` and removes the divergence.
-struct CreateTableRequest<'a> {
-    /// The UNQUALIFIED table name. Each backend qualifies it its own way — with a
-    /// project schema on PostgreSQL and MySQL, not at all on SQLite, where the
-    /// app file IS `main`.
-    table: &'a str,
-    /// The resolved desired shape: columns, constraints, indexes, partitioning.
-    snapshot: &'a TableSnapshot,
-    /// The foreign keys CORE decided to INLINE in the create rather than defer.
-    ///
-    /// SQLite ignores this and inlines every `FOREIGN KEY` straight off
-    /// `snapshot.constraints`, because it has no late `ADD CONSTRAINT` to defer
-    /// TO — the routing decision that produces this slice is made in
-    /// [`DeclarativeAuthor::lower_create_table`], gated on
-    /// `Capability::AlterTableAddConstraint`.
-    inline_fks: &'a [&'a ConstraintSnapshot],
-    /// The active policy's resolved injection, when the caller has one.
-    ///
-    /// Only SQLite reads it: it emits the injected indexes INSIDE the create
-    /// payload instead of as follow-on `CREATE INDEX` units, which is why the
-    /// differ skips re-emitting them on that dialect. `None` means "the caller
-    /// had no inject to give", which today is only ever a PostgreSQL or MySQL
-    /// caller — neither of which looks at this field.
-    inject: Option<&'a ResolvedInject>,
-}
-
-trait DdlEmitter {
-    /// Render a `CREATE TABLE` as its STRUCTURAL statement list — the create
-    /// itself plus whatever the dialect attaches to it. `join(";\n")` over the
-    /// list is the canonical `up`, and the list (not the joined string) is what
-    /// the guard-per-statement lower consumes, so a string-literal DEFAULT
-    /// carrying an interior `;\n` is never re-split mid-statement.
-    ///
-    /// What "attaches to it" differs, and that IS the vendor's business: PostgreSQL
-    /// appends one `COMMENT ON COLUMN` per sentinel-carrying column, SQLite appends
-    /// the policy-injected `CREATE INDEX`es, MySQL appends nothing.
-    fn create_table(&self, req: &CreateTableRequest<'_>) -> Vec<String>;
-
-    /// Render an `ALTER TABLE … ADD COLUMN …` as `(up_statements, down)`. The mask
-    /// / encrypted sentinel spelling differs by dialect: PG appends a trailing
-    /// `COMMENT ON COLUMN` as a SEPARATE structural statement; `SQLite` rides the
-    /// sentinel inline in the column clause (a single statement). Returning the
-    /// per-statement list (not a `;\n`-joined string) keeps the guard-per-statement
-    /// lower from re-splitting a string-literal DEFAULT that itself contains `;\n`.
-    /// `join(";\n")` over the list is the canonical `up`.
-    fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>);
-
-    /// Render a `CREATE … INDEX …` as `(up, down)`. PG emits the access-method
-    /// (`USING …`), the `WITH (lists=…)` storage param, and qualifies; `SQLite`
-    /// emits a plain unqualified b-tree index.
-    fn create_index(&self, table: &str, idx: &IndexSnapshot) -> (String, String);
-
-    /// Render the `up` of a `DROP TABLE` (qualification differs).
-    fn drop_table_up(&self, table: &str) -> String;
-
-    /// Render an `ALTER TABLE <old> RENAME TO <new>` as `(up, down)`. The `down`
-    /// is the inverse rename (`new` → `old`). On PG the table-ref is
-    /// schema-qualified, but the RENAME TARGET is a BARE name — Postgres rejects a
-    /// schema-qualified target (`… RENAME TO "schema"."t"` is a syntax error); the
-    /// renamed table stays in the same schema. On SQLite both are unqualified
-    /// `main` names.
-    fn rename_table(&self, table: &str, to: &str) -> (String, String);
-
-    /// Render the `up` of an `ALTER TABLE … DROP COLUMN …` (qualification differs).
-    fn drop_column_up(&self, table: &str, col: &str) -> String;
-
-    /// Render the `up` of a `DROP INDEX …`. PG qualifies the index name; `SQLite`
-    /// must emit it unqualified (a qualified `DROP INDEX "schema"."ix"` silently
-    /// no-ops on `SQLite` — the dangerous silent-drift mode).
-    fn drop_index_up(&self, table: Option<&str>, idx_name: &str) -> String;
-}
+// DdlEmitter — the per-dialect EMISSION seam — now lives in
+// `zero_migrate_backend::ddl`, with `CreateTableRequest`, because the three impls
+// below are on their way into the three vendor crates and a trait cannot cross a
+// crate boundary ahead of the types in its signatures. The seam's own account of
+// what it isolates moved with it; this is the engine's door to it.
 
 /// Postgres DDL emitter — schema-qualified, access-method / `WITH`-aware, with
 /// trailing `COMMENT ON COLUMN` sentinels. Holds the project schema for
@@ -9369,10 +9294,11 @@ impl DdlEmitter for SqliteEmitter {
         // why the differ's follow-on index loop skips them on this dialect. A caller
         // with no inject to give (PostgreSQL's or MySQL's, neither of which reaches
         // this impl) contributes none.
-        for idx in t.indexes.iter().filter(|idx| {
-            req.inject
-                .is_some_and(|inj| is_injected_index(table, &idx.name, inj))
-        }) {
+        for idx in t
+            .indexes
+            .iter()
+            .filter(|idx| req.injected_indexes.contains(&idx.name))
+        {
             let (up, _) = self.create_index(table, idx);
             statements.push(up);
         }
@@ -10459,12 +10385,13 @@ mod snapshot_builder_refactor_safety_tests {
         let sqlite_snap =
             build_resolved_table_snapshot("app", &d, SqlDialect::Sqlite, &sqlite_inject)
                 .expect("SQLite snapshot builds");
+        let injected_indexes = injected_index_names(&d.name, &sqlite_snap, Some(&sqlite_inject));
         let sqlite_sql = SqliteEmitter
             .create_table(&CreateTableRequest {
                 table: &d.name,
                 snapshot: &sqlite_snap,
                 inline_fks: &[],
-                inject: Some(&sqlite_inject),
+                injected_indexes: &injected_indexes,
             })
             .join(";\n");
         assert!(

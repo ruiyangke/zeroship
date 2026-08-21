@@ -70,6 +70,7 @@
 //! engine DECIDING something about a vendor.
 
 pub mod advisory;
+pub mod ddl;
 pub mod descriptors;
 pub mod dml;
 pub mod error;
