@@ -207,9 +207,20 @@ mod tests {
     fn every_vendor_agrees_with_its_own_descriptor() {
         for v in VENDORS.as_slice() {
             assert_eq!(
-                v.schema.dialect().id(),
+                v.schema.dialect(),
                 v.descriptor.id,
                 "{} registered a SchemaRenderer for a different dialect",
+                v.descriptor.display_name
+            );
+            // The DmlRenderer answers through its descriptor now rather than a
+            // literal of its own, so this half checks the vendor filed the SAME
+            // descriptor in both places: one that returned SQLite's descriptor
+            // while registering PostgreSQL's would spell one vendor's SQL under
+            // the other's capability answers.
+            assert_eq!(
+                v.dml.descriptor(),
+                v.descriptor,
+                "{} registered a DmlRenderer carrying a different descriptor",
                 v.descriptor.display_name
             );
         }

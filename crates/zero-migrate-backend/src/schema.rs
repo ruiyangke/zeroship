@@ -39,7 +39,7 @@
 //! second physical home of the quoting bytes back in the tree, which is exactly the
 //! defect `render::backends`'s header measured and removed.
 
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
 
 /// Dialect-specific schema/DDL spelling.
 ///
@@ -73,7 +73,16 @@ use zero_migrate_ir::dialect::SqlDialect;
 /// caller of this trait outside this module — stop resolving a renderer at all.
 /// 8 methods to 7.
 pub trait SchemaRenderer: std::fmt::Debug + Sync {
-    fn dialect(&self) -> SqlDialect;
+    /// Which vendor this is, as the OPEN [`DialectId`] rather than the closed
+    /// [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect).
+    ///
+    /// The same signature change, and for the same reason, as
+    /// [`DmlRenderer::dialect`](crate::renderer::DmlRenderer::dialect): a backend
+    /// crate cannot construct a variant of an enum it does not own, so a closed
+    /// return type left `todo!()` as the only body a fourth backend could write.
+    /// `DialectId::new` is `const`, so an outsider declares its identity at item
+    /// scope and this method hands it back.
+    fn dialect(&self) -> DialectId;
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
     fn column_type(&self, def: &serde_json::Value) -> String;
     fn json_object_default(&self) -> String;
