@@ -39,18 +39,21 @@
 //! feature is on, so a `SharedFd` field would make [`Client`](crate::Client)
 //! `!Send`.
 //!
-//! # Why the connection task also needs the shutdown handle
+//! # Why the connection half also needs a shutdown guard
 //!
-//! The mirror case is a local error that ends the connection task while the
-//! client is still live. Dropping the task's descriptor only removes one
-//! reference; the client's dup keeps the socket and the server backend alive.
-//! `shutdown(Both)` changes the shared socket state reached through every dup,
-//! so a peer blocked writing a frame this process refused observes the end of
-//! the session immediately.
+//! The mirror cases are every way the connection half can end while the client
+//! is still live: it can be discarded without being run, its `run` future can
+//! be cancelled, the future can unwind, or the task can return. Dropping the
+//! connection's descriptor only removes one reference; the client's dup keeps
+//! the socket and the server backend alive. `shutdown(Both)` changes the shared
+//! socket state reached through every dup, so the session ends immediately.
 //!
-//! The connection task holds only a `Weak` view of the client's dup. If the
-//! client goes away first, its drop must still close that descriptor even when
-//! compio never reclaims the parked connection task described above.
+//! [`ConnectionDropRelease`] is an RAII guard: it lives in `Connection` before
+//! `run`, then in a local spanning the run future. Its `Drop` is the same plain
+//! syscall as the client-side release and therefore needs no executor. The
+//! guard holds only a `Weak` view of the client's dup. If the client goes away
+//! first, its drop must still close that descriptor even when compio never
+//! reclaims the parked connection task described above.
 
 use std::{
     net::Shutdown,
@@ -70,9 +73,9 @@ pub(crate) struct ConnectionRelease {
     socket: Arc<socket2::Socket>,
 }
 
-/// A non-owning path for a failed connection task to reach the client's dup.
+/// A non-owning shutdown guard for every connection-side exit.
 #[derive(Debug)]
-pub(crate) struct ConnectionErrorRelease {
+pub(crate) struct ConnectionDropRelease {
     socket: Weak<socket2::Socket>,
 }
 
@@ -112,18 +115,18 @@ impl ConnectionRelease {
 }
 
 impl ConnectionRelease {
-    pub(crate) fn error_handle(&self) -> ConnectionErrorRelease {
-        ConnectionErrorRelease {
+    pub(crate) fn connection_guard(&self) -> ConnectionDropRelease {
+        ConnectionDropRelease {
             socket: Arc::downgrade(&self.socket),
         }
     }
 }
 
-impl ConnectionErrorRelease {
-    pub(crate) fn shutdown(&self) {
+impl Drop for ConnectionDropRelease {
+    fn drop(&mut self) {
         if let Some(socket) = self.socket.upgrade() {
-            // Preserve the connection's original error: failure here means a
-            // concurrent client drop or peer close already won the teardown.
+            // Drop cannot report an error, and a concurrent client release or
+            // peer close can legitimately win this shutdown race.
             let _ = socket.shutdown(Shutdown::Both);
         }
     }

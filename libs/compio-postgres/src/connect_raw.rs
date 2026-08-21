@@ -265,7 +265,7 @@ where
     .await?;
 
     let (sender, receiver) = mpsc::unbounded();
-    let error_release = release.as_ref().map(|release| release.error_handle());
+    let drop_release = release.as_ref().map(|release| release.connection_guard());
     let client = Client::new_with_statement_cache_capacity(
         sender,
         config.get_ssl_mode(),
@@ -282,7 +282,7 @@ where
         receiver,
         client.tx_status_handle(),
         client.in_flight_requests_handle(),
-        error_release,
+        drop_release,
     );
 
     Ok((client, connection))
