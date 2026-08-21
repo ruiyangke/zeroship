@@ -2176,6 +2176,38 @@ impl Drop for CloseWaiter<'_> {
 /// expires, the pool synchronously shuts down and later evicts the session.
 const COMMAND_TIMEOUT_RECOVERY_GRACE: Duration = Duration::from_secs(5);
 
+/// Retires a physical session whose command-timeout recovery did not finish.
+///
+/// Recovery is the one place a pooled session is knowingly left mid-protocol:
+/// a CancelRequest is in flight and the backend has not yet been proven idle.
+/// Every exit from that state has to either complete the recovery or destroy
+/// the session, and a dropped future takes neither branch on its own.
+struct CommandRecoveryGuard<'a> {
+    client: &'a Client,
+    armed: bool,
+}
+
+impl<'a> CommandRecoveryGuard<'a> {
+    fn new(client: &'a Client) -> Self {
+        Self {
+            client,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CommandRecoveryGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.client.force_close();
+        }
+    }
+}
+
 /// A borrowed connection that returns to the pool on drop.
 ///
 /// Dereferences to [`Client`] — call any client method (`.query(...)`,
@@ -2265,6 +2297,13 @@ impl PooledClient<'_> {
             return result;
         }
 
+        // Recovery either restores this physical session or destroys it, and
+        // the deciding arms below only run if this future is polled to
+        // completion. A caller that drops it - a timeout of its own, a select
+        // that lost, a cancelled task - would otherwise return a session that
+        // is mid-CancelRequest to the pool, and the next borrower inherits it.
+        // The guard makes retirement the default and success the exception.
+        let recovery_guard = CommandRecoveryGuard::new(client);
         let recovery = compio::time::timeout(COMMAND_TIMEOUT_RECOVERY_GRACE, async {
             // Waiting for EOF on the dedicated cancel connection is the
             // cross-connection ordering barrier: write/flush alone would let a
@@ -2297,13 +2336,14 @@ impl PooledClient<'_> {
         .await;
 
         match recovery {
-            Ok(Ok(())) => Err(Error::command_timeout(None)),
-            Ok(Err(error)) => {
-                client.force_close();
-                Err(Error::command_timeout(Some(Box::new(error))))
+            Ok(Ok(())) => {
+                // The only arm that keeps the session: recovery ran to
+                // completion and left the backend idle and frame-aligned.
+                recovery_guard.disarm();
+                Err(Error::command_timeout(None))
             }
+            Ok(Err(error)) => Err(Error::command_timeout(Some(Box::new(error)))),
             Err(_) => {
-                client.force_close();
                 Err(Error::command_timeout(Some(Box::new(io::Error::new(
                     io::ErrorKind::TimedOut,
                     format!(
