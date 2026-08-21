@@ -8,14 +8,9 @@
 //! out whether the value it supplied mattered, so a host that hardcodes one is right
 //! or wrong silently. `has_dialectal_ops` is that missing fact.
 //!
-//! WHAT THE FIELD REPORTS, and the distinction the arms below exist to pin: the
-//! history CONTAINS an op-level `dialect()` wrapper - NOT that a leg was selected.
-//! Those come apart in the case that matters most. A postgres-only wrapper folded
-//! under SQLite selects nothing at all (`selected_dialectal_leg` finds no `sqlite`
-//! leg, so the op contributes zero ops and the fold succeeds), which is exactly the
-//! silent divergence a caller needs told about. A field reporting SELECTION would
-//! read `false` there - the wrong answer at the only moment the answer is
-//! load-bearing.
+//! WHAT THE FIELD REPORTS: on a successful fold, the history CONTAINS an op-level
+//! `dialect()` wrapper. A wrapper without a leg for the target fails closed, so a
+//! refused call reports no answer rather than treating an absent leg as a no-op.
 //!
 //! WHAT `false` DOES NOT MEAN: that the artifacts are dialect-independent. Other
 //! fold rules key on the dialect too - the materialized enum/domain capability gates
@@ -110,15 +105,9 @@ fn a_selected_dialectal_leg_reports_true() {
     );
 }
 
-/// The arm that makes PRESENCE the right predicate rather than SELECTION.
-///
-/// Under SQLite and MySQL the postgres-only wrapper matches no leg, so it
-/// contributes nothing and the fold still succeeds. The dialect argument decided
-/// the whole content of that op, so the honest answer is still `true`.
-/// Re-implementing the field as "a leg was selected" flips these two to `false` and
-/// this is the test that catches it.
+/// A target absent from `legs` is a refusal, not an empty op.
 #[test]
-fn an_unselected_dialectal_leg_still_reports_true() {
+fn an_absent_target_leg_fails_closed() {
     for dialect in ["sqlite", "mysql"] {
         let reply = gen_artifacts_from_envelopes(
             &postgres_only_leg_history(),
@@ -127,20 +116,31 @@ fn an_unselected_dialectal_leg_still_reports_true() {
             &[charter().as_str()],
         );
         assert!(
-            reply.ok,
-            "{dialect} should fold the history and skip the absent op leg: {:?}",
+            !reply.ok,
+            "{dialect} must refuse a dialectal op without its target leg: {:?}",
             reply.error
         );
         assert_eq!(
-            reply.has_dialectal_ops,
-            Some(true),
-            "{dialect} selected no leg, but the dialect argument is what emptied the op",
+            reply.has_dialectal_ops, None,
+            "a refused fold has no dialectal-op answer",
+        );
+        assert!(
+            reply.env_db_ts.is_none() && reply.runtime_json.is_none(),
+            "a refused fold must emit no artifacts",
+        );
+        assert!(
+            reply
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("dialectal op has no leg for target dialect")),
+            "the refusal must name the absent target leg: {:?}",
+            reply.error,
         );
     }
 }
 
 #[test]
-fn pg_alias_and_misspelled_postgres_leg_select_no_op() {
+fn pg_alias_and_misspelled_postgres_leg_fail_closed() {
     for wrong_key in ["pg", "postgre"] {
         let mut history = postgres_only_leg_history();
         let legs = history[1]["ops"][0]["legs"]
@@ -154,18 +154,22 @@ fn pg_alias_and_misspelled_postgres_leg_select_no_op() {
         let reply =
             gen_artifacts_from_envelopes(&history, "postgres", Some(SCHEMA), &[charter().as_str()]);
         assert!(
-            reply.ok,
-            "{wrong_key:?} is an unselected op leg, not a postgres alias: {:?}",
+            !reply.ok,
+            "{wrong_key:?} is not a postgres alias and must leave postgres uncovered: {:?}",
             reply.error
         );
-        assert_eq!(reply.has_dialectal_ops, Some(true));
+        assert_eq!(reply.has_dialectal_ops, None);
         assert!(
-            !reply
-                .runtime_json
+            reply.env_db_ts.is_none() && reply.runtime_json.is_none(),
+            "a misspelled leg must emit no artifacts",
+        );
+        assert!(
+            reply
+                .error
                 .as_deref()
-                .expect("successful fold renders runtime JSON")
-                .contains("postgres_only"),
-            "{wrong_key:?} must not select the postgres-only column",
+                .is_some_and(|error| error.contains("dialectal op has no leg for target dialect")),
+            "{wrong_key:?} must fail as an absent postgres leg: {:?}",
+            reply.error,
         );
     }
 }

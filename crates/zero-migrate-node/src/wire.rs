@@ -692,11 +692,10 @@ pub struct GenArtifactsReply {
     /// falsiness, so neither a refusal nor an older addon that predates the field
     /// can pass as a clean result.
     ///
-    /// Reports PRESENCE, not selection. A postgres-only wrapper folded under SQLite
-    /// selects no leg, contributing nothing while the fold succeeds - the case a
-    /// caller most needs told about - so a selection-shaped answer would be `false`
-    /// exactly there. The descriptor source cannot carry a wrapper at all and
-    /// reports `false` by construction.
+    /// Reports PRESENCE on a successful fold, not how many legs were selected. A
+    /// wrapper without a target leg fails closed, so a refusal reports `None`
+    /// together with no artifacts. The descriptor source cannot carry a wrapper at
+    /// all and reports `false` by construction.
     ///
     /// `false` does NOT mean the artifacts are dialect-independent. The
     /// materialized enum/domain capability gates and the identity/primary-key reuse
