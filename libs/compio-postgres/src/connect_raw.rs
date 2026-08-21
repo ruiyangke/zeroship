@@ -518,7 +518,7 @@ where
     if let Some(options) = config.get_options() {
         params.push(("options", options));
     }
-    if let Some(application_name) = config.get_application_name() {
+    if let Some(application_name) = config.resolved_application_name() {
         params.push(("application_name", application_name));
     }
     // Streaming-replication protocol opt-in. `replication=database`
