@@ -7849,7 +7849,7 @@ impl IrAuthor {
                     ))?
                 } else {
                     let mut render_column = live_from_column.clone();
-                    render_column.data_type = ir_data_type.clone();
+                    render_column.data_type = ir_data_type;
                     crate::render::backends::schema_renderer(SqlDialect::Postgres)
                         .column_type(&render_column, false)
                 };

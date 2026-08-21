@@ -339,6 +339,9 @@ impl std::fmt::Debug for ColumnSnapshot {
         if self.type_def.is_some() {
             s.field("type_def", &self.type_def);
         }
+        if self.authored_type {
+            s.field("authored_type", &self.authored_type);
+        }
         if self.catalog_uuid_format_check {
             s.field("catalog_uuid_format_check", &self.catalog_uuid_format_check);
         }
