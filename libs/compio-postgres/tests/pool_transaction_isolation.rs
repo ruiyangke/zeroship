@@ -15,6 +15,8 @@
 //! probe - so the only thing that can break it is the behaviour itself.
 
 use compio_postgres::{Pool, PoolConfig};
+use futures_util::FutureExt;
+use std::time::Duration;
 
 mod common;
 
@@ -23,77 +25,143 @@ fn test_url() -> String {
         .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
-/// Schema of its own, so this target can run beside `integration.rs` without
-/// either tripping over the other's fixed object names.
-const SCHEMA: &str = "cpg_pool_tx_isolation";
+const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const POOL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn connect_pool(url: &str, config: PoolConfig) -> Pool {
+    match compio::time::timeout(
+        POOL_CONNECT_TIMEOUT,
+        Pool::connect_with_pool_config(url, config),
+    )
+    .await
+    {
+        Ok(Ok(pool)) => pool,
+        Ok(Err(error)) => common::postgres_unreachable(url, &error),
+        Err(_) => panic!(
+            "pool connection exceeded its {} second timeout",
+            POOL_CONNECT_TIMEOUT.as_secs()
+        ),
+    }
+}
+
+async fn drop_test_schema(pool: &Pool, schema: &str) -> Result<(), String> {
+    let sql = format!(
+        "ROLLBACK; SET lock_timeout = '4s'; SET statement_timeout = '4s'; \
+         DROP SCHEMA IF EXISTS {schema} CASCADE"
+    );
+    let cleanup = async {
+        let client = pool
+            .get()
+            .await
+            .map_err(|error| common::error_chain(&error))?;
+        client
+            .batch_execute(&sql)
+            .await
+            .map_err(|error| common::error_chain(&error))
+    }
+    .boxed_local();
+    compio::time::timeout(CLEANUP_TIMEOUT, cleanup)
+    .await
+    .map_err(|_| format!("dropping {schema} exceeded its cleanup timeout"))?
+}
 
 #[compio::test]
 async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
     let url = test_url();
+    let schema = common::test_object_name("cpg_pool_tx_isolation");
+    let table = common::test_object_name("cpg_pool_tx_isolation_table");
+    let relation = format!("{schema}.{table}");
     // One connection, so the release and the next acquisition are guaranteed to
     // be the same backend - without that the test can pass by being handed a
     // different, clean connection.
     let mut config = PoolConfig::new();
     config.max_size(1).min_idle(1);
-    let pool = match Pool::connect_with_pool_config(&url, config).await {
-        Ok(pool) => pool,
-        Err(e) => common::postgres_unreachable(&url, &e),
+    let pool = connect_pool(&url, config).await;
+
+    let outcome = match compio::time::timeout(
+        TEST_TIMEOUT,
+        std::panic::AssertUnwindSafe(async {
+            {
+                let client = pool.get().await.expect("first checkout");
+                client
+                    .batch_execute(&format!(
+                        "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+                         CREATE TABLE {relation} (id int);"
+                    ))
+                    .await
+                    .expect("seed schema");
+            }
+
+            // Borrower 1 opens a transaction with RAW SQL - no `Transaction`
+            // guard is involved, which is the case that has no other protection,
+            // and releases without committing.
+            {
+                let client = pool.get().await.expect("second checkout");
+                client
+                    .batch_execute(&format!("BEGIN; INSERT INTO {relation} VALUES (1);"))
+                    .await
+                    .expect("open a raw transaction and write in it");
+            }
+
+            // Borrower 2 gets the same backend. If the transaction leaked it
+            // sees its own uncommitted row and reports an assigned transaction
+            // id.
+            let client = pool.get().await.expect("third checkout");
+            let rows = client
+                .query(
+                    &format!("SELECT count(*)::int8 AS n FROM {relation}"),
+                    &[],
+                )
+                .await
+                .expect("count rows");
+            let visible: i64 = rows[0].get("n");
+            let in_transaction: bool = client
+                .query(
+                    "SELECT (pg_current_xact_id_if_assigned() IS NOT NULL) AS b",
+                    &[],
+                )
+                .await
+                .map(|r| r[0].get("b"))
+                .unwrap_or(false);
+
+            assert_eq!(
+                visible, 0,
+                "the next borrower inherited an uncommitted row, so the pool handed back \
+                 a connection still inside a raw transaction"
+            );
+            assert!(
+                !in_transaction,
+                "the next borrower is inside a transaction it never opened"
+            );
+        })
+        .catch_unwind(),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => Err(Box::new(format!(
+            "pool transaction-isolation test exceeded its {TEST_TIMEOUT:?} timeout"
+        )) as Box<dyn std::any::Any + Send>),
     };
 
-    {
-        let client = pool.get().await.expect("first checkout");
-        client
-            .batch_execute(&format!(
-                "DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; CREATE SCHEMA {SCHEMA};
-                 CREATE TABLE {SCHEMA}.t (id int);"
-            ))
-            .await
-            .expect("seed schema");
-    }
-
-    // Borrower 1 opens a transaction with RAW SQL - no `Transaction` guard is
-    // involved, which is the case that has no other protection - and releases
-    // without committing.
-    {
-        let client = pool.get().await.expect("second checkout");
-        client
-            .batch_execute(&format!("BEGIN; INSERT INTO {SCHEMA}.t VALUES (1);"))
-            .await
-            .expect("open a raw transaction and write in it");
-    }
-
-    // Borrower 2 gets the same backend. If the transaction leaked it sees its
-    // own uncommitted row and reports an assigned transaction id.
-    let client = pool.get().await.expect("third checkout");
-    let rows = client
-        .query(&format!("SELECT count(*)::int8 AS n FROM {SCHEMA}.t"), &[])
+    let cleanup = match std::panic::AssertUnwindSafe(drop_test_schema(&pool, &schema))
+        .catch_unwind()
         .await
-        .expect("count rows");
-    let visible: i64 = rows[0].get("n");
-    let in_transaction: bool = client
-        .query(
-            "SELECT (pg_current_xact_id_if_assigned() IS NOT NULL) AS b",
-            &[],
-        )
-        .await
-        .map(|r| r[0].get("b"))
-        .unwrap_or(false);
-
-    let _ = client
-        .batch_execute(&format!(
-            "ROLLBACK; DROP SCHEMA IF EXISTS {SCHEMA} CASCADE;"
-        ))
-        .await;
-
-    assert_eq!(
-        visible, 0,
-        "the next borrower inherited an uncommitted row, so the pool handed back \
-         a connection still inside a raw transaction"
-    );
-    assert!(
-        !in_transaction,
-        "the next borrower is inside a transaction it never opened"
-    );
+    {
+        Ok(cleanup) => cleanup,
+        Err(_) => Err(format!("cleanup for {schema} panicked")),
+    };
+    match outcome {
+        Ok(()) => cleanup
+            .unwrap_or_else(|error| panic!("failed to clean up {schema}: {error}")),
+        Err(panic) => {
+            if let Err(error) = cleanup {
+                eprintln!("failed to clean up {schema} after test failure: {error}");
+            }
+            std::panic::resume_unwind(panic);
+        }
+    }
 }
 
 /// An ABORTED transaction must not leak either.
@@ -109,10 +177,7 @@ async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
     let url = test_url();
     let mut config = PoolConfig::new();
     config.max_size(1).min_idle(1);
-    let pool = match Pool::connect_with_pool_config(&url, config).await {
-        Ok(pool) => pool,
-        Err(e) => common::postgres_unreachable(&url, &e),
-    };
+    let pool = connect_pool(&url, config).await;
 
     // Borrower 1 poisons the session: the divide-by-zero aborts the
     // transaction, and the release happens with the server still in that
@@ -161,10 +226,7 @@ async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
         // Force the alive-check: without this the pool may skip validation on
         // a connection it saw moments ago, and the test would prove nothing.
         .validation_bypass(std::time::Duration::ZERO);
-    let pool = match Pool::connect_with_pool_config(&url, config).await {
-        Ok(pool) => pool,
-        Err(e) => common::postgres_unreachable(&url, &e),
-    };
+    let pool = connect_pool(&url, config).await;
 
     let pid: i32 = {
         let client = pool.get().await.expect("first checkout");
@@ -175,9 +237,13 @@ async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
         rows[0].get("pid")
     };
 
-    let (killer, connection) = compio_postgres::connect(&url, compio_postgres::NoTls)
-        .await
-        .expect("second connection to issue the terminate");
+    let (killer, connection) = compio::time::timeout(
+        POOL_CONNECT_TIMEOUT,
+        compio_postgres::connect(&url, compio_postgres::NoTls),
+    )
+    .await
+    .expect("second connection exceeded its timeout")
+    .expect("second connection to issue the terminate");
     let driver = compio::runtime::spawn(async move { connection.run().await });
     killer
         .execute("SELECT pg_terminate_backend($1)", &[&pid])
