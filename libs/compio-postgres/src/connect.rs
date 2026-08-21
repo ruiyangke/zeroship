@@ -30,8 +30,153 @@ use crate::{Config, Error, Socket};
 use compio::net::ToSocketAddrsAsync;
 use rand::seq::SliceRandom;
 use std::future::Future;
+use std::net::{IpAddr, SocketAddr};
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::time::Duration;
 use std::{cmp, io};
+
+/// One configured host entry, separated into the address to reach and the
+/// optional name TLS validates.
+pub(crate) struct Endpoint {
+    target: EndpointTarget,
+    hostname: Option<String>,
+    port: u16,
+}
+
+enum EndpointTarget {
+    Name(String),
+    Ip(IpAddr),
+    #[cfg(unix)]
+    Unix(PathBuf),
+}
+
+/// The name-resolution seam used by the endpoint walk.
+pub(crate) trait Resolver {
+    async fn resolve(&mut self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>>;
+}
+
+pub(crate) struct SystemResolver;
+
+impl Resolver for SystemResolver {
+    async fn resolve(&mut self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        Ok((host, port)
+            .to_socket_addrs_async()
+            .await?
+            .collect::<Vec<_>>())
+    }
+}
+
+impl Endpoint {
+    pub(crate) fn hostname(&self) -> Option<&str> {
+        self.hostname.as_deref()
+    }
+
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Resolve this host entry to the addresses it denotes. Numeric
+    /// `hostaddr` values and Unix sockets bypass name resolution entirely.
+    pub(crate) async fn addresses<R>(
+        &self,
+        resolver: &mut R,
+        load_balance_hosts: LoadBalanceHosts,
+    ) -> Result<Vec<Addr>, Error>
+    where
+        R: Resolver,
+    {
+        match &self.target {
+            EndpointTarget::Name(host) => {
+                let mut addrs = resolver
+                    .resolve(host, self.port)
+                    .await
+                    .map_err(Error::connect)?;
+
+                if load_balance_hosts == LoadBalanceHosts::Random {
+                    addrs.shuffle(&mut rand::rng());
+                }
+
+                if addrs.is_empty() {
+                    return Err(Error::connect(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "could not resolve any addresses",
+                    )));
+                }
+
+                Ok(addrs.into_iter().map(|addr| Addr::Tcp(addr.ip())).collect())
+            }
+            EndpointTarget::Ip(ip) => Ok(vec![Addr::Tcp(*ip)]),
+            #[cfg(unix)]
+            EndpointTarget::Unix(path) => Ok(vec![Addr::Unix(path.clone())]),
+        }
+    }
+}
+
+/// Validate and enumerate the configured host entries once for every
+/// connection path.
+pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
+    config.validate_tls_settings()?;
+
+    if config.get_hosts().is_empty() && config.get_hostaddrs().is_empty() {
+        return Err(Error::config("both host and hostaddr are missing".into()));
+    }
+
+    if !config.get_hosts().is_empty()
+        && !config.get_hostaddrs().is_empty()
+        && config.get_hosts().len() != config.get_hostaddrs().len()
+    {
+        let msg = format!(
+            "number of hosts ({}) is different from number of hostaddrs ({})",
+            config.get_hosts().len(),
+            config.get_hostaddrs().len(),
+        );
+        return Err(Error::config(msg.into()));
+    }
+
+    let num_hosts = cmp::max(config.get_hosts().len(), config.get_hostaddrs().len());
+    if config.get_ports().len() > 1 && config.get_ports().len() != num_hosts {
+        return Err(Error::config("invalid number of ports".into()));
+    }
+
+    let mut indices = (0..num_hosts).collect::<Vec<_>>();
+    if config.get_load_balance_hosts() == LoadBalanceHosts::Random {
+        indices.shuffle(&mut rand::rng());
+    }
+
+    Ok(indices
+        .into_iter()
+        .map(|i| {
+            let host = config.get_hosts().get(i);
+            let hostname = match host {
+                Some(Host::Tcp(host)) => Some(host.clone()),
+                #[cfg(unix)]
+                Some(Host::Unix(_)) => None,
+                None => None,
+            };
+            let target = match config.get_hostaddrs().get(i) {
+                Some(ip) => EndpointTarget::Ip(*ip),
+                None => match host.expect("one of host / hostaddr is present at this index") {
+                    Host::Tcp(host) => EndpointTarget::Name(host.clone()),
+                    #[cfg(unix)]
+                    Host::Unix(path) => EndpointTarget::Unix(path.clone()),
+                },
+            };
+            let port = config
+                .get_ports()
+                .get(i)
+                .or_else(|| config.get_ports().first())
+                .copied()
+                .unwrap_or(5432);
+
+            Endpoint {
+                target,
+                hostname,
+                port,
+            }
+        })
+        .collect())
+}
 
 pub(crate) async fn with_connect_timeout<T, F>(
     timeout: Option<Duration>,
@@ -53,126 +198,87 @@ where
 }
 
 pub async fn connect<T>(
-    mut tls: T,
+    tls: T,
     config: &Config,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
     T: MakeTlsConnect<Socket>,
 {
-    config.validate_tls_settings()?;
+    let mut resolver = SystemResolver;
+    connect_with_resolver(tls, config, &mut resolver).await
+}
 
-    if config.get_hosts().is_empty() && config.get_hostaddrs().is_empty() {
-        return Err(Error::config("both host and hostaddr are missing".into()));
-    }
-
-    if !config.get_hosts().is_empty()
-        && !config.get_hostaddrs().is_empty()
-        && config.get_hosts().len() != config.get_hostaddrs().len()
-    {
-        let msg = format!(
-            "number of hosts ({}) is different from number of hostaddrs ({})",
-            config.get_hosts().len(),
-            config.get_hostaddrs().len(),
-        );
-        return Err(Error::config(msg.into()));
-    }
-
-    // Either one of config.host or config.hostaddr is empty, or their
-    // lengths are equal.
-    let num_hosts = cmp::max(config.get_hosts().len(), config.get_hostaddrs().len());
-
-    if config.get_ports().len() > 1 && config.get_ports().len() != num_hosts {
-        return Err(Error::config("invalid number of ports".into()));
-    }
-
-    let mut indices = (0..num_hosts).collect::<Vec<_>>();
-    if config.get_load_balance_hosts() == LoadBalanceHosts::Random {
-        indices.shuffle(&mut rand::rng());
-    }
+async fn connect_with_resolver<T, R>(
+    mut tls: T,
+    config: &Config,
+    resolver: &mut R,
+) -> Result<(Client, Connection<Socket, T::Stream>), Error>
+where
+    T: MakeTlsConnect<Socket>,
+    R: Resolver,
+{
+    let endpoints = endpoints(config)?;
 
     let mut error = None;
-    for i in indices {
-        let host = config.get_hosts().get(i);
-        let hostaddr = config.get_hostaddrs().get(i);
-        let port = config
-            .get_ports()
-            .get(i)
-            .or_else(|| config.get_ports().first())
-            .copied()
-            .unwrap_or(5432);
-
-        // `host` is the TLS validation hostname.
-        let hostname = match host {
-            Some(Host::Tcp(host)) => Some(host.clone()),
-            #[cfg(unix)]
-            Some(Host::Unix(_)) => None,
-            None => None,
-        };
-
-        // Prefer `hostaddr` (numeric IP) when present; else fall back
-        // to `host` (which may be a hostname or Unix socket path).
-        let addr = match hostaddr {
-            Some(ipaddr) => Host::Tcp(ipaddr.to_string()),
-            None => host.cloned().unwrap(),
-        };
-
-        match connect_host(addr, hostname, port, &mut tls, config).await {
+    for endpoint in endpoints {
+        match connect_host(&endpoint, resolver, &mut tls, config).await {
             Ok((client, connection)) => return Ok((client, connection)),
             Err(e) => error = Some(e),
         }
     }
 
-    Err(error.unwrap())
+    Err(error.expect("endpoints rejects an empty host list"))
 }
 
-async fn connect_host<T>(
-    host: Host,
-    hostname: Option<String>,
-    port: u16,
+/// One configured host entry: resolve it, then try each address it denotes
+/// until one connects.
+///
+/// `connect_timeout` is applied once to resolution and then AFRESH to each
+/// address, so a host entry's total budget scales with the addresses it names.
+async fn connect_host<T, R>(
+    endpoint: &Endpoint,
+    resolver: &mut R,
     tls: &mut T,
     config: &Config,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
     T: MakeTlsConnect<Socket>,
+    R: Resolver,
 {
-    match host {
-        Host::Tcp(host) => {
-            // Resolve DNS via compio.
-            let mut addrs = (&*host, port)
-                .to_socket_addrs_async()
-                .await
-                .map_err(Error::connect)?
-                .collect::<Vec<_>>();
+    let timeout = config.get_connect_timeout().copied();
 
-            if config.get_load_balance_hosts() == LoadBalanceHosts::Random {
-                addrs.shuffle(&mut rand::rng());
+    // libpq leaves name resolution OUTSIDE the deadline: `pg_getaddrinfo_all`
+    // blocks inside `PQconnectPoll`, and `connectDBComplete`'s `finish_time`
+    // only governs the socket waits around it. We diverge deliberately and
+    // give resolution its own budget, because an unresponsive resolver
+    // otherwise hangs a connect that asked for a time limit.
+    let addrs = with_connect_timeout(
+        timeout,
+        endpoint.addresses(resolver, config.get_load_balance_hosts()),
+    )
+    .await?;
+
+    let mut last_err = None;
+    for addr in addrs {
+        // The deadline restarts for EVERY address, matching libpq
+        // (`fe-connect.c`, `connectDBComplete`), which recomputes
+        // `finish_time` whenever `whichhost` OR `whichaddr` moves. One budget
+        // shared across the walk would let the first blackholed A record
+        // consume it all and strand the healthy addresses behind it.
+        match with_connect_timeout(
+            timeout,
+            connect_once(addr, endpoint.hostname(), endpoint.port(), tls, config),
+        )
+        .await
+        {
+            Ok(stream) => return Ok(stream),
+            Err(e) => {
+                last_err = Some(e);
             }
-
-            let mut last_err = None;
-            for addr in addrs {
-                match connect_once(Addr::Tcp(addr.ip()), hostname.as_deref(), port, tls, config)
-                    .await
-                {
-                    Ok(stream) => return Ok(stream),
-                    Err(e) => {
-                        last_err = Some(e);
-                        continue;
-                    }
-                };
-            }
-
-            Err(last_err.unwrap_or_else(|| {
-                Error::connect(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "could not resolve any addresses",
-                ))
-            }))
-        }
-        #[cfg(unix)]
-        Host::Unix(path) => {
-            connect_once(Addr::Unix(path), hostname.as_deref(), port, tls, config).await
         }
     }
+
+    Err(last_err.expect("Endpoint::addresses rejects an empty address list"))
 }
 
 /// The first transport to use for a newly opened socket.
@@ -212,26 +318,6 @@ pub(crate) fn first_encryption_for_addr(addr: &Addr, mode: SslMode) -> Encryptio
 /// does not get one; that case is handled inside `negotiate_tls` on the
 /// original socket.
 async fn connect_once<T>(
-    addr: Addr,
-    hostname: Option<&str>,
-    port: u16,
-    tls: &mut T,
-    config: &Config,
-) -> Result<(Client, Connection<Socket, T::Stream>), Error>
-where
-    T: MakeTlsConnect<Socket>,
-{
-    with_connect_timeout(
-        config.get_connect_timeout().copied(),
-        connect_once_inner(addr, hostname, port, tls, config),
-    )
-    .await
-}
-
-/// One address-level connection sequence. The caller's deadline spans this
-/// whole operation, including a permitted TLS/plaintext retry on a fresh
-/// socket, rather than restarting for each transport leg.
-async fn connect_once_inner<T>(
     addr: Addr,
     hostname: Option<&str>,
     port: u16,
@@ -304,7 +390,6 @@ where
     let socket = connect_socket(
         &addr,
         port,
-        config.get_connect_timeout().copied(),
         config.get_tcp_user_timeout().copied(),
         if config.get_keepalives() {
             Some(&config.keepalive_config)
@@ -366,6 +451,7 @@ mod tests {
     use compio::net::TcpListener;
     use futures_channel::oneshot;
     use std::error::Error as _;
+    use std::future;
     use std::net::SocketAddr;
     use std::time::Duration;
 
@@ -387,7 +473,20 @@ mod tests {
     async fn scripted_server_after_startup(
         server_says: Option<Vec<u8>>,
     ) -> (SocketAddr, oneshot::Receiver<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        scripted_server_bound("127.0.0.1:0".parse().unwrap(), server_says).await
+    }
+
+    /// The same scripted server, on a caller-chosen bind address.
+    ///
+    /// The per-address deadline test needs TWO stalled endpoints sharing ONE
+    /// port, because `Endpoint::addresses` discards the resolved port
+    /// (`Addr::Tcp(addr.ip())`) and `connect_once` dials `endpoint.port()`.
+    /// Two loopback IPs on the same port is the only shape that expresses it.
+    async fn scripted_server_bound(
+        bind: SocketAddr,
+        server_says: Option<Vec<u8>>,
+    ) -> (SocketAddr, oneshot::Receiver<()>) {
+        let listener = TcpListener::bind(bind).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (startup_seen, startup_observed) = oneshot::channel();
 
@@ -430,6 +529,96 @@ mod tests {
         config
     }
 
+    struct PendingResolver;
+
+    impl Resolver for PendingResolver {
+        async fn resolve(&mut self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+            future::pending().await
+        }
+    }
+
+    struct EmptyResolver;
+
+    impl Resolver for EmptyResolver {
+        async fn resolve(&mut self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct StaticResolver(SocketAddr);
+
+    impl Resolver for StaticResolver {
+        async fn resolve(&mut self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+            Ok(vec![self.0])
+        }
+    }
+
+    fn hostname_config_for(addr: SocketAddr, connect_timeout: Duration) -> Config {
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .host("scripted.example")
+            .port(addr.port())
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(connect_timeout);
+        config
+    }
+
+    #[compio::test]
+    async fn empty_dns_result_is_a_connect_error() {
+        let mut config = Config::new();
+        config.host("empty.example").ssl_mode(SslMode::Disable);
+        let endpoint = endpoints(&config)
+            .expect("one hostname is a valid endpoint list")
+            .pop()
+            .expect("the endpoint list contains the hostname");
+        let mut resolver = EmptyResolver;
+
+        let error = match endpoint
+            .addresses(&mut resolver, LoadBalanceHosts::Disable)
+            .await
+        {
+            Ok(_) => panic!("an empty DNS result named an address to connect to"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "error connecting to server");
+        let io = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("the connect error must retain its I/O cause");
+        assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(io.to_string(), "could not resolve any addresses");
+    }
+
+    #[compio::test]
+    async fn connect_timeout_covers_dns_resolution() {
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .host("slow.example")
+            .ssl_mode(SslMode::Disable)
+            .connect_timeout(Duration::from_millis(50));
+        let mut resolver = PendingResolver;
+
+        let result = compio::time::timeout(
+            Duration::from_secs(1),
+            connect_with_resolver(NoTls, &config, &mut resolver),
+        )
+        .await
+        .expect("outer watchdog expired because DNS resolution escaped connect_timeout");
+        let error = match result {
+            Ok(_) => panic!("a resolver that never answered produced a connection"),
+            Err(error) => error,
+        };
+
+        let io = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("connection timeout must retain its I/O cause");
+        assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(io.to_string(), "connection timed out");
+    }
+
     #[compio::test]
     async fn connect_timeout_covers_a_server_stalled_during_handshake() {
         let (addr, startup_observed) = scripted_server_after_startup(None).await;
@@ -459,18 +648,93 @@ mod tests {
     }
 
     #[compio::test]
-    async fn connect_timeout_allows_a_handshake_inside_the_deadline() {
+    async fn connect_timeout_allows_dns_and_handshake_inside_deadline() {
         let (addr, startup_observed) =
             scripted_server_after_startup(Some(successful_handshake())).await;
-        let config = config_for(addr, Duration::from_secs(5));
+        let config = hostname_config_for(addr, Duration::from_secs(5));
+        let mut resolver = StaticResolver(addr);
 
-        let connected = compio::time::timeout(Duration::from_secs(10), config.connect(NoTls))
-            .await
-            .expect("outer watchdog expired during a scripted local handshake")
-            .expect("a handshake inside connect_timeout must succeed");
+        let connected = compio::time::timeout(
+            Duration::from_secs(10),
+            connect_with_resolver(NoTls, &config, &mut resolver),
+        )
+        .await
+        .expect("outer watchdog expired during scripted DNS and local handshake")
+        .expect("DNS and a handshake inside connect_timeout must succeed");
         startup_observed
             .await
             .expect("server did not observe the complete startup packet");
         drop(connected);
+    }
+
+    struct ListResolver(Vec<SocketAddr>);
+
+    impl Resolver for ListResolver {
+        async fn resolve(&mut self, _host: &str, _port: u16) -> io::Result<Vec<SocketAddr>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// `connect_timeout` restarts for EVERY resolved address, not once per
+    /// configured host entry.
+    ///
+    /// libpq restarts its deadline whenever `whichhost` OR `whichaddr` moves
+    /// (`fe-connect.c`, `connectDBComplete`):
+    ///
+    /// ```text
+    /// if (flag != PGRES_POLLING_OK && timeout > 0 &&
+    ///     (conn->whichhost != last_whichhost ||
+    ///      conn->whichaddr != last_whichaddr))
+    ///     finish_time = time(NULL) + timeout;
+    /// ```
+    ///
+    /// So a name resolving to N addresses gets N budgets, not one. Wrapping the
+    /// whole per-host walk in a single budget instead means the FIRST address
+    /// that stalls consumes all of it and the remaining addresses are never
+    /// dialled -- a hostname whose first A record is a blackhole becomes
+    /// unreachable even when its second one is healthy.
+    ///
+    /// Asserted on whether the second address was ever DIALLED rather than on
+    /// elapsed wall-clock, so the test states the behaviour instead of timing
+    /// noise.
+    #[compio::test]
+    async fn connect_timeout_restarts_for_each_resolved_address() {
+        let (first, first_seen) = scripted_server_after_startup(None).await;
+        // Same port, second loopback IP: see `scripted_server_bound`.
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (second, second_seen) = scripted_server_bound(second_bind, None).await;
+
+        let config = hostname_config_for(first, Duration::from_millis(150));
+        let mut resolver = ListResolver(vec![first, second]);
+
+        let result = compio::time::timeout(
+            Duration::from_secs(10),
+            connect_with_resolver(NoTls, &config, &mut resolver),
+        )
+        .await
+        .expect("the outer watchdog expired, so some leg had no deadline at all");
+        assert!(
+            result.is_err(),
+            "both addresses stall forever, so this cannot connect"
+        );
+
+        // Bounded, because an address that was never dialled leaves its server
+        // parked in `accept()` still holding the sender -- a bare `.await` here
+        // would hang forever instead of failing.
+        async fn dialled(seen: oneshot::Receiver<()>) -> bool {
+            compio::time::timeout(Duration::from_secs(2), seen)
+                .await
+                .is_ok_and(|received| received.is_ok())
+        }
+
+        assert!(
+            dialled(first_seen).await,
+            "the first address was never dialled"
+        );
+        assert!(
+            dialled(second_seen).await,
+            "the second address was never dialled: one budget was shared across the whole \
+             host walk instead of restarting per address"
+        );
     }
 }
