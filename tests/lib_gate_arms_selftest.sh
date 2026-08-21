@@ -145,8 +145,8 @@ fi
 
 # --- the delegate path ------------------------------------------------------
 #
-# A shim over a gate implemented elsewhere (tests/compose_secret_strength_gate.sh
-# over a Rust binary) has no counts of its own. It must still be held to the
+# A shim over a gate implemented elsewhere (a script that execs a Rust binary)
+# has no counts of its own. It must still be held to the
 # contract, or "become a shim" is how a gate opts out of it. All three cases use
 # the same `sh -c` delegate and differ only in what it prints.
 delegate_silent() {

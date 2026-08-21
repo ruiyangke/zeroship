@@ -682,8 +682,9 @@ services:
     # test suite that silently connects to a stranger's Redis is a worse
     # outcome than one that cannot connect at all.
     #
-    # Loopback-bound, like every non-edge port here; tests/compose_port_exposure_gate.sh
-    # enforces that.
+    # Loopback-bound, like every non-edge port here. That was enforced by
+    # tests/compose_port_exposure_gate.sh until 2026-08-21; it is now a
+    # convention nothing checks.
     ports:
       - "127.0.0.1:6390:6379"
     volumes:

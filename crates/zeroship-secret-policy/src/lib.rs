@@ -4,7 +4,7 @@
 //! A LEAF ON PURPOSE. This was `zeroship_core::config::secrets` until it moved
 //! here. `zeroship-core` declares `cyper`, which pulls `hyper`, which declares
 //! TOKIO, so every consumer of the secret table linked an HTTP stack to reach
-//! it - including `zeroship-gatekit`, whose whole job is to read a compose file
+//! it - including a repository gate whose whole job was to read a compose file
 //! and compare eight strings against [`PLATFORM_SECRETS`]. This crate's entire
 //! dependency set is `base64`, `hex`, `url` and `thiserror`; the zero-tokio gate
 //! is what keeps it that way, by pinning who reaches tokio at all.
@@ -128,10 +128,12 @@ pub struct PlatformSecret {
 /// product enforces on it.
 ///
 /// This is the enumerable form of "which secrets have a minimum". It is read
-/// by `zeroship dev init` (to generate and re-validate the overlay) and by the
-/// compose secret-strength gate (`crates/zeroship-gatekit`), so a deployment
-/// file shipping a value below the floor is a build failure rather than a
-/// crash-loop on the next bring-up.
+/// by `zeroship dev init` (to generate and re-validate the overlay) and by
+/// every service's boot-time credential audit. NOTHING READS IT AGAINST
+/// `deploy/compose/docker-compose.yml` as of 2026-08-21: the compose
+/// secret-strength gate that did was deleted, so a deployment file shipping a
+/// value below the floor is a crash-loop on the next bring-up rather than a
+/// build failure.
 pub const PLATFORM_SECRETS: &[PlatformSecret] = &[
     PlatformSecret {
         env: "ZEROSHIP_CONTROL_KEY",
@@ -646,8 +648,8 @@ mod tests {
         KNOWN_WEAK_WORKER_KEYS, MIN_SECRET_BYTES, PLATFORM_SECRETS,
     };
 
-    /// THE DEFECT THIS TABLE EXISTS FOR. `tests/compose_secret_strength_gate.sh`
-    /// used to derive its rule set by regexing the refusal message text out of
+    /// THE DEFECT THIS TABLE EXISTS FOR. The compose secret-strength gate
+    /// (deleted 2026-08-21) derived its rule set by regexing the message text out of
     /// this file. 2c56e92a3 replaced the baked-in `WORKER_KEY` in those messages
     /// with a `{label}` format parameter - a correct change - and the regex
     /// silently matched nothing from that day on. The gate's anti-vacuity guard

@@ -22,10 +22,6 @@
 #   configured    the one-variable control. Same launch, same flags, real key
 #                 material: must exit 0. Without this arm a gate that refused
 #                 everything would print exactly what this one prints.
-#   compose       `deploy/compose/docker-compose.yml` itself, through
-#                 tests/compose_secret_strength_gate.sh. The compose file is
-#                 what people copy, and a safe code default defeated by the
-#                 project's own deployment artifact is the Loki case.
 #
 # CREDENTIALS ARRIVE THROUGH THE ENVIRONMENT, not through `--<name>-file`, and
 # that is a measurement rather than a convenience. `--check-config` deliberately
@@ -60,6 +56,12 @@
 #     in crates/gateway/src/health.rs and crates/worker/src/health.rs.
 #   - control and auth. Neither is launched here; control's rows are asserted
 #     by its own unit tests. Adding them means standing up Postgres.
+#   - deploy/compose/docker-compose.yml, AS OF 2026-08-21. A `compose` arm
+#     delegated to tests/compose_secret_strength_gate.sh and ruled on 14 of its
+#     checks; that gate was deleted with the rest of the compose gates and this
+#     arm went with it. So the binaries' own defaults are checked here and the
+#     deployment artifact people copy is checked nowhere - which is exactly the
+#     Loki case the arm was added for.
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -352,18 +354,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# The compose file this repository ships. Delegated rather than reimplemented.
-# ---------------------------------------------------------------------------
-COMPOSE_EXAMINED=0
-if "$ROOT/tests/compose_secret_strength_gate.sh" > "$TMP/compose.log" 2>&1; then
-  COMPOSE_EXAMINED=$(grep -cE '^  ok ' "$TMP/compose.log")
-else
-  note_fail "deploy/compose/docker-compose.yml fails the platform secret rules"
-  sed 's/^/    /' "$TMP/compose.log"
-  COMPOSE_EXAMINED=$(grep -cE '^  (ok|FAIL) ' "$TMP/compose.log")
-fi
-
-# ---------------------------------------------------------------------------
 # The census. Floors are bound to what these arms enumerate today and sit
 # under it, so a collapse is visible and ordinary editing is not.
 #   sentinel:       6 launches today (3 gateway, 1 worker, 2 migrated), floor 3
@@ -377,15 +367,12 @@ fi
 #                   pass: the build-profile claim is the one thing no debug
 #                   binary can measure, so a run that skipped it must not print
 #                   what a run that made it prints.
-#   compose:        14 checks today (floor 8) - it was 9 before the floorless
-#                   rows were let in, so the floor must sit under BOTH
 # ---------------------------------------------------------------------------
 gate_arm sentinel   "$SENTINEL_EXAMINED"   3
 gate_arm empty      "$EMPTY_EXAMINED"      2
 gate_arm configured "$CONFIGURED_EXAMINED" 2
 gate_arm subsystem  "$SUBSYSTEM_EXAMINED"  2
 gate_arm profile    "$PROFILE_EXAMINED"    1
-gate_arm compose    "$COMPOSE_EXAMINED"    8
 
 status=0
 if [ "$FAILURES" -ne 0 ]; then

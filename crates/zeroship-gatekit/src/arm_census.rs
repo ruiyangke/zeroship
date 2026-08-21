@@ -253,10 +253,13 @@ pub fn audit(gates: &[GateFile], enumeration_floor: usize) -> Report {
 /// emits.
 ///
 /// A gate written in Rust owes the same account as a shell one, and it has to
-/// be the SAME account: `tests/compose_secret_strength_gate.sh` is a shim over
-/// a Rust binary, and `gate_arms_delegate` refuses unless the binary emits
-/// these lines. Two spellings of the census would let the shim be satisfied by
-/// something the meta-gate cannot read.
+/// be the SAME account: such a gate keeps a `tests/<name>_gate.sh` shim, and
+/// `gate_arms_delegate` refuses unless the binary it execs emits these lines.
+/// Two spellings of the census would let the shim be satisfied by something the
+/// meta-gate cannot read. NO GATE USES THIS PATH AS OF 2026-08-21 - the five
+/// compose gates that did were deleted - so it is pinned only by
+/// `a_rendered_arm_line_parses_back_to_itself` below and by the `sh -c`
+/// delegates in `tests/lib_gate_arms_selftest.sh`.
 #[derive(Debug)]
 pub struct Arm<'a> {
     /// Gate id, matching what `gate_arms_init` would take.

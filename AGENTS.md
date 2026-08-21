@@ -141,17 +141,17 @@ crates/
 │ Tools
 +-- cli/              CLI: serve, deploy, migrate, config, login, logout, whoami, secret, var, dev
                       (no `build` — builds go through @zeroship/vite-plugin)
-+-- zeroship-gatekit/ Repository GATES as Rust: shared docker-compose model, the
-                      green/red/REFUSED verdict type, the META-gate
-                      (`gate-arm-census`, which checks that every gate declares
-                      per arm how much it examined), and the gates themselves.
-                      Not zeroship-test-support - that crate is the test-DATABASE
-                      substrate; these read files and link no driver.
-                      It links no HTTP stack either, as of 2026-08-21: its one
-                      product dependency is zeroship-secret-policy, the leaf
-                      above. `cargo tree -p zeroship-gatekit -i tokio -e normal`
-                      now reports no match. Reaching for zeroship-core again
-                      would silently restore the edge.
++-- zeroship-gatekit/ The repository META-gate as Rust: the green/red/REFUSED
+                      verdict type and `gate-arm-census`, which checks that
+                      every `tests/*_gate.sh` declares per arm how much it
+                      examined. Not zeroship-test-support - that crate is the
+                      test-DATABASE substrate; this one reads files and links
+                      no driver. It ships no dependency at all as of
+                      2026-08-21; the five docker-compose gates it also held
+                      were deleted that day to keep the crate small, so the
+                      compose file has no automated check of its secrets,
+                      published ports, volumes, backing-service reachability or
+                      the unsigned workflow-advance flag.
 ```
 
 **Writing or changing a gate.** Every arm of every gate declares the number of
@@ -171,9 +171,9 @@ A gate written in RUST declares the same arms through
 arm falls under its floor, and keeps a `tests/<name>_gate.sh` SHIM that execs
 the binary through `gate_arms_delegate`. The shim carries no rules; it exists
 because the census enumerates `tests/*_gate.sh`, so deleting it would take the
-gate out of the only check that it declares arms at all. Five compose gates are
-Rust today (`crates/zeroship-gatekit/src/{secret_strength,port_exposure,
-stateful_volume,backing_service_reach,workflow_advance_flag}.rs`).
+gate out of the only check that it declares arms at all. NO GATE IS WRITTEN IN
+RUST TODAY: the five compose gates that were, were deleted on 2026-08-21, and
+every gate is once again a script.
 
 Standalone, zeroship-independent driver libraries (own top-level `libs/`, publishable):
 

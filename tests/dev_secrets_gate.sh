@@ -36,8 +36,9 @@
 #     held its own `ENV_KEYS` copy until 2026-08-20), but the names in that
 #     const are not distinguished in the SOURCE TEXT from any other quoted
 #     uppercase constant, so pairing them here would assert this file's parse
-#     rather than the contract. Reading it as typed data is what
-#     crates/zeroship-gatekit does.
+#     rather than the contract. Reading it as typed data needs a Rust consumer,
+#     and the one that did (a crates/zeroship-gatekit compose gate) was deleted
+#     on 2026-08-21; nothing reads the table against compose today.
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
