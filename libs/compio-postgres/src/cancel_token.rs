@@ -42,6 +42,27 @@ impl CancelToken {
         .await
     }
 
+    /// Send cancellation and wait until the postmaster closes its dedicated
+    /// connection after consuming the packet.
+    ///
+    /// Pool timeout recovery uses this stronger internal primitive before it
+    /// allows the original backend to be reused. The public method preserves
+    /// its established fire-and-forget contract.
+    pub(crate) async fn cancel_query_confirmed<T>(&self, tls: T) -> Result<(), Error>
+    where
+        T: MakeTlsConnect<Socket>,
+    {
+        cancel_query::cancel_query_confirmed(
+            self.socket_config.clone(),
+            self.ssl_mode,
+            self.ssl_negotiation,
+            tls,
+            self.process_id,
+            self.secret_key,
+        )
+        .await
+    }
+
     /// Like `cancel_query`, but uses a stream which is already connected to the server rather than opening a new
     /// connection itself.
     pub async fn cancel_query_raw<S, T>(&self, stream: S, tls: T) -> Result<(), Error>

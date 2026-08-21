@@ -70,16 +70,79 @@ where
     .await
 }
 
+/// Send `CancelRequest` and wait for the postmaster to consume its connection.
+///
+/// The public cancellation API intentionally remains fire-and-forget. Pool
+/// timeout recovery needs the stronger server-close barrier so a late cancel
+/// cannot race with reuse of the original backend.
+pub(crate) async fn cancel_query_confirmed<T>(
+    config: Option<SocketConfig>,
+    ssl_mode: SslMode,
+    ssl_negotiation: SslNegotiation,
+    mut tls: T,
+    process_id: i32,
+    secret_key: i32,
+) -> Result<(), Error>
+where
+    T: MakeTlsConnect<Socket>,
+{
+    let config = match config {
+        Some(config) => config,
+        None => {
+            return Err(Error::connect(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unknown host",
+            )));
+        }
+    };
+
+    let stream = with_connect_timeout(config.connect_timeout, async move {
+        let encryption = first_encryption_for_addr(&config.addr, ssl_mode);
+        let tls = tls
+            .make_tls_connect(config.hostname.as_deref().unwrap_or(""))
+            .map_err(|e| Error::tls(e.into()))?;
+        let has_hostname = config.hostname.is_some();
+
+        let socket = connect_socket::connect_socket(
+            &config.addr,
+            config.port,
+            config.tcp_user_timeout,
+            config.keepalive.as_ref(),
+        )
+        .await?;
+
+        cancel_query_raw::send_cancel_request_with_encryption(
+            socket,
+            encryption,
+            ssl_mode,
+            ssl_negotiation,
+            tls,
+            has_hostname,
+            process_id,
+            secret_key,
+        )
+        .await
+    })
+    .await?;
+
+    // Deliberately outside `with_connect_timeout`: waiting for postmaster EOF
+    // is timeout-recovery synchronization, not connection setup and not a
+    // socket read deadline. The caller bounds the whole recovery operation.
+    cancel_query_raw::wait_for_server_close(stream).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::client::Addr;
     use crate::tls::{ChannelBinding, TlsConnect, TlsStream};
+    use crate::NoTls;
     use compio::buf::{IoBuf, IoBufMut};
     use compio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
     use compio::net::TcpListener;
     #[cfg(unix)]
     use compio::net::UnixListener;
+    use futures_util::future::{Either, select};
     use postgres_protocol::message::frontend;
     use std::future::Future;
     use std::pin::Pin;
@@ -96,6 +159,66 @@ mod tests {
         let mut packet = bytes::BytesMut::new();
         frontend::cancel_request(PROCESS_ID, SECRET_KEY, &mut packet);
         packet.to_vec()
+    }
+
+    #[compio::test]
+    async fn confirmed_cancel_waits_for_postmaster_connection_close() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted cancel server");
+        let addr = listener.local_addr().expect("scripted server address");
+        let (packet_seen_tx, packet_seen_rx) = futures_channel::oneshot::channel();
+        let (allow_close_tx, allow_close_rx) = futures_channel::oneshot::channel();
+
+        let server = compio::runtime::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept cancel connection");
+            assert_eq!(read_exact(&mut stream, 16).await, cancel_packet());
+            packet_seen_tx.send(()).expect("report cancel packet");
+            allow_close_rx.await.expect("allow cancel connection close");
+            drop(stream);
+        });
+
+        let config = SocketConfig {
+            addr: Addr::Tcp(addr.ip()),
+            hostname: Some("localhost".to_string()),
+            port: addr.port(),
+            connect_timeout: None,
+            tcp_user_timeout: None,
+            keepalive: None,
+        };
+        let cancel = Box::pin(cancel_query_confirmed(
+            Some(config),
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            NoTls,
+            PROCESS_ID,
+            SECRET_KEY,
+        ));
+        let packet_seen = Box::pin(packet_seen_rx);
+        let cancel = match select(cancel, packet_seen).await {
+            Either::Left((result, _)) => {
+                panic!(
+                    "confirmed cancellation returned before server EOF: {:?}",
+                    result
+                )
+            }
+            Either::Right((packet_seen, cancel)) => {
+                packet_seen.expect("server did not read cancel packet");
+                cancel
+            }
+        };
+
+        allow_close_tx
+            .send(())
+            .expect("release scripted cancel connection");
+        compio::time::timeout(Duration::from_secs(2), cancel)
+            .await
+            .expect("confirmed cancellation did not observe server EOF")
+            .expect("confirmed cancellation failed");
+        compio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("scripted cancel server timed out")
+            .expect("scripted cancel server panicked");
     }
 
     #[cfg(unix)]

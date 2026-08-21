@@ -382,7 +382,9 @@ enum Kind {
     /// meet the requested property. This stays distinct from a transport
     /// failure so `sslmode=allow` does not retry the same endpoint.
     TargetSessionAttrs,
-    Timeout,
+    /// A deadline configured by the caller around a pooled client command
+    /// expired. This is local policy, not `PostgreSQL`'s `57014` response.
+    CommandTimeout,
 }
 
 struct ErrorInner {
@@ -430,7 +432,7 @@ impl fmt::Display for Error {
             Kind::RowCount => fmt.write_str("query returned an unexpected number of rows"),
             Kind::Connect => fmt.write_str("error connecting to server"),
             Kind::TargetSessionAttrs => fmt.write_str("error checking target session attributes"),
-            Kind::Timeout => fmt.write_str("timeout waiting for server"),
+            Kind::CommandTimeout => fmt.write_str("client command timeout expired"),
         }
     }
 }
@@ -466,6 +468,17 @@ impl Error {
     /// [`Kind::Cancelled`]. Discard it and open another.
     pub fn is_cancelled(&self) -> bool {
         self.0.kind == Kind::Cancelled
+    }
+
+    /// Whether a pooled client's configured command deadline expired.
+    ///
+    /// This reports only the client-side deadline from
+    /// [`crate::PoolConfig::command_timeout`]. A server-side cancellation,
+    /// including `PostgreSQL`'s `statement_timeout`, remains a database error
+    /// with SQLSTATE `57014` and returns `false` here.
+    #[must_use]
+    pub fn is_command_timeout(&self) -> bool {
+        self.0.kind == Kind::CommandTimeout
     }
 
     /// Whether this is a failure of the TLS handshake itself.
@@ -579,8 +592,7 @@ impl Error {
         Error::new(Kind::TargetSessionAttrs, e.into_source())
     }
 
-    #[doc(hidden)]
-    pub fn __private_api_timeout() -> Error {
-        Error::new(Kind::Timeout, None)
+    pub(crate) fn command_timeout(cause: Option<Box<dyn error::Error + Sync + Send>>) -> Error {
+        Error::new(Kind::CommandTimeout, cause)
     }
 }

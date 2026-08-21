@@ -697,7 +697,7 @@ pub struct InnerClient {
     ///
     /// `None` for [`Config::connect_raw`](crate::Config::connect_raw), whose
     /// stream belongs to the caller and need not be a socket at all.
-    _release: Option<ConnectionRelease>,
+    release: Option<ConnectionRelease>,
 }
 
 impl InnerClient {
@@ -1160,7 +1160,7 @@ impl Client {
                 dirty: AtomicBool::new(false),
                 tx_status: Arc::new(AtomicU8::new(b'I')),
                 in_flight_requests: Arc::new(AtomicUsize::new(0)),
-                _release: release,
+                release,
             }),
             socket_config: None,
             ssl_mode,
@@ -1850,6 +1850,18 @@ impl Client {
     #[doc(hidden)]
     pub fn __private_api_close(&mut self) {
         self.inner.sender.close_channel()
+    }
+
+    /// Retire this physical session without waiting for the connection task.
+    ///
+    /// Pool command-timeout recovery calls this only when it cannot prove a
+    /// trailing `ReadyForQuery` was drained. The synchronous socket shutdown
+    /// prevents the still-running backend from outliving the poisoned lease.
+    pub(crate) fn force_close(&self) {
+        self.inner.sender.close_channel();
+        if let Some(release) = &self.inner.release {
+            release.shutdown();
+        }
     }
 }
 
