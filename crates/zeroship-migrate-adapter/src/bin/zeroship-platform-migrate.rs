@@ -199,6 +199,17 @@ where
     })
 }
 
+/// The default `db/migrations-ts` directory, resolved relative to the repo root
+/// (the crate is two levels below it: `crates/zeroship-migrate-adapter`).
+fn default_migrations_dir() -> PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .ancestors()
+        .nth(2)
+        .map(|root| root.join("db").join("migrations-ts"))
+        .unwrap_or_else(|| PathBuf::from("db/migrations-ts"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -302,15 +313,4 @@ mod tests {
             "got {error:?}"
         );
     }
-}
-
-/// The default `db/migrations-ts` directory, resolved relative to the repo root
-/// (the crate is two levels below it: `crates/zeroship-migrate-adapter`).
-fn default_migrations_dir() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    manifest
-        .ancestors()
-        .nth(2)
-        .map(|root| root.join("db").join("migrations-ts"))
-        .unwrap_or_else(|| PathBuf::from("db/migrations-ts"))
 }

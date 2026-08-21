@@ -90,7 +90,7 @@
 # nothing. The gate REFUSES with exit 2 in that case rather than returning a
 # narrower green. See the preflight block below for how the list is derived.
 #
-# THREE ARMS
+# FOUR ARMS
 #
 #   1. LINT VERDICT. Any diagnostic at level "error" owned by a workspace
 #      package is a failure. Errors are SPLIT by whether their code is a
@@ -109,6 +109,48 @@
 #      The enabled feature set is resolved by asking `cargo metadata` for it
 #      under the SAME `--features` flags the lint run uses, so the two cannot
 #      disagree about which targets were in scope.
+#
+#   4. FEATURE COVERAGE. Every non-`default` feature the workspace members
+#      declare must have been ENABLED by the run. This is the arm that was
+#      missing until 2026-08-20, and its absence is arm 3's own failure mode one
+#      level out - see the next section.
+#
+# WHY ARM 4 EXISTS: A TARGET THAT DOES NOT EXIST CANNOT BE "UNLINTED"
+#
+# Arms 2 and 3 audit per-package and per-target coverage OF ONE FEATURE
+# RESOLUTION. A target whose `required-features` that resolution does not
+# satisfy is not counted as unlinted - it is filtered out of the expectation by
+# the `select` that builds `expected.tsv`, so it is not in arm 3's bookkeeping
+# at all. The gate then reports full coverage of a workspace it has silently
+# made smaller, which is the same "a tool that stopped early and a tool that
+# found nothing print the same thing" confusion the whole file is built around.
+#
+# MEASURED on main at 6d3ca2d84, with the two-feature list this gate used to
+# carry (`zeroship-control/live-db-tests,zeroship-migrated/live-db-tests`):
+#
+#   declared non-default features across the 30 members   28
+#   features that resolution enabled                      10
+#   features it did not                                   18
+#   DECLARED TARGETS dropped by the required-features
+#     filter, and therefore absent from arm 3             10
+#
+# One of those ten was `zeroship-migrate-adapter`'s `platform_migrate` test.
+# Linting it needs only `--features platform-cli`, and doing so reports ELEVEN
+# deny-level `clippy::await_holding_lock` errors plus, in the sibling
+# `zeroship-platform-migrate` bin the same feature gates, one
+# `clippy::items_after_test_module`. Twelve deny-level errors in a workspace
+# this gate had just called clean. None of them are new; the gate had never
+# compiled the code they are in.
+#
+# THE FIX IS NOT "ADD platform-cli TO THE LIST". That closes one hole and leaves
+# the mechanism blind, and a hand-maintained list of features is a census - the
+# shape this repo's gates keep failing at. So the run enables `--all-features`
+# and arm 4 checks, against `cargo metadata` resolved under the same flag, that
+# every declared feature really came out enabled. A feature added to any crate
+# tomorrow is linted without anyone touching this file; a feature that CANNOT be
+# enabled is NAMED, with the targets it gates, instead of vanishing.
+#
+# WHAT IT COSTS, measured on this workspace: see the CARGO_ARGS comment below.
 #
 # READING A RED RUN: THE COVERAGE NUMBER IS ONLY STABLE WHEN IT IS GREEN
 #
@@ -130,17 +172,15 @@
 # Read this before treating three green arms as completeness. They are checks on
 # the RUN, and the run's scope is set by the FEATURES constant below.
 #
-#   - NARROWING `FEATURES` IN THIS SCRIPT IS INVISIBLE TO ARM 3, BECAUSE ARM 3
-#     RESOLVES ITS EXPECTATION UNDER THAT SAME LIST. Delete a feature and the
-#     targets it gated leave the expected set and the observed set together; the
-#     comparison stays balanced, the count drops, and every arm reports green on
-#     a smaller workspace. This is the one place the expectation and the subject
-#     share a source, and it is the blind spot that matters most: it is the
-#     `--all-targets`/`required-features` coverage loss the old ci.yml comment
-#     warned about, reappearing one level up where the guard cannot look at it.
-#     Only review catches an edit to that constant. Widening it is always safe.
-#   - Code behind a `cfg` this build does not enable, or a target platform this
-#     machine is not. Clippy lints what it compiles.
+#   - THE `off` ARM OF EVERY FEATURE. `--all-features` compiles the code behind
+#     `#[cfg(feature = "x")]` for every x, and therefore compiles the code behind
+#     `#[cfg(not(feature = "x"))]` for NONE of them. crates/runtime's WebSocket
+#     polyfill fallback and plugin-db's no-backend arms are real code this run
+#     never sees. Covering both arms of n features needs 2^n runs; this gate
+#     covers one point of that space and arm 4 states which point. A
+#     `not(feature)` arm is a review question, not a gate question.
+#   - Code behind a non-feature `cfg` this build does not enable, or a target
+#     platform this machine is not. Clippy lints what it compiles.
 #   - A target deleted from Cargo.toml. It leaves both the expected and the
 #     observed set in the same commit, so the comparison stays balanced and
 #     silent. Deletions are a review question, not a gate question.
@@ -160,12 +200,13 @@
 #
 # EXIT CODES
 #   0  every target linted, no deny-level errors
-#   1  a lint failed, or a target went unlinted
+#   1  a lint failed, a target went unlinted, or a declared feature was not
+#      enabled
 #   2  the gate could not run, or could not be trusted to have measured anything
 #
 # REDIRECTING THE CORPUS, and why each group is all-or-nothing.
 #
-#   --metadata <file> --min-members <n> --min-targets <n>
+#   --metadata <file> --min-members <n> --min-targets <n> --min-features <n>
 #                        pre-captured `cargo metadata` json (skips cargo), plus
 #                        the bounds that json's own arms are held to
 #   --src-roots "<dirs>" --min-literals <n>
@@ -207,43 +248,62 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/lib/gate_arms.sh"
 gate_arms_init clippy
 
-# The feature list lives HERE and nowhere else, so the local run and the CI run
-# cannot lint different sets of targets. It was carried over verbatim from the
-# ci.yml step this replaced, with its reasoning:
+# The feature selection lives HERE and nowhere else, so the local run and the CI
+# run cannot lint different sets of targets, and `cargo metadata` below is asked
+# with the SAME flag so the two cannot disagree about what was in scope.
+#
+# It was `--features zeroship-control/live-db-tests,zeroship-migrated/live-db-tests`
+# until 2026-08-20, carried over verbatim from the ci.yml step this replaced:
 #
 #   `--all-targets` only reaches targets whose `required-features` are
 #   satisfied, so the 45 live-database test files would silently stop being
 #   linted the moment they were gated. Naming the feature keeps exactly the set
 #   that was linted before still linted.
 #
-# Adding a feature here widens what is linted and is always safe. Removing one
-# narrows it, which is the failure mode arm 3 exists to catch - and arm 3 will
-# NOT catch it, because it resolves its expectation under this same list. That
-# is the one place the expectation and the subject share a source; a removal
-# here has to be caught in review.
-FEATURES="zeroship-control/live-db-tests,zeroship-migrated/live-db-tests"
+# That reasoning is right and the list was the wrong instrument for it. It named
+# the two features somebody had noticed; the workspace declared 28, and the 18 it
+# omitted gated 10 declared targets and, in one of them, 12 standing deny-level
+# errors. A list of features somebody remembered to add is a census, and this
+# repo's gates keep failing that way. `--all-features` needs nobody to remember.
+#
+# WHAT IT COSTS. Nothing at steady state: this is still ONE invocation resolving
+# ONE feature set into ONE target directory, so it is not a matrix and does not
+# multiply CI time or disk the way a second `--features` pass would. What it does
+# add is the extra work that set implies - the ~10 targets the old list filtered
+# out, the ~290 `#[cfg(feature = "test-helpers")]` sites in plugin-db that now
+# compile, and the type-mapping dependencies compio-postgres's `with-*` features
+# pull in (jiff, geo-types, cidr, eui48, bit-vec, smol_str, time). MEASURED on
+# this workspace, cold target dir, in the commit that introduced this line:
+# see docs below the arm-4 block for the before/after target counts.
+FEATURE_ARGS=(--all-features)
 
 # Not `-D warnings`. The workspace grades its lints in the root Cargo.toml
 # `[workspace.lints]` table - `clippy::all` deny, `pedantic` and `nursery` warn -
 # and flattening that grading would promote every pedantic and nursery warning
 # to a hard error, which the workspace does not satisfy and is not trying to.
 # Deny-level lints still fail, because they are declared deny.
-CARGO_ARGS=(clippy --workspace --all-targets --features "$FEATURES")
+CARGO_ARGS=(clippy --workspace --all-targets "${FEATURE_ARGS[@]}")
 
 # MEASURED 2026-08-20 on this workspace, each by running the gate and reading
 # the arm line it printed:
 #
 #   workspace members            30   (--audit-only, arm workspace_members)
-#   feature-enabled targets     146   (--audit-only, arm expected_targets)
-#   include_str! literals       239   (--preflight-only, arm preflight_include_str)
+#   feature-enabled targets     158   (--audit-only, arm expected_targets)
+#                                     148 under the two-feature list this
+#                                     replaced; the 10 new ones are the targets
+#                                     whose required-features that list did not
+#                                     satisfy, listed in the arm-4 comment below
+#   declared features            28   (--audit-only, arm declared_features)
+#   include_str! literals       243   (--preflight-only, arm preflight_include_str)
 #
 # MIN_MEMBERS is a bound on arm 2's DENOMINATOR, not on arm 2: the arm's floor is
 # the member count itself, so a metadata blob that collapsed would satisfy
-# completeness with nothing in it. The other two are floors on the arm directly,
-# set well under today's number - far enough that ordinary editing does not reach
-# them, close enough that a collapse does.
+# completeness with nothing in it. The other three are floors on the arm
+# directly, set well under today's number - far enough that ordinary editing does
+# not reach them, close enough that a collapse does.
 MIN_MEMBERS_DEFAULT=20
 MIN_TARGETS_DEFAULT=100
+MIN_FEATURES_DEFAULT=18
 MIN_LITERALS_DEFAULT=150
 
 MODE="run"
@@ -252,13 +312,14 @@ META=""
 SRC_ROOTS=""
 MIN_MEMBERS=""
 MIN_TARGETS=""
+MIN_FEATURES=""
 MIN_LITERALS=""
 meta_group=0
 roots_group=0
 
 usage() {
   echo "usage: $0 [--audit-only <cargo-json> | --preflight-only]" >&2
-  echo "          [--metadata F --min-members N --min-targets N]" >&2
+  echo "          [--metadata F --min-members N --min-targets N --min-features N]" >&2
   echo "          [--src-roots \"DIRS\" --min-literals N]" >&2
 }
 
@@ -282,6 +343,7 @@ while [ "$#" -gt 0 ]; do
     --metadata)     need_value "$1" "$#"; META="$2";         meta_group=$((meta_group + 1));  shift 2 ;;
     --min-members)  need_value "$1" "$#"; MIN_MEMBERS="$2";  meta_group=$((meta_group + 1));  shift 2 ;;
     --min-targets)  need_value "$1" "$#"; MIN_TARGETS="$2";  meta_group=$((meta_group + 1));  shift 2 ;;
+    --min-features) need_value "$1" "$#"; MIN_FEATURES="$2"; meta_group=$((meta_group + 1));  shift 2 ;;
     --src-roots)    need_value "$1" "$#"; SRC_ROOTS="$2";    roots_group=$((roots_group + 1)); shift 2 ;;
     --min-literals) need_value "$1" "$#"; MIN_LITERALS="$2"; roots_group=$((roots_group + 1)); shift 2 ;;
     *) usage; exit 2 ;;
@@ -289,9 +351,9 @@ while [ "$#" -gt 0 ]; do
 done
 
 # A corpus half-redirected is a corpus measured against somebody else's floor.
-if [ "$meta_group" -ne 0 ] && [ "$meta_group" -ne 3 ]; then
-  echo "error: --metadata, --min-members and --min-targets must be given together" >&2
-  echo "       ($meta_group of 3 present). A supplied metadata corpus gated against" >&2
+if [ "$meta_group" -ne 0 ] && [ "$meta_group" -ne 4 ]; then
+  echo "error: --metadata, --min-members, --min-targets, --min-features must be given together" >&2
+  echo "       ($meta_group of 4 present). A supplied metadata corpus gated against" >&2
   echo "       this workspace's numbers is the defect these flags replaced." >&2
   exit 2
 fi
@@ -301,7 +363,11 @@ if [ "$roots_group" -ne 0 ] && [ "$roots_group" -ne 2 ]; then
   exit 2
 fi
 
-[ "$meta_group" -eq 3 ] || { MIN_MEMBERS="$MIN_MEMBERS_DEFAULT"; MIN_TARGETS="$MIN_TARGETS_DEFAULT"; }
+[ "$meta_group" -eq 4 ] || {
+  MIN_MEMBERS="$MIN_MEMBERS_DEFAULT"
+  MIN_TARGETS="$MIN_TARGETS_DEFAULT"
+  MIN_FEATURES="$MIN_FEATURES_DEFAULT"
+}
 [ "$roots_group" -eq 2 ] || { SRC_ROOTS="crates libs"; MIN_LITERALS="$MIN_LITERALS_DEFAULT"; }
 
 if [ "$MODE" = "audit" ] && { [ -z "$CAPTURED" ] || [ ! -f "$CAPTURED" ]; }; then
@@ -464,12 +530,12 @@ fi
 #   path+file:///.../libs/compio-postgres#0.1.0         <- name absent
 #
 # `cargo metadata` states the mapping instead of inferring it. It is asked with
-# the SAME --features as the lint run, so `.resolve.nodes[].features` is the
+# the SAME feature flags as the lint run, so `.resolve.nodes[].features` is the
 # feature set the run actually had, and the required-features filter below is
 # exact rather than a guess.
 if [ -z "$META" ]; then
   META="$TMP/metadata.json"
-  if ! (cd "$ROOT" && cargo metadata --format-version 1 --features "$FEATURES") > "$META" 2>"$TMP/meta.err"; then
+  if ! (cd "$ROOT" && cargo metadata --format-version 1 "${FEATURE_ARGS[@]}") > "$META" 2>"$TMP/meta.err"; then
     echo "error: cargo metadata failed; the expected target set cannot be built" >&2
     tail -5 "$TMP/meta.err" >&2
     exit 2
@@ -539,6 +605,81 @@ if ! gate_arm expected_targets "$(grep -c . "$TMP/expected.tsv" || true)" "$MIN_
   echo "error: too few expected targets derived from cargo metadata" >&2
   exit 2
 fi
+
+# --- arm 4's corpus: declared features vs enabled features -----------------
+#
+# THIS IS THE ARM THAT WAS MISSING, and its absence is the failure the header
+# describes: arm 3's expectation is FILTERED by the run's own feature set, so a
+# target the run cannot build is not "unlinted" in its bookkeeping - it is not
+# there. Arm 3 then reports 148 of 148 on a workspace that declares 158.
+#
+# What the two-feature list this gate carried until 2026-08-20 left out, taken
+# from this same jq under that list:
+#
+#   compio-postgres/live-tls-tests       tls_live             (test)
+#   compio-postgres/tls                  "                    "
+#   zeroship-migrate-adapter/platform-cli  platform_migrate   (test)
+#                                          zeroship-platform-migrate (bin)
+#   zeroship-plugin-db/live-db-tests     distributed_live     (test)
+#   zeroship-plugin-db/test-helpers      integration          (test)
+#                                        missing_role         (test)
+#                                        native_transaction   (test)
+#                                        sqlite_integration   (test)
+#   zeroship-runtime/bench-bins          echo-server          (bin)
+#                                        zeroship-bench-server (bin)
+#
+# Ten targets, and `platform_migrate` alone held eleven standing deny-level
+# `clippy::await_holding_lock` errors while this gate reported the workspace
+# clean. `test-helpers` additionally gates ~290 `#[cfg(feature = ...)]` sites
+# INSIDE plugin-db's already-linted lib, which no target-level accounting could
+# ever have noticed were missing.
+#
+# The verdict is deferred to the reporting section below so the arms print in
+# order; only the corpus and its anti-vacuity floor are established here.
+jq -r '
+  (.workspace_members // []) as $ws
+  | (reduce (.resolve.nodes // [])[] as $n ({}; .[$n.id] = ($n.features // []))) as $feat
+  | .packages[]
+  | select(.id as $i | $ws | index($i))
+  | . as $p
+  | ($feat[$p.id] // []) as $enabled
+  | (($p.features // {}) | keys | map(select(. != "default"))[])
+  | . as $f
+  | [$p.name, $f, (if ($enabled | index($f)) then "on" else "OFF" end)] | @tsv
+' "$META" | sort -u > "$TMP/features.tsv"
+
+# feature<TAB>target<TAB>kind, so a feature reported OFF can be printed with the
+# targets it gates rather than as a bare name nobody can act on. Keyed
+# `pkg/feature` because `required-features` entries are bare names scoped to
+# their own package, and two packages can declare the same one - `live-db-tests`
+# is declared by three.
+jq -r '
+  (.workspace_members // []) as $ws
+  | .packages[]
+  | select(.id as $i | $ws | index($i))
+  | . as $p
+  | $p.targets[]
+  | . as $t
+  | (((($t."required-features") // [])[]))
+  | [($p.name + "/" + .), $t.name, ($t.kind[0] // "?")] | @tsv
+' "$META" | sort -u > "$TMP/feature_targets.tsv"
+
+# Arm 4 rules on every declared non-`default` feature: one on/OFF verdict each.
+# `default` is excluded because it is not a thing that can go unlinted - cargo
+# enables it unless told otherwise, and counting it would inflate this number by
+# one per package for no verdict.
+#
+# The floor cannot be derived the way arm 2's is: nothing in the metadata says
+# how many features a workspace OUGHT to declare. So it travels with the corpus,
+# like MIN_TARGETS. MEASURED 2026-08-20 on this workspace: 28.
+if ! gate_arm declared_features "$(grep -c . "$TMP/features.tsv" || true)" "$MIN_FEATURES"; then
+  echo "error: too few declared features derived from cargo metadata - either the" >&2
+  echo "       .packages[].features shape changed or the join dropped every member," >&2
+  echo "       and an empty feature list reads as full feature coverage." >&2
+  exit 2
+fi
+
+UNENABLED_FEATURES="$(awk -F'\t' '$3 == "OFF" {print $1 "/" $2}' "$TMP/features.tsv")"
 
 # --- run clippy ------------------------------------------------------------
 JSON="$TMP/clippy.json"
@@ -675,6 +816,37 @@ if [ -n "$UNREACHED_TARGETS" ]; then
   fi
 fi
 
+# --- arm 4: feature coverage -----------------------------------------------
+#
+# The three arms above all audit ONE feature resolution. This one audits the
+# resolution itself, against the features the manifests declare - a source the
+# run cannot influence. It is what makes the `--all-features` above checkable
+# rather than merely intended: edit the invocation back to a narrow
+# `--features a,b` and arms 1-3 stay green on a smaller workspace, exactly as
+# they did for the two years the platform-cli targets went uncompiled, while
+# this arm names every feature that dropped out.
+#
+# A feature that CANNOT be enabled - one that conflicts with another, or needs a
+# toolchain this machine has not got - belongs here as a named, reviewed failure,
+# not as an exemption list. An exemption list is a census and would rot the same
+# way the feature list did. There is no such feature on this workspace today;
+# `--all-features` resolves and compiles.
+if [ -n "$UNENABLED_FEATURES" ]; then
+  rc=1
+  n="$(printf '%s\n' "$UNENABLED_FEATURES" | grep -c . || true)"
+  echo "::error::$n declared workspace feature(s) were NOT enabled by this run - the code and targets they gate were never compiled, so nothing above says anything about them"
+  while IFS= read -r feat; do
+    [ -n "$feat" ] || continue
+    echo "  $feat"
+    awk -F'\t' -v f="$feat" '$1 == f {printf "      gates target %s (%s)\n", $2, $3}' \
+      "$TMP/feature_targets.tsv"
+  done <<< "$UNENABLED_FEATURES"
+  echo "  A target whose required-features are unmet is not counted as unlinted by"
+  echo "  arm 3 - it is filtered out of arm 3's expectation, so the coverage"
+  echo "  numbers above balance on a workspace this run made smaller. Enable the"
+  echo "  feature, or delete it if nothing needs it."
+fi
+
 # --- the numbers -----------------------------------------------------------
 OBS_T="$(grep -c . "$TMP/observed.tsv" || true)"
 EXP_T="$(grep -c . "$TMP/expected.tsv" || true)"
@@ -701,7 +873,11 @@ EXP_P="$(grep -c . "$TMP/expected_pkgs.txt" || true)"
 # something on a green run fires on every ordinary red one.
 gate_arm linted_targets "$OBS_T" 1 || true
 
+FEAT_ALL="$(grep -c . "$TMP/features.tsv" || true)"
+FEAT_OFF="$(printf '%s' "$UNENABLED_FEATURES" | grep -c . || true)"
+
 echo "linted:   $OBS_T targets in $OBS_P packages (expected $EXP_T in $EXP_P)"
+echo "features: $((FEAT_ALL - FEAT_OFF)) of $FEAT_ALL declared non-default workspace features enabled"
 echo "warnings: $WARN_COUNT distinct lint codes (pedantic/nursery are warn by design; not gated)"
 if [ "$EXTERNAL_ERRS" -gt 0 ]; then
   echo "note:     $EXTERNAL_ERRS error(s) in non-workspace crates, not gated on here"

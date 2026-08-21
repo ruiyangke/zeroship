@@ -17,6 +17,13 @@
 #   a broken instrument MUST NOT read as a
 #     clean tree                              - an empty stream and a spotless
 #                                               workspace are the same bytes
+#   a feature the run did not enable MUST
+#     be red and NAMED                        - the same failure one level out:
+#                                               a target the run cannot build is
+#                                               not "unlinted", it is filtered
+#                                               out of the expectation, so the
+#                                               coverage numbers balance on a
+#                                               workspace the run made smaller
 #
 # Every case runs against fixtures. None of it builds anything, so this is a
 # second-scale check that can run on every commit, unlike the gate itself.
@@ -56,12 +63,12 @@ cat > "$TMP/metadata.json" <<EOF
       {"name": "pkg-alpha", "kind": ["lib"]},
       {"name": "alpha_it", "kind": ["test"]}
     ]},
-    {"id": "$ID_M", "name": "pkg-mike", "targets": [
+    {"id": "$ID_M", "name": "pkg-mike", "features": {"default": [], "live-db-tests": []}, "targets": [
       {"name": "pkg-mike", "kind": ["lib"]},
       {"name": "mike_it", "kind": ["test"]},
       {"name": "mike_live", "kind": ["test"], "required-features": ["live-db-tests"]}
     ]},
-    {"id": "$ID_Z", "name": "pkg-zulu", "targets": [
+    {"id": "$ID_Z", "name": "pkg-zulu", "features": {"cfg-only": []}, "targets": [
       {"name": "pkg-zulu", "kind": ["lib"]}
     ]},
     {"id": "$ID_EXT", "name": "serde", "targets": [
@@ -71,7 +78,7 @@ cat > "$TMP/metadata.json" <<EOF
   "resolve": {"nodes": [
     {"id": "$ID_A", "features": []},
     {"id": "$ID_M", "features": ["live-db-tests"]},
-    {"id": "$ID_Z", "features": []},
+    {"id": "$ID_Z", "features": ["cfg-only"]},
     {"id": "$ID_EXT", "features": []}
   ]}
 }
@@ -116,11 +123,14 @@ full_stream() {
 # So the corpus and its bounds travel together, on argv, declared here per call.
 # `--min-targets 5` is the number case 6 deliberately resolves down to; if a
 # target is later deleted from the fixture this goes red, which is correct - the
-# fixture changed and its declaration must change with it.
+# fixture changed and its declaration must change with it. `--min-features 2` is
+# the two non-`default` features the fixture declares: `pkg-mike/live-db-tests`
+# (which gates a target) and `pkg-zulu/cfg-only` (which gates none, the shape
+# plugin-db's `test-helpers` has - 290 cfg sites inside an already-linted lib).
 run() {
   OUT="$("$GATE" --audit-only "$1" \
            --metadata "${2:-$TMP/metadata.json}" \
-           --min-members 3 --min-targets 5 2>&1)"
+           --min-members 3 --min-targets 5 --min-features 2 2>&1)"
   RC=$?
 }
 
@@ -227,13 +237,53 @@ if printf '%s\n' "$OUT" | grep -q "NOT REACHED"; then
 fi
 
 # ------------------------------------------------------------------- case 6
-# A target whose required-features the run did NOT enable is out of scope and
-# must not be demanded. Same stream as case 1, but resolved with the feature
-# off: `mike_live` disappears from BOTH sides and the run is still green.
+# THE DEFECT ARM 4 EXISTS FOR, and case 1 is its one-variable control: the same
+# artifact stream, the same fixture, differing only in whether the resolve node
+# enables `live-db-tests`.
+#
+# With the feature off, `mike_live` leaves the EXPECTED set and the OBSERVED set
+# together. Arm 3's comparison stays balanced - correctly, since a target cargo
+# cannot build is not a target that went unlinted - and the count silently drops
+# from 6 to 5. Until 2026-08-20 that was the whole result: exit 0, "expected 5",
+# green. That is how zeroship-migrate-adapter's `platform_migrate` sat outside
+# the gate with eleven deny-level errors in it.
+#
+# So the shrink must be RED, named by feature and by the target it took with it,
+# and it must NOT be double-reported by arm 3 under a heading that means
+# something else.
 sed 's/"features": \["live-db-tests"\]/"features": []/' "$TMP/metadata.json" > "$TMP/metadata_nofeat.json"
 run "$TMP/clean.json" "$TMP/metadata_nofeat.json"
-check "a target gated off by required-features is not demanded" 0 \
-  "linted:   6 targets in 3 packages (expected 5 in 3)"
+check "a feature the run did not enable is named, not silently dropped" 1 \
+  "were NOT enabled by this run" "pkg-mike/live-db-tests" "gates target mike_live (test)" \
+  "linted:   6 targets in 3 packages (expected 5 in 3)" \
+  "features: 1 of 2 declared non-default workspace features enabled"
+if printf '%s\n' "$OUT" | grep -q "went unlinted"; then
+  echo "FAIL: a target cargo was never asked to build is not an unlinted target"
+  printf '%s\n' "$OUT" | sed 's/^/       /'
+  fail=$((fail + 1)); pass=$((pass - 1))
+fi
+
+# ------------------------------------------------------------------ case 6b
+# A feature that gates NO target at all. This is the case no target-level
+# accounting can ever reach: `pkg-zulu/cfg-only` gates only `#[cfg(feature)]`
+# code inside a lib that is linted either way, so every artifact still appears
+# and every count still balances. It is the shape of plugin-db's `test-helpers`
+# (~290 cfg sites, and four test targets besides). Arm 4 must name it with no
+# "gates target" line to hang it on.
+sed 's/"features": \["cfg-only"\]/"features": []/' "$TMP/metadata.json" > "$TMP/metadata_nocfg.json"
+run "$TMP/clean.json" "$TMP/metadata_nocfg.json"
+check "a feature that gates only cfg-code, not targets, is still named" 1 \
+  "were NOT enabled by this run" "pkg-zulu/cfg-only" \
+  "linted:   6 targets in 3 packages (expected 6 in 3)"
+
+# ------------------------------------------------------------------ case 6c
+# THE INSTRUMENT ARM FOR ARM 4. Metadata whose packages declare no features at
+# all makes "every declared feature was enabled" vacuously true, and a vacuous
+# arm 4 prints exactly what full feature coverage prints. Refuse it.
+jq '.packages = [.packages[] | del(.features)]' "$TMP/metadata.json" > "$TMP/metadata_nofeatures.json"
+run "$TMP/clean.json" "$TMP/metadata_nofeatures.json"
+check "metadata declaring no features at all is refused, not read as full coverage" 2 \
+  "too few declared features"
 
 # ------------------------------------------------------------------- case 7
 # THE INSTRUMENT ARM. An empty stream and a spotless workspace are the same
