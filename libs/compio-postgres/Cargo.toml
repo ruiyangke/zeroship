@@ -172,3 +172,7 @@ workspace = true
 [[bench]]
 name = "query_live"
 harness = false
+
+[[bench]]
+name = "hot_path"
+harness = false
