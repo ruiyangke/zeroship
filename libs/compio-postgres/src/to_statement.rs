@@ -16,12 +16,35 @@ mod private {
         Uncached(&'a str),
     }
 
-    impl ToStatementType<'_> {
-        pub(crate) async fn into_statement(self, client: &Arc<InnerClient>) -> Result<Statement, Error> {
+    pub(crate) struct StatementExecution<'a> {
+        pub(crate) statement: Statement,
+        pub(crate) cache_sql: Option<&'a str>,
+    }
+
+    impl<'a> ToStatementType<'a> {
+        pub(crate) async fn into_statement(
+            self,
+            client: &Arc<InnerClient>,
+        ) -> Result<StatementExecution<'a>, Error> {
             match self {
-                ToStatementType::Statement(s) => Ok(s.clone()),
-                ToStatementType::Query(s) => prepare::prepare_cached(client, s).await,
-                ToStatementType::Uncached(s) => prepare::prepare(client, s, &[]).await,
+                // Explicit Statements stay caller-owned. Repreparing one would
+                // silently replace its identity and result metadata underneath
+                // the caller instead of making them opt into a fresh prepare.
+                ToStatementType::Statement(statement) => Ok(StatementExecution {
+                    statement: statement.clone(),
+                    cache_sql: None,
+                }),
+                ToStatementType::Query(sql) => {
+                    let cached = prepare::prepare_cached_with_origin(client, sql).await?;
+                    Ok(StatementExecution {
+                        statement: cached.statement,
+                        cache_sql: cached.cache_hit.then_some(sql),
+                    })
+                }
+                ToStatementType::Uncached(sql) => Ok(StatementExecution {
+                    statement: prepare::prepare(client, sql, &[]).await?,
+                    cache_sql: None,
+                }),
             }
         }
     }

@@ -551,6 +551,25 @@ fn statement_uses_cached_typeinfo(statement: &Statement) -> bool {
         .any(|type_| Type::from_oid(type_.oid()).is_none())
 }
 
+/// Whether reparsing can heal this cached-statement failure.
+///
+/// Match `26000` broadly, as pgjdbc does. `0A000` covers many unrelated
+/// unsupported features, so match PostgreSQL's plan-cache routines rather
+/// than hiding every error in that broad SQLSTATE class. These are the same
+/// stable routine names pgjdbc uses for its one-shot reparse decision.
+fn cached_statement_error_can_retry(error: &Error) -> bool {
+    match error.code() {
+        Some(code) if code == &crate::error::SqlState::INVALID_SQL_STATEMENT_NAME => true,
+        Some(code) if code == &crate::error::SqlState::FEATURE_NOT_SUPPORTED => error
+            .as_db_error()
+            .and_then(crate::error::DbError::routine)
+            .is_some_and(|routine| {
+                matches!(routine, "RevalidateCachedQuery" | "RevalidateCachedPlan")
+            }),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod type_cache_tests {
     use super::{Client, statement_uses_cached_typeinfo};
@@ -1155,6 +1174,35 @@ impl Client {
         &self.inner
     }
 
+    /// Return one freshly resolved replacement when an implicit cache entry
+    /// failed before producing caller-visible output.
+    ///
+    /// The Sync is a FIFO barrier for the failed request's trailing
+    /// ReadyForQuery. Without it, `transaction_status()` may still be `None`
+    /// and its last byte may still describe the state before PostgreSQL
+    /// aborted an open transaction.
+    async fn reprepare_cached_statement_once(
+        &self,
+        cache_sql: Option<&str>,
+        started_idle: bool,
+        error: &Error,
+    ) -> Option<Result<Statement, Error>> {
+        let sql = cache_sql
+            .filter(|_| started_idle && cached_statement_error_can_retry(error))?;
+        if query::sync(self.inner()).await.is_err()
+            || self.inner.transaction_status() != Some(TransactionStatus::Idle)
+        {
+            // No retry attempt began. Keep the original server diagnostic
+            // when the barrier cannot prove that replay is safe.
+            return None;
+        }
+
+        // Deliberately return one replacement instead of looping: if its
+        // attempt fails too, the condition is persistent or raced again and
+        // the second server error is the useful result for the caller.
+        Some(prepare::prepare_cached(self.inner(), sql).await)
+    }
+
     pub(crate) fn tx_status_handle(&self) -> Arc<AtomicU8> {
         Arc::clone(&self.inner.tx_status)
     }
@@ -1347,8 +1395,44 @@ impl Client {
         I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
-        let statement = statement.__convert().into_statement(&self.inner).await?;
-        query::query(&self.inner, statement, params).await
+        let execution = statement.__convert().into_statement(&self.inner).await?;
+        let Some(cache_sql) = execution.cache_sql else {
+            return query::query(&self.inner, execution.statement, params).await;
+        };
+        let retry_started_idle =
+            self.inner.transaction_status() == Some(TransactionStatus::Idle);
+        if !retry_started_idle {
+            return query::query(&self.inner, execution.statement, params).await;
+        }
+
+        let params = params.into_iter().collect::<Vec<_>>();
+        let first = query::query_cached(
+            &self.inner,
+            execution.statement,
+            params.iter().map(BorrowToSql::borrow_to_sql),
+        )
+        .await;
+        match first {
+            Ok(stream) => Ok(stream),
+            Err(error) => {
+                let Some(replacement) = self
+                    .reprepare_cached_statement_once(
+                        Some(cache_sql),
+                        retry_started_idle,
+                        &error,
+                    )
+                    .await
+                else {
+                    return Err(error);
+                };
+                query::query_cached(
+                    &self.inner,
+                    replacement?,
+                    params.iter().map(BorrowToSql::borrow_to_sql),
+                )
+                .await
+            }
+        }
     }
 
     /// Like `query`, but requires the types of query parameters to be explicitly specified.
@@ -1488,8 +1572,44 @@ impl Client {
         I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
-        let statement = statement.__convert().into_statement(&self.inner).await?;
-        query::execute(self.inner(), statement, params).await
+        let execution = statement.__convert().into_statement(&self.inner).await?;
+        let Some(cache_sql) = execution.cache_sql else {
+            return query::execute(self.inner(), execution.statement, params).await;
+        };
+        let retry_started_idle =
+            self.inner.transaction_status() == Some(TransactionStatus::Idle);
+        if !retry_started_idle {
+            return query::execute(self.inner(), execution.statement, params).await;
+        }
+
+        let params = params.into_iter().collect::<Vec<_>>();
+        let first = query::execute(
+            self.inner(),
+            execution.statement,
+            params.iter().map(BorrowToSql::borrow_to_sql),
+        )
+        .await;
+        match first {
+            Ok(rows) => Ok(rows),
+            Err(error) => {
+                let Some(replacement) = self
+                    .reprepare_cached_statement_once(
+                        Some(cache_sql),
+                        retry_started_idle,
+                        &error,
+                    )
+                    .await
+                else {
+                    return Err(error);
+                };
+                query::execute(
+                    self.inner(),
+                    replacement?,
+                    params.iter().map(BorrowToSql::borrow_to_sql),
+                )
+                .await
+            }
+        }
     }
 
     /// Executes a `COPY FROM STDIN` statement, returning a sink used to write the copy data.
@@ -1501,8 +1621,25 @@ impl Client {
         T: ?Sized + ToStatement,
         U: Buf + 'static + Send,
     {
-        let statement = statement.__convert().into_statement(&self.inner).await?;
-        copy_in::copy_in(self.inner(), statement).await
+        let execution = statement.__convert().into_statement(&self.inner).await?;
+        let retry_started_idle = execution.cache_sql.is_some()
+            && self.inner.transaction_status() == Some(TransactionStatus::Idle);
+        match copy_in::copy_in(self.inner(), execution.statement).await {
+            Ok(sink) => Ok(sink),
+            Err(error) => {
+                let Some(replacement) = self
+                    .reprepare_cached_statement_once(
+                        execution.cache_sql,
+                        retry_started_idle,
+                        &error,
+                    )
+                    .await
+                else {
+                    return Err(error);
+                };
+                copy_in::copy_in(self.inner(), replacement?).await
+            }
+        }
     }
 
     /// Executes a `COPY TO STDOUT` statement, returning a stream of the resulting data.
@@ -1510,8 +1647,25 @@ impl Client {
     where
         T: ?Sized + ToStatement,
     {
-        let statement = statement.__convert().into_statement(&self.inner).await?;
-        copy_out::copy_out(self.inner(), statement).await
+        let execution = statement.__convert().into_statement(&self.inner).await?;
+        let retry_started_idle = execution.cache_sql.is_some()
+            && self.inner.transaction_status() == Some(TransactionStatus::Idle);
+        match copy_out::copy_out(self.inner(), execution.statement).await {
+            Ok(stream) => Ok(stream),
+            Err(error) => {
+                let Some(replacement) = self
+                    .reprepare_cached_statement_once(
+                        execution.cache_sql,
+                        retry_started_idle,
+                        &error,
+                    )
+                    .await
+                else {
+                    return Err(error);
+                };
+                copy_out::copy_out(self.inner(), replacement?).await
+            }
+        }
     }
 
     /// Executes a sequence of SQL statements using the simple query protocol, returning the resulting rows.
