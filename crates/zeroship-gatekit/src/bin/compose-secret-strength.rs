@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use zeroship_core::config::PLATFORM_SECRETS;
+use zeroship_secret_policy::PLATFORM_SECRETS;
 use zeroship_gatekit::arm_census::Arm;
 use zeroship_gatekit::compose::ComposeFile;
 use zeroship_gatekit::secret_strength::{enforced_rules, run};
@@ -59,7 +59,7 @@ fn main() -> ExitCode {
     println!("{}", arm.line());
     println!(
         "  rules: {enforced} of {} platform secrets carry a strength floor \
-         (zeroship_core::config::PLATFORM_SECRETS)",
+         (zeroship_secret_policy::PLATFORM_SECRETS)",
         PLATFORM_SECRETS.len()
     );
     if !arm.cleared() {
@@ -97,7 +97,7 @@ fn main() -> ExitCode {
     if !placeholder_arm.cleared() {
         eprintln!(
             "  x REFUSED: only {all_rules} platform secret(s) enumerated, floor {}. \
-             zeroship_core::config::PLATFORM_SECRETS stopped enumerating.",
+             zeroship_secret_policy::PLATFORM_SECRETS stopped enumerating.",
             placeholder_arm.floor
         );
         return ExitCode::FAILURE;

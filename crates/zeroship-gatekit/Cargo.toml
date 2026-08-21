@@ -45,14 +45,19 @@ serde_norway = { workspace = true }
 # crate: the rules are compiler-checked data, not text scraped out of the
 # product's messages.
 #
-# IT IS ALSO THE COST, stated so nobody reads this crate as leaf-light.
-# MEASURED 2026-08-20, `cargo tree -p zeroship-gatekit -e normal -i tokio`:
-# tokio IS in this binary's graph, via zeroship-core -> cyper -> hyper. That is
-# the pre-existing exception AGENTS.md documents, not something this crate
-# introduces, but a gate that only reads a YAML file still links an HTTP stack
-# to reach eight strings. If the rule table ever moves to a leaf crate, this
-# dependency goes with it.
-zeroship-core = { workspace = true }
+# IT USED TO BE THE COST TOO. This was `zeroship-core`, and MEASURED 2026-08-20
+# with `cargo tree -p zeroship-gatekit -e normal -i tokio`, tokio WAS in this
+# binary's graph through zeroship-core -> cyper -> hyper: a gate that reads a
+# YAML file linked an HTTP stack to reach eight strings. The table moved to a
+# leaf crate and this dependency moved with it, as the note here said it should.
+# Re-measured after the move, the same command reports "package ID
+# specification `tokio` did not match any packages" for this crate.
+#
+# KEEP IT A LEAF. `zeroship-secret-policy` depends only on base64, hex, url and
+# thiserror. Reaching for zeroship-core again - for a wire type, for a typed_id,
+# for anything - puts the HTTP stack straight back, and `tests/zero_tokio_gate.sh`
+# is what would notice.
+zeroship-secret-policy = { workspace = true }
 
 [lints]
 workspace = true

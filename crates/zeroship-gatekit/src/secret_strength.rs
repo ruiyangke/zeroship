@@ -18,7 +18,7 @@
 //!
 //! WHY THE RULE SET IS TYPED DATA, AND NOT DERIVED FROM PROSE. The shell gate
 //! this replaces derived its rules by regexing the product's own refusal
-//! MESSAGES out of `crates/core/src/config/secrets.rs`. That coupling is
+//! MESSAGES out of the secret-policy source. That coupling is
 //! unenforceable by construction, and it broke: `2c56e92a3` (2026-08-13)
 //! replaced the baked-in variable name in those messages with a `{label}`
 //! format parameter - a correct change, since one validator serves binaries
@@ -26,7 +26,7 @@
 //! on. The gate's anti-vacuity guard caught it, so it went red rather than
 //! falsely green, but the invariant went unenforced for seven days.
 //!
-//! The rules now come from [`zeroship_core::config::PLATFORM_SECRETS`], a
+//! The rules now come from [`zeroship_secret_policy::PLATFORM_SECRETS`], a
 //! const slice the product's own generator and validators read. A change to
 //! the rules is a change to compiler-checked data, so this gate cannot
 //! silently de-enumerate again. Whether each row states the floor its
@@ -53,7 +53,7 @@
 //! row is now judged by its own validator; the length-floor subset survives as
 //! the arm count.
 
-use zeroship_core::config::{PlatformSecret, SecretStrength};
+use zeroship_secret_policy::{PlatformSecret, SecretStrength};
 
 use crate::compose::{ComposeFile, ComposeValue};
 use crate::report::Report;
@@ -96,7 +96,7 @@ pub fn run(compose: &ComposeFile, rules: &'static [PlatformSecret]) -> Report {
 
     if rules.is_empty() {
         report.refuse(
-            "zeroship_core::config::PLATFORM_SECRETS yielded ZERO strength rules. Either the \
+            "zeroship_secret_policy::PLATFORM_SECRETS yielded ZERO strength rules. Either the \
              table was emptied or every row lost its floor; a gate that checks nothing must not \
              report success.",
         );
@@ -233,7 +233,7 @@ fn measure(
 
 #[cfg(test)]
 mod tests {
-    use zeroship_core::config::{
+    use zeroship_secret_policy::{
         PlatformSecret, MIN_SECRET_BYTES, PLATFORM_SECRETS, SERVICE_CREDENTIAL_SENTINEL,
     };
 
