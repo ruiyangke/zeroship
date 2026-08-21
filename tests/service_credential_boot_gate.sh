@@ -76,13 +76,13 @@ gate_arms_init service_credential_boot
 # The sentinel is read from the product, never spelled here. A gate that
 # carried its own copy would keep passing after the product renamed it.
 #
-# IT ALSO CATCHES A MOVE, and did on 2026-08-21: the constant left
-# crates/core/src/config/credential_gate.rs for the zeroship-secret-policy leaf
-# crate, and this refused with the message below instead of testing a sentinel
-# it had invented. Keep the path pointed at wherever the constant is DEFINED,
-# never at a re-export - core still re-exports it, so a grep of config/mod.rs
-# would find the NAME and never the value.
-SENTINEL_SRC="$ROOT/crates/zeroship-secret-policy/src/sentinel.rs"
+# IT ALSO CATCHES A MOVE, and did twice on 2026-08-21: the constant left
+# credential_gate.rs for a leaf crate and came back the same day, and on each
+# move this refused with the message below instead of testing a sentinel it had
+# invented. Keep the path pointed at wherever the constant is DEFINED, never at
+# a re-export - config/mod.rs re-exports it, so a grep there would find the NAME
+# and never the value.
+SENTINEL_SRC="$ROOT/crates/core/src/config/credential_gate.rs"
 SENTINEL="$(grep -oE 'CHANGE_ME_[A-Z_]+' "$SENTINEL_SRC" | head -1)"
 if [ -z "$SENTINEL" ]; then
   echo "REFUSED: no sentinel constant found in $SENTINEL_SRC" >&2

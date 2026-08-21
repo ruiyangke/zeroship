@@ -21,14 +21,6 @@ base64 = { workspace = true }
 thiserror = { workspace = true }
 linkme = { workspace = true }
 zeroship-config-macros = { workspace = true }
-# The secret policy. It used to be `config::secrets` in this crate; it is a leaf
-# now so that gates and harnesses can read the table without linking `cyper`.
-#
-# THIS CRATE IS A CONSUMER, not a conduit: `config::credential_gate` audits every
-# row of PLATFORM_SECRETS and `config::names` resolves secret references. Nothing
-# here re-exports the policy - callers name `zeroship_secret_policy` themselves,
-# so one symbol has one public path.
-zeroship-secret-policy = { workspace = true }
 aes-gcm = { workspace = true }
 # Service assertions (`service_assertion`) sign with ed25519. `pkcs8` is what
 # bridges a `SigningKey` to `jsonwebtoken::EncodingKey::from_ed_der`, which

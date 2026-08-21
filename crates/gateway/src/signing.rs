@@ -338,7 +338,7 @@ mod tests {
         let material = b"gateway-broker-secret-test-master-32-bytes\n";
         std::fs::write(&newline, material).expect("write");
         set_mode(&newline, 0o600);
-        let as_string = zeroship_secret_policy::read_secret_file(
+        let as_string = zeroship_core::config::read_secret_file(
             newline.to_str().expect("utf8 path"),
         )
         .expect("the string tier reads a text file");
@@ -358,7 +358,7 @@ mod tests {
         std::fs::write(&binary, &bytes).expect("write");
         set_mode(&binary, 0o600);
         assert!(
-            zeroship_secret_policy::read_secret_file(binary.to_str().expect("utf8 path")).is_err(),
+            zeroship_core::config::read_secret_file(binary.to_str().expect("utf8 path")).is_err(),
             "the string tier cannot read `head -c 32 /dev/urandom` material"
         );
         assert_eq!(load_broker_master_secret(&binary).expect("raw loader"), bytes);

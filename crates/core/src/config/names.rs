@@ -954,7 +954,7 @@ pub fn resolve_secret_sources(
         if mode == SecretResolution::CheckConfig {
             return Ok(Secret::supplied(SourceKind::CliFile, None));
         }
-        let material = zeroship_secret_policy::read_secret_file(&path.to_string_lossy())
+        let material = super::secrets::read_secret_file(&path.to_string_lossy())
             .map_err(|error| secret_file_error(name, path, error))?;
         return Ok(Secret::supplied(SourceKind::CliFile, Some(material)));
     }
@@ -981,16 +981,16 @@ fn resolve_secret_input(
     value: &str,
     mode: SecretResolution,
 ) -> Result<Secret<String>, ConfigResolveError> {
-    let parsed = zeroship_secret_policy::parse_secret_ref(value).map_err(|_| {
+    let parsed = super::secrets::parse_secret_ref(value).map_err(|_| {
         ConfigResolveError::InvalidSecretSource {
             canonical: name.as_str(),
         }
     })?;
     let material = match (parsed, mode) {
-        (zeroship_secret_policy::SecretRef::Literal(literal), _) => Some(literal.to_owned()),
-        (zeroship_secret_policy::SecretRef::File(_), SecretResolution::CheckConfig) => None,
-        (zeroship_secret_policy::SecretRef::File(path), SecretResolution::Boot) => Some(
-            zeroship_secret_policy::read_secret_file(path)
+        (super::secrets::SecretRef::Literal(literal), _) => Some(literal.to_owned()),
+        (super::secrets::SecretRef::File(_), SecretResolution::CheckConfig) => None,
+        (super::secrets::SecretRef::File(path), SecretResolution::Boot) => Some(
+            super::secrets::read_secret_file(path)
                 .map_err(|error| secret_file_error(name, PathBuf::from(path), error))?,
         ),
     };
@@ -1007,11 +1007,11 @@ fn resolve_secret_input(
 fn secret_file_error(
     name: CanonicalName<'static>,
     path: PathBuf,
-    error: zeroship_secret_policy::SecretError,
+    error: super::secrets::SecretError,
 ) -> ConfigResolveError {
     match error {
-        error @ (zeroship_secret_policy::SecretError::InsecurePermissions { .. }
-        | zeroship_secret_policy::SecretError::UndeterminableMode { .. }) => {
+        error @ (super::secrets::SecretError::InsecurePermissions { .. }
+        | super::secrets::SecretError::UndeterminableMode { .. }) => {
             ConfigResolveError::SecretFilePermissions {
                 canonical: name.as_str(),
                 reason: error.to_string(),
@@ -1066,7 +1066,7 @@ pub enum ConfigResolveError {
     /// Distinct from [`ConfigResolveError::SecretFile`] because "could not read"
     /// sends an operator hunting a missing file or a bad mount, and the fix here
     /// is a `chmod`. The reason comes from
-    /// [`zeroship_secret_policy::SecretError`] and quotes only the path and the mode -
+    /// [`crate::config::SecretError`] and quotes only the path and the mode -
     /// both operator-selected, neither secret material.
     #[error("configuration {canonical} rejected its secret file: {reason}")]
     SecretFilePermissions {
