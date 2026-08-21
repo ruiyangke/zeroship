@@ -172,8 +172,9 @@ every artefact this repository ships.**
 broker on `internal://redpanda:9092`, a healthcheck, and a persistent
 `redpanda-data` volume. `deploy/scripts/deploy-remote.sh:1054` runs
 `docker compose up -d --remove-orphans`, so on the deployed host **the broker
-runs.** `tests/compose_stateful_volume_gate.sh:58` even keeps it in
-`STATEFUL="postgres redis redpanda"` so its volume cannot regress.
+runs.** The stateful-volume gate even keeps it in its
+`STATEFUL` list (`crates/zeroship-gatekit/src/stateful_volume.rs:51`) so its
+volume cannot regress.
 
 Nothing publishes to it and nothing consumes from it:
 

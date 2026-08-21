@@ -3,18 +3,24 @@
 //! WHY THIS EXISTS. Surveyed 2026-08-20: four shell gates
 //! (`compose_secret_strength_gate.sh`, `compose_stateful_volume_gate.sh`,
 //! `compose_port_exposure_gate.sh`, `compose_workflow_advance_flag_gate.sh`)
-//! plus `deploy/scripts/deploy-remote.sh` hand-roll SIX separate compose
-//! "parsers" out of `grep`/`sed` over indentation. Every one of them is a
-//! different approximation of YAML, and each has to be re-audited on its own.
-//! One of those approximations - the secret gate's rule regex - is what went
-//! silently blind on 2026-08-13.
+//! plus `deploy/scripts/deploy-remote.sh` hand-rolled SIX separate compose
+//! "parsers" out of `grep`/`sed`/`awk` over indentation. Every one was a
+//! different approximation of YAML, each needing its own audit, and each came
+//! with its own scar: the secret gate's rule regex went silently blind on
+//! 2026-08-13; the port gate's first parser invented six ports out of
+//! `command:` scalars; the volume gate's awk rebuilt `$0` and let exactly one
+//! volume escape before losing its block anchor.
 //!
 //! This module is the substrate those gates collapse onto: a real YAML parse
 //! into typed structures, so a gate asks the model a question instead of
-//! guessing at text. It is deliberately PARTIAL - it models the keys the gates
-//! read and lets `serde` ignore the rest - but it is partial by declaration
-//! rather than by accident, and unknown shapes surface as parse errors on the
-//! keys it does claim.
+//! guessing at text. As of 2026-08-21 all four gates above are Rust and read
+//! this module; `deploy-remote.sh` is the one text scanner left, and is a
+//! different slice.
+//!
+//! It is deliberately PARTIAL in what it NAMES - it models the keys the gates
+//! read - but it drops nothing: unmodelled keys land in [`Service::extra`],
+//! because a scan that cannot see a key nobody predicted is blind in exactly
+//! the direction that reads as clean.
 //!
 //! It models the FILE, not what `docker compose` would resolve it to. No
 //! variable substitution is performed and no `.env` is read: a gate about what
