@@ -1,6 +1,6 @@
 //! Live coverage for graceful pool shutdown.
 
-use compio_postgres::{Error, Pool, PoolConfig, PoolHooks};
+use compio_postgres::{Error, Pool, PoolConfig};
 use futures_channel::oneshot;
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -20,23 +20,17 @@ fn test_url() -> String {
 }
 
 fn config(max_size: usize, min_idle: usize) -> PoolConfig {
-    PoolConfig {
-        max_size,
-        min_idle,
-        connection_timeout: Duration::from_secs(30),
-        validation_bypass: Duration::from_secs(60),
-        ..PoolConfig::default()
-    }
+    let mut config = PoolConfig::new();
+    config
+        .max_size(max_size)
+        .min_idle(min_idle)
+        .connection_timeout(Duration::from_secs(30))
+        .validation_bypass(Duration::from_secs(60));
+    config
 }
 
 async fn connect_pool(url: &str, config: PoolConfig) -> Pool {
-    Pool::connect_with_config(url, config)
-        .await
-        .unwrap_or_else(|error| common::postgres_unreachable(url, &error))
-}
-
-async fn connect_pool_with_hooks(url: &str, config: PoolConfig, hooks: PoolHooks) -> Pool {
-    Pool::connect_with_config_and_hooks(url, config, hooks)
+    Pool::connect_with_pool_config(url, config)
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(url, &error))
 }
@@ -252,11 +246,12 @@ async fn after_release_is_skipped_when_a_borrower_returns_during_close() {
     let url = test_url();
     let calls = Rc::new(Cell::new(0));
     let hook_calls = Rc::clone(&calls);
-    let hooks = PoolHooks::new().after_release(move |_client| {
+    let mut config = config(1, 1);
+    config.after_release(move |_client| {
         hook_calls.set(hook_calls.get() + 1);
         true
     });
-    let pool = connect_pool_with_hooks(&url, config(1, 1), hooks).await;
+    let pool = connect_pool(&url, config).await;
     let held = pool.get().await.unwrap();
 
     let waker = Waker::noop();
@@ -281,7 +276,8 @@ async fn acquisition_in_a_hook_cannot_commit_after_close() {
     let (release_tx, release_rx) = oneshot::channel();
     let release_rx = Rc::new(RefCell::new(Some(release_rx)));
     let hook_release_rx = Rc::clone(&release_rx);
-    let hooks = PoolHooks::new().before_acquire(move |_client| {
+    let mut config = config(1, 1);
+    config.before_acquire(move |_client| {
         let hook_entered = Rc::clone(&hook_entered);
         let release_rx = hook_release_rx
             .borrow_mut()
@@ -293,7 +289,7 @@ async fn acquisition_in_a_hook_cannot_commit_after_close() {
             Ok(true)
         })
     });
-    let pool = connect_pool_with_hooks(&url, config(1, 1), hooks).await;
+    let pool = connect_pool(&url, config).await;
 
     let wakes = Arc::new(AtomicUsize::new(0));
     let waker = counting_waker(&wakes);

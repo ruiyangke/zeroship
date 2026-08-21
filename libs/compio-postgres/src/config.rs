@@ -176,10 +176,11 @@ pub enum SslNegotiation {
 /// server unless you give it something to authenticate against. That is
 /// libpq's behaviour, and this driver is a driver.
 ///
-/// [`Pool::connect`](crate::Pool::connect) takes a URL and nothing else, so
-/// the connection string is the only channel that reaches every caller: a
-/// deployment whose Postgres presents a private-CA or self-signed certificate
-/// names the signing CA with `sslrootcert=<path>`.
+/// A deployment whose Postgres presents a private-CA or self-signed certificate
+/// names the signing CA with `sslrootcert=<path>` in the connection string, or
+/// by setting it on a [`Config`] handed to
+/// [`Pool::connect_with_config`](crate::Pool::connect_with_config). The
+/// URL-taking constructors reach it only through the connection string.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum SslRootCert {

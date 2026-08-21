@@ -7819,6 +7819,7 @@ fn direct_connection_sites_do_not_grow() {
     let needles = [
         concat!("Pool", "::connect("),
         concat!("Pool", "::connect_with_config("),
+        concat!("Pool", "::connect_with_pool_config("),
         concat!("compio_postgres", "::connect("),
     ];
     let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests"));
