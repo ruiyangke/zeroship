@@ -25,6 +25,73 @@ BIN="$ROOT/target/release"
 source "$ROOT/tests/lib/runtime_secrets.sh"
 GP_SECURITY_DIR="/tmp/zeroship-golden-security-$$"
 
+# --- WHICH ARM STEP 3 TAKES IS AN ARGUMENT, NOT AN AMBIENT CONDITION -------
+#
+# Step 3 is "create app + deploy", and there are two ways to get an app onto
+# this stack: `zeroship deploy` against the control plane's deploy API - the
+# command this file is named after - or the `dev-provision` binary, which writes
+# the registry row and the blob store itself and whose own header says it
+# "deliberately bypasses the PAT/OAuth flow".
+#
+# THE CHOICE USED TO BE AMBIENT AND SILENT. The line was
+#
+#     TOKEN="${ZEROSHIP_TOKEN:-}"
+#
+# and with that variable unset - which is CI's case, because nothing in
+# .github/workflows/ci.yml sets it - every CI run took the bypass arm and said
+# nothing about it. A run that shipped the artifact through the CLI and a run
+# that did not printed the same shape of green: one tick with a different label,
+# in a list of a hundred and twenty.
+#
+# "THE DEPLOY CLI WAS NEVER EXERCISED IN CI" WOULD BE TOO STRONG, and the CI job
+# used to say it. Measured 2026-08-21 on the bypass arm, `zeroship deploy` runs
+# at three OTHER sites in this file - step 10f's policy-flip redeploy, step 12's
+# second app, step 14's - and one of them carries a pass ("second app registered
+# through the deploy API") that checks the CLI's exit status and nothing else.
+# All three are SETUP for steps measuring something else, each behind that other
+# step's guard. What was absent was step 3 taking the path, and any assertion
+# about the deploy itself; not the binary running.
+#
+# ZEROSHIP_TOKEN IS NO LONGER READ AT ALL. The arm is this argument, the deploy
+# arm is the DEFAULT, and its bearer is minted by the harness's own OP (see step
+# 3) and handed to the CLI through `--token=`, which is one of the three auth
+# inputs the deploy command documents. An ambient variable that decides which
+# code a test exercises is the defect being removed, so it is not replaced with
+# a differently-named ambient variable.
+#
+# The bypass arm survives - it is the right arm when the deploy API is not the
+# thing under test - but it ANNOUNCES itself with the repo's skip marker, so
+# `tests/lib/skip_census.sh` over this run's log finds it and a reader gets a
+# different sentence rather than a shorter list of ticks.
+GP_PROVISION=deploy
+for _arg in "$@"; do
+  case "$_arg" in
+    --provision=deploy|--provision=dev-provision)
+      GP_PROVISION="${_arg#--provision=}" ;;
+    -h|--help)
+      echo "usage: tests/golden_path.sh [--provision=deploy|--provision=dev-provision]"
+      echo "  deploy         (default) mint a creator bearer against the harness OP,"
+      echo "                 POST /api/apps, and ship the .zship with"
+      echo "                 \`zeroship deploy --app=... --token=...\`."
+      echo "  dev-provision  write the registry row and blob store directly. The"
+      echo "                 deploy CLI is NOT exercised, and the run says so."
+      exit 0 ;;
+    *)
+      echo "golden_path.sh: unknown argument '$_arg'" >&2
+      echo "      The only argument is --provision=deploy|--provision=dev-provision." >&2
+      echo "      Nothing was asserted. This is not a pass and not a failure." >&2
+      exit 2 ;;
+  esac
+done
+# Said out loud rather than ignored in silence: an operator who exported
+# ZEROSHIP_TOKEN for their own `zeroship deploy` would otherwise expect it to
+# select something here, and unexamined expectation is what made the old gap
+# survive. It is not an error - the harness mints its own bearer either way.
+if [ -n "${ZEROSHIP_TOKEN:-}" ]; then
+  echo "  note: ZEROSHIP_TOKEN is set and is IGNORED by this harness. Step 3's arm is" >&2
+  echo "        --provision=$GP_PROVISION, and its bearer is minted by the harness OP." >&2
+fi
+
 # A MISSING TOOL MUST SAY SO, not fail somewhere in the middle.
 #
 # This file had no prerequisite check at all, and its failures on a missing tool
@@ -40,9 +107,13 @@ GP_SECURITY_DIR="/tmp/zeroship-golden-security-$$"
 # are deliberately excluded: checking things that cannot be missing is noise
 # that trains readers to skip the check.
 #
-# jq is NOT here on purpose. Its only use is inside step 3's `if [ -n "$TOKEN" ]`
-# branch, which CI never takes, so requiring it up front would refuse to run a
-# harness that does not need it. It is checked at that branch instead.
+# jq is NOT here because this file no longer uses it AT ALL. Its only two call
+# sites were in step 3's bearer arm, and that arm now parses the create-app
+# response with the same anchored grep+sed idiom step 12's pairwise block uses
+# and documents (`"id"[[:space:]]*:[[:space:]]*"..."`). That was not tidying: the
+# arm is now the DEFAULT, so a jq dependency would have become unconditional,
+# and the CI job for this harness installs lsof, zstd and postgresql-client and
+# nothing else. `grep -c jq tests/golden_path.sh` outside comments is the check.
 #
 # exit 2, matching the convention at :241 and :253 - "could not run" is a
 # distinct outcome from "ran and something failed", and must not be counted as
@@ -1142,30 +1213,177 @@ fi
 
 # --- 3. Create app + deploy the real .zship ---
 step 3 "Create app + deploy"
-TOKEN="${ZEROSHIP_TOKEN:-}"
-if [ -n "$TOKEN" ]; then
-  # Scoped prerequisite: jq is used ONLY on this arm, so it is checked here
-  # rather than in the top-of-file list. Without it the two `jq -r` calls below
-  # print nothing, APP_ID comes out empty, and the harness reports
-  # "create app: <the full JSON body>" - a message that points at the server
-  # response when the actual fault is a missing tool on this machine.
-  command -v jq >/dev/null 2>&1 || {
-    echo "FAIL: ZEROSHIP_TOKEN is set, which selects the bearer arm, but jq is not installed." >&2
-    echo "      Install jq, or unset ZEROSHIP_TOKEN to use the dev-provision arm." >&2
-    exit 2
-  }
-  APP=$(curl -sf -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" -H 'Content-Type: application/json' \
-    -H "Authorization: Bearer $TOKEN" -d "{\"name\":\"$APP_NAME\"}")
-  APP_ID=$(echo "$APP" | jq -r '.id'); API_KEY=$(echo "$APP" | jq -r '.api_key')
-  [ -n "$APP_ID" ] && [ "$APP_ID" != "null" ] && pass "created app ($APP_ID)" || { fail "create app: $APP"; exit 1; }
+# The two arms do not assert the same number of things - the deploy arm has a
+# before/after control the bypass arm cannot have - so the total-passed floor at
+# the bottom has to know which one ran. Otherwise a legitimate bypass run
+# reports "assertions do not vanish by accident", which is true and is not what
+# happened.
+GP_ARM_PASS_DELTA=0
+if [ "$GP_PROVISION" = "deploy" ]; then
+  # THE BEARER IS MINTED HERE, not handed in, and that is the whole reason this
+  # arm could not run in CI before.
+  #
+  # Control accepts exactly ONE principal credential: an `at+jwt` access token
+  # signed by the issuer it was booted against, with the registered claims and
+  # an audience matching its own `--oauth-audience`
+  # (crates/core/src/auth_provider/platform.rs). This harness IS that issuer
+  # already - step 2 called `e2e_platform_op_up "$GP_SIGNING_KEY"`, which
+  # publishes the workspace ed25519 key as a one-key JWKS on a loopback port and
+  # names that origin as ZEROSHIP_AUTH_PLATFORM_ISSUER before control starts. So
+  # the only thing standing between "control is up" and "a usable bearer" is a
+  # `zeroship.users` row for the token's `sub`, which control resolves and
+  # refuses when it is missing.
+  #
+  # THAT IS TWO LINES, AND STEPS 9, 10 AND 14 OF THIS FILE ALREADY WRITE THEM.
+  # Step 3 - the step named after the deploy command - was the one that did not,
+  # and instead read an environment variable nothing sets.
+  #
+  # The scope string is one scope per Cedar action, and it is the CEILING on what
+  # this token may do: control intersects it with the principal's own authority.
+  # apps:write creates, apps:deploy deploys, apps:read is what the deploy path
+  # reads the app record with. Nothing else is asked for; steps 10-14 mint their
+  # own wider bearers where they need them.
+  GP3_SCOPE="apps:read apps:write apps:deploy"
+  GP3_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
+  docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
+INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$GP3_CREATOR','golden-step3-$GP3_CREATOR@zeroship.test'::citext,'Golden Step 3',NOW());
+SQL
+  GP3_TOKEN="$(e2e_mint_platform_bearer "$GP3_CREATOR" "$GP3_SCOPE" 2>/tmp/gp-step3-mint.log)"
+  if [ "$(printf '%s' "$GP3_TOKEN" | awk -F. '{print NF}')" != "3" ]; then
+    fail "step 3 could not mint a creator bearer, so the deploy CLI cannot be exercised:
+      $(tail -3 /tmp/gp-step3-mint.log 2>/dev/null | tr '\n' ' ')
+      This is a HARNESS failure, not a platform verdict. Re-run with
+      --provision=dev-provision to get the rest of the suite, knowing the deploy
+      CLI is then not covered."
+    exit 1
+  fi
 
-  DEPLOY=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$TOKEN" 2>&1)
-  echo "$DEPLOY" | grep -q "deploy_hash" && pass "deployed real vite .zship" || { fail "deploy: $DEPLOY"; exit 1; }
+  # NO jq. See the prerequisite block at the top of this file: the CI job for
+  # this harness installs three packages and jq is not one of them, and this arm
+  # is now the default, so a jq dependency here would be unconditional. The
+  # pattern is anchored on the QUOTED key rather than a greedy `.*"id"`, the same
+  # idiom step 12 uses and for the same reason - `owner_id` also ends in `id`.
+  APP=$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $GP3_TOKEN" -d "{\"name\":\"$APP_NAME\"}")
+  gp3_json_str() { printf '%s' "$2" | grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" | head -1 | sed 's/.*"\([^"]*\)"$/\1/'; }
+  APP_ID=$(gp3_json_str id "$APP")
+  API_KEY=$(gp3_json_str api_key "$APP")
+  if [ -n "$APP_ID" ] && [ -n "$API_KEY" ]; then
+    pass "created app ($APP_ID) through POST /api/apps with a harness-minted bearer"
+  else
+    fail "create app: ${APP:0:300}"
+    exit 1
+  fi
+
+  # THE NEGATIVE CONTROL, and without it the assertion after the deploy proves
+  # nothing. `zeroship.apps.deploy_hash` is what control writes when it commits a
+  # deploy; a freshly created app has never had one. Reading it as NULL HERE is
+  # what makes the same column being set two lines later attributable to the CLI
+  # invocation between them, rather than to anything else this harness did. A
+  # run where this arm reports a non-empty hash means the app is not new and the
+  # comparison below is not measuring the deploy.
+  GP3_HASH_PRE=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select coalesce(deploy_hash,'') from zeroship.apps where id = '$APP_ID'" | tr -d '[:space:]')
+  [ -z "$GP3_HASH_PRE" ] \
+    && pass "CONTROL: the app carries no deploy before the CLI runs (apps.deploy_hash is NULL)" \
+    || fail "CONTROL: the freshly created app ALREADY has deploy_hash='$GP3_HASH_PRE', so the
+      before/after below cannot attribute anything to \`zeroship deploy\`"
+
+  # THE COMMAND UNDER TEST. Auth arrives on `--token=`, one of the three inputs
+  # AGENTS.md documents for deploy (`zeroship login`, `--token=`, ZEROSHIP_TOKEN)
+  # and the only one that is a credential the caller states rather than a
+  # credential the environment happens to hold.
+  DEPLOY=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" \
+    --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$GP3_TOKEN" 2>&1)
+  # Extracted, not grepped for. `grep -q deploy_hash` passed on any output
+  # containing the word - including the CLI's own error text, which prints the
+  # response body. The hash itself is what the next assertion needs, and the
+  # character class is deliberately narrow so nothing from a failure body can
+  # travel into the SQL below.
+  GP3_HASH=$(printf '%s' "$DEPLOY" | grep -oE 'deploy_hash: [A-Za-z0-9:_.-]+' | head -1 | sed 's/^deploy_hash: //')
+  if [ -n "$GP3_HASH" ]; then
+    pass "\`zeroship deploy\` shipped the real vite .zship (deploy_hash=$GP3_HASH)"
+  else
+    fail "deploy: ${DEPLOY:0:400}"
+    exit 1
+  fi
+
+  # THE DISCRIMINATOR: the artifact reached the CONTROL PLANE, through this CLI.
+  # The hash on the left is what the CLI printed, which it read out of control's
+  # deploy response; the two on the right are what control wrote to its own
+  # registry and deploy ledger. They agree only if the archive this harness built
+  # travelled the real deploy API. A CLI that failed, that talked to nothing, or
+  # that was silently replaced by the dev-provision arm produces no hash at all
+  # and dies on the assertion above; one that talked to something other than this
+  # control plane leaves these rows untouched.
+  GP3_HASH_POST=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select coalesce(deploy_hash,'') from zeroship.apps where id = '$APP_ID'" | tr -d '[:space:]')
+  GP3_LEDGER=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select count(*) from zeroship.app_deploys where app_id = '$APP_ID' and deploy_hash = '$GP3_HASH'" | tr -d '[:space:]')
+  if [ "$GP3_HASH_POST" = "$GP3_HASH" ] && [ "${GP3_LEDGER:-0}" = "1" ]; then
+    pass "control recorded the CLI's deploy: apps.deploy_hash matches and app_deploys holds the row"
+  else
+    fail "the CLI reported deploy_hash=$GP3_HASH but control's registry says
+      apps.deploy_hash='$GP3_HASH_POST' and app_deploys has ${GP3_LEDGER:-0} matching row(s).
+      The artifact did not reach the control plane through the deploy API, so
+      everything below is serving something this run did not deploy."
+  fi
+
+  # THE NEGATIVE CONTROL, and it is what makes the three assertions above
+  # load-bearing rather than merely present. Everything they check is also true
+  # of a harness that stopped authenticating at all: if the deploy endpoint
+  # accepted anything, or if this step quietly fell back to writing the registry
+  # itself, the hashes would still agree and every tick would still be green.
+  #
+  # So the SAME command runs again with ONE variable changed - the bearer - and
+  # must be REFUSED. A deploy that succeeds here means the credential is not
+  # being checked, which is a finding about the platform, not about this test.
+  #
+  # THE LEDGER IS READ TWICE, AROUND THIS INVOCATION ALONE, and not compared
+  # against the count the assertion above already took. Reusing that one made
+  # this arm a function of whether the GOOD deploy landed: a run where the good
+  # deploy had gone wrong would fail here too, under a message accusing the
+  # deploy endpoint of not checking credentials - a second red with a wrong
+  # cause beside a first red with the right one. "Exited non-zero" and "wrote
+  # nothing" are separate claims and only the pair is about this deploy.
+  GP3_LEDGER_PRE_BAD=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select count(*) from zeroship.app_deploys where app_id = '$APP_ID'" | tr -d '[:space:]')
+  GP3_BAD=$("$BIN/zeroship" deploy "$ZSHIP" --app="$APP_ID" \
+    --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="not-a-real-token" 2>&1)
+  GP3_BAD_RC=$?
+  GP3_LEDGER_POST_BAD=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
+    "select count(*) from zeroship.app_deploys where app_id = '$APP_ID'" | tr -d '[:space:]')
+  if [ "$GP3_BAD_RC" != "0" ] && [ "$GP3_LEDGER_POST_BAD" = "$GP3_LEDGER_PRE_BAD" ]; then
+    pass "CONTROL: the same deploy with a bad bearer is REFUSED and commits nothing ($(printf '%s' "$GP3_BAD" | tail -1 | head -c 60))"
+  else
+    fail "CONTROL: \`zeroship deploy\` with the token \`not-a-real-token\` exited $GP3_BAD_RC and
+      moved the app's deploy ledger from $GP3_LEDGER_PRE_BAD to $GP3_LEDGER_POST_BAD row(s).
+      The deploy endpoint is not checking the credential, so the passes above do
+      not show that the arm above authenticated - they show only that something
+      answered.
+      output: $(printf '%s' "$GP3_BAD" | tr '\n' ' ' | head -c 240)"
+  fi
 else
+  # THE BYPASS ARM. `dev-provision` writes zeroship.apps and the blob store
+  # itself and calls no API, so nothing on this path exercises the deploy
+  # endpoint, the bearer, or the CLI. It stays because it is the right arm when
+  # the deploy API is not what you are measuring - but a run that takes it must
+  # not be able to read as a run that covered the command this file is named
+  # after.
+  #
+  # The marker is the one `tests/lib/skip_census.sh` counts and
+  # `zeroship_test_support::skip` emits, byte for byte, so one search over a run
+  # log finds every announced no-op in the workspace and this is one of them.
+  # stderr for the same reason that function uses it: it is the channel that
+  # survives a passing run.
+  echo "ZEROSHIP-TEST-SKIPPED: golden_path step 3: --provision=dev-provision selected, so \`zeroship deploy\` was NOT exercised - the app was written straight into the registry and blob store" >&2
+  GP_ARM_PASS_DELTA=4
   OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
   APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
   API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
-  [ -n "$APP_ID" ] && [ -n "$API_KEY" ] && pass "dev-provisioned app ($APP_ID)" || { fail "dev-provision: $OUT"; exit 1; }
+  [ -n "$APP_ID" ] && [ -n "$API_KEY" ] \
+    && pass "dev-provisioned app ($APP_ID) -- THE DEPLOY CLI DID NOT RUN" \
+    || { fail "dev-provision: $OUT"; exit 1; }
 fi
 sleep 4  # gateway route-sync poll
 
@@ -4103,6 +4321,13 @@ gp_close_step
 # fires: static - 2 without a token, static - 1 with one. The two instruments
 # disagree for different reasons if either is wrong, which is the whole point.
 #
+# THE ARITHMETIC ABOVE IS HISTORY, kept because the reasoning is still the
+# lesson. Step 3 no longer branches on ZEROSHIP_TOKEN: the arm is the
+# `--provision=` argument, the deploy arm is the default and carries FIVE call
+# sites, the bypass arm one. So the branch correction is `static - 1` on the
+# default arm and `static - 5` on the bypass arm, and the floor expresses that
+# as a subtraction (GP_ARM_PASS_DELTA) rather than as a second literal.
+#
 # THE COMMAND NAMED ABOVE MUST EXCLUDE COMMENTS, and for years it did not.
 # `grep -c 'pass "'` matches this very block -- the sentence documenting the
 # instrument contains the pattern it searches for. So the documented command has
@@ -4432,7 +4657,33 @@ gp_close_step
 #   failures: 15 total, 15 expected, 0 unexpected, 0 stale expectation(s)
 # The delta and the run agree to the assertion, and the 15 reds are the same
 # ticketed set (#260 x6, #236 x2, #332/#333 x3, #331 x4).
-GOLDEN_MIN_PASSED=121
+# 121 -> 126, and this raise is a NEW SHAPE rather than another delta: the floor
+# is now arm-aware. Step 3's deploy arm asserts five outcomes (created app, the
+# NULL-deploy_hash control, the CLI's deploy_hash, control's registry agreeing
+# with it, and the bad-bearer refusal) where the bypass arm asserts one, so the
+# two legitimate configurations differ by exactly 4. The old convention - one
+# literal, sitting at the LOWER of the legitimate configurations - would have put
+# the floor at the bypass arm's total and given the DEFAULT arm four assertions
+# of slack, defeating the exact-floor rule for the arm CI actually runs. So the
+# literal is the default arm's measurement and the bypass arm subtracts its own
+# known delta, which is set beside the branch that causes it rather than here.
+#
+# BOTH NUMBERS ARE MEASURED. Two full four-service runs of this file against the
+# Postgres on :5440, 2026-08-21, differing only in the argument:
+#   --provision=deploy         126 passed, 15 failed   step 3: 5 outcome(s)
+#   --provision=dev-provision  122 passed, 15 failed   step 3: 1 outcome(s)
+# 15 expected, 0 unexpected, 0 stale on BOTH, and every other step's outcome
+# count was identical across the pair - so the arm changes what is COVERED and
+# nothing about what is broken. The reds are the ticketed set (#260 x6, #236 x2,
+# #332/#333 x3, #331 x4).
+#
+# 121 -> 126 IS NOT ALL STEP 3. A third run, taken first, scored 114 because
+# step 14 produced ONE outcome instead of twelve: it consumes a PREBUILT
+# examples/auth-notes-db/dist/app.zship that root `pnpm build` does not produce
+# and git does not track. That was true before this change and is true of CI,
+# which is why the golden-path job now builds that example. Of the +5 over 121,
+# +4 is step 3's new arm and +1 was already there, unreachable.
+GOLDEN_MIN_PASSED=$((126 - GP_ARM_PASS_DELTA))
 
 # Guard 2: every DECLARED step must have run and asserted something. See the
 # reasoning beside GP_EXPECTED_STEPS at the top of this file.
@@ -4472,6 +4723,22 @@ done
 echo ""
 echo "============================================"
 echo "  golden path: $PASS passed, $FAIL failed (floor $GOLDEN_MIN_PASSED)"
+# WHICH ARM STEP 3 TOOK, on every run, green or red. The summary is what a
+# reader and a CI log both keep, and the whole point of making the arm an
+# argument is that these two sentences are not interchangeable.
+if [ "$GP_PROVISION" = "deploy" ]; then
+  echo "  step 3 arm: --provision=deploy -- \`zeroship deploy\` WAS exercised against the control plane"
+else
+  echo "  step 3 arm: --provision=dev-provision -- \`zeroship deploy\` was NOT exercised;"
+  echo "              the app was written straight into the registry and blob store."
+  # The marker token is deliberately NOT spelled here. It is printed once, by
+  # the announcement at step 3, and a second literal in this summary would make
+  # a census over this log report two skips for one skipped arm - the same
+  # self-counting-instrument trap the floor's own comment block documents.
+  echo "              This run says nothing about the deploy CLI. Step 3 announced"
+  echo "              itself with the repo's skip marker; tests/lib/skip_census.sh"
+  echo "              over this log counts it."
+fi
 for _s in $GP_EXPECTED_STEPS; do
   printf '    step %s: %s outcome(s)\n' "$_s" "${GP_STEP_OUTCOMES[$_s]-MISSING}"
 done
