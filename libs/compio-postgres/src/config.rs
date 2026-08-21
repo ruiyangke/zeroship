@@ -155,6 +155,30 @@ pub enum SslNegotiation {
     Direct,
 }
 
+/// A TLS protocol version this driver's rustls backend can negotiate.
+///
+/// libpq also recognises `TLSv1` and `TLSv1.1`. rustls deliberately does not
+/// implement either, so connection strings that request them are rejected
+/// rather than being widened to include a newer version.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum SslProtocolVersion {
+    /// TLS 1.2 (`TLSv1.2`).
+    TlsV1_2,
+    /// TLS 1.3 (`TLSv1.3`).
+    TlsV1_3,
+}
+
+impl SslProtocolVersion {
+    /// The spelling libpq uses in a connection string.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TlsV1_2 => "TLSv1.2",
+            Self::TlsV1_3 => "TLSv1.3",
+        }
+    }
+}
+
 /// Where the trust anchors for server-certificate verification come from.
 ///
 /// This is the `sslrootcert` connection parameter, and together with
@@ -492,6 +516,14 @@ pub enum Host {
 /// * `sslcrl` - Path to a PEM certificate revocation list used while verifying
 ///     the server certificate. As in libpq, a missing or unreadable file has no
 ///     effect.
+/// * `sslcrldir` - Path to a directory prepared with `openssl rehash` or
+///     `c_rehash`. Its hashed PEM CRL entries are used together with `sslcrl`.
+/// * `ssl_min_protocol_version` - Minimum TLS version: `TLSv1.2` (the default)
+///     or `TLSv1.3`. libpq's `TLSv1` and `TLSv1.1` values are rejected because
+///     rustls cannot honour them.
+/// * `ssl_max_protocol_version` - Maximum TLS version: `TLSv1.2` or `TLSv1.3`.
+///     Unset by default. A maximum below the minimum is rejected before
+///     connecting.
 /// * `host` - The host to connect to. On Unix platforms, if the host starts with a `/` character it is treated as the
 ///     path to the directory containing Unix domain sockets. Otherwise, it is treated as a hostname. Multiple hosts
 ///     can be specified, separated by commas. Each host will be tried in turn when connecting. Required if connecting
@@ -612,6 +644,9 @@ pub struct Config {
     pub(crate) ssl_key: Option<String>,
     pub(crate) ssl_password: Option<Vec<u8>>,
     pub(crate) ssl_crl: Option<String>,
+    pub(crate) ssl_crl_dir: Option<String>,
+    pub(crate) ssl_min_protocol_version: SslProtocolVersion,
+    pub(crate) ssl_max_protocol_version: Option<SslProtocolVersion>,
     pub(crate) host: Vec<Host>,
     pub(crate) hostaddr: Vec<IpAddr>,
     pub(crate) port: Vec<u16>,
@@ -651,6 +686,9 @@ impl Config {
             ssl_key: None,
             ssl_password: None,
             ssl_crl: None,
+            ssl_crl_dir: None,
+            ssl_min_protocol_version: SslProtocolVersion::TlsV1_2,
+            ssl_max_protocol_version: None,
             host: vec![],
             hostaddr: vec![],
             port: vec![],
@@ -886,6 +924,49 @@ impl Config {
     /// Gets the certificate revocation list path, if one has been set.
     pub fn get_ssl_crl(&self) -> Option<&str> {
         self.ssl_crl.as_deref()
+    }
+
+    /// Sets the directory of OpenSSL-hashed PEM certificate revocation lists.
+    ///
+    /// A blank path behaves as though none was supplied. The directory may be
+    /// used together with [`Config::ssl_crl`], but two CRLs for the same issuer
+    /// are refused because rustls cannot reproduce OpenSSL's newest-CRL
+    /// selection safely.
+    pub fn ssl_crl_dir(&mut self, ssl_crl_dir: impl Into<String>) -> &mut Config {
+        self.ssl_crl_dir = Some(ssl_crl_dir.into());
+        self
+    }
+
+    /// Gets the hashed certificate revocation list directory, if one was set.
+    pub fn get_ssl_crl_dir(&self) -> Option<&str> {
+        self.ssl_crl_dir.as_deref()
+    }
+
+    /// Sets the minimum TLS protocol version.
+    ///
+    /// Defaults to [`SslProtocolVersion::TlsV1_2`].
+    pub fn ssl_min_protocol_version(&mut self, version: SslProtocolVersion) -> &mut Config {
+        self.ssl_min_protocol_version = version;
+        self
+    }
+
+    /// Gets the minimum TLS protocol version.
+    pub fn get_ssl_min_protocol_version(&self) -> SslProtocolVersion {
+        self.ssl_min_protocol_version
+    }
+
+    /// Sets the maximum TLS protocol version.
+    ///
+    /// By default no maximum below rustls' own highest supported version is
+    /// imposed.
+    pub fn ssl_max_protocol_version(&mut self, version: SslProtocolVersion) -> &mut Config {
+        self.ssl_max_protocol_version = Some(version);
+        self
+    }
+
+    /// Gets the maximum TLS protocol version, if one has been set.
+    pub fn get_ssl_max_protocol_version(&self) -> Option<SslProtocolVersion> {
+        self.ssl_max_protocol_version
     }
 
     /// Adds a host to the configuration.
@@ -1215,6 +1296,25 @@ impl Config {
             "sslcrl" => {
                 self.ssl_crl(value);
             }
+            "sslcrldir" => {
+                self.ssl_crl_dir(value);
+            }
+            "ssl_min_protocol_version" => {
+                let version = parse_ssl_protocol_version("ssl_min_protocol_version", value)?;
+                self.ssl_min_protocol_version(version);
+            }
+            "ssl_max_protocol_version" => {
+                // An empty maximum is libpq's spelling for leaving the TLS
+                // backend's own upper bound in force.
+                self.ssl_max_protocol_version = if value.is_empty() {
+                    None
+                } else {
+                    Some(parse_ssl_protocol_version(
+                        "ssl_max_protocol_version",
+                        value,
+                    )?)
+                };
+            }
             "host" => {
                 for host in value.split(',') {
                     self.host(host);
@@ -1363,12 +1463,14 @@ impl Config {
     /// Reject TLS parameter combinations that contradict each other.
     ///
     /// libpq runs these in `connectOptions2`, before a socket is opened, and so
-    /// do we: both rules describe a URL that can never work, so answering at
+    /// do we: each rule describes a URL that can never work, so answering at
     /// connect time is the difference between naming the cause and blaming the
     /// server for a handshake that was never going to happen.
     ///
-    /// Both rules are libpq's, including the wording:
+    /// The latter two rules are libpq's, including the wording:
     ///
+    /// * A maximum TLS version below the minimum names an empty protocol set.
+    ///   rustls cannot honour it without crossing one of the caller's bounds.
     /// * `sslrootcert=system` demands `sslmode=verify-full`. Trusting the
     ///   public root program *without* checking the host name accepts any
     ///   certificate any public CA has issued for any name, which is barely
@@ -1378,6 +1480,8 @@ impl Config {
     ///   direct handshake sends no `SSLRequest`, so there is no negotiation to
     ///   fall back *from*; a mode that permits plaintext must not drive it.
     pub(crate) fn validate_tls_settings(&self) -> Result<(), Error> {
+        self.validate_ssl_protocol_version_range()?;
+
         if self.ssl_root_cert == SslRootCert::System && self.ssl_mode != SslMode::VerifyFull {
             return Err(Error::config(
                 format!(
@@ -1398,6 +1502,26 @@ impl Config {
                 )
                 .into(),
             ));
+        }
+
+        Ok(())
+    }
+
+    /// Reject a range rustls could only answer by enabling a version outside
+    /// the caller's bounds.
+    pub(crate) fn validate_ssl_protocol_version_range(&self) -> Result<(), Error> {
+        if let Some(maximum) = self.ssl_max_protocol_version {
+            if self.ssl_min_protocol_version > maximum {
+                return Err(Error::config(
+                    format!(
+                        "ssl_min_protocol_version={} cannot be higher than \
+                         ssl_max_protocol_version={}",
+                        self.ssl_min_protocol_version.as_str(),
+                        maximum.as_str()
+                    )
+                    .into(),
+                ));
+            }
         }
 
         Ok(())
@@ -1496,6 +1620,9 @@ impl fmt::Debug for Config {
                 &self.ssl_password.as_ref().map(|_| Redaction {}),
             )
             .field("ssl_crl", &self.ssl_crl)
+            .field("ssl_crl_dir", &self.ssl_crl_dir)
+            .field("ssl_min_protocol_version", &self.ssl_min_protocol_version)
+            .field("ssl_max_protocol_version", &self.ssl_max_protocol_version)
             .field("host", &self.host)
             .field("hostaddr", &self.hostaddr)
             .field("port", &self.port)
@@ -1541,6 +1668,38 @@ impl fmt::Display for InvalidValue {
 }
 
 impl error::Error for InvalidValue {}
+
+fn parse_ssl_protocol_version(
+    parameter: &'static str,
+    value: &str,
+) -> Result<SslProtocolVersion, Error> {
+    if value.eq_ignore_ascii_case("TLSv1.2") {
+        return Ok(SslProtocolVersion::TlsV1_2);
+    }
+    if value.eq_ignore_ascii_case("TLSv1.3") {
+        return Ok(SslProtocolVersion::TlsV1_3);
+    }
+    if value.is_empty() {
+        return Err(Error::config_parse(
+            format!(
+                "option `{parameter}` leaves the minimum TLS version unbounded, but rustls cannot \
+                 negotiate the TLS 1.0 or TLS 1.1 versions that would include"
+            )
+            .into(),
+        ));
+    }
+    if value.eq_ignore_ascii_case("TLSv1") || value.eq_ignore_ascii_case("TLSv1.1") {
+        return Err(Error::config_parse(
+            format!(
+                "option `{parameter}` requests {value}, but rustls cannot negotiate TLS 1.0 or \
+                 TLS 1.1; use TLSv1.2 or TLSv1.3"
+            )
+            .into(),
+        ));
+    }
+
+    Err(Error::config_parse(Box::new(InvalidValue(parameter))))
+}
 
 #[derive(Debug)]
 struct InvalidRequireAuth(String);
@@ -1929,8 +2088,8 @@ mod tests {
     use std::net::IpAddr;
 
     use crate::config::{
-        AuthMethod, AuthMethods, RequireAuth, SslMode, SslNegotiation, SslRootCert,
-        TargetSessionAttrs,
+        AuthMethod, AuthMethods, RequireAuth, SslMode, SslNegotiation, SslProtocolVersion,
+        SslRootCert, TargetSessionAttrs,
     };
     use crate::{Config, config::Host};
 
@@ -2110,7 +2269,7 @@ mod tests {
     #[test]
     fn tls_file_and_secret_parameters_are_recognised() {
         let config = "host=h sslrootcert=/etc/ca.pem sslcert=/etc/c.pem sslkey=/etc/k.pem \
-                      sslpassword=key-secret sslcrl=/etc/root.crl"
+                      sslpassword=key-secret sslcrl=/etc/root.crl sslcrldir=/etc/crls"
             .parse::<Config>()
             .unwrap();
         assert_eq!(
@@ -2121,6 +2280,7 @@ mod tests {
         assert_eq!(config.get_ssl_key(), Some("/etc/k.pem"));
         assert_eq!(config.get_ssl_password(), Some(b"key-secret".as_slice()));
         assert_eq!(config.get_ssl_crl(), Some("/etc/root.crl"));
+        assert_eq!(config.get_ssl_crl_dir(), Some("/etc/crls"));
 
         let debug = format!("{config:?}");
         assert!(
@@ -2131,10 +2291,96 @@ mod tests {
         let mut built = Config::new();
         built
             .ssl_password(b"built-secret")
-            .ssl_crl("/tmp/built.crl");
+            .ssl_crl("/tmp/built.crl")
+            .ssl_crl_dir("/tmp/built-crls");
         assert_eq!(built.get_ssl_password(), Some(b"built-secret".as_slice()));
         assert_eq!(built.get_ssl_crl(), Some("/tmp/built.crl"));
+        assert_eq!(built.get_ssl_crl_dir(), Some("/tmp/built-crls"));
         assert!(!format!("{built:?}").contains("built-secret"));
+    }
+
+    #[test]
+    fn tls_protocol_bounds_parse_with_libpq_defaults_and_spelling() {
+        let default = Config::new();
+        assert_eq!(
+            default.get_ssl_min_protocol_version(),
+            SslProtocolVersion::TlsV1_2
+        );
+        assert_eq!(default.get_ssl_max_protocol_version(), None);
+
+        let config = "host=h ssl_min_protocol_version=tlsV1.3 \
+                      ssl_max_protocol_version=TLSV1.3"
+            .parse::<Config>()
+            .unwrap();
+        assert_eq!(
+            config.get_ssl_min_protocol_version(),
+            SslProtocolVersion::TlsV1_3
+        );
+        assert_eq!(
+            config.get_ssl_max_protocol_version(),
+            Some(SslProtocolVersion::TlsV1_3)
+        );
+
+        let unbounded = "host=h ssl_max_protocol_version=''"
+            .parse::<Config>()
+            .unwrap();
+        assert_eq!(unbounded.get_ssl_max_protocol_version(), None);
+
+        let error = "host=h ssl_min_protocol_version=''"
+            .parse::<Config>()
+            .expect_err("rustls cannot honour an explicitly unbounded minimum");
+        let cause = std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            cause.contains("ssl_min_protocol_version") && cause.contains("rustls"),
+            "the refusal must name the unbounded setting: {cause}"
+        );
+    }
+
+    /// TLS 1.0 and 1.1 are valid libpq values, so accepting and approximating
+    /// either one would be more dangerous than treating it as a typo.
+    #[test]
+    fn rustls_unsupported_protocol_versions_are_refused_by_key() {
+        for key in [
+            "ssl_min_protocol_version",
+            "ssl_max_protocol_version",
+        ] {
+            for version in ["TLSv1", "TLSv1.1"] {
+                let error = format!("host=h {key}={version}")
+                    .parse::<Config>()
+                    .expect_err("rustls cannot honour TLS 1.0 or TLS 1.1");
+                let cause = std::error::Error::source(&error)
+                    .map(ToString::to_string)
+                    .unwrap_or_default();
+                assert!(
+                    cause.contains(key) && cause.contains("rustls"),
+                    "the refusal must name the unsupported setting: {cause}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inverted_tls_protocol_range_is_refused_before_connecting() {
+        for dsn in [
+            "host=h ssl_min_protocol_version=TLSv1.3 ssl_max_protocol_version=TLSv1.2",
+            "host=h ssl_max_protocol_version=TLSv1.2 ssl_min_protocol_version=TLSv1.3",
+        ] {
+            let error = dsn
+                .parse::<Config>()
+                .unwrap()
+                .validate_tls_settings()
+                .expect_err("a maximum below the minimum cannot be approximated");
+            let cause = std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                cause.contains("ssl_min_protocol_version")
+                    && cause.contains("ssl_max_protocol_version"),
+                "the refusal must name both conflicting bounds: {cause}"
+            );
+        }
     }
 
     /// `system` is the one `sslrootcert` value that is a keyword rather than a
@@ -2199,14 +2445,18 @@ mod tests {
         }
     }
 
-    /// libpq treats blank sslpassword and sslcrl values as absent at TLS setup
-    /// time. Preserve the parsed values so callers can still distinguish an
-    /// explicitly blank setting from one that was never supplied.
+    /// libpq treats blank sslpassword, sslcrl, and sslcrldir values as absent
+    /// at TLS setup time. Preserve the parsed values so callers can still
+    /// distinguish an explicitly blank setting from one that was never
+    /// supplied.
     #[test]
-    fn empty_sslpassword_and_sslcrl_parse_but_have_no_tls_effect() {
-        let config = "host=h sslpassword='' sslcrl=''".parse::<Config>().unwrap();
+    fn empty_optional_tls_paths_parse_but_have_no_tls_effect() {
+        let config = "host=h sslpassword='' sslcrl='' sslcrldir=''"
+            .parse::<Config>()
+            .unwrap();
         assert_eq!(config.get_ssl_password(), Some(b"".as_slice()));
         assert_eq!(config.get_ssl_crl(), Some(""));
+        assert_eq!(config.get_ssl_crl_dir(), Some(""));
     }
 
     #[test]
