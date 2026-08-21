@@ -74,7 +74,7 @@ pub(crate) struct ConnectionRelease {
 }
 
 /// A non-owning shutdown guard for every connection-side exit.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct ConnectionDropRelease {
     socket: Weak<socket2::Socket>,
 }
@@ -137,9 +137,21 @@ impl ConnectionRelease {
 
 impl Drop for ConnectionDropRelease {
     fn drop(&mut self) {
+        // Drop cannot report an error, and a concurrent client release or peer
+        // close can legitimately win this shutdown race.
+        self.shutdown();
+    }
+}
+
+impl ConnectionDropRelease {
+    /// End the physical session from a connection-side fatal I/O path.
+    ///
+    /// In particular, compio does not promise that cancelling a submitted
+    /// read promptly releases its shared descriptor. A socket-read timeout
+    /// therefore performs this synchronous shutdown before waiting for the
+    /// main connection task to finish its teardown.
+    pub(crate) fn shutdown(&self) {
         if let Some(socket) = self.socket.upgrade() {
-            // Drop cannot report an error, and a concurrent client release or
-            // peer close can legitimately win this shutdown race.
             let _ = socket.shutdown(Shutdown::Both);
         }
     }

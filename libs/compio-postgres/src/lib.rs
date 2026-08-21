@@ -107,6 +107,23 @@
 //! [`Client::check_connection`]. The pool wrapper performs both barriers,
 //! restores an idle transaction state, and otherwise retires the session.
 //!
+//! # Socket read deadlines
+//!
+//! [`Config::read_timeout`] is an opt-in, programmatic-only inactivity clock
+//! on post-startup socket reads. It is armed while a protocol response is owed
+//! and reset by every successful underlying read, so an idle plaintext
+//! connection's background notification read does not spend the budget. If it
+//! expires, the driver drops the possibly partial read and makes the protocol
+//! session permanently non-reusable. Both the stalled operation and
+//! [`Connection::run`] receive an [`Error`] for which
+//! [`Error::is_read_timeout`] is true. Standard [`Socket`] connections also
+//! synchronously shut down an owned descriptor; an arbitrary stream passed to
+//! [`Config::connect_raw`] has no generic descriptor to shut down and is
+//! instead dropped when `run` returns.
+//!
+//! This is not `tcp_user_timeout`, connection setup, pool acquisition, or a
+//! whole-command deadline, and it sends no `CancelRequest`.
+//!
 //! # SSL/TLS support
 //!
 //! `Client::connect` and `Config::connect` take a TLS implementation as an argument. The `NoTls` type in this crate can

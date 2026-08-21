@@ -264,6 +264,14 @@ where
     )
     .await?;
 
+    // `connect_timeout` owns negotiation, startup, authentication, and the
+    // target-session probe above. The socket-read inactivity clock is a
+    // different, post-startup clock and begins only when Connection::run owes
+    // an application response.
+    handshake
+        .stream
+        .set_read_timeout(config.get_read_timeout().copied());
+
     let (sender, receiver) = mpsc::unbounded();
     let drop_release = release.as_ref().map(|release| release.connection_guard());
     let client = Client::new_with_statement_cache_capacity(
