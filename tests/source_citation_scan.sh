@@ -214,6 +214,19 @@ found=0
 allowed=0
 missing=0
 
+# THE CORPUS IS `git ls-files`, not the filesystem, for both passes below. A
+# working tree carries files git does not: untracked scratch docs, planted
+# probes, build output. Scanning the filesystem makes the verdict depend on
+# what happens to be lying around locally rather than on the commit under
+# test - two people on the same commit can get different answers, and it errs
+# in both directions (a stray untracked doc turns a clean commit red; a
+# gitignored `dist/` turns a broken one green). `git ls-files` is exactly what
+# a fresh checkout has, which is what CI has, so scanning it is what makes the
+# gate reproducible AND CI-representative. (MEASURED 2026-08-20: an untracked,
+# undated `docs/pilot/e2e-scenarios.md` citing a genuinely-deleted
+# `tests/supabase_deploy_e2e.sh` flips this gate red with the filesystem as
+# corpus and has no effect once the corpus is `git ls-files`.)
+
 # WHY A RESOLVED CITATION IS ALSO WORTH RECORDING. This gate reads the WORKING
 # TREE, and a developer's working tree has been built. CI's has not: the `rust`
 # job is checkout + toolchain + `cargo check`, with no pnpm install and no pnpm
@@ -254,14 +267,11 @@ while IFS= read -r line; do
 
   echo "::error::$src cites $cite, which resolves neither from the repo root nor from $base/"
   missing=$((missing + 1))
-done < <(grep -roP "$PAT" \
-    --include='*.rs' --include='*.ts' --include='*.js' --include='*.tsx' \
-    --include='*.toml' --include='*.sh' \
-    --exclude-dir=wpt --exclude-dir=dist \
-    --exclude-dir=node_modules --exclude-dir=target \
-    --exclude=source_citation_scan.sh \
-    --exclude=source_citation_selftest.sh \
-    $ROOTS 2>/dev/null | sort -u)
+done < <(git ls-files -- $ROOTS \
+    | grep -E '\.(rs|ts|tsx|js|toml|sh)$' \
+    | grep -v -e '/wpt/' -e '/dist/' -e '/node_modules/' -e '/target/' \
+    | grep -vx -e 'tests/source_citation_scan.sh' -e 'tests/source_citation_selftest.sh' \
+    | xargs -d '\n' -r grep -oP "$PAT" -- 2>/dev/null | sort -u)
 
 # Printed on success too. A number nobody sees until the gate has already failed
 # cannot warn anyone, and this is the channel where a false green differs from a
@@ -309,14 +319,16 @@ while IFS= read -r line; do
 
   echo "::error::$src cites $cite, which does not resolve"
   missing=$((missing + 1))
-done < <( { grep -roP "$DOC_PAT" --include='*.md' \
-      --exclude-dir=node_modules --exclude-dir=target \
-      docs 2>/dev/null \
-    | grep -Ev "^docs/($(printf '%s' "$DOC_EXCLUDED" | tr ' ' '|'))/" \
-    | grep -Ev '/[0-9]{4}-[0-9]{2}-[0-9]{2}-[^/]*\.md:'
+done < <( {
+    git ls-files -- docs \
+      | grep -E '\.md$' \
+      | grep -v -e '/node_modules/' -e '/target/' \
+      | grep -Ev "^docs/($(printf '%s' "$DOC_EXCLUDED" | tr ' ' '|'))/" \
+      | grep -Ev '/[0-9]{4}-[0-9]{2}-[0-9]{2}-[^/]*\.md$' \
+      | xargs -d '\n' -r grep -oP "$DOC_PAT" -- 2>/dev/null
     # The repo-root pages are the most-read docs in the tree and belong to no
     # docs/ subdirectory, so they need naming separately or they are missed.
-    grep -oP "$DOC_PAT" --include='*.md' ./*.md 2>/dev/null | sed 's|^\./||'
+    git ls-files -- '*.md' | grep -v '/' | xargs -d '\n' -r grep -oP "$DOC_PAT" -- 2>/dev/null
   } | sort -u )
 
 echo "doc citations checked: $doc_found across docs/ + root *.md, excluding $DOC_EXCLUDED and dated records (allowed: $doc_allowed, unresolvable: $((missing - src_missing)))"

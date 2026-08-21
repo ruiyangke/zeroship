@@ -66,8 +66,23 @@ BUILD_TARGET="$BUILD_DIR/probe.js"
 # that resolved.
 TRACKED_CITATION="crates/core/src/typed_id.rs"
 
-cleanup() { rm -f "$PROBE" "$DOC_PROBE" "$BUILD_PROBE"; rm -rf "${BUILD_DIR%/dist}"; }
+cleanup() {
+  rm -f "$PROBE" "$DOC_PROBE" "$BUILD_PROBE"
+  rm -rf "${BUILD_DIR%/dist}"
+  git reset -- "$PROBE" "$DOC_PROBE" "$BUILD_PROBE" > /dev/null 2>&1
+}
 trap cleanup EXIT
+
+# The scan's corpus is `git ls-files`, not the filesystem (2026-08-20 fix: a
+# filesystem corpus makes the verdict depend on whatever untracked clutter is
+# lying around, so two people on the same commit could disagree). Every probe
+# below is a scratch file that is never committed, so it needs `git add -N`
+# (intent-to-add) to become visible to that corpus - the same state a `git add`
+# right before commit would produce, without writing any blob. `git reset --
+# <path>` in cleanup drops the index entry again, whether or not the working
+# copy still exists, so a probe never lingers as a staged addition of a
+# deleted file.
+stage() { git add -N -- "$1"; }
 
 fail() { echo "::error::source-citation gate self-test: $1"; exit 1; }
 
@@ -80,6 +95,7 @@ fi
 
 # --- Direction 2: a planted bad citation must be DETECTED and must exit non-zero.
 printf '\n// Self-test probe: %s\n' "$CITATION" > "$PROBE"
+stage "$PROBE"
 
 out="$(bash "$SCAN" 2>&1)"
 rc=$?
@@ -94,6 +110,7 @@ esac
 
 # --- Direction 3: removing it must return the gate to green. -----------------
 rm -f "$PROBE"
+git reset -- "$PROBE" > /dev/null 2>&1
 if ! bash "$SCAN" > /dev/null 2>&1; then
   fail "the gate stayed red after the probe was removed; it is not tracking the tree"
 fi
@@ -101,6 +118,7 @@ fi
 # --- Direction 4: the same three assertions for the DOC corpus. --------------
 # Run against a clean tree that direction 3 just re-established.
 printf '# Self-test probe\n\nSee [probe](%s).\n' "$DOC_CITATION" > "$DOC_PROBE"
+stage "$DOC_PROBE"
 
 doc_out="$(bash "$SCAN" 2>&1)"
 doc_rc=$?
@@ -114,6 +132,7 @@ case "$doc_out" in
 esac
 
 rm -f "$DOC_PROBE"
+git reset -- "$DOC_PROBE" > /dev/null 2>&1
 if ! bash "$SCAN" > /dev/null 2>&1; then
   fail "the gate stayed red after the doc probe was removed; it is not tracking the doc tree"
 fi
@@ -136,6 +155,10 @@ fi
 mkdir -p "$BUILD_DIR" || fail "could not create $BUILD_DIR"
 printf '// self-test build output\n' > "$BUILD_TARGET"
 printf '\n// Self-test probe: %s and %s\n' "$BUILD_TARGET" "$TRACKED_CITATION" > "$BUILD_PROBE"
+# BUILD_PROBE is staged so the corpus scan reaches it; BUILD_TARGET is
+# deliberately left untracked - that gap is the exact thing this direction
+# tests for.
+stage "$BUILD_PROBE"
 
 build_out="$(bash "$SCAN" 2>&1)"
 build_rc=$?
@@ -157,6 +180,7 @@ esac
 
 rm -f "$BUILD_PROBE"
 rm -rf "${BUILD_DIR%/dist}"
+git reset -- "$BUILD_PROBE" > /dev/null 2>&1
 gone_out="$(bash "$SCAN" 2>&1)"
 if [ $? -ne 0 ]; then
   fail "the gate stayed red after the build-state probe was removed; it is not tracking the tree"
