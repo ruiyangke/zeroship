@@ -1,0 +1,663 @@
+//! Interaction coverage for the driver's four client-owned timeout clocks.
+//!
+//! The scripted peer is used where transport silence and recovery ordering
+//! must be controlled. It speaks only enough plaintext PostgreSQL to complete
+//! startup, inspect simple-query/Sync/CancelRequest frames, and send selected
+//! responses. It does not simulate TLS, authentication, actual SQL execution,
+//! packet loss, or a postmaster applying cancellation. The command-only test
+//! therefore uses live PostgreSQL and `pg_sleep` to exercise a real backend.
+
+// Compio's test/timeout wrappers nest enough generic futures that rustc's
+// default query-depth limit is exhausted before the interaction tests build.
+#![recursion_limit = "256"]
+
+use compio_postgres::config::SslMode;
+use compio_postgres::{Client, Config, Error, Pool, PoolConfig};
+use futures_channel::oneshot;
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[allow(dead_code)]
+mod common;
+
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
+const READ_FIRST_TIMEOUT: Duration = Duration::from_millis(100);
+const COMMAND_FIRST_TIMEOUT: Duration = Duration::from_millis(100);
+const READ_DURING_RECOVERY_TIMEOUT: Duration = Duration::from_millis(750);
+const LATE_COMMAND_TIMEOUT: Duration = Duration::from_millis(500);
+const ASYNC_WATCHDOG: Duration = Duration::from_secs(8);
+const OPERATION_WATCHDOG: Duration = Duration::from_secs(2);
+const LIVE_OPERATION_WATCHDOG: Duration = Duration::from_secs(4);
+const SOCKET_WATCHDOG: Duration = Duration::from_secs(2);
+const THREAD_WATCHDOG: Duration = Duration::from_secs(3);
+const CANCEL_REQUEST_CODE: u32 = 80_877_102;
+const CANCEL_SECRET: i32 = 1234;
+
+struct StubServer {
+    addr: SocketAddr,
+    done: mpsc::Receiver<()>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl StubServer {
+    fn spawn(script: impl FnOnce(TcpListener) + Send + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted PostgreSQL peer");
+        listener
+            .set_nonblocking(true)
+            .expect("make scripted listener bounded");
+        let addr = listener.local_addr().expect("scripted listener address");
+        let (done_tx, done) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                script(listener);
+            }));
+            let _ = done_tx.send(());
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
+            }
+        });
+        Self { addr, done, thread }
+    }
+
+    fn finish(self) {
+        self.done
+            .recv_timeout(THREAD_WATCHDOG)
+            .expect("scripted PostgreSQL peer exceeded its thread watchdog");
+        self.thread
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+}
+
+fn accept_bounded(listener: &TcpListener) -> TcpStream {
+    let deadline = Instant::now() + SOCKET_WATCHDOG;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_read_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("set scripted peer read watchdog");
+                stream
+                    .set_write_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("set scripted peer write watchdog");
+                return stream;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "client did not connect before the scripted accept watchdog"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("scripted accept failed: {error}"),
+        }
+    }
+}
+
+fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(5 + body.len());
+    frame.push(tag);
+    frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+    frame.extend_from_slice(body);
+    frame
+}
+
+fn complete_startup(stream: &mut TcpStream, process_id: i32) {
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read startup packet length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 8, "startup packet is shorter than its header");
+    assert!(length <= 1024 * 1024, "startup packet is implausibly large");
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read startup packet body");
+    assert_eq!(
+        &body[..4],
+        &[0, 3, 0, 0],
+        "client did not request protocol 3"
+    );
+
+    let mut response = backend_frame(b'R', &0u32.to_be_bytes());
+    let mut key_data = Vec::with_capacity(8);
+    key_data.extend_from_slice(&process_id.to_be_bytes());
+    key_data.extend_from_slice(&CANCEL_SECRET.to_be_bytes());
+    response.extend_from_slice(&backend_frame(b'K', &key_data));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream
+        .write_all(&response)
+        .expect("write scripted startup response");
+    stream.flush().expect("flush scripted startup response");
+}
+
+fn read_frontend_frame(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+    let mut tag = [0u8; 1];
+    stream.read_exact(&mut tag).expect("read frontend tag");
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read frontend frame length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 4, "frontend frame length is below its header");
+    assert!(length <= 1024 * 1024, "frontend frame is implausibly large");
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read frontend frame body");
+    (tag[0], body)
+}
+
+fn expect_simple_query(stream: &mut TcpStream) -> Vec<u8> {
+    let (tag, body) = read_frontend_frame(stream);
+    assert_eq!(tag, b'Q', "fixture expects one simple-query frame");
+    assert_eq!(body.last(), Some(&0), "simple query is not NUL terminated");
+    body
+}
+
+fn expect_sync(stream: &mut TcpStream) {
+    let (tag, body) = read_frontend_frame(stream);
+    assert_eq!(tag, b'S', "command recovery did not send its Sync barrier");
+    assert!(body.is_empty(), "Sync carried an unexpected body");
+}
+
+fn expect_cancel_request(stream: &mut TcpStream, process_id: i32) {
+    let mut packet = [0u8; 16];
+    stream
+        .read_exact(&mut packet)
+        .expect("read the complete CancelRequest");
+    assert_eq!(u32::from_be_bytes(packet[0..4].try_into().unwrap()), 16);
+    assert_eq!(
+        u32::from_be_bytes(packet[4..8].try_into().unwrap()),
+        CANCEL_REQUEST_CODE
+    );
+    assert_eq!(
+        i32::from_be_bytes(packet[8..12].try_into().unwrap()),
+        process_id
+    );
+    assert_eq!(
+        i32::from_be_bytes(packet[12..16].try_into().unwrap()),
+        CANCEL_SECRET
+    );
+}
+
+fn answer_ready(stream: &mut TcpStream) {
+    stream
+        .write_all(&backend_frame(b'Z', b"I"))
+        .expect("write ReadyForQuery");
+    stream.flush().expect("flush ReadyForQuery");
+}
+
+fn answer_empty_query(stream: &mut TcpStream) {
+    let mut response = backend_frame(b'I', &[]);
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream
+        .write_all(&response)
+        .expect("write empty-query response");
+    stream.flush().expect("flush empty-query response");
+}
+
+fn answer_cancelled_query(stream: &mut TcpStream) {
+    let mut response = backend_frame(
+        b'E',
+        b"SERROR\0C57014\0Mcanceling statement due to user request\0\0",
+    );
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream
+        .write_all(&response)
+        .expect("write cancelled-query response");
+    stream.flush().expect("flush cancelled-query response");
+}
+
+fn write_row_description(stream: &mut TcpStream) {
+    let mut body = Vec::new();
+    body.extend_from_slice(&1u16.to_be_bytes());
+    body.extend_from_slice(b"v\0");
+    body.extend_from_slice(&0u32.to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes());
+    body.extend_from_slice(&25u32.to_be_bytes());
+    body.extend_from_slice(&(-1i16).to_be_bytes());
+    body.extend_from_slice(&(-1i32).to_be_bytes());
+    body.extend_from_slice(&0u16.to_be_bytes());
+    stream
+        .write_all(&backend_frame(b'T', &body))
+        .expect("write RowDescription before scripted silence");
+    stream
+        .flush()
+        .expect("flush RowDescription before scripted silence");
+}
+
+fn write_partial_data_row(stream: &mut TcpStream) {
+    // A read timeout must retire rather than resume after bytes were already
+    // removed from the socket but the rest of this valid frame never arrived.
+    stream
+        .write_all(b"D\0\0\0\x0a\0\x01")
+        .expect("write partial DataRow frame");
+    stream.flush().expect("flush partial DataRow frame");
+}
+
+fn expect_disconnect(stream: &mut TcpStream) {
+    let deadline = Instant::now() + SOCKET_WATCHDOG;
+    let mut bytes = [0u8; 256];
+    loop {
+        match stream.read(&mut bytes) {
+            Ok(0) => return,
+            // A graceful close can send Terminate first; physical EOF/reset is
+            // the proof that this particular scripted session was retired.
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::NotConnected
+                ) =>
+            {
+                return;
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                panic!("client kept the scripted session open after its watchdog: {error}")
+            }
+            Err(error) => panic!("reading scripted disconnect failed: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client kept sending bytes without retiring its connection"
+        );
+    }
+}
+
+fn stub_config(addr: SocketAddr, read_timeout: Option<Duration>) -> Config {
+    let mut config = Config::new();
+    config
+        .user("scripted-user")
+        .hostaddr(addr.ip())
+        .port(addr.port())
+        .ssl_mode(SslMode::Disable)
+        .connect_timeout(CONNECT_TIMEOUT);
+    if let Some(read_timeout) = read_timeout {
+        config.read_timeout(read_timeout);
+    }
+    config
+}
+
+fn pool_config(command_timeout: Option<Duration>, acquire_timeout: Duration) -> PoolConfig {
+    let mut config = PoolConfig::new();
+    config
+        .max_size(1)
+        .min_idle(0)
+        .acquire_timeout(acquire_timeout)
+        .validation_bypass(Duration::from_secs(5));
+    if let Some(command_timeout) = command_timeout {
+        config.command_timeout(command_timeout);
+    }
+    config
+}
+
+async fn wait_for_client_close(client: &Client) {
+    compio::time::timeout(OPERATION_WATCHDOG, async {
+        while !client.is_closed() {
+            compio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("retired client did not close before its watchdog");
+}
+
+fn assert_single_retirement(pool: &Pool) {
+    assert_eq!(pool.active_count(), 0, "retired lease remained active");
+    assert_eq!(pool.idle_count(), 0, "retired session became idle");
+    assert_eq!(pool.total_count(), 0, "retired session kept its pool slot");
+    assert_eq!(
+        pool.metrics.evictions.get(),
+        1,
+        "pool did not record exactly one eviction for the retired session"
+    );
+}
+
+fn live_url() -> String {
+    let url = common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@127.0.0.1:5455/zeroship".to_string());
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}sslmode=disable")
+}
+
+/// Scripted peer: a real backend cannot stop after RowDescription on demand;
+/// this does not exercise SQL execution or a real postmaster cancellation.
+#[compio::test]
+async fn read_timeout_wins_deterministically_when_both_clocks_are_eligible() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 101);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+            write_row_description(&mut stream);
+            // The peer stays open, so only a client-owned clock can end this
+            // response after the valid first frame.
+            expect_disconnect(&mut stream);
+        });
+
+        let connection_config = stub_config(server.addr, Some(READ_FIRST_TIMEOUT));
+        let pool_config = pool_config(Some(LATE_COMMAND_TIMEOUT), Duration::from_secs(1));
+        let pool = Pool::connect_with_config(connection_config, pool_config)
+            .await
+            .expect("open pool against mid-response scripted peer");
+        let mut client = pool.get().await.expect("check out scripted session");
+
+        let error = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.command(async |client| client.simple_query("SELECT 1").await),
+        )
+        .await
+        .expect("dual-clock command exceeded its operation watchdog")
+        .expect_err("silent mid-response peer completed the command");
+        assert!(
+            error.is_read_timeout(),
+            "shorter read clock lost its stable classification: {error:?}"
+        );
+        assert!(
+            !error.is_command_timeout(),
+            "the later whole-command clock replaced the earlier read timeout"
+        );
+
+        wait_for_client_close(&client).await;
+        drop(client);
+        assert_single_retirement(&pool);
+        compio::time::timeout(OPERATION_WATCHDOG, pool.close())
+            .await
+            .expect("dual-clock pool close exceeded its watchdog");
+        server.finish();
+    })
+    .await
+    .expect("read-first timeout interaction exceeded its outer watchdog");
+}
+
+/// Scripted peer: withholding the cancelled response makes recovery silence
+/// deterministic; this does not claim a real postmaster ignores CancelRequest.
+#[compio::test]
+async fn read_timeout_during_command_recovery_keeps_command_classification() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(|listener| {
+            let mut primary = accept_bounded(&listener);
+            complete_startup(&mut primary, 202);
+            assert_eq!(expect_simple_query(&mut primary), b"SELECT 1\0");
+            write_row_description(&mut primary);
+
+            let mut cancel = accept_bounded(&listener);
+            expect_cancel_request(&mut cancel, 202);
+            // EOF confirms the CancelRequest to the client. Withholding both
+            // the cancelled response and ReadyForQuery parks recovery on its
+            // FIFO Sync barrier until the current socket-read budget expires.
+            drop(cancel);
+            expect_sync(&mut primary);
+            expect_disconnect(&mut primary);
+        });
+
+        let connection_config = stub_config(server.addr, Some(READ_DURING_RECOVERY_TIMEOUT));
+        let pool_config = pool_config(Some(COMMAND_FIRST_TIMEOUT), Duration::from_secs(1));
+        let pool = Pool::connect_with_config(connection_config, pool_config)
+            .await
+            .expect("open pool against recovery-silence peer");
+        let mut client = pool.get().await.expect("check out scripted session");
+
+        let error = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.command(async |client| client.simple_query("SELECT 1").await),
+        )
+        .await
+        .expect("recovery/read interaction exceeded its operation watchdog")
+        .expect_err("recovery-silence peer completed the command");
+        assert!(
+            error.is_command_timeout(),
+            "the command clock lost ownership after recovery began: {error:?}"
+        );
+        assert!(
+            !error.is_read_timeout(),
+            "a recovery failure replaced the already-expired command clock"
+        );
+        let recovery_error = error
+            .into_source()
+            .expect("command timeout omitted its recovery failure")
+            .downcast::<Error>()
+            .expect("command timeout recovery source was not a driver Error");
+        assert!(
+            recovery_error.is_read_timeout(),
+            "Sync recovery did not surface the read deadline: {recovery_error:?}"
+        );
+
+        wait_for_client_close(&client).await;
+        drop(client);
+        assert_single_retirement(&pool);
+        compio::time::timeout(OPERATION_WATCHDOG, pool.close())
+            .await
+            .expect("recovery/read pool close exceeded its watchdog");
+        server.finish();
+    })
+    .await
+    .expect("read-during-recovery interaction exceeded its outer watchdog");
+}
+
+/// Live PostgreSQL: `pg_sleep` proves real CancelRequest recovery; a healthy
+/// backend cannot simulate partial-frame transport silence for the read clock.
+#[compio::test]
+async fn command_timeout_recovers_without_a_read_timeout() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let url = live_url();
+        let mut connection_config: Config = url.parse().expect("parse PG_TEST_URL");
+        connection_config
+            .connect_timeout(CONNECT_TIMEOUT)
+            .options("-c statement_timeout=0");
+        assert_eq!(
+            connection_config.get_read_timeout(),
+            None,
+            "command-only fixture accidentally enabled the read clock"
+        );
+
+        let pool_config = pool_config(Some(COMMAND_FIRST_TIMEOUT), Duration::from_secs(1));
+        let pool = Pool::connect_with_config(connection_config, pool_config)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let mut client = pool.get().await.expect("check out live PostgreSQL session");
+        let backend_pid = client.process_id();
+
+        let error = compio::time::timeout(
+            LIVE_OPERATION_WATCHDOG,
+            client.command(async |client| {
+                client
+                    .query_one("SELECT pg_backend_pid(), 42::int4 FROM pg_sleep(3)", &[])
+                    .await
+            }),
+        )
+        .await
+        .expect("live command cancellation exceeded its operation watchdog")
+        .expect_err("pg_sleep outlived the configured command timeout");
+        assert!(error.is_command_timeout());
+        assert!(!error.is_read_timeout());
+
+        let row = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.query_one("SELECT pg_backend_pid(), 42::int4", &[]),
+        )
+        .await
+        .expect("same-client follow-up exceeded its watchdog")
+        .expect("command timeout did not recover the held client");
+        assert_eq!(
+            row.get::<_, i32>(0),
+            backend_pid,
+            "follow-up query ran on a replacement physical session"
+        );
+        assert_eq!(row.get::<_, i32>(1), 42);
+        assert!(!client.is_closed());
+
+        drop(client);
+        assert_eq!(pool.idle_count(), 1);
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 0);
+        compio::time::timeout(OPERATION_WATCHDOG, pool.close())
+            .await
+            .expect("command-only pool close exceeded its watchdog");
+    })
+    .await
+    .expect("command-only timeout interaction exceeded its outer watchdog");
+}
+
+/// Scripted peer: a withheld DataRow tail proves transport retirement; it does
+/// not execute the SQL or model PostgreSQL's server-side statement timeout.
+#[compio::test]
+async fn read_timeout_retires_an_entry_without_a_command_timeout() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 303);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+            write_partial_data_row(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let connection_config = stub_config(server.addr, Some(READ_FIRST_TIMEOUT));
+        let pool_config = pool_config(None, Duration::from_secs(1));
+        assert_eq!(pool_config.get_command_timeout(), None);
+        let pool = Pool::connect_with_config(connection_config, pool_config)
+            .await
+            .expect("open pool against partial-frame peer");
+        let mut client = pool.get().await.expect("check out scripted session");
+
+        let error = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            client.command(async |client| client.simple_query("SELECT 1").await),
+        )
+        .await
+        .expect("read-only command exceeded its operation watchdog")
+        .expect_err("partial-frame peer completed the command");
+        assert!(error.is_read_timeout());
+        assert!(!error.is_command_timeout());
+
+        wait_for_client_close(&client).await;
+        drop(client);
+        assert_single_retirement(&pool);
+        compio::time::timeout(OPERATION_WATCHDOG, pool.close())
+            .await
+            .expect("read-only pool close exceeded its watchdog");
+        server.finish();
+    })
+    .await
+    .expect("read-only timeout interaction exceeded its outer watchdog");
+}
+
+/// Scripted peer: gating CancelRequest EOF exposes recovery occupancy; it does
+/// not prove how quickly a real postmaster would consume or apply cancellation.
+#[compio::test]
+async fn acquire_timeout_cannot_steal_a_connection_in_command_recovery() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (cancel_seen_tx, cancel_seen_rx) = oneshot::channel();
+        let (release_cancel_tx, release_cancel_rx) = mpsc::channel();
+        let server = StubServer::spawn(move |listener| {
+            let mut primary = accept_bounded(&listener);
+            complete_startup(&mut primary, 404);
+            assert_eq!(expect_simple_query(&mut primary), b"SELECT pg_sleep(30)\0");
+
+            let mut cancel = accept_bounded(&listener);
+            expect_cancel_request(&mut cancel, 404);
+            cancel_seen_tx
+                .send(())
+                .expect("acquire test dropped its CancelRequest signal");
+            // Confirmed cancellation waits for EOF. Keeping this socket open
+            // until the competing get() finishes makes recovery occupancy an
+            // observed protocol state rather than a scheduling guess.
+            release_cancel_rx
+                .recv_timeout(SOCKET_WATCHDOG)
+                .expect("competing acquire did not release CancelRequest gate");
+            drop(cancel);
+
+            answer_cancelled_query(&mut primary);
+            expect_sync(&mut primary);
+            answer_ready(&mut primary);
+
+            assert_eq!(expect_simple_query(&mut primary), b"\0");
+            answer_empty_query(&mut primary);
+            expect_disconnect(&mut primary);
+        });
+
+        let connection_config = stub_config(server.addr, Some(Duration::from_secs(2)));
+        let pool_config = pool_config(Some(COMMAND_FIRST_TIMEOUT), ACQUIRE_TIMEOUT);
+        let pool = Pool::connect_with_config(connection_config, pool_config)
+            .await
+            .expect("open pool against gated-recovery peer");
+        let mut client = pool.get().await.expect("check out recovery session");
+        assert_eq!(client.process_id(), 404);
+
+        // Both pool futures contain the full connection/recovery state
+        // machine. Boxing keeps their joined state off the executor stack.
+        let command = Box::pin(
+            client.command(async |client| client.batch_execute("SELECT pg_sleep(30)").await),
+        );
+        let contender = Box::pin(async {
+            cancel_seen_rx
+                .await
+                .expect("server ended before observing the CancelRequest");
+            assert_eq!(pool.active_count(), 1, "recovering lease was not active");
+            assert_eq!(pool.idle_count(), 0, "recovering lease became idle");
+            assert_eq!(pool.total_count(), 1);
+
+            let acquire = compio::time::timeout(OPERATION_WATCHDOG, pool.get())
+                .await
+                .expect("competing get() exceeded its operation watchdog");
+            // Unblock the command on either outcome so a failed assertion
+            // cannot strand the scripted server behind its recovery gate.
+            release_cancel_tx
+                .send(())
+                .expect("scripted recovery dropped its release receiver");
+            let error = acquire.expect_err("competing caller stole the recovering entry");
+            assert!(
+                common::error_chain(&error).contains("connection timeout after"),
+                "competing caller got the wrong pool error: {error:?}"
+            );
+            assert_eq!(pool.metrics.timeouts.get(), 1);
+            assert_eq!(pool.pending_count(), 0, "timed-out waiter remained queued");
+            assert_eq!(pool.active_count(), 1, "recovery lease was returned early");
+            assert_eq!(pool.idle_count(), 0, "recovery entry was handed off early");
+            assert_eq!(pool.total_count(), 1);
+        });
+
+        let (command_result, ()) = compio::time::timeout(
+            LIVE_OPERATION_WATCHDOG,
+            futures_util::future::join(command, contender),
+        )
+        .await
+        .expect("command recovery/acquire join exceeded its watchdog");
+        let command_error = command_result.expect_err("scripted long command was not cancelled");
+        assert!(command_error.is_command_timeout());
+        assert!(!command_error.is_read_timeout());
+
+        assert_eq!(pool.active_count(), 1);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 0);
+        assert_eq!(
+            client.process_id(),
+            404,
+            "pool replaced the physical session after successful recovery"
+        );
+        compio::time::timeout(OPERATION_WATCHDOG, client.simple_query(""))
+            .await
+            .expect("same-session query exceeded its watchdog")
+            .expect("recovered physical session was not usable");
+        assert!(!client.is_closed());
+        drop(client);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.idle_count(), 1);
+
+        compio::time::timeout(OPERATION_WATCHDOG, pool.close())
+            .await
+            .expect("acquire/recovery pool close exceeded its watchdog");
+        server.finish();
+    })
+    .await
+    .expect("acquire/recovery timeout interaction exceeded its outer watchdog");
+}
