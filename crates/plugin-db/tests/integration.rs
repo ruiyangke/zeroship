@@ -7661,19 +7661,38 @@ async fn t6_introspection_cache_invalidates_on_deploy_token_bump() {
 ///
 /// SCOPE, stated because a check that does not say what it covers gets trusted
 /// for more than it checks: this counts direct constructions across EVERY `.rs`
-/// file in this tests directory - pooled and raw - and asserts it saw at least
-/// two files, so a narrowed scan fails loudly instead of quietly passing. It does
-/// NOT cover other crates. control, auth, gateway, migrated and both compio libs
-/// all construct connections in their tests with no teardown at all; the same
-/// leak was measured in control (peak backends climbing 0 to 8 across ten tests
-/// under `--test-threads=1`). Nothing here guards those.
+/// file in this tests directory - pooled and raw, top level AND subdirectories.
+/// It does NOT cover other crates. control, auth, gateway, migrated and both
+/// compio libs all construct connections in their tests with no teardown at all;
+/// the same leak was measured in control (peak backends climbing 0 to 8 across
+/// ten tests under `--test-threads=1`). Nothing here guards those.
+///
+/// THE SCAN DESCENDS, and it did not until 2026-08-20. It used a flat
+/// `read_dir` and skipped `tests/parity/`, so `parity/mod.rs` - a module
+/// `integration.rs` and `sqlite_integration.rs` both compile, and which raw
+/// connects to probe for a live server - was invisible to a check whose own
+/// comment claimed it covered every file here. The `files >= 2` floor was
+/// supposed to catch exactly that narrowing and did not: two is met by the two
+/// largest files alone, so the floor could not tell a whole directory apart from
+/// nothing. A file floor cannot catch this at all - flatten the walk and it
+/// still reads 9 of the 10 files. So the guard that does is `nested_files`,
+/// which goes to zero the moment the walk stops descending; the file floor below
+/// only rules out the scan being aimed somewhere else entirely.
+///
+/// What it still does NOT catch: a site reached through an aliased import
+/// (`use compio_postgres::Pool as P; P::connect(..)`), a connection opened by a
+/// helper in another crate, or a site that HAS teardown text nearby but never
+/// runs it on the failing path. It counts constructor spellings, not liveness.
 ///
 /// Sound as a text check because these are CONSTRUCTION sites: a constructor has
 /// to be written literally to be called, so it cannot hide behind indirection the
-/// way an execution can. Verified when this was written: no aliased `Pool` import,
-/// no indirect use of the constructor, and no shared helper wrapping it - every
-/// site sits directly in a test body. An alias would evade it, which is why the
-/// message says to keep the pairing rather than to satisfy the number.
+/// way an execution can. Verified when this was written: no aliased `Pool`
+/// import and no indirect use of the constructor. It also said every site sat
+/// directly in a test body with no shared helper wrapping one; that was wrong on
+/// the day it was written - `parity::maybe_pg_url` is exactly such a helper, and
+/// it went unnoticed because the scan could not see the directory it lives in.
+/// An alias would still evade this, which is why the message says to keep the
+/// pairing rather than to satisfy the number.
 ///
 /// THIS TEST HAS AN EXPIRY, and it expires by SUCCEEDING. It counts sites, not
 /// pools opened. A shared helper that opens a pool is one site whatever number of
@@ -7694,27 +7713,56 @@ fn direct_connection_sites_do_not_grow() {
         concat!("Pool", "::connect_with_config("),
         concat!("compio_postgres", "::connect("),
     ];
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
+    let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests"));
 
     let mut sites = 0usize;
     let mut files = 0usize;
-    for entry in std::fs::read_dir(dir).expect("read the tests directory") {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path).expect("read a test file");
-        files += 1;
-        for needle in needles {
-            sites += source.matches(needle).count();
+    let mut nested_files = 0usize;
+    let mut pending = vec![(root, false)];
+    while let Some((dir, nested)) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read a tests directory") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                pending.push((path, true));
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read a test file");
+            files += 1;
+            nested_files += usize::from(nested);
+            for needle in needles {
+                sites += source.matches(needle).count();
+            }
         }
     }
 
-    const PINNED: usize = 119;
+    // 121 = 120 at the top level + 1 in tests/parity/mod.rs, which the flat scan
+    // this replaced never read. Raised from 119 for two reasons, both named
+    // because a pin moved without one is a rubber stamp:
+    //   +1  c1_setup_refuses_to_create_a_missing_publication, added 2026-08-16 in
+    //       2a44ea8ef. It opens its own pool and DOES pair it with `release_pg`,
+    //       which is the property this pin exists to keep, so it is an accepted
+    //       site and not a leak. The gate has been red since that commit landed.
+    //   +1  parity::maybe_pg_url, unchanged since 2026-05-24 and older than this
+    //       test. Not a new connection - a newly VISIBLE one, in scope only
+    //       because the walk now descends.
+    const PINNED: usize = 121;
+    // 10 files today, one of them nested. This floor alone does NOT catch a walk
+    // that stops descending - measured: flattening it reads 9 and clears 9. That
+    // is what the second assertion is for. This one catches the scan being
+    // pointed at the wrong directory or reading nothing, which `>= 2` could not.
     assert!(
-        files >= 2,
+        files >= 9,
         "expected to scan the whole tests directory, saw {files} file(s) - if this \
          drops the count is measuring less than it claims"
+    );
+    assert!(
+        nested_files >= 1,
+        "the walk read {files} file(s) but none from a subdirectory - it stopped \
+         descending, and every connection site under tests/parity/ is then \
+         uncounted while this still reports a number"
     );
     assert!(
         sites <= PINNED,
