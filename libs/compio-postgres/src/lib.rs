@@ -58,10 +58,10 @@
 //! be used when TLS is not required.
 //!
 //! The `tls` Cargo feature adds `MakeRustlsConnect`, a rustls backend that reads its trust anchors from the
-//! connection string (`sslrootcert`, plus `sslcert`/`sslkey` for client-certificate auth) and implements
+//! connection configuration (`sslrootcert`, plus `sslcert`/`sslkey` for client-certificate auth) and implements
 //! `tls-server-end-point` channel binding. With that feature on, [`Pool`] builds one automatically for a
-//! `sslmode=require` URL; see the `tls_rustls` module (`src/tls_rustls.rs`) and the `Transport` section of the
-//! `pool` module docs (`src/pool.rs`).
+//! connection configuration whose `sslmode` permits TLS; see the `tls_rustls` module (`src/tls_rustls.rs`) and
+//! the `Transport` section of the `pool` module docs (`src/pool.rs`).
 
 // `MakeRustlsConnect` and `tls_rustls` above are code spans, not intra-doc links, and must stay that way. The
 // module carrying them is `#[cfg(feature = "tls")]`, so in a default-feature `cargo doc` there is no item for a
@@ -83,7 +83,7 @@ use crate::error::DbError;
 pub use crate::error::Error;
 pub use crate::generic_client::GenericClient;
 pub use crate::live::{drain_connections, live_connections};
-pub use crate::pool::{Pool, PoolConfig, PoolHookFuture, PoolHooks, PoolMetrics, PooledClient};
+pub use crate::pool::{Pool, PoolConfig, PoolHookFuture, PoolMetrics, PooledClient};
 pub use crate::portal::Portal;
 pub use crate::query::RowStream;
 pub use crate::row::{Row, SimpleQueryRow};
