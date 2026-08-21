@@ -664,3 +664,183 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compio::buf::{BufResult, IoBuf};
+
+    struct ReadySplitIo;
+
+    impl AsyncRead for ReadySplitIo {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(1), buf)
+        }
+    }
+
+    impl AsyncWrite for ReadySplitIo {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SplitStream for ReadySplitIo {
+        type ReadHalf = Self;
+        type WriteHalf = Self;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((Self, Self))
+        }
+    }
+
+    struct UnsplitIo;
+
+    impl AsyncRead for UnsplitIo {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+    }
+
+    impl AsyncWrite for UnsplitIo {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            BufResult(Ok(0), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SplitStream for UnsplitIo {
+        type ReadHalf = ReadySplitIo;
+        type WriteHalf = ReadySplitIo;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Err(self)
+        }
+    }
+
+    #[compio::test]
+    async fn ready_socket_bytes_win_a_same_poll_deadline_race() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            let deadline = ReadDeadline::new(Duration::ZERO);
+            deadline.begin_response();
+            let mut reader = ReadySplitIo;
+
+            let BufResult(result, _) =
+                read_with_deadline(&mut reader, vec![0u8; 1], Some(&deadline))
+                    .await
+                    .expect("a ready read lost to its simultaneous deadline");
+            assert_eq!(result.expect("the ready read failed"), 1);
+        })
+        .await
+        .expect("same-poll read/deadline test exceeded its watchdog");
+    }
+
+    #[test]
+    fn splitting_preserves_every_buffer_and_unsplittable_fallback_does_too() {
+        let mut splittable = BufStream::new(ReadySplitIo);
+        splittable.read_buf.extend_from_slice(b"buffered server bytes");
+        splittable.write_buf.extend_from_slice(b"buffered client bytes");
+        splittable.set_read_timeout(Some(Duration::from_secs(1)));
+
+        let (read, write) = match splittable.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("splittable fixture took the fallback path"),
+        };
+        assert_eq!(&read.read_buf[..], b"buffered server bytes");
+        assert_eq!(&write.write_buf[..], b"buffered client bytes");
+        assert!(read.read_deadline.is_some());
+
+        let mut unsplittable = BufStream::new(UnsplitIo);
+        unsplittable.read_buf.extend_from_slice(b"fallback server bytes");
+        unsplittable
+            .write_buf
+            .extend_from_slice(b"fallback client bytes");
+        unsplittable.set_read_timeout(Some(Duration::from_secs(1)));
+
+        let rebuilt = match unsplittable.try_into_split() {
+            Ok(_) => panic!("unsplittable fixture unexpectedly split"),
+            Err(stream) => stream,
+        };
+        assert_eq!(&rebuilt.read_buf[..], b"fallback server bytes");
+        assert_eq!(&rebuilt.write_buf[..], b"fallback client bytes");
+        assert!(rebuilt.read_deadline.is_some());
+    }
+
+    #[test]
+    fn pipelined_obligations_keep_the_first_budget_until_the_last_response() {
+        let deadline = ReadDeadline::new(Duration::from_secs(60));
+
+        deadline.begin_response();
+        assert_eq!(deadline.inner.obligations.get(), 1);
+        assert!(deadline.current().is_some());
+
+        // Use a deterministic marker rather than relying on clock resolution:
+        // resetting the budget cannot reproduce this exact instant.
+        let first_budget = Instant::now();
+        deadline.inner.deadline.set(Some(first_budget));
+
+        deadline.begin_response();
+        assert_eq!(deadline.inner.obligations.get(), 2);
+        assert_eq!(
+            deadline.current(),
+            Some(first_budget),
+            "a pipelined response extended the existing read budget"
+        );
+
+        deadline.finish_response();
+        assert_eq!(deadline.inner.obligations.get(), 1);
+        assert_eq!(
+            deadline.current(),
+            Some(first_budget),
+            "the first pipelined completion disarmed the remaining obligation"
+        );
+
+        deadline.finish_response();
+        assert_eq!(deadline.inner.obligations.get(), 0);
+        assert_eq!(deadline.current(), None);
+    }
+
+    #[test]
+    fn unrepresentable_read_timeout_is_effectively_unbounded() {
+        let deadline = ReadDeadline::new(Duration::MAX);
+
+        deadline.begin_response();
+        assert_eq!(deadline.inner.obligations.get(), 1);
+        assert_eq!(deadline.current(), None);
+
+        // Cover the actual-underlying-read arm as well as response setup.
+        deadline.begin_read();
+        assert_eq!(deadline.current(), None);
+    }
+
+    #[test]
+    fn dropping_a_reader_registration_releases_its_waker() {
+        let deadline = ReadDeadline::new(Duration::from_secs(60));
+        let waker = Waker::noop();
+
+        {
+            let _registration = ReaderRegistration(&deadline);
+            deadline.register_reader(waker);
+            assert!(deadline.inner.reader_waker.borrow().is_some());
+        }
+
+        assert!(
+            deadline.inner.reader_waker.borrow().is_none(),
+            "a cancelled parked read left its task waker retained"
+        );
+    }
+}
