@@ -1429,6 +1429,35 @@ impl InnerClient {
             return;
         }
 
+        // The type-info helpers are not implicit SQL-cache entries, but their
+        // server-side names can be invalidated by the same events, and a stale
+        // one is reused by the NEXT lookup rather than failing this one.
+        let removed_typeinfo = {
+            let mut cache = self.cached_typeinfo.lock();
+            fn take_matching(
+                slot: &mut Option<Statement>,
+                statement: &Statement,
+            ) -> Option<Statement> {
+                if slot
+                    .as_ref()
+                    .is_some_and(|cached| cached.same_instance(statement))
+                {
+                    slot.take()
+                } else {
+                    None
+                }
+            }
+
+            [
+                take_matching(&mut cache.typeinfo, statement),
+                take_matching(&mut cache.typeinfo_composite, statement),
+                take_matching(&mut cache.typeinfo_enum, statement),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+        };
+
         let removed = {
             let mut cache = self.statement_cache.lock();
             let key = cache.statements.iter().find_map(|(key, cached)| {
@@ -1443,9 +1472,10 @@ impl InnerClient {
             removed
         };
 
-        // Statement::drop enqueues Close + Sync and must not run under the
+        // Statement::drop enqueues Close + Sync and must not run under either
         // cache mutex.
         drop(removed);
+        drop(removed_typeinfo);
     }
 
     /// Lock the shared scratch buffer, run `f`, and clear the buffer on
