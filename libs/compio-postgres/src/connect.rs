@@ -427,9 +427,10 @@ where
         Err(e) => e,
     };
 
-    // Reaching the target-session probe means this transport completed TLS,
-    // startup, and authentication. A probe failure rejects the endpoint; it is
-    // not a reason for `sslmode=allow` to reopen that same endpoint over TLS.
+    // A completed target-session probe that proves the endpoint does not meet
+    // the requirement is not a reason for `sslmode=allow` to reopen that same
+    // endpoint over TLS. Transport and protocol failures during the probe keep
+    // their original kinds and reach the normal retry policy below.
     if err.is_target_session_attrs() {
         return Err(err);
     }
@@ -573,6 +574,7 @@ mod tests {
 
     enum ProbeReply {
         Close,
+        CloseThenTls(oneshot::Sender<u32>),
         Stall,
         Recovery(bool),
     }
@@ -639,6 +641,21 @@ mod tests {
 
             match reply {
                 ProbeReply::Close => {}
+                ProbeReply::CloseThenTls(opening_seen) => {
+                    drop(socket);
+
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let compio::BufResult(result, opening) =
+                        socket.read_exact(vec![0u8; 8]).await;
+                    result.unwrap();
+                    assert_eq!(u32::from_be_bytes(opening[..4].try_into().unwrap()), 8);
+                    let code = u32::from_be_bytes(opening[4..].try_into().unwrap());
+                    let _ = opening_seen.send(code);
+
+                    let compio::BufResult(result, _) = socket.write_all(vec![b'S']).await;
+                    result.unwrap();
+                    socket.flush().await.unwrap();
+                }
                 ProbeReply::Stall => {
                     let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
                 }
@@ -1020,6 +1037,48 @@ mod tests {
         assert!(
             result.is_err(),
             "a connection that died without answering the probe was returned"
+        );
+    }
+
+    #[compio::test]
+    async fn allow_retries_tls_after_probe_transport_failure() {
+        let (tls_seen, tls_observed) = oneshot::channel();
+        let (addr, query_observed) =
+            scripted_probe_server(ProbeReply::CloseThenTls(tls_seen)).await;
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .host("localhost")
+            .hostaddr(addr.ip())
+            .port(addr.port())
+            .ssl_mode(SslMode::Allow)
+            .target_session_attrs(TargetSessionAttrs::ReadWrite);
+
+        let connect =
+            compio::runtime::spawn(async move { config.connect(HandshakeFailingTls).await });
+        let query = compio::time::timeout(Duration::from_secs(2), query_observed)
+            .await
+            .expect("the plaintext target-session probe was never sent")
+            .expect("the plaintext connection closed before the target-session probe");
+        assert_eq!(query, b"SHOW transaction_read_only\0");
+
+        let opening = compio::time::timeout(Duration::from_secs(2), tls_observed)
+            .await
+            .expect("sslmode=allow did not retry the probe transport failure over TLS")
+            .expect("the TLS retry closed before sending its SSLRequest");
+        assert_eq!(opening, SSL_REQUEST_CODE);
+
+        let result = compio::time::timeout(Duration::from_secs(2), connect)
+            .await
+            .expect("the scripted TLS handshake failure hung connect")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let error = match result {
+            Ok(_) => panic!("the scripted TLS handshake unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(
+            error.is_tls_handshake(),
+            "the TLS retry must report its handshake failure: {error:?}"
         );
     }
 
