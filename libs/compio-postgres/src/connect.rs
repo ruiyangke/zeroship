@@ -13,13 +13,12 @@
 //   `FuturesOrdered` for parallel attempts when `hosts > 1`; that's a
 //   nice-to-have future optimisation and documented as a hand-off in
 //   PHASE3.md.
-// * `target_session_attrs=ReadWrite`/`ReadOnly` is checked on the raw stream
-//   before `connect_raw` packages it into a `Connection`.
+// * `target_session_attrs` is checked on the raw stream before `connect_raw`
+//   packages it into a `Connection`. `PreferStandby` makes a standby-only
+//   pass over the host list followed, if needed, by an any-host pass.
 
 use crate::client::{Addr, Client, SocketConfig};
-use crate::config::{Host, LoadBalanceHosts, SslMode};
-#[cfg(test)]
-use crate::config::TargetSessionAttrs;
+use crate::config::{Host, LoadBalanceHosts, SslMode, TargetSessionAttrs};
 use crate::connect_raw::connect_raw_with_target_session_attrs;
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::Encryption;
@@ -217,10 +216,56 @@ where
     R: Resolver,
 {
     let endpoints = endpoints(config)?;
+    let target = config.get_target_session_attrs();
 
+    if target == TargetSessionAttrs::PreferStandby {
+        if let Ok(connected) = connect_pass(
+            &endpoints,
+            resolver,
+            &mut tls,
+            config,
+            TargetSessionAttrs::Standby,
+        )
+        .await
+        {
+            return Ok(connected);
+        }
+
+        return connect_pass(
+            &endpoints,
+            resolver,
+            &mut tls,
+            config,
+            TargetSessionAttrs::Any,
+        )
+        .await;
+    }
+
+    connect_pass(&endpoints, resolver, &mut tls, config, target).await
+}
+
+async fn connect_pass<T, R>(
+    endpoints: &[Endpoint],
+    resolver: &mut R,
+    tls: &mut T,
+    config: &Config,
+    target_session_attrs: TargetSessionAttrs,
+) -> Result<(Client, Connection<Socket, T::Stream>), Error>
+where
+    T: MakeTlsConnect<Socket>,
+    R: Resolver,
+{
     let mut error = None;
     for endpoint in endpoints {
-        match connect_host(&endpoint, resolver, &mut tls, config).await {
+        match connect_host(
+            endpoint,
+            resolver,
+            tls,
+            config,
+            target_session_attrs,
+        )
+        .await
+        {
             Ok((client, connection)) => return Ok((client, connection)),
             Err(e) => error = Some(e),
         }
@@ -239,6 +284,7 @@ async fn connect_host<T, R>(
     resolver: &mut R,
     tls: &mut T,
     config: &Config,
+    target_session_attrs: TargetSessionAttrs,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
     T: MakeTlsConnect<Socket>,
@@ -275,11 +321,22 @@ where
         // consume it all and strand the healthy addresses behind it.
         match with_connect_timeout(
             timeout,
-            connect_once(addr, endpoint.hostname(), endpoint.port(), tls, config),
+            connect_once(
+                addr,
+                endpoint.hostname(),
+                endpoint.port(),
+                tls,
+                config,
+                target_session_attrs,
+            ),
         )
         .await
         {
             Ok(stream) => return Ok(stream),
+            // libpq treats the role as a property of this configured host: a
+            // mismatch advances to the next host instead of trying another
+            // address returned for this one.
+            Err(e) if e.is_target_session_attrs() => return Err(e),
             Err(e) => {
                 last_err = Some(e);
             }
@@ -331,6 +388,7 @@ async fn connect_once<T>(
     port: u16,
     tls: &mut T,
     config: &Config,
+    target_session_attrs: TargetSessionAttrs,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
     T: MakeTlsConnect<Socket>,
@@ -342,10 +400,29 @@ where
     // a certificate, so every mode - including verify-full - is plaintext.
     #[cfg(unix)]
     if matches!(addr, Addr::Unix(_)) {
-        return connect_leg(&addr, hostname, port, tls, config, first).await;
+        return connect_leg(
+            &addr,
+            hostname,
+            port,
+            tls,
+            config,
+            target_session_attrs,
+            first,
+        )
+        .await;
     }
 
-    let err = match connect_leg(&addr, hostname, port, tls, config, first).await {
+    let err = match connect_leg(
+        &addr,
+        hostname,
+        port,
+        tls,
+        config,
+        target_session_attrs,
+        first,
+    )
+    .await
+    {
         Ok(connected) => return Ok(connected),
         Err(e) => e,
     };
@@ -386,7 +463,16 @@ where
         _ => return Err(err),
     };
 
-    connect_leg(&addr, hostname, port, tls, config, retry).await
+    connect_leg(
+        &addr,
+        hostname,
+        port,
+        tls,
+        config,
+        target_session_attrs,
+        retry,
+    )
+    .await
 }
 
 /// One attempt: a fresh socket, one transport, one startup exchange.
@@ -396,6 +482,7 @@ async fn connect_leg<T>(
     port: u16,
     tls: &mut T,
     config: &Config,
+    target_session_attrs: TargetSessionAttrs,
     encryption: Encryption,
 ) -> Result<(Client, Connection<Socket, T::Stream>), Error>
 where
@@ -427,7 +514,7 @@ where
         encryption,
         has_hostname,
         config,
-        config.get_target_session_attrs(),
+        target_session_attrs,
         release,
     )
     .await?;
@@ -487,12 +574,13 @@ mod tests {
     enum ProbeReply {
         Close,
         Stall,
-        Value(&'static str),
+        Recovery(bool),
     }
 
-    fn probe_result(value: &str) -> Vec<u8> {
+    fn probe_result(column: &[u8], value: &str, command_complete: &[u8]) -> Vec<u8> {
         let mut row_description = 1u16.to_be_bytes().to_vec();
-        row_description.extend_from_slice(b"transaction_read_only\0");
+        row_description.extend_from_slice(column);
+        row_description.push(0);
         row_description.extend_from_slice(&0u32.to_be_bytes());
         row_description.extend_from_slice(&0i16.to_be_bytes());
         row_description.extend_from_slice(&25u32.to_be_bytes());
@@ -506,7 +594,7 @@ mod tests {
 
         let mut script = frame(b'T', &row_description);
         script.extend_from_slice(&frame(b'D', &data_row));
-        script.extend_from_slice(&frame(b'C', b"SHOW\0"));
+        script.extend_from_slice(&frame(b'C', command_complete));
         script.extend_from_slice(&frame(b'Z', b"I"));
         script
     }
@@ -554,8 +642,11 @@ mod tests {
                 ProbeReply::Stall => {
                     let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
                 }
-                ProbeReply::Value(value) => {
-                    let compio::BufResult(result, _) = socket.write_all(probe_result(value)).await;
+                ProbeReply::Recovery(in_recovery) => {
+                    let value = if in_recovery { "t" } else { "f" };
+                    let reply =
+                        probe_result(b"pg_is_in_recovery", value, b"SELECT 1\0");
+                    let compio::BufResult(result, _) = socket.write_all(reply).await;
                     result.unwrap();
                     socket.flush().await.unwrap();
                     let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
@@ -565,6 +656,75 @@ mod tests {
         .detach();
 
         (addr, query_observed)
+    }
+
+    /// A primary-only endpoint that accepts exactly the three connections a
+    /// correct two-host `prefer-standby` fallback makes. The first two report
+    /// that they are not in recovery; the third completes startup for the
+    /// `any` pass.
+    async fn scripted_prefer_standby_fallback_server() -> (
+        SocketAddr,
+        oneshot::Receiver<Vec<Vec<u8>>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (fallback_seen, fallback_observed) = oneshot::channel();
+
+        compio::runtime::spawn(async move {
+            let mut first_pass_queries = Vec::with_capacity(2);
+            for _ in 0..2 {
+                let (mut candidate, _) = listener.accept().await.unwrap();
+
+                let compio::BufResult(result, length) =
+                    candidate.read_exact(vec![0u8; 4]).await;
+                result.unwrap();
+                let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+                let compio::BufResult(result, _) =
+                    candidate.read_exact(vec![0u8; length - 4]).await;
+                result.unwrap();
+
+                let compio::BufResult(result, _) =
+                    candidate.write_all(successful_handshake()).await;
+                result.unwrap();
+                candidate.flush().await.unwrap();
+
+                let compio::BufResult(result, tag) =
+                    candidate.read_exact(vec![0u8; 1]).await;
+                result.unwrap();
+                assert_eq!(tag, b"Q");
+                let compio::BufResult(result, length) =
+                    candidate.read_exact(vec![0u8; 4]).await;
+                result.unwrap();
+                let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+                let compio::BufResult(result, query) =
+                    candidate.read_exact(vec![0u8; length - 4]).await;
+                result.unwrap();
+                first_pass_queries.push(query);
+
+                let reply = probe_result(b"pg_is_in_recovery", "f", b"SELECT 1\0");
+                let compio::BufResult(result, _) = candidate.write_all(reply).await;
+                result.unwrap();
+                candidate.flush().await.unwrap();
+            }
+
+            let (mut fallback, _) = listener.accept().await.unwrap();
+            let compio::BufResult(result, length) = fallback.read_exact(vec![0u8; 4]).await;
+            result.unwrap();
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            let compio::BufResult(result, _) =
+                fallback.read_exact(vec![0u8; length - 4]).await;
+            result.unwrap();
+
+            let compio::BufResult(result, _) = fallback.write_all(successful_handshake()).await;
+            result.unwrap();
+            fallback.flush().await.unwrap();
+            let _ = fallback_seen.send(first_pass_queries);
+
+            let compio::BufResult(_, _) = fallback.read(vec![0u8; 1]).await;
+        })
+        .detach();
+
+        (addr, fallback_observed)
     }
 
     async fn scripted_server_after_startup(
@@ -890,6 +1050,97 @@ mod tests {
             .expect("connection timeout must retain its I/O cause");
         assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
         assert_eq!(io.to_string(), "connection timed out");
+    }
+
+    #[compio::test]
+    async fn connect_timeout_covers_a_stalled_recovery_probe() {
+        let (addr, query_observed) = scripted_probe_server(ProbeReply::Stall).await;
+        let mut config = config_for(addr, Duration::from_millis(100));
+        config.target_session_attrs(TargetSessionAttrs::Primary);
+        let connect = compio::runtime::spawn(async move { config.connect(NoTls).await });
+
+        let query = compio::time::timeout(Duration::from_secs(2), query_observed)
+            .await
+            .expect("the recovery probe was never sent")
+            .expect("the connection closed without the recovery probe");
+        assert_eq!(query, b"SELECT pg_catalog.pg_is_in_recovery()\0");
+
+        let result = compio::time::timeout(Duration::from_secs(2), connect)
+            .await
+            .expect(
+                "the outer watchdog expired because the recovery probe escaped connect_timeout",
+            )
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        let Err(error) = result else {
+            panic!("a server that never answered the recovery probe connected");
+        };
+        let io = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("connection timeout must retain its I/O cause");
+        assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(io.to_string(), "connection timed out");
+    }
+
+    #[compio::test]
+    async fn prefer_standby_exhausts_the_host_list_before_the_any_pass() {
+        let (addr, fallback_observed) = scripted_prefer_standby_fallback_server().await;
+        let mut config = config_for(addr, Duration::from_secs(2));
+        config
+            .hostaddr(addr.ip())
+            .port(addr.port())
+            .target_session_attrs(TargetSessionAttrs::PreferStandby);
+
+        let connected = compio::time::timeout(Duration::from_secs(5), config.connect(NoTls))
+            .await
+            .expect("the two-pass connection walk hung")
+            .expect("the any-mode pass did not accept the primary endpoint");
+        let first_pass_queries = compio::time::timeout(Duration::from_secs(2), fallback_observed)
+            .await
+            .expect("the server never observed the any-mode fallback connection")
+            .expect("the server closed before reporting the first-pass queries");
+
+        let expected = b"SELECT pg_catalog.pg_is_in_recovery()\0".to_vec();
+        assert_eq!(
+            first_pass_queries,
+            vec![expected.clone(), expected],
+            "the any-mode pass began before both configured hosts failed the standby check"
+        );
+        drop(connected);
+    }
+
+    #[compio::test]
+    async fn target_mismatch_skips_other_addresses_for_the_same_host() {
+        let (first, first_query_observed) =
+            scripted_probe_server(ProbeReply::Recovery(false)).await;
+        let second_bind = SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (second, mut second_startup_observed) =
+            scripted_server_bound(second_bind, Some(successful_handshake())).await;
+        let mut config = hostname_config_for(first, Duration::from_secs(2));
+        config.target_session_attrs(TargetSessionAttrs::Standby);
+        let mut resolver = ListResolver(vec![first, second]);
+
+        let Err(error) = connect_with_resolver(NoTls, &config, &mut resolver).await else {
+            panic!("a primary satisfied target_session_attrs=standby");
+        };
+        let io = error
+            .source()
+            .and_then(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("target mismatch must retain its I/O cause");
+        assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(io.to_string(), "database server is not in recovery");
+
+        let query = first_query_observed
+            .await
+            .expect("the first address closed without the recovery probe");
+        assert_eq!(query, b"SELECT pg_catalog.pg_is_in_recovery()\0");
+        assert!(
+            second_startup_observed
+                .try_recv()
+                .expect("the second-address fixture disappeared")
+                .is_none(),
+            "a target mismatch tried another address for the same host"
+        );
     }
 
     #[compio::test]

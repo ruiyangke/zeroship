@@ -55,6 +55,63 @@ async fn transaction_read_only(client: &Client) -> String {
         .expect("SHOW transaction_read_only returned no row")
 }
 
+async fn server_is_in_recovery(client: &Client) -> bool {
+    let value = client
+        .simple_query("SELECT pg_catalog.pg_is_in_recovery()")
+        .await
+        .expect("pg_is_in_recovery() failed")
+        .into_iter()
+        .find_map(|message| match message {
+            SimpleQueryMessage::Row(row) => row.get(0).map(str::to_owned),
+            _ => None,
+        })
+        .expect("pg_is_in_recovery() returned no row");
+
+    match value.as_str() {
+        "t" => true,
+        "f" => false,
+        value => panic!("pg_is_in_recovery() returned {value:?}"),
+    }
+}
+
+#[compio::test]
+async fn primary_accepts_a_server_not_in_recovery() {
+    let config = config_for(TargetSessionAttrs::Primary, "cpg_standby_primary");
+    let client = connect_and_drive(&config)
+        .await
+        .expect("primary rejected the primary test server");
+
+    assert!(!server_is_in_recovery(&client).await);
+}
+
+#[compio::test]
+async fn standby_rejects_a_read_only_primary() {
+    let mut config = config_for(TargetSessionAttrs::Standby, "cpg_standby_reject_primary");
+    config.options("-c default_transaction_read_only=on");
+
+    let Err(error) = config.connect(NoTls).await else {
+        panic!("standby accepted a primary configured read only");
+    };
+    let io = source_io_error(&error).expect("target mismatch did not retain its I/O cause");
+    assert_eq!(io.kind(), io::ErrorKind::PermissionDenied);
+    assert_eq!(io.to_string(), "database server is not in recovery");
+}
+
+#[compio::test]
+async fn primary_accepts_a_read_only_session() {
+    let mut config = config_for(
+        TargetSessionAttrs::Primary,
+        "cpg_standby_primary_read_only",
+    );
+    config.options("-c default_transaction_read_only=on");
+    let client = connect_and_drive(&config)
+        .await
+        .expect("primary rejected a read-only session on the primary server");
+
+    assert_eq!(transaction_read_only(&client).await, "on");
+    assert!(!server_is_in_recovery(&client).await);
+}
+
 #[compio::test]
 async fn read_write_accepts_a_writable_server() {
     let config = config_for(TargetSessionAttrs::ReadWrite, "cpg_tsa_read_write");
@@ -145,4 +202,24 @@ async fn read_write_reaches_the_second_host_after_a_closed_first_host() {
         .await
         .expect("the closed first host prevented reaching the live second host");
     assert_eq!(transaction_read_only(&client).await, "off");
+}
+
+#[compio::test]
+async fn prefer_standby_retries_an_all_primary_host_list_in_any_mode() {
+    let url = test_url();
+    let (live_host, live_port) = live_endpoint(&url);
+    let mut config = credentials_only(&url);
+    config
+        .host(live_host.clone())
+        .port(live_port)
+        .host(live_host)
+        .port(live_port)
+        .ssl_mode(SslMode::Disable)
+        .target_session_attrs(TargetSessionAttrs::PreferStandby)
+        .application_name("cpg_standby_prefer_fallback");
+
+    let client = connect_and_drive(&config)
+        .await
+        .expect("prefer-standby did not retry the all-primary list in any mode");
+    assert!(!server_is_in_recovery(&client).await);
 }
