@@ -132,8 +132,20 @@ impl PgAdmin {
                     let _ = connection.run().await;
                 });
                 let result = client.simple_query(sql).await;
+                // Drop the client first - that is what asks the driver to shut
+                // down - and then WAIT for the driver, rather than detaching
+                // it. A detached driver is still parked on a read when this
+                // runtime is dropped one line below, and a pending io_uring
+                // submission holds a strong `Rc` to the runtime's inner state:
+                // `Runtime::drop` takes its `strong_count > 1` early return,
+                // never clears the scheduler, and the cycle it leaves keeps the
+                // whole `Proactor` alive. That stranded the ring, its eventfd
+                // and the socket - three descriptors per admin statement, in a
+                // process that runs one per provisioning step. Awaiting costs
+                // nothing here: the client is already gone, so `run` returns on
+                // the next poll.
                 drop(client);
-                driver.detach();
+                let _ = driver.await;
                 let messages = result.map_err(|e| format!("{e}"))?;
                 Ok(messages
                     .into_iter()
