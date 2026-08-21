@@ -35,6 +35,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future;
 use std::net::IpAddr;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
@@ -618,6 +619,20 @@ pub(crate) struct CachedTypeInfo {
 struct StatementCache {
     statements: HashMap<Arc<str>, Statement>,
     lru: VecDeque<Arc<str>>,
+    candidates: HashMap<Arc<str>, usize>,
+    candidate_lru: VecDeque<Arc<str>>,
+}
+
+/// Keep admission bookkeeping independent of the configured prepared slots.
+/// One hundred mirrors Npgsql's bounded auto-prepare candidate pool: it is
+/// broad enough for a normal working set while making the worst-case number of
+/// extra retained SQL strings predictable regardless of user cache capacity.
+const STATEMENT_CACHE_CANDIDATE_CAPACITY: usize = 100;
+
+pub(crate) enum StatementCacheAdmission {
+    Cached(Statement),
+    PrepareNamed,
+    ExecuteUnnamed,
 }
 
 fn statement_uses_cached_typeinfo(statement: &Statement) -> bool {
@@ -651,11 +666,15 @@ fn cached_statement_error_can_retry(error: &Error) -> bool {
 
 #[cfg(test)]
 mod type_cache_tests {
-    use super::{Client, statement_uses_cached_typeinfo};
+    use super::{
+        Client, STATEMENT_CACHE_CANDIDATE_CAPACITY, StatementCacheAdmission,
+        StatementCacheSettings, statement_uses_cached_typeinfo,
+    };
     use crate::config::{SslMode, SslNegotiation};
     use crate::Statement;
     use crate::types::{Kind, Type};
     use futures_channel::mpsc;
+    use std::num::NonZeroUsize;
 
     fn custom_type() -> Type {
         Type::new(
@@ -668,14 +687,14 @@ mod type_cache_tests {
 
     fn client_with_statement_cache() -> Client {
         let (sender, _receiver) = mpsc::unbounded();
-        Client::new_with_statement_cache_capacity(
+        Client::new_with_statement_cache(
             sender,
             SslMode::Disable,
             SslNegotiation::Postgres,
             0,
             0,
             None,
-            1,
+            StatementCacheSettings::new(1, NonZeroUsize::MIN),
         )
     }
 
@@ -717,6 +736,80 @@ mod type_cache_tests {
         assert!(client.inner().cached_statement("SELECT $1").is_none());
         drop(returned);
     }
+
+    #[test]
+    fn statement_cache_admission_candidates_have_a_hard_bound() {
+        let (sender, _receiver) = mpsc::unbounded();
+        let client = Client::new_with_statement_cache(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            0,
+            None,
+            StatementCacheSettings::new(1, NonZeroUsize::new(usize::MAX).unwrap()),
+        );
+
+        for index in 0..=STATEMENT_CACHE_CANDIDATE_CAPACITY {
+            assert!(matches!(
+                client
+                    .inner()
+                    .statement_cache_admission(&format!("SELECT {index}")),
+                StatementCacheAdmission::ExecuteUnnamed
+            ));
+        }
+
+        let cache = client.inner().statement_cache.lock();
+        assert_eq!(cache.candidates.len(), STATEMENT_CACHE_CANDIDATE_CAPACITY);
+        assert_eq!(
+            cache.candidate_lru.len(),
+            STATEMENT_CACHE_CANDIDATE_CAPACITY
+        );
+        assert!(!cache.candidates.contains_key("SELECT 0"));
+    }
+
+    #[test]
+    fn statement_cache_admission_forgets_a_stale_near_threshold_working_set() {
+        let (sender, _receiver) = mpsc::unbounded();
+        let client = Client::new_with_statement_cache(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            0,
+            None,
+            StatementCacheSettings::new(1, NonZeroUsize::new(3).unwrap()),
+        );
+
+        for index in 0..STATEMENT_CACHE_CANDIDATE_CAPACITY {
+            let sql = format!("SELECT stale_{index}");
+            assert!(matches!(
+                client.inner().statement_cache_admission(&sql),
+                StatementCacheAdmission::ExecuteUnnamed
+            ));
+            assert!(matches!(
+                client.inner().statement_cache_admission(&sql),
+                StatementCacheAdmission::ExecuteUnnamed
+            ));
+        }
+
+        for sql in ["SELECT fresh_a", "SELECT fresh_b"] {
+            assert!(matches!(
+                client.inner().statement_cache_admission(sql),
+                StatementCacheAdmission::ExecuteUnnamed
+            ));
+        }
+        for sql in ["SELECT fresh_a", "SELECT fresh_b"] {
+            assert!(matches!(
+                client.inner().statement_cache_admission(sql),
+                StatementCacheAdmission::ExecuteUnnamed
+            ));
+        }
+        assert!(matches!(
+            client.inner().statement_cache_admission("SELECT fresh_a"),
+            StatementCacheAdmission::PrepareNamed
+        ));
+    }
 }
 
 /// Shared inner state of a `Client`. Lives behind an `Arc` so helpers
@@ -728,6 +821,7 @@ pub struct InnerClient {
     query_observer: Mutex<Option<QueryObserver>>,
     cached_typeinfo: Mutex<CachedTypeInfo>,
     statement_cache_capacity: usize,
+    statement_cache_execution_threshold: NonZeroUsize,
     statement_cache: Mutex<StatementCache>,
 
     /// Scratch buffer for encoding frontend messages. `with_buf` locks
@@ -1013,6 +1107,75 @@ impl InnerClient {
         self.statement_cache_capacity
     }
 
+    pub(crate) const fn statement_cache_execution_threshold(&self) -> NonZeroUsize {
+        self.statement_cache_execution_threshold
+    }
+
+    /// Choose the protocol path for this exact SQL execution.
+    ///
+    /// Candidate tracking is a bounded, separate admission cache. It evicts
+    /// least-recently-used SQL so stale near-threshold entries cannot prevent a
+    /// new repeating working set from accumulating enough executions.
+    pub(crate) fn statement_cache_admission(&self, query: &str) -> StatementCacheAdmission {
+        let mut cache = self.statement_cache.lock();
+        if let Some((key, statement)) = cache
+            .statements
+            .get_key_value(query)
+            .map(|(key, statement)| (Arc::clone(key), statement.clone()))
+        {
+            if let Some(position) = cache.lru.iter().position(|candidate| candidate == &key) {
+                cache.lru.remove(position);
+            }
+            cache.lru.push_back(key);
+            return StatementCacheAdmission::Cached(statement);
+        }
+
+        let threshold = self.statement_cache_execution_threshold.get();
+        if threshold == 1 {
+            return StatementCacheAdmission::PrepareNamed;
+        }
+
+        let (key, executions) = if let Some((key, executions)) = cache
+            .candidates
+            .get_key_value(query)
+            .map(|(key, executions)| (Arc::clone(key), *executions))
+        {
+            let executions = executions.saturating_add(1).min(threshold);
+            *cache
+                .candidates
+                .get_mut(query)
+                .expect("the candidate was just found") = executions;
+            (key, executions)
+        } else {
+            if cache.candidates.len() == STATEMENT_CACHE_CANDIDATE_CAPACITY {
+                let evicted = cache
+                    .candidate_lru
+                    .pop_front()
+                    .expect("every candidate has an LRU entry");
+                cache.candidates.remove(&evicted);
+            }
+
+            let key: Arc<str> = Arc::from(query);
+            cache.candidates.insert(Arc::clone(&key), 1);
+            (key, 1)
+        };
+
+        if let Some(position) = cache
+            .candidate_lru
+            .iter()
+            .position(|candidate| candidate == &key)
+        {
+            cache.candidate_lru.remove(position);
+        }
+        cache.candidate_lru.push_back(key);
+
+        if executions == threshold {
+            StatementCacheAdmission::PrepareNamed
+        } else {
+            StatementCacheAdmission::ExecuteUnnamed
+        }
+    }
+
     /// Look up an exact SQL string and promote it to most-recently used.
     pub(crate) fn cached_statement(&self, query: &str) -> Option<Statement> {
         let mut cache = self.statement_cache.lock();
@@ -1055,6 +1218,14 @@ impl InnerClient {
 
         let (winner, evicted) = {
             let mut cache = self.statement_cache.lock();
+            if let Some((key, _)) = cache
+                .candidates
+                .get_key_value(query)
+                .map(|(key, executions)| (Arc::clone(key), *executions))
+            {
+                cache.candidates.remove(&key);
+                cache.candidate_lru.retain(|candidate| candidate != &key);
+            }
             let outcome = if let Some((key, winner)) = cache
                 .statements
                 .get_key_value(query)
@@ -1202,6 +1373,21 @@ pub struct Client {
     secret_key: i32,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct StatementCacheSettings {
+    capacity: usize,
+    execution_threshold: NonZeroUsize,
+}
+
+impl StatementCacheSettings {
+    pub(crate) const fn new(capacity: usize, execution_threshold: NonZeroUsize) -> Self {
+        Self {
+            capacity,
+            execution_threshold,
+        }
+    }
+}
+
 impl Client {
     pub(crate) fn new(
         sender: mpsc::UnboundedSender<Request>,
@@ -1211,25 +1397,25 @@ impl Client {
         secret_key: i32,
         release: Option<ConnectionRelease>,
     ) -> Self {
-        Self::new_with_statement_cache_capacity(
+        Self::new_with_statement_cache(
             sender,
             ssl_mode,
             ssl_negotiation,
             process_id,
             secret_key,
             release,
-            0,
+            StatementCacheSettings::new(0, NonZeroUsize::MIN),
         )
     }
 
-    pub(crate) fn new_with_statement_cache_capacity(
+    pub(crate) fn new_with_statement_cache(
         sender: mpsc::UnboundedSender<Request>,
         ssl_mode: SslMode,
         ssl_negotiation: SslNegotiation,
         process_id: i32,
         secret_key: i32,
         release: Option<ConnectionRelease>,
-        statement_cache_capacity: usize,
+        statement_cache: StatementCacheSettings,
     ) -> Self {
         Self {
             inner: Arc::new(InnerClient {
@@ -1237,7 +1423,8 @@ impl Client {
                 query_observer_enabled: AtomicBool::new(false),
                 query_observer: Mutex::new(None),
                 cached_typeinfo: Default::default(),
-                statement_cache_capacity,
+                statement_cache_capacity: statement_cache.capacity,
+                statement_cache_execution_threshold: statement_cache.execution_threshold,
                 statement_cache: Mutex::default(),
                 buffer: Default::default(),
                 dirty: AtomicBool::new(false),
@@ -1507,7 +1694,62 @@ impl Client {
         I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
-        let execution = statement.__convert().into_statement(&self.inner).await?;
+        let execution = statement
+            .__convert()
+            .into_statement(&self.inner)
+            .await?;
+        if execution.unnamed_sql.is_some() {
+            let params = params.into_iter().collect::<Vec<_>>();
+            let execution = execution
+                .finalize_probationary(&self.inner, params.len())
+                .await?;
+            if let Some(sql) = execution.unnamed_sql {
+                let types = execution.statement.params().to_vec();
+                // Reparse and Bind in one frontend batch. The earlier unnamed
+                // Describe supplied parameter OIDs; this second Parse makes
+                // the execution immune to concurrent users of PostgreSQL's
+                // unnamed statement slot, while query_typed reads the current
+                // row shape.
+                return query::query_typed(&self.inner, sql, params.into_iter().zip(types)).await;
+            }
+
+            let Some(cache_sql) = execution.cache_sql else {
+                return query::query(&self.inner, execution.statement, params).await;
+            };
+            let retry_started_idle =
+                self.inner.transaction_status() == Some(TransactionStatus::Idle);
+            if !retry_started_idle {
+                return query::query(&self.inner, execution.statement, params).await;
+            }
+
+            let first = query::query_cached(
+                &self.inner,
+                execution.statement,
+                params.iter().map(BorrowToSql::borrow_to_sql),
+            )
+            .await;
+            return match first {
+                Ok(stream) => Ok(stream),
+                Err(error) => {
+                    let Some(replacement) = self
+                        .reprepare_cached_statement_once(
+                            Some(cache_sql),
+                            retry_started_idle,
+                            &error,
+                        )
+                        .await
+                    else {
+                        return Err(error);
+                    };
+                    query::query_cached(
+                        &self.inner,
+                        replacement?,
+                        params.iter().map(BorrowToSql::borrow_to_sql),
+                    )
+                    .await
+                }
+            };
+        }
         let Some(cache_sql) = execution.cache_sql else {
             return query::query(&self.inner, execution.statement, params).await;
         };
@@ -1684,7 +1926,62 @@ impl Client {
         I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
-        let execution = statement.__convert().into_statement(&self.inner).await?;
+        let execution = statement
+            .__convert()
+            .into_statement(&self.inner)
+            .await?;
+        if execution.unnamed_sql.is_some() {
+            let params = params.into_iter().collect::<Vec<_>>();
+            let execution = execution
+                .finalize_probationary(&self.inner, params.len())
+                .await?;
+            if let Some(sql) = execution.unnamed_sql {
+                let types = execution.statement.params().to_vec();
+                return query::execute_typed(
+                    &self.inner,
+                    sql,
+                    params.into_iter().zip(types),
+                )
+                .await;
+            }
+
+            let Some(cache_sql) = execution.cache_sql else {
+                return query::execute(self.inner(), execution.statement, params).await;
+            };
+            let retry_started_idle =
+                self.inner.transaction_status() == Some(TransactionStatus::Idle);
+            if !retry_started_idle {
+                return query::execute(self.inner(), execution.statement, params).await;
+            }
+
+            let first = query::execute(
+                self.inner(),
+                execution.statement,
+                params.iter().map(BorrowToSql::borrow_to_sql),
+            )
+            .await;
+            return match first {
+                Ok(rows) => Ok(rows),
+                Err(error) => {
+                    let Some(replacement) = self
+                        .reprepare_cached_statement_once(
+                            Some(cache_sql),
+                            retry_started_idle,
+                            &error,
+                        )
+                        .await
+                    else {
+                        return Err(error);
+                    };
+                    query::execute(
+                        self.inner(),
+                        replacement?,
+                        params.iter().map(BorrowToSql::borrow_to_sql),
+                    )
+                    .await
+                }
+            };
+        }
         let Some(cache_sql) = execution.cache_sql else {
             return query::execute(self.inner(), execution.statement, params).await;
         };
@@ -1733,10 +2030,21 @@ impl Client {
         T: ?Sized + ToStatement,
         U: Buf + 'static + Send,
     {
-        let execution = statement.__convert().into_statement(&self.inner).await?;
+        let execution = statement
+            .__convert()
+            .into_statement(&self.inner)
+            .await?
+            .finalize_probationary(&self.inner, 0)
+            .await?;
         let retry_started_idle = execution.cache_sql.is_some()
             && self.inner.transaction_status() == Some(TransactionStatus::Idle);
-        match copy_in::copy_in(self.inner(), execution.statement).await {
+        match copy_in::copy_in(
+            self.inner(),
+            execution.statement,
+            execution.unnamed_sql,
+        )
+        .await
+        {
             Ok(sink) => Ok(sink),
             Err(error) => {
                 let Some(replacement) = self
@@ -1749,7 +2057,7 @@ impl Client {
                 else {
                     return Err(error);
                 };
-                copy_in::copy_in(self.inner(), replacement?).await
+                copy_in::copy_in(self.inner(), replacement?, None).await
             }
         }
     }
@@ -1759,10 +2067,21 @@ impl Client {
     where
         T: ?Sized + ToStatement,
     {
-        let execution = statement.__convert().into_statement(&self.inner).await?;
+        let execution = statement
+            .__convert()
+            .into_statement(&self.inner)
+            .await?
+            .finalize_probationary(&self.inner, 0)
+            .await?;
         let retry_started_idle = execution.cache_sql.is_some()
             && self.inner.transaction_status() == Some(TransactionStatus::Idle);
-        match copy_out::copy_out(self.inner(), execution.statement).await {
+        match copy_out::copy_out(
+            self.inner(),
+            execution.statement,
+            execution.unnamed_sql,
+        )
+        .await
+        {
             Ok(stream) => Ok(stream),
             Err(error) => {
                 let Some(replacement) = self
@@ -1775,7 +2094,7 @@ impl Client {
                 else {
                     return Err(error);
                 };
-                copy_out::copy_out(self.inner(), replacement?).await
+                copy_out::copy_out(self.inner(), replacement?, None).await
             }
         }
     }

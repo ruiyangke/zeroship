@@ -227,13 +227,20 @@ where
     }
 }
 
-pub async fn copy_in<T>(client: &InnerClient, statement: Statement) -> Result<CopyInSink<T>, Error>
+pub async fn copy_in<T>(
+    client: &InnerClient,
+    statement: Statement,
+    unnamed_sql: Option<&str>,
+) -> Result<CopyInSink<T>, Error>
 where
     T: Buf + 'static + Send,
 {
     debug!("executing copy in statement {}", statement.name());
 
-    let buf = query::encode(client, &statement, slice_iter(&[]))?;
+    let buf = match unnamed_sql {
+        Some(sql) => query::encode_unnamed(client, sql, &statement, slice_iter(&[]))?,
+        None => query::encode(client, &statement, slice_iter(&[]))?,
+    };
 
     let (mut sender, receiver) = mpsc::channel(1);
     let receiver = CopyInReceiver::new(receiver);
@@ -249,6 +256,20 @@ where
     // drop synthesize a `CopyFail`. See [`CopyInMessage::Abort`].
     async fn abort(sender: &mut mpsc::Sender<CopyInMessage>) {
         let _ = sender.send(CopyInMessage::Abort).await;
+    }
+
+    if unnamed_sql.is_some() {
+        match responses.next().await {
+            Ok(Message::ParseComplete) => {}
+            Ok(_) => {
+                abort(&mut sender).await;
+                return Err(Error::unexpected_message());
+            }
+            Err(e) => {
+                abort(&mut sender).await;
+                return Err(e);
+            }
+        }
     }
 
     match responses.next().await {

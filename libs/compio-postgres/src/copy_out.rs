@@ -16,11 +16,18 @@ use postgres_protocol::message::backend::Message;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
-pub async fn copy_out(client: &InnerClient, statement: Statement) -> Result<CopyOutStream, Error> {
+pub async fn copy_out(
+    client: &InnerClient,
+    statement: Statement,
+    unnamed_sql: Option<&str>,
+) -> Result<CopyOutStream, Error> {
     debug!("executing copy out statement {}", statement.name());
 
-    let buf = query::encode(client, &statement, slice_iter(&[]))?;
-    let responses = match start(client, buf, &statement).await {
+    let buf = match unnamed_sql {
+        Some(sql) => query::encode_unnamed(client, sql, &statement, slice_iter(&[]))?,
+        None => query::encode(client, &statement, slice_iter(&[]))?,
+    };
+    let responses = match start(client, buf, &statement, unnamed_sql.is_some()).await {
         Ok(responses) => responses,
         Err(error) => {
             statement.invalidate_cache_on_error(&error);
@@ -34,11 +41,19 @@ async fn start(
     client: &InnerClient,
     buf: Bytes,
     statement: &Statement,
+    reparsed: bool,
 ) -> Result<Responses, Error> {
     let mut responses = client.send_statement(
         RequestMessages::Single(FrontendMessage::Raw(buf)),
         statement,
     )?;
+
+    if reparsed {
+        match responses.next().await? {
+            Message::ParseComplete => {}
+            _ => return Err(Error::unexpected_message()),
+        }
+    }
 
     match responses.next().await? {
         Message::BindComplete => {}
