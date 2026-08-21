@@ -28,6 +28,10 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         '"'
     }
 
+    fn stored_ddl(&self) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
+        Some(&crate::stored_ddl::PARSER)
+    }
+
     fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
         self.quote_ident(target)
     }

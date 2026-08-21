@@ -254,7 +254,7 @@ pub(crate) async fn resolve(
         .ok_or_else(|| fail(format!("table {table:?} has no stored CREATE TABLE")))?;
     let columns = table_columns(actor, table).await?;
     let current = primary_key(&columns);
-    let without_rowid = crate::render::declarative::sqlite_create_is_without_rowid(&stored_create);
+    let without_rowid = super::stored_ddl().create_is_without_rowid(&stored_create);
 
     match action {
         AlterPrimaryKeyAction::Add { .. } if !current.is_empty() => {
@@ -359,19 +359,22 @@ pub(crate) async fn resolve(
         verify_inbound_foreign_keys(actor, table, &current, &stored_create).await?;
     }
 
-    let rewritten = crate::render::declarative::rewrite_sqlite_stored_primary_key(
-        table,
-        &stored_create,
-        target_columns(action),
-        generated_rowid.map(|column| column.name.as_str()),
-        crate::render::backends::schema_renderer(super::SQLITE_DIALECT),
-    )
-    .map_err(|error| fail(error.to_string()))?;
-    let (open, _) = crate::render::declarative::sqlite_create_body_bounds(&rewritten)
+    let stored_ddl = super::stored_ddl();
+    let rewritten = stored_ddl
+        .rewrite_stored_primary_key(
+            table,
+            &stored_create,
+            target_columns(action),
+            generated_rowid.map(|column| column.name.as_str()),
+            crate::render::backends::schema_renderer(super::SQLITE_DIALECT),
+        )
+        .map_err(|error| fail(error.to_string()))?;
+    let (open, _) = stored_ddl
+        .create_body_bounds(&rewritten)
         .ok_or_else(|| fail("rewritten CREATE TABLE has no body"))?;
     let tmp_table = TableRebuildSpec::tmp_name(table);
     let new_table_create = format!("CREATE TABLE {} {}", ident(&tmp_table), &rewritten[open..]);
-    let generated = crate::render::declarative::sqlite_generated_columns(&rewritten);
+    let generated = stored_ddl.generated_columns(&rewritten);
     let copy_columns = columns
         .iter()
         .filter(|column| {

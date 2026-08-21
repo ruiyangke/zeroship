@@ -4,7 +4,7 @@
 //! have both called "the future `zero-migrate-backend`" in their headers since the
 //! in-crate backend modules were written. This is it.
 //!
-//! It holds the four per-vendor TRAITS, the vocabulary their signatures name, and
+//! It holds the per-vendor TRAITS, the vocabulary their signatures name, and
 //! the registry shape a vendor crate hands back. It deliberately holds no vendor:
 //! nothing here spells a keyword, quotes an identifier or names a dialect except
 //! `SqlDialect`, which is a wire-level target descriptor from `zero-migrate-ir`.
@@ -15,8 +15,9 @@
 //! | [`schema::SchemaRenderer`] | how does this vendor spell column types and collations |
 //! | [`ddl::DdlEmitter`] | how does this vendor spell schema-changing statements |
 //! | [`guard::MigrationGuard`] | what does this vendor REFUSE to run |
+//! | [`stored_ddl::StoredDdl`] | how does this vendor parse catalog-stored table DDL |
 //!
-//! The same dependency rule governs all four: a trait declared in the engine would
+//! The same dependency rule governs all five: a trait declared in the engine would
 //! force every vendor to depend on the engine, which already depends on every vendor.
 //!
 //! ```text
@@ -84,4 +85,5 @@ pub mod schema_error;
 pub mod snapshot;
 pub mod spelling;
 pub mod step;
+pub mod stored_ddl;
 pub mod vendor;

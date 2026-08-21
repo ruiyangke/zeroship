@@ -283,8 +283,7 @@ async fn introspect_columns(
             (ordinal > 0).then_some(ordinal)
         })
         .count();
-    let without_rowid =
-        crate::render::declarative::sqlite_create_is_without_rowid(stored_create_sql);
+    let without_rowid = super::stored_ddl().create_is_without_rowid(stored_create_sql);
     let Some(t) = tables.get_mut(table) else {
         return Ok(());
     };
@@ -1317,12 +1316,13 @@ fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str
     // Parse only the outer CREATE body, then compare each clause's decoded first
     // identifier. A global substring search can confuse the table name with a
     // same-named column and cannot correctly skip backtick/bracket quoting.
-    let (open, close) = crate::render::declarative::sqlite_create_body_bounds(create_sql)?;
-    let clauses = crate::render::declarative::sqlite_table_clauses(&create_sql[open + 1..close])?;
+    let stored_ddl = super::stored_ddl();
+    let (open, close) = stored_ddl.create_body_bounds(create_sql)?;
+    let clauses = stored_ddl.table_clauses(&create_sql[open + 1..close])?;
     for clause in clauses {
-        let quoted = crate::render::declarative::sqlite_first_ddl_word_is_quoted(clause);
+        let quoted = stored_ddl.first_ddl_word_is_quoted(clause);
         let mut cursor = 0_usize;
-        let first = crate::render::declarative::sqlite_ddl_word(clause, &mut cursor)?;
+        let first = stored_ddl.ddl_word(clause, &mut cursor)?;
         if !quoted
             && matches!(
                 first.to_ascii_uppercase().as_str(),

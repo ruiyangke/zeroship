@@ -267,6 +267,11 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         '"'
     }
 
+    /// DuckDB deliberately offers no catalog-stored DDL parser in this stub.
+    fn stored_ddl(&self) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
+        None
+    }
+
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
         format!("\"{app_id}\".\"{target}\"")
     }

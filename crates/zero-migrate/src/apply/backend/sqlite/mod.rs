@@ -91,6 +91,12 @@ pub use rebuild_sql::RebuildError;
 /// `render::backends::sqlite`'s own `DIALECT`.
 const SQLITE_DIALECT: SqlDialect = SqlDialect::Sqlite;
 
+/// The parser registered by this backend for its catalog-stored table DDL.
+fn stored_ddl() -> &'static dyn zero_migrate_backend::stored_ddl::StoredDdl {
+    crate::render::backends::stored_ddl(SQLITE_DIALECT)
+        .expect("the registered SQLite backend must provide stored-DDL analysis")
+}
+
 /// The SQLite [`MigrationBackend`]. Holds the dedicated hardened migration actor
 /// for ONE tenant. Construct via [`SqliteBackend::open`].
 #[derive(Debug)]

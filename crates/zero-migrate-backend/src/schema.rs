@@ -3,7 +3,9 @@
 //!
 //! The sibling of [`crate::renderer`], for the OTHER renderer registry. There are
 //! two, because there are two things a vendor is asked to spell: DML/trigger/view
-//! text ([`crate::renderer::DmlRenderer`]) and column/DDL text (this).
+//! text ([`crate::renderer::DmlRenderer`]) and column/DDL text (this). This trait
+//! also selects the vendor-owned parser for catalog-stored table DDL when that
+//! backend exposes such DDL to the engine.
 //!
 //! # What is here and what stayed in the engine
 //!
@@ -13,6 +15,8 @@
 //!
 //! * the trait itself, including the required identifier primitives each vendor
 //!   supplies;
+//! * the neutral [`crate::stored_ddl::StoredDdl`] contract used to reach a
+//!   vendor-owned stored-DDL parser;
 //! * the sentinel builders PostgreSQL's `column_comment_statements` spells
 //!   ([`build_encryption_sentinel_comments`], [`build_mask_sentinel_comments`] and
 //!   the three field-level readers under them).
@@ -84,6 +88,12 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// deriving a vendor spelling in core. Required for the same reason as
     /// [`Self::quote_ident`].
     fn ident_quote_char(&self) -> char;
+
+    /// This vendor's parser for catalog-stored table DDL, or an explicit `None`
+    /// when its snapshots do not retain a grammar that the engine may rewrite.
+    ///
+    /// Required with no default so a new backend states that boundary itself.
+    fn stored_ddl(&self) -> Option<&'static dyn crate::stored_ddl::StoredDdl>;
 
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
     fn column_type(&self, c: &ColumnSnapshot, inline_pk: bool) -> String;

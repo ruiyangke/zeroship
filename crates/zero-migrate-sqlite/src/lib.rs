@@ -26,6 +26,7 @@ mod ddl;
 mod dml;
 pub mod guard;
 mod schema;
+mod stored_ddl;
 
 pub use guard::SqliteGuard;
 

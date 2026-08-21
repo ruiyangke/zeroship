@@ -966,9 +966,11 @@ fn sqlite_folded_rowid_generation(
     if !sqlite_integer_storage_for_rowid(snap, &folded.data_type) {
         return false;
     }
+    let stored_ddl = crate::render::backends::stored_ddl(SqlDialect::Sqlite)
+        .expect("the SQLite renderer must provide stored-DDL analysis");
     snap.stored_create_sql.as_deref().is_none_or(|stored| {
-        !crate::render::declarative::sqlite_create_is_without_rowid(stored)
-            && !crate::render::declarative::sqlite_inline_primary_key_is_desc(stored, column)
+        !stored_ddl.create_is_without_rowid(stored)
+            && !stored_ddl.inline_primary_key_is_desc(stored, column)
     })
 }
 
@@ -1070,7 +1072,9 @@ fn apply_fold_alter_primary_key(
                 .find(|column| column.name == target[0])
                 .is_some_and(|column| sqlite_integer_storage_for_rowid(snap, &column.data_type))
             && snap.stored_create_sql.as_deref().is_none_or(|stored| {
-                !crate::render::declarative::sqlite_create_is_without_rowid(stored)
+                !crate::render::backends::stored_ddl(SqlDialect::Sqlite)
+                    .expect("the SQLite renderer must provide stored-DDL analysis")
+                    .create_is_without_rowid(stored)
             })
         {
             return Err(FoldError::Unsupported(
@@ -3469,9 +3473,11 @@ fn apply_fold_sqlite_rowid_metadata(snap: &mut TableSnapshot) -> Result<(), Fold
     let storage_generates =
         sqlite_integer_storage_for_rowid(snap, &snap.columns[column_index].data_type)
             || matches!(snap.columns[column_index].identity, Some(identity) if !identity.always);
+    let stored_ddl = crate::render::backends::stored_ddl(SqlDialect::Sqlite)
+        .expect("the SQLite renderer must provide stored-DDL analysis");
     let stored_shape_allows_rowid = snap.stored_create_sql.as_deref().is_none_or(|stored| {
-        !crate::render::declarative::sqlite_create_is_without_rowid(stored)
-            && !crate::render::declarative::sqlite_inline_primary_key_is_desc(stored, column_name)
+        !stored_ddl.create_is_without_rowid(stored)
+            && !stored_ddl.inline_primary_key_is_desc(stored, column_name)
     });
     let sqlite_rowid = storage_generates && stored_shape_allows_rowid;
     let column = &mut snap.columns[column_index];

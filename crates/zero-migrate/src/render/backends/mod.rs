@@ -134,6 +134,14 @@ pub(crate) fn schema_renderer(
     vendor(dialect).schema
 }
 
+/// The vendor-owned parser for catalog-stored table DDL, when this backend
+/// explicitly provides one.
+pub(crate) fn stored_ddl(
+    dialect: SqlDialect,
+) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
+    vendor(dialect).schema.stored_ddl()
+}
+
 /// The schema-bound DDL emitter registered by a dialect's vendor crate.
 pub(crate) fn ddl_emitter(dialect: SqlDialect, project_schema: &str) -> Box<dyn DdlEmitter> {
     (vendor(dialect).ddl)(project_schema)

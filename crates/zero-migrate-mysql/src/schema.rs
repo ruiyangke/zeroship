@@ -30,6 +30,12 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         '`'
     }
 
+    /// MySQL snapshots expose structured catalog facts rather than retaining a
+    /// vendor CREATE statement for surgical rewrites.
+    fn stored_ddl(&self) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
+        None
+    }
+
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
         format!("{}.{}", self.quote_ident(app_id), self.quote_ident(target))
     }

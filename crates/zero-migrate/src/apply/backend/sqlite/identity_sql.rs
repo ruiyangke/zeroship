@@ -139,7 +139,7 @@ async fn resolve_rowid_allocation(
         .iter()
         .filter(|candidate| candidate.pk_ordinal > 0)
         .collect::<Vec<_>>();
-    let without_rowid = crate::render::declarative::sqlite_create_is_without_rowid(&stored_create);
+    let without_rowid = super::stored_ddl().create_is_without_rowid(&stored_create);
     let primary_has_index = primary_key_has_separate_index(actor, table).await?;
     let aliases_rowid = primary.len() == 1
         && target.pk_ordinal == 1
@@ -347,14 +347,16 @@ fn top_level_words(sql: &str) -> Option<Vec<String>> {
 }
 
 fn column_declares_autoincrement(create_sql: &str, column: &str) -> Result<bool, SqliteActorError> {
-    let (open, close) = crate::render::declarative::sqlite_create_body_bounds(create_sql)
+    let stored_ddl = super::stored_ddl();
+    let (open, close) = stored_ddl
+        .create_body_bounds(create_sql)
         .ok_or_else(|| fail("stored CREATE TABLE body could not be parsed"))?;
     let clauses = table_clauses(&create_sql[open + 1..close])
         .ok_or_else(|| fail("stored CREATE TABLE clauses could not be parsed"))?;
     let mut found_column = false;
     for clause in clauses {
         let mut cursor = 0_usize;
-        let Some(name) = crate::render::declarative::sqlite_ddl_word(clause, &mut cursor) else {
+        let Some(name) = stored_ddl.ddl_word(clause, &mut cursor) else {
             return Err(fail("stored CREATE TABLE contains an empty clause"));
         };
         if !name.eq_ignore_ascii_case(column) {
