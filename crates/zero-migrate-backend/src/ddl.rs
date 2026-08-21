@@ -248,7 +248,11 @@ pub fn sqlite_auto_increment_identity_pk(c: &ColumnSnapshot, inline_pk: bool) ->
 /// The trailing ` PRIMARY KEY` (or `SQLite`'s ` PRIMARY KEY AUTOINCREMENT`) clause
 /// an inline single-column PK carries, or the empty string.
 #[must_use]
-pub fn primary_key_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> &'static str {
+pub fn primary_key_clause(
+    c: &ColumnSnapshot,
+    dialect: SqlDialect,
+    inline_pk: bool,
+) -> &'static str {
     if matches!(dialect, SqlDialect::Sqlite) && sqlite_auto_increment_identity_pk(c, inline_pk) {
         " PRIMARY KEY AUTOINCREMENT"
     } else if inline_pk {
@@ -265,7 +269,8 @@ pub fn primary_key_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bo
 #[must_use]
 pub fn null_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> &'static str {
     if c.nullable
-        || (matches!(dialect, SqlDialect::Sqlite) && sqlite_auto_increment_identity_pk(c, inline_pk))
+        || (matches!(dialect, SqlDialect::Sqlite)
+            && sqlite_auto_increment_identity_pk(c, inline_pk))
         || (matches!(dialect, SqlDialect::Mysql)
             && matches!(c.identity, Some(identity) if !identity.always))
     {
