@@ -1,4 +1,14 @@
-//! Cfg-independent source gate for undeclared Rust environment reads.
+//! Cfg-independent source gate for undeclared Rust environment reads, and for
+//! every mutation of the process environment.
+//!
+//! TWO POPULATIONS, ONE WALK. A raw READ is banned so the population of reads
+//! stays enumerable, and two roles may perform one. A WRITE - `set_var`,
+//! `remove_var` - is banned because the process environment is global and
+//! shared, so a value one test sets is read by every other test in the same
+//! binary; Rust 2024 made both `unsafe` because they race with concurrent
+//! `getenv` in libc. No role is exempt from the write rule. Handing an
+//! environment to a CHILD process (`Command::env`) is untouched: it is an
+//! explicit argument at the call site, scoped to the child.
 //!
 //! Two things share this module because they are the same walk over the same
 //! syntax tree: the GATE that Section 4.5 of
@@ -9,10 +19,14 @@
 //! progress rather than only after it finishes.
 //!
 //! Why a source scan at all, when Clippy's `disallowed_methods` already denies
-//! the four raw methods: the lint only sees code the current cfg activates. A
-//! read behind a disabled feature compiles out and the lint says nothing, while
-//! a different feature selection ships it. This parses the file, so a disabled
-//! cfg is still source.
+//! these methods: the lint only sees code the current cfg activates. A read
+//! behind a disabled feature compiles out and the lint says nothing, while a
+//! different feature selection ships it. This parses the file, so a disabled
+//! cfg is still source. That is not hypothetical for the WRITE half:
+//! `tests/clippy_gate.sh` lints under a fixed `--features` list that does not
+//! include `zeroship-plugin-storage/s3`, so the `set_var` calls that used to
+//! sit behind `#[cfg(feature = "s3")]` in `crates/plugin-storage/tests/
+//! backend_parity.rs` were invisible to the lint and visible only here.
 //!
 //! What it does NOT do. It cannot see a read inside a dependency, a read behind
 //! a macro this crate does not expand, or a name assembled at run time. The
@@ -29,6 +43,30 @@ use syn::{Attribute, Expr, ExprCall, ExprPath, ItemUse, Lit, Macro, Meta, Token,
 use thiserror::Error;
 
 const RAW_METHODS: &[&str] = &["var", "var_os", "vars", "vars_os"];
+
+/// The two ways to MUTATE the process environment.
+///
+/// A separate population from [`RAW_METHODS`] because the reason differs and so
+/// does the exemption set. A raw READ is banned so the population of reads
+/// stays enumerable, and two roles are permitted to perform one. A WRITE is
+/// banned because the process environment is global and shared: a value one
+/// test sets is read by every other test in the same binary and by any thread
+/// already running, which is why Rust 2024 made both functions `unsafe` - they
+/// race with concurrent `getenv` in libc, and the race is undefined behaviour
+/// rather than a flaky assertion. Nothing in this workspace needs to write, so
+/// NO role is exempt, not even the central accessor.
+///
+/// What this deliberately does not reach: giving an environment to a CHILD
+/// process. `Command::env` and the shell's `VAR=x cmd` are explicit arguments
+/// at the call site, scoped to the child, and are the sanctioned way to test
+/// that a variable reaches a binary. Neither is a function on `std::env`, so
+/// neither is named here or in [`WRITE_FFI_ESCAPES`].
+const WRITE_METHODS: &[&str] = &["set_var", "remove_var"];
+
+/// The FFI spellings of the same mutation, for the same reason `libc::getenv`
+/// is watched on the read side: a gate that only knows the `std` path is
+/// defeated by one `extern` call.
+const WRITE_FFI_ESCAPES: &[&str] = &["setenv", "unsetenv", "putenv"];
 
 /// The typed accessors the registering macros wrap.
 ///
@@ -119,6 +157,9 @@ pub enum RawEnvViolation {
     /// A forbidden method or known FFI escape was referenced.
     #[error("undeclared raw environment read: {0}")]
     Read(String),
+    /// The process environment was MUTATED. Permitted in no role.
+    #[error("process-global environment mutation: {0}")]
+    Write(String),
     /// A zeroship-owned name was captured at compile time.
     #[error("undeclared compile-time environment read: {0}")]
     CompileTime(String),
@@ -167,6 +208,10 @@ pub struct RawEnvReport {
 #[derive(Default)]
 struct Imports {
     function_aliases: BTreeSet<String>,
+    /// Local names bound to `std::env::set_var` / `remove_var`. Kept apart
+    /// from `function_aliases` so a write is never reported as a read: the two
+    /// carry different messages and different exemption rules.
+    write_aliases: BTreeSet<String>,
     module_aliases: BTreeSet<String>,
     violations: Vec<RawEnvViolation>,
 }
@@ -223,6 +268,12 @@ fn inspect_import(prefix: &[String], original: &str, local: &str, imports: &mut 
         imports.function_aliases.insert(local.to_owned());
         imports.violations.push(RawEnvViolation::Import(format!(
             "std::env::{original} as {local}"
+        )));
+    }
+    if prefix == ["std", "env"] && WRITE_METHODS.contains(&original) {
+        imports.write_aliases.insert(local.to_owned());
+        imports.violations.push(RawEnvViolation::Write(format!(
+            "imported as std::env::{original} as {local}"
         )));
     }
 }
@@ -286,6 +337,25 @@ impl<'ast> Visit<'ast> for Reads<'_> {
     /// read a second time from `visit_expr_path`, so this arm walks the
     /// arguments itself and deliberately does not visit `call.func`.
     fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+        // The write arm, handled here and not at the callee path for the same
+        // reason the read arm is: descending into `call.func` afterwards would
+        // report the same mutation a second time from `visit_expr_path`. No
+        // role permits a write, so unlike the read arm there is no literal
+        // argument to inspect and no exemption to consult.
+        if let Expr::Path(path) = call.func.as_ref() {
+            let segments = path_segments(path);
+            if is_write_path(&segments, self.imports) {
+                let line = call.func.span().start().line;
+                self.violations.push(RawEnvViolation::Write(format!(
+                    "{line}: {}",
+                    segments.join("::")
+                )));
+                for argument in &call.args {
+                    self.visit_expr(argument);
+                }
+                return;
+            }
+        }
         let raw_callee = match call.func.as_ref() {
             Expr::Path(path) => {
                 let segments = path_segments(path);
@@ -327,6 +397,16 @@ impl<'ast> Visit<'ast> for Reads<'_> {
     fn visit_expr_path(&mut self, path: &'ast ExprPath) {
         let segments = path_segments(path);
         let line = path.span().start().line;
+        // A write reached WITHOUT calling it - `let f = std::env::set_var;`,
+        // or handing it to a `map` - is the same mutation one indirection
+        // away. `visit_expr_call` returns early for a direct call, so this arm
+        // only ever sees the indirect form.
+        if is_write_path(&segments, self.imports) {
+            self.violations.push(RawEnvViolation::Write(format!(
+                "{line}: {}",
+                segments.join("::")
+            )));
+        }
         if is_raw_path(&segments, self.imports) {
             self.violations.push(RawEnvViolation::Read(format!(
                 "{line}: {}",
@@ -388,6 +468,11 @@ impl<'ast> Visit<'ast> for Reads<'_> {
         } else if let Some(spelling) = raw_spelling_in_tokens(&mac.tokens) {
             self.violations.push(RawEnvViolation::Read(format!(
                 "in {} macro body: {spelling}",
+                name.clone().unwrap_or_else(|| "unnamed".to_owned())
+            )));
+        } else if let Some(spelling) = write_spelling_in_tokens(&mac.tokens) {
+            self.violations.push(RawEnvViolation::Write(format!(
+                "in {} macro body: {spelling}",
                 name.unwrap_or_else(|| "unnamed".to_owned())
             )));
         }
@@ -427,6 +512,26 @@ fn raw_spelling_in_tokens(tokens: &proc_macro2::TokenStream) -> Option<String> {
     }
     flat.contains("libc::getenv")
         .then(|| "libc::getenv".to_owned())
+}
+
+/// The write-side twin of [`raw_spelling_in_tokens`], with the same blind spot
+/// and the same reason for excluding string literals: this file's own tests
+/// name `std::env::set_var` inside `matches!` guards and assertion messages,
+/// and a text test that counted those would fail on the code that proves the
+/// gate works.
+fn write_spelling_in_tokens(tokens: &proc_macro2::TokenStream) -> Option<String> {
+    let mut flat = String::new();
+    flatten_non_literal_tokens(tokens, &mut flat);
+    for method in WRITE_METHODS {
+        let spelling = format!("std::env::{method}");
+        if flat.contains(&spelling) {
+            return Some(spelling);
+        }
+    }
+    WRITE_FFI_ESCAPES
+        .iter()
+        .map(|escape| format!("libc::{escape}"))
+        .find(|spelling| flat.contains(spelling))
 }
 
 fn flatten_non_literal_tokens(tokens: &proc_macro2::TokenStream, out: &mut String) {
@@ -498,6 +603,34 @@ fn silences_raw_env_lint(attribute: &Attribute) -> bool {
     };
     let tokens = list.tokens.to_string().replace(' ', "");
     tokens.contains("clippy::disallowed_methods")
+}
+
+/// Whether a call path MUTATES the process environment.
+///
+/// The mirror of [`is_raw_path`] over [`WRITE_METHODS`]. A METHOD call is not
+/// reachable here by construction, which is what keeps this from flagging the
+/// unrelated `set_var` methods the workspace legitimately owns -
+/// `EnvStore::set_var` in the control plane is `store.set_var(..)`, a method
+/// receiver and not a path, and `syn` routes it to `visit_expr_method_call`.
+/// Only a free function reached through `std::env`, an alias of that module,
+/// or an alias of the function itself matches.
+fn is_write_path(segments: &[String], imports: &Imports) -> bool {
+    if let [std, env, method] = segments
+        && std == "std"
+        && env == "env"
+        && WRITE_METHODS.contains(&method.as_str())
+    {
+        return true;
+    }
+    if let [module, method] = segments {
+        if imports.module_aliases.contains(module) && WRITE_METHODS.contains(&method.as_str()) {
+            return true;
+        }
+        if module == "libc" && WRITE_FFI_ESCAPES.contains(&method.as_str()) {
+            return true;
+        }
+    }
+    matches!(segments, [function] if imports.write_aliases.contains(function))
 }
 
 fn is_raw_path(segments: &[String], imports: &Imports) -> bool {
@@ -811,6 +944,7 @@ fn prefix(name: &str, violation: RawEnvViolation) -> RawEnvViolation {
         RawEnvViolation::Parse(detail) => RawEnvViolation::Parse(format!("{name}: {detail}")),
         RawEnvViolation::Import(detail) => RawEnvViolation::Import(format!("{name}: {detail}")),
         RawEnvViolation::Read(detail) => RawEnvViolation::Read(format!("{name}: {detail}")),
+        RawEnvViolation::Write(detail) => RawEnvViolation::Write(format!("{name}: {detail}")),
         RawEnvViolation::CompileTime(detail) => {
             RawEnvViolation::CompileTime(format!("{name}: {detail}"))
         }
