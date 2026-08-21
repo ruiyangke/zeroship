@@ -8,7 +8,7 @@
 //! Five properties, each of which exists because some project shipped its
 //! opposite:
 //!
-//! 1. **A named sentinel**, [`SERVICE_CREDENTIAL_SENTINEL`], never a
+//! 1. **A named sentinel**, [`zeroship_secret_policy::SERVICE_CREDENTIAL_SENTINEL`], never a
 //!    plausible-looking random string. The whole value of the constant is that
 //!    it is unmistakable in a config file, in a boot log and in a grep.
 //! 2. **Empty and sentinel are ONE state.** Gitaly's
