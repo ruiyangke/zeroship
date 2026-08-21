@@ -55,6 +55,12 @@ struct Servers {
     client_cert: String,
     /// The private key for `client_cert`.
     client_key: String,
+    /// The same key encoded as passphrase-encrypted PKCS#8.
+    client_encrypted_key: String,
+    /// The passphrase used for `client_encrypted_key`.
+    client_key_password: String,
+    /// A CRL issued by `ca` that revokes the exact certificate on `tls_url`.
+    server_crl: String,
 }
 
 impl Servers {
@@ -81,6 +87,9 @@ impl Servers {
             ca: field("ca"),
             client_cert: field("client_cert"),
             client_key: field("client_key"),
+            client_encrypted_key: field("client_encrypted_key"),
+            client_key_password: field("client_key_password"),
+            server_crl: field("server_crl"),
         }
     }
 }
@@ -112,7 +121,10 @@ async fn server_reports_ssl(client: &Client) -> (bool, String) {
 /// evidence this suite exists to produce - a reader should not have to infer
 /// what the server saw from the names of the tests that passed.
 async fn transport_of(url: &str) -> Result<bool, Error> {
-    let redacted = url.replace(PASSWORD_MARKER, "***");
+    let redacted = url
+        .replace(PASSWORD_MARKER, "***")
+        .replace(KEY_PASSWORD_MARKER, "***")
+        .replace(WRONG_KEY_PASSWORD_MARKER, "***");
     let pool = match Pool::connect(url, 1).await {
         Ok(pool) => pool,
         Err(e) => {
@@ -137,9 +149,11 @@ async fn transport_of(url: &str) -> Result<bool, Error> {
     Ok(ssl)
 }
 
-/// The password the setup script bakes into every URL, kept out of the printed
-/// matrix above.
+/// The fixtures use fixed secrets. Replacing the exact values also redacts a
+/// future quoted DSN value containing whitespace.
 const PASSWORD_MARKER: &str = "compio-postgres-tls-test";
+const KEY_PASSWORD_MARKER: &str = "compio-postgres-encrypted-key-test";
+const WRONG_KEY_PASSWORD_MARKER: &str = "definitely-wrong";
 
 fn describe(err: &Error) -> String {
     format!("{err}: {:?}", std::error::Error::source(err))
@@ -531,19 +545,103 @@ async fn channel_binding_require_fails_without_tls() {
 /// The server here uses `cert` authentication: `ssl_ca_file` is set and
 /// `pg_hba` accepts no password at all. The URL carries no password either. So
 /// a session that reaches `SELECT` did so because rustls presented the client
-/// certificate and PostgreSQL mapped its `CN=postgres` to the role.
+/// certificate and PostgreSQL mapped its `CN=postgres` to the role. Supplying
+/// `sslpassword` here also proves it is ignored for this unencrypted key.
 #[compio::test]
 async fn client_certificates_authenticate_the_session() {
     let s = servers();
     let url = format!(
-        "{} sslmode=verify-full sslrootcert={} sslcert={} sslkey={}",
-        s.clientcert_url, s.ca, s.client_cert, s.client_key
+        "{} sslmode=verify-full sslrootcert={} sslcert={} sslkey={} sslpassword={}",
+        s.clientcert_url, s.ca, s.client_cert, s.client_key, s.client_key_password
     );
     assert!(
         transport_of(&url)
             .await
             .expect("the client certificate must authenticate"),
         "client-certificate session was not encrypted"
+    );
+}
+
+/// A real encrypted PKCS#8 key must be unusable with the wrong passphrase and
+/// usable with the right one. Both attempts present the same certificate to
+/// the same `cert`-authentication server; only `sslpassword` changes.
+#[compio::test]
+async fn encrypted_client_key_requires_matching_sslpassword() {
+    let s = servers();
+    let base = format!(
+        "{} sslmode=verify-full sslrootcert={} sslcert={} sslkey={}",
+        s.clientcert_url, s.ca, s.client_cert, s.client_encrypted_key
+    );
+
+    let wrong = transport_of(&format!("{base} sslpassword={WRONG_KEY_PASSWORD_MARKER}"))
+        .await
+        .expect_err("the wrong private-key passphrase must be refused");
+    assert!(
+        describe(&wrong).contains("sslkey"),
+        "the refusal must come from loading the encrypted key: {}",
+        describe(&wrong)
+    );
+
+    assert!(
+        transport_of(&format!("{base} sslpassword={}", s.client_key_password))
+            .await
+            .expect("the matching private-key passphrase must authenticate"),
+        "encrypted client-key session was not encrypted"
+    );
+}
+
+/// Revocation is enforced, not merely parsed: the same server certificate and
+/// trust anchor are accepted until the one differing variable names a CRL
+/// that revokes that exact leaf certificate.
+#[compio::test]
+async fn sslcrl_refuses_the_server_certificate_it_revokes() {
+    let s = servers();
+    let base = format!("{} sslmode=verify-full sslrootcert={}", s.tls_url, s.ca);
+
+    assert!(
+        transport_of(&base)
+            .await
+            .expect("the server certificate is valid without a CRL"),
+        "the no-CRL control was not encrypted"
+    );
+
+    let revoked = transport_of(&format!("{base} sslcrl={}", s.server_crl))
+        .await
+        .expect_err("the CRL must refuse the exact server certificate it revokes");
+    assert!(
+        describe(&revoked).to_ascii_lowercase().contains("revoked"),
+        "the refusal must be certificate revocation, not a parse error: {}",
+        describe(&revoked)
+    );
+}
+
+/// `verify-ca` suppresses only host-name failures. This combines a deliberately
+/// wrong TLS name with the revoked certificate so a future rustls reordering
+/// cannot accidentally make that suppression swallow revocation too.
+#[compio::test]
+async fn verify_ca_still_enforces_sslcrl_with_a_wrong_host_name() {
+    let s = servers();
+    let endpoint = s.tls_url.replacen(
+        "host=localhost",
+        "host=revoked-name.invalid hostaddr=127.0.0.1",
+        1,
+    );
+    let base = format!("{endpoint} sslmode=verify-ca sslrootcert={}", s.ca);
+
+    assert!(
+        transport_of(&base)
+            .await
+            .expect("verify-ca must ignore only the deliberately wrong host name"),
+        "the no-CRL control was not encrypted"
+    );
+
+    let revoked = transport_of(&format!("{base} sslcrl={}", s.server_crl))
+        .await
+        .expect_err("verify-ca must not suppress a revocation failure");
+    assert!(
+        describe(&revoked).to_ascii_lowercase().contains("revoked"),
+        "verify-ca suppressed more than the host-name error: {}",
+        describe(&revoked)
     );
 }
 

@@ -37,8 +37,10 @@ tls = [
     "dep:futures-rustls",
     "dep:rustls",
     "dep:rustls-native-certs",
+    "dep:pkcs8",
     "dep:sha2",
     "dep:x509-parser",
+    "dep:zeroize",
 ]
 # Opt-in for `tests/tls_live.rs`, which needs the four PostgreSQL servers
 # `tests/tls_live_setup.sh` stands up.
@@ -104,6 +106,23 @@ optional = true
 
 [dependencies.rustls-native-certs]
 version = "0.8"
+optional = true
+
+# rustls-pki-types deliberately parses only unencrypted private keys. Modern
+# OpenSSL emits passphrase-protected keys as encrypted PKCS#8, so the TLS
+# connector needs PKCS#5 PBES2 decryption in addition to rustls' PEM reader.
+# This stays pure Rust and avoids adding OpenSSL to the rustls-only transport.
+[dependencies.pkcs8]
+version = "0.10.2"
+default-features = false
+features = ["encryption", "pem"]
+optional = true
+
+# rustls-pki-types exposes explicit key zeroization but does not invoke it when
+# the provider consumes an owned DER key. Wipe that transient copy after
+# aws-lc imports it instead of leaving decrypted key bytes in freed memory.
+[dependencies.zeroize]
+version = "1"
 optional = true
 
 # `tls-server-end-point` is the hash of the server's DER certificate, and RFC
