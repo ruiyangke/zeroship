@@ -632,8 +632,8 @@ mod tests {
         KNOWN_WEAK_WORKER_KEYS, MIN_SECRET_BYTES, PLATFORM_SECRETS,
     };
 
-    /// THE DEFECT THIS TABLE EXISTS FOR. `tests/compose_secret_strength_gate.sh`
-    /// used to derive its rule set by regexing the refusal message text out of
+    /// THE DEFECT THIS TABLE EXISTS FOR. The compose secret-strength gate
+    /// (deleted 2026-08-21) derived its rule set by regexing the message text out of
     /// this file. 2c56e92a3 replaced the baked-in `WORKER_KEY` in those messages
     /// with a `{label}` format parameter - a correct change - and the regex
     /// silently matched nothing from that day on. The gate's anti-vacuity guard

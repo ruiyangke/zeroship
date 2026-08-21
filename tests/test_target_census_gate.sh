@@ -122,7 +122,10 @@ gate_arms_init test_target_census
 #   5504 test names across 125 test binaries in 30 packages
 #
 # against the floor of 5413. So the 31 is not a measured component any more, it
-# is 91 points of ordinary slack. It is deliberately NOT tightened here, because
+# is 91 points of ordinary slack, and 2026-08-21 spent 63 of it: the five
+# zeroship-gatekit compose gates took 44 test names with them and the crate's
+# own deletion took 19 more, leaving about 5441 against the same floor. It is
+# deliberately NOT tightened here, because
 # this file already records that no CI run of this job has ever printed its own
 # number, so nobody knows whether a runner resolves features the way the two
 # machines that produced 5444 and 5504 did. Tighten it in the change that first
@@ -153,7 +156,7 @@ NAME_FLOOR_DEFAULT=5413
 # show for it. Guard the side that can collapse silently by comparing it to the
 # side that cannot; guard the side that cannot with a constant.
 #
-# 15 against the 30 rows counted 2026-08-20 in tests/test_target_packages.txt.
+# 15 against the 29 rows counted 2026-08-21 in tests/test_target_packages.txt.
 # Half, because packages are added and removed in ones and this must survive a
 # real consolidation. The same shape as run_doc_gate.sh's `>= 10` guard on the
 # workspace member count it derives its own floor from.
