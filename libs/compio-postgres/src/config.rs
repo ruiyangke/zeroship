@@ -334,9 +334,9 @@ pub enum Host {
 ///     This option is ignored when connecting with Unix sockets.
 /// * `keepalives_retries` - The maximum number of TCP keepalive probes that will be sent before dropping a connection.
 ///     This option is ignored when connecting with Unix sockets.
-/// * `target_session_attrs` - Specifies requirements of the session. If set to `read-write`, the client will check that
-///     the `transaction_read_write` session parameter is set to `on`. This can be used to connect to the primary server
-///     in a database cluster as opposed to the secondary read-only mirrors. Defaults to `all`.
+/// * `target_session_attrs` - Specifies requirements of the session. `read-write` requires
+///     `transaction_read_only` to be `off`, while `read-only` requires it to be `on`. This can be used to select a
+///     suitable server from a database cluster. Defaults to `any`.
 /// * `channel_binding` - Controls usage of channel binding in the authentication process. If set to `disable`, channel
 ///     binding will not be used. If set to `prefer`, channel binding will be used if available, but not used otherwise.
 ///     If set to `require`, the authentication process will fail if channel binding is not used. Defaults to `prefer`.
