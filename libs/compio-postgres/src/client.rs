@@ -1334,6 +1334,14 @@ impl Client {
     ///
     /// Calling this method follows the same replacement and in-flight request
     /// semantics as [`Client::query_events`].
+    ///
+    /// A threshold discards every sub-threshold execution, so it cannot see a
+    /// problem made of many individually fast queries: an N+1 issuing thousands
+    /// of quick statements produces no events at all. Elapsed time also counts
+    /// waiting behind an earlier query on the same connection, so one trivial
+    /// statement can be reported for another's slowness. Use
+    /// [`Client::query_events`] when the question is "what is this connection
+    /// doing", and a threshold when it is "which single query is slow".
     #[must_use = "the receiver must be retained to observe query events"]
     pub fn query_events_with_threshold(
         &self,
