@@ -268,9 +268,22 @@ fn main() -> std::io::Result<()> {
         report.field("control_url", CheckValue::Plain(control_url));
         report.field("auth_ui_url", CheckValue::Plain(auth_ui_url));
         report.field("origin_scheme", CheckValue::Plain(origin_scheme.to_string()));
+        // The ORIGINS, not their count. A trusted origin is a public host, not
+        // a credential, so there is nothing to withhold; and the count could
+        // not answer the question an operator actually asks of this report -
+        // which origins does this gateway trust, and did my overlay reach it.
+        // `crates/gateway/tests/config_env_tier.rs` is the reader that needs
+        // the values: a count cannot tell a right-sized list from the wrong
+        // configuration tier.
         report.field(
-            "trusted_origins_count",
-            CheckValue::Count(trusted_origins.len()),
+            "trusted_origins",
+            CheckValue::Plain(
+                trusted_origins
+                    .iter()
+                    .map(zeroship_core::config::TrustedOrigin::as_str)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
         );
         report.field("log_filter", CheckValue::Plain(boot.log_filter.clone()));
         report.field("log_format", CheckValue::Plain(log_format));
@@ -655,16 +668,18 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_core::config::{GeneratedConfig, OriginScheme, SourceKind, TrustedOrigin};
+    use zeroship_core::config::{GeneratedConfig, SourceKind};
 
-    static CLI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn restore_env_var(key: &str, old: Option<std::ffi::OsString>) {
-        match old {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
-    }
+    // WHAT LEFT THIS MODULE. The two tests that drove the ENVIRONMENT tier of
+    // `GateSettings` moved to `crates/gateway/tests/config_env_tier.rs`. That
+    // tier is clap's `env = "ZEROSHIP_..."` attribute, so the only way to
+    // exercise it in-process was `std::env::set_var`, which mutates the
+    // environment every other test in this binary parses in. They now run the
+    // real `zeroship-gate` under `--check-config` with `Command::env`, which
+    // scopes the environment to the child and observes the shipped resolver
+    // rather than a reconstruction of it.
+    //
+    // What stayed here is everything that needs no environment at all.
 
     /// A temp file that removes itself even when an assertion panics.
     struct SecretFile(PathBuf);
@@ -710,61 +725,6 @@ mod tests {
     }
 
     #[test]
-    fn topology_cli_overrides_environment_and_environment_overrides_file() {
-        let _guard = CLI_ENV_LOCK.lock().expect("env lock");
-        let old_scheme = zeroship_core::test_env_os!("ZEROSHIP_ORIGIN_SCHEME");
-        let old_origins = zeroship_core::test_env_os!("ZEROSHIP_TRUSTED_ORIGINS");
-        std::env::set_var("ZEROSHIP_ORIGIN_SCHEME", "http");
-        std::env::set_var(
-            "ZEROSHIP_TRUSTED_ORIGINS",
-            "https://env.example,http://localhost:3000",
-        );
-
-        // The environment reaches the same carrier the flag does, and the
-        // generated resolver then prefers the carrier over the overlay. The
-        // hand-written resolve_origin_scheme/resolve_trusted_origins helpers
-        // this test used to call are deleted; the precedence they encoded is
-        // now the resolver's, asserted here against a REAL overlay.
-        let overlay: toml::Value = toml::from_str(
-            "origin_scheme = \"https\"\ntrusted_origins = [\"https://file.example\"]\n",
-        )
-        .expect("fixture overlay");
-        let env =
-            GateSettingsSources::try_parse_from(["zeroship-gate"]).expect("parse env topology");
-        let resolved =
-            GateSettings::resolve_config(env, Some(&overlay)).expect("settings resolve");
-        assert_eq!(resolved.origin_scheme.get(), &OriginScheme::Http);
-        assert_eq!(
-            resolved
-                .trusted_origins
-                .get()
-                .iter()
-                .map(TrustedOrigin::as_str)
-                .collect::<Vec<_>>(),
-            vec!["https://env.example", "http://localhost:3000"]
-        );
-
-        let cli = GateSettingsSources::try_parse_from([
-            "zeroship-gate",
-            "--origin-scheme",
-            "https",
-            "--trusted-origins",
-            "https://cli.example",
-        ])
-        .expect("parse CLI topology");
-        let flagged =
-            GateSettings::resolve_config(cli, Some(&overlay)).expect("settings resolve");
-        assert_eq!(flagged.origin_scheme.get(), &OriginScheme::Https);
-        assert_eq!(
-            flagged.trusted_origins.get()[0].as_str(),
-            "https://cli.example"
-        );
-
-        restore_env_var("ZEROSHIP_ORIGIN_SCHEME", old_scheme);
-        restore_env_var("ZEROSHIP_TRUSTED_ORIGINS", old_origins);
-    }
-
-    #[test]
     fn deleted_security_relaxation_flag_is_rejected() {
         let parsed = GateSettingsSources::try_parse_from(["zeroship-gate", "--dev-insecure"]);
         let err = match parsed {
@@ -772,25 +732,6 @@ mod tests {
             Err(err) => err,
         };
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
-    }
-
-    #[test]
-    fn obsolete_security_relaxation_environment_variable_is_ignored() {
-        let _guard = CLI_ENV_LOCK.lock().expect("env lock");
-        let old = zeroship_core::declared_env_os!(
-            dev,
-            "ZEROSHIP_DEV_INSECURE",
-            zeroship_gateway::config::GateSettingsConsumer
-        );
-        std::env::set_var("ZEROSHIP_DEV_INSECURE", "1");
-        let parsed = GateSettingsSources::try_parse_from(["zeroship-gate"]);
-        restore_env_var("ZEROSHIP_DEV_INSECURE", old);
-
-        let Ok(sources) = parsed else {
-            panic!("an obsolete environment variable must not affect parsing");
-        };
-        assert_eq!(sources.origin_scheme, None);
-        assert_eq!(sources.trust_proxy, None);
     }
 
     #[test]

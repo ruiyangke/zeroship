@@ -165,6 +165,7 @@ mod common;
 
 mod authz_guard_supabase_test;
 mod billing_pipeline_redpanda_e2e;
+mod config_env_tier;
 mod durable_workflows_keystone_e2e;
 mod provider_conformance;
 mod trusted_clients_test;
