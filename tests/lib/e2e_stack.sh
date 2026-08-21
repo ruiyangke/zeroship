@@ -36,8 +36,11 @@
 # Tunables (export BEFORE calling stack_up):
 #   ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT ZEROSHIP_GATEWAY_PORT PG_PORT
 #   E2E_PLATFORM_OP_PORT         - listen ports
+#   PG_CONTAINER                 - docker container name
+#   ZEROSHIP_WORKER_THREADS      - worker --threads
+#   E2E_ROOT                     - repo root (auto-derived)
 #
-# THE DEFAULTS BELOW ARE A FALLBACK, NOT A DESIGN. A per-harness constant lets
+# THE PORT DEFAULTS BELOW ARE A FALLBACK, NOT A DESIGN. A per-harness constant lets
 # a harness run back-to-back with a DIFFERENT harness; it does nothing for the
 # case that actually happens on a shared box - two agents running the SAME
 # harness, or two harnesses whose bands were chosen independently and overlap
@@ -52,9 +55,6 @@
 # The harness OP already works this way and has since it was written: it binds
 # port 0 and reads the number back from a file (tests/lib/runtime_secrets.sh
 # e2e_platform_op_up). Nothing about a listen port here is different.
-#   PG_CONTAINER                 - docker container name
-#   ZEROSHIP_WORKER_THREADS      - worker --threads
-#   E2E_ROOT                     - repo root (auto-derived)
 #
 # Exports after stack_up: ZEROSHIP_CONTROL_PORT ZEROSHIP_WORKER_PORT
 #   ZEROSHIP_GATEWAY_PORT PG_CONTAINER WORK
