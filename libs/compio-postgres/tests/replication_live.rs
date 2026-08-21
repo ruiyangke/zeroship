@@ -9,15 +9,261 @@
 //! mode, where the regular query grammar is gone and only the replication
 //! commands answer.
 //!
+//! Deadline stalls use a bounded scripted peer: PostgreSQL cannot be told to
+//! stop at a chosen byte inside a protocol frame, and its keepalives make a
+//! measured zero-byte streaming interval nondeterministic.
+//!
 //! The crate had NO live coverage of `src/replication.rs` before this file.
 //! Its unit tests build `IDENTIFY_SYSTEM` row bodies by hand, and that is
 //! exactly how the defect below survived: the hand-built shape is not the one
 //! `DataRowBody::buffer()` produces, so parser and fixture agreed on a row
 //! layout the server never sends.
 
+use compio_postgres::config::SslMode;
+use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
 use compio_postgres::{Config, NoTls};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::thread;
+use std::time::{Duration, Instant};
 
 mod common;
+
+const READ_TIMEOUT: Duration = Duration::from_millis(75);
+const IDLE_EXPOSURE: Duration = Duration::from_millis(225);
+const OPERATION_WATCHDOG: Duration = Duration::from_secs(1);
+const SOCKET_WATCHDOG: Duration = Duration::from_secs(2);
+const ASYNC_WATCHDOG: Duration = Duration::from_secs(5);
+const THREAD_WATCHDOG: Duration = Duration::from_secs(3);
+
+/// A bounded plaintext peer for states a real walsender cannot be instructed
+/// to enter, such as stopping after an exact frame prefix.
+struct ReplicationStub {
+    addr: SocketAddr,
+    done: std::sync::mpsc::Receiver<()>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl ReplicationStub {
+    fn spawn(script: impl FnOnce(TcpListener) + Send + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted replication peer");
+        listener
+            .set_nonblocking(true)
+            .expect("make scripted replication listener bounded");
+        let addr = listener.local_addr().expect("scripted listener address");
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let thread = thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                script(listener);
+            }));
+            let _ = done_tx.send(());
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
+            }
+        });
+        Self { addr, done, thread }
+    }
+
+    fn finish(self) {
+        self.done
+            .recv_timeout(THREAD_WATCHDOG)
+            .expect("scripted replication peer exceeded its thread watchdog");
+        self.thread
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+}
+
+fn accept_bounded(listener: &TcpListener) -> TcpStream {
+    let deadline = Instant::now() + SOCKET_WATCHDOG;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_read_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("set scripted peer read watchdog");
+                stream
+                    .set_write_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("set scripted peer write watchdog");
+                return stream;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "replication client missed the scripted accept watchdog"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("scripted replication accept failed: {error}"),
+        }
+    }
+}
+
+fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(5 + body.len());
+    frame.push(tag);
+    frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+    frame.extend_from_slice(body);
+    frame
+}
+
+fn complete_replication_startup(stream: &mut TcpStream, delay: Duration) {
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read replication startup length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(
+        length >= 8,
+        "replication startup is shorter than its header"
+    );
+    assert!(
+        length <= 1024 * 1024,
+        "replication startup is implausibly large"
+    );
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read replication startup body");
+    assert_eq!(&body[..4], &[0, 3, 0, 0]);
+    assert!(
+        body.windows(b"replication\0database\0".len())
+            .any(|window| window == b"replication\0database\0"),
+        "client startup did not request logical replication mode"
+    );
+
+    // Startup is deliberately delayed in one test to prove read_timeout is
+    // not installed until authentication completes.
+    thread::sleep(delay);
+    let mut response = backend_frame(b'R', &0u32.to_be_bytes());
+    response.extend_from_slice(&backend_frame(b'K', &[0; 8]));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream
+        .write_all(&response)
+        .expect("write scripted replication startup response");
+    stream
+        .flush()
+        .expect("flush scripted replication startup response");
+}
+
+fn expect_simple_query(stream: &mut TcpStream) -> Vec<u8> {
+    let mut tag = [0u8; 1];
+    stream.read_exact(&mut tag).expect("read simple-query tag");
+    assert_eq!(tag[0], b'Q');
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read simple-query length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 5, "simple query has no NUL-terminated body");
+    assert!(length <= 1024 * 1024, "simple query is implausibly large");
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read simple-query body");
+    assert_eq!(body.last(), Some(&0), "simple query is not NUL terminated");
+    body
+}
+
+fn send_identify_system(stream: &mut TcpStream) {
+    let mut row = Vec::new();
+    row.extend_from_slice(&4u16.to_be_bytes());
+    for field in [
+        b"scripted-system".as_slice(),
+        b"1".as_slice(),
+        b"0/10".as_slice(),
+        b"scripted-db".as_slice(),
+    ] {
+        row.extend_from_slice(&i32::try_from(field.len()).unwrap().to_be_bytes());
+        row.extend_from_slice(field);
+    }
+
+    let mut response = backend_frame(b'D', &row);
+    response.extend_from_slice(&backend_frame(b'C', b"IDENTIFY_SYSTEM\0"));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream
+        .write_all(&response)
+        .expect("write IDENTIFY_SYSTEM response");
+    stream.flush().expect("flush IDENTIFY_SYSTEM response");
+}
+
+fn send_copy_both(stream: &mut TcpStream) {
+    // Overall format byte + zero columns. The driver intentionally ignores
+    // these fields, but this is the real CopyBothResponse shape.
+    stream
+        .write_all(&backend_frame(b'W', &[0, 0, 0]))
+        .expect("write CopyBothResponse");
+    stream.flush().expect("flush CopyBothResponse");
+}
+
+fn send_keepalive(stream: &mut TcpStream, wal_end: u64) {
+    let mut body = vec![b'k'];
+    body.extend_from_slice(&wal_end.to_be_bytes());
+    body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+    body.push(0);
+    stream
+        .write_all(&backend_frame(b'd', &body))
+        .expect("write PrimaryKeepalive");
+    stream.flush().expect("flush PrimaryKeepalive");
+}
+
+fn send_notice(stream: &mut TcpStream) {
+    stream
+        .write_all(&backend_frame(b'N', b"Mscripted notice\0\0"))
+        .expect("write replication NoticeResponse");
+    stream.flush().expect("flush replication NoticeResponse");
+}
+
+fn expect_disconnect(stream: &mut TcpStream) {
+    let deadline = Instant::now() + SOCKET_WATCHDOG;
+    let mut bytes = [0u8; 256];
+    loop {
+        match stream.read(&mut bytes) {
+            Ok(0) => return,
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::NotConnected
+                ) =>
+            {
+                return;
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                panic!("replication client kept its timed-out session open: {error}")
+            }
+            Err(error) => panic!("reading replication disconnect failed: {error}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replication client kept sending without retiring its session"
+        );
+    }
+}
+
+fn stub_config(addr: SocketAddr) -> Config {
+    let mut config = Config::new();
+    config
+        .user("scripted-replication-user")
+        .hostaddr(addr.ip())
+        .port(addr.port())
+        .ssl_mode(SslMode::Disable)
+        .connect_timeout(Duration::from_secs(1))
+        .read_timeout(READ_TIMEOUT);
+    config
+}
+
+fn start_options() -> StartReplicationOptions<'static> {
+    StartReplicationOptions {
+        slot_name: "deadline_slot",
+        start_lsn: "0/0",
+        proto_version: 1,
+        publication_names: "deadline_publication",
+    }
+}
 
 fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
@@ -310,4 +556,300 @@ async fn replication_tls_refusal_is_keyed_to_the_contradiction_not_the_endpoint(
         !common::server_answered(&dialled),
         "the second arm must reach the socket and be refused there: {dialled_chain}"
     );
+}
+
+/// Authentication is still governed by `connect_timeout`; `read_timeout`
+/// starts only on the post-startup `IDENTIFY_SYSTEM` exchange.
+///
+/// One peer holds startup longer than three read budgets, then starts but does
+/// not finish an IDENTIFY_SYSTEM frame. Pairing both phases on one socket makes
+/// it impossible for a disabled deadline to satisfy the startup assertion and
+/// masquerade as coverage of the command deadline.
+#[compio::test]
+async fn replication_read_timeout_starts_after_startup_and_poisons_identify_system() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, IDLE_EXPOSURE);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+
+            // Valid RowDescription tag and declared length, but only one of
+            // the body bytes. The peer stays connected at an unknown frame
+            // boundary until the client retires it.
+            stream
+                .write_all(&[b'T', 0, 0, 0, 29, 0])
+                .expect("write partial IDENTIFY_SYSTEM response");
+            stream
+                .flush()
+                .expect("flush partial IDENTIFY_SYSTEM response");
+            expect_disconnect(&mut stream);
+        });
+
+        let startup_started = Instant::now();
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("replication startup exceeded its outer watchdog")
+        .expect("read_timeout incorrectly covered replication startup");
+        assert!(
+            startup_started.elapsed() >= IDLE_EXPOSURE,
+            "scripted startup did not expose three read budgets"
+        );
+
+        let first = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("IDENTIFY_SYSTEM exceeded its outer watchdog")
+            .expect_err("partial IDENTIFY_SYSTEM response completed");
+        assert!(
+            first.is_read_timeout(),
+            "IDENTIFY_SYSTEM lost its socket-read timeout: {first}"
+        );
+
+        let second = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("poisoned IDENTIFY_SYSTEM retry exceeded its watchdog")
+            .expect_err("timed-out replication connection was reused");
+        assert!(
+            second.is_cancelled(),
+            "IDENTIFY_SYSTEM timeout did not poison the session: {second}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("replication startup/IDENTIFY timeout test exceeded its outer watchdog");
+}
+
+/// `START_REPLICATION` has its own response obligation before CopyBoth mode.
+/// The call consumes the connection, so physical disconnect is the observable
+/// retirement proof; there is deliberately no same-object retry API.
+#[compio::test]
+async fn a_stalled_start_replication_exchange_times_out_and_retires_its_session() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" 'deadline_publication')\0"
+            );
+
+            // CopyBothResponse declares its three-byte body, but only its
+            // format byte arrives. This cannot be reproduced with PostgreSQL.
+            stream
+                .write_all(&[b'W', 0, 0, 0, 7, 0])
+                .expect("write partial CopyBothResponse");
+            stream.flush().expect("flush partial CopyBothResponse");
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                NoTls,
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let start_result = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its outer watchdog");
+        let error = match start_result {
+            Ok(_) => panic!("partial CopyBothResponse started a stream"),
+            Err(error) => error,
+        };
+        assert!(
+            error.is_read_timeout(),
+            "START_REPLICATION lost its socket-read timeout: {error}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("START_REPLICATION timeout test exceeded its outer watchdog");
+}
+
+/// Waiting for the first byte of a CopyBoth frame is legitimate idle time.
+/// Keep one `next()` future alive across three read budgets, then require the
+/// exact later keepalive. A second interval follows a skipped NoticeResponse,
+/// proving every complete frame disarms the clock before the next idle wait.
+#[compio::test]
+async fn an_awaited_idle_replication_stream_survives_repeated_read_budgets() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (begin_idle_tx, begin_idle_rx) = std::sync::mpsc::channel();
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            send_identify_system(&mut stream);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" 'deadline_publication')\0"
+            );
+            send_copy_both(&mut stream);
+
+            begin_idle_rx
+                .recv_timeout(SOCKET_WATCHDOG)
+                .expect("client never began the first idle read");
+            thread::sleep(IDLE_EXPOSURE);
+            send_keepalive(&mut stream, 0x100);
+
+            begin_idle_rx
+                .recv_timeout(SOCKET_WATCHDOG)
+                .expect("client never began the post-notice idle read");
+            send_notice(&mut stream);
+            thread::sleep(IDLE_EXPOSURE);
+            send_keepalive(&mut stream, 0x200);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                NoTls,
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let identity = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("IDENTIFY_SYSTEM exceeded its watchdog")
+            .expect("scripted IDENTIFY_SYSTEM failed");
+        assert_eq!(identity.systemid, "scripted-system");
+        assert_eq!(identity.timeline, 1);
+        assert_eq!(identity.xlogpos, "0/10");
+        assert_eq!(identity.dbname.as_deref(), Some("scripted-db"));
+        let mut stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("scripted peer refused CopyBoth mode");
+
+        for (iteration, expected_wal_end) in [("first", 0x100), ("post-notice", 0x200)] {
+            let started = Instant::now();
+            let message = {
+                let mut next = std::pin::pin!(stream.next());
+                assert!(
+                    futures_util::poll!(next.as_mut()).is_pending(),
+                    "{iteration} idle read completed before the peer was released"
+                );
+                begin_idle_tx
+                    .send(())
+                    .expect("scripted peer dropped its idle trigger");
+                compio::time::timeout(OPERATION_WATCHDOG, next.as_mut())
+                    .await
+                    .unwrap_or_else(|_| panic!("{iteration} idle read exceeded its watchdog"))
+                    .unwrap_or_else(|error| {
+                        panic!("{iteration} idle read spent the read budget: {error}")
+                    })
+                    .unwrap_or_else(|| panic!("{iteration} idle stream ended without a frame"))
+            };
+            assert!(
+                started.elapsed() >= IDLE_EXPOSURE,
+                "{iteration} idle interval did not expose three read budgets"
+            );
+            match message {
+                ReplicationMessage::PrimaryKeepalive { wal_end, .. } => {
+                    assert_eq!(wal_end, expected_wal_end);
+                }
+                other => panic!("{iteration} idle read returned {other:?}"),
+            }
+        }
+
+        drop(stream);
+        server.finish();
+    })
+    .await
+    .expect("idle replication deadline test exceeded its outer watchdog");
+}
+
+/// Once any frame byte arrives, a quiet peer is no longer merely idle: the
+/// driver has lost a frame boundary if that read is cancelled. The timeout is
+/// therefore terminal, observable both as logical poison and physical EOF.
+#[compio::test]
+async fn a_mid_frame_replication_stall_times_out_and_poisons_the_stream() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (send_prefix_tx, send_prefix_rx) = std::sync::mpsc::channel();
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" 'deadline_publication')\0"
+            );
+            send_copy_both(&mut stream);
+            send_prefix_rx
+                .recv_timeout(SOCKET_WATCHDOG)
+                .expect("client never started the bounded frame read");
+
+            // CopyData length 22 declares an 18-byte PrimaryKeepalive body.
+            // The sub-tag and four WAL bytes prove the frame began, but its
+            // remaining fields never arrive.
+            stream
+                .write_all(&[b'd', 0, 0, 0, 22, b'k', 0, 0, 0, 1])
+                .expect("write partial PrimaryKeepalive");
+            stream
+                .flush()
+                .expect("flush partial PrimaryKeepalive");
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(
+                NoTls,
+                &stub_config(server.addr),
+            ),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+        let mut stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(start_options()),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("scripted peer refused CopyBoth mode");
+
+        let first = {
+            let mut next = std::pin::pin!(stream.next());
+            assert!(
+                futures_util::poll!(next.as_mut()).is_pending(),
+                "stream produced a frame before the peer sent its prefix"
+            );
+            send_prefix_tx
+                .send(())
+                .expect("scripted peer dropped its frame-prefix trigger");
+            compio::time::timeout(OPERATION_WATCHDOG, next.as_mut())
+                .await
+                .expect("partial replication frame exceeded its outer watchdog")
+                .expect_err("partial PrimaryKeepalive completed")
+        };
+        assert!(
+            first.is_read_timeout(),
+            "mid-frame stall lost its socket-read timeout: {first}"
+        );
+
+        let second = compio::time::timeout(OPERATION_WATCHDOG, stream.next())
+            .await
+            .expect("poisoned stream retry exceeded its watchdog")
+            .expect_err("timed-out replication framing was reused");
+        assert!(
+            second.is_cancelled(),
+            "mid-frame timeout did not poison the stream: {second}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("mid-frame replication timeout test exceeded its outer watchdog");
 }
