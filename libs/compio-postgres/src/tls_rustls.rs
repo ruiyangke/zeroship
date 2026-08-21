@@ -48,15 +48,23 @@ use std::sync::Arc;
 
 use compio::io::compat::AsyncStream;
 use compio::io::{AsyncRead, AsyncWrite};
+use pkcs8::der::pem::PemLabel;
+use pkcs8::{EncryptedPrivateKeyInfo, SecretDocument};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::{WebPkiServerVerifier, verify_server_cert_signed_by_trust_anchor};
+use rustls::client::{VerifierBuilderError, WebPkiServerVerifier};
 use rustls::crypto::{
-    CryptoProvider, WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature,
+    CryptoProvider, KeyProvider, WebPkiSupportedAlgorithms, verify_tls12_signature,
+    verify_tls13_signature,
 };
 use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::server::ParsedCertificate;
-use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls::pki_types::{
+    CertificateDer, CertificateRevocationListDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName,
+    UnixTime,
+};
+use rustls::{
+    CertificateError, ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
+};
+use zeroize::Zeroize;
 
 use crate::Error;
 use crate::config::{Config, SslMode, SslRootCert};
@@ -141,6 +149,7 @@ impl VerifyPolicy {
 fn verifier_for(
     mode: SslMode,
     roots: Arc<RootCertStore>,
+    crls: Vec<CertificateRevocationListDer<'static>>,
     provider: &CryptoProvider,
 ) -> Result<Arc<dyn ServerCertVerifier>, Error> {
     let algorithms = provider.signature_verification_algorithms;
@@ -149,30 +158,51 @@ fn verifier_for(
     // rather than returning an empty store for `System` or `File`. Asking the
     // store is the safer of the two identical questions, because a store with
     // no anchors could not verify anything even if a path had been named.
-    Ok(match VerifyPolicy::select(mode, !roots.is_empty())? {
-        VerifyPolicy::AcceptAny => Arc::new(AcceptAnyServerCert { algorithms }),
-        VerifyPolicy::Chain => Arc::new(ChainOnlyServerCert { roots, algorithms }),
-        VerifyPolicy::ChainAndHostname => {
-            WebPkiServerVerifier::builder_with_provider(roots, Arc::new(provider.clone()))
-                .build()
-                .map_err(|e| Error::tls(Box::new(e)))?
+    let policy = VerifyPolicy::select(mode, !roots.is_empty())?;
+    if policy == VerifyPolicy::AcceptAny {
+        return Ok(Arc::new(AcceptAnyServerCert { algorithms }));
+    }
+
+    let builder = || {
+        WebPkiServerVerifier::builder_with_provider(roots.clone(), Arc::new(provider.clone()))
+    };
+    let verifier = if crls.is_empty() {
+        builder().build()
+    } else {
+        // libpq ignores a CRL file OpenSSL cannot load. rustls defers DER
+        // validation until build(), so its equivalent is to rebuild without
+        // revocation after an invalid CRL is rejected here.
+        match builder()
+            .with_crls(crls)
+            .enforce_revocation_expiration()
+            .build()
+        {
+            Ok(verifier) => Ok(verifier),
+            Err(VerifierBuilderError::InvalidCrl(_)) => builder().build(),
+            Err(error) => Err(error),
         }
+    }
+    .map_err(|e| Error::tls(Box::new(e)))?;
+
+    Ok(match policy {
+        VerifyPolicy::Chain => Arc::new(ChainOnlyServerCert { verifier }),
+        VerifyPolicy::ChainAndHostname => verifier,
+        VerifyPolicy::AcceptAny => unreachable!("handled above"),
     })
 }
 
 /// [`VerifyPolicy::Chain`]: the chain is checked against the configured trust
 /// anchors, the host name is not.
 ///
-/// This is not "the default verifier with the name check removed" - it is
-/// rustls' own chain-verification entry point,
-/// [`verify_server_cert_signed_by_trust_anchor`] (a public, non-`danger`
-/// function), with `verify_server_name` simply not called. No path building is
-/// reimplemented here. A custom verifier is needed only because
-/// [`WebPkiServerVerifier`] has no knob to disable the name check.
+/// The inner webpki verifier checks the chain and CRLs before the host name.
+/// Only its host-name error is suppressed; every chain, expiry, purpose, and
+/// revocation error is returned unchanged. A custom verifier is needed because
+/// [`WebPkiServerVerifier`] has no knob to disable only the name check. The
+/// combined wrong-name/revoked-certificate case in `tests/tls_live.rs` guards
+/// that load-bearing order against a rustls change.
 #[derive(Debug)]
 struct ChainOnlyServerCert {
-    roots: Arc<RootCertStore>,
-    algorithms: WebPkiSupportedAlgorithms,
+    verifier: Arc<WebPkiServerVerifier>,
 }
 
 impl ServerCertVerifier for ChainOnlyServerCert {
@@ -180,19 +210,23 @@ impl ServerCertVerifier for ChainOnlyServerCert {
         &self,
         end_entity: &CertificateDer<'_>,
         intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
-        _ocsp_response: &[u8],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        let cert = ParsedCertificate::try_from(end_entity)?;
-        verify_server_cert_signed_by_trust_anchor(
-            &cert,
-            &self.roots,
+        match self.verifier.verify_server_cert(
+            end_entity,
             intermediates,
+            server_name,
+            ocsp_response,
             now,
-            self.algorithms.all,
-        )?;
-        Ok(ServerCertVerified::assertion())
+        ) {
+            Ok(verified) => Ok(verified),
+            Err(rustls::Error::InvalidCertificate(
+                CertificateError::NotValidForName | CertificateError::NotValidForNameContext { .. },
+            )) => Ok(ServerCertVerified::assertion()),
+            Err(error) => Err(error),
+        }
     }
 
     fn verify_tls12_signature(
@@ -201,7 +235,7 @@ impl ServerCertVerifier for ChainOnlyServerCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls12_signature(message, cert, dss, &self.algorithms)
+        self.verifier.verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -210,11 +244,11 @@ impl ServerCertVerifier for ChainOnlyServerCert {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        verify_tls13_signature(message, cert, dss, &self.algorithms)
+        self.verifier.verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.algorithms.supported_schemes()
+        self.verifier.supported_verify_schemes()
     }
 }
 
@@ -270,12 +304,114 @@ impl ServerCertVerifier for AcceptAnyServerCert {
     }
 }
 
+/// Import a private key into aws-lc, then erase rustls' owned DER copy.
+#[derive(Debug)]
+struct ZeroizingAwsLcKeyProvider;
+
+impl KeyProvider for ZeroizingAwsLcKeyProvider {
+    fn load_private_key(
+        &self,
+        mut key_der: PrivateKeyDer<'static>,
+    ) -> Result<Arc<dyn rustls::sign::SigningKey>, rustls::Error> {
+        let result = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key_der);
+        key_der.zeroize();
+        result
+    }
+
+    fn fips(&self) -> bool {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .key_provider
+            .fips()
+    }
+}
+
+static ZEROIZING_AWS_LC_KEY_PROVIDER: ZeroizingAwsLcKeyProvider = ZeroizingAwsLcKeyProvider;
+
+/// Load a private key without letting the presence of `sslpassword` change the
+/// meaning of an ordinary plaintext key.
+fn private_key_from_config(
+    key_path: &str,
+    password: Option<&[u8]>,
+) -> Result<PrivateKeyDer<'static>, Error> {
+    let unencrypted_error = match PrivateKeyDer::from_pem_file(key_path) {
+        Ok(key) => return Ok(key),
+        Err(error) => error,
+    };
+
+    // rustls-pki-types intentionally ignores ENCRYPTED PRIVATE KEY sections.
+    // Parse only that one additional label here; malformed plaintext keys must
+    // retain the existing rustls PEM error instead of being misreported as a
+    // bad passphrase.
+    let pem = match std::fs::read_to_string(key_path) {
+        Ok(pem) => pem,
+        Err(_) => {
+            return Err(Error::tls(
+                format!("sslkey={key_path}: cannot read PEM: {unencrypted_error}").into(),
+            ));
+        }
+    };
+    let (label, encrypted_document) = match SecretDocument::from_pem(&pem) {
+        Ok(document) => document,
+        Err(_) => {
+            return Err(Error::tls(
+                format!("sslkey={key_path}: cannot read PEM: {unencrypted_error}").into(),
+            ));
+        }
+    };
+    if EncryptedPrivateKeyInfo::validate_pem_label(label).is_err() {
+        return Err(Error::tls(
+            format!("sslkey={key_path}: cannot read PEM: {unencrypted_error}").into(),
+        ));
+    }
+
+    let password = password
+        .filter(|password| !password.is_empty())
+        .ok_or_else(|| {
+            Error::tls(
+                format!(
+                    "sslkey={key_path}: encrypted private key requires a non-empty sslpassword"
+                )
+                .into(),
+            )
+        })?;
+    let encrypted =
+        EncryptedPrivateKeyInfo::try_from(encrypted_document.as_bytes()).map_err(|error| {
+            Error::tls(format!("sslkey={key_path}: invalid encrypted PKCS#8 key: {error}").into())
+        })?;
+    let cleartext = encrypted.decrypt(password).map_err(|error| {
+        Error::tls(
+            format!(
+                "sslkey={key_path}: cannot decrypt encrypted PKCS#8 key with sslpassword: {error}"
+            )
+            .into(),
+        )
+    })?;
+
+    Ok(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+        cleartext.as_bytes().to_vec(),
+    )))
+}
+
+/// Read libpq's optional CRL without turning it into a new trust anchor.
+fn crls_from_config(config: &Config) -> Vec<CertificateRevocationListDer<'static>> {
+    let Some(path) = config.get_ssl_crl().filter(|path| !path.is_empty()) else {
+        return Vec::new();
+    };
+
+    // libpq deliberately clears OpenSSL's error when sslcrl cannot be loaded:
+    // a CRL revokes certificates only "if it exists". Preserve that surprising
+    // contract for missing files and malformed PEM.
+    CertificateRevocationListDer::pem_file_iter(path)
+        .and_then(|crls| crls.collect::<Result<Vec<_>, _>>())
+        .unwrap_or_default()
+}
+
 /// A [`MakeTlsConnect`] that performs handshakes with rustls.
 ///
 /// Build one from a [`Config`] with [`MakeRustlsConnect::from_config`] (which
-/// reads `sslrootcert` / `sslcert` / `sslkey`), or hand it a fully built
-/// [`ClientConfig`] with [`MakeRustlsConnect::new`] when the trust decisions
-/// are made in code rather than in the connection string.
+/// reads `sslrootcert`, `sslcrl`, and the client-certificate settings), or hand
+/// it a fully built [`ClientConfig`] with [`MakeRustlsConnect::new`] when the
+/// trust decisions are made in code rather than in the connection string.
 #[derive(Clone, Debug)]
 pub struct MakeRustlsConnect {
     config: Arc<ClientConfig>,
@@ -306,10 +442,10 @@ impl MakeRustlsConnect {
 
     /// Build a connector from the TLS parameters of a connection string.
     ///
-    /// Reads `sslrootcert` (trust anchors) and the `sslcert` / `sslkey` pair
-    /// (client-certificate authentication). The two client-auth parameters must
-    /// be given together; naming one without the other is an error rather than
-    /// a silently ignored half-configuration.
+    /// Reads `sslrootcert` / `sslcrl` (server authentication) and the
+    /// `sslcert` / `sslkey` / `sslpassword` client-authentication settings. The
+    /// certificate and key must be given together; naming one without the other
+    /// is an error rather than a silently ignored half-configuration.
     pub fn from_config(config: &Config) -> Result<MakeRustlsConnect, Error> {
         let mut roots = RootCertStore::empty();
         match config.get_ssl_root_cert() {
@@ -361,8 +497,15 @@ impl MakeRustlsConnect {
         // process-global default and panics when none was installed, which
         // would make this driver's behaviour depend on whether some unrelated
         // main() happened to call `install_default` first.
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let verifier = verifier_for(config.get_ssl_mode(), Arc::new(roots), &provider)?;
+        let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+        provider.key_provider = &ZEROIZING_AWS_LC_KEY_PROVIDER;
+        let provider = Arc::new(provider);
+        let verifier = verifier_for(
+            config.get_ssl_mode(),
+            Arc::new(roots),
+            crls_from_config(config),
+            &provider,
+        )?;
 
         // `dangerous()` is rustls saying "you are about to choose the
         // verification policy yourself", and that is precisely what a
@@ -383,9 +526,7 @@ impl MakeRustlsConnect {
                     .map_err(|e| {
                         Error::tls(format!("sslcert={cert_path}: cannot read PEM: {e}").into())
                     })?;
-                let key = PrivateKeyDer::from_pem_file(key_path).map_err(|e| {
-                    Error::tls(format!("sslkey={key_path}: cannot read PEM: {e}").into())
-                })?;
+                let key = private_key_from_config(key_path, config.get_ssl_password())?;
                 builder
                     .with_client_auth_cert(certs, key)
                     .map_err(|e| Error::tls(Box::new(e)))?
@@ -619,6 +760,7 @@ mod tests {
         let verifier = verifier_for(
             SslMode::Require,
             Arc::new(RootCertStore::empty()),
+            Vec::new(),
             &provider,
         )
         .expect("build accept-any test verifier");
@@ -701,7 +843,8 @@ mod tests {
         roots: Arc<RootCertStore>,
         name: &'static str,
     ) -> Result<(), String> {
-        let verifier = verifier_for(mode, roots, &provider()).map_err(|e| e.to_string())?;
+        let verifier =
+            verifier_for(mode, roots, Vec::new(), &provider()).map_err(|e| e.to_string())?;
         let cert = CertificateDer::from_pem_slice(SERVER_LOCALHOST.as_bytes()).unwrap();
         verifier
             .verify_server_cert(&cert, &[], &ServerName::try_from(name).unwrap(), &[], AT)
@@ -851,5 +994,30 @@ mod tests {
         let pem = include_str!("../tests/data/ed25519_cert.pem");
         let cert = CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
         assert!(tls_server_end_point(&cert).is_none());
+    }
+
+    /// libpq treats sslcrl as optional even when the caller named a path: an
+    /// absent file or invalid CRL DER leaves revocation checking disabled.
+    #[test]
+    fn missing_or_invalid_sslcrl_is_ignored_like_libpq() {
+        let path = "/definitely/missing/compio-postgres.crl";
+        let config = format!("host=h sslcrl={path}").parse::<Config>().unwrap();
+        assert!(
+            crls_from_config(&config).is_empty(),
+            "{path} unexpectedly produced a CRL"
+        );
+
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/verifier_ca.pem");
+        let invalid_crl = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/invalid_crl.pem"
+        );
+        let config = format!(
+            "host=h sslmode=verify-full sslrootcert={root} sslcrl={invalid_crl}"
+        )
+        .parse::<Config>()
+        .unwrap();
+        MakeRustlsConnect::from_config(&config)
+            .expect("libpq ignores a CRL file whose DER cannot be parsed");
     }
 }
