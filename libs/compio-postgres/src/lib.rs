@@ -93,7 +93,7 @@ pub use crate::statement::{Column, Statement};
 pub use crate::tls::NoTls;
 #[cfg(feature = "tls")]
 pub use crate::tls_rustls::{MakeRustlsConnect, RustlsConnect, RustlsStream};
-pub use crate::to_statement::ToStatement;
+pub use crate::to_statement::{ToStatement, Uncached};
 pub use crate::transaction::Transaction;
 pub use crate::transaction_builder::{IsolationLevel, TransactionBuilder};
 use crate::types::ToSql;

@@ -13,15 +13,36 @@ mod private {
     pub enum ToStatementType<'a> {
         Statement(&'a Statement),
         Query(&'a str),
+        Uncached(&'a str),
     }
 
     impl ToStatementType<'_> {
         pub(crate) async fn into_statement(self, client: &Arc<InnerClient>) -> Result<Statement, Error> {
             match self {
                 ToStatementType::Statement(s) => Ok(s.clone()),
-                ToStatementType::Query(s) => prepare::prepare(client, s, &[]).await,
+                ToStatementType::Query(s) => prepare::prepare_cached(client, s).await,
+                ToStatementType::Uncached(s) => prepare::prepare(client, s, &[]).await,
             }
         }
+    }
+}
+
+/// A raw SQL string which bypasses the connection's prepared-statement cache
+/// for one operation.
+///
+/// The statement is prepared normally, used once, and closed when the
+/// operation releases its last clone. It neither looks up nor populates a
+/// configured cache.
+#[derive(Clone, Copy, Debug)]
+#[must_use = "Uncached only bypasses the cache when passed to an operation"]
+pub struct Uncached<'a> {
+    query: &'a str,
+}
+
+impl<'a> Uncached<'a> {
+    /// Marks `query` as a one-shot statement for the next operation.
+    pub const fn new(query: &'a str) -> Self {
+        Self { query }
     }
 }
 
@@ -59,3 +80,11 @@ impl ToStatement for String {
 }
 
 impl Sealed for String {}
+
+impl ToStatement for Uncached<'_> {
+    fn __convert(&self) -> ToStatementType<'_> {
+        ToStatementType::Uncached(self.query)
+    }
+}
+
+impl Sealed for Uncached<'_> {}

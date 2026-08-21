@@ -272,6 +272,24 @@ pub async fn prepare(
     Ok(Statement::new(client, guard.disarm(), parameters, columns))
 }
 
+/// Prepare an implicit raw-SQL statement through this connection's opt-in
+/// exact-text cache. Public `Client::prepare` stays outside this path: an
+/// explicitly prepared Statement remains a distinct caller-owned object.
+pub(crate) async fn prepare_cached(
+    client: &Arc<InnerClient>,
+    query: &str,
+) -> Result<Statement, Error> {
+    if client.statement_cache_capacity() == 0 {
+        return prepare(client, query, &[]).await;
+    }
+    if let Some(statement) = client.cached_statement(query) {
+        return Ok(statement);
+    }
+
+    let statement = prepare(client, query, &[]).await?;
+    Ok(client.cache_statement(query, statement))
+}
+
 /// Build an error describing a cycle in pg_catalog type resolution.
 ///
 /// The Error type has no dedicated `cycle_detected`/`unknown_type`
