@@ -11,11 +11,12 @@
 //! `report.magic_links_deleted`:
 //!     assertion `left == right` failed
 //!       left: 2   right: 1
-//! - the peer run's stale magic link, counted by this run's sweep. Each test
-//! now leases the sweep across processes ([`common::lease_sweep`]) and asserts
-//! a FLOOR on the count plus the fate of its OWN rows, because a row a crashed
-//! peer left behind survives in a database nothing drops and would break an
-//! exact figure on a solo run too.
+//! - the peer run's stale magic link, counted by this run's sweep.
+//!
+//! Each test now leases the sweep across processes ([`common::lease_sweep`])
+//! and asserts a FLOOR on the count plus the fate of its OWN rows, because a
+//! row a crashed peer left behind survives in a database nothing drops and
+//! would break an exact figure on a solo run too.
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
