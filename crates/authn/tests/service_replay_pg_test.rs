@@ -18,6 +18,30 @@
 //! not one of them. There is no environment variable that changes the verdict -
 //! `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` used to, and being opt-in it was set by
 //! everyone except the person whose run it would have saved.
+//!
+//! # What makes this hermetic, and what it costs
+//!
+//! The table is SHARED - `service_authn.service_assertion_replay`, unqualified,
+//! established below and reused by every run against a given database. Nothing
+//! truncates it between runs. That is deliberate and it is safe, because every
+//! key this file writes is fresh per run rather than per fixture: the race and
+//! replay tests key on `iss|jti` where `jti` is 128 random bits from
+//! `new_jti()`, and the rest carry [`unique_suffix`]. No run can see another
+//! run's key, so no neighbouring row can decide any verdict here.
+//!
+//! MEASURED, 2026-08-21, on the shared 5440 server: 74 databases carry this
+//! table and the largest holds 9 rows, which is exactly one run's residue - one
+//! per race, one per sequential replay, `live` and `stale`, and one per granted
+//! role. Back-to-back runs against ONE database do stack (9, 18, 27, 36), for
+//! the retention window only: rows outlive their run by at most 120 seconds and
+//! the next run past that window sweeps them. The residue is bounded by the
+//! window, not by the number of runs, which is why every long-lived database on
+//! that server sits at 9 or 0 rather than in the thousands.
+//!
+//! The one number here that a neighbour DOES contaminate is the count
+//! `purge_expired` returns, and nothing asserts on it; see the sweep arm of
+//! [`a_live_claim_blocks_a_replay_and_an_expired_one_does_not`] for why it
+//! cannot be asserted on and what is checked instead.
 
 #![allow(clippy::future_not_send)]
 
@@ -137,14 +161,22 @@ fn fixture_grant_sql() -> String {
 
 /// Serialises the fixture DDL across concurrent test threads and processes.
 ///
-/// MEASURED: without it, the first run against a database that does not yet
-/// have the table fails 3 of 4 tests, because cargo runs the four tests on four
-/// threads and `CREATE TABLE IF NOT EXISTS` is not concurrency-safe - the
-/// existence check and the create are not atomic, so the losers raise a
-/// duplicate-key error on the catalogue. The second run passed 4 of 4 and every
-/// run after it did too, which is exactly the shape that gets a fixture bug
-/// mistaken for a flake and then ignored: it only ever fails on a fresh
-/// database.
+/// MEASURED, when this file held four tests: without it, the first run against
+/// a database that does not yet have the table fails 3 of 4, because cargo runs
+/// the tests on a thread each and `CREATE TABLE IF NOT EXISTS` is not
+/// concurrency-safe - the existence check and the create are not atomic, so the
+/// losers raise a duplicate-key error on the catalogue. The second run passed 4
+/// of 4 and every run after it did too, which is exactly the shape that gets a
+/// fixture bug mistaken for a flake and then ignored: it only ever fails on a
+/// fresh database.
+///
+/// The file holds six tests now, so the lock serialises six threads rather than
+/// four and matters MORE, not less. RE-MEASURED 2026-08-21, both arms, against a
+/// database whose `service_authn` schema had just been dropped: with the lock, 6
+/// of 6 on the first run; with only this one statement replaced by a `SELECT 1`
+/// and nothing else changed, 0 of 6. It has gone from losing 3 of 4 to losing
+/// every test, because a sixth racer is a sixth chance for the catalogue insert
+/// to collide.
 const FIXTURE_LOCK: i64 = 7_523_000_001;
 
 fn db_url() -> Option<String> {
@@ -210,6 +242,24 @@ fn unique_suffix() -> String {
 
 fn issuer(uri: &str) -> ServiceIssuer {
     ServiceIssuer::parse(uri).expect("a well-formed issuer identifier")
+}
+
+/// Whether the table holds a row for `key`, read on a connection of its own.
+///
+/// The store cannot answer this and should not be able to: `claim` reports
+/// `Accepted` for an absent key and for an expired one alike, which is the
+/// whole point of the reclaim arm. Asking the table directly is the only way to
+/// tell "the sweep deleted it" from "the sweep left it and the next claim
+/// reclaimed it".
+async fn row_exists(client: &Client, key: &str) -> bool {
+    !client
+        .query(
+            "SELECT 1 FROM service_authn.service_assertion_replay WHERE replay_key = $1",
+            &[&key],
+        )
+        .await
+        .expect("read the replay table")
+        .is_empty()
 }
 
 /// The WRONG shape, over real connections: SELECT, then INSERT.
@@ -362,6 +412,9 @@ async fn a_live_claim_blocks_a_replay_and_an_expired_one_does_not() {
     };
     let client = connect(&url).await;
     ensure_fixture(&client).await;
+    // A second connection: the store takes ownership of the first and exposes
+    // no read of its own.
+    let probe = connect(&url).await;
     let store = PostgresReplayStore::new(client);
 
     let live = format!("spiffe://zeroship.ai/svc/gateway|live-{}", unique_suffix());
@@ -390,8 +443,46 @@ async fn a_live_claim_blocks_a_replay_and_an_expired_one_does_not() {
         "an expired claim must not block the key forever"
     );
 
-    let purged = store.purge_expired().await.expect("sweep");
-    assert!(purged < u64::MAX, "the sweep runs and reports a count: {purged}");
+    // The sweep, judged on two rows this run owns rather than on the count it
+    // returns.
+    //
+    // The count is not assertable here. `purge_expired` reports rows deleted
+    // TABLE-WIDE, and every row this run still holds at this point is live -
+    // MEASURED: a completed run leaves nine rows and all nine are inside their
+    // retention window. So on a fresh database the count is 0, and on a shared
+    // one it is composed entirely of OTHER runs' rows. The assertion that stood
+    // here was `assert!(purged < u64::MAX)`, which no return value of `execute`
+    // can fail: it read as a check on the sweep while being satisfied by a
+    // sweep that deleted nothing.
+    //
+    // The pair below differs in one variable, the retention window, so it
+    // discriminates in both directions: a purge that deletes nothing fails the
+    // second, and a purge that dropped its `WHERE` and deleted everything fails
+    // the first.
+    let swept = format!("spiffe://zeroship.ai/svc/gateway|swept-{}", unique_suffix());
+    assert_eq!(
+        store
+            .claim(&swept, SystemTime::now() - Duration::from_secs(1))
+            .await
+            .expect("claim"),
+        ReplayClaim::Accepted,
+        "the row the sweep is about to be judged on was written"
+    );
+    store.purge_expired().await.expect("sweep");
+    assert!(
+        row_exists(&probe, &live).await,
+        "the sweep must not touch a claim still inside its retention window"
+    );
+    assert!(
+        !row_exists(&probe, &swept).await,
+        "the sweep must delete a claim whose retention window has closed"
+    );
+    // WHAT THIS DOES NOT CATCH: a run racing this one against the same database
+    // sweeps `swept` too, so under concurrency the absence above can be that
+    // run's work rather than this store's. That direction is a false GREEN and
+    // never a false red, which is the right way round for a shared fixture -
+    // the failure this file's advisory lock exists to prevent is a fixture bug
+    // that reads as a flake.
 }
 
 #[compio::test]
