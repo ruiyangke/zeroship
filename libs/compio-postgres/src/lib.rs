@@ -137,6 +137,23 @@
 //! feature on, [`Pool`] builds one automatically for a
 //! connection configuration whose `sslmode` permits TLS; see the `tls_rustls` module (`src/tls_rustls.rs`) and
 //! the `Transport` section of the `pool` module docs (`src/pool.rs`).
+//!
+//! # Opt-in behaviour worth knowing about
+//!
+//! These are off unless asked for, so the base client behaves like
+//! tokio-postgres. Each carries a caveat that is easier to learn here than to
+//! discover in production:
+//!
+//! - [`Config::target_session_attrs`] picks among several hosts by whether the
+//!   session is writable or in recovery. `primary` and `standby` need
+//!   hot-standby detection and are refused rather than approximated.
+//! - [`Config::statement_cache_capacity`] caches prepared statements per
+//!   connection, and [`Config::statement_cache_execution_threshold`] delays
+//!   promotion until SQL repeats. Leave the cache off when connecting through a
+//!   transaction-mode pooler, which does not keep one session per transaction.
+//! - [`Client::query_events`] reports completed queries, and
+//!   [`Client::query_events_with_threshold`] reports only slow ones. A
+//!   threshold hides an N+1 built from many fast queries.
 
 // `MakeRustlsConnect` and `tls_rustls` above are code spans, not intra-doc links, and must stay that way. The
 // module carrying them is `#[cfg(feature = "tls")]`, so in a default-feature `cargo doc` there is no item for a
