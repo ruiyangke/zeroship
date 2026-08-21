@@ -273,6 +273,45 @@ fn expect_disconnect(stream: &mut TcpStream) {
     }
 }
 
+fn disconnect_observed_within(stream: &mut TcpStream, timeout: Duration) -> bool {
+    stream
+        .set_read_timeout(Some(timeout))
+        .expect("set scripted disconnect probe timeout");
+    let deadline = Instant::now() + timeout;
+    let mut bytes = [0u8; 256];
+    loop {
+        match stream.read(&mut bytes) {
+            Ok(0) => return true,
+            Ok(_) => {
+                if Instant::now() >= deadline {
+                    stream
+                        .set_read_timeout(Some(SOCKET_WATCHDOG))
+                        .expect("restore scripted peer read watchdog");
+                    return false;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::NotConnected
+                ) =>
+            {
+                return true;
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                stream
+                    .set_read_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("restore scripted peer read watchdog");
+                return false;
+            }
+            Err(error) => panic!("scripted disconnect probe failed: {error}"),
+        }
+    }
+}
+
 fn stub_config(addr: SocketAddr, read_timeout: Option<Duration>) -> Config {
     let mut config = Config::new();
     config
@@ -773,4 +812,136 @@ async fn command_recovery_waits_for_cancel_eof_before_sync_and_reuse() {
     })
     .await
     .expect("cancel EOF ordering test exceeded its outer watchdog");
+}
+
+/// Once timeout recovery has opened its out-of-band cancellation connection,
+/// abandoning the command future must retire the original physical session.
+/// Otherwise the unconfirmed `CancelRequest` can arrive after a later command
+/// starts and cancel work belonging to the next operation or pool borrower.
+#[compio::test]
+async fn dropping_command_during_timeout_recovery_retires_session_before_reuse() {
+    compio::time::timeout(
+        ASYNC_WATCHDOG,
+        Box::pin(async {
+            let (cancel_seen_tx, cancel_seen_rx) = oneshot::channel();
+            let (retired_tx, retired_rx) = oneshot::channel();
+            let (continue_tx, continue_rx) = mpsc::channel::<bool>();
+            let server = StubServer::spawn(move |listener| {
+                let mut primary = accept_bounded(&listener);
+                complete_startup(&mut primary, 606);
+                assert_eq!(expect_simple_query(&mut primary), b"SELECT pg_sleep(30)\0");
+
+                let mut cancel = accept_bounded(&listener);
+                expect_cancel_request(&mut cancel, 606);
+                cancel_seen_tx
+                    .send(())
+                    .expect("abandonment test dropped its CancelRequest signal");
+
+                let retired = disconnect_observed_within(&mut primary, Duration::from_millis(500));
+                retired_tx
+                    .send(retired)
+                    .expect("abandonment test dropped its retirement probe");
+
+                let continue_with_replacement = continue_rx
+                    .recv_timeout(SOCKET_WATCHDOG)
+                    .expect("abandonment test did not release the scripted peer");
+                drop(cancel);
+
+                if !continue_with_replacement {
+                    expect_disconnect(&mut primary);
+                    return;
+                }
+                assert!(
+                    retired,
+                    "test advanced after retaining the poisoned session"
+                );
+                drop(primary);
+
+                let mut replacement = accept_bounded(&listener);
+                complete_startup(&mut replacement, 607);
+                assert_eq!(expect_simple_query(&mut replacement), b"\0");
+                answer_empty_query(&mut replacement);
+                expect_disconnect(&mut replacement);
+            });
+
+            let connection_config = stub_config(server.addr, None);
+            let pool_config = pool_config(Some(COMMAND_FIRST_TIMEOUT), Duration::from_secs(1));
+            let pool = Pool::connect_with_config(connection_config, pool_config)
+                .await
+                .expect("open pool against abandonment peer");
+            let mut client = Box::pin(pool.get())
+                .await
+                .expect("check out abandonment session");
+            assert_eq!(client.process_id(), 606);
+
+            let command = Box::pin(
+                client.command(async |client| client.batch_execute("SELECT pg_sleep(30)").await),
+            );
+            let command = match compio::time::timeout(
+                OPERATION_WATCHDOG,
+                futures_util::future::select(command, cancel_seen_rx),
+            )
+            .await
+            .expect("command did not reach timeout recovery before its watchdog")
+            {
+                futures_util::future::Either::Right((seen, command)) => {
+                    seen.expect("server ended before observing the CancelRequest");
+                    command
+                }
+                futures_util::future::Either::Left((result, _)) => {
+                    panic!("command recovery completed before its cancel EOF gate: {result:?}")
+                }
+            };
+
+            drop(command);
+            let retired = compio::time::timeout(OPERATION_WATCHDOG, retired_rx)
+                .await
+                .expect("scripted peer did not report retirement before its watchdog")
+                .expect("scripted peer dropped its retirement report");
+
+            if !retired {
+                continue_tx
+                    .send(false)
+                    .expect("scripted peer dropped its cleanup control");
+                drop(client);
+                compio::time::timeout(OPERATION_WATCHDOG, pool.close())
+                    .await
+                    .expect("failed-arm pool close exceeded its watchdog");
+                server.finish();
+                assert!(
+                    retired,
+                    "dropping timeout recovery left the old physical session reusable"
+                );
+                return;
+            }
+
+            drop(client);
+            assert_single_retirement(&pool);
+            continue_tx
+                .send(true)
+                .expect("scripted peer dropped its replacement control");
+
+            let replacement = Box::pin(compio::time::timeout(OPERATION_WATCHDOG, pool.get()))
+                .await
+                .expect("replacement acquisition exceeded its watchdog")
+                .expect("pool could not replace the abandoned recovery session");
+            assert_eq!(
+                replacement.process_id(),
+                607,
+                "pool reused the retired session"
+            );
+            compio::time::timeout(OPERATION_WATCHDOG, replacement.simple_query(""))
+                .await
+                .expect("replacement query exceeded its watchdog")
+                .expect("replacement session was not usable");
+            drop(replacement);
+
+            compio::time::timeout(OPERATION_WATCHDOG, pool.close())
+                .await
+                .expect("abandonment pool close exceeded its watchdog");
+            server.finish();
+        }),
+    )
+    .await
+    .expect("command-recovery abandonment test exceeded its outer watchdog");
 }
