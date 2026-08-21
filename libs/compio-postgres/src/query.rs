@@ -58,7 +58,13 @@ where
     } else {
         encode(client, &statement, params)?
     };
-    let responses = start(client, buf).await?;
+    let responses = match start(client, buf).await {
+        Ok(responses) => responses,
+        Err(error) => {
+            statement.invalidate_cache_on_error(&error);
+            return Err(error);
+        }
+    };
     Ok(RowStream {
         statement,
         responses,
@@ -389,7 +395,13 @@ where
     } else {
         encode(client, &statement, params)?
     };
-    let mut responses = start(client, buf).await?;
+    let mut responses = match start(client, buf).await {
+        Ok(responses) => responses,
+        Err(error) => {
+            statement.invalidate_cache_on_error(&error);
+            return Err(error);
+        }
+    };
 
     let mut rows = 0;
     loop {
@@ -510,7 +522,14 @@ impl Stream for RowStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
         loop {
-            match ready!(this.responses.poll_next(cx)?) {
+            let message = match ready!(this.responses.poll_next(cx)) {
+                Ok(message) => message,
+                Err(error) => {
+                    this.statement.invalidate_cache_on_error(&error);
+                    return Poll::Ready(Some(Err(error)));
+                }
+            };
+            match message {
                 Message::DataRow(body) => {
                     return Poll::Ready(Some(Ok(Row::new(this.statement.clone(), body)?)));
                 }

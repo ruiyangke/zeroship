@@ -20,7 +20,13 @@ pub async fn copy_out(client: &InnerClient, statement: Statement) -> Result<Copy
     debug!("executing copy out statement {}", statement.name());
 
     let buf = query::encode(client, &statement, slice_iter(&[]))?;
-    let responses = start(client, buf).await?;
+    let responses = match start(client, buf).await {
+        Ok(responses) => responses,
+        Err(error) => {
+            statement.invalidate_cache_on_error(&error);
+            return Err(error);
+        }
+    };
     Ok(CopyOutStream { responses })
 }
 

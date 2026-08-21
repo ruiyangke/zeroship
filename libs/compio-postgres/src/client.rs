@@ -31,7 +31,7 @@ use parking_lot::Mutex;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use postgres_types::{BorrowToSql, FromSqlOwned};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future;
 use std::net::IpAddr;
@@ -126,12 +126,23 @@ pub(crate) struct CachedTypeInfo {
     pub(crate) types: HashMap<Oid, Type>,
 }
 
+/// Exact-SQL LRU for statements prepared implicitly by raw-string operations.
+/// The capacity lives here, rather than on `Client`, so every physical
+/// `PostgreSQL` connection owns an independent cache.
+#[derive(Default)]
+struct StatementCache {
+    statements: HashMap<Arc<str>, Statement>,
+    lru: VecDeque<Arc<str>>,
+}
+
 /// Shared inner state of a `Client`. Lives behind an `Arc` so helpers
 /// like `bind`, `prepare`, and the Drop impls on `Statement`/`Portal`
 /// can keep a `Weak<InnerClient>` back-reference.
 pub struct InnerClient {
     sender: mpsc::UnboundedSender<Request>,
     cached_typeinfo: Mutex<CachedTypeInfo>,
+    statement_cache_capacity: usize,
+    statement_cache: Mutex<StatementCache>,
 
     /// Scratch buffer for encoding frontend messages. `with_buf` locks
     /// this, hands the caller a `&mut BytesMut`, and clears on drop so
@@ -313,6 +324,115 @@ impl InnerClient {
         self.cached_typeinfo.lock().types.clear();
     }
 
+    pub(crate) const fn statement_cache_capacity(&self) -> usize {
+        self.statement_cache_capacity
+    }
+
+    /// Look up an exact SQL string and promote it to most-recently used.
+    pub(crate) fn cached_statement(&self, query: &str) -> Option<Statement> {
+        let mut cache = self.statement_cache.lock();
+        let (key, statement) = cache
+            .statements
+            .get_key_value(query)
+            .map(|(key, statement)| (Arc::clone(key), statement.clone()))?;
+
+        if let Some(position) = cache.lru.iter().position(|candidate| candidate == &key) {
+            cache.lru.remove(position);
+        }
+        cache.lru.push_back(key);
+        drop(cache);
+        Some(statement)
+    }
+
+    /// Install a freshly prepared statement after a cold miss.
+    ///
+    /// Preparation deliberately happens without this lock held. A concurrent
+    /// caller may therefore have installed a winner in the meantime; in that
+    /// case this returns the winner and drops the losing statement only after
+    /// releasing the cache lock. Its existing Drop implementation closes the
+    /// losing server-side name.
+    pub(crate) fn cache_statement(&self, query: &str, statement: Statement) -> Statement {
+        let mut candidate = Some(statement);
+        let capacity = self.statement_cache_capacity();
+        if capacity == 0 {
+            return candidate.take().expect("the candidate is present");
+        }
+        let (winner, evicted) = {
+            let mut cache = self.statement_cache.lock();
+            let outcome = if let Some((key, winner)) = cache
+                .statements
+                .get_key_value(query)
+                .map(|(key, statement)| (Arc::clone(key), statement.clone()))
+            {
+                if let Some(position) = cache.lru.iter().position(|candidate| candidate == &key) {
+                    cache.lru.remove(position);
+                }
+                cache.lru.push_back(key);
+                (winner, None)
+            } else {
+                let evicted = if cache.statements.len() == capacity {
+                    cache
+                        .lru
+                        .pop_front()
+                        .and_then(|key| cache.statements.remove(&key))
+                } else {
+                    None
+                };
+
+                let key: Arc<str> = Arc::from(query);
+                let statement = candidate.take().expect("the candidate is present");
+                let winner = statement.clone();
+                cache.statements.insert(Arc::clone(&key), statement);
+                cache.lru.push_back(key);
+                (winner, evicted)
+            };
+            drop(cache);
+            outcome
+        };
+
+        // Both Drop paths can lock the encoding buffer and enqueue Close +
+        // Sync, so neither is allowed to run while the cache mutex is held.
+        drop(evicted);
+        drop(candidate);
+        winner
+    }
+
+    /// Remove only the cached entry backed by `statement` when `PostgreSQL` says
+    /// that named statement is no longer usable. Identity matters: a late
+    /// error from an evicted statement must not remove a newer replacement for
+    /// the same SQL text.
+    pub(crate) fn invalidate_cached_statement_on_error(
+        &self,
+        statement: &Statement,
+        error: &Error,
+    ) {
+        let invalidates = error.code().is_some_and(|code| {
+            code == &crate::error::SqlState::FEATURE_NOT_SUPPORTED
+                || code == &crate::error::SqlState::INVALID_SQL_STATEMENT_NAME
+        });
+        if !invalidates {
+            return;
+        }
+
+        let removed = {
+            let mut cache = self.statement_cache.lock();
+            let key = cache.statements.iter().find_map(|(key, cached)| {
+                cached.same_instance(statement).then(|| Arc::clone(key))
+            });
+
+            let removed = key.and_then(|key| {
+                cache.lru.retain(|candidate| candidate != &key);
+                cache.statements.remove(&key)
+            });
+            drop(cache);
+            removed
+        };
+
+        // Statement::drop enqueues Close + Sync and must not run under the
+        // cache mutex.
+        drop(removed);
+    }
+
     /// Lock the shared scratch buffer, run `f`, and clear the buffer on
     /// exit. Used by encoders that want to build a frontend message
     /// without allocating a fresh `BytesMut` each time.
@@ -393,11 +513,33 @@ impl Client {
         process_id: i32,
         secret_key: i32,
         release: Option<ConnectionRelease>,
-    ) -> Client {
-        Client {
+    ) -> Self {
+        Self::new_with_statement_cache_capacity(
+            sender,
+            ssl_mode,
+            ssl_negotiation,
+            process_id,
+            secret_key,
+            release,
+            0,
+        )
+    }
+
+    pub(crate) fn new_with_statement_cache_capacity(
+        sender: mpsc::UnboundedSender<Request>,
+        ssl_mode: SslMode,
+        ssl_negotiation: SslNegotiation,
+        process_id: i32,
+        secret_key: i32,
+        release: Option<ConnectionRelease>,
+        statement_cache_capacity: usize,
+    ) -> Self {
+        Self {
             inner: Arc::new(InnerClient {
                 sender,
                 cached_typeinfo: Default::default(),
+                statement_cache_capacity,
+                statement_cache: Mutex::default(),
                 buffer: Default::default(),
                 dirty: AtomicBool::new(false),
                 tx_status: Arc::new(AtomicU8::new(b'I')),
