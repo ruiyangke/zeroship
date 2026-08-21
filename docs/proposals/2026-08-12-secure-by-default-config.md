@@ -237,8 +237,9 @@ All FIVE binaries carry their own parser-rejection test, not three:
 the cross-crate backstop that keys on the clap DECLARATION, so a re-added flag
 fails even in a crate whose own suite was not run; it guards its own input list
 (`dev_init_test.rs:668`, `sources.len() > 50`) so it cannot pass over nothing.
-`tests/compose_port_exposure_gate.sh:119` independently detects the flag
-reappearing in the control service's compose block.
+The port-exposure gate
+(`crates/zeroship-gatekit/src/port_exposure.rs:193`) independently detects the
+flag reappearing in the control service's compose block.
 Its stated blind spot is a hand-rolled `std::env::var("ZEROSHIP_DEV_INSECURE")`
 that never reaches clap - which `crates/core/tests/config_env_access_gate.rs`
 closes from the other side, since `crates/core/src/config/env.rs` is the only

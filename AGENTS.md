@@ -160,6 +160,15 @@ how four OTHER gates went red the same week when two new crates landed.
 `cargo run -p zeroship-gatekit --bin gate-arm-census -- tests` checks that every
 gate participates; `--run <gate.sh>` also rules on the counts they emit.
 
+A gate written in RUST declares the same arms through
+`zeroship_gatekit::arm_census::GateRun`, which refuses the report the moment an
+arm falls under its floor, and keeps a `tests/<name>_gate.sh` SHIM that execs
+the binary through `gate_arms_delegate`. The shim carries no rules; it exists
+because the census enumerates `tests/*_gate.sh`, so deleting it would take the
+gate out of the only check that it declares arms at all. Five compose gates are
+Rust today (`crates/zeroship-gatekit/src/{secret_strength,port_exposure,
+stateful_volume,backing_service_reach,workflow_advance_flag}.rs`).
+
 Standalone, zeroship-independent driver libraries (own top-level `libs/`, publishable):
 
 ```
