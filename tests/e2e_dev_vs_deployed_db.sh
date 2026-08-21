@@ -809,7 +809,7 @@ docker exec "$PGC" psql -U postgres -d zeroship -tAc 'select 1' >/dev/null 2>&1 
   }
 psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
 
-"$BIN/zeroship-platform-migrate" --database-url "$DBURL" \
+zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
   --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$WORK/migrate.log" 2>&1 \
   && pass "platform migrations applied" \

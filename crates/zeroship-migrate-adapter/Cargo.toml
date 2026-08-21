@@ -59,6 +59,12 @@ zero-migrate-policy = { workspace = true, optional = true }
 # gated on `platform-cli` would not cover the two feature-free test targets.
 # zeroship-core does NOT depend on this crate, so this adds no cycle.
 zeroship-core = { workspace = true }
+# NOT optional, and not gated on `platform-cli`. `src/config.rs` is outside that
+# feature so the contract checker can link the declaration without linking V8,
+# and the generated carrier there expands clap's `Parser` derive, whose own
+# output names the crate as bare `clap::` - so the LIBRARY needs it in scope,
+# not just the bin.
+clap = { workspace = true, features = ["derive", "env"] }
 # The platform's native io_uring Postgres driver — the concrete session this
 # adapter maps onto the neutral seam.
 compio-postgres = { workspace = true }

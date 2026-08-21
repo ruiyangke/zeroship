@@ -89,8 +89,8 @@ for _ in $(seq 1 40); do docker exec "$RPC" rpk cluster health --exit-when-healt
 docker exec "$RPC" rpk cluster health --exit-when-healthy >/dev/null 2>&1 && pass "redpanda on $RP_BROKERS" || { fail "redpanda"; exit 1; }
 
 MIG_LOG="$WORK/migrate.log"
-"$BIN/zeroship-platform-migrate" \
-  --database-url "$DBURL" --migrations-dir "$ROOT/db/migrations-ts" \
+zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+  --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1 \
   && pass "zeroship platform migrations applied" || { fail "migrate"; tail -20 "$MIG_LOG"; exit 1; }
 

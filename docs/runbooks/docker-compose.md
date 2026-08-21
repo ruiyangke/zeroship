@@ -417,11 +417,16 @@ service runs:
 
 ```bash
 zeroship-platform-migrate \
-  --database-url postgres://postgres:zeroship@postgres:5432/zeroship \
+  --database-url-file /etc/zeroship/secrets/migrate-dsn \
   --migrations-dir /db/migrations-ts \
   --project-schema zeroship \
   --project-id zeroship
 ```
+
+The privileged DSN is mounted as a file, not passed as an argument: there is no
+`--database-url` value flag, because a container's argv is published by
+`docker inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline. The file must
+be mode 0600.
 
 The source of truth is the committed JS DSL corpus in `db/migrations-ts/`; the
 runner records each `.ts` file to transient IR and applies that plan.

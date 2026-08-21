@@ -95,8 +95,8 @@ done
 [ "$OM_READY" = "1" ] && pass "OpenMeter healthy on $OM_URL (requests meter present)" || { fail "openmeter never ready"; docker compose -f "$ROOT/deploy/compose/openmeter.yml" logs openmeter 2>&1 | tail -20; exit 1; }
 
 MIG_LOG="$WORK/migrate.log"
-"$BIN/zeroship-platform-migrate" \
-  --database-url "$DBURL" --migrations-dir "$ROOT/db/migrations-ts" \
+zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+  --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1 \
   && pass "zeroship platform migrations applied" || { fail "migrate"; tail -20 "$MIG_LOG"; exit 1; }
 

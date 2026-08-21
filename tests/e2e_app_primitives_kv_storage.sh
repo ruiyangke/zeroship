@@ -155,8 +155,7 @@ fi
 
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 MIG_LOG="$WORK/migrate.log"
-if "$BIN/zeroship-platform-migrate" \
-    --database-url "$DBURL" \
+if zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
     --migrations-dir "$ROOT/db/migrations-ts" \
     --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1; then
   pass "platform migrations applied cleanly from scratch (zeroship-platform-migrate)"

@@ -57,11 +57,17 @@ directory is `.ts` source only, not `.sql` and not committed `.ir.json`.
 
 ```bash
 zeroship-platform-migrate \
-  --database-url postgres://postgres:zeroship@postgres:5432/zeroship \
+  --database-url-file /etc/zeroship/secrets/migrate-dsn \
   --migrations-dir /db/migrations-ts \
   --project-schema zeroship \
   --project-id zeroship
 ```
+
+The DSN arrives as a PATH, never as a value: it is the cluster superuser DSN,
+and an argument list is readable by `docker inspect`, `docker ps --no-trunc` and
+anything sharing the PID namespace. There is no `--database-url` value flag.
+`zeroship dev init` writes that file; it must be mode 0600, and the runner
+refuses to start on any file with a bit set in `0o077`.
 
 ```bash
 docker compose up -d            # migrate runs, then control/auth boot
@@ -98,12 +104,17 @@ CLI's `status`, `validate`, or `rollback` verbs. The live-PG
 
    ```bash
    cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+   umask 077 && printf '%s' "$DATABASE_URL" > ./migrate-dsn
    ./target/release/zeroship-platform-migrate \
-     --database-url "$DATABASE_URL" \
+     --database-url-file ./migrate-dsn \
      --migrations-dir db/migrations-ts \
      --project-schema zeroship \
      --project-id zeroship
+   rm -f ./migrate-dsn
    ```
+
+   `umask 077` is not decoration: the reader enforces owner-only permissions and
+   refuses a DSN file with any bit set in `0o077`.
 
 The loader picks the file up by its timestamp order - no master file to edit.
 While the platform remains pre-launch, the repository `AGENTS.md` policy is the

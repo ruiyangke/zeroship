@@ -16,24 +16,31 @@
 //! forgetting this file fails there rather than silently shrinking every count
 //! in this tool.
 //!
-//! Cargo metadata classifies SEVEN targets `platform`: these six servers plus
-//! the `zeroship-platform-migrate` one-shot, which the design puts in scope and
-//! has not converted. The test pins that gap by exact name, so it stays one
-//! target wide instead of becoming the precedent for the next one.
+//! Cargo metadata classifies SEVEN targets `platform`: six servers plus the
+//! `zeroship-platform-migrate` one-shot. All seven declare, so `real_registry.rs`
+//! compares the two sets for exact equality with no named exception. It carried
+//! one until the one-shot was converted: its parser was hand-rolled, so it
+//! contributed no `ConfigSpec` and no `ReadSite`, and every count in this tool
+//! was one binary short while reporting green.
+//!
+//! The one-shot's declaration lives in `zeroship-migrate-adapter`'s LIBRARY and
+//! outside its `platform-cli` feature, which is what lets this tool link the
+//! configuration without linking V8.
 
 use zeroship_core::config::{ConfigSpec, GeneratedConfig, ReadSite, CONFIG_READ_SITES};
 
 /// Every binary whose generated registry is linked into this tool.
-pub const DECLARING_BINARIES: [&str; 6] = [
+pub const DECLARING_BINARIES: [&str; 7] = [
     "zeroship-auth",
     "zeroship-control",
     "zeroship-gate",
     "zeroship-migrated",
+    "zeroship-platform-migrate",
     "zeroship-worker",
     "zeroship-workflow-scheduler",
 ];
 
-/// Every declaration the six platform binaries compile.
+/// Every declaration the seven platform binaries compile.
 #[must_use]
 pub fn platform_specs() -> Vec<ConfigSpec> {
     let mut specs = Vec::new();
@@ -41,6 +48,7 @@ pub fn platform_specs() -> Vec<ConfigSpec> {
     specs.extend_from_slice(zeroship_control::config::ControlSettings::SPECS);
     specs.extend_from_slice(zeroship_gateway::config::GateSettings::SPECS);
     specs.extend_from_slice(zeroship_migrated::config::MigratedSettings::SPECS);
+    specs.extend_from_slice(zeroship_migrate_adapter::config::PlatformMigrateSettings::SPECS);
     specs.extend_from_slice(zeroship_worker::config::WorkerSettings::SPECS);
     specs.extend_from_slice(zeroship_workflow_scheduler::config::SchedulerSettings::SPECS);
     specs

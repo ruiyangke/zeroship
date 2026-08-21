@@ -205,9 +205,8 @@ if [ -f "$ROOT/ops/postgres-init.sql" ]; then
   pass "applied ops/postgres-init.sql"
 fi
 
-"$BIN/zeroship-platform-migrate" \
+zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
   --migrations-dir "$ROOT/db/migrations-ts" \
-  --database-url "$DBURL" \
   --project-schema zeroship \
   --project-id zeroship > "$WORK/migrate.log" 2>&1 || {
     fail "platform migrations failed"
