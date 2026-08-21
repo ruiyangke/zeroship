@@ -436,10 +436,11 @@ jobs:
       #
       # STATIC by design. The per-arm floors are enforced at the point of
       # measurement by tests/lib/gate_arms.sh, in each gate's own CI step above
-      # and below, which is where the diagnosis is. This is milliseconds and
-      # needs no docker, no database and no built workspace beyond cargo.
+      # and below, which is where the diagnosis is. This reads text: no docker,
+      # no database, no cargo. It was a 959-line Rust crate until 2026-08-21,
+      # which is a lot of workspace member to read shell scripts with.
       - name: Every gate declares how much each of its arms examined
-        run: cargo run -q -p zeroship-gatekit --bin gate-arm-census -- tests
+        run: tests/gate_arm_census.sh tests
       # NOTHING IN THIS REPO BUILDS THE PLATFORM IMAGE. Measured 2026-08-11:
       # grep over .github/workflows/*.yml for `deploy/Dockerfile`, `docker build`
       # and `docker compose` returns ZERO hits, so the deploy path AGENTS.md

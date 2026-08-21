@@ -79,7 +79,7 @@ cd "$ROOT" || exit 1
 # library refuses outright.
 #
 # EACH FUNCTION NAMES THAT PARAMETER DIFFERENTLY - compose_arm, alias_arm,
-# argv_arm, ops_arm, secret_arm - and that is not style. `gate-arm-census` reads
+# argv_arm, ops_arm, secret_arm - and that is not style. `gate_arm_census.sh` reads
 # this file as TEXT and cannot evaluate a variable, so five functions all
 # spelling `gate_arm "$arm"` are five occurrences of one token to it, and it
 # fails the file for declaring the same arm five times. Distinct spellings are

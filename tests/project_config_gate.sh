@@ -164,12 +164,13 @@ fi
 # fire - a declared vacuity wearing the uniform of a floor.
 #
 # NOT MEASURED ON THE REAL BINARY: target/debug/zeroship is not built in this
-# worktree, which is why the run refuses above. 20 is set from a PROXY - the
-# gatekit binaries that WERE built here (target/debug/gate-arm-census.d and, at
-# the time of the reading, compose-secret-strength.d, deleted 2026-08-21) both
-# resolved to 74 inputs through this same program, with a fraction of the CLI's
-# dependency surface. Re-measure and raise it the first time this gate runs on
-# a built tree.
+# worktree, which is why the run refuses above. 20 is set from a PROXY, and the
+# proxy is GONE: two zeroship-gatekit binaries built here at the time of the
+# reading (gate-arm-census.d and compose-secret-strength.d) both resolved to 74
+# inputs through this same program, with a fraction of the CLI's dependency
+# surface. That crate was deleted on 2026-08-21, so 20 now rests on a
+# measurement nothing in the tree can reproduce. Re-measure and raise it the
+# first time this gate runs on a built tree.
 gate_arm binary_freshness_inputs "$(grep -c . "$WORK/binary-inputs" || true)" 20 || true
 
 STALE_INPUT=""

@@ -54,12 +54,10 @@
 #
 #     zsgate-arm gate=<gate-id> arm=<arm-id> examined=<n> floor=<m>
 #
-# That line is a WIRE FORMAT, not prose to be scraped. `gate-arm-census`
-# (crates/zeroship-gatekit) consumes it, and a gate written in Rust emits the
-# same line from `zeroship_gatekit::arm_census::Arm`. Changing the shape means
-# changing both spellings in the same patch. The whole reason this is fixed is
-# that the compose-secret failure above was caused by one program regexing
-# another program's human-readable message.
+# That line is a WIRE FORMAT, not prose to be scraped. `tests/gate_arm_census.sh`
+# consumes it; changing the shape means changing both files in the same patch.
+# The whole reason this is fixed is that the compose-secret failure above was
+# caused by one program regexing another program's human-readable message.
 #
 # Usage:
 #
@@ -158,8 +156,8 @@ gate_arm() {
 
   # A floor of zero is a DECLARED VACUITY: it says out loud that this arm may
   # rule on nothing and still pass, which is the defect wearing the uniform of
-  # the fix. `gate-arm-census` refuses a literal 0 in the source as well, so
-  # this cannot be smuggled past by a gate CI happens not to run.
+  # the fix. `tests/gate_arm_census.sh` refuses a literal 0 in the source as
+  # well, so this cannot be smuggled past by a gate CI happens not to run.
   if ! _gate_arms_is_uint "$floor" || [ "$floor" -lt 1 ]; then
     echo "GATE ARM CONTRACT [$ZS_GATE_ARMS_ID/$arm]: floor='$floor' must be an" >&2
     echo "  integer of at least 1. A floor of 0 permits an arm that examines" >&2
@@ -187,66 +185,6 @@ gate_arm() {
     return 1
   fi
   return 0
-}
-
-# gate_arms_delegate <command> [args...]
-#
-# For a shell gate that is a SHIM over a gate implemented elsewhere - a script
-# that execs a Rust binary. The shim has no counts of its own; the
-# implementation does, and emits the same `zsgate-arm` lines. NO GATE TAKES
-# THIS PATH AS OF 2026-08-21: the five compose_*_gate.sh shims that did were
-# deleted with the gates behind them, so the only exercise this function gets
-# is the three `sh -c` delegates in tests/lib_gate_arms_selftest.sh.
-#
-# This is NOT an exemption from the contract, and the difference matters
-# because an exemption is how skip_marker_gate.sh came to rule on nothing. The
-# delegate is REQUIRED to emit at least one arm line, checked at runtime on
-# every run: a delegate that stopped emitting is a refusal here, exactly as a
-# gate that declared no arms is a refusal in gate_arms_finish. What the shim
-# does not do is invent a number it did not measure.
-#
-# Output is forwarded verbatim, so the human-readable half is unchanged and the
-# arm lines remain on stdout for `gate-arm-census --run` to consume.
-gate_arms_delegate() {
-  if [ "$ZS_GATE_ARMS_STARTED" -ne 1 ]; then
-    echo "GATE ARM CONTRACT: gate_arms_delegate called before gate_arms_init." >&2
-    return 1
-  fi
-  local out status emitted
-  out="$("$@" 2>&1)"
-  status=$?
-  printf '%s\n' "$out"
-  emitted=$(printf '%s\n' "$out" | grep -c '^zsgate-arm ')
-  if [ "$emitted" -lt 1 ]; then
-    echo "GATE ARM CONTRACT [$ZS_GATE_ARMS_ID]: the delegate emitted no zsgate-arm" >&2
-    echo "  line. Either it does not participate in the arm contract or it never" >&2
-    echo "  reached an arm; either way its result says nothing about the tree." >&2
-    ZS_GATE_ARMS_REFUSALS=$((ZS_GATE_ARMS_REFUSALS + 1))
-    return 1
-  fi
-  # RULE ON THE FORWARDED LINES, do not just count them. The delegate is
-  # expected to enforce its own floors, but "expected to" is what this whole
-  # file exists to replace: if the implementation ever forgets, the shim would
-  # forward `examined=0` and pass. The floor is applied here as well, on the
-  # numbers the delegate itself published.
-  local line arm examined floor
-  while IFS= read -r line; do
-    arm=${line##*arm=}; arm=${arm%% *}
-    examined=${line##*examined=}; examined=${examined%% *}
-    floor=${line##*floor=}; floor=${floor%% *}
-    if _gate_arms_is_uint "$examined" && _gate_arms_is_uint "$floor" \
-       && [ "$examined" -lt "$floor" ]; then
-      echo "GATE ARM EXAMINED TOO LITTLE: $ZS_GATE_ARMS_ID/$arm (delegated) ruled on" \
-           "$examined item(s), floor $floor." >&2
-      ZS_GATE_ARMS_REFUSALS=$((ZS_GATE_ARMS_REFUSALS + 1))
-    fi
-  done < <(printf '%s\n' "$out" | grep '^zsgate-arm ')
-
-  # Count the delegate's arms so gate_arms_finish's zero-arm refusal does not
-  # fire on a shim that did its job.
-  ZS_GATE_ARMS_COUNT=$((ZS_GATE_ARMS_COUNT + emitted))
-  [ "$ZS_GATE_ARMS_REFUSALS" -eq 0 ] || return 1
-  return "$status"
 }
 
 # gate_arms_finish

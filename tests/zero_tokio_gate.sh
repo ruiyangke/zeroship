@@ -42,7 +42,7 @@
 #    ours reaching for the tokio-carrying HTTP client is invisible to both, and
 #    is precisely the drift that grows the edge.
 #
-# WHY THE PINNED SETS ARE NOT THE FULL REACHABILITY CLOSURE. 21 of our 30 crates
+# WHY THE PINNED SETS ARE NOT THE FULL REACHABILITY CLOSURE. 21 of our 29 crates
 # can reach tokio today, purely by depending on zeroship-core. Pinning that set
 # would go red on ordinary internal dependency edits that have nothing to do
 # with tokio, which is the churn that gets a gate deleted. The two sets pinned
@@ -50,7 +50,8 @@
 #
 # THE PRICE OF THAT CHOICE, stated because it was paid on 2026-08-21.
 # zeroship-gatekit LEFT the reachable set that day - it stopped depending on
-# zeroship-core, so it stopped linking hyper - and this gate was green before
+# zeroship-core, so it stopped linking hyper, and was then deleted outright
+# hours later - and this gate was green before
 # the change and green after it, in the same words. Neither pinned set moved,
 # because gatekit never NAMED a carrier; it reached tokio through zeroship-core,
 # and core is still on both lists. So: this gate rules on whether the accepted
@@ -71,15 +72,14 @@
 # That is the point: the alternative is a docs paragraph that still describes an
 # edge nobody has had since.
 #
-# WHY SHELL AND NOT crates/zeroship-gatekit. The whole gate is set arithmetic
-# over `cargo metadata` and `cargo tree`, both of which resolve from the
-# manifests and the lockfile without compiling anything - this runs in about two
-# seconds on a cold target/. Putting it in gatekit would mean COMPILING a crate
-# graph in order to read manifests, and until 2026-08-21 it would have meant
-# compiling hyper and tokio to notice hyper and tokio, because gatekit reached
-# the edge through zeroship-core. Nothing here needs a compiler-checked rule
-# table, which was the reason the compose secret gate was Rust before it was
-# deleted.
+# WHY SHELL AND NOT A RUST GATE CRATE. The whole gate is set arithmetic over
+# `cargo metadata` and `cargo tree`, both of which resolve from the manifests
+# and the lockfile without compiling anything - this runs in about two seconds
+# on a cold target/. A Rust gate would mean COMPILING a crate graph in order to
+# read manifests, and while `crates/zeroship-gatekit` existed it would have
+# meant compiling hyper and tokio to notice hyper and tokio, because that crate
+# reached the edge through zeroship-core. It was deleted on 2026-08-21 and
+# every gate is shell again.
 #
 # MEASURED DISCRIMINATION, 2026-08-20, each mutation confirmed present with
 # `git diff` before the red run and absent after, and each followed by a green
@@ -223,7 +223,7 @@ if [ "$declared_hits" -ne 0 ]; then
   sed 's/^/      /' "$TMP/root-declared.txt"
   fail=1
 fi
-# Floor 20 against 31: a query that stops matching the metadata shape returns an
+# Floor 20 against 30: a query that stops matching the metadata shape returns an
 # empty array and this arm would otherwise print the same clean line.
 gate_arm declared "$manifests_checked" 20 || fail=1
 
