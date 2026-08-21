@@ -5014,3 +5014,43 @@ async fn rejected_copy_start_does_not_poison_the_connection() {
     .expect("the refused COPY start poisoned its connection");
     assert_eq!(row.get::<_, i32>("n"), 1);
 }
+
+/// The resolution between `application_name` and `fallback_application_name`
+/// only matters if it reaches the startup packet, so ask the server which name
+/// the session ended up with rather than trusting the config accessor.
+#[compio::test]
+async fn fallback_application_name_names_the_session() {
+    let Some(url) = require_pg().await else { return };
+    let sep = if url.contains('?') { '&' } else { '?' };
+
+    let session_name = |dsn: String| async move {
+        let mut config: Config = dsn.parse().unwrap();
+        config.statement_cache_capacity(0);
+        let (client, connection) = config.connect(NoTls).await.unwrap();
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+        client
+            .query_one("SHOW application_name", &[])
+            .await
+            .unwrap()
+            .get::<_, String>(0)
+    };
+
+    assert_eq!(
+        session_name(format!("{url}{sep}fallback_application_name=faller")).await,
+        "faller",
+        "the fallback did not reach the startup packet"
+    );
+
+    // One variable apart: with a primary present the fallback must not win.
+    assert_eq!(
+        session_name(format!(
+            "{url}{sep}application_name=primary&fallback_application_name=faller"
+        ))
+        .await,
+        "primary",
+        "the fallback displaced an application_name the caller set"
+    );
+}

@@ -469,6 +469,10 @@ pub enum Host {
 /// * `dbname` - The name of the database to connect to. Defaults to the username.
 /// * `options` - Command line options used to configure the server.
 /// * `application_name` - Sets the `application_name` parameter on the server.
+/// * `fallback_application_name` - The `application_name` to announce when none is set, so a library can name the
+///     session without overriding the application's own choice.
+/// * `client_encoding` - Accepted only as `UTF8` (or `UNICODE`). The startup packet always announces UTF8 because
+///     Rust strings are UTF-8; any other encoding is refused rather than mis-decoded.
 /// * `statement_cache_capacity` - Maximum number of implicit raw-SQL prepared
 ///     statements retained per connection. Defaults to 0 (disabled).
 /// * `sslmode` - Controls usage of TLS, with libpq's six values and libpq's meanings: `disable`, `allow`, `prefer`
@@ -599,6 +603,7 @@ pub struct Config {
     pub(crate) dbname: Option<String>,
     pub(crate) options: Option<String>,
     pub(crate) application_name: Option<String>,
+    pub(crate) fallback_application_name: Option<String>,
     pub(crate) statement_cache_capacity: usize,
     pub(crate) ssl_mode: SslMode,
     pub(crate) ssl_negotiation: SslNegotiation,
@@ -637,6 +642,7 @@ impl Config {
             dbname: None,
             options: None,
             application_name: None,
+            fallback_application_name: None,
             statement_cache_capacity: 0,
             ssl_mode: SslMode::Prefer,
             ssl_negotiation: SslNegotiation::Postgres,
@@ -730,6 +736,33 @@ impl Config {
     /// been set with the `application_name` method.
     pub fn get_application_name(&self) -> Option<&str> {
         self.application_name.as_deref()
+    }
+
+    /// Sets the session name to announce when `application_name` is unset.
+    ///
+    /// libpq's purpose for this key is that a library can name the session
+    /// without overriding a name the application itself chose, so it never
+    /// displaces `application_name`.
+    pub fn fallback_application_name(
+        &mut self,
+        fallback_application_name: impl Into<String>,
+    ) -> &mut Config {
+        self.fallback_application_name = Some(fallback_application_name.into());
+        self
+    }
+
+    /// Gets the value of the `fallback_application_name` runtime parameter, if
+    /// it has been set with the `fallback_application_name` method.
+    pub fn get_fallback_application_name(&self) -> Option<&str> {
+        self.fallback_application_name.as_deref()
+    }
+
+    /// The session name the startup packet announces: `application_name` when
+    /// set, otherwise `fallback_application_name`. Resolved in one place so the
+    /// two getters can keep mirroring their setters.
+    pub(crate) fn resolved_application_name(&self) -> Option<&str> {
+        self.get_application_name()
+            .or_else(|| self.get_fallback_application_name())
     }
 
     /// Sets the maximum number of implicit raw-SQL prepared statements cached
@@ -1104,6 +1137,22 @@ impl Config {
             "options" => {
                 self.options(value);
             }
+            "fallback_application_name" => {
+                self.fallback_application_name(value);
+            }
+            "client_encoding" => {
+                // The startup packet always announces UTF8 because Rust strings
+                // are UTF-8. Naming UTF8 is therefore a no-op, and naming any
+                // other encoding is a request this driver cannot honour --
+                // refuse it rather than decode the server's bytes as something
+                // they are not.
+                let normalized = value.replace(['-', '_'], "").to_ascii_uppercase();
+                if !matches!(normalized.as_str(), "UTF8" | "UNICODE") {
+                    return Err(Error::config_parse(Box::new(InvalidValue(
+                        "client_encoding",
+                    ))));
+                }
+            }
             "application_name" => {
                 self.application_name(value);
             }
@@ -1432,6 +1481,10 @@ impl fmt::Debug for Config {
             .field("dbname", &self.dbname)
             .field("options", &self.options)
             .field("application_name", &self.application_name)
+            .field(
+                "fallback_application_name",
+                &self.fallback_application_name,
+            )
             .field("statement_cache_capacity", &self.statement_cache_capacity)
             .field("ssl_mode", &self.ssl_mode)
             .field("ssl_negotiation", &self.ssl_negotiation)
@@ -2392,5 +2445,53 @@ mod dsn_parse_tests {
         "host=h keepalives=1 keepalives_retries=9"
             .parse::<Config>()
             .expect_err("keepalives_retries survived as an alias");
+    }
+
+    /// libpq falls back to `fallback_application_name` when `application_name`
+    /// is unset, so a connection string carrying one was rejected outright as
+    /// an unknown key. The getters mirror their setters; which one actually
+    /// reaches the server is resolved once, where the startup packet is built,
+    /// and is pinned live by `fallback_application_name_names_the_session`.
+    #[test]
+    fn fallback_application_name_parses_alongside_the_primary() {
+        let fallback = "host=h fallback_application_name=faller"
+            .parse::<Config>()
+            .expect("fallback_application_name did not parse");
+        assert_eq!(fallback.get_application_name(), None);
+        assert_eq!(fallback.get_fallback_application_name(), Some("faller"));
+
+        // One variable apart: naming both keeps them distinct rather than
+        // letting the later key overwrite the earlier.
+        let both = "host=h application_name=primary fallback_application_name=faller"
+            .parse::<Config>()
+            .expect("the pair did not parse");
+        assert_eq!(both.get_application_name(), Some("primary"));
+        assert_eq!(both.get_fallback_application_name(), Some("faller"));
+    }
+
+    /// `client_encoding` is one of the most common libpq keys, and was refused.
+    /// The startup packet always announces UTF8 because Rust strings are UTF-8,
+    /// so naming UTF8 is accepted and any other encoding is refused rather than
+    /// silently decoded as something it is not.
+    #[test]
+    fn client_encoding_accepts_utf8_and_refuses_an_encoding_we_cannot_decode() {
+        for spelling in ["UTF8", "utf8", "UNICODE", "utf-8"] {
+            format!("host=h client_encoding={spelling}")
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("client_encoding={spelling} did not parse: {error}"));
+        }
+
+        let refused = "host=h client_encoding=LATIN1"
+            .parse::<Config>()
+            .expect_err("a non-UTF8 client_encoding must be refused, not ignored");
+        // The top-level Display is only "invalid connection string", so the key
+        // has to be reachable through the source chain or the caller cannot
+        // tell which option they got wrong.
+        let named = std::iter::successors(
+            std::error::Error::source(&refused),
+            |error| std::error::Error::source(*error),
+        )
+        .any(|cause| cause.to_string().contains("client_encoding"));
+        assert!(named, "no cause names the offending key: {refused}");
     }
 }
