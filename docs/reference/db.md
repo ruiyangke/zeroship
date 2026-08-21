@@ -367,9 +367,63 @@ end of the statement rather than firing per row.
 Override with `t.ref("users", { onDelete: "cascade" })` for physical cascade,
 or `{ deferrable: true }` if you need cyclic refs insertable within one
 transaction — that is opt-in, not the default. Cross-app targets are refused;
-FKs stay inside the calling app. See
-`sdks/db/src/types.ts`, `crates/zeroship-schema/src/query.rs`, and
-`crates/plugin-db/src/cross_app_fk.rs`.
+FKs stay inside the calling app. See `sdks/db/src/types.ts` for the builder,
+and the next section for what does the refusing, which is not what this page
+said until 2026-08-20.
+
+### Can an FK point at another app's table?
+
+No, and it is worth being exact about which code makes that true, because two
+plausible-looking answers are wrong.
+
+**It is not `crates/plugin-db/src/cross_app_fk.rs`.** That file holds a
+`reject_cross_app_fk` validator that scans `refTarget` for an `<other_app>.`
+prefix and returns `cross_app_fk_forbidden`, and it is the mechanism this page
+used to cite. As of 2026-08-20 it has **no production call site**: one caller
+lives in a `#[cfg(any(test, feature = "test-helpers"))]` module, the other in a
+function whose every caller is a `#[cfg(test)]` test. Production
+`registerModel` issues no DDL on either backend, so it never runs. Nor is it
+`crates/zeroship-schema`, whose FK builders are reached only from that same
+cfg-gated pipeline; the migration engine carries its own copy of that renderer
+and does not depend on the crate.
+
+**Schema is applied by the migration engine at deploy**, and that is where the
+answer lives. Four things hold there, in order:
+
+1. A dot-qualified target on a COLUMN-level ref (`t.ref("other.users")`, or
+   `.references("other.users", ...)`) is refused at author time by
+   `reject_cross_app_ref`
+   (`third_party/zero-migrate/crates/zero-migrate/src/render/declarative.rs:4606`,
+   reached from the op-DSL lower path at `declarative.rs:3491`), which raises
+   `CrossAppFkForbidden`.
+2. A TABLE-level foreign-key constraint gets no such prefix check. It does not
+   escape anyway: the renderer qualifies every `REFERENCES` with the schema it
+   was called FOR (`fk_definition_for_dialect`, `declarative.rs:4502`), so
+   `"other.users"` renders as `"<app>"."other.users"` -- a table name inside
+   the app's own schema. The differ then rejects it as
+   `CrossAppFkTargetMissing` because no such table is declared or live
+   (`declarative.rs:6080`). So this case is caught, but as a missing target
+   rather than as a boundary violation.
+3. An op-level `schema:` qualifier naming another schema is refused
+   fail-closed under `SchemaScope::Single`
+   (`third_party/zero-migrate/crates/zero-migrate/src/model/validate.rs`,
+   `CODE_CROSS_SCHEMA`), and the rendered SQL is swept again by the guard's
+   `check_cross_schema`
+   (`third_party/zero-migrate/crates/zero-migrate-guard/src/guard/mod.rs:2288`).
+4. Underneath all of it, `crates/migrated` derives the target schema from the
+   app id server-side (`src/apply.rs:413`) -- no author input reaches it -- and
+   applies under a `NOLOGIN`/`NOSUPERUSER` per-app role whose `search_path` and
+   grants reach that schema only (`src/provisioning.rs:104-208`).
+
+The `ForeignKeyReference.schema` field in `sdks/migrate/src/types.ts` is an
+authoring hint only. It is never serialised into the IR, and when the enclosing
+op carries an explicit schema a mismatch throws `OP_INVALID`; when it does not,
+the hint is accepted and discarded.
+
+What none of this covers: two apps that the control plane assigns the same
+`app_id`. Isolation there is a control-plane property, not a rendering one.
+The differ's own comment at `declarative.rs:6074` makes the matching point
+about inbound-FK consent.
 
 ## Collection CRUD
 
