@@ -3408,7 +3408,7 @@ fn a_connection_does_not_outlive_the_runtime_that_opened_it() {
 }
 
 /// Name of the test below, needed as a literal because it re-executes itself.
-const FD_PROBE_TEST: &str = "a_torn_down_runtime_leaks_a_bounded_number_of_descriptors";
+const FD_PROBE_TEST: &str = "a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection";
 
 /// Set in the re-executed child. Its presence selects the measuring arm.
 ///
@@ -3419,8 +3419,18 @@ const FD_PROBE_TEST: &str = "a_torn_down_runtime_leaks_a_bounded_number_of_descr
 /// the WRITE side alone would be the same literal in two files.
 const FD_PROBE_CHILD: common::env::TestEnvKey = common::env::TestEnvKey::FdProbeChild;
 
-/// Marks the child's machine-readable result line.
+/// Marks the child's machine-readable result lines: `<marker><arm> <csv>`.
 const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
+
+/// Create/drop cycles per arm. Twenty, so a per-iteration constant is a slope
+/// and not a pair of readings that happen to differ.
+const FD_PROBE_ITERATIONS: usize = 20;
+
+/// What a torn-down runtime leaks on its own, once a single in-flight
+/// submission has stopped it being reclaimed: the `io_uring` ring and the
+/// eventfd the driver notifies through. Measured, not assumed - see the arms
+/// below and the identity table in the doc comment.
+const LEAKED_RUNTIME_FDS: i64 = 2;
 
 /// The descriptor half of the invariant above, which `crate::release` does NOT
 /// fix and is not trying to.
@@ -3428,23 +3438,69 @@ const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
 /// Measured 2026-08-20 against the same binary with `Socket::release_handle`
 /// forced to `None`: the backend series went `[1,2,3,4,5,6]` and the fd series
 /// stayed `[10,16,22,28,34,40]` - byte for byte what it is with the release in
-/// place. The release ends the SESSION; the descriptor is co-owned by an
-/// io_uring submission that `Runtime::drop` never reclaims (`crate::live` has
-/// the mechanism), so it stays for the life of the process either way.
+/// place. The release ends the SESSION, not the descriptor.
 ///
-/// Three per runtime is a known, accepted cost, and this bound is what makes it
-/// accepted rather than unmeasured. It multiplies: `crates/auth` runs 254 tests
-/// in ONE process (`crates/auth/tests/main.rs`), so at this rate that binary
-/// ends holding ~760 descriptors. That is under the 1024 soft `RLIMIT_NOFILE`
-/// many CI images still ship - with no room for a second connection per test,
-/// which several of them open. What it would surface as is EMFILE in a test
-/// unrelated to whatever raised the cost.
+/// # What actually leaks, and why it is not one descriptor
 ///
-/// The bound is three and not six because the test above measures TWO runtime
-/// teardowns per iteration: `tagged_backends` builds a `Runtime` and a
-/// connection of its own to ask the server its question. Its series therefore
-/// reads `[6,6,6,6,6]` for the same underlying cost, which is why the number
-/// this asserts is measured here rather than taken from what that one prints.
+/// Re-measured 2026-08-20 by reading `/proc/self/fd` targets rather than
+/// counting entries, over 24 create/drop cycles in a process doing nothing
+/// else. One detached connection per runtime leaks exactly three, and they are
+/// not three sockets:
+///
+/// ```text
+/// anon_inode:[io_uring]   the ring
+/// anon_inode:[eventfd]    the driver's notify handle
+/// socket:[...]            the connection
+/// ```
+///
+/// So the unit that leaks is THE WHOLE RUNTIME plus one descriptor per
+/// connection that still had a submission in flight. Two connections per
+/// runtime leak four, not six - measured `[4,4,4,...]` over 24 cycles - which
+/// is why the arms below assert `connections + 2` and not a flat budget. The
+/// prior version of this asserted `<= 3`, a number that is only the truth at
+/// one connection per runtime; a two-connection test would have tripped it,
+/// and the message told the reader to raise the bound.
+///
+/// The mechanism is not postgres and is not this crate. A bare
+/// `compio::net::TcpStream` read on a detached task leaks the same three.
+/// `compio_runtime::runtime::Submit` holds a strong `Rc<RuntimeInner>`, so a
+/// submission that is still pending at teardown makes `Runtime::drop` see
+/// `Rc::strong_count > 1` and take its early return without calling
+/// `scheduler.clear()`. What is left is an Rc cycle - `RuntimeInner` ->
+/// `Scheduler` -> task -> `Submit` -> `RuntimeInner` - so the `Proactor`, and
+/// with it the ring and the eventfd, is never dropped. Confirmed by patching
+/// that drop to print the count: 2 on the leaking arm, 1 on a detached task
+/// that is pending on something other than a submission, which leaks nothing.
+/// That early return is not a bug to delete, either: forcing the clear made
+/// live queries fail, because `Runtime::drop` also runs for the transient
+/// handles `Submit` clones mid-run.
+///
+/// # It is reclaimable, and the drained arm is the proof
+///
+/// Any teardown that leaves no submission in flight leaks zero. Awaiting the
+/// driver task, cancelling it and letting the runtime reap the cancellation,
+/// and [`compio_postgres::drain_connections`] all measured `[0,0,0,...]` over
+/// 24 cycles. The drained arm below is the one this crate ships an API for, so
+/// it is the one that is guarded: without it, nothing here would notice
+/// `drain_connections` silently ceasing to drain.
+///
+/// # Why the cost is worth a guard at all
+///
+/// It multiplies across a consolidated test binary and never comes back. This
+/// crate's own `integration` target, 98 tests in one process at
+/// `--test-threads=1`, was watched from outside on 2026-08-20: the count went
+/// `7 -> 301`, ending on 198 `anon_inode` (99 runtimes x 2) and 109 sockets.
+/// `crates/auth/tests/main.rs` is 257 tests in one process. What the cost
+/// surfaces as, when it does, is EMFILE against a 1024 soft `RLIMIT_NOFILE` in
+/// a test unrelated to whatever raised it.
+///
+/// # What this does NOT catch
+///
+/// Nothing outside a test process. Every `Runtime::new` in `crates/` and
+/// `libs/` outside a `tests/` directory is inside a `#[cfg(test)]` module;
+/// the services build one runtime per thread and hold it for the life of the
+/// process, so this cost is zero in production by construction, and a change
+/// that made a service tear runtimes down in a loop would not go red here.
 ///
 /// # Why this re-executes itself
 ///
@@ -3456,6 +3512,10 @@ const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
 ///
 ///   default:            fds [78,122,165,170,171,176]  deltas [44,43,5,1,5]
 ///   --test-threads=1:   fds [10, 16, 22, 28, 34, 40]  deltas [6,6,6,6,6]
+///
+/// (That serial series reads six per iteration for a three-per-runtime cost
+/// because the test above tears down TWO runtimes per iteration:
+/// `tagged_backends` builds one of its own to ask the server its question.)
 ///
 /// An earlier version of this asserted the budget inline and passed only
 /// because it had been run serially - and it did not merely mis-measure, it
@@ -3471,7 +3531,7 @@ const FD_PROBE_MARKER: &str = "FD-PROBE-SERIES ";
 /// nothing else. That is isolated by construction rather than by a convention
 /// the next runner has to know.
 #[test]
-fn a_torn_down_runtime_leaks_a_bounded_number_of_descriptors() {
+fn a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection() {
     if common::env::get(FD_PROBE_CHILD).is_some() {
         measure_and_report_fd_series();
         return;
@@ -3491,66 +3551,143 @@ fn a_torn_down_runtime_leaks_a_bounded_number_of_descriptors() {
         "the isolated child failed.\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"
     );
 
+    // One connection per runtime, undrained: the ring, its eventfd, and the
+    // socket.
+    assert_leak_per_runtime(&stdout, "one-connection", 1 + LEAKED_RUNTIME_FDS);
+    // Two, undrained. This is the arm the old flat budget of three would have
+    // failed, and the reason the expectation is a law rather than a number.
+    assert_leak_per_runtime(&stdout, "two-connections", 2 + LEAKED_RUNTIME_FDS);
+    // Drained before the runtime goes. Nothing is in flight, so nothing is
+    // stranded - including the runtime itself.
+    assert_leak_per_runtime(&stdout, "drained", 0);
+}
+
+/// Parses one arm's series out of the child's stdout and asserts every
+/// create/drop cycle moved the descriptor count by exactly `expected`.
+///
+/// Exact, not an upper bound, in both directions on purpose. A HIGHER number
+/// means a teardown now strands more submissions than it did. A LOWER one
+/// means the cost this file documents at length has gone away - most likely a
+/// compio upgrade - and the doc comment above is now wrong, which is worth a
+/// red run rather than a quietly passing `<=`.
+fn assert_leak_per_runtime(stdout: &str, arm: &str, expected: i64) {
     // Searched for anywhere in the line, not as a prefix: libtest writes
     // `test <name> ... ` without a newline and the child's first `println!`
     // lands on the end of it, so the marker is mid-line on the run that
     // matters.
-    let series = stdout
-        .lines()
-        .find_map(|line| line.split_once(FD_PROBE_MARKER))
-        .map(|(_, rest)| rest)
-        .unwrap_or_else(|| {
-            panic!("child printed no {FD_PROBE_MARKER} line.\n--- stdout ---\n{stdout}")
-        });
+    let needle = format!("{FD_PROBE_MARKER}{arm} ");
+    let Some((_, series)) = stdout.lines().find_map(|line| line.split_once(&needle)) else {
+        panic!("child printed no `{needle}` line.\n--- stdout ---\n{stdout}")
+    };
     let fds: Vec<i64> = series
         .split(',')
         .map(|n| n.trim().parse().expect("fd count"))
         .collect();
-    assert!(fds.len() >= 2, "need at least two samples, got {fds:?}");
+    assert_eq!(
+        fds.len(),
+        FD_PROBE_ITERATIONS + 1,
+        "arm {arm} should report a baseline plus {FD_PROBE_ITERATIONS} samples, got {fds:?}"
+    );
 
     // Signed, so a count that goes DOWN is a number this reports rather than a
     // panic inside the assertion that was supposed to describe it.
     let per_runtime: Vec<i64> = fds.windows(2).map(|w| w[1] - w[0]).collect();
-    println!("open fds in the isolated child: {fds:?}");
-    println!("descriptors leaked per runtime: {per_runtime:?}");
+    println!("[{arm}] open fds in the isolated child: {fds:?}");
+    println!("[{arm}] descriptors leaked per runtime: {per_runtime:?}");
 
-    const BUDGET: i64 = 3;
     assert!(
-        per_runtime.iter().all(|&d| d <= BUDGET),
-        "a torn-down runtime leaks at most {BUDGET} descriptors; got {per_runtime:?} \
-         from {fds:?}. Read the doc comment before raising this."
+        per_runtime.iter().all(|&d| d == expected),
+        "arm {arm}: every runtime teardown should move the descriptor count by \
+         exactly {expected}; got {per_runtime:?} from {fds:?}. Read the doc \
+         comment before changing this number."
     );
 }
 
-/// The child arm of [`a_torn_down_runtime_leaks_a_bounded_number_of_descriptors`].
+/// The child arm of
+/// [`a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection`].
 ///
-/// Opens and drops one runtime per iteration and prints the descriptor count
-/// after each, on a line the parent parses. Sampling `/proc/self/fd` is only
+/// Runs the three arms back to back in this one process and prints a series
+/// per arm on a line the parent parses. Sampling `/proc/self/fd` is only
 /// meaningful here because the parent invoked this process with `--exact` and
 /// `--test-threads=1`, so no other test shares it.
+/// Each arm runs on a thread of its own, and that is load-bearing rather than
+/// tidy. [`compio_postgres::live_connections`] counts per THREAD, and a
+/// connection abandoned by an abrupt teardown is never dropped, so its guard
+/// never decrements. Run the drained arm on a thread the abrupt arms have
+/// already used and `drain_connections` waits out its whole timeout on
+/// connections that no longer exist - which is exactly how this was first
+/// written, and it failed with "the drivers did not finish". Threads run one
+/// at a time here; `/proc/self/fd` is per-process, so the counts still compose.
 fn measure_and_report_fd_series() {
     let url = test_url();
-    let tag = "cpg_fd_probe";
-    let sep = if url.contains('?') { '&' } else { '?' };
-    let tagged = format!("{url}{sep}application_name={tag}");
+    for (arm, connections, teardown) in [
+        ("one-connection", 1, Teardown::Abrupt),
+        ("two-connections", 2, Teardown::Abrupt),
+        ("drained", 1, Teardown::Drained),
+    ] {
+        let url = url.clone();
+        let fds = std::thread::spawn(move || fd_series(&url, connections, teardown))
+            .join()
+            .expect("fd probe arm panicked");
+        report_fd_series(arm, &fds);
+    }
+}
 
-    let mut fds = Vec::new();
-    for _ in 0..6 {
+/// How the arm ends its `block_on` before the runtime is dropped.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Teardown {
+    /// Let `block_on` return with the driver tasks still parked on a read.
+    /// This is what every `#[compio::test]` in the tree does today.
+    Abrupt,
+    /// Drop the clients and wait for the drivers to finish, so no submission
+    /// is in flight when the runtime goes.
+    Drained,
+}
+
+/// Opens `connections` connections inside a fresh runtime, tears the runtime
+/// down `teardown`-wise, and does that [`FD_PROBE_ITERATIONS`] times.
+///
+/// Returns the descriptor count before the first runtime and after each
+/// teardown, so the caller gets exactly one delta per cycle. The baseline is
+/// included rather than warmed away: a one-time cost on the first cycle is
+/// something this should name, not absorb.
+fn fd_series(url: &str, connections: usize, teardown: Teardown) -> Vec<usize> {
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let tagged = format!("{url}{sep}application_name=cpg_fd_probe");
+
+    let mut fds = Vec::with_capacity(FD_PROBE_ITERATIONS + 1);
+    fds.push(open_fds());
+    for _ in 0..FD_PROBE_ITERATIONS {
         let rt = compio::runtime::Runtime::new().expect("cannot create runtime");
         rt.block_on(async {
-            let client = match connect(&tagged).await {
-                Ok(client) => client,
-                Err(e) => common::postgres_unreachable(&tagged, &e),
-            };
-            let rows = client.query("SELECT 1::int4 AS one", &[]).await.unwrap();
-            assert_eq!(rows[0].get::<_, i32>("one"), 1);
+            let mut clients = Vec::with_capacity(connections);
+            for _ in 0..connections {
+                let client = match connect(&tagged).await {
+                    Ok(client) => client,
+                    Err(e) => common::postgres_unreachable(&tagged, &e),
+                };
+                let rows = client.query("SELECT 1::int4 AS one", &[]).await.unwrap();
+                assert_eq!(rows[0].get::<_, i32>("one"), 1);
+                clients.push(client);
+            }
+            if teardown == Teardown::Drained {
+                drop(clients);
+                assert!(
+                    compio_postgres::drain_connections(std::time::Duration::from_secs(5)).await,
+                    "the drivers did not finish; a live handle would keep them counted"
+                );
+            }
         });
         drop(rt);
         fds.push(open_fds());
     }
+    fds
+}
 
+/// Prints one arm's series on the machine-readable line the parent parses.
+fn report_fd_series(arm: &str, fds: &[usize]) {
     let series: Vec<String> = fds.iter().map(ToString::to_string).collect();
-    println!("{FD_PROBE_MARKER}{}", series.join(","));
+    println!("{FD_PROBE_MARKER}{arm} {}", series.join(","));
 }
 
 /// The one-variable partner. The test above would also pass if the connection
