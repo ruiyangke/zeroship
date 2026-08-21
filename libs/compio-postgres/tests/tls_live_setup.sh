@@ -7,6 +7,9 @@
 #
 #   tls       ssl=on, certificate for `localhost` signed by a private CA.
 #             The positive case for every mode that encrypts.
+#             That exact certificate is also listed in a generated CRL, so
+#             the client can prove the same server is accepted without the
+#             CRL and refused with it.
 #   plain     TLS off entirely. Without it, "sslmode=require connected" is
 #             consistent with a driver that ignores sslmode.
 #   mismatch  ssl=on, certificate for a name that is NOT the one the test
@@ -36,6 +39,7 @@ mismatch_name=compio-pg-mismatch-test
 sslonly_name=compio-pg-sslonly-test
 clientcert_name=compio-pg-clientcert-test
 password=compio-postgres-tls-test
+key_password=compio-postgres-encrypted-key-test
 
 if [ "${1:-}" = "--down" ]; then
     docker rm -f "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name" >/dev/null 2>&1 || true
@@ -65,9 +69,55 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt \
 
 openssl req -newkey rsa:2048 -nodes -keyout server.key -out server.csr \
     -sha256 -subj "/CN=localhost" 2>/dev/null
-printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n' >san.ext
-openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
-    -out server.crt -days 3650 -sha256 -extfile san.ext 2>/dev/null
+
+# Sign this certificate through `openssl ca`, rather than the shorter `x509`
+# path used by the other fixtures, because a meaningful CRL needs the CA's
+# issuance database to identify the exact serial it revokes.
+mkdir ca-newcerts
+: >ca-index.txt
+printf '1000\n' >ca-serial
+printf '1000\n' >ca-crlnumber
+cat >ca.cnf <<EOF
+[ ca ]
+default_ca = test_ca
+
+[ test_ca ]
+database = $live/ca-index.txt
+new_certs_dir = $live/ca-newcerts
+certificate = $live/ca.crt
+private_key = $live/ca.key
+serial = $live/ca-serial
+crlnumber = $live/ca-crlnumber
+default_md = sha256
+default_days = 3650
+default_crl_days = 3650
+policy = test_policy
+x509_extensions = server_ext
+
+[ test_policy ]
+commonName = supplied
+
+[ server_ext ]
+subjectAltName = DNS:localhost,IP:127.0.0.1
+extendedKeyUsage = serverAuth
+EOF
+openssl ca -batch -notext -config ca.cnf -in server.csr -out server.crt 2>/dev/null
+openssl ca -batch -config ca.cnf -revoke server.crt 2>/dev/null
+openssl ca -batch -config ca.cnf -gencrl -out server.crl 2>/dev/null
+
+# Prove the generated pair is discriminating before the code under test sees
+# it: the certificate is otherwise valid, and this CRL rejects it specifically
+# because its serial is revoked.
+openssl verify -CAfile ca.crt server.crt >/dev/null
+if crl_verdict=$(openssl verify -CAfile ca.crt -CRLfile server.crl \
+    -crl_check server.crt 2>&1); then
+    echo "FATAL: generated CRL did not revoke server.crt" >&2
+    exit 1
+fi
+if ! grep -qi 'certificate revoked' <<<"$crl_verdict"; then
+    echo "FATAL: generated CRL failed for the wrong reason: $crl_verdict" >&2
+    exit 1
+fi
 
 # Same CA, deliberately wrong name. `.invalid` is reserved by RFC 2606, so this
 # can never accidentally match anything resolvable.
@@ -84,6 +134,8 @@ openssl req -newkey rsa:2048 -nodes -keyout client.key -out client.csr \
 printf 'extendedKeyUsage=clientAuth\n' >client.ext
 openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
     -out client.crt -days 3650 -sha256 -extfile client.ext 2>/dev/null
+openssl pkcs8 -topk8 -in client.key -out client-encrypted.key \
+    -v2 aes-256-cbc -passout "pass:$key_password" 2>/dev/null
 
 # `hostssl` only: a plaintext connection is refused during startup, which is
 # the trigger `allow` falls back on.
@@ -195,6 +247,9 @@ clientcert_url=host=localhost port=$clientcert_port user=postgres dbname=postgre
 ca=$live/ca.crt
 client_cert=$live/client.crt
 client_key=$live/client.key
+client_encrypted_key=$live/client-encrypted.key
+client_key_password=$key_password
+server_crl=$live/server.crl
 EOF
 
 echo "wrote $live/tls_live.conf"
