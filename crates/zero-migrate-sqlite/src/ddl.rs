@@ -2,8 +2,8 @@
 
 use zero_migrate_backend::ddl::{
     default_clause, fk_local_columns, fk_policy_tail, fk_referenced_columns, fk_target_table,
-    generated_clause, inline_checks_clause, inline_pk_for_column, null_clause, primary_key_clause,
-    render_index_order_suffix, should_render_table_pk, CreateTableRequest, DdlEmitter,
+    generated_clause, inline_checks_clause, inline_pk_for_column, render_index_order_suffix,
+    should_render_table_pk, CreateTableRequest, DdlEmitter,
 };
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
@@ -16,6 +16,24 @@ const DIALECT: SqlDialect = SqlDialect::Sqlite;
 
 fn sqlite_ident(ident: &str) -> String {
     crate::schema::RENDERER.quote_ident(ident)
+}
+
+fn primary_key_clause(c: &ColumnSnapshot, inline_pk: bool) -> &'static str {
+    if crate::schema::sqlite_auto_increment_identity_pk(c, inline_pk) {
+        " PRIMARY KEY AUTOINCREMENT"
+    } else if inline_pk {
+        " PRIMARY KEY"
+    } else {
+        ""
+    }
+}
+
+fn null_clause(c: &ColumnSnapshot, inline_pk: bool) -> &'static str {
+    if c.nullable || crate::schema::sqlite_auto_increment_identity_pk(c, inline_pk) {
+        ""
+    } else {
+        " NOT NULL"
+    }
 }
 
 pub(super) fn emitter(project_schema: &str) -> Box<dyn DdlEmitter> {
@@ -118,8 +136,8 @@ impl DdlEmitter for SqliteEmitter {
         for c in &t.columns {
             let inline_pk = inline_pk_for_column(table, t, &c.name);
             let ty = crate::schema::RENDERER.column_type(c, inline_pk);
-            let pk = primary_key_clause(c, DIALECT, inline_pk);
-            let null = null_clause(c, DIALECT, inline_pk);
+            let pk = primary_key_clause(c, inline_pk);
+            let null = null_clause(c, inline_pk);
             let generated = generated_clause(c.generated.as_ref());
             let default = default_clause(c.default.as_deref());
             let checks = inline_checks_clause(c);
@@ -187,7 +205,7 @@ impl DdlEmitter for SqliteEmitter {
 
     fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>) {
         let inline_pk = false;
-        let null = null_clause(c, DIALECT, inline_pk);
+        let null = null_clause(c, inline_pk);
         let generated = generated_clause(c.generated.as_ref());
         let default = default_clause(c.default.as_deref());
         let checks = inline_checks_clause(c);

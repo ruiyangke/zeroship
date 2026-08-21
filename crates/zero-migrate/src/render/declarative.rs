@@ -279,8 +279,8 @@ pub(crate) fn constraintdef_cols(cols: &[String]) -> String {
 // to go below the vendors with the trait. Imported at the top of this module; the
 // engine's own non-emitter render paths are unchanged callers.
 
-// `sqlite_auto_increment_identity_pk` MOVED to `zero_migrate_backend::ddl`, with
-// the two clause builders that gate on it.
+// `sqlite_auto_increment_identity_pk` MOVED to `zero_migrate_sqlite::schema`,
+// shared by that backend's schema and DDL renderers.
 
 /// Whether `data_type` is one of the three types PostgreSQL lets an IDENTITY
 /// column have.
@@ -358,7 +358,7 @@ impl MysqlStorage {
     }
 }
 
-// `primary_key_clause` and `null_clause` MOVED to `zero_migrate_backend::ddl`.
+// `primary_key_clause` and `null_clause` MOVED to each vendor's DDL module.
 
 fn normalize_timestamptz_bound_literal(value: &str) -> String {
     let mut out = value.to_string();
@@ -2011,7 +2011,8 @@ pub(crate) fn column_snapshot_for_field(
 /// never creates.
 ///
 /// `inline_pk` is false because it is read only on the SQLite rowid-alias leg
-/// (`sqlite_auto_increment_identity_pk`); the MySQL arm never consults it.
+/// (the SQLite vendor's `sqlite_auto_increment_identity_pk`); the MySQL arm never
+/// consults it.
 ///
 /// The live side parses MySQL's own `COLUMN_TYPE` through the same function. That is
 /// what lets the two sides agree despite spelling apart: the renderer emits

@@ -1,6 +1,5 @@
 //! SQLite schema/DDL spelling. The future `zero-migrate-sqlite`.
 
-use zero_migrate_backend::ddl::sqlite_auto_increment_identity_pk;
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{decimal_precision_scale, SchemaRenderer};
 use zero_migrate_backend::snapshot::ColumnSnapshot;
@@ -14,6 +13,19 @@ const DIALECT: SqlDialect = SqlDialect::Sqlite;
 pub(super) struct SqliteSchemaRenderer;
 
 pub(super) static RENDERER: SqliteSchemaRenderer = SqliteSchemaRenderer;
+
+/// Whether this column is `SQLite`'s rowid-alias `INTEGER PRIMARY KEY
+/// AUTOINCREMENT` shape — an auto-increment identity, inline PK, over one of the
+/// integer storage classes.
+#[must_use]
+pub(super) fn sqlite_auto_increment_identity_pk(c: &ColumnSnapshot, inline_pk: bool) -> bool {
+    matches!(c.identity, Some(identity) if !identity.always)
+        && inline_pk
+        && matches!(
+            c.data_type.to_ascii_lowercase().as_str(),
+            "integer" | "bigint" | "smallint" | "int" | "int2" | "int4" | "int8"
+        )
+}
 
 impl SchemaRenderer for SqliteSchemaRenderer {
     fn dialect(&self) -> DialectId {

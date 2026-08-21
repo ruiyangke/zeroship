@@ -47,7 +47,7 @@ use crate::snapshot::{
     canonical_index_sort_order, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
     IndexElementSnapshot, IndexSnapshot, TableSnapshot,
 };
-use zero_migrate_ir::dialect::{DialectId, SqlDialect};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::IndexSortOrder;
 
 // once, handed to whichever emitter the dialect selects.
@@ -395,11 +395,10 @@ pub fn fk_referenced_columns(definition: &str) -> Vec<String> {
 // cannot stay above the vendors — that is the same arrow the trait itself moved
 // to satisfy.
 //
-// They are dialect-PARAMETERIZED, not dialect-specific: each takes the
-// `SqlDialect` it is spelling for, or takes none at all because the clause is
-// identical on all three. Nothing here resolves a vendor or names one it was not
-// handed, so the boundary rule in `zero_migrate::render::backends`'s header is
-// unchanged — the caller has already decided which vendor it is.
+// They are dialect-neutral: every helper left here has one spelling shared by all
+// three backends. Nothing here resolves a vendor or names one it was not handed,
+// so the boundary rule in `zero_migrate::render::backends`'s header is unchanged —
+// the caller has already decided which vendor it is.
 //
 // Moved VERBATIM: same bodies, same names, same order of tests over the same
 // snapshot fields. The engine's own non-emitter render paths still call them, now
@@ -450,59 +449,6 @@ pub fn generated_clause(generated: Option<&GeneratedColumnSnapshot>) -> String {
             format!(" GENERATED ALWAYS AS ({}) {storage}", g.expr)
         }
         None => String::new(),
-    }
-}
-
-/// Whether this column is `SQLite`'s rowid-alias `INTEGER PRIMARY KEY
-/// AUTOINCREMENT` shape — an auto-increment identity, inline PK, over one of the
-/// integer storage classes.
-///
-/// Both [`primary_key_clause`] and [`null_clause`] gate on it, and so does the
-/// engine's own type renderer, which is why it sits beside them rather than in the
-/// SQLite vendor: three callers in two crates, and the answer is read off the
-/// snapshot without asking any vendor anything.
-#[must_use]
-pub fn sqlite_auto_increment_identity_pk(c: &ColumnSnapshot, inline_pk: bool) -> bool {
-    matches!(c.identity, Some(identity) if !identity.always)
-        && inline_pk
-        && matches!(
-            c.data_type.to_ascii_lowercase().as_str(),
-            "integer" | "bigint" | "smallint" | "int" | "int2" | "int4" | "int8"
-        )
-}
-
-/// The trailing ` PRIMARY KEY` (or `SQLite`'s ` PRIMARY KEY AUTOINCREMENT`) clause
-/// an inline single-column PK carries, or the empty string.
-#[must_use]
-pub fn primary_key_clause(
-    c: &ColumnSnapshot,
-    dialect: SqlDialect,
-    inline_pk: bool,
-) -> &'static str {
-    if matches!(dialect, SqlDialect::Sqlite) && sqlite_auto_increment_identity_pk(c, inline_pk) {
-        " PRIMARY KEY AUTOINCREMENT"
-    } else if inline_pk {
-        " PRIMARY KEY"
-    } else {
-        ""
-    }
-}
-
-/// The trailing ` NOT NULL` clause, or the empty string.
-///
-/// Two dialects suppress it where the column is implicitly non-null already:
-/// `SQLite`'s rowid alias, and MySQL's `AUTO_INCREMENT`.
-#[must_use]
-pub fn null_clause(c: &ColumnSnapshot, dialect: SqlDialect, inline_pk: bool) -> &'static str {
-    if c.nullable
-        || (matches!(dialect, SqlDialect::Sqlite)
-            && sqlite_auto_increment_identity_pk(c, inline_pk))
-        || (matches!(dialect, SqlDialect::Mysql)
-            && matches!(c.identity, Some(identity) if !identity.always))
-    {
-        ""
-    } else {
-        " NOT NULL"
     }
 }
 

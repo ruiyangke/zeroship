@@ -5,8 +5,8 @@ use std::collections::BTreeSet;
 use zero_migrate_backend::ddl::{
     constraint_supports_fk_columns, fk_local_columns, fk_policy_tail, fk_referenced_columns,
     fk_target_table, generated_clause, index_supports_fk_columns, inline_checks_clause,
-    inline_pk_for_column, null_clause, primary_key_clause, render_index_order_suffix,
-    should_render_table_pk, CreateTableRequest, DdlEmitter, GENERATED_PREFIX,
+    inline_pk_for_column, render_index_order_suffix, should_render_table_pk, CreateTableRequest,
+    DdlEmitter, GENERATED_PREFIX,
 };
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
@@ -46,6 +46,22 @@ fn mysql_identity_clause(c: &ColumnSnapshot) -> &'static str {
         " AUTO_INCREMENT"
     } else {
         ""
+    }
+}
+
+fn primary_key_clause(inline_pk: bool) -> &'static str {
+    if inline_pk {
+        " PRIMARY KEY"
+    } else {
+        ""
+    }
+}
+
+fn null_clause(c: &ColumnSnapshot) -> &'static str {
+    if c.nullable || matches!(c.identity, Some(identity) if !identity.always) {
+        ""
+    } else {
+        " NOT NULL"
     }
 }
 
@@ -274,8 +290,8 @@ impl DdlEmitter for MysqlEmitter {
             } else {
                 crate::schema::RENDERER.column_type(c, inline_pk)
             };
-            let pk = primary_key_clause(c, DIALECT, inline_pk);
-            let null = null_clause(c, DIALECT, inline_pk);
+            let pk = primary_key_clause(inline_pk);
+            let null = null_clause(c);
             let identity = mysql_identity_clause(c);
             let generated = mysql_generated_clause(c.generated.as_ref());
             let default = mysql_default_clause(c.default.as_deref());
@@ -329,7 +345,7 @@ impl DdlEmitter for MysqlEmitter {
 
     fn add_column(&self, table: &str, c: &ColumnSnapshot) -> (Vec<String>, Option<String>) {
         let inline_pk = false;
-        let null = null_clause(c, DIALECT, inline_pk);
+        let null = null_clause(c);
         let generated = mysql_generated_clause(c.generated.as_ref());
         let default = mysql_default_clause(c.default.as_deref());
         let identity = mysql_identity_clause(c);
