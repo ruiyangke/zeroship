@@ -2353,6 +2353,203 @@ async fn dropped_copy_in_sink_recovers_the_same_connection() {
         .unwrap();
 }
 
+
+#[compio::test]
+async fn panicking_copy_input_does_not_leak_partial_bytes_into_the_next_item() {
+    use bytes::{Buf, Bytes};
+    use futures_util::{FutureExt, SinkExt};
+    use std::panic::AssertUnwindSafe;
+
+    enum ScriptedBuf {
+        PanicAfterChunk { advanced: bool },
+        Good(Bytes),
+    }
+
+    impl Buf for ScriptedBuf {
+        fn remaining(&self) -> usize {
+            match self {
+                Self::PanicAfterChunk { advanced } => usize::from(!advanced) * b"stale\n".len(),
+                Self::Good(bytes) => bytes.remaining(),
+            }
+        }
+
+        fn chunk(&self) -> &[u8] {
+            match self {
+                Self::PanicAfterChunk { advanced: false } => b"stale\n",
+                Self::PanicAfterChunk { advanced: true } => b"",
+                Self::Good(bytes) => bytes.chunk(),
+            }
+        }
+
+        fn advance(&mut self, count: usize) {
+            match self {
+                Self::PanicAfterChunk { advanced } => {
+                    assert_eq!(count, b"stale\n".len());
+                    *advanced = true;
+                    panic!("scripted Buf panic after its chunk was copied");
+                }
+                Self::Good(bytes) => bytes.advance(count),
+            }
+        }
+    }
+
+    compio::time::timeout(std::time::Duration::from_secs(10), async {
+        let Some(url) = require_pg().await else {
+            return;
+        };
+        let client = connect(&url).await.unwrap();
+        let table = common::test_object_name("cpg_copy_panicking_buf");
+        client
+            .batch_execute(&format!("CREATE TEMP TABLE {table} (value text NOT NULL)"))
+            .await
+            .unwrap();
+        let copy = format!("COPY {table} (value) FROM STDIN");
+
+        let sink = client.copy_in::<_, ScriptedBuf>(&copy).await.unwrap();
+        let mut sink = Box::pin(sink);
+        sink.as_mut()
+            .feed(ScriptedBuf::Good(Bytes::from_static(b"prefix\n")))
+            .await
+            .expect("seed the COPY buffer before the panicking item");
+
+        let panic = AssertUnwindSafe(
+            sink.as_mut()
+                .feed(ScriptedBuf::PanicAfterChunk { advanced: false }),
+        )
+        .catch_unwind()
+        .await;
+        assert!(panic.is_err(), "the scripted input did not panic");
+
+        sink.as_mut()
+            .send(ScriptedBuf::Good(Bytes::from_static(b"clean\n")))
+            .await
+            .expect("send the item after the panic");
+        sink.as_mut().finish().await.expect("finish COPY input");
+
+        let query = format!("SELECT value FROM {table} ORDER BY ctid");
+        let values = client
+            .query(&query, &[])
+            .await
+            .expect("read rows after the panicking COPY item")
+            .iter()
+            .map(|row| row.get::<_, &str>(0).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(values, ["prefix", "clean"]);
+    })
+    .await
+    .expect("panicking COPY input test exceeded its watchdog");
+}
+
+#[compio::test]
+async fn failed_or_panicking_large_copy_input_preserves_its_buffered_predecessor() {
+    use bytes::{Buf, Bytes};
+    use futures_util::{FutureExt, SinkExt};
+    use std::cell::Cell;
+    use std::panic::AssertUnwindSafe;
+
+    enum ScriptedBuf {
+        LengthOverflow,
+        PanicWhileFraming { remaining_calls: Cell<usize> },
+        Good(Bytes),
+    }
+
+    impl Buf for ScriptedBuf {
+        fn remaining(&self) -> usize {
+            match self {
+                Self::LengthOverflow => usize::MAX,
+                Self::PanicWhileFraming { remaining_calls } => {
+                    let call = remaining_calls.get();
+                    remaining_calls.set(call + 1);
+                    if call == 0 {
+                        4097
+                    } else {
+                        panic!("scripted Buf panic while framing a chained COPY item");
+                    }
+                }
+                Self::Good(bytes) => bytes.remaining(),
+            }
+        }
+
+        fn chunk(&self) -> &[u8] {
+            match self {
+                Self::LengthOverflow | Self::PanicWhileFraming { .. } => {
+                    unreachable!("the scripted failure happens before COPY reads a chunk")
+                }
+                Self::Good(bytes) => bytes.chunk(),
+            }
+        }
+
+        fn advance(&mut self, count: usize) {
+            match self {
+                Self::LengthOverflow | Self::PanicWhileFraming { .. } => {
+                    unreachable!("the scripted failure happens before COPY advances the item")
+                }
+                Self::Good(bytes) => bytes.advance(count),
+            }
+        }
+    }
+
+    compio::time::timeout(std::time::Duration::from_secs(10), async {
+        let Some(url) = require_pg().await else {
+            return;
+        };
+        let client = connect(&url).await.unwrap();
+        let table = common::test_object_name("cpg_copy_panicking_frame");
+        client
+            .batch_execute(&format!("CREATE TEMP TABLE {table} (value text NOT NULL)"))
+            .await
+            .unwrap();
+        let copy = format!("COPY {table} (value) FROM STDIN");
+        let sink = client.copy_in::<_, ScriptedBuf>(&copy).await.unwrap();
+        let mut sink = Box::pin(sink);
+
+        sink.as_mut()
+            .feed(ScriptedBuf::Good(Bytes::from_static(b"error-prefix\n")))
+            .await
+            .unwrap();
+        sink.as_mut()
+            .feed(ScriptedBuf::LengthOverflow)
+            .await
+            .expect_err("oversized input did not return an encoding error");
+        sink.as_mut()
+            .feed(ScriptedBuf::Good(Bytes::from_static(b"after-error\n")))
+            .await
+            .unwrap();
+        sink.as_mut().flush().await.unwrap();
+
+        sink.as_mut()
+            .feed(ScriptedBuf::Good(Bytes::from_static(b"panic-prefix\n")))
+            .await
+            .unwrap();
+        let panic = AssertUnwindSafe(sink.as_mut().feed(ScriptedBuf::PanicWhileFraming {
+            remaining_calls: Cell::new(0),
+        }))
+        .catch_unwind()
+        .await;
+        assert!(panic.is_err(), "the scripted framing input did not panic");
+        sink.as_mut()
+            .send(ScriptedBuf::Good(Bytes::from_static(b"clean\n")))
+            .await
+            .unwrap();
+        sink.as_mut().finish().await.unwrap();
+
+        let query = format!("SELECT value FROM {table} ORDER BY ctid");
+        let values = client
+            .query(&query, &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<_, &str>(0).to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            values,
+            ["error-prefix", "after-error", "panic-prefix", "clean"]
+        );
+    })
+    .await
+    .expect("panicking COPY framing test exceeded its watchdog");
+}
+
 /// A caller may stop consuming COPY OUT before PostgreSQL has sent the body.
 /// The driver must keep draining that response so the following request stays
 /// aligned with its own backend messages.
@@ -5095,6 +5292,7 @@ async fn statement_cache_execution_threshold_one_promotes_immediately() {
     assert_eq!(second_live, 1);
     assert_eq!(prepared_statement_name(&client, SQL).await, first_name);
 }
+
 
 /// Once SQL has crossed the admission threshold, losing its server-side
 /// statement must not charge it the threshold again. The retry itself observes

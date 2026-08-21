@@ -108,6 +108,38 @@ enum SinkState {
     Reading,
 }
 
+struct BufferedCopyAppend<'a> {
+    buf: &'a mut BytesMut,
+    checkpoint: usize,
+    committed: bool,
+}
+
+impl<'a> BufferedCopyAppend<'a> {
+    fn new(buf: &'a mut BytesMut) -> Self {
+        Self {
+            checkpoint: buf.len(),
+            buf,
+            committed: false,
+        }
+    }
+
+    fn put<T: Buf>(&mut self, item: T) {
+        self.buf.put(item);
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for BufferedCopyAppend<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.buf.truncate(self.checkpoint);
+        }
+    }
+}
+
 pin_project! {
     /// A sink for `COPY ... FROM STDIN` query data.
     ///
@@ -185,14 +217,18 @@ where
     fn start_send(self: Pin<&mut Self>, item: T) -> Result<(), Error> {
         let this = self.project();
 
-        let data: Box<dyn Buf + Send> = if item.remaining() > 4096 {
+        let large_item = item.remaining() > 4096;
+        let staged_buffered_prefix = large_item && !this.buf.is_empty();
+        let data: Box<dyn Buf + Send> = if large_item {
             if this.buf.is_empty() {
                 Box::new(item)
             } else {
-                Box::new(this.buf.split().freeze().chain(item))
+                Box::new(this.buf.clone().freeze().chain(item))
             }
         } else {
-            this.buf.put(item);
+            let mut append = BufferedCopyAppend::new(this.buf);
+            append.put(item);
+            append.commit();
             if this.buf.len() >= 4096 {
                 Box::new(this.buf.split().freeze())
             } else {
@@ -203,7 +239,11 @@ where
         let data = CopyData::new(data).map_err(Error::encode)?;
         this.sender
             .start_send(CopyInMessage::Message(FrontendMessage::CopyData(data)))
-            .map_err(|_| Error::closed())
+            .map_err(|_| Error::closed())?;
+        if staged_buffered_prefix {
+            this.buf.clear();
+        }
+        Ok(())
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
