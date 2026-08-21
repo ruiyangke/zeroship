@@ -606,6 +606,64 @@ async fn replacing_observer_preserves_the_in_flight_requests_receiver() {
 }
 
 #[compio::test]
+async fn replacing_observer_preserves_prepared_statement_attribution() {
+    const SQL: &str = "SELECT 81::int4 /* cpg_obs_replacement_prepared */";
+    const BARRIER: &str = "SELECT 82::int4 /* cpg_obs_replacement_prepared_barrier */";
+
+    compio::time::timeout(Duration::from_secs(10), async {
+        let client = connect().await;
+        let _original_events = client.query_events();
+        let statement = client.prepare(SQL).await.unwrap();
+
+        let mut replacement_events = client.query_events();
+        client.query(&statement, &[]).await.unwrap();
+        client.simple_query(BARRIER).await.unwrap();
+
+        let observed = events_through(&mut replacement_events, BARRIER).await;
+        let attributed = observed
+            .iter()
+            .filter(|event| event.sql() == SQL)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            attributed.len(),
+            1,
+            "observer replacement forgot the prepared statement's SQL mapping"
+        );
+        assert_eq!(attributed[0].outcome(), &QueryOutcome::Success);
+    })
+    .await
+    .expect("prepared-statement replacement claim exceeded its watchdog");
+}
+
+#[compio::test]
+async fn reinstalling_observer_after_disconnect_preserves_statement_attribution() {
+    const SQL: &str = "SELECT 87::int4 /* cpg_obs_reinstall_prepared */";
+    const BARRIER: &str = "SELECT 88::int4 /* cpg_obs_reinstall_prepared_barrier */";
+
+    compio::time::timeout(Duration::from_secs(10), async {
+        let client = connect().await;
+        let original_events = client.query_events();
+        let statement = client.prepare(SQL).await.unwrap();
+
+        drop(original_events);
+        client.simple_query("").await.unwrap();
+
+        let mut replacement_events = client.query_events();
+        client.query(&statement, &[]).await.unwrap();
+        client.simple_query(BARRIER).await.unwrap();
+
+        let observed = events_through(&mut replacement_events, BARRIER).await;
+        assert_eq!(
+            observed.iter().filter(|event| event.sql() == SQL).count(),
+            1,
+            "observer reinstall forgot the prepared statement's SQL mapping"
+        );
+    })
+    .await
+    .expect("prepared-statement observer reinstall claim exceeded its watchdog");
+}
+
+#[compio::test]
 async fn observer_queue_does_not_backpressure_and_consumer_can_reenter() {
     use futures_util::future;
 
