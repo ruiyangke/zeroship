@@ -17,6 +17,8 @@
  * The injection shape here MUST match the apply-side confined ceiling's `[[inject]]`
  * rule (`crates/migrated/policies/confined.policy.toml`) so the emitted
  * `schema.runtime.json` describes the SAME table shape the migration apply produces.
+ * `tests/inject_policy_mirror_gate.sh` enforces that, and does so against all six
+ * copies of the rule rather than the two it compared until 2026-08-20.
  *
  * Both gen-types sources (GENERATED envelopes + MANUAL descriptors) pass this SAME
  * ceiling, which is what preserves the byte-identical-by-construction guarantee now
