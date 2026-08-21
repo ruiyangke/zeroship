@@ -5,18 +5,18 @@
 # FIVE servers, because each one is the control for a claim that would
 # otherwise be unfalsifiable:
 #
-#   tls       ssl=on, certificate for `localhost` signed by a private CA.
-#             The positive case for every mode that encrypts.
+#   tls       ssl=on, TLS 1.2 only, certificate for `localhost` signed by a
+#             private CA. The positive case for every mode that encrypts and
+#             the discriminator for the client's minimum-version bound.
 #             That exact certificate is also listed in a generated CRL, so
 #             the client can prove the same server is accepted without the
 #             CRL and refused with it.
 #   plain     TLS off entirely. Without it, "sslmode=require connected" is
 #             consistent with a driver that ignores sslmode.
-#   mismatch  ssl=on, certificate for a name that is NOT the one the test
-#             connects to, signed by the SAME CA. This is the only way to
-#             separate verify-ca from verify-full: the chain is good and the
-#             name is wrong, so the two modes must reach opposite verdicts on
-#             one server differing in one variable.
+#   mismatch  ssl=on, TLS 1.3 only, certificate for a name that is NOT the one
+#             the test connects to, signed by the SAME CA. This separates
+#             verify-ca from verify-full and discriminates the client's
+#             maximum-version bound.
 #   sslonly   ssl=on, pg_hba accepting `hostssl` only. This is the only way to
 #             see `allow` do anything: `allow` tries plaintext FIRST and
 #             reaches TLS only when the plaintext attempt is refused. Against
@@ -105,6 +105,15 @@ openssl ca -batch -notext -config ca.cnf -in server.csr -out server.crt 2>/dev/n
 openssl ca -batch -config ca.cnf -revoke server.crt 2>/dev/null
 openssl ca -batch -config ca.cnf -gencrl -out server.crl 2>/dev/null
 
+# `openssl rehash` normally creates a symlink. A regular file under the exact
+# issuer-hash lookup name exercises the same OpenSSL directory contract while
+# keeping this fixture self-contained on filesystems without symlink support.
+mkdir server-crl-dir
+crl_hash="$(openssl crl -in server.crl -hash -noout)"
+cp server.crl "server-crl-dir/${crl_hash}.r0"
+mkdir server-crl-wrong-hash-dir
+cp server.crl server-crl-wrong-hash-dir/00000000.r0
+
 # Prove the generated pair is discriminating before the code under test sees
 # it: the certificate is otherwise valid, and this CRL rejects it specifically
 # because its serial is revoked.
@@ -173,9 +182,11 @@ start_pg() {
 }
 
 start_pg "$tls_name" "$tls_port" \
-    -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key
+    -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key \
+    -c ssl_min_protocol_version=TLSv1.2 -c ssl_max_protocol_version=TLSv1.2
 start_pg "$mismatch_name" "$mismatch_port" \
-    -c ssl=on -c ssl_cert_file=/certs/mismatch.crt -c ssl_key_file=/certs/mismatch.key
+    -c ssl=on -c ssl_cert_file=/certs/mismatch.crt -c ssl_key_file=/certs/mismatch.key \
+    -c ssl_min_protocol_version=TLSv1.3 -c ssl_max_protocol_version=TLSv1.3
 start_pg "$sslonly_name" "$sslonly_port" \
     -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key \
     -c hba_file=/certs/pg_hba_sslonly.conf
@@ -204,7 +215,17 @@ done
 # The TLS server really came up with ssl=on.
 docker exec -e PGPASSWORD="$password" "$tls_name" \
     psql "host=127.0.0.1 user=postgres dbname=postgres sslmode=require" \
-    -tAc "select ssl from pg_stat_ssl where pid = pg_backend_pid()" | grep -qx t
+    -tAc "select version from pg_stat_ssl where pid = pg_backend_pid()" | grep -qx TLSv1.2
+
+# The hashed regular file is meaningful to libpq/OpenSSL before it is handed
+# to the Rust implementation. A source `.crl` scanned by filename would not
+# satisfy this check.
+if docker exec -e PGPASSWORD="$password" "$tls_name" \
+    psql "host=localhost user=postgres dbname=postgres sslmode=verify-full sslrootcert=/certs/ca.crt sslcrldir=/certs/server-crl-dir" \
+    -tAc "select 1" >/dev/null 2>&1; then
+    echo "FATAL: libpq ignored the hashed CRL in server-crl-dir" >&2
+    exit 1
+fi
 
 # So did the mismatch server - and libpq reaches it at verify-ca (chain good)
 # while refusing it at verify-full (name wrong). That is the discriminator the
@@ -212,7 +233,16 @@ docker exec -e PGPASSWORD="$password" "$tls_name" \
 # test, so a driver bug cannot make it look satisfied.
 docker exec -e PGPASSWORD="$password" "$mismatch_name" \
     psql "host=localhost user=postgres dbname=postgres sslmode=verify-ca sslrootcert=/certs/ca.crt" \
-    -tAc "select ssl from pg_stat_ssl where pid = pg_backend_pid()" | grep -qx t
+    -tAc "select version from pg_stat_ssl where pid = pg_backend_pid()" | grep -qx TLSv1.3
+docker exec -e PGPASSWORD="$password" "$mismatch_name" \
+    psql "host=localhost user=postgres dbname=postgres sslmode=verify-ca sslrootcert=/certs/ca.crt sslcrldir=/certs/server-crl-dir" \
+    -tAc "select 1" | grep -qx 1
+if docker exec -e PGPASSWORD="$password" "$mismatch_name" \
+    psql "host=localhost user=postgres dbname=postgres sslmode=verify-ca sslrootcert=/certs/ca.crt sslcrldir=/certs/server-crl-wrong-hash-dir" \
+    -tAc "select 1" >/dev/null 2>&1; then
+    echo "FATAL: libpq accepted a CRL stored under the wrong issuer hash" >&2
+    exit 1
+fi
 if docker exec -e PGPASSWORD="$password" "$mismatch_name" \
     psql "host=localhost user=postgres dbname=postgres sslmode=verify-full sslrootcert=/certs/ca.crt" \
     -tAc "select 1" >/dev/null 2>&1; then
@@ -250,6 +280,8 @@ client_key=$live/client.key
 client_encrypted_key=$live/client-encrypted.key
 client_key_password=$key_password
 server_crl=$live/server.crl
+server_crl_dir=$live/server-crl-dir
+server_crl_wrong_hash_dir=$live/server-crl-wrong-hash-dir
 EOF
 
 echo "wrote $live/tls_live.conf"
