@@ -1,8 +1,3 @@
-// The async bodies here nest a pooled/TLS transport deep enough that rustc's
-// layout query exceeds its default depth. Structural fixes do not apply: the
-// depth is in the generated future, not in anything this file can flatten.
-#![recursion_limit = "256"]
-
 //! Live `sslmode` tests against real PostgreSQL servers.
 //!
 //! Constructing a connector proves nothing about a handshake, and neither does
