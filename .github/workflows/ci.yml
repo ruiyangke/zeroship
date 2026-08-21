@@ -1433,6 +1433,22 @@ jobs:
       # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
       # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
+      # THE ONE EXAMPLE THE HARNESS DOES NOT BUILD ITSELF, and until now nothing
+      # built it here either. golden_path.sh builds starter, db-todos, the
+      # scaffold and wall-probe inside the run; step 14 deliberately consumes a
+      # PREBUILT examples/auth-notes-db/dist/app.zship (its own comment says so,
+      # and it asserts the artifact is newer than its sources so that a
+      # forgotten rebuild cannot pass). Root `pnpm build` filters to ./sdks/*,
+      # and `dist` is gitignored, so on a fresh checkout that file is absent.
+      #
+      # MEASURED on a clean worktree 2026-08-21: step 14 produced ONE outcome -
+      # `14: missing .../examples/auth-notes-db/dist/app.zship` - instead of its
+      # twelve, a red that is NOT in GOLDEN_EXPECTED_FAILURES, so the run also
+      # reported `1 unexpected` and sat well under its own floor. That was true
+      # before this commit and has nothing to do with the deploy arm: the whole
+      # of step 14 (two identities, one row, no cross-tenant leak) has never run
+      # in CI, and the floor has been unreachable here for as long.
+      - run: pnpm --filter auth-notes-db build
       # Exactly the prereq list in golden_path.sh's own header (lines 14-18).
       # `-p zeroship-control --bins` is what produces `dev-provision`, which step
       # 3 uses; `-p zeroship` produces the `zeroship` binary that `pnpm dev`
