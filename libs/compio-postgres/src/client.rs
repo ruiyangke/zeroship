@@ -112,6 +112,7 @@ struct QueryObserver(Arc<QueryObserverInner>);
 
 struct QueryObserverInner {
     sender: mpsc::UnboundedSender<QueryEvent>,
+    threshold: Option<Duration>,
     registry: Mutex<FrontendRegistry>,
     active: AtomicBool,
 }
@@ -152,16 +153,17 @@ struct QueryObservationState {
 }
 
 impl QueryObserver {
-    fn new(sender: mpsc::UnboundedSender<QueryEvent>) -> Self {
+    fn new(sender: mpsc::UnboundedSender<QueryEvent>, threshold: Option<Duration>) -> Self {
         Self(Arc::new(QueryObserverInner {
             sender,
+            threshold,
             registry: Mutex::default(),
             active: AtomicBool::new(true),
         }))
     }
 
     fn is_active(&self) -> bool {
-        self.0.active.load(Ordering::Relaxed)
+        self.0.active.load(Ordering::Relaxed) && !self.0.sender.is_closed()
     }
 
     fn inspect_frontend(&self, message: &FrontendMessage, observation: &QueryObservation) {
@@ -176,6 +178,16 @@ impl QueryObserver {
         if self.0.sender.unbounded_send(event).is_err() {
             self.0.active.store(false, Ordering::Relaxed);
         }
+    }
+
+    fn reports_elapsed(&self, elapsed: Duration) -> bool {
+        query_elapsed_meets_threshold(elapsed, self.0.threshold)
+    }
+
+    fn filters_by_elapsed(&self) -> bool {
+        self.0
+            .threshold
+            .is_some_and(|threshold| !threshold.is_zero())
     }
 }
 
@@ -218,6 +230,10 @@ impl QueryObservation {
         self.0.state.lock().sql.is_some()
     }
 
+    pub(crate) fn filters_by_elapsed(&self) -> bool {
+        self.0.observer.filters_by_elapsed()
+    }
+
     pub(crate) fn inspect_frontend(&self, message: &FrontendMessage) {
         self.0.observer.inspect_frontend(message, self);
     }
@@ -238,6 +254,18 @@ impl QueryObservation {
     pub(crate) fn server_complete(&self, at: Instant) {
         self.0.state.lock().server_completed_at.get_or_insert(at);
         self.maybe_emit();
+    }
+
+    pub(crate) fn filter_completed_at(&self, at: Instant) -> bool {
+        let elapsed = at.saturating_duration_since(self.0.started_at);
+        if self.0.observer.reports_elapsed(elapsed) {
+            return false;
+        }
+
+        let mut state = self.0.state.lock();
+        state.server_completed_at.get_or_insert(at);
+        state.emitted = true;
+        true
     }
 
     pub(crate) fn connection_closed(&self) {
@@ -293,6 +321,15 @@ impl QueryObservation {
                 return;
             }
 
+            let completed_at = state
+                .server_completed_at
+                .expect("checked that server completion is present");
+            let elapsed = completed_at.saturating_duration_since(self.0.started_at);
+            state.emitted = true;
+            if !self.0.observer.reports_elapsed(elapsed) {
+                return;
+            }
+
             let outcome = if state.consumer == ConsumerDisposition::Cancelled
                 || state.error.as_ref() == Some(&crate::error::SqlState::QUERY_CANCELED)
             {
@@ -310,19 +347,19 @@ impl QueryObservation {
                 }),
                 _ => None,
             };
-            let completed_at = state
-                .server_completed_at
-                .expect("checked that server completion is present");
-            state.emitted = true;
             QueryEvent {
                 sql: state.sql.clone().expect("checked that SQL is present"),
-                elapsed: completed_at.saturating_duration_since(self.0.started_at),
+                elapsed,
                 outcome,
                 rows,
             }
         };
         self.0.observer.emit(event);
     }
+}
+
+fn query_elapsed_meets_threshold(elapsed: Duration, threshold: Option<Duration>) -> bool {
+    threshold.is_none_or(|threshold| elapsed >= threshold)
 }
 
 fn error_sqlstate(
@@ -411,6 +448,34 @@ fn inspect_frontend_frames(
     }
 }
 
+#[cfg(test)]
+mod query_observer_threshold_tests {
+    use super::{QueryObserver, query_elapsed_meets_threshold};
+    use futures_channel::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn threshold_includes_the_exact_boundary() {
+        let threshold = Duration::from_millis(50);
+
+        assert!(!query_elapsed_meets_threshold(
+            threshold - Duration::from_nanos(1),
+            Some(threshold),
+        ));
+        assert!(query_elapsed_meets_threshold(threshold, Some(threshold)));
+    }
+
+    #[test]
+    fn dropping_receiver_deactivates_observer_without_an_event() {
+        let (sender, receiver) = mpsc::unbounded();
+        let observer = QueryObserver::new(sender, Some(Duration::MAX));
+
+        assert!(observer.is_active());
+        drop(receiver);
+        assert!(!observer.is_active());
+    }
+}
+
 /// The transaction state the server reported in the most recent
 /// `ReadyForQuery`.
 ///
@@ -464,6 +529,9 @@ pub struct Responses {
 pub(crate) enum ResponseMessages {
     Raw(BackendMessages),
     Observed(VecDeque<Result<Message, Error>>),
+    /// The terminal response completed below its minimum duration, so retaining
+    /// observer state while the caller decodes it would produce no event.
+    Filtered(BackendMessages),
 }
 
 impl ResponseMessages {
@@ -473,9 +541,15 @@ impl ResponseMessages {
 
     fn next(&mut self) -> Result<Option<Message>, Error> {
         match self {
-            Self::Raw(messages) => messages.next().map_err(Error::parse),
+            Self::Raw(messages) | Self::Filtered(messages) => {
+                messages.next().map_err(Error::parse)
+            }
             Self::Observed(messages) => messages.pop_front().transpose(),
         }
+    }
+
+    fn ends_observation(&self) -> bool {
+        matches!(self, Self::Filtered(_))
     }
 }
 
@@ -496,7 +570,12 @@ impl Responses {
             }
 
             match ready!(self.receiver.poll_next_unpin(cx)) {
-                Some(messages) => self.cur = messages,
+                Some(messages) => {
+                    if messages.ends_observation() {
+                        self.observation = None;
+                    }
+                    self.cur = messages;
+                }
                 None => return Poll::Ready(Err(Error::closed())),
             }
         }
@@ -827,8 +906,12 @@ impl InnerClient {
         Some(observation)
     }
 
-    fn install_query_observer(&self, sender: mpsc::UnboundedSender<QueryEvent>) {
-        *self.query_observer.lock() = Some(QueryObserver::new(sender));
+    fn install_query_observer(
+        &self,
+        sender: mpsc::UnboundedSender<QueryEvent>,
+        threshold: Option<Duration>,
+    ) {
+        *self.query_observer.lock() = Some(QueryObserver::new(sender, threshold));
         self.query_observer_enabled.store(true, Ordering::Release);
     }
 
@@ -1236,7 +1319,28 @@ impl Client {
     #[must_use = "the receiver must be retained to observe query events"]
     pub fn query_events(&self) -> mpsc::UnboundedReceiver<QueryEvent> {
         let (sender, receiver) = mpsc::unbounded();
-        self.inner.install_query_observer(sender);
+        self.inner.install_query_observer(sender, None);
+        receiver
+    }
+
+    /// Installs query execution observation with a minimum elapsed duration.
+    ///
+    /// Only executions whose elapsed time is greater than or equal to
+    /// `threshold` are reported. The cutoff applies equally to successful,
+    /// failed, and cancelled executions. A zero threshold reports every
+    /// execution and is equivalent to [`Client::query_events`].
+    /// Elapsed time has the same enqueue-to-terminal-server-response meaning
+    /// as [`QueryEvent::elapsed`]; it is not PostgreSQL execution time alone.
+    ///
+    /// Calling this method follows the same replacement and in-flight request
+    /// semantics as [`Client::query_events`].
+    #[must_use = "the receiver must be retained to observe query events"]
+    pub fn query_events_with_threshold(
+        &self,
+        threshold: Duration,
+    ) -> mpsc::UnboundedReceiver<QueryEvent> {
+        let (sender, receiver) = mpsc::unbounded();
+        self.inner.install_query_observer(sender, Some(threshold));
         receiver
     }
 

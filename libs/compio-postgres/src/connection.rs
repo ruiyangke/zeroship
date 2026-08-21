@@ -578,6 +578,12 @@ impl Dispatch<'_> {
                 _ => return Err(Error::unexpected_message()),
             },
         };
+        let completed_at = (request_complete
+            && response
+                .observation
+                .as_ref()
+                .is_some_and(QueryObservation::filters_by_elapsed))
+        .then(Instant::now);
 
         if let Some(cleanup) = response.prepare_cleanup.as_ref() {
             match messages.first_tag() {
@@ -617,30 +623,8 @@ impl Dispatch<'_> {
             }
         }
 
-        let completion_observation = response.observation.clone();
-        let messages = if let Some(observation) = response
-            .observation
-            .as_ref()
-            .filter(|observation| observation.is_execution())
-        {
-            let mut observed = VecDeque::new();
-            loop {
-                match messages.next() {
-                    Ok(Some(message)) => {
-                        observation.observe_server_message(&message);
-                        observed.push_back(Ok(message));
-                    }
-                    Ok(None) => break,
-                    Err(error) => {
-                        observed.push_back(Err(Error::parse(error)));
-                        break;
-                    }
-                }
-            }
-            ResponseMessages::Observed(observed)
-        } else {
-            ResponseMessages::Raw(messages)
-        };
+        let (messages, completion_observation) =
+            observe_response_batch(&mut response, messages, completed_at);
 
         match response.sender.try_send(messages) {
             Ok(()) => {
@@ -678,10 +662,53 @@ impl Dispatch<'_> {
         if request_complete
             && let Some(observation) = completion_observation
         {
-            observation.server_complete(Instant::now());
+            let completed_at = completed_at.unwrap_or_else(Instant::now);
+            observation.server_complete(completed_at);
         }
         Ok(())
     }
+}
+
+fn observe_response_batch(
+    response: &mut Response,
+    mut messages: BackendMessages,
+    completed_at: Option<Instant>,
+) -> (ResponseMessages, Option<QueryObservation>) {
+    let observation = response
+        .observation
+        .as_ref()
+        .filter(|observation| observation.is_execution());
+    let completion_filtered = observation.is_some_and(|observation| {
+        completed_at.is_some_and(|at| observation.filter_completed_at(at))
+    });
+    let messages = if let Some(observation) = observation.filter(|_| !completion_filtered) {
+        let mut observed = VecDeque::new();
+        loop {
+            match messages.next() {
+                Ok(Some(message)) => {
+                    observation.observe_server_message(&message);
+                    observed.push_back(Ok(message));
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    observed.push_back(Err(Error::parse(error)));
+                    break;
+                }
+            }
+        }
+        ResponseMessages::Observed(observed)
+    } else if completion_filtered {
+        ResponseMessages::Filtered(messages)
+    } else {
+        ResponseMessages::Raw(messages)
+    };
+    let completion_observation = if completion_filtered {
+        response.observation = None;
+        None
+    } else {
+        response.observation.clone()
+    };
+    (messages, completion_observation)
 }
 
 /// Route an async server message (notice / notification / parameter
