@@ -110,13 +110,19 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
 
 /// The confined table-shape ceiling plugin-db's own SQLite arm compiles in.
 ///
-/// Read from THE SAME FILE rather than restated here on purpose: the two legs of
-/// this matrix must inject the identical seven system columns, `["id"]` PK and
-/// three system indexes, or the projections they produce differ for a reason
-/// that has nothing to do with the dialect. `tests/inject_policy_mirror_gate.sh`
-/// pins the copies of that rule that exist in the tree; a seventh copy here
-/// would be a copy the gate would then have to be taught about.
-const CONFINED_CEILING_TOML: &str = include_str!("../../policies/confined.policy.toml");
+/// Assembled from THE SAME TWO FILES the SQLite arm compiles in rather than
+/// restated here on purpose: the two legs of this matrix must inject the
+/// identical seven system columns, `["id"]` PK and three system indexes, or the
+/// projections they produce differ for a reason that has nothing to do with the
+/// dialect. The grants come from plugin-db's own file; the `[[inject]]` rule is
+/// the platform-wide fragment every consumer takes.
+/// `tests/inject_policy_mirror_gate.sh` counts those consumers and refuses if one
+/// stops taking it - dropping the second `include_str!` here would leave this
+/// matrix comparing two dialects that both inject nothing.
+const CONFINED_CEILING_TOML: &str = concat!(
+    include_str!("../../policies/confined.policy.toml"),
+    include_str!("../../../../policies/confined-system-shape.inject.toml"),
+);
 
 /// Bind that ceiling to the matrix app's schema, the way the Postgres path does.
 ///

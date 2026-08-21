@@ -12,14 +12,18 @@
 # confinement from the app id); this ceiling governs the table-SHAPE injection +
 # the creation/destructive posture a confined app gets.
 #
-# Shape (mirrors the engine test ceiling `ZEROSHIP_CONFINED_CEILING_TOML`): the
-# seven system columns + three system indexes + `["id"]` PK + `author_primary_key =
-# "forbid"`, injected mandatorily into every created table.
+# THIS FILE IS HALF A DOCUMENT. It holds the grants only. The mandatory
+# system-table `[[inject]]` rule - the seven system columns + three system indexes
+# + `["id"]` PK + `author_primary_key = "forbid"` - is NOT written here: it lives
+# once, in `policies/confined-system-shape.inject.toml` at the repo root, and
+# `crates/migrated/src/policy.rs` concatenates the two with
+# `concat!(include_str!(..), include_str!(..))`. Read that file for the shape and
+# for why it is shared; loading this file alone gets a ceiling that injects
+# nothing.
 #
-# This is the REFERENCE copy: it is the deployed one, so when another copy of the
-# [[inject]] rule disagrees with it, the other copy is by definition wrong about
-# production. `tests/inject_policy_mirror_gate.sh` diffs the other five against
-# this one and refuses on a sixth appearing.
+# The grants stayed here because they are NOT shared: the emit ceiling needs none
+# and the adapter fixtures pin `schema.cross_schema` to a throwaway schema. Only
+# the shape is invariant across consumers, so only the shape was collapsed.
 
 policy_version = 1
 
@@ -80,47 +84,3 @@ scope = "all"
 # softened to stay: ANY value above 1, in this ceiling or in a creator draft, is
 # refused at load.
 
-# ── the mandatory system table shape (II.2.6a) ──
-[[inject]]
-scope = "all"
-mandatory = true
-primary_key = ["id"]
-author_primary_key = "forbid"
-columns = [
-  # The three NOT NULL columns carry defaults because the data plane does not
-  # send them. `crud/system_fields_pass.rs` omits created_at/updated_at/version
-  # from every INSERT by design and relies on the DDL to supply the canonical
-  # value; without these the first insert into any migration-created table fails
-  # with "null value in column created_at violates not-null constraint".
-  # `id` is deliberately defaultless — it is minted into the INSERT instead.
-  #
-  # THE NAMES AND NULLABILITY match `zeroship-schema`'s `system_field_columns`,
-  # and that is all that matches. An earlier version of this comment claimed the
-  # two producers "emit the same table"; they do not, and the claim is what kept
-  # anyone from checking (measured 2026-08-10 on a deployed app schema):
-  #
-  #   this file, via the engine   id / created_by / updated_by  varchar(255)
-  #   zeroship-schema PG renderer id / created_by / updated_by  text
-  #
-  # THE LIVE CONSEQUENCE is the collation, not the width. All three columns hold
-  # typed ids (`<prefix>_<base62(uuidv7)>`), whose byte order IS creation order -
-  # and the engine has no way to express a column collation for an injected
-  # column, so they land on the database default (`en_US.utf8`), which
-  # interleaves base62's case runs. `ORDER BY id` on a deployed creator app is
-  # therefore NOT creation order, while dev's SQLite (BINARY) is correct.
-  # `zeroship-schema` now pins `COLLATE "C"` on its three; this file CANNOT until
-  # the engine grows a collation slot on `InjectColumn`. Tracked as #255; the
-  # end-to-end red is `tests/golden_path.sh` step 11.
-  { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()" },
-  { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()" },
-  { name = "created_by", type = "text",        nullable = true  },
-  { name = "updated_by", type = "text",        nullable = true  },
-  { name = "version",    type = "integer",     nullable = false, default = "1" },
-  { name = "deleted_at", type = "timestamptz", nullable = true  },
-]
-indexes = [
-  { name = "ix_deleted_at", columns = ["deleted_at"] },
-  { name = "ix_updated_at", columns = ["updated_at"] },
-  { name = "ix_created_by", columns = ["created_by"] },
-]

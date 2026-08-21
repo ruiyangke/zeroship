@@ -32,15 +32,21 @@ use zeroship_migrate_adapter::CompioPgSession;
 /// into an `EffectivePolicy` via the engine's `effective_policy_from_charter_toml`.
 /// (The old `PolicyProfile::confined()` is gone; the confined shape is now policy data.)
 ///
-/// The `[[inject]]` rule below is the SHIPPED one, byte for byte, and
-/// `tests/inject_policy_mirror_gate.sh` holds it to that. It was NOT until
-/// 2026-08-20: `ddf636140` added the created_at/updated_at/version DDL defaults
-/// to the two ceilings the mirror gate then compared, and this fixture -- which
-/// its own doc comment calls "the confined table-shape ceiling" -- kept the
-/// pre-fix shape for eleven days. This test never inserts a row, so nothing here
-/// went red; it simply stopped exercising the shape a creator actually gets,
-/// which is the one thing a fixture calling itself the confined ceiling is for.
-const CONFINED_CEILING_TOML: &str = r#"policy_version = 1
+/// Only the GRANTS are written here, because only the grants are this fixture's
+/// own: it pins `schema.cross_schema` to its throwaway project schema, which no
+/// shipped ceiling does. The `[[inject]]` rule is the platform-wide fragment in
+/// `policies/`, concatenated in at compile time, so this fixture cannot describe
+/// a table shape the deployed server does not produce.
+///
+/// It could, and did. Until 2026-08-20 the rule was inlined here: `ddf636140`
+/// added the created_at/updated_at/version DDL defaults to the two ceilings the
+/// mirror gate then compared, and this fixture -- which its own doc comment calls
+/// "the confined table-shape ceiling" -- kept the pre-fix shape for eleven days.
+/// This test never inserts a row, so nothing went red; it simply stopped
+/// exercising the shape a creator actually gets, which is the one thing a fixture
+/// calling itself the confined ceiling is for.
+const CONFINED_CEILING_TOML: &str = concat!(
+    r#"policy_version = 1
 
 [[grant]]
 key = "schema.cross_schema"
@@ -62,26 +68,9 @@ key = "safety.destructive_ops"
 value = "allow"
 scope = "all"
 
-[[inject]]
-scope = "all"
-mandatory = true
-primary_key = ["id"]
-author_primary_key = "forbid"
-columns = [
-  { name = "id",         type = "text",        nullable = false },
-  { name = "created_at", type = "timestamptz", nullable = false, default = "NOW()" },
-  { name = "updated_at", type = "timestamptz", nullable = false, default = "NOW()" },
-  { name = "created_by", type = "text",        nullable = true  },
-  { name = "updated_by", type = "text",        nullable = true  },
-  { name = "version",    type = "integer",     nullable = false, default = "1" },
-  { name = "deleted_at", type = "timestamptz", nullable = true  },
-]
-indexes = [
-  { name = "ix_deleted_at", columns = ["deleted_at"] },
-  { name = "ix_updated_at", columns = ["updated_at"] },
-  { name = "ix_created_by", columns = ["created_by"] },
-]
-"#;
+"#,
+    include_str!("../../../policies/confined-system-shape.inject.toml"),
+);
 
 const PROJECT: &str = "prj_smoke";
 const APP: &str = "app_smoke";
