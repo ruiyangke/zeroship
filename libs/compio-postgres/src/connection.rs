@@ -220,7 +220,7 @@ pub struct Connection<S, T> {
     in_flight_requests: Arc<AtomicUsize>,
     /// Weak so a task stranded by compio cannot retain the client's dup after
     /// client-first teardown has synchronously released the server session.
-    error_release: Option<crate::release::ConnectionErrorRelease>,
+    drop_release: Option<crate::release::ConnectionDropRelease>,
     /// Keeps this connection counted in `live_connections()` for exactly as
     /// long as it owns its socket, so `drain_connections` can wait for the
     /// socket to be released instead of guessing at a sleep.
@@ -239,7 +239,7 @@ where
         receiver: mpsc::UnboundedReceiver<Request>,
         tx_status: Arc<AtomicU8>,
         in_flight_requests: Arc<AtomicUsize>,
-        error_release: Option<crate::release::ConnectionErrorRelease>,
+        drop_release: Option<crate::release::ConnectionDropRelease>,
     ) -> Connection<S, T> {
         Connection {
             stream,
@@ -251,7 +251,7 @@ where
             async_sender: None,
             tx_status,
             in_flight_requests,
-            error_release,
+            drop_release,
             _live: crate::live::LiveConnectionGuard::new(),
         }
     }
@@ -980,19 +980,10 @@ where
     /// connections that negotiate TLS, cannot be split, so they fall back to
     /// the [serialized loop](Self::run_serialized).
     pub async fn run(mut self) -> Result<(), Error> {
-        let error_release = self.error_release.take();
-        let run_result = self.run_inner().await;
-
-        if run_result.is_err()
-            && let Some(error_release) = error_release
-        {
-            // A close only releases this task's descriptor, while shutdown
-            // changes the socket shared with the client's dup. `Both` matters
-            // when the peer is blocked writing the locally refused frame.
-            error_release.shutdown();
-        }
-
-        run_result
+        // The field covers a Connection discarded before `run`; this local
+        // spans every poll so cancellation and unwinding release it too.
+        let _drop_release = self.drop_release.take();
+        self.run_inner().await
     }
 
     async fn run_inner(mut self) -> Result<(), Error> {
@@ -1015,7 +1006,7 @@ where
             async_sender,
             tx_status,
             in_flight_requests,
-            error_release: _,
+            drop_release: _,
             _live,
         } = self;
 
@@ -1046,7 +1037,7 @@ where
                     async_sender,
                     tx_status,
                     in_flight_requests,
-                    error_release: None,
+                    drop_release: None,
                     _live,
                 };
                 conn.run_serialized().await
