@@ -7,7 +7,7 @@ pub mod load;
 // wire type (the logic that could not ride the `Op` type into the leaf crate).
 pub mod op_support;
 pub mod schema_model;
-pub mod snapshot;
+pub use zero_migrate_backend::snapshot;
 pub mod support;
 #[cfg(test)]
 pub(crate) mod support_matrix;

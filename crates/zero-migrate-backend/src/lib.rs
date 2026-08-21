@@ -80,6 +80,7 @@ pub mod registry;
 pub mod renderer;
 pub mod schema;
 pub mod schema_error;
+pub mod snapshot;
 pub mod spelling;
 pub mod step;
 pub mod vendor;

@@ -55,6 +55,11 @@
 //! structural surface is re-exported below so callers name it unchanged.
 
 use crate::model::expr::{CaseBranch, Expr, ScalarFn};
+// The PG argument-type alias fold. It moved to `zero-migrate-backend` with the
+// snapshot value types, whose `canonical_pg_signature_type` is its other caller;
+// re-imported here under its historical name so this module's two call sites and
+// `crate::apply::drift` read unchanged.
+pub(crate) use zero_migrate_backend::snapshot::canonical_pg_arg_type;
 use pg_query::protobuf::node::Node as NodeEnum;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -3843,46 +3848,6 @@ fn validate_no_name_is_claimed_twice(
     }
 
     Ok(())
-}
-
-/// A PostgreSQL argument-type spelling reduced to the form that decides whether
-/// two function signatures collide.
-///
-/// EVERY PAIR FOLDED HERE WAS MEASURED, one `CREATE FUNCTION` per alias against a
-/// live server, and each of the eight raised `function "p" already exists with
-/// same argument types`. Three near-neighbours were measured NOT to collide and
-/// are deliberately left apart, because folding them would refuse a real
-/// overload: `int`/`bigint`, `varchar`/`text`, and `timestamptz`/`timestamp`.
-///
-/// AN UNRECOGNISED SPELLING FALLS THROUGH TO ITSELF, and that direction is
-/// chosen. A missing alias means two colliding signatures are ACCEPTED here and
-/// refused by the server - the same under-refusal that existed before this
-/// function - whereas a wrong alias would refuse a migration the server runs.
-/// `varchar(255)` versus `varchar` is a known instance: length is not part of a
-/// PG signature, but it is not folded here because it was not measured.
-///
-/// SHARED WITH DRIFT. `crate::apply::drift` compares a folded function signature
-/// against the one `pg_proc` reports, and the catalog reports `integer` where the
-/// author wrote `int`, so it needs exactly this mapping. It calls this function
-/// rather than carrying a second copy - a duplicated type table that drifts from
-/// this one is a defect this codebase has already had. Drift layers ONE further
-/// reduction of its own (dropping a type modifier) on top of the result; that
-/// belongs to drift and not here, because widening this function widens what the
-/// authoring gate REFUSES.
-pub(crate) fn canonical_pg_arg_type(raw: &str) -> String {
-    let lowered = raw.trim().to_ascii_lowercase();
-    let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
-    match collapsed.as_str() {
-        "int" | "integer" | "int4" => "int4".to_string(),
-        "bigint" | "int8" => "int8".to_string(),
-        "smallint" | "int2" => "int2".to_string(),
-        "bool" | "boolean" => "bool".to_string(),
-        "varchar" | "character varying" => "varchar".to_string(),
-        "decimal" | "numeric" => "numeric".to_string(),
-        "float8" | "double precision" => "float8".to_string(),
-        "timestamptz" | "timestamp with time zone" => "timestamptz".to_string(),
-        _ => collapsed,
-    }
 }
 
 /// Every column an op names inside an EXPRESSION, attributed to the op's target

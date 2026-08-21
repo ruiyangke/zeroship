@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::expr::Expr;
-use crate::model::ir::{
+use zero_migrate_ir::expr::Expr;
+use zero_migrate_ir::ir::{
     ColType, ForEach, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol,
     IndexSortOrder, IndexStorageParams, PartitionBounds, PartitionSpec, PolicyCmd, SafeI64,
     SafeU64, SequenceOwnedBy, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming,
@@ -223,7 +223,7 @@ pub struct ColumnSnapshot {
     /// attribute (introspection's `snapshot_schema` leaves it `None`; only
     /// `desired_snapshot` populates it), so it is EXCLUDED from `PartialEq` /
     /// `Eq`. The sentinel is built by the shared
-    /// [`crate::schema::query`] kernel — never re-spelled here.
+    /// `zero_migrate::schema::query` kernel — never re-spelled here.
     pub encryption_sentinel: Option<String>,
     /// The body of a `COMMENT ON COLUMN` sentinel to attach to
     /// THIS column in CREATE / ADD COLUMN DDL. Two sentinel families ride here:
@@ -234,7 +234,7 @@ pub struct ColumnSnapshot {
     ///     the inline `/* zero-migrate:enc */` comment at parse time, so plugin-db recovers
     ///     the encryption metadata from `pg_description` at runtime.
     ///
-    /// Built by the shared codecs ([`crate::schema::mask_codec`]) — never
+    /// Built by the shared codecs ([`crate::mask_codec`]) — never
     /// re-spelled here. EXCLUDED from `PartialEq` / `Eq`: desired
     /// snapshots use it to emit runtime metadata, and PostgreSQL introspection
     /// classifies matching catalog comments back into this field instead of the
@@ -364,7 +364,7 @@ pub enum IdDefaultSnapshot {
 /// expression defaults use the semantics-preserving fingerprint in the render
 /// layer instead.
 #[must_use]
-pub(crate) fn canonical_id_default_expression(expression: &str) -> String {
+pub fn canonical_id_default_expression(expression: &str) -> String {
     fn balanced_outer_parens(value: &str) -> bool {
         let bytes = value.as_bytes();
         if bytes.first() != Some(&b'(') || bytes.last() != Some(&b')') {
@@ -731,7 +731,7 @@ impl PartialEq for ColumnSnapshot {
 impl Eq for ColumnSnapshot {}
 
 /// One ordered key element of an index snapshot. The expression arm stores the
-/// dialect-rendered expression text produced from a closed [`crate::model::expr::Expr`]
+/// dialect-rendered expression text produced from a closed [`Expr`]
 /// or recovered from catalog introspection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum IndexElementSnapshot {
@@ -834,7 +834,7 @@ fn canonical_index_sql_text(s: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub(crate) fn index_elements_canonically_eq(
+pub fn index_elements_canonically_eq(
     left: &[IndexElementSnapshot],
     right: &[IndexElementSnapshot],
 ) -> bool {
@@ -863,14 +863,14 @@ pub(crate) fn index_elements_canonically_eq(
         })
 }
 
-pub(crate) fn canonical_index_sort_order(order: Option<IndexSortOrder>) -> Option<IndexSortOrder> {
+pub fn canonical_index_sort_order(order: Option<IndexSortOrder>) -> Option<IndexSortOrder> {
     match order {
         Some(IndexSortOrder::Desc) => Some(IndexSortOrder::Desc),
         Some(IndexSortOrder::Asc) | None => None,
     }
 }
 
-pub(crate) fn index_predicates_canonically_eq(left: Option<&str>, right: Option<&str>) -> bool {
+pub fn index_predicates_canonically_eq(left: Option<&str>, right: Option<&str>) -> bool {
     left.map(canonical_index_sql_text) == right.map(canonical_index_sql_text)
 }
 
@@ -993,7 +993,7 @@ impl IndexSnapshot {
     /// snapshot can observe - unique, columns, canonical elements, access method,
     /// canonical predicate, INCLUDE, storage params, ONLY and comment - and nothing
     /// more.
-    pub(crate) fn same_definition_except_name(&self, other: &Self) -> bool {
+    pub fn same_definition_except_name(&self, other: &Self) -> bool {
         self.definition_differences_except_name(other).is_empty()
     }
 
@@ -1011,7 +1011,7 @@ impl IndexSnapshot {
     /// `same_definition_except_name`'s: `opclass`, `nulls_not_distinct`, `only` and
     /// `expr_cascade_columns` are emission-only, excluded from equality, and
     /// invisible here too.
-    pub(crate) fn definition_differences_except_name(&self, other: &Self) -> Vec<String> {
+    pub fn definition_differences_except_name(&self, other: &Self) -> Vec<String> {
         let mut out = Vec::new();
         if self.unique != other.unique {
             out.push(format!("uniqueness {} -> {}", self.unique, other.unique));
@@ -1270,14 +1270,14 @@ pub struct ViewSnapshot {
     /// identical across dialects. A snapshot built by introspection leaves it `None`,
     /// because a live catalog cannot yield a typed query - and a drop with no typed
     /// body correctly stays irreversible rather than guessing one.
-    pub authored_query: Option<crate::model::ir::ViewQuery>,
+    pub authored_query: Option<zero_migrate_ir::ir::ViewQuery>,
     /// The schema the authored `createView` resolved to, paired with
     /// [`Self::authored_query`] so the inverse names the object the drop named.
     pub authored_schema: Option<String>,
     /// User-authored catalog comment on this view.
     pub comment: Option<String>,
     /// This view's body as the SERVER re-prints it, written ONLY by
-    /// [`crate::apply::drift::resolve_view_bodies`] and only onto the two snapshots
+    /// `zero_migrate::apply::drift::resolve_view_bodies` and only onto the two snapshots
     /// a single drift check is about to compare.
     ///
     /// DELIBERATELY NOT [`Self::definition`], and the distinction is the reason this
@@ -1308,7 +1308,7 @@ impl PartialEq for ViewSnapshot {
     /// snapshots one drift check is comparing - so folding it into structural
     /// equality would make two otherwise identical snapshots differ on whether
     /// anyone had run that step. The body comparison lives in
-    /// [`crate::diff_snapshots`], which reports WHICH field differs; this stays the
+    /// `zero_migrate::diff_snapshots`, which reports WHICH field differs; this stays the
     /// cheap identity test its callers already rely on.
     fn eq(&self, other: &Self) -> bool {
         self.materialized == other.materialized && self.comment == other.comment
@@ -1347,7 +1347,7 @@ impl std::fmt::Display for SequenceDataTypeSnapshot {
 impl SequenceDataTypeSnapshot {
     /// Convert an authored sequence `AS` type into the snapshot's closed catalog
     /// enum. `None` is PostgreSQL's default `bigint`.
-    pub(crate) fn from_sequence_col_type(as_type: Option<&ColType>) -> Result<Self, &'static str> {
+    pub fn from_sequence_col_type(as_type: Option<&ColType>) -> Result<Self, &'static str> {
         match as_type {
             None | Some(ColType::BigInt) => Ok(Self::BigInt),
             Some(ColType::SmallInt) => Ok(Self::SmallInt),
@@ -1357,7 +1357,7 @@ impl SequenceDataTypeSnapshot {
     }
 
     /// Convert the PostgreSQL catalog spelling into the snapshot's closed enum.
-    pub(crate) fn from_pg_type_name(name: &str) -> Self {
+    pub fn from_pg_type_name(name: &str) -> Self {
         match name {
             "smallint" | "int2" => Self::SmallInt,
             "integer" | "int4" => Self::Int,
@@ -1401,7 +1401,7 @@ fn normalize_sequence_bound(default: i64, value: i64) -> Result<Option<SafeI64>,
 
 /// Normalize a sequence minimum value against PostgreSQL's default/`NO MINVALUE`
 /// semantics.
-pub(crate) fn normalize_sequence_min_value(
+pub fn normalize_sequence_min_value(
     as_type: SequenceDataTypeSnapshot,
     increment: SafeI64,
     value: i64,
@@ -1411,7 +1411,7 @@ pub(crate) fn normalize_sequence_min_value(
 
 /// Normalize a sequence maximum value against PostgreSQL's default/`NO MAXVALUE`
 /// semantics.
-pub(crate) fn normalize_sequence_max_value(
+pub fn normalize_sequence_max_value(
     as_type: SequenceDataTypeSnapshot,
     increment: SafeI64,
     value: i64,
@@ -1422,7 +1422,7 @@ pub(crate) fn normalize_sequence_max_value(
 /// PostgreSQL's default start value for an omitted `START WITH`: the minimum for
 /// ascending sequences and the maximum for descending sequences, after applying
 /// explicit non-default bounds if present.
-pub(crate) fn sequence_default_start_value(
+pub fn sequence_default_start_value(
     as_type: SequenceDataTypeSnapshot,
     increment: SafeI64,
     min_value: Option<SafeI64>,
@@ -1558,7 +1558,7 @@ pub struct FunctionKey {
 }
 
 impl FunctionKey {
-    pub(crate) fn from_create(
+    pub fn from_create(
         name: &str,
         schema: Option<&str>,
         args: Option<&[FuncArg]>,
@@ -1577,7 +1577,7 @@ impl FunctionKey {
         }
     }
 
-    pub(crate) fn from_drop(
+    pub fn from_drop(
         name: &str,
         schema: Option<&str>,
         arg_types: Option<&[String]>,
@@ -1621,7 +1621,7 @@ impl FunctionKey {
 ///     `CREATE FUNCTION g(x varchar(255))` reads back from `pg_proc` as `character
 ///     varying`, so an authored `varchar(255)` that kept its length would be
 ///     reported as a missing function and an unexpected one on every snapshot.
-///  2. **Fold the alias**, through [`crate::model::validate::canonical_pg_arg_type`]
+///  2. **Fold the alias**, through [`canonical_pg_arg_type`]
 ///     - the authoring gate's own table, called rather than copied.
 ///
 /// Step 1 is deliberately NOT pushed into that shared function. It decides which
@@ -1636,7 +1636,7 @@ pub fn canonical_pg_signature_type(raw: &str) -> String {
         }
         _ => trimmed.to_string(),
     };
-    crate::model::validate::canonical_pg_arg_type(&base)
+    canonical_pg_arg_type(&base)
 }
 
 /// The authored definition needed to restore a dropped PostgreSQL function.
@@ -1774,7 +1774,7 @@ pub struct PolicyKey {
 }
 
 impl PolicyKey {
-    pub(crate) fn new(name: &str, table: &str, schema: Option<&str>, default_schema: &str) -> Self {
+    pub fn new(name: &str, table: &str, schema: Option<&str>, default_schema: &str) -> Self {
         Self {
             schema: schema.unwrap_or(default_schema).to_string(),
             table: table.to_string(),
@@ -1816,7 +1816,7 @@ pub struct TriggerKey {
 }
 
 impl TriggerKey {
-    pub(crate) fn new(name: &str, table: &str, schema: Option<&str>, default_schema: &str) -> Self {
+    pub fn new(name: &str, table: &str, schema: Option<&str>, default_schema: &str) -> Self {
         Self {
             schema: schema.unwrap_or(default_schema).to_string(),
             table: table.to_string(),
@@ -1940,7 +1940,7 @@ impl TriggerIdentity {
 pub struct VendorObjectIdentities {
     /// Function overloads present, keyed by [`FunctionKey`] whose `arg_types` are
     /// CANONICAL PostgreSQL type names, not authored spellings - see
-    /// [`crate::model::validate::canonical_pg_arg_type`]. `pg_proc` reports
+    /// [`canonical_pg_arg_type`]. `pg_proc` reports
     /// `integer` for an authored `int`, so an uncanonicalised key would report the
     /// same function as both missing and unexpected.
     ///
@@ -1961,7 +1961,7 @@ pub struct VendorObjectIdentities {
 /// A relation on PostgreSQL only. SQLite and MySQL collapse a partition child into
 /// its parent rather than creating one, so their introspection reports no partition
 /// and this map stays empty there while a folded snapshot still carries the child -
-/// see the fold's own account of the exception in [`crate::render::fold`].
+/// see the fold's own account of the exception in `zero_migrate::render::fold`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionSnapshot {
     /// Parent partitioned table.
@@ -2078,4 +2078,44 @@ pub struct NamedTypeSnapshot {
     pub kind: String,
     /// User-authored catalog comment on this enum/domain.
     pub comment: Option<String>,
+}
+
+/// A PostgreSQL argument-type spelling reduced to the form that decides whether
+/// two function signatures collide.
+///
+/// EVERY PAIR FOLDED HERE WAS MEASURED, one `CREATE FUNCTION` per alias against a
+/// live server, and each of the eight raised `function "p" already exists with
+/// same argument types`. Three near-neighbours were measured NOT to collide and
+/// are deliberately left apart, because folding them would refuse a real
+/// overload: `int`/`bigint`, `varchar`/`text`, and `timestamptz`/`timestamp`.
+///
+/// AN UNRECOGNISED SPELLING FALLS THROUGH TO ITSELF, and that direction is
+/// chosen. A missing alias means two colliding signatures are ACCEPTED here and
+/// refused by the server - the same under-refusal that existed before this
+/// function - whereas a wrong alias would refuse a migration the server runs.
+/// `varchar(255)` versus `varchar` is a known instance: length is not part of a
+/// PG signature, but it is not folded here because it was not measured.
+///
+/// SHARED WITH DRIFT. `zero_migrate::apply::drift` compares a folded function signature
+/// against the one `pg_proc` reports, and the catalog reports `integer` where the
+/// author wrote `int`, so it needs exactly this mapping. It calls this function
+/// rather than carrying a second copy - a duplicated type table that drifts from
+/// this one is a defect this codebase has already had. Drift layers ONE further
+/// reduction of its own (dropping a type modifier) on top of the result; that
+/// belongs to drift and not here, because widening this function widens what the
+/// authoring gate REFUSES.
+pub fn canonical_pg_arg_type(raw: &str) -> String {
+    let lowered = raw.trim().to_ascii_lowercase();
+    let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
+    match collapsed.as_str() {
+        "int" | "integer" | "int4" => "int4".to_string(),
+        "bigint" | "int8" => "int8".to_string(),
+        "smallint" | "int2" => "int2".to_string(),
+        "bool" | "boolean" => "bool".to_string(),
+        "varchar" | "character varying" => "varchar".to_string(),
+        "decimal" | "numeric" => "numeric".to_string(),
+        "float8" | "double precision" => "float8".to_string(),
+        "timestamptz" | "timestamp with time zone" => "timestamptz".to_string(),
+        _ => collapsed,
+    }
 }
