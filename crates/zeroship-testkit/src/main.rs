@@ -24,7 +24,10 @@
 //! OUTPUT CONTRACT. Subcommands that replace a shell function which SET
 //! variables print `NAME=value` lines on stdout for the shim to `eval`, with
 //! the value single-quoted. Diagnostics go to stderr. Exit codes are the shell
-//! library's: 0 yes, 1 no, 2 refused-or-broken.
+//! library's: 0 yes, 1 no, 2 refused-or-broken, 3 could-not-look. The last one
+//! is not a synonym for 2: `sweep decide` uses it to say that a check came back
+//! empty because it could not run, which is the one answer a sweeper must never
+//! read as "nothing is alive".
 
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
@@ -167,8 +170,7 @@ enum SweepCmd {
         #[arg(long)]
         pid: i32,
     },
-    /// One `/proc` pass. Prints `ZS_SWEEP_HELD_BY=` and
-    /// `ZS_SWEEP_PROC_UNREADABLE=` for the shim to `eval`.
+    /// One `/proc` pass. Prints a `ZS_SWEEP_*` block for the shim to `eval`.
     Scan {
         #[arg(long = "self-pid")]
         self_pid: i32,
@@ -181,6 +183,56 @@ enum SweepCmd {
         #[arg(long)]
         name: String,
     },
+    /// May this run drop what it planned to drop?
+    ///
+    /// Exit 0 to proceed, 3 (`exit::BLIND`) to refuse. The distinction is the
+    /// whole subcommand: "scanned everything, nothing is dead" and "could not
+    /// scan, so nothing looked alive" used to be the same zero.
+    ///
+    /// EVERY INPUT IS A FLAG. The caller gathers them -- the `/proc` half from
+    /// `sweep scan`, the rest from the server and from git -- and states what
+    /// it found. Nothing here reads the environment, so no ambient value can
+    /// turn the refusal off, and there is deliberately no flag that can either.
+    Decide {
+        /// How many databases the run would drop.
+        #[arg(long)]
+        doomed: usize,
+        /// Did `sweep scan` itself succeed?
+        #[arg(long = "proc-scan-ok", action = clap::ArgAction::Set, value_parser = boolish(), default_value = "1")]
+        proc_scan_ok: bool,
+        /// `ZS_SWEEP_PROC_UNLISTABLE`.
+        #[arg(long = "proc-unlistable", action = clap::ArgAction::Set, value_parser = boolish(), default_value = "0")]
+        proc_unlistable: bool,
+        /// `ZS_SWEEP_PROC_HIDDEN`.
+        #[arg(long = "proc-hidden", action = clap::ArgAction::Set, value_parser = boolish(), default_value = "0")]
+        proc_hidden: bool,
+        /// `ZS_SWEEP_PROC_EXAMINED`.
+        #[arg(long = "proc-examined", default_value = "0")]
+        proc_examined: usize,
+        /// `ZS_SWEEP_PROC_PEER_ENV_READ`.
+        #[arg(long = "proc-peer-env-read", default_value = "0")]
+        proc_peer_env_read: usize,
+        /// `ZS_SWEEP_PROC_UNEXPLAINED`, space separated.
+        #[arg(long = "proc-unexplained", default_value = "")]
+        proc_unexplained: String,
+        /// Did the `pg_stat_activity` query return?
+        #[arg(long = "sessions-ok", action = clap::ArgAction::Set, value_parser = boolish(), default_value = "1")]
+        sessions_ok: bool,
+        /// Did git enumerate the worktrees and the refs?
+        #[arg(long = "git-listing-ok", action = clap::ArgAction::Set, value_parser = boolish(), default_value = "1")]
+        git_listing_ok: bool,
+        /// Working trees `git worktree list` reported.
+        #[arg(long = "worktrees-seen", default_value = "0")]
+        worktrees_seen: usize,
+        /// Working trees whose migration set could be hashed.
+        #[arg(long = "worktrees-fingerprinted", default_value = "0")]
+        worktrees_fingerprinted: usize,
+    },
+}
+
+/// `--flag 0` / `--flag 1`, which is what a shell has to hand.
+fn boolish() -> clap::builder::BoolishValueParser {
+    clap::builder::BoolishValueParser::new()
 }
 
 fn main() -> ExitCode {
@@ -401,7 +453,31 @@ fn run_sweep(cmd: SweepCmd) -> i32 {
                 rendered.push_str(&format!("{name} {pid}\n"));
             }
             assign("ZS_SWEEP_HELD_BY", &rendered);
-            assign("ZS_SWEEP_PROC_UNREADABLE", &held.unreadable.to_string());
+            // The pass's own account of itself, not just its findings. The
+            // single `ZS_SWEEP_PROC_UNREADABLE` these replace counted 406 of
+            // 495 entries on an ordinary run, so it could never separate a
+            // healthy pass from a blind one; `sweep decide` rules on the parts.
+            assign("ZS_SWEEP_PROC_EXAMINED", &held.examined.to_string());
+            assign("ZS_SWEEP_PROC_VANISHED", &held.vanished.to_string());
+            assign("ZS_SWEEP_PROC_ENV_DENIED", &held.env_denied.to_string());
+            assign(
+                "ZS_SWEEP_PROC_PEER_ENV_READ",
+                &held.peer_env_read.to_string(),
+            );
+            assign(
+                "ZS_SWEEP_PROC_UNEXPLAINED",
+                &held
+                    .unexplained
+                    .iter()
+                    .map(i32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+            assign(
+                "ZS_SWEEP_PROC_UNLISTABLE",
+                if held.proc_unlistable { "1" } else { "0" },
+            );
+            assign("ZS_SWEEP_PROC_HIDDEN", if held.proc_hidden { "1" } else { "0" });
             exit::OK
         }
         SweepCmd::HoldersOf { name } => {
@@ -414,7 +490,10 @@ fn run_sweep(cmd: SweepCmd) -> i32 {
                         Some((n.to_string(), pid.trim().parse().ok()?))
                     })
                     .collect(),
-                unreadable: 0,
+                // This subcommand answers "which pids hold this name" from a
+                // rendered `held_by` body, so the pass's account of itself is
+                // not in scope here; `sweep decide` is where that is ruled on.
+                ..sweep::Holders::default()
             };
             let pids: Vec<String> = sweep::holders_of(&held, &name)
                 .iter()
@@ -422,6 +501,48 @@ fn run_sweep(cmd: SweepCmd) -> i32 {
                 .collect();
             print!("{}", pids.join(" "));
             exit::OK
+        }
+        SweepCmd::Decide {
+            doomed,
+            proc_scan_ok,
+            proc_unlistable,
+            proc_hidden,
+            proc_examined,
+            proc_peer_env_read,
+            proc_unexplained,
+            sessions_ok,
+            git_listing_ok,
+            worktrees_seen,
+            worktrees_fingerprinted,
+        } => {
+            let evidence = sweep::Evidence {
+                proc_scan_failed: !proc_scan_ok,
+                proc_unlistable,
+                proc_hidden,
+                proc_examined,
+                proc_peer_env_read,
+                proc_unexplained: proc_unexplained
+                    .split_whitespace()
+                    .filter_map(|pid| pid.parse().ok())
+                    .collect(),
+                sessions_query_ok: sessions_ok,
+                git_listing_ok,
+                worktrees_seen,
+                worktrees_fingerprinted,
+                doomed,
+            };
+            match sweep::verdict(&evidence) {
+                sweep::Verdict::Proceed => exit::OK,
+                // Stdout, not stderr, and exit 0: nothing was at risk, and a
+                // warning nobody sees is the silent count this exists to end.
+                sweep::Verdict::ProceedWithGaps(gaps) => {
+                    print!("{}", sweep::gap_warning_text(&gaps));
+                    exit::OK
+                }
+                sweep::Verdict::Refuse(gaps) => {
+                    refuse(&sweep::refusal_text(&gaps, doomed), exit::BLIND)
+                }
+            }
         }
     }
 }
