@@ -500,6 +500,30 @@ where
     })
 }
 
+/// Recreate a described statement in PostgreSQL's unnamed slot and bind it in
+/// the same frontend batch. Keeping Parse adjacent to Bind is what makes the
+/// threshold path safe when multiple callers share one connection.
+pub(crate) fn encode_unnamed<P, I>(
+    client: &InnerClient,
+    sql: &str,
+    statement: &Statement,
+    params: I,
+) -> Result<Bytes, Error>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = P>,
+    I::IntoIter: ExactSizeIterator,
+{
+    client.with_buf(|buf| {
+        frontend::parse("", sql, statement.params().iter().map(Type::oid), buf)
+            .map_err(Error::encode)?;
+        encode_bind(statement, params, "", buf)?;
+        frontend::execute("", 0, buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })
+}
+
 pub fn encode_bind<P, I>(
     statement: &Statement,
     params: I,

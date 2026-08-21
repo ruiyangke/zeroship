@@ -18,6 +18,7 @@ use std::borrow::Cow;
 #[cfg(unix)]
 use std::ffi::OsStr;
 use std::net::IpAddr;
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -637,6 +638,7 @@ pub struct Config {
     pub(crate) application_name: Option<String>,
     pub(crate) fallback_application_name: Option<String>,
     pub(crate) statement_cache_capacity: usize,
+    pub(crate) statement_cache_execution_threshold: NonZeroUsize,
     pub(crate) ssl_mode: SslMode,
     pub(crate) ssl_negotiation: SslNegotiation,
     pub(crate) ssl_root_cert: SslRootCert,
@@ -682,6 +684,7 @@ impl Config {
             application_name: None,
             fallback_application_name: None,
             statement_cache_capacity: 0,
+            statement_cache_execution_threshold: NonZeroUsize::MIN,
             ssl_mode: SslMode::Prefer,
             ssl_negotiation: SslNegotiation::Postgres,
             ssl_root_cert: SslRootCert::Unset,
@@ -815,6 +818,14 @@ impl Config {
     /// caller-owned and are not cached. [`Uncached`](crate::Uncached) bypasses
     /// an enabled cache for one operation.
     ///
+    /// [`Config::statement_cache_execution_threshold`] controls which
+    /// execution first earns a prepared slot. It defaults to 1, preserving
+    /// immediate preparation. Higher values execute through PostgreSQL's
+    /// unnamed statement below the threshold. Admission history is a separate
+    /// 100-entry LRU per connection and is forgotten when a prepared entry is
+    /// evicted, so generated SQL cannot grow the tracker without bound or
+    /// return immediately after eviction to displace the new working set.
+    ///
     /// The cache is disabled by default. Keep it disabled when connecting
     /// through a transaction-mode connection pooler: persistent named
     /// statements are scoped to a `PostgreSQL` session, while successive
@@ -842,6 +853,36 @@ impl Config {
     #[must_use]
     pub const fn get_statement_cache_capacity(&self) -> usize {
         self.statement_cache_capacity
+    }
+
+    /// Sets the execution which first promotes exact SQL into the implicit
+    /// prepared-statement cache.
+    ///
+    /// A threshold of 1 prepares the first execution and is the default. Zero
+    /// has no useful meaning here: cache capacity zero already disables the
+    /// cache, so the type rejects zero instead of silently aliasing it.
+    /// Executions below the threshold use PostgreSQL's unnamed statement and
+    /// do not consume a prepared slot. Here an execution is a valid raw-SQL
+    /// operation with matching parameter arity; the counter advances before
+    /// parameter-value encoding or server completion. A validated
+    /// [`Transaction::bind`](crate::Transaction::bind) counts once because
+    /// promotion avoids its repeated Parse/Describe work, even if its portal
+    /// is never executed. This is programmatic-only because libpq defines no
+    /// equivalent connection-string parameter.
+    pub const fn statement_cache_execution_threshold(
+        &mut self,
+        threshold: NonZeroUsize,
+    ) -> &mut Config {
+        self.statement_cache_execution_threshold = threshold;
+        self
+    }
+
+    /// Gets the per-connection statement-cache execution threshold.
+    ///
+    /// Defaults to 1.
+    #[must_use]
+    pub const fn get_statement_cache_execution_threshold(&self) -> NonZeroUsize {
+        self.statement_cache_execution_threshold
     }
 
     /// Sets the SSL configuration.
@@ -1580,11 +1621,12 @@ impl Config {
     /// Connects to a PostgreSQL database over an arbitrary stream.
     ///
     /// Uses `user`, `password`, `dbname`, `options`, `application_name`,
-    /// `connect_timeout`, `read_timeout`, `statement_cache_capacity`, and
-    /// `require_auth`; all other settings are ignored. The connect timeout
-    /// starts with TLS negotiation on the supplied stream and covers startup
-    /// and authentication. It cannot cover the caller's work to open that
-    /// stream. The read timeout is installed only after startup succeeds.
+    /// `connect_timeout`, `read_timeout`, `statement_cache_capacity`,
+    /// `statement_cache_execution_threshold`, and `require_auth`; all other
+    /// settings are ignored. The connect timeout starts with TLS negotiation,
+    /// covers startup and authentication, and cannot cover the caller's work
+    /// to open that stream. The read timeout is installed only after startup
+    /// succeeds.
     ///
     /// One exception, and it is the reason this is not simply "sslmode is
     /// ignored": the caller owns the stream, so this entry point cannot open a
@@ -1653,6 +1695,10 @@ impl fmt::Debug for Config {
                 &self.fallback_application_name,
             )
             .field("statement_cache_capacity", &self.statement_cache_capacity)
+            .field(
+                "statement_cache_execution_threshold",
+                &self.statement_cache_execution_threshold,
+            )
             .field("ssl_mode", &self.ssl_mode)
             .field("ssl_negotiation", &self.ssl_negotiation)
             .field("ssl_root_cert", &self.ssl_root_cert)
@@ -2130,6 +2176,7 @@ impl<'a> UrlParser<'a> {
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
+    use std::num::NonZeroUsize;
 
     use crate::config::{
         AuthMethod, AuthMethods, RequireAuth, SslMode, SslNegotiation, SslProtocolVersion,
@@ -2524,6 +2571,38 @@ mod tests {
         "host=h statement_cache_capacity=-1"
             .parse::<Config>()
             .expect_err("a cache capacity cannot be negative");
+    }
+
+    #[test]
+    fn statement_cache_execution_threshold_is_nonzero_and_programmatic() {
+        assert_eq!(
+            Config::new().get_statement_cache_execution_threshold(),
+            NonZeroUsize::MIN
+        );
+
+        let mut config = Config::new();
+        config.statement_cache_execution_threshold(NonZeroUsize::new(5).unwrap());
+        assert_eq!(
+            config.get_statement_cache_execution_threshold(),
+            NonZeroUsize::new(5).unwrap()
+        );
+        assert!(NonZeroUsize::new(0).is_none());
+
+        for dsn in [
+            "host=h statement_cache_execution_threshold=5",
+            "postgresql://h/db?statement_cache_execution_threshold=5",
+        ] {
+            let error = dsn
+                .parse::<Config>()
+                .expect_err("the builder-only threshold parsed from a connection string");
+            let cause = std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                cause.contains("statement_cache_execution_threshold"),
+                "{dsn}: rejection did not identify the unsupported key: {cause:?}"
+            );
+        }
     }
 
     #[test]

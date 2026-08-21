@@ -108,6 +108,28 @@ async fn connect_with_statement_cache(url: &str, capacity: usize) -> Result<Clie
     Ok(client)
 }
 
+/// Open one cached connection whose Nth exact-SQL execution is eligible for
+/// promotion. The threshold is programmatic-only, not a libpq parameter.
+async fn connect_with_statement_cache_threshold(
+    url: &str,
+    capacity: usize,
+    threshold: usize,
+) -> Result<Client, Error> {
+    let mut config: Config = url.parse()?;
+    config.statement_cache_capacity(capacity);
+    config.statement_cache_execution_threshold(
+        std::num::NonZeroUsize::new(threshold).expect("test thresholds are nonzero"),
+    );
+    let (client, connection) = config.connect(NoTls).await?;
+    compio::runtime::spawn(async move {
+        if let Err(e) = connection.run().await {
+            eprintln!("connection error: {e}");
+        }
+    })
+    .detach();
+    Ok(client)
+}
+
 /// Checks that Postgres is reachable and hands back a URL scoped to a schema
 /// this test alone owns.
 ///
@@ -4339,8 +4361,9 @@ async fn statement_cache_reuses_identical_sql() {
     let client = connect_with_statement_cache(&url, 2).await.unwrap();
 
     const SQL: &str = "SELECT 52::int4 AS cpg_cache_hit";
-    let mut results = Vec::new();
-    for _ in 0..8 {
+    let mut results = vec![client.query(SQL, &[]).await.unwrap()];
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+    for _ in 1..8 {
         let rows = client.query(SQL, &[]).await.unwrap();
         assert_eq!(rows[0].get::<_, i32>(0), 52);
         results.push(rows);
@@ -4351,6 +4374,185 @@ async fn statement_cache_reuses_identical_sql() {
     drop(results);
     client.simple_query("").await.unwrap();
     assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+}
+
+/// The target SQL observes itself while it is executing. A named Parse is
+/// already visible in `pg_prepared_statements` at that point; an unnamed Parse
+/// is not, so this cannot pass merely because a transient name was closed
+/// before a later probe.
+#[compio::test]
+async fn statement_cache_promotes_on_the_execution_threshold() {
+    let url = test_url();
+    let client = connect_with_statement_cache_threshold(&url, 2, 3)
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT count(*)::int8 FROM pg_prepared_statements \
+        WHERE statement = $1::text AND NOT from_sql \
+        /* cpg_cache_execution_threshold_three */";
+
+    for execution in 1..3 {
+        let live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
+        assert_eq!(live, 0, "execution {execution} was sent with a name");
+        assert!(prepared_statement_names(&client, SQL).await.is_empty());
+    }
+
+    let live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
+    assert_eq!(live, 1, "the threshold execution was not named");
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+}
+
+#[compio::test]
+async fn statement_cache_execution_threshold_one_promotes_immediately() {
+    let url = test_url();
+    let client = connect_with_statement_cache_threshold(&url, 2, 1)
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT count(*)::int8 FROM pg_prepared_statements \
+        WHERE statement = $1::text AND NOT from_sql \
+        /* cpg_cache_execution_threshold_one */";
+
+    let first_live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
+    assert_eq!(first_live, 1);
+    let first_name = prepared_statement_name(&client, SQL).await;
+
+    let second_live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
+    assert_eq!(second_live, 1);
+    assert_eq!(prepared_statement_name(&client, SQL).await, first_name);
+}
+
+#[compio::test]
+async fn statement_cache_does_not_count_wrong_parameter_arity() {
+    let url = test_url();
+    let client = connect_with_statement_cache_threshold(&url, 2, 2)
+        .await
+        .unwrap();
+
+    const SQL: &str = "SELECT count(*)::int8 FROM pg_prepared_statements \
+        WHERE statement = $1::text AND NOT from_sql \
+        /* cpg_cache_threshold_rejected_execution */";
+
+    client
+        .query(SQL, &[])
+        .await
+        .expect_err("the SQL requires one parameter");
+
+    let first_live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
+    assert_eq!(first_live, 0, "wrong parameter arity earned execution credit");
+    let second_live: i64 = client.query_one_scalar(SQL, &[&SQL]).await.unwrap();
+    assert_eq!(second_live, 1);
+}
+
+#[compio::test]
+async fn statement_cache_execution_threshold_applies_to_execute() {
+    let url = test_url();
+    let client = connect_with_statement_cache_threshold(&url, 2, 2)
+        .await
+        .unwrap();
+    client
+        .batch_execute("CREATE TEMP TABLE cpg_cache_execute_seen (value int8)")
+        .await
+        .unwrap();
+
+    const SQL: &str = "INSERT INTO cpg_cache_execute_seen(value) \
+        SELECT count(*)::int8 FROM pg_prepared_statements \
+        WHERE statement = $1::text AND NOT from_sql \
+        /* cpg_cache_threshold_execute */";
+
+    assert_eq!(client.execute(SQL, &[&SQL]).await.unwrap(), 1);
+    assert!(prepared_statement_names(&client, SQL).await.is_empty());
+    assert_eq!(client.execute(SQL, &[&SQL]).await.unwrap(), 1);
+    assert_eq!(prepared_statement_names(&client, SQL).await.len(), 1);
+
+    let rows = client
+        .query("SELECT value FROM cpg_cache_execute_seen ORDER BY ctid", &[])
+        .await
+        .unwrap();
+    let observed = rows
+        .iter()
+        .map(|row| row.get::<_, i64>(0))
+        .collect::<Vec<_>>();
+    assert_eq!(observed, [0, 1]);
+}
+
+#[compio::test]
+async fn statement_cache_execution_threshold_applies_to_transaction_bind() {
+    let url = test_url();
+    let mut client = connect_with_statement_cache_threshold(&url, 2, 2)
+        .await
+        .unwrap();
+    let transaction = client.transaction().await.unwrap();
+
+    const SQL: &str = "SELECT $1::int4 /* cpg_cache_threshold_bind */";
+    let first = transaction.bind(SQL, &[&7_i32]).await.unwrap();
+    assert!(prepared_statement_names(transaction.client(), SQL).await.is_empty());
+    let rows = transaction.query_portal(&first, 0).await.unwrap();
+    assert_eq!(rows[0].get::<_, i32>(0), 7);
+    assert!(prepared_statement_names(transaction.client(), SQL).await.is_empty());
+    drop(first);
+
+    let second = transaction.bind(SQL, &[&8_i32]).await.unwrap();
+    assert_eq!(prepared_statement_names(transaction.client(), SQL).await.len(), 1);
+    let rows = transaction.query_portal(&second, 0).await.unwrap();
+    assert_eq!(rows[0].get::<_, i32>(0), 8);
+    drop(second);
+    transaction.rollback().await.unwrap();
+}
+
+#[compio::test]
+async fn statement_cache_execution_threshold_applies_to_copy_out() {
+    use futures_util::StreamExt;
+
+    let url = test_url();
+    let client = connect_with_statement_cache_threshold(&url, 2, 2)
+        .await
+        .unwrap();
+
+    const SQL: &str = "COPY (SELECT 1::int4) TO STDOUT \
+        /* cpg_cache_threshold_copy_out */";
+    for execution in 1..=2 {
+        let stream = client.copy_out(SQL).await.unwrap();
+        let mut stream = Box::pin(stream);
+        let mut bytes = 0;
+        while let Some(chunk) = stream.as_mut().next().await {
+            bytes += chunk.unwrap().len();
+        }
+        assert!(bytes > 0);
+        assert_eq!(
+            prepared_statement_names(&client, SQL).await.len(),
+            usize::from(execution == 2)
+        );
+    }
+}
+
+#[compio::test]
+async fn statement_cache_execution_count_resets_after_prepared_eviction() {
+    let url = test_url();
+    let client = connect_with_statement_cache_threshold(&url, 1, 2)
+        .await
+        .unwrap();
+
+    const SQL_A: &str = "SELECT count(*)::int8 FROM pg_prepared_statements \
+        WHERE statement = $1::text AND NOT from_sql \
+        /* cpg_cache_threshold_eviction_a */";
+    const SQL_B: &str = "SELECT count(*)::int8 FROM pg_prepared_statements \
+        WHERE statement = $1::text AND NOT from_sql \
+        /* cpg_cache_threshold_eviction_b */";
+
+    let a_first: i64 = client.query_one_scalar(SQL_A, &[&SQL_A]).await.unwrap();
+    let a_second: i64 = client.query_one_scalar(SQL_A, &[&SQL_A]).await.unwrap();
+    assert_eq!((a_first, a_second), (0, 1));
+
+    let b_first: i64 = client.query_one_scalar(SQL_B, &[&SQL_B]).await.unwrap();
+    let b_second: i64 = client.query_one_scalar(SQL_B, &[&SQL_B]).await.unwrap();
+    assert_eq!((b_first, b_second), (0, 1));
+    assert!(prepared_statement_names(&client, SQL_A).await.is_empty());
+
+    let a_after_eviction: i64 = client.query_one_scalar(SQL_A, &[&SQL_A]).await.unwrap();
+    assert_eq!(a_after_eviction, 0, "eviction retained admission history");
+    let a_readmitted: i64 = client.query_one_scalar(SQL_A, &[&SQL_A]).await.unwrap();
+    assert_eq!(a_readmitted, 1);
 }
 
 #[compio::test]
