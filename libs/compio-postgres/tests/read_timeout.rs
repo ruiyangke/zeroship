@@ -460,7 +460,7 @@ async fn a_timed_out_pool_entry_is_retired_before_return() {
         pool_config
             .max_size(1)
             .min_idle(0)
-            .connection_timeout(Duration::from_secs(2))
+            .acquire_timeout(Duration::from_secs(2))
             .validation_bypass(Duration::from_secs(5));
         let pool = Pool::connect_with_config(stub_config(server.addr), pool_config)
             .await
@@ -525,7 +525,7 @@ async fn backpressure_cannot_hide_retirement_from_the_pool() {
         pool_config
             .max_size(1)
             .min_idle(0)
-            .connection_timeout(Duration::from_secs(2))
+            .acquire_timeout(Duration::from_secs(2))
             .validation_bypass(Duration::from_secs(5));
         let pool = Pool::connect_with_config(stub_config(server.addr), pool_config)
             .await

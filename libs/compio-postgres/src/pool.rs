@@ -139,7 +139,7 @@ pub struct PoolConfig {
     min_idle: usize,
     max_lifetime: Duration,
     idle_timeout: Duration,
-    connection_timeout: Duration,
+    acquire_timeout: Duration,
     command_timeout: Option<Duration>,
     validation_bypass: Duration,
     after_connect: Option<Rc<AfterConnectHook>>,
@@ -154,7 +154,7 @@ impl Default for PoolConfig {
             min_idle: 2,
             max_lifetime: Duration::from_secs(1800),
             idle_timeout: Duration::from_secs(600),
-            connection_timeout: Duration::from_secs(30),
+            acquire_timeout: Duration::from_secs(30),
             command_timeout: None,
             validation_bypass: Duration::from_millis(500),
             after_connect: None,
@@ -227,15 +227,15 @@ impl PoolConfig {
     }
 
     /// Set how long `get()` waits for a connection (default: 30 s).
-    pub fn connection_timeout(&mut self, connection_timeout: Duration) -> &mut Self {
-        self.connection_timeout = connection_timeout;
+    pub fn acquire_timeout(&mut self, acquire_timeout: Duration) -> &mut Self {
+        self.acquire_timeout = acquire_timeout;
         self
     }
 
     /// Get the connection timeout.
     #[must_use]
-    pub fn get_connection_timeout(&self) -> Duration {
-        self.connection_timeout
+    pub fn get_acquire_timeout(&self) -> Duration {
+        self.acquire_timeout
     }
 
     /// Set the client command deadline applied by [`PooledClient::command`].
@@ -256,7 +256,7 @@ impl PoolConfig {
     ///   it does not detect a healthy peer that simply sends nothing.
     /// - Clock (4), [`Config::connect_timeout`], applies per address to
     ///   connection setup, including the handshake.
-    /// - Clock (5), [`PoolConfig::connection_timeout`], limits waiting to
+    /// - Clock (5), [`PoolConfig::acquire_timeout`], limits waiting to
     ///   acquire a pooled connection.
     ///
     /// This is pool policy, not a libpq connection parameter, and therefore is
@@ -384,7 +384,7 @@ impl std::fmt::Debug for PoolConfig {
             .field("min_idle", &self.min_idle)
             .field("max_lifetime", &self.max_lifetime)
             .field("idle_timeout", &self.idle_timeout)
-            .field("connection_timeout", &self.connection_timeout)
+            .field("acquire_timeout", &self.acquire_timeout)
             .field("command_timeout", &self.command_timeout)
             .field("validation_bypass", &self.validation_bypass)
             .field("after_connect", &self.after_connect.is_some())
@@ -829,7 +829,7 @@ impl Pool {
     /// Refuses a `max_size` of 0, and a `min_idle` greater than `max_size`.
     /// Both are configurations the pool cannot honour rather than preferences
     /// it can approximate, and both are cheaper to hear about here than as a
-    /// checkout that blocks for `connection_timeout`.
+    /// checkout that blocks for `acquire_timeout`.
     pub async fn connect_with_pool_config(
         url: &str,
         pool_config: PoolConfig,
@@ -1062,12 +1062,12 @@ impl Pool {
     ///
     /// Tries idle connections first (with alive-bypass validation), then
     /// creates a new connection if under `max_size`, then waits up to
-    /// `connection_timeout` for a connection to be returned. Async lifecycle
+    /// `acquire_timeout` for a connection to be returned. Async lifecycle
     /// hooks are inside that timeout; cancellation discards their candidate and
     /// releases its capacity slot.
     pub async fn get(&self) -> Result<PooledClient<'_>, Error> {
         self.ensure_open()?;
-        match compio::time::timeout(self.config.connection_timeout, self.get_inner()).await {
+        match compio::time::timeout(self.config.acquire_timeout, self.get_inner()).await {
             Ok(result) => result,
             Err(_) => {
                 // If shutdown raced the timeout, report the terminal state and
@@ -1077,7 +1077,7 @@ impl Pool {
                 self.metrics.inc_timeouts();
                 Err(pool_error(format!(
                     "connection timeout after {}s (pool: {}/{} idle, {}/{} total)",
-                    self.config.connection_timeout.as_secs(),
+                    self.config.acquire_timeout.as_secs(),
                     self.idle.borrow().len(),
                     self.config.max_size,
                     self.total.get(),
@@ -1190,7 +1190,7 @@ impl Pool {
             // callers in the same loop see the bumped `total` and don't race
             // past `max_size`. The reservation rides on a PermitGuard: if this
             // future is cancelled while parked at `connect_one().await` (the
-            // outer `connection_timeout`, or a caller dropping the get()), the
+            // outer `acquire_timeout`, or a caller dropping the get()), the
             // guard's Drop releases the slot — without it the `+1` would leak
             // forever (POOL-1). On Err the guard also releases it on return.
             if self.total.get() < self.config.max_size {

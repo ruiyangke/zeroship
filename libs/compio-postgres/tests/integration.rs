@@ -1384,10 +1384,10 @@ async fn null_in_params() {
 #[compio::test]
 async fn pool_exhaustion() {
     let Some(url) = require_pg().await else { return };
-    // max_size=2 with a very short connection_timeout, so the test does not
+    // max_size=2 with a very short acquire_timeout, so the test does not
     // wait 30 s to observe the exhaustion error.
     //
-    // `min_idle: 2`, NOT 0, and that is load-bearing. `connection_timeout`
+    // `min_idle: 2`, NOT 0, and that is load-bearing. `acquire_timeout`
     // bounds the WHOLE of `get()` - opening a connection as well as waiting for
     // one - so with an empty pool the first two acquisitions had to complete a
     // TCP connect, a startup exchange and SCRAM-SHA-256 (4096 PBKDF2 rounds, in
@@ -1404,7 +1404,7 @@ async fn pool_exhaustion() {
     config
         .max_size(2)
         .min_idle(2)
-        .connection_timeout(std::time::Duration::from_millis(200));
+        .acquire_timeout(std::time::Duration::from_millis(200));
     let pool = Pool::connect_with_pool_config(&url, config).await.unwrap();
     assert_eq!(
         pool.idle_count(),
@@ -1536,7 +1536,7 @@ async fn get_cancellation_during_connect_does_not_leak_permits() {
         // Normal timeout: cancellation is driven by dropping the future, not by
         // the timer firing, so this value is irrelevant to the race (and safely
         // long so a genuine acquire never times out).
-        .connection_timeout(std::time::Duration::from_secs(30))
+        .acquire_timeout(std::time::Duration::from_secs(30))
         // Large, so acquiring the already-warm connection never does a network
         // round-trip (no validation / dirty barrier).
         .validation_bypass(std::time::Duration::from_secs(60));
@@ -1690,7 +1690,7 @@ async fn freed_connection_goes_to_front_waiter_not_a_barging_fresh_caller() {
     config
         .max_size(1)
         .min_idle(0)
-        .connection_timeout(std::time::Duration::from_secs(5))
+        .acquire_timeout(std::time::Duration::from_secs(5))
         // Large so reacquiring the warm entry never does a network round-trip
         // (no validation / dirty barrier) — keeps the interleaving synchronous
         // and deterministic.
@@ -1808,7 +1808,7 @@ async fn handed_off_connection_is_reclaimed_if_waiter_is_cancelled() {
     config
         .max_size(1)
         .min_idle(0)
-        .connection_timeout(std::time::Duration::from_secs(5))
+        .acquire_timeout(std::time::Duration::from_secs(5))
         .validation_bypass(std::time::Duration::from_secs(60));
     let pool = Rc::new(
         Pool::connect_with_pool_config(&url, config)
@@ -4007,7 +4007,7 @@ async fn a_pool_with_room_still_warms_up_to_min_idle() {
 /// Both were added with the warm-set fix and neither had coverage. The
 /// `max_size = 0` arm matters most: without it the pool constructs `Ok`,
 /// never opens a connection, and then parks every `get()` on a waiter nothing
-/// can wake, so the caller pays the full `connection_timeout` - 30s by
+/// can wake, so the caller pays the full `acquire_timeout` - 30s by
 /// default - to learn what the constructor already knew.
 ///
 /// `min_idle > max_size` is reachable without setting `min_idle`, because

@@ -217,12 +217,12 @@ async fn cancelling_an_async_hook_releases_its_capacity_slot() {
             Ok(true)
         })
     });
-    pool_config.connection_timeout(Duration::from_secs(1));
+    pool_config.acquire_timeout(Duration::from_secs(1));
     let pool = connect_pool(&url, pool_config).await;
 
     pool.get()
         .await
-        .expect_err("checkout outlived its connection_timeout inside a hook");
+        .expect_err("checkout outlived its acquire_timeout inside a hook");
     assert_eq!(calls.get(), 1);
     assert_eq!(pool.active_count(), 0);
     assert_eq!(pool.idle_count(), 0);
