@@ -395,10 +395,10 @@ async fn drop_column_keeps_a_partial_index_whose_predicate_leg_never_reads_it() 
         {"op":"createIndex","table":"pred_legs","name":"pred_legs_id_key",
          "columns":[{"kind":"column","name":"id"}],"unique":false,
          "where":{"node":"dialect",
-           "pg":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
-                 "rhs":{"node":"literal","value":0}},
-           "sqlite":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"b"},
-                     "rhs":{"node":"literal","value":0}}}},
+           "legs":{"postgres":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
+                                "rhs":{"node":"literal","value":0}},
+                   "sqlite":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"b"},
+                              "rhs":{"node":"literal","value":0}}}}},
         {"op":"dropColumn","table":"pred_legs","column":"b"}
       ]
     }"#;

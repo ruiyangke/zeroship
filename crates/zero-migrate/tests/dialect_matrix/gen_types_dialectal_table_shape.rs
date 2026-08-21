@@ -4,7 +4,7 @@
 //! `createTable` into the shape the charter mandates - the injected system columns,
 //! the pinned primary key, the injected indexes. It ran BEFORE leg expansion and
 //! walked only the top level, matching `Op::CreateTable` and `continue`-ing past
-//! everything else, so a create authored inside `dialect({ pg, ... })` never reached
+//! everything else, so a create authored inside `dialect({ postgres, ... })` never reached
 //! it.
 //!
 //! The consequence is not cosmetic. The injected shape IS the confinement the charter
@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::{render_artifacts, SqlDialect};
+use zero_migrate::{render_artifacts, SqlDialect, SQLITE};
 
 const SCHEMA: &str = "public";
 
@@ -46,11 +46,11 @@ fn history() -> Vec<Op> {
       {"name":"title","type":"text","nullable":true}
     ]},
     {"op":"dialectal",
-     "pg":[
+     "legs":{"postgres":[
        {"op":"createTable","name":"wrapped","columns":[
          {"name":"title","type":"text","nullable":true}
        ]}
-     ]}
+     ]}}
   ]
 }"#;
     serde_json::from_str::<MigrationIr>(source)
@@ -129,11 +129,11 @@ fn a_create_in_an_unselected_leg_is_resolved_too() {
   "owner_app": "app_test",
   "ops": [
     {"op":"dialectal",
-     "sqlite":[
+     "legs":{"sqlite":[
        {"op":"createTable","name":"only_sqlite","columns":[
          {"name":"title","type":"text","nullable":true}
        ]}
-     ]}
+     ]}}
   ]
 }"#;
     let ir: MigrationIr = serde_json::from_str(source).expect("the unselected-leg IR parses");
@@ -141,10 +141,12 @@ fn a_create_in_an_unselected_leg_is_resolved_too() {
         zero_migrate::resolve_create_table_policy(&ir, &support::confined_charter(), SCHEMA)
             .expect("the confined charter resolves the leg's create");
 
-    let Some(Op::Dialectal { sqlite, .. }) = resolved.ops.first() else {
+    let Some(Op::Dialectal { legs }) = resolved.ops.first() else {
         panic!("resolution keeps the wrapper in place: {:#?}", resolved.ops);
     };
-    let leg = sqlite.as_ref().expect("the sqlite leg survives resolution");
+    let leg = legs
+        .get(&SQLITE)
+        .expect("the sqlite leg survives resolution");
     let Some(Op::CreateTable { columns, .. }) = leg.first() else {
         panic!("the leg still holds its createTable: {leg:#?}");
     };

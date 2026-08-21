@@ -289,10 +289,10 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     // nothing, and reports clean. The comparison above would then be `{}` == `{}`
     // and pass. This floor is what the three fields used to do for free, and it is
     // asserted on BOTH sides, because a cell can go missing on either.
-    let census: BTreeSet<&str> = DIALECT_TABLE
+    let census: BTreeSet<String> = DIALECT_TABLE
         .iter()
         .flat_map(|row| row.dialects())
-        .map(zero_migrate_ir::dialect::DialectId::as_str)
+        .map(|id| id.as_str().to_owned())
         .collect();
     assert!(
         census.len() >= 3,
@@ -302,14 +302,15 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     );
     assert_eq!(
         census,
-        BTreeSet::from(["mysql", "postgres", "sqlite"]),
+        BTreeSet::from([
+            "mysql".to_owned(),
+            "postgres".to_owned(),
+            "sqlite".to_owned()
+        ]),
         "the shipping dialect census changed; a backend was added or lost"
     );
     for row in DIALECT_TABLE {
-        let row_ids: BTreeSet<&str> = row
-            .dialects()
-            .map(zero_migrate_ir::dialect::DialectId::as_str)
-            .collect();
+        let row_ids: BTreeSet<String> = row.dialects().map(|id| id.as_str().to_owned()).collect();
         assert_eq!(
             row_ids, census,
             "table row {}/{} declares {:?}, not the table census {census:?} — a row \
@@ -318,7 +319,7 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
         );
     }
     for row in &sidecar {
-        let row_ids: BTreeSet<&str> = row.dispositions.keys().map(String::as_str).collect();
+        let row_ids: BTreeSet<String> = row.dispositions.keys().cloned().collect();
         assert_eq!(
             row_ids, census,
             "sidecar row {}/{} declares {:?}, not the table census {census:?}",

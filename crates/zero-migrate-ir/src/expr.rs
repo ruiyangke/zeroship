@@ -30,9 +30,12 @@
 //! is the data + (with [`crate::validate`]) the structural
 //! gate. Nothing here renders SQL.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::dialect::DialectId;
 use crate::ir::IrScalar;
 
 /// A binary operator admitted in the closed AST (method↔node table).
@@ -487,47 +490,32 @@ pub enum Expr {
     },
     /// **The one Layer-2 portability escape** — a
     /// per-dialect VALUE divergence. Each present leg is a full [`Expr`]; the
-    /// engine renders the leg matching the render's TARGET dialect — the
-    /// dialect's own leg if present, else `default`. This is `dialect({ default?,
-    /// pg?, sqlite?, mysql? })` in the builder (e.g. `default(dialect({ pg:
-    /// uuidV4(), sqlite: …, mysql: uuidV4() }))`).
+    /// engine renders the leg matching the render's TARGET dialect. This is
+    /// `dialect({ [backendId]: value })` in the builder.
     ///
-    /// The node tag on the wire is `"dialect"` (`#[serde(rename)]`); the four
-    /// legs serialize in declaration order (`default, pg, sqlite, mysql`) — the
-    /// canonical leg order the checksum folds. A leg that is `None` is skipped on
-    /// the wire (`skip_serializing_if`), so a two-leg divergence is byte-minimal.
+    /// The node tag on the wire is `"dialect"` (`#[serde(rename)]`). The map keys
+    /// are canonical [`DialectId`] strings, sorted by `BTreeMap` for checksum
+    /// stability. There is deliberately no fallback leg: non-portable values must
+    /// name every backend they intend to cover.
     ///
     /// **Scope math (validate, [`crate::validate`]).** The covered dialect
-    /// set is `{legs present} ∪ {all dialects if default present}`; a target with
-    /// NEITHER its own leg NOR a `default` is REFUSED fail-closed
+    /// set is exactly the map's keys; a target with no own leg is REFUSED fail-closed
     /// (`EXPR_NOT_PORTABLE`). This is a per-TARGET check: a `dialect()` missing
-    /// the `sqlite` leg with no `default` is fine when targeting PG, refused when
-    /// targeting `SQLite`. At least one leg must be present — a legless `dialect({})`
-    /// is malformed on every target (`UNSUPPORTED`), enforced at validate (all
-    /// four fields are `serde(default)` so an empty node deserializes, then the
-    /// structural gate refuses it).
+    /// the `sqlite` leg is fine when targeting PostgreSQL, refused when targeting
+    /// `SQLite`. At least one leg must be present — a legless `dialect({})`
+    /// is malformed on every target (`UNSUPPORTED`), enforced at validate.
     ///
-    /// **RATCHET OBLIGATION.** The design counts each
-    /// `dialect()` leg as one of the four ratcheted budget counters. That budget
+    /// **RATCHET OBLIGATION.** The design counts each `dialect()` leg toward the
+    /// ratcheted budget. That budget
     /// / baseline mechanism is a LATER phase and is NOT YET BUILT (there is no
     /// baseline file in-tree). When it lands, the per-leg count of this node must
     /// be wired into it. Deferred by design — this additive slice does not gate
     /// on it.
     #[serde(rename = "dialect")]
     Dialectal {
-        /// The fallback leg, rendered for any target dialect that has no explicit
-        /// own leg. Its presence makes the covered set ALL dialects.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        default: Option<Box<Self>>,
-        /// The `PostgreSQL` leg.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pg: Option<Box<Self>>,
-        /// The `SQLite` leg.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sqlite: Option<Box<Self>>,
-        /// The `MySQL` leg.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mysql: Option<Box<Self>>,
+        /// Full expressions keyed by the backend identity that owns each value.
+        #[serde(default)]
+        legs: BTreeMap<DialectId, Box<Self>>,
     },
 }
 
@@ -596,5 +584,92 @@ impl Expr {
     #[must_use]
     pub const fn lit(value: IrScalar) -> Self {
         Self::Literal { value }
+    }
+}
+
+#[cfg(test)]
+mod dialectal_tests {
+    use super::*;
+    use crate::dialect::DialectId;
+    use crate::ir::Op;
+    use crate::validate::{
+        validate_expr, Dialect, TargetScope, CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED,
+    };
+
+    fn literal(value: &str) -> Box<Expr> {
+        Box::new(Expr::lit(IrScalar::Str(value.to_string())))
+    }
+
+    #[test]
+    fn wire_uses_a_nested_lexically_sorted_dialect_id_map() {
+        let expr = Expr::Dialectal {
+            legs: [
+                (DialectId::new("sqlite"), literal("s")),
+                (DialectId::new("postgres"), literal("p")),
+                (DialectId::new("mysql"), literal("m")),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            serde_json::to_string(&expr).unwrap(),
+            r#"{"node":"dialect","legs":{"mysql":{"node":"literal","value":"m"},"postgres":{"node":"literal","value":"p"},"sqlite":{"node":"literal","value":"s"}}}"#
+        );
+    }
+
+    #[test]
+    fn an_unknown_owned_id_round_trips_without_an_enum_or_a_leak() {
+        let wire = r#"{"node":"dialect","legs":{"duckdb":{"node":"literal","value":1}}}"#;
+        let expr: Expr = serde_json::from_str(wire).unwrap();
+        assert_eq!(serde_json::to_string(&expr).unwrap(), wire);
+        let Expr::Dialectal { legs } = expr else {
+            panic!("wire must deserialize as Dialectal");
+        };
+        assert_eq!(legs.keys().next().unwrap().as_str(), "duckdb");
+    }
+
+    #[test]
+    fn legacy_flat_alias_and_default_fields_are_rejected() {
+        for wire in [
+            r#"{"node":"dialect","pg":{"node":"literal","value":1}}"#,
+            r#"{"node":"dialect","default":{"node":"literal","value":1}}"#,
+        ] {
+            assert!(serde_json::from_str::<Expr>(wire).is_err(), "{wire}");
+        }
+        for wire in [
+            r#"{"op":"dialectal","pg":[]}"#,
+            r#"{"op":"dialectal","default":[]}"#,
+        ] {
+            assert!(serde_json::from_str::<Op>(wire).is_err(), "{wire}");
+        }
+    }
+
+    #[test]
+    fn malformed_dialect_ids_are_rejected_at_the_wire_boundary() {
+        for key in ["", "Postgres", "post-gres", "_postgres", "4postgres"] {
+            let wire = format!(
+                r#"{{"node":"dialect","legs":{{{key:?}:{{"node":"literal","value":1}}}}}}"#
+            );
+            assert!(serde_json::from_str::<Expr>(&wire).is_err(), "{wire}");
+        }
+    }
+
+    #[test]
+    fn empty_and_misspelled_maps_fail_closed() {
+        let scope = TargetScope::structural_only("items");
+        let empty = Expr::Dialectal {
+            legs: BTreeMap::new(),
+        };
+        let err = validate_expr(&empty, Dialect::Postgres, &scope, 3).unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+
+        let typo = Expr::Dialectal {
+            legs: [(DialectId::new("postgre"), literal("p"))]
+                .into_iter()
+                .collect(),
+        };
+        let err = validate_expr(&typo, Dialect::Postgres, &scope, 4).unwrap_err();
+        assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
+        assert_eq!(err.dialect, Dialect::Postgres);
     }
 }

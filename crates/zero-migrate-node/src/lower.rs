@@ -29,7 +29,7 @@ use zero_migrate::ops::status::{
     AppliedPlanStatus, PlanStatusManifest, PlanStatusStepState, ReconciledPlanState,
 };
 use zero_migrate::{
-    effective_policy_from_charter_layers, fold_ops_onto, resolve_create_table_policy,
+    effective_policy_from_charter_layers, fold_ops_onto, resolve_create_table_policy, DialectId,
     EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, SqlDialect,
 };
 
@@ -994,20 +994,8 @@ fn ops_contain_contract_rename(
         Op::RenameColumn {
             table, from, to, ..
         } => table == &contract.table && from == &contract.from_col && to == &contract.to_col,
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let selected = match dialect {
-                SqlDialect::Postgres => pg.as_deref().or(default.as_deref()),
-                SqlDialect::Sqlite => sqlite.as_deref().or(default.as_deref()),
-                SqlDialect::Mysql => mysql.as_deref().or(default.as_deref()),
-            };
-            selected
-                .is_some_and(|selected| ops_contain_contract_rename(selected, dialect, contract))
-        }
+        Op::Dialectal { legs } => selected_dialectal_leg(legs, dialect)
+            .is_some_and(|selected| ops_contain_contract_rename(selected, dialect, contract)),
         _ => false,
     })
 }
@@ -1100,18 +1088,8 @@ fn normalize_historical_renames(
                     changed = true;
                 }
             }
-            Op::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } => {
-                let selected = match dialect {
-                    SqlDialect::Postgres => pg.as_deref().or(default.as_deref()),
-                    SqlDialect::Sqlite => sqlite.as_deref().or(default.as_deref()),
-                    SqlDialect::Mysql => mysql.as_deref().or(default.as_deref()),
-                };
-                if let Some(selected) = selected {
+            Op::Dialectal { legs } => {
+                if let Some(selected) = selected_dialectal_leg(legs, dialect) {
                     changed |= normalize_historical_renames(
                         live,
                         selected,
@@ -1204,6 +1182,14 @@ fn dialect_name(dialect: SqlDialect) -> &'static str {
         SqlDialect::Sqlite => "sqlite",
         SqlDialect::Mysql => "mysql",
     }
+}
+
+fn selected_dialectal_leg(
+    legs: &BTreeMap<DialectId, Vec<Op>>,
+    dialect: SqlDialect,
+) -> Option<&[Op]> {
+    legs.get(&DialectId::new(dialect_name(dialect)))
+        .map(Vec::as_slice)
 }
 
 fn live_schema_with_ownership(
@@ -1628,18 +1614,8 @@ fn advance_ownership_registry(
             Op::DropPartition { name, .. } => {
                 registry.remove(name);
             }
-            Op::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } => {
-                let selected = match dialect {
-                    SqlDialect::Postgres => pg.as_deref().or(default.as_deref()),
-                    SqlDialect::Sqlite => sqlite.as_deref().or(default.as_deref()),
-                    SqlDialect::Mysql => mysql.as_deref().or(default.as_deref()),
-                };
-                if let Some(selected) = selected {
+            Op::Dialectal { legs } => {
+                if let Some(selected) = selected_dialectal_leg(legs, dialect) {
                     advance_ownership_registry(registry, selected, dialect, owner_app);
                 }
             }

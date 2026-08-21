@@ -453,7 +453,7 @@ const REFUSAL_PROBES: &[(&str, &str)] = &[
     (
         "dialect_leg_selection",
         r#"[
-  {"op":"dialectal","pg":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"pg_only","type":"text"}],"primaryKey":["id"]}],"sqlite":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"sqlite_only","type":"text"}],"primaryKey":["id"]}],"mysql":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"mysql_only","type":"text"}],"primaryKey":["id"]}]}
+  {"op":"dialectal","legs":{"postgres":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"pg_only","type":"text"}],"primaryKey":["id"]}],"sqlite":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"sqlite_only","type":"text"}],"primaryKey":["id"]}],"mysql":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"mysql_only","type":"text"}],"primaryKey":["id"]}]}}
 ]"#,
     ),
     (

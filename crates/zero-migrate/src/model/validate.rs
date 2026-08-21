@@ -278,25 +278,13 @@ fn validate_authored_identifier_lengths_op(
         authored_name_within_bound(kind, name, position, op_index, target_dialect)
     };
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
+        Op::Dialectal { legs } => {
             // Select the leg the lowering will select. An UNSELECTED leg never renders
             // against this target's catalog, so bounding it would refuse an IR that is
             // correct here. `dialectal` inside `dialectal` is refused elsewhere, so one
             // level of descent covers the shape.
-            let own = match target_dialect {
-                Dialect::Postgres => pg.as_deref(),
-                Dialect::Sqlite => sqlite.as_deref(),
-                Dialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(ops) = own.or(default.as_deref()) {
-                for inner in ops {
-                    validate_authored_identifier_lengths_op(inner, target_dialect, op_index)?;
-                }
+            for inner in dialectal_leg(target_dialect, legs) {
+                validate_authored_identifier_lengths_op(inner, target_dialect, op_index)?;
             }
         }
         Op::CreateIndex {
@@ -1317,28 +1305,16 @@ fn validate_per_row_op(
     use crate::model::ir::{BackfillSetValue, Op};
 
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let own = match target_dialect {
-                Dialect::Postgres => pg.as_deref(),
-                Dialect::Sqlite => sqlite.as_deref(),
-                Dialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(ops) = own.or(default.as_deref()) {
-                for inner in ops {
-                    validate_per_row_op(
-                        inner,
-                        target_dialect,
-                        op_index,
-                        declared,
-                        missing,
-                        schema_mode,
-                    )?;
-                }
+        Op::Dialectal { legs } => {
+            for inner in dialectal_leg(target_dialect, legs) {
+                validate_per_row_op(
+                    inner,
+                    target_dialect,
+                    op_index,
+                    declared,
+                    missing,
+                    schema_mode,
+                )?;
             }
         }
         Op::CreateTable {
@@ -1729,21 +1705,9 @@ fn collect_logical_declarations_op(
     use crate::model::ir::Op;
 
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let own = match target_dialect {
-                Dialect::Postgres => pg.as_deref(),
-                Dialect::Sqlite => sqlite.as_deref(),
-                Dialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(ops) = own.or(default.as_deref()) {
-                for inner in ops {
-                    collect_logical_declarations_op(inner, target_dialect, declared, schema_mode);
-                }
+        Op::Dialectal { legs } => {
+            for inner in dialectal_leg(target_dialect, legs) {
+                collect_logical_declarations_op(inner, target_dialect, declared, schema_mode);
             }
         }
         Op::CreateTable {
@@ -2244,29 +2208,17 @@ fn validate_column_references_op(
     use crate::model::ir::Op;
 
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let own = match target_dialect {
-                Dialect::Postgres => pg.as_deref(),
-                Dialect::Sqlite => sqlite.as_deref(),
-                Dialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(ops) = own.or(default.as_deref()) {
-                for inner in ops {
-                    validate_column_references_op(
-                        inner,
-                        target_dialect,
-                        op_index,
-                        declared,
-                        schema_mode,
-                        missing,
-                        catalog,
-                    )?;
-                }
+        Op::Dialectal { legs } => {
+            for inner in dialectal_leg(target_dialect, legs) {
+                validate_column_references_op(
+                    inner,
+                    target_dialect,
+                    op_index,
+                    declared,
+                    schema_mode,
+                    missing,
+                    catalog,
+                )?;
             }
         }
         Op::CreateTable {
@@ -2519,28 +2471,16 @@ fn validate_mysql_key_storage_op(
     };
 
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let own = match target_dialect {
-                Dialect::Postgres => pg.as_deref(),
-                Dialect::Sqlite => sqlite.as_deref(),
-                Dialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(ops) = own.or(default.as_deref()) {
-                for inner in ops {
-                    validate_mysql_key_storage_op(
-                        inner,
-                        target_dialect,
-                        op_index,
-                        declared,
-                        schema_mode,
-                        catalog,
-                    )?;
-                }
+        Op::Dialectal { legs } => {
+            for inner in dialectal_leg(target_dialect, legs) {
+                validate_mysql_key_storage_op(
+                    inner,
+                    target_dialect,
+                    op_index,
+                    declared,
+                    schema_mode,
+                    catalog,
+                )?;
             }
         }
         Op::CreateIndex {
@@ -4289,14 +4229,8 @@ fn effective_ops(
     use crate::model::ir::Op;
 
     fn push<'a>(out: &mut Vec<(usize, &'a Op)>, index: usize, op: &'a Op, target_dialect: Dialect) {
-        if let Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } = op
-        {
-            for nested in dialectal_leg(target_dialect, default, pg, sqlite, mysql) {
+        if let Op::Dialectal { legs } = op {
+            for nested in dialectal_leg(target_dialect, legs) {
                 push(out, index, nested, target_dialect);
             }
         } else {
@@ -4312,8 +4246,7 @@ fn effective_ops(
 }
 
 /// The nested op sequence a [`Op::Dialectal`] container actually emits for one
-/// target dialect: the dialect's own leg when present, and the `default` leg
-/// otherwise.
+/// target dialect: the dialect's own leg when present, and no ops otherwise.
 ///
 /// Descending into a leg that will NOT run would refuse a migration on a
 /// reference the server never sees, so the choice is made here once and shared.
@@ -4330,18 +4263,14 @@ fn effective_ops(
 /// would still be self-consistent.
 fn dialectal_leg<'a>(
     target_dialect: Dialect,
-    default: &'a Option<Vec<crate::model::ir::Op>>,
-    pg: &'a Option<Vec<crate::model::ir::Op>>,
-    sqlite: &'a Option<Vec<crate::model::ir::Op>>,
-    mysql: &'a Option<Vec<crate::model::ir::Op>>,
+    legs: &'a BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
 ) -> &'a [crate::model::ir::Op] {
     let sql_dialect = match target_dialect {
         Dialect::Postgres => crate::schema::query::SqlDialect::Postgres,
         Dialect::Sqlite => crate::schema::query::SqlDialect::Sqlite,
         Dialect::Mysql => crate::schema::query::SqlDialect::Mysql,
     };
-    crate::render::fold::selected_dialectal_leg(sql_dialect, default, pg, sqlite, mysql)
-        .unwrap_or_default()
+    crate::render::fold::selected_dialectal_leg(sql_dialect, legs).unwrap_or_default()
 }
 
 /// Refuse an operation that names a column an earlier `dropColumn` removed.
@@ -5046,29 +4975,17 @@ fn validate_table_foreign_keys_op(
     use crate::model::ir::Op;
 
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let own = match target_dialect {
-                Dialect::Postgres => pg.as_deref(),
-                Dialect::Sqlite => sqlite.as_deref(),
-                Dialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(ops) = own.or(default.as_deref()) {
-                for inner in ops {
-                    validate_table_foreign_keys_op(
-                        inner,
-                        target_dialect,
-                        op_index,
-                        declared,
-                        schema_mode,
-                        missing,
-                        catalog,
-                    )?;
-                }
+        Op::Dialectal { legs } => {
+            for inner in dialectal_leg(target_dialect, legs) {
+                validate_table_foreign_keys_op(
+                    inner,
+                    target_dialect,
+                    op_index,
+                    declared,
+                    schema_mode,
+                    missing,
+                    catalog,
+                )?;
             }
         }
         Op::CreateTable {
@@ -5263,21 +5180,9 @@ fn validate_online_rename_isolation_op<'a>(
     use crate::model::ir::Op;
 
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let own = match target_dialect {
-                Dialect::Postgres => pg.as_deref(),
-                Dialect::Sqlite => sqlite.as_deref(),
-                Dialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(ops) = own.or(default.as_deref()) {
-                for inner in ops {
-                    validate_online_rename_isolation_op(inner, target_dialect, op_index, seen)?;
-                }
+        Op::Dialectal { legs } => {
+            for inner in dialectal_leg(target_dialect, legs) {
+                validate_online_rename_isolation_op(inner, target_dialect, op_index, seen)?;
             }
         }
         table_op => {
@@ -5517,23 +5422,10 @@ fn validate_partition_recording(
         .iter()
         .enumerate()
         .flat_map(|(op_index, op)| match op {
-            Op::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } => {
-                let own = match target_dialect {
-                    Dialect::Postgres => pg.as_deref(),
-                    Dialect::Sqlite => sqlite.as_deref(),
-                    Dialect::Mysql => mysql.as_deref(),
-                };
-                own.or(default.as_deref())
-                    .unwrap_or(&[])
-                    .iter()
-                    .map(|inner| (op_index, inner))
-                    .collect::<Vec<_>>()
-            }
+            Op::Dialectal { legs } => dialectal_leg(target_dialect, legs)
+                .iter()
+                .map(|inner| (op_index, inner))
+                .collect::<Vec<_>>(),
             other => vec![(op_index, other)],
         })
         .collect();
@@ -6066,10 +5958,7 @@ pub fn validate_op(
 }
 
 fn validate_dialectal_op(
-    default: Option<&[crate::model::ir::Op]>,
-    pg: Option<&[crate::model::ir::Op]>,
-    sqlite: Option<&[crate::model::ir::Op]>,
-    mysql: Option<&[crate::model::ir::Op]>,
+    legs: &BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
     target_dialect: Dialect,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
@@ -6091,24 +5980,15 @@ fn validate_dialectal_op(
         }
     }
 
-    let legs = [
-        ("default", default),
-        ("pg", pg),
-        ("sqlite", sqlite),
-        ("mysql", mysql),
-    ];
-    if legs.iter().all(|(_, leg)| leg.is_none()) {
+    if legs.is_empty() {
         return Err(mk(
             target_dialect,
             op_index,
-            "dialectal op carries no legs; at least one of default/pg/sqlite/mysql must be present",
+            "dialectal op carries no legs; at least one backend id must be present",
             "supply at least one dialectal op leg, or remove the dialect() statement",
         ));
     }
-    for (label, leg) in legs {
-        let Some(ops) = leg else {
-            continue;
-        };
+    for (id, ops) in legs {
         if ops
             .iter()
             .any(|op| matches!(op, crate::model::ir::Op::Dialectal { .. }))
@@ -6116,25 +5996,22 @@ fn validate_dialectal_op(
             return Err(mk(
                 target_dialect,
                 op_index,
-                format!("dialectal op leg {label:?} contains a nested dialectal op"),
+                format!("dialectal op leg {id:?} contains a nested dialectal op"),
                 "flatten the inner dialect() into the outer leg; nested op-level dialect() is not supported",
             ));
         }
-    }
-
-    if let Some(ops) = default {
-        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
-            for op in ops {
-                validate_op_authorized(op, dialect, op_index, schema_scope, authority)?;
-            }
-        }
-    }
-    for (dialect, leg) in [
-        (Dialect::Postgres, pg),
-        (Dialect::Sqlite, sqlite),
-        (Dialect::Mysql, mysql),
-    ] {
-        let Some(ops) = leg else { continue };
+        let dialect = if id == &zero_migrate_ir::dialect::POSTGRES {
+            Dialect::Postgres
+        } else if id == &zero_migrate_ir::dialect::SQLITE {
+            Dialect::Sqlite
+        } else if id == &zero_migrate_ir::dialect::MYSQL {
+            Dialect::Mysql
+        } else {
+            // Cluster F makes the validator target an open DialectId. Until
+            // then, unknown legs are still structurally checked and exact-key
+            // selection ensures they never run for a shipping target.
+            target_dialect
+        };
         for op in ops {
             validate_op_authorized(op, dialect, op_index, schema_scope, authority)?;
         }
@@ -6172,23 +6049,8 @@ pub fn validate_op_authorized(
         ColumnOrExpr, IndexElement, IrConstraintKind, Op, TriggerAction, ViewQuery,
     };
 
-    if let Op::Dialectal {
-        default,
-        pg,
-        sqlite,
-        mysql,
-    } = op
-    {
-        return validate_dialectal_op(
-            default.as_deref(),
-            pg.as_deref(),
-            sqlite.as_deref(),
-            mysql.as_deref(),
-            target_dialect,
-            op_index,
-            schema_scope,
-            authority,
-        );
+    if let Op::Dialectal { legs } = op {
+        return validate_dialectal_op(legs, target_dialect, op_index, schema_scope, authority);
     }
 
     // schema confinement + guard-direction gate, BEFORE any expression
@@ -9200,21 +9062,9 @@ pub fn validate_op_resolved(
         // never executed here and its columns are not this catalog's to satisfy.
         //
         // One level deep is complete: a leg cannot hold a wrapper.
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let own = match target_dialect {
-                Dialect::Postgres => pg.as_deref(),
-                Dialect::Sqlite => sqlite.as_deref(),
-                Dialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(ops) = own.or(default.as_deref()) {
-                for inner in ops {
-                    validate_op_resolved(inner, target_dialect, live_columns, op_index)?;
-                }
+        Op::Dialectal { legs } => {
+            for inner in dialectal_leg(target_dialect, legs) {
+                validate_op_resolved(inner, target_dialect, live_columns, op_index)?;
             }
         }
         // Every other op: revalidate structurally (its own scope is already
@@ -10065,56 +9915,61 @@ mod tests {
     // ── the Layer-2 dialect() per-dialect value escape ──────────────────────
 
     fn dialectal(
-        default: Option<Expr>,
-        pg: Option<Expr>,
-        sqlite: Option<Expr>,
-        mysql: Option<Expr>,
+        legs: impl IntoIterator<Item = (zero_migrate_ir::dialect::DialectId, Expr)>,
     ) -> Expr {
         Expr::Dialectal {
-            default: default.map(Box::new),
-            pg: pg.map(Box::new),
-            sqlite: sqlite.map(Box::new),
-            mysql: mysql.map(Box::new),
+            legs: legs
+                .into_iter()
+                .map(|(dialect, expr)| (dialect, Box::new(expr)))
+                .collect(),
         }
     }
 
     #[test]
-    fn dialectal_missing_leg_no_default_accepted_on_own_target_refused_off_target() {
-        // dialect({ pg: A }) — no default. Its covered set is exactly {pg}: it is
+    fn dialectal_missing_leg_accepted_on_own_target_refused_off_target() {
+        // dialect({ postgres: A }). Its covered set is exactly {postgres}: it is
         // ACCEPTED targeting PG (its own leg), REFUSED targeting SQLite/MySQL
-        // (neither own leg nor default) — the per-TARGET scope math.
+        // (neither target has a leg) — the per-TARGET scope math.
         let sc = TargetScope::structural_only("t");
-        let e = dialectal(None, Some(Expr::lit(IrScalar::Str("A".into()))), None, None);
+        let e = dialectal([(
+            zero_migrate_ir::dialect::POSTGRES,
+            Expr::lit(IrScalar::Str("A".into())),
+        )]);
 
         assert!(
             validate_expr(&e, Dialect::Postgres, &sc, 0).is_ok(),
-            "a pg-only dialect() covers the PG target"
+            "a postgres-only dialect() covers the PostgreSQL target"
         );
         for d in [Dialect::Sqlite, Dialect::Mysql] {
             let err = validate_expr(&e, d, &sc, 0).unwrap_err();
             assert_eq!(
                 err.code, CODE_EXPR_NOT_PORTABLE,
-                "a pg-only dialect() must refuse the {d:?} target (no own leg, no default); got: {err}"
+                "a postgres-only dialect() must refuse the {d:?} target (no own leg); got: {err}"
             );
             assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         }
     }
 
     #[test]
-    fn dialectal_default_covers_every_off_target() {
-        // dialect({ default: D, pg: A }) covers ALL dialects: PG via its own leg,
-        // SQLite/MySQL via the default. Accepted on every target.
+    fn dialectal_explicit_legs_cover_every_target() {
+        // Coverage is exactly the map's key set, so all three targets require
+        // their own explicit leg.
         let sc = TargetScope::structural_only("t");
-        let e = dialectal(
-            Some(Expr::lit(IrScalar::Int(0))),
-            Some(Expr::lit(IrScalar::Str("A".into()))),
-            None,
-            None,
-        );
+        let e = dialectal([
+            (
+                zero_migrate_ir::dialect::POSTGRES,
+                Expr::lit(IrScalar::Str("A".into())),
+            ),
+            (
+                zero_migrate_ir::dialect::SQLITE,
+                Expr::lit(IrScalar::Int(0)),
+            ),
+            (zero_migrate_ir::dialect::MYSQL, Expr::lit(IrScalar::Int(0))),
+        ]);
         for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
             assert!(
                 validate_expr(&e, d, &sc, 0).is_ok(),
-                "a default leg covers the {d:?} target"
+                "an explicit leg covers the {d:?} target"
             );
         }
     }
@@ -10122,22 +9977,24 @@ mod tests {
     #[test]
     fn dialectal_pg_vendor_node_in_pg_leg_validates_on_all_covered_targets() {
         // Regression: the PG-only gate must validate each dialect() leg as the
-        // dialect that owns that leg. A PG-vendor node in the pg leg is fine even
+        // dialect that owns that leg. A PG-vendor node in the postgres leg is fine even
         // while validating a SQLite/MySQL target, because those targets render
-        // their own portable legs and never render the pg leg.
+        // their own portable legs and never render the postgres leg.
         let c = cols();
         let sc = scope("users", &c);
-        let e = dialectal(
-            None,
-            Some(Expr::PgColumnSize {
-                expr: Box::new(Expr::col("name")),
-            }),
-            Some(Expr::col("name")),
-            Some(Expr::col("name")),
-        );
+        let e = dialectal([
+            (
+                zero_migrate_ir::dialect::POSTGRES,
+                Expr::PgColumnSize {
+                    expr: Box::new(Expr::col("name")),
+                },
+            ),
+            (zero_migrate_ir::dialect::SQLITE, Expr::col("name")),
+            (zero_migrate_ir::dialect::MYSQL, Expr::col("name")),
+        ]);
         for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
             validate_expr(&e, d, &sc, 0).unwrap_or_else(|err| {
-                panic!("pgColumnSize in the pg leg must validate on covered {d:?}: {err}")
+                panic!("pgColumnSize in the postgres leg must validate on covered {d:?}: {err}")
             });
         }
     }
@@ -10145,48 +10002,25 @@ mod tests {
     #[test]
     fn dialectal_pg_vendor_node_in_pg_leg_does_not_cover_missing_mysql_leg() {
         // The per-leg PG-only fix must not weaken the existing coverage rule:
-        // pg+sqlite with no default still cannot target MySQL.
+        // postgres+sqlite still cannot target MySQL.
         let c = cols();
         let sc = scope("users", &c);
-        let e = dialectal(
-            None,
-            Some(Expr::PgColumnSize {
-                expr: Box::new(Expr::col("name")),
-            }),
-            Some(Expr::col("name")),
-            None,
-        );
+        let e = dialectal([
+            (
+                zero_migrate_ir::dialect::POSTGRES,
+                Expr::PgColumnSize {
+                    expr: Box::new(Expr::col("name")),
+                },
+            ),
+            (zero_migrate_ir::dialect::SQLITE, Expr::col("name")),
+        ]);
         assert!(validate_expr(&e, Dialect::Postgres, &sc, 0).is_ok());
         assert!(validate_expr(&e, Dialect::Sqlite, &sc, 0).is_ok());
         let err = validate_expr(&e, Dialect::Mysql, &sc, 0).unwrap_err();
         assert_eq!(
             err.code, CODE_EXPR_NOT_PORTABLE,
-            "a dialect() with no mysql/default leg must still refuse MySQL; got: {err}"
+            "a dialect() with no mysql leg must still refuse MySQL; got: {err}"
         );
-    }
-
-    #[test]
-    fn dialectal_default_leg_must_remain_portable() {
-        // `default` is not a vendor bucket. It may be selected for any target, so
-        // a PG-only node in default is refused even when the current target is PG.
-        let c = cols();
-        let sc = scope("users", &c);
-        let e = dialectal(
-            Some(Expr::PgColumnSize {
-                expr: Box::new(Expr::col("name")),
-            }),
-            None,
-            Some(Expr::col("name")),
-            Some(Expr::col("name")),
-        );
-        for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
-            let err = validate_expr(&e, d, &sc, 0).unwrap_err();
-            assert_eq!(
-                err.code, CODE_UNSUPPORTED,
-                "a PG-only node in default must be refused on {d:?}; got: {err}"
-            );
-            assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        }
     }
 
     #[test]
@@ -10195,7 +10029,7 @@ mod tests {
         // CODE_UNSUPPORTED), enforced at validate (serde deserializes the empty
         // node, the structural gate refuses it).
         let sc = TargetScope::structural_only("t");
-        let e = dialectal(None, None, None, None);
+        let e = dialectal([]);
         for d in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
             let err = validate_expr(&e, d, &sc, 0).unwrap_err();
             assert_eq!(
@@ -10214,12 +10048,13 @@ mod tests {
         // mysql leg while targeting PG.
         let c = cols();
         let sc = scope("users", &c);
-        let e = dialectal(
-            Some(Expr::lit(IrScalar::Int(0))),
-            Some(Expr::col("name")),
-            None,
-            Some(Expr::col("ghost")), // not a column on `users`
-        );
+        let e = dialectal([
+            (zero_migrate_ir::dialect::POSTGRES, Expr::col("name")),
+            (
+                zero_migrate_ir::dialect::MYSQL,
+                Expr::col("ghost"), // not a column on `users`
+            ),
+        ]);
         let err = validate_expr(&e, Dialect::Postgres, &sc, 0).unwrap_err();
         assert_eq!(
             err.code, CODE_UNSUPPORTED,
@@ -11486,12 +11321,15 @@ mod tests {
         }
     }
 
-    fn dialectal_legs(pg: Option<Vec<Op>>, mysql: Option<Vec<Op>>) -> Op {
+    fn dialectal_legs(postgres: Option<Vec<Op>>, mysql: Option<Vec<Op>>) -> Op {
         Op::Dialectal {
-            default: None,
-            pg,
-            sqlite: None,
-            mysql,
+            legs: [
+                (zero_migrate_ir::dialect::POSTGRES, postgres),
+                (zero_migrate_ir::dialect::MYSQL, mysql),
+            ]
+            .into_iter()
+            .filter_map(|(dialect, ops)| ops.map(|ops| (dialect, ops)))
+            .collect(),
         }
     }
 
@@ -11819,13 +11657,21 @@ mod tests {
     #[test]
     fn validate_ir_checks_only_the_selected_dialectal_rename_sequence() {
         let ir = ir_with(vec![Op::Dialectal {
-            default: None,
-            pg: Some(vec![
-                rename_column("users", "first", "first_name"),
-                rename_column("users", "last", "last_name"),
-            ]),
-            sqlite: Some(vec![rename_column("users", "name", "display_name")]),
-            mysql: None,
+            legs: [
+                (
+                    zero_migrate_ir::dialect::POSTGRES,
+                    vec![
+                        rename_column("users", "first", "first_name"),
+                        rename_column("users", "last", "last_name"),
+                    ],
+                ),
+                (
+                    zero_migrate_ir::dialect::SQLITE,
+                    vec![rename_column("users", "name", "display_name")],
+                ),
+            ]
+            .into_iter()
+            .collect(),
         }]);
 
         let err = validate_ir(&ir, Dialect::Postgres)
@@ -13362,10 +13208,18 @@ mod tests {
     #[test]
     fn per_row_destination_tracking_uses_only_the_selected_dialectal_leg() {
         let dialectal_declaration = Op::Dialectal {
-            default: Some(vec![per_row_create_op(ColType::Text, None)]),
-            pg: Some(vec![per_row_create_op(ColType::Uuid, None)]),
-            sqlite: None,
-            mysql: None,
+            legs: [
+                (
+                    zero_migrate_ir::dialect::POSTGRES,
+                    vec![per_row_create_op(ColType::Uuid, None)],
+                ),
+                (
+                    zero_migrate_ir::dialect::SQLITE,
+                    vec![per_row_create_op(ColType::Text, None)],
+                ),
+            ]
+            .into_iter()
+            .collect(),
         };
         let ir = ir_with(vec![
             dialectal_declaration,
@@ -13375,7 +13229,7 @@ mod tests {
         validate_ir_platform(&ir, Dialect::Postgres)
             .expect("the selected PG declaration is logical UUID");
         let error = validate_ir_platform(&ir, Dialect::Sqlite)
-            .expect_err("SQLite must use the generic-text default leg, not the PG leg");
+            .expect_err("SQLite must use its generic-text leg, not the PostgreSQL leg");
         assert!(
             error
                 .reason

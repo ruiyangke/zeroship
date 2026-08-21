@@ -495,20 +495,22 @@
       },
       {
         "op": "dialectal",
-        "pg": [
-          {
-            "op": "createIndex",
-            "table": "docs",
-            "columns": [
-              {
-                "kind": "column",
-                "name": "embedding"
-              }
-            ],
-            "name": "docs_embedding_hnsw_idx",
-            "using": "hnsw"
-          }
-        ]
+        "legs": {
+          "postgres": [
+            {
+              "op": "createIndex",
+              "table": "docs",
+              "columns": [
+                {
+                  "kind": "column",
+                  "name": "embedding"
+                }
+              ],
+              "name": "docs_embedding_hnsw_idx",
+              "using": "hnsw"
+            }
+          ]
+        }
       }
     ]
   },

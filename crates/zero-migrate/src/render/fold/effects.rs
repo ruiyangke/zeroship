@@ -349,8 +349,8 @@ mod tests {
     fn an_unflattened_dialectal_wrapper_is_a_removal() {
         assert_eq!(
             effect_of(&op(
-                r#"{"op":"dialectal","pg":[{"op":"addColumn","table":"t",
-                    "column":"c","type":"text"}]}"#
+                r#"{"op":"dialectal","legs":{"postgres":[{"op":"addColumn","table":"t",
+                    "column":"c","type":"text"}]}}"#
             )),
             Effect::MayRemove
         );

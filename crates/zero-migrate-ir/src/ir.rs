@@ -3400,21 +3400,11 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// A per-dialect op sequence. The target's own leg wins; otherwise `default`
-    /// wins; otherwise the wrapper emits nothing on that target.
+    /// Per-backend op sequences. A target with no own leg emits nothing.
     Dialectal {
-        /// Fallback op sequence.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        default: Option<Vec<Self>>,
-        /// `PostgreSQL` op sequence.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pg: Option<Vec<Self>>,
-        /// `SQLite` op sequence.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        sqlite: Option<Vec<Self>>,
-        /// `MySQL` op sequence.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mysql: Option<Vec<Self>>,
+        /// Op sequences keyed by the backend identity that owns each sequence.
+        #[serde(default)]
+        legs: BTreeMap<crate::dialect::DialectId, Vec<Self>>,
     },
 
     /// `CREATE [OR REPLACE] VIEW` / `CREATE MATERIALIZED VIEW`.
@@ -4029,21 +4019,10 @@ impl Op {
             // ── opaque raw SQL — fail closed ───────────────────────────────────
             | Self::PgRaw { .. } => true,
             // `Dialectal` is destructive iff any present leg is.
-            Self::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } => [
-                default.as_deref(),
-                pg.as_deref(),
-                sqlite.as_deref(),
-                mysql.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(Op::is_destructive),
+            Self::Dialectal { legs } => legs
+                .values()
+                .flatten()
+                .any(Op::is_destructive),
             // ── additive / non-lossy — NOT destructive (guard: NonDestructive) ─
             Self::CreateTable { .. }
             | Self::CreatePartition { .. }
@@ -4093,22 +4072,8 @@ impl Op {
     /// table and delegate to [`Self::touched_table`]; `Dialectal` recursively
     /// flattens all present legs because its op sequence can touch several tables.
     pub fn collect_touched_tables<'a>(&'a self, set: &mut std::collections::BTreeSet<&'a str>) {
-        if let Self::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } = self
-        {
-            for leg in [
-                default.as_deref(),
-                pg.as_deref(),
-                sqlite.as_deref(),
-                mysql.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
+        if let Self::Dialectal { legs } = self {
+            for leg in legs.values() {
                 for op in leg {
                     op.collect_touched_tables(set);
                 }

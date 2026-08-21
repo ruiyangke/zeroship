@@ -913,13 +913,13 @@ const REFUSAL_PROBES: &[(&str, &str)] = &[
         "duplicate_enum_inside_a_dialect_leg",
         r#"[
   {"op":"createEnum","name":"tier","values":["free"]},
-  {"op":"dialectal","pg":[{"op":"createEnum","name":"tier","values":["free","paid"]}],"sqlite":[],"mysql":[]}
+  {"op":"dialectal","legs":{"postgres":[{"op":"createEnum","name":"tier","values":["free","paid"]}],"sqlite":[],"mysql":[]}}
 ]"#,
     ),
     (
         "duplicate_enum_only_in_an_inactive_leg",
         r#"[
-  {"op":"dialectal","pg":[{"op":"createEnum","name":"tier","values":["free"]}],"sqlite":[{"op":"createEnum","name":"other","values":["a"]}],"mysql":[{"op":"createEnum","name":"other","values":["a"]}]},
+  {"op":"dialectal","legs":{"postgres":[{"op":"createEnum","name":"tier","values":["free"]}],"sqlite":[{"op":"createEnum","name":"other","values":["a"]}],"mysql":[{"op":"createEnum","name":"other","values":["a"]}]}},
   {"op":"createEnum","name":"tier","values":["free","paid"]}
 ]"#,
     ),

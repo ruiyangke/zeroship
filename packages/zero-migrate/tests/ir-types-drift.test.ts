@@ -169,7 +169,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   update: ["schema", "set", "table", "where"].sort(),
   delete: ["limit", "schema", "table", "where"].sort(),
   backfill: ["batchSize", "cursorColumns", "cursorStability", "filter", "name", "schema", "set", "table"].sort(),
-  dialectal: ["default", "mysql", "pg", "sqlite"].sort(),
+  dialectal: ["legs"],
   createView: ["columns", "materialized", "name", "query", "replace", "schema"].sort(),
   dropView: ["existenceGuard", "materialized", "name", "schema"].sort(),
   createEnum: ["name", "schema", "values"].sort(),

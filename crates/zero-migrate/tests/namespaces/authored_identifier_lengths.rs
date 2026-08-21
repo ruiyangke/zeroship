@@ -52,7 +52,7 @@ use zero_migrate::model::validate::{validate_ir_scoped, AuthoringError, Dialect}
 use zero_migrate::render::existence_probe::{decide, GuardVerdict};
 use zero_migrate::{
     ColType, IndexElement, IrAuthor, IrColumn, IrConstraint, IrConstraintKind, IrIndex, LiveSchema,
-    MigrationIr, Op, SchemaScope, SqlDialect,
+    MigrationIr, Op, SchemaScope, SqlDialect, POSTGRES, SQLITE,
 };
 
 use crate::support;
@@ -459,20 +459,7 @@ fn lower_accepts_a_63_byte_authored_constraint_name() {
 /// A `dropConstraint` buried in the PostgreSQL leg of a `dialectal` wrapper.
 fn dialectal_pg_drop_constraint(name: &str) -> Op {
     Op::Dialectal {
-        default: None,
-        pg: Some(vec![drop_constraint(name)]),
-        sqlite: None,
-        mysql: None,
-    }
-}
-
-/// The same op in the `default` leg, which every dialect falls back to.
-fn dialectal_default_drop_constraint(name: &str) -> Op {
-    Op::Dialectal {
-        default: Some(vec![drop_constraint(name)]),
-        pg: None,
-        sqlite: None,
-        mysql: None,
+        legs: BTreeMap::from([(POSTGRES, vec![drop_constraint(name)])]),
     }
 }
 
@@ -482,14 +469,9 @@ fn dialectal_default_drop_constraint(name: &str) -> Op {
 fn the_load_gate_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
     let name = ascii_name(MAX + 1);
     assert_refused_for_length(
-        "dialectal pg dropConstraint",
+        "dialectal postgres dropConstraint",
         Dialect::Postgres,
         dialectal_pg_drop_constraint(&name),
-    );
-    assert_refused_for_length(
-        "dialectal default dropConstraint",
-        Dialect::Postgres,
-        dialectal_default_drop_constraint(&name),
     );
 }
 
@@ -497,14 +479,9 @@ fn the_load_gate_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
 fn the_lower_seam_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
     let name = ascii_name(MAX + 1);
     assert_lower_refused_for_length(
-        "dialectal pg dropConstraint",
+        "dialectal postgres dropConstraint",
         SqlDialect::Postgres,
         dialectal_pg_drop_constraint(&name),
-    );
-    assert_lower_refused_for_length(
-        "dialectal default dropConstraint",
-        SqlDialect::Postgres,
-        dialectal_default_drop_constraint(&name),
     );
 }
 
@@ -514,10 +491,10 @@ fn the_lower_seam_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
 fn an_unselected_dialectal_leg_is_not_bounded() {
     let name = ascii_name(MAX + 1);
     let op = Op::Dialectal {
-        default: None,
-        pg: None,
-        sqlite: Some(vec![drop_constraint(&name)]),
-        mysql: None,
+        legs: BTreeMap::from([
+            (POSTGRES, Vec::new()),
+            (SQLITE, vec![drop_constraint(&name)]),
+        ]),
     };
     assert_not_refused_for_length("dialectal sqlite leg on postgres", Dialect::Postgres, op);
 }

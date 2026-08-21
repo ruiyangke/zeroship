@@ -2425,37 +2425,65 @@ test("portable between/like/in/notIn/distinctFrom chain builders record the righ
   });
 });
 
-test("dialect() records the Layer-2 per-dialect value escape in canonical leg order", () => {
+test("dialect() records the Layer-2 per-backend value escape in canonical leg order", () => {
   // the one Layer-2 escape. Each leg is a full expression; the legs record
-  // in full in the `dialect` node in canonical order (default, pg, sqlite, mysql).
+  // in full in the `dialect` node in lexical DialectId order.
   const ops = record(() =>
     table("t").update({
       set: {
-        // all three explicit legs, no default
-        u: () => dialect({ pg: lit("A"), sqlite: lit("B"), mysql: lit("C") }),
-        // default + one explicit leg
-        d: () => dialect({ default: lit(0), pg: lit(1) }),
+        u: () => dialect({ postgres: lit("A"), sqlite: lit("B"), mysql: lit("C") }),
+        d: () => dialect({ postgres: lit(1), duckdb: lit(0) }),
       },
     }),
   );
   const set = ops[0].set;
   assert.deepEqual(set.u, {
     node: "dialect",
-    pg: { node: "literal", value: "A" },
-    sqlite: { node: "literal", value: "B" },
-    mysql: { node: "literal", value: "C" },
+    legs: {
+      mysql: { node: "literal", value: "C" },
+      postgres: { node: "literal", value: "A" },
+      sqlite: { node: "literal", value: "B" },
+    },
   });
-  // Canonical leg order: default serializes first.
-  assert.deepEqual(Object.keys(set.d), ["node", "default", "pg"]);
+  assert.deepEqual(Object.keys(set.d), ["node", "legs"]);
+  assert.deepEqual(Object.keys(set.d.legs), ["duckdb", "postgres"]);
   assert.deepEqual(set.d, {
     node: "dialect",
-    default: { node: "literal", value: 0 },
-    pg: { node: "literal", value: 1 },
+    legs: {
+      duckdb: { node: "literal", value: 0 },
+      postgres: { node: "literal", value: 1 },
+    },
   });
 });
 
 test("dialect() rejects an empty leg set at record time", () => {
   assert.throws(() => record(() => table("t").update({ set: { x: () => dialect({}) } })), /at least one leg/);
+});
+
+test("dialect() requires a plain leg map", () => {
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: () => dialect([] as any) } })),
+    /must be an object keyed by backend id/,
+  );
+});
+
+test("dialect() rejects malformed backend ids at record time", () => {
+  assert.throws(
+    () => record(() => table("t").update({ set: { x: () => dialect({ Postgres: lit(1) }) } })),
+    /must match \[a-z\]\[a-z0-9_\]\*/,
+  );
+});
+
+test("dialect() records a well-formed hostile-looking own key without prototype dispatch", () => {
+  const ops = record(() =>
+    table("t").update({
+      set: { x: () => dialect({ constructor: lit(1), postgres: lit(2) }) },
+    }),
+  );
+  const legs = ops[0].set.x.legs;
+  assert.deepEqual(Object.keys(legs), ["constructor", "postgres"]);
+  assert.equal(Object.hasOwn(legs, "constructor"), true);
+  assert.deepEqual(legs.constructor, { node: "literal", value: 1 });
 });
 
 test("dialect() records op-level thunk legs by sub-recording normal ops", () => {
@@ -2467,15 +2495,16 @@ test("dialect() records op-level thunk legs by sub-recording normal ops", () => 
       },
     });
     dialect({
-      pg: () => table("docs").index("docs_embedding_hnsw_idx").add({ on: ["embedding"], using: "hnsw" }),
+      postgres: () => table("docs").index("docs_embedding_hnsw_idx").add({ on: ["embedding"], using: "hnsw" }),
       sqlite: () => {},
     });
   });
 
   assert.equal(ops.length, 2);
   assert.equal(ops[1].op, "dialectal");
-  assert.deepEqual(Object.keys(ops[1]), ["op", "pg", "sqlite"]);
-  assert.deepEqual(ops[1].pg, [
+  assert.deepEqual(Object.keys(ops[1]), ["op", "legs"]);
+  assert.deepEqual(Object.keys(ops[1].legs), ["postgres", "sqlite"]);
+  assert.deepEqual(ops[1].legs.postgres, [
     {
       op: "createIndex",
       table: "docs",
@@ -2484,13 +2513,13 @@ test("dialect() records op-level thunk legs by sub-recording normal ops", () => 
       using: "hnsw",
     },
   ]);
-  assert.deepEqual(ops[1].sqlite, []);
-  assert.equal("mysql" in ops[1], false);
+  assert.deepEqual(ops[1].legs.sqlite, []);
+  assert.equal("mysql" in ops[1].legs, false);
 });
 
 test("dialect() rejects mixed op thunk and expression legs", () => {
   assert.throws(
-    () => record(() => dialect({ pg: () => table("docs").column("title").add({ type: t.text() }), sqlite: lit(0) })),
+    () => record(() => dialect({ postgres: () => table("docs").column("title").add({ type: t.text() }), sqlite: lit(0) })),
     (e: any) => e.code === "OP_INVALID" && /cannot mix op thunk legs/.test(e.message),
   );
 });
@@ -2499,14 +2528,16 @@ test("dialect() still treats bare native synth symbols as expression legs", () =
   const ops = record(() =>
     table("t").update({
       set: {
-        ts: () => dialect({ pg: Date.now, sqlite: now() }),
+        ts: () => dialect({ postgres: Date.now, sqlite: now() }),
       },
     }),
   );
   assert.deepEqual(ops[0].set.ts, {
     node: "dialect",
-    pg: { node: "fnSynth", fn: "now", args: [] },
-    sqlite: { node: "fnSynth", fn: "now", args: [] },
+    legs: {
+      postgres: { node: "fnSynth", fn: "now", args: [] },
+      sqlite: { node: "fnSynth", fn: "now", args: [] },
+    },
   });
 });
 

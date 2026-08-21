@@ -135,8 +135,8 @@ fn variant_index(dialect: SqlDialect) -> usize {
 }
 
 /// The enum variant that answers for `id`, if the closed enum has one.
-fn bridge_variant(id: DialectId) -> Option<SqlDialect> {
-    ALL_SQL_DIALECTS.iter().copied().find(|d| d.id() == id)
+fn bridge_variant(id: &DialectId) -> Option<SqlDialect> {
+    ALL_SQL_DIALECTS.iter().copied().find(|d| &d.id() == id)
 }
 
 /// Every capability the two rows disagree about, by name, with which side said yes.
@@ -300,7 +300,7 @@ fn the_enum_bridge_and_the_registry_resolve_to_one_descriptor() {
     for registered in vendors.iter() {
         let id = registered.id.as_str();
 
-        let Some(dialect) = bridge_variant(registered.id) else {
+        let Some(dialect) = bridge_variant(&registered.id) else {
             disagreements.push(format!(
                 "vendor `{id}` is registered but no `SqlDialect` variant answers for it, \
                  so it is unreachable through the enum bridge entirely. Engine code still \
@@ -313,7 +313,7 @@ fn the_enum_bridge_and_the_registry_resolve_to_one_descriptor() {
         if bridge != registered {
             disagreements.push(describe("the vendor registry", id, bridge, registered));
         }
-        if let Some(from_ir) = ir_shipping.get(registered.id) {
+        if let Some(from_ir) = ir_shipping.get(&registered.id) {
             if bridge != from_ir {
                 disagreements.push(describe("`-ir`'s shipping registry", id, bridge, from_ir));
             }
@@ -331,7 +331,7 @@ fn the_enum_bridge_and_the_registry_resolve_to_one_descriptor() {
     // rather than in a second test because it is the same defect seen from the far
     // side — one door open, the other shut.
     for dialect in ALL_SQL_DIALECTS {
-        if vendors.get(dialect.id()).is_none() {
+        if vendors.get(&dialect.id()).is_none() {
             disagreements.push(format!(
                 "`SqlDialect::{dialect:?}` hands out a descriptor through the bridge but \
                  no vendor is registered under `{}`, so the bridge is describing a \

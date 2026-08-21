@@ -17,7 +17,7 @@ export default {
     });
 
     dialect({
-      pg: () => table("docs").index("docs_embedding_hnsw_idx").add({
+      postgres: () => table("docs").index("docs_embedding_hnsw_idx").add({
         on: ["embedding"],
         using: "hnsw",
       }),

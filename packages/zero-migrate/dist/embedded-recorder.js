@@ -1810,19 +1810,26 @@ function countStar() {
   return aggNode("count", void 0);
 }
 function dialect(legs) {
-  if (legs === null || typeof legs !== "object") {
+  if (!isPlainObject(legs)) {
     throw structuredError(
       "OP_INVALID",
-      "dialect(legs): legs must be an object with default/pg/sqlite/mysql expression or op thunk legs"
+      "dialect(legs): legs must be an object keyed by backend id with expression or op thunk legs"
     );
   }
-  const ordered = ["default", "pg", "sqlite", "mysql"];
-  const present = ordered.map((leg) => [leg, legs[leg]]).filter(([, value]) => value !== void 0);
+  const present = Object.keys(legs).sort().map((leg) => [leg, legs[leg]]).filter(([, value]) => value !== void 0);
   if (present.length === 0) {
     throw structuredError(
       "OP_INVALID",
-      "dialect(legs): at least one leg (default/pg/sqlite/mysql) must be present"
+      "dialect(legs): at least one leg must be present"
     );
+  }
+  for (const [leg] of present) {
+    if (!/^[a-z][a-z0-9_]*$/.test(leg)) {
+      throw structuredError(
+        "OP_INVALID",
+        `dialect(legs): backend id ${JSON.stringify(leg)} must match [a-z][a-z0-9_]*`
+      );
+    }
   }
   const isOpThunk = (value) => typeof value === "function" && nativeDbExprNode(value) === void 0;
   const firstIsThunk = isOpThunk(present[0][1]);
@@ -1835,22 +1842,22 @@ function dialect(legs) {
     }
   }
   if (firstIsThunk) {
-    const node2 = {};
+    const recordedLegs = {};
     for (const [leg, value] of present) {
       const thunk = value;
       const rec = recorder();
       const start = rec.ops.length;
       thunk();
-      node2[leg] = rec.ops.splice(start);
+      setOwn(recordedLegs, leg, rec.ops.splice(start));
     }
-    emitDialectal(node2);
+    emitDialectal({ legs: recordedLegs });
     return;
   }
-  const node = { node: "dialect" };
+  const expressionLegs = {};
   for (const [leg, value] of present) {
-    node[leg] = exprArg(value);
+    setOwn(expressionLegs, leg, exprArg(value));
   }
-  return chain(node);
+  return chain({ node: "dialect", legs: expressionLegs });
 }
 function aggNode(func, expr, opts) {
   const node = { node: "agg", func };
@@ -2123,8 +2130,11 @@ function validateImmutableExpr(expr, position, opts = {}) {
         }
         return;
       case "dialect":
-        for (const leg of ["default", "pg", "sqlite", "mysql"]) {
-          if (n[leg] !== void 0 && n[leg] !== null) walk(n[leg]);
+        if (!isPlainObject(n.legs)) {
+          rejectImmutableExpr(position, "dialect legs must be an object keyed by backend id");
+        }
+        for (const leg of Object.values(n.legs)) {
+          if (leg !== void 0 && leg !== null) walk(leg);
         }
         return;
       default:

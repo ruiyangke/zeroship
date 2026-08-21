@@ -15,7 +15,7 @@ use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
 /// variant. `PgOnly` could only ever say "Postgres", so a MySQL-only or
 /// DuckDB-only artifact had no way to describe itself; `Only(id)` does, and it
 /// does so without this enum growing a variant per backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialectScope {
     /// Applies faithfully to every dialect the artifact's ops support.
     Portable,
@@ -34,7 +34,7 @@ impl DialectScope {
 
     /// Whether this plan may be applied against `target`.
     #[must_use]
-    pub fn admits(self, target: DialectId) -> bool {
+    pub fn admits(&self, target: &DialectId) -> bool {
         match self {
             Self::Portable => true,
             Self::Only(id) => id == target,

@@ -31,6 +31,7 @@ use zero_migrate::model::ir::{
     RaiseLevel, SafeI64, SafeU64, SelectAst, SequenceRef, TableRef, TableRuntimeOptionsPatch,
     TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
 };
+use zero_migrate::{MYSQL, POSTGRES, SQLITE};
 
 fn col_ref() -> Expr {
     Expr::ColRef {
@@ -381,10 +382,11 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         "dialectal",
         "base",
         Op::Dialectal {
-            default: Some(Vec::new()),
-            pg: None,
-            sqlite: None,
-            mysql: None,
+            legs: std::collections::BTreeMap::from([
+                (POSTGRES, Vec::new()),
+                (SQLITE, Vec::new()),
+                (MYSQL, Vec::new()),
+            ]),
         },
     ));
     c.push((

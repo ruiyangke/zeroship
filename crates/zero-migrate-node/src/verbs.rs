@@ -1243,7 +1243,7 @@ mod status_projection_tests {
                 ApplyDialect::parse(target.id().as_str()).expect("a host-apply id round-trips");
             assert_eq!(parsed.id(), target.id());
             assert!(
-                BackendRegistry::shipping().get(target.id()).is_some(),
+                BackendRegistry::shipping().get(&target.id()).is_some(),
                 "{} must be a registered backend",
                 target.id()
             );

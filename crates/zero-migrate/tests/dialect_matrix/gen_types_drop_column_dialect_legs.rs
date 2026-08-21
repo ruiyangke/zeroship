@@ -1,6 +1,6 @@
 //! **`gen-types` cascades a column drop through the SELECTED dialect leg.**
 //!
-//! `render_expr_inline` installs exactly one leg of a `dialect({ pg, sqlite,
+//! `render_expr_inline` installs exactly one leg of a `dialect({ postgres, sqlite,
 //! mysql })` expression per target, so the object that reaches the database names
 //! only that leg's columns. The `gen-types` IR replay decides which constraints and
 //! indexes survive an `Op::DropColumn`, and a `true` verdict DROPS - so a walk that
@@ -30,10 +30,11 @@ const SCHEMA: &str = "public";
 /// reads `b` - so the two targets disagree about which column drop cascades.
 const SPLIT_PREDICATE: &str = r#"{
   "node":"dialect",
-  "pg":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
-        "rhs":{"node":"literal","value":0}},
-  "sqlite":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"b"},
-            "rhs":{"node":"literal","value":0}}
+  "legs":{
+    "postgres":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"a"},
+               "rhs":{"node":"literal","value":0}},
+    "sqlite":{"node":"binOp","op":"gt","lhs":{"node":"colRef","name":"b"},
+               "rhs":{"node":"literal","value":0}}}
 }"#;
 
 /// The history: create `legs(id, a, b)` carrying the split predicate as a partial

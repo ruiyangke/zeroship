@@ -254,7 +254,7 @@ pub struct Limits {
 /// [`Self::capabilities`] yes/no questions, and reads [`Self::limits`] for the
 /// quantities it must respect. [`Self::display_name`] is for humans and for the
 /// duplicate-registration diagnostic; it is never a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackendDescriptor {
     /// The opaque identity. The registry refuses two descriptors sharing one.
     pub id: DialectId,
@@ -322,7 +322,7 @@ pub const MYSQL_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
     .with(Capability::TriggerBody);
 
 /// The PostgreSQL backend descriptor.
-pub const POSTGRES_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
+pub static POSTGRES_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
     id: POSTGRES,
     display_name: "PostgreSQL",
     capabilities: POSTGRES_CAPABILITIES,
@@ -333,7 +333,7 @@ pub const POSTGRES_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
 };
 
 /// The `SQLite` backend descriptor.
-pub const SQLITE_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
+pub static SQLITE_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
     id: SQLITE,
     display_name: "SQLite",
     capabilities: SQLITE_CAPABILITIES,
@@ -343,7 +343,7 @@ pub const SQLITE_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
 };
 
 /// The `MySQL` backend descriptor.
-pub const MYSQL_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
+pub static MYSQL_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
     id: MYSQL,
     display_name: "MySQL",
     capabilities: MYSQL_CAPABILITIES,
@@ -353,7 +353,7 @@ pub const MYSQL_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
 };
 
 /// Every backend this build ships, in registration order.
-pub const SHIPPING_DESCRIPTORS: &[&BackendDescriptor] =
+pub static SHIPPING_DESCRIPTORS: &[&BackendDescriptor] =
     &[&POSTGRES_DESCRIPTOR, &SQLITE_DESCRIPTOR, &MYSQL_DESCRIPTOR];
 
 impl SqlDialect {
@@ -502,14 +502,14 @@ impl BackendRegistry {
 
     /// The descriptor filed under `id`, if this build has one.
     #[must_use]
-    pub fn get(&self, id: DialectId) -> Option<&'static BackendDescriptor> {
-        self.entries.iter().copied().find(|d| d.id == id)
+    pub fn get(&self, id: &DialectId) -> Option<&'static BackendDescriptor> {
+        self.entries.iter().copied().find(|d| &d.id == id)
     }
 
     /// Every registered id.
     #[must_use]
     pub fn ids(&self) -> DialectSet {
-        DialectSet::from_ids(self.entries.iter().map(|d| d.id))
+        DialectSet::from_ids(self.entries.iter().map(|d| d.id.clone()))
     }
 
     /// How many backends are registered.

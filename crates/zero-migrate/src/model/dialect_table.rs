@@ -74,9 +74,9 @@ impl DispositionRow {
     /// decide which they mean; [`Self::disposition`] panics rather than pick one
     /// silently.
     #[must_use]
-    pub fn disposition_for(&self, id: DialectId) -> Option<Disposition> {
+    pub fn disposition_for(&self, id: &DialectId) -> Option<Disposition> {
         self.dispositions
-            .binary_search_by_key(&id, |(dialect, _)| *dialect)
+            .binary_search_by(|(dialect, _)| dialect.cmp(id))
             .ok()
             .map(|i| self.dispositions[i].1)
     }
@@ -91,7 +91,7 @@ impl DispositionRow {
     #[must_use]
     pub fn disposition(&self, dialect: Dialect) -> Disposition {
         let id = dialect.id();
-        self.disposition_for(id).unwrap_or_else(|| {
+        self.disposition_for(&id).unwrap_or_else(|| {
             panic!(
                 "dialect table row {}/{} declares no disposition for {id}",
                 self.kind, self.variant
@@ -101,7 +101,7 @@ impl DispositionRow {
 
     /// The dialects this row declares a disposition for, in ascending id order.
     pub fn dialects(&self) -> impl Iterator<Item = DialectId> + '_ {
-        self.dispositions.iter().map(|(id, _)| *id)
+        self.dispositions.iter().map(|(id, _)| id.clone())
     }
 }
 

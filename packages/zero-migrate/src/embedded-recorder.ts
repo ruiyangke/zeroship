@@ -64,7 +64,7 @@ export {
   createFunction,
   dropFunction,
   raw,
-  // dialect() — expression legs AND op-level thunked legs
+  // dialect() — DialectId-keyed expression legs AND op-level thunked legs
   dialect,
   // the determinism lint (best-effort source scan)
   lintDeterminism,

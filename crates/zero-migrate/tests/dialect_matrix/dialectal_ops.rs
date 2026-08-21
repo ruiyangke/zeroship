@@ -9,7 +9,7 @@ use zero_migrate::model::validate::{validate_ir, Dialect, CODE_OP_INVALID};
 use zero_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PlanStep,
-    SqlDialect, SqliteBackend, CURRENT_IR_VERSION,
+    SqlDialect, SqliteBackend, CURRENT_IR_VERSION, POSTGRES,
 };
 
 const PROJECT: &str = "prj_dialectal";
@@ -58,16 +58,13 @@ fn pg_only_ir() -> MigrationIr {
     ir(
         "pg_only_hnsw",
         vec![Op::Dialectal {
-            default: None,
-            pg: Some(vec![hnsw_index_op()]),
-            sqlite: None,
-            mysql: None,
+            legs: BTreeMap::from([(POSTGRES, vec![hnsw_index_op()])]),
         }],
     )
 }
 
 #[test]
-fn lower_selects_pg_leg_and_skips_absent_sqlite_mysql_legs() {
+fn lower_selects_postgres_leg_and_skips_absent_sqlite_mysql_legs() {
     let pg_steps = IrAuthor::new(
         PROJECT,
         APP,
@@ -92,7 +89,7 @@ fn lower_selects_pg_leg_and_skips_absent_sqlite_mysql_legs() {
             .unwrap_or_else(|err| panic!("{dialect:?} absent dialectal leg should skip: {err}"));
         assert!(
             steps.is_empty(),
-            "{dialect:?} should skip absent pg-only leg"
+            "{dialect:?} should skip absent postgres-only leg"
         );
     }
 }
@@ -201,15 +198,15 @@ fn authored_create_table_lowers_under_the_charter_that_shaped_it() {
 }
 
 #[compio::test]
-async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
+async fn sqlite_apply_skips_absent_postgres_leg_without_column_effect() {
     let p = paths("sqlite_skip");
     let be = backend(&p);
     let ir = resolved_envelope_json(
-        r#"{"ir_version":1,"name":"sqlite_skip_pg_leg","ops":[
+        r#"{"ir_version":1,"name":"sqlite_skip_postgres_leg","ops":[
           {"op":"createTable","name":"docs","columns":[{"name":"title","type":"text"}]},
-          {"op":"dialectal","pg":[
+          {"op":"dialectal","legs":{"postgres":[
             {"op":"addColumn","table":"docs","column":"pg_only","type":"text"}
-          ]}
+          ]}}
         ]}"#,
     );
 
@@ -221,11 +218,11 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
     );
     let migrations = author
         .load_and_lower(&ir, APP, &registry(&[]), &LiveSchema::default())
-        .expect("SQLite should lower createTable and skip absent dialectal leg");
+        .expect("SQLite should lower createTable and skip the absent dialectal leg");
     assert_eq!(
         migrations.len(),
         1,
-        "SQLite lower should emit only createTable; dialectal pg leg is absent"
+        "SQLite lower should emit only createTable; its dialectal leg is absent"
     );
 
     let engine = MigrationEngine::new();
@@ -253,7 +250,7 @@ async fn sqlite_apply_skips_absent_pg_leg_without_column_effect() {
         .expect("pragma_table_info probe");
     assert!(
         rows.is_empty(),
-        "SQLite must not apply the absent pg-only leg"
+        "SQLite must not apply the PostgreSQL-only column op"
     );
 }
 
@@ -262,10 +259,7 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
     let empty = ir(
         "empty",
         vec![Op::Dialectal {
-            default: None,
-            pg: None,
-            sqlite: None,
-            mysql: None,
+            legs: BTreeMap::new(),
         }],
     );
     let err = validate_ir(&empty, Dialect::Postgres).unwrap_err();
@@ -274,15 +268,12 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
     let nested = ir(
         "nested",
         vec![Op::Dialectal {
-            default: None,
-            pg: Some(vec![Op::Dialectal {
-                default: None,
-                pg: Some(Vec::new()),
-                sqlite: None,
-                mysql: None,
-            }]),
-            sqlite: None,
-            mysql: None,
+            legs: BTreeMap::from([(
+                POSTGRES,
+                vec![Op::Dialectal {
+                    legs: BTreeMap::from([(POSTGRES, Vec::new())]),
+                }],
+            )]),
         }],
     );
     let err = validate_ir(&nested, Dialect::Postgres).unwrap_err();

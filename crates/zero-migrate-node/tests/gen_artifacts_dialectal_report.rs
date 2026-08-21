@@ -1,7 +1,8 @@
 //! **`genArtifacts` reports whether the history it folded is dialect-sensitive.**
 //!
 //! `GenArtifactsSource.dialect` is REQUIRED and has no default, because the fold
-//! selects `Op::Dialectal` legs and a history authored with `dialect({ pg, mysql })`
+//! selects `Op::Dialectal` legs and a history authored with
+//! `dialect({ postgres, mysql })`
 //! yields a different column set per target. A host that does not know its target
 //! therefore cannot call this verb correctly - but nothing in the reply let it find
 //! out whether the value it supplied mattered, so a host that hardcodes one is right
@@ -9,12 +10,12 @@
 //!
 //! WHAT THE FIELD REPORTS, and the distinction the arms below exist to pin: the
 //! history CONTAINS an op-level `dialect()` wrapper - NOT that a leg was selected.
-//! Those come apart in the case that matters most. A pg-only wrapper folded under
-//! SQLite selects nothing at all (`selected_dialectal_leg` finds no `sqlite` leg and
-//! no `default`, so the op contributes zero ops and the fold succeeds), which is
-//! exactly the silent divergence a caller needs told about. A field reporting
-//! SELECTION would read `false` there - the wrong answer at the only moment the
-//! answer is load-bearing.
+//! Those come apart in the case that matters most. A postgres-only wrapper folded
+//! under SQLite selects nothing at all (`selected_dialectal_leg` finds no `sqlite`
+//! leg, so the op contributes zero ops and the fold succeeds), which is exactly the
+//! silent divergence a caller needs told about. A field reporting SELECTION would
+//! read `false` there - the wrong answer at the only moment the answer is
+//! load-bearing.
 //!
 //! WHAT `false` DOES NOT MEAN: that the artifacts are dialect-independent. Other
 //! fold rules key on the dialect too - the materialized enum/domain capability gates
@@ -50,22 +51,24 @@ fn leg_free_history() -> Vec<Value> {
     })]
 }
 
-/// The same history plus a column authored inside a PG-ONLY `dialect()` leg. The
+/// The same history plus a column authored inside a POSTGRES-ONLY `dialect()` leg. The
 /// plain `createTable` is kept so every dialect still folds something and the arms
 /// differ only in the wrapper, not in whether the fold has work to do.
-fn pg_only_leg_history() -> Vec<Value> {
+fn postgres_only_leg_history() -> Vec<Value> {
     let mut history = leg_free_history();
     history.push(json!({
         "ir_version": 1,
-        "name": "pg_only_column",
+        "name": "postgres_only_column",
         "ops": [{
             "op": "dialectal",
-            "pg": [{
-                "op": "addColumn",
-                "table": "notes",
-                "column": "pg_only",
-                "type": "text",
-            }],
+            "legs": {
+                "postgres": [{
+                    "op": "addColumn",
+                    "table": "notes",
+                    "column": "postgres_only",
+                    "type": "text",
+                }],
+            },
         }],
     }));
     history
@@ -90,14 +93,14 @@ fn a_history_with_no_dialectal_leg_reports_false() {
 #[test]
 fn a_selected_dialectal_leg_reports_true() {
     let reply = gen_artifacts_from_envelopes(
-        &pg_only_leg_history(),
+        &postgres_only_leg_history(),
         "postgres",
         Some(SCHEMA),
         &[charter().as_str()],
     );
     assert!(
         reply.ok,
-        "pg leg under postgres should fold: {:?}",
+        "postgres leg under postgres should fold: {:?}",
         reply.error
     );
     assert_eq!(
@@ -109,29 +112,60 @@ fn a_selected_dialectal_leg_reports_true() {
 
 /// The arm that makes PRESENCE the right predicate rather than SELECTION.
 ///
-/// Under SQLite and MySQL the pg-only wrapper matches no leg and has no `default`,
-/// so it contributes nothing and the fold still succeeds. The dialect argument
-/// decided the whole content of that op, so the honest answer is still `true`.
+/// Under SQLite and MySQL the postgres-only wrapper matches no leg, so it
+/// contributes nothing and the fold still succeeds. The dialect argument decided
+/// the whole content of that op, so the honest answer is still `true`.
 /// Re-implementing the field as "a leg was selected" flips these two to `false` and
 /// this is the test that catches it.
 #[test]
 fn an_unselected_dialectal_leg_still_reports_true() {
     for dialect in ["sqlite", "mysql"] {
         let reply = gen_artifacts_from_envelopes(
-            &pg_only_leg_history(),
+            &postgres_only_leg_history(),
             dialect,
             Some(SCHEMA),
             &[charter().as_str()],
         );
         assert!(
             reply.ok,
-            "{dialect} should fold the history and skip the absent leg: {:?}",
+            "{dialect} should fold the history and skip the absent op leg: {:?}",
             reply.error
         );
         assert_eq!(
             reply.has_dialectal_ops,
             Some(true),
             "{dialect} selected no leg, but the dialect argument is what emptied the op",
+        );
+    }
+}
+
+#[test]
+fn pg_alias_and_misspelled_postgres_leg_select_no_op() {
+    for wrong_key in ["pg", "postgre"] {
+        let mut history = postgres_only_leg_history();
+        let legs = history[1]["ops"][0]["legs"]
+            .as_object_mut()
+            .expect("fixture carries a legs map");
+        let postgres = legs
+            .remove("postgres")
+            .expect("fixture carries the canonical postgres leg");
+        legs.insert(wrong_key.to_string(), postgres);
+
+        let reply =
+            gen_artifacts_from_envelopes(&history, "postgres", Some(SCHEMA), &[charter().as_str()]);
+        assert!(
+            reply.ok,
+            "{wrong_key:?} is an unselected op leg, not a postgres alias: {:?}",
+            reply.error
+        );
+        assert_eq!(reply.has_dialectal_ops, Some(true));
+        assert!(
+            !reply
+                .runtime_json
+                .as_deref()
+                .expect("successful fold renders runtime JSON")
+                .contains("postgres_only"),
+            "{wrong_key:?} must not select the postgres-only column",
         );
     }
 }

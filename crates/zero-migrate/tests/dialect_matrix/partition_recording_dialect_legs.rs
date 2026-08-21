@@ -57,7 +57,7 @@ fn a_top_level_orphan_partition_is_refused_on_sqlite() {
 #[test]
 fn an_orphan_partition_inside_the_selected_leg_is_refused() {
     let error = refusal(
-        &format!(r#"[{{"op":"dialectal","sqlite":[{ORPHAN_CHILD}]}}]"#),
+        &format!(r#"[{{"op":"dialectal","legs":{{"sqlite":[{ORPHAN_CHILD}]}}}}]"#),
         ValidatorDialect::Sqlite,
     )
     .expect("a dialect() wrapper must not hide a partition from the recording check");
@@ -73,12 +73,12 @@ fn an_orphan_partition_inside_the_selected_leg_is_refused() {
 #[test]
 fn an_orphan_partition_in_an_unselected_leg_is_not_refused() {
     let error = refusal(
-        &format!(r#"[{{"op":"dialectal","pg":[{ORPHAN_CHILD}]}}]"#),
+        &format!(r#"[{{"op":"dialectal","legs":{{"postgres":[{ORPHAN_CHILD}]}}}}]"#),
         ValidatorDialect::Sqlite,
     );
     assert!(
         error.is_none(),
-        "SQLite never runs the pg leg, so its partitions are not this target's to \
+        "SQLite never runs the postgres leg, so its partitions are not this target's to \
          validate: {error:?}"
     );
 }
@@ -92,11 +92,11 @@ fn a_top_level_parent_is_visible_to_a_child_inside_a_leg() {
       {"op":"createTable","name":"events","columns":[
         {"name":"tenant","type":"int","nullable":false}
       ],"primaryKey":["tenant"],"partitionBy":{"kind":"list","columns":["tenant"],"collapse":true}},
-      {"op":"dialectal","sqlite":[
+      {"op":"dialectal","legs":{"sqlite":[
         {"op":"createPartition","name":"events_a","of":"events",
          "bounds":{"kind":"list","values":[{"kind":"int","value":1}]}},
         {"op":"createPartition","name":"events_rest","of":"events",
-         "bounds":{"kind":"default"}}]}
+         "bounds":{"kind":"default"}}]}}
     ]"#;
     let error = refusal(ops, ValidatorDialect::Sqlite);
     assert!(

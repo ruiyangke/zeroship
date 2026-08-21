@@ -243,11 +243,12 @@ fn render_runtime_descriptor_v1(
 /// Fold `ops` to per-collection wire-`FieldDef` maps and render both artifacts.
 ///
 /// `dialect` is the project's REAL target. It is not a formality: `Op::Dialectal`
-/// leg selection happens inside the fold, so a history carrying a `dialect({ pg,
-/// mysql })` leg produces a different column set per target, and an artifact folded
-/// under the wrong dialect names columns the database does not have. Every fold rule
-/// that keys on the dialect (leg selection, the materialized enum/domain capability
-/// gates, the identity/primary-key reuse rules) therefore reaches the artifacts.
+/// leg selection happens inside the fold, so a history carrying a
+/// `dialect({ postgres, mysql })` leg produces a different column set per target,
+/// and an artifact folded under the wrong dialect names columns the database does
+/// not have. Every fold rule that keys on the dialect (leg selection, the
+/// materialized enum/domain capability gates, the identity/primary-key reuse rules)
+/// therefore reaches the artifacts.
 /// The type RECOVERY inside `ir_column_to_field` is dialect-neutral, which is what
 /// the earlier hard-coded `Postgres` argument was justified by; that justification
 /// never covered leg selection.
@@ -651,22 +652,17 @@ fn visit_expr_values_mut(
 /// pins that spelling against a real `Expr::Dialectal`.
 const DIALECT_NODE: &str = "dialect";
 
-/// The leg a serialized `dialect({ default?, pg?, sqlite?, mysql? })` node renders
-/// for `dialect`: the target's OWN leg, else `default`. The same rule
-/// `render::dml::select_dialect_leg` applies, which is what actually
-/// reaches the database. A node with neither is refused per-target by
+/// The leg a serialized `dialect({ postgres?, sqlite?, mysql? })` node renders
+/// for `dialect`: the target's exact [`DialectId`](zero_migrate_ir::dialect::DialectId)
+/// key. The same rule `render::dml::select_dialect_leg` applies, which is what
+/// actually reaches the database. A node without the target key is refused by
 /// `crate::model::validate` long before here; it renders nothing on this target, so
 /// it reads no column here either.
 fn selected_dialect_leg(
     node: &serde_json::Map<String, Value>,
     dialect: SqlDialect,
 ) -> Option<&Value> {
-    let own = match dialect {
-        SqlDialect::Postgres => "pg",
-        SqlDialect::Sqlite => "sqlite",
-        SqlDialect::Mysql => "mysql",
-    };
-    node.get(own).or_else(|| node.get("default"))
+    node.get("legs")?.as_object()?.get(dialect.id().as_str())
 }
 
 /// Whether `expr` reads `table`.`column` AS IT RENDERS FOR `dialect`.
@@ -2006,16 +2002,25 @@ mod tests {
             })
         };
         let expr = Expr::Dialectal {
-            default: Some(leg("d")),
-            pg: Some(leg("p")),
-            sqlite: Some(leg("s")),
-            mysql: Some(leg("m")),
+            legs: [
+                (zero_migrate_ir::dialect::POSTGRES, leg("p")),
+                (zero_migrate_ir::dialect::SQLITE, leg("s")),
+                (zero_migrate_ir::dialect::MYSQL, leg("m")),
+            ]
+            .into_iter()
+            .collect(),
         };
         let value = serde_json::to_value(&expr).expect("Expr serializes");
         let node = value
             .as_object()
             .expect("a dialectal Expr is a JSON object");
         assert_eq!(node.get("node").and_then(Value::as_str), Some(DIALECT_NODE));
+        let legs = node["legs"].as_object().expect("legs is a JSON object");
+        assert!(legs.contains_key("postgres"));
+        assert!(
+            !legs.contains_key("pg"),
+            "the canonical wire id is postgres"
+        );
         for (dialect, name) in [
             (SqlDialect::Postgres, "p"),
             (SqlDialect::Sqlite, "s"),
@@ -2028,35 +2033,35 @@ mod tests {
             );
         }
 
-        let default_only = Expr::Dialectal {
-            default: Some(leg("d")),
-            pg: None,
-            sqlite: None,
-            mysql: None,
+        let postgres_only = Expr::Dialectal {
+            legs: [(zero_migrate_ir::dialect::POSTGRES, leg("p"))]
+                .into_iter()
+                .collect(),
         };
-        let value = serde_json::to_value(&default_only).expect("Expr serializes");
-        let node = value
-            .as_object()
-            .expect("a dialectal Expr is a JSON object");
-        assert_eq!(
-            selected_dialect_leg(node, SqlDialect::Postgres).and_then(|leg| leg.get("name")),
-            Some(&Value::String("d".to_string())),
-            "a target with no own leg falls back to default"
-        );
-
-        let pg_only = Expr::Dialectal {
-            default: None,
-            pg: Some(leg("p")),
-            sqlite: None,
-            mysql: None,
-        };
-        let value = serde_json::to_value(&pg_only).expect("Expr serializes");
+        let value = serde_json::to_value(&postgres_only).expect("Expr serializes");
         let node = value
             .as_object()
             .expect("a dialectal Expr is a JSON object");
         assert!(
             selected_dialect_leg(node, SqlDialect::Mysql).is_none(),
-            "a target with neither an own leg nor a default renders nothing"
+            "a target without its own key renders nothing"
+        );
+
+        let misspelled = Expr::Dialectal {
+            legs: [(
+                zero_migrate_ir::dialect::DialectId::new("postgre"),
+                leg("typo"),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let value = serde_json::to_value(&misspelled).expect("Expr serializes");
+        let node = value
+            .as_object()
+            .expect("a dialectal Expr is a JSON object");
+        assert!(
+            selected_dialect_leg(node, SqlDialect::Postgres).is_none(),
+            "a misspelled id does not cover the canonical postgres target"
         );
     }
 }

@@ -773,16 +773,8 @@ impl LiveSchema {
     /// with already-selected inner ops, so the descent is the preview's path; both
     /// callers get the same answer either way.
     pub(crate) fn advance_declared_column_generation(&mut self, op: &Op, dialect: SqlDialect) {
-        if let Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } = op
-        {
-            if let Some(leg) =
-                crate::render::fold::selected_dialectal_leg(dialect, default, pg, sqlite, mysql)
-            {
+        if let Op::Dialectal { legs } = op {
+            if let Some(leg) = crate::render::fold::selected_dialectal_leg(dialect, legs) {
                 for inner in leg {
                     self.advance_declared_column_generation(inner, dialect);
                 }
@@ -1019,19 +1011,8 @@ fn collect_typed_reference_sites<'a>(
     out: &mut Vec<TypedReferenceSite<'a>>,
 ) {
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let selected = match dialect {
-                SqlDialect::Postgres => pg.as_deref(),
-                SqlDialect::Sqlite => sqlite.as_deref(),
-                SqlDialect::Mysql => mysql.as_deref(),
-            }
-            .or(default.as_deref());
-            if let Some(ops) = selected {
+        Op::Dialectal { legs } => {
+            if let Some(ops) = crate::render::fold::selected_dialectal_leg(dialect, legs) {
                 for inner in ops {
                     collect_typed_reference_sites(inner, dialect, op_index, out);
                 }
@@ -1061,19 +1042,8 @@ fn collect_table_foreign_key_sites<'a>(
     out: &mut Vec<TableForeignKeySite<'a>>,
 ) {
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let selected = match dialect {
-                SqlDialect::Postgres => pg.as_deref(),
-                SqlDialect::Sqlite => sqlite.as_deref(),
-                SqlDialect::Mysql => mysql.as_deref(),
-            }
-            .or(default.as_deref());
-            if let Some(ops) = selected {
+        Op::Dialectal { legs } => {
+            if let Some(ops) = crate::render::fold::selected_dialectal_leg(dialect, legs) {
                 for inner in ops {
                     collect_table_foreign_key_sites(inner, dialect, op_index, out);
                 }
@@ -2351,18 +2321,8 @@ fn collect_op_database_requirements(
                 collect_expr_database_requirements(predicate, dialect, requirements);
             }
         }
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let own = match dialect {
-                SqlDialect::Postgres => pg.as_deref(),
-                SqlDialect::Sqlite => sqlite.as_deref(),
-                SqlDialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(selected) = own.or(default.as_deref()) {
+        Op::Dialectal { legs } => {
+            if let Some(selected) = crate::render::fold::selected_dialectal_leg(dialect, legs) {
                 for inner in selected {
                     collect_op_database_requirements(inner, dialect, requirements);
                 }
@@ -2689,18 +2649,8 @@ fn collect_expr_database_requirements(
         Expr::Extract { from, .. } | Expr::PgExtract { from, .. } => {
             collect_expr_database_requirements(from, dialect, requirements);
         }
-        Expr::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let own = match dialect {
-                SqlDialect::Postgres => pg.as_deref(),
-                SqlDialect::Sqlite => sqlite.as_deref(),
-                SqlDialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(selected) = own.or(default.as_deref()) {
+        Expr::Dialectal { legs } => {
+            if let Some(selected) = legs.get(&dialect.id()) {
                 collect_expr_database_requirements(selected, dialect, requirements);
             }
         }
@@ -3029,13 +2979,8 @@ impl IrAuthor {
         // One level deep is complete: a leg cannot hold a wrapper.
         for op in &ir.ops {
             let effective: &[Op] = match op {
-                Op::Dialectal {
-                    default,
-                    pg,
-                    sqlite,
-                    mysql,
-                } => {
-                    for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+                Op::Dialectal { legs } => {
+                    for leg in legs.values() {
                         Self::supplement_bare_index_drops(leg, live, &mut touched_tables);
                     }
                     &[]
@@ -3916,20 +3861,10 @@ impl IrAuthor {
                 if std::ptr::eq(op, stop) {
                     return Ok(true);
                 }
-                if let Op::Dialectal {
-                    default,
-                    pg,
-                    sqlite,
-                    mysql,
-                } = op
-                {
-                    let selected = match author.dialect {
-                        SqlDialect::Postgres => pg.as_deref(),
-                        SqlDialect::Sqlite => sqlite.as_deref(),
-                        SqlDialect::Mysql => mysql.as_deref(),
-                    }
-                    .or(default.as_deref());
-                    if let Some(selected) = selected {
+                if let Op::Dialectal { legs } = op {
+                    if let Some(selected) =
+                        crate::render::fold::selected_dialectal_leg(author.dialect, legs)
+                    {
                         if replay_ops(author, selected, stop, table, snapshot)? {
                             return Ok(true);
                         }
@@ -4082,17 +4017,9 @@ impl IrAuthor {
 
     fn selected_dialectal_leg<'a>(
         &self,
-        default: &'a Option<Vec<Op>>,
-        pg: &'a Option<Vec<Op>>,
-        sqlite: &'a Option<Vec<Op>>,
-        mysql: &'a Option<Vec<Op>>,
+        legs: &'a BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<Op>>,
     ) -> Option<&'a [Op]> {
-        let own = match self.dialect {
-            SqlDialect::Postgres => pg.as_deref(),
-            SqlDialect::Sqlite => sqlite.as_deref(),
-            SqlDialect::Mysql => mysql.as_deref(),
-        };
-        own.or(default.as_deref())
+        crate::render::fold::selected_dialectal_leg(self.dialect, legs)
     }
 
     fn lower_op_into_steps(
@@ -4106,14 +4033,8 @@ impl IrAuthor {
         named_types: &mut NamedTypeRegistry,
         pending_foreign_keys: &mut Vec<DeferredForeignKeyUnit>,
     ) -> Result<(), IrLowerError> {
-        if let Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } = op
-        {
-            if let Some(leg) = self.selected_dialectal_leg(default, pg, sqlite, mysql) {
+        if let Op::Dialectal { legs } = op {
+            if let Some(leg) = self.selected_dialectal_leg(legs) {
                 for inner in leg {
                     if matches!(inner, Op::Dialectal { .. }) {
                         return Err(IrLowerError::UnsupportedOp(
@@ -4241,7 +4162,7 @@ impl IrAuthor {
         // The SELECTED leg, not every leg: a rename sitting in the PostgreSQL leg is
         // never executed here and rebuilds nothing, so refusing on it would reject a
         // migration that is correct on this target. Selection goes through the fold's
-        // own `selected_dialectal_leg` rather than a second own-then-default rule
+        // own `selected_dialectal_leg` rather than a second exact-id lookup rule
         // written here, so the two cannot drift.
         //
         // One level deep is complete: a leg cannot hold a wrapper, refused by the
@@ -4249,19 +4170,9 @@ impl IrAuthor {
         let mut seen: BTreeSet<&str> = BTreeSet::new();
         for op in &ir.ops {
             let effective: &[Op] = match op {
-                Op::Dialectal {
-                    default,
-                    pg,
-                    sqlite,
-                    mysql,
-                } => crate::render::fold::selected_dialectal_leg(
-                    self.dialect,
-                    default,
-                    pg,
-                    sqlite,
-                    mysql,
-                )
-                .unwrap_or(&[]),
+                Op::Dialectal { legs } => {
+                    crate::render::fold::selected_dialectal_leg(self.dialect, legs).unwrap_or(&[])
+                }
                 other => std::slice::from_ref(other),
             };
             for inner in effective {
@@ -6882,14 +6793,8 @@ impl IrAuthor {
         // deny-list backstop so embedded arbitrary SQL cannot host-reach.
         skips_static_guard: bool,
     ) -> Result<(), IrGuardedLowerError> {
-        if let Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } = op
-        {
-            if let Some(leg) = self.selected_dialectal_leg(default, pg, sqlite, mysql) {
+        if let Op::Dialectal { legs } = op {
+            if let Some(leg) = self.selected_dialectal_leg(legs) {
                 for inner in leg {
                     if matches!(inner, Op::Dialectal { .. }) {
                         return Err(IrLowerError::UnsupportedOp(
@@ -10696,13 +10601,8 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             // The Layer-2 dialect() escape: collect refs from EVERY present
             // leg so a derived CHECK name is stable regardless of which dialect the
             // divergence resolves to at render time.
-            Expr::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } => {
-                for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+            Expr::Dialectal { legs } => {
+                for leg in legs.values() {
                     collect_col_refs(leg, out);
                 }
             }
@@ -11638,10 +11538,18 @@ mod tests {
             name: "dialectal_events".into(),
             owner_app: "app_a".into(),
             ops: vec![Op::Dialectal {
-                default: Some(vec![insert_uuid_expr(Expr::UuidV7)]),
-                pg: Some(vec![insert_uuid_expr(Expr::UuidV4)]),
-                sqlite: None,
-                mysql: None,
+                legs: [
+                    (
+                        zero_migrate_ir::dialect::POSTGRES,
+                        vec![insert_uuid_expr(Expr::UuidV4)],
+                    ),
+                    (
+                        zero_migrate_ir::dialect::SQLITE,
+                        vec![insert_uuid_expr(Expr::UuidV7)],
+                    ),
+                ]
+                .into_iter()
+                .collect(),
             }],
             flags: IrFlagsOverride::default(),
             depends_on: Vec::new(),
@@ -11657,16 +11565,18 @@ mod tests {
         assert_eq!(
             plan.database_requirements.iter().collect::<Vec<_>>(),
             vec![DatabaseFeature::UuidV4Generation],
-            "inactive op and expression fallback legs must not raise the PostgreSQL floor"
+            "inactive op and expression legs must not raise the PostgreSQL floor"
         );
 
         let mut expression_requirements = DatabaseRequirements::default();
         collect_expr_database_requirements(
             &Expr::Dialectal {
-                default: Some(Box::new(Expr::UuidV7)),
-                pg: Some(Box::new(Expr::UuidV4)),
-                sqlite: None,
-                mysql: None,
+                legs: [
+                    (zero_migrate_ir::dialect::POSTGRES, Box::new(Expr::UuidV4)),
+                    (zero_migrate_ir::dialect::SQLITE, Box::new(Expr::UuidV7)),
+                ]
+                .into_iter()
+                .collect(),
             },
             SqlDialect::Postgres,
             &mut expression_requirements,
@@ -11674,24 +11584,22 @@ mod tests {
         assert_eq!(
             expression_requirements.iter().collect::<Vec<_>>(),
             vec![DatabaseFeature::UuidV4Generation],
-            "the explicit PostgreSQL expression leg wins over the fallback"
+            "the exact PostgreSQL expression leg is selected"
         );
 
-        let mut fallback_requirements = DatabaseRequirements::default();
+        let mut absent_requirements = DatabaseRequirements::default();
         collect_expr_database_requirements(
             &Expr::Dialectal {
-                default: Some(Box::new(Expr::UuidV7)),
-                pg: None,
-                sqlite: None,
-                mysql: None,
+                legs: [(zero_migrate_ir::dialect::SQLITE, Box::new(Expr::UuidV7))]
+                    .into_iter()
+                    .collect(),
             },
             SqlDialect::Postgres,
-            &mut fallback_requirements,
+            &mut absent_requirements,
         );
-        assert_eq!(
-            fallback_requirements.iter().collect::<Vec<_>>(),
-            vec![DatabaseFeature::UuidV7Generation],
-            "the expression fallback is selected when no PostgreSQL leg exists"
+        assert!(
+            absent_requirements.is_empty(),
+            "a dialectal expression without a postgres key contributes no PostgreSQL requirement"
         );
     }
 
@@ -16004,11 +15912,13 @@ columns = [
         let empty = parse(serde_json::json!([]));
         let dialectal = parse(serde_json::json!([{
             "op": "dialectal",
-            "pg": [{
-                "op": "update",
-                "table": "accounts",
-                "set": { "score": 7 }
-            }]
+            "legs": {
+                "postgres": [{
+                    "op": "update",
+                    "table": "accounts",
+                    "set": { "score": 7 }
+                }]
+            }
         }]));
         let author = test_ir_author("app", "app_a", SqlDialect::Sqlite);
         let lower_twice = |ir: &MigrationIr| {

@@ -2354,19 +2354,8 @@ pub fn check_ir_data_security_policy(
         op: &'a Op,
         out: &mut Vec<(usize, &'a Op)>,
     ) {
-        if let Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } = op
-        {
-            let own = match cfg.dialect() {
-                SqlDialect::Postgres => pg.as_deref(),
-                SqlDialect::Sqlite => sqlite.as_deref(),
-                SqlDialect::Mysql => mysql.as_deref(),
-            };
-            if let Some(leg) = own.or(default.as_deref()) {
+        if let Op::Dialectal { legs } = op {
+            if let Some(leg) = legs.get(&cfg.dialect().id()) {
                 for inner in leg {
                     push_policy_ops(cfg, op_index, inner, out);
                 }

@@ -41,6 +41,9 @@
 //! in the data layer. Until a separate analysis pass above `model` + `guard`
 //! walks raw view bodies, this is the one deliberate `model -> guard` edge.
 
+use std::collections::BTreeMap;
+
+use crate::dialect::DialectId;
 use crate::expr::{AggFunc, CaseBranch, Duration, Expr, ScalarFn, SynthFn};
 use crate::ir::AlterPrimaryKeyAction;
 
@@ -376,7 +379,11 @@ impl Dialect {
     /// drift into two spellings of one dialect.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
-        self.id().as_str()
+        match self {
+            Self::Postgres => "postgres",
+            Self::Sqlite => "sqlite",
+            Self::Mysql => "mysql",
+        }
     }
 }
 
@@ -703,20 +710,7 @@ fn first_aggregate(expr: &Expr) -> Option<&'static str> {
             .or_else(|| delimiter.as_deref().and_then(first_aggregate))
             .or_else(|| Some(agg_func_name(*func))),
         Expr::InList { expr, .. } => first_aggregate(expr),
-        Expr::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => [
-            default.as_deref(),
-            pg.as_deref(),
-            sqlite.as_deref(),
-            mysql.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .find_map(first_aggregate),
+        Expr::Dialectal { legs } => legs.values().find_map(|leg| first_aggregate(leg)),
     }
 }
 
@@ -766,20 +760,7 @@ fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
             .and_then(first_volatile_function)
             .or_else(|| delimiter.as_deref().and_then(first_volatile_function)),
         Expr::InList { expr, .. } => first_volatile_function(expr),
-        Expr::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => [
-            default.as_deref(),
-            pg.as_deref(),
-            sqlite.as_deref(),
-            mysql.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .find_map(first_volatile_function),
+        Expr::Dialectal { legs } => legs.values().find_map(|leg| first_volatile_function(leg)),
     }
 }
 
@@ -1001,18 +982,14 @@ impl Ctx<'_> {
             }
             // The one Layer-2 portability escape: a per-dialect value
             // divergence. Structurally validate EVERY present leg (dialect-
-            // neutral), then apply the per-TARGET scope math (own leg OR default).
-            Expr::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } => self.check_dialectal(default, pg, sqlite, mysql, d),
+            // neutral), then apply the per-TARGET scope check.
+            Expr::Dialectal { legs } => self.check_dialectal(legs, d),
         }
     }
 
-    /// Validate an [`Expr::Dialectal`] — the `dialect({ default?, pg?, sqlite?,
-    /// mysql? })` Layer-2 escape. Three checks, in order:
+    /// Validate an [`Expr::Dialectal`] — the
+    /// `dialect({ [backendId]: value })` Layer-2 escape. Three checks,
+    /// in order:
     ///
     /// 1. **At least one leg** — a legless `dialect({})` is malformed on EVERY
     ///    target (dialect-neutral [`CODE_UNSUPPORTED`]).
@@ -1021,58 +998,53 @@ impl Ctx<'_> {
     ///    leg must reject (dialect-neutral, mirroring `check_synth`). Runs before
     ///    the scope check so a precise per-node error surfaces rather than being
     ///    masked by the coverage refusal.
-    /// 3. **Scope math, per-TARGET** — the target must be covered by either its
-    ///    OWN leg or a `default`; else refuse fail-closed with
+    /// 3. **Scope check, per-TARGET** — the target must have its OWN leg; else
+    ///    refuse fail-closed with
     ///    [`CODE_EXPR_NOT_PORTABLE`]. This is per-target: a `dialect()` missing
-    ///    the sqlite leg (no default) is fine targeting PG, refused targeting
+    ///    the postgres leg is fine targeting PostgreSQL, refused targeting
     ///    SQLite/MySQL.
     ///
-    /// RATCHET: each leg is one of the four ratcheted budget
-    /// counters. The budget mechanism does not exist, so the per-leg count has
-    /// nothing to feed and this is not gated here.
+    /// RATCHET: each leg counts toward the ratcheted budget. The budget mechanism
+    /// does not exist, so the per-leg count has nothing to feed and this is not
+    /// gated here.
     fn check_dialectal(
         &self,
-        default: &Option<Box<Expr>>,
-        pg: &Option<Box<Expr>>,
-        sqlite: &Option<Box<Expr>>,
-        mysql: &Option<Box<Expr>>,
+        legs: &BTreeMap<DialectId, Box<Expr>>,
         depth: u32,
     ) -> Result<(), AuthoringError> {
         // (1) at least one leg.
-        if default.is_none() && pg.is_none() && sqlite.is_none() && mysql.is_none() {
+        if legs.is_empty() {
             return Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
                 self.target_dialect,
                 "dialect({}) carries no legs; a per-dialect value escape must \
-                 provide at least one of default/pg/sqlite/mysql"
+                 provide at least one backend id"
                     .to_string(),
-                Some("supply at least one dialect leg (or a default)".to_string()),
+                Some("supply at least one dialect leg".to_string()),
             ));
         }
         // (2) recurse into EVERY present leg. The structural checks remain the
-        // same, but PG-only portability gates must be judged against the leg that
-        // could render them: pg as PG, sqlite as SQLite, mysql as MySQL. The
-        // default leg is required to be portable because it may cover any target.
-        if let Some(leg) = default {
-            self.walk_depth_portable_default(leg, depth)?;
+        // same, but vendor-specific portability gates must be judged against the
+        // leg that could render them.
+        for (id, leg) in legs {
+            let leg_target = if id == &crate::dialect::POSTGRES {
+                Dialect::Postgres
+            } else if id == &crate::dialect::SQLITE {
+                Dialect::Sqlite
+            } else if id == &crate::dialect::MYSQL {
+                Dialect::Mysql
+            } else {
+                // This validator's target becomes an open DialectId in Cluster F.
+                // Until then, an unknown leg is still walked structurally under
+                // the current target; it can never cover a shipping target by
+                // accident because coverage below is exact key equality.
+                self.target_dialect
+            };
+            self.walk_depth_as(leg_target, leg, depth)?;
         }
-        if let Some(leg) = pg {
-            self.walk_depth_as(Dialect::Postgres, leg, depth)?;
-        }
-        if let Some(leg) = sqlite {
-            self.walk_depth_as(Dialect::Sqlite, leg, depth)?;
-        }
-        if let Some(leg) = mysql {
-            self.walk_depth_as(Dialect::Mysql, leg, depth)?;
-        }
-        // (3) SCOPE MATH, per-TARGET: own leg OR default covers this dialect.
-        let own_present = match self.target_dialect {
-            Dialect::Postgres => pg.is_some(),
-            Dialect::Sqlite => sqlite.is_some(),
-            Dialect::Mysql => mysql.is_some(),
-        };
-        if own_present || default.is_some() {
+        // (3) SCOPE CHECK, per-TARGET: only an exact id key covers the target.
+        if legs.contains_key(&self.target_dialect.id()) {
             return Ok(());
         }
         Err(self.err(
@@ -1080,12 +1052,12 @@ impl Ctx<'_> {
             Some(UnsupportedKind::Expr),
             self.target_dialect,
             format!(
-                "dialect() has no leg for the {} target and no default leg; the \
-                 per-dialect divergence does not cover this dialect",
+                "dialect() has no leg for the {} target; the per-dialect \
+                 divergence does not cover this dialect",
                 self.target_dialect.as_str()
             ),
             Some(format!(
-                "add a {} leg or a default leg to the dialect() escape",
+                "add a {} leg to the dialect() escape",
                 self.target_dialect.as_str()
             )),
         ))
@@ -1107,13 +1079,6 @@ impl Ctx<'_> {
     ) -> Result<(), AuthoringError> {
         self.with_target_dialect(target_dialect)
             .walk_depth(expr, depth)
-    }
-
-    fn walk_depth_portable_default(&self, expr: &Expr, depth: u32) -> Result<(), AuthoringError> {
-        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
-            self.walk_depth_as(dialect, expr, depth)?;
-        }
-        Ok(())
     }
 
     /// Rule (c): a `ColRef` must resolve to a column on the enclosing target
@@ -1378,7 +1343,7 @@ impl Ctx<'_> {
             self.target_dialect,
             format!("{name} is supported on PostgreSQL and MySQL, but SQLite has no stock REGEXP"),
             Some(
-                "use dialect({ pg: ..., sqlite: ..., mysql: ... }) to provide an explicit \
+                "use dialect({ postgres: ..., sqlite: ..., mysql: ... }) to provide an explicit \
                  SQLite leg, or avoid regex on SQLite"
                     .to_string(),
             ),
@@ -1395,7 +1360,7 @@ impl Ctx<'_> {
             self.target_dialect,
             format!("{name} aggregate is PostgreSQL-first and has no native SQLite/MySQL renderer"),
             Some(
-                "wrap this aggregate in dialect({ pg: ..., sqlite: ..., mysql: ... }) with \
+                "wrap this aggregate in dialect({ postgres: ..., sqlite: ..., mysql: ... }) with \
                  explicit non-Postgres legs, or target Postgres only"
                     .to_string(),
             ),

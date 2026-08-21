@@ -31,9 +31,9 @@
 //! this file had ever descended into.
 //!
 //! ONLY THE LEG THAT RUNS IS DESCENDED INTO. A `dialectal` op carries a sequence
-//! per dialect plus a `default`; refusing on a reference in a leg the target
-//! dialect never emits would reject a migration the server never sees. Controls
-//! below hold that line from both sides.
+//! per backend identity; refusing on a reference in a leg the target never emits
+//! would reject a migration the server never sees. Controls below hold that line
+//! from both sides.
 //!
 //! STILL OPEN, MEASURED, AND NAMED RATHER THAN IMPLIED: the TABLE-level walk has
 //! the same container blindness. A `dropTable` nested in a `dialectal` leg does
@@ -95,22 +95,18 @@ fn synchronizing_identity_on_a_dropped_column_is_refused() {
 #[test]
 fn a_dialectal_leg_naming_a_dropped_column_is_refused() {
     expect_column_refusal(
-        &format!(r#"{A},{DROP_V},{{"op":"dialectal","pg":[{INDEX_V}]}}"#),
+        &format!(r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"postgres":[{INDEX_V}]}}}}"#),
         "this createIndex names column",
         "a nested op names a column that is gone",
     );
 }
 
 #[test]
-fn a_dialectal_default_leg_naming_a_dropped_column_is_refused() {
-    // The fallback leg runs when the dialect has no leg of its own, so it must
-    // be descended into as well. Reading only the dialect-specific legs passes
-    // the test above and misses this.
-    expect_column_refusal(
-        &format!(r#"{A},{DROP_V},{{"op":"dialectal","default":[{INDEX_V}]}}"#),
-        "this createIndex names column",
-        "the default leg runs on PostgreSQL when pg is absent",
-    );
+fn a_misspelled_leg_key_is_not_selected_for_postgres() {
+    verdict(&format!(
+        r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"postgre":[{INDEX_V}]}}}}"#
+    ))
+    .expect("a misspelled key cannot select or execute its invalid PostgreSQL operation");
 }
 
 // ---------------------------------------------------------------------------
@@ -124,8 +120,10 @@ fn synchronizing_identity_on_a_live_column_is_still_allowed() {
 
 #[test]
 fn a_dialectal_leg_naming_a_live_column_is_still_allowed() {
-    verdict(&format!(r#"{A},{{"op":"dialectal","pg":[{INDEX_V}]}}"#))
-        .expect("a nested op on a live column is ordinary");
+    verdict(&format!(
+        r#"{A},{{"op":"dialectal","legs":{{"postgres":[{INDEX_V}]}}}}"#
+    ))
+    .expect("a nested op on a live column is ordinary");
 }
 
 #[test]
@@ -135,28 +133,27 @@ fn a_leg_for_another_dialect_is_not_descended_into() {
     // the obvious implementation, and the one that looks more thorough - would
     // refuse a migration the server never sees.
     verdict(&format!(
-        r#"{A},{DROP_V},{{"op":"dialectal","sqlite":[{INDEX_V}]}}"#
+        r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"sqlite":[{INDEX_V}]}}}}"#
     ))
     .expect("the sqlite leg is not emitted on PostgreSQL");
 }
 
 #[test]
-fn the_dialect_specific_leg_wins_over_the_default() {
+fn each_target_selects_only_its_exact_leg() {
     // The same envelope, read two ways. Under SQLite the `sqlite` leg runs and
-    // the reference is refused; the `default` leg it shadows names a live
-    // column, so a reader that took `default` whenever it was present would
-    // accept this.
+    // the reference is refused; the PostgreSQL leg names a live column and passes
+    // under PostgreSQL.
     let ops = format!(
-        r#"{A},{DROP_V},{{"op":"dialectal","sqlite":[{INDEX_V}],"default":[{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"c0"}}]}}]}}"#
+        r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"sqlite":[{INDEX_V}],"postgres":[{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"c0"}}]}}]}}}}"#
     );
     let sqlite = verdict_on(Dialect::Sqlite, &ops)
         .expect_err("the sqlite leg runs and names a dropped column");
     assert!(
         sqlite.contains("this createIndex names column"),
-        "the SQLite leg must be refused by the same rule as its PG twin: {sqlite}"
+        "the SQLite leg must be refused by the same rule as its PostgreSQL twin: {sqlite}"
     );
     verdict_on(Dialect::Postgres, &ops)
-        .expect("PostgreSQL falls back to the default leg, which names a live column");
+        .expect("PostgreSQL selects its own leg, which names a live column");
 }
 
 #[test]
@@ -167,7 +164,7 @@ fn a_leg_less_container_never_reaches_the_accessor() {
     // now pins the real reason instead - `dialectal_leg` returning an empty
     // slice is unreachable in practice, and that is why, rather than an
     // accident.
-    let refusal = verdict(&format!(r#"{A},{DROP_V},{{"op":"dialectal"}}"#))
+    let refusal = verdict(&format!(r#"{A},{DROP_V},{{"op":"dialectal","legs":{{}}}}"#))
         .expect_err("a dialectal op must carry at least one leg");
     assert!(
         refusal.contains("carries no legs"),

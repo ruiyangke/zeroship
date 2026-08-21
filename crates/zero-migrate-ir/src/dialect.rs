@@ -20,6 +20,9 @@
 use core::fmt;
 use std::borrow::Cow;
 
+use schemars::JsonSchema;
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+
 /// The SQL dialect a migration renders/applies against.
 ///
 /// A closed enum: adding a fourth dialect breaks the exhaustive dispatch matches
@@ -62,14 +65,14 @@ impl SqlDialect {
     }
 }
 
-/// An opaque, cheaply copyable dialect identity with a stable string name.
+/// An opaque dialect identity with a stable string name.
 ///
 /// NOT an enum: core code cannot exhaustively match it, which is the property
 /// that lets a backend live in a crate the core does not own.
 ///
 /// # Equality is by CONTENT
 ///
-/// `PartialEq`/`Ord`/`Hash` are derived over `&'static str`, so they compare the
+/// `PartialEq`/`Ord`/`Hash` are derived over the string, so they compare the
 /// STRING, not the pointer. Two crates that both spell `"postgres"` are the same
 /// dialect. That is the desired behaviour and it is also the hazard: nothing
 /// structurally prevents two backends from claiming the same name, the way a
@@ -85,8 +88,14 @@ impl SqlDialect {
 /// and does NOT check — a `const` constructor cannot return a `Result` usefully
 /// — so the check is enforced at REGISTRATION rather than trusted. See
 /// [`DialectId::is_well_formed`].
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DialectId(&'static str);
+/// Backend declarations use the borrowed form through [`DialectId::new`]. Wire
+/// data uses the owned form: a deserialized migration must be able to name a
+/// backend that did not exist when this crate was compiled, without leaking the
+/// input string to manufacture a fake `&'static str`.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, JsonSchema)]
+#[serde(transparent)]
+#[schemars(transparent)]
+pub struct DialectId(#[schemars(regex(pattern = r"^[a-z][a-z0-9_]*$"))] Cow<'static, str>);
 
 impl DialectId {
     /// Declare an id. `const`, so a backend crate can write
@@ -96,13 +105,16 @@ impl DialectId {
     /// diagnostic naming the offender: [`crate::backend::BackendRegistry::build`].
     #[must_use]
     pub const fn new(name: &'static str) -> Self {
-        Self(name)
+        Self(Cow::Borrowed(name))
     }
 
     /// The id's stable string name.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        self.0
+    pub const fn as_str(&self) -> &str {
+        match &self.0 {
+            Cow::Borrowed(name) => name,
+            Cow::Owned(name) => name.as_str(),
+        }
     }
 
     /// Whether this id satisfies the id rule: lowercase ASCII `[a-z][a-z0-9_]*`.
@@ -112,8 +124,8 @@ impl DialectId {
     /// at compile time; the registry asserts it again at build time because a
     /// backend is not trusted about its own declaration.
     #[must_use]
-    pub const fn is_well_formed(self) -> bool {
-        let bytes = self.0.as_bytes();
+    pub const fn is_well_formed(&self) -> bool {
+        let bytes = self.as_str().as_bytes();
         if bytes.is_empty() {
             return false;
         }
@@ -132,6 +144,23 @@ impl DialectId {
     }
 }
 
+impl<'de> Deserialize<'de> for DialectId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let id = Self(Cow::Owned(String::deserialize(deserializer)?));
+        if id.is_well_formed() {
+            Ok(id)
+        } else {
+            Err(D::Error::custom(format!(
+                "dialect id {:?} must match [a-z][a-z0-9_]*",
+                id.as_str()
+            )))
+        }
+    }
+}
+
 impl fmt::Debug for DialectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "DialectId({:?})", self.0)
@@ -140,7 +169,7 @@ impl fmt::Debug for DialectId {
 
 impl fmt::Display for DialectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 
@@ -202,13 +231,13 @@ impl DialectSet {
     /// Whether the closed [`crate::validate::Dialect`] variant is a member.
     #[must_use]
     pub fn contains(&self, dialect: crate::validate::Dialect) -> bool {
-        self.contains_id(dialect.id())
+        self.contains_id(&dialect.id())
     }
 
     /// Whether an id is a member.
     #[must_use]
-    pub fn contains_id(&self, id: DialectId) -> bool {
-        self.0.binary_search(&id).is_ok()
+    pub fn contains_id(&self, id: &DialectId) -> bool {
+        self.0.binary_search(id).is_ok()
     }
 
     /// How many dialects the set holds.
@@ -224,8 +253,8 @@ impl DialectSet {
     }
 
     /// The members, in ascending id order.
-    pub fn iter(&self) -> impl Iterator<Item = DialectId> + '_ {
-        self.0.iter().copied()
+    pub fn iter(&self) -> impl Iterator<Item = &DialectId> + '_ {
+        self.0.iter()
     }
 }
 
@@ -306,19 +335,19 @@ mod tests {
                 DialectId::new(name)
             })
             .collect();
-        let set = DialectSet::from_ids(many.iter().copied());
+        let set = DialectSet::from_ids(many.iter().cloned());
         assert_eq!(set.len(), 64);
         for id in &many {
-            assert!(set.contains_id(*id), "{id} must be a member");
+            assert!(set.contains_id(id), "{id} must be a member");
         }
-        assert!(!set.contains_id(DialectId::new("absent")));
+        assert!(!set.contains_id(&DialectId::new("absent")));
 
         // Set equality, not sequence equality.
         let mut reversed = many.clone();
         reversed.reverse();
         assert_eq!(DialectSet::from_ids(reversed), set);
         // Duplicates collapse.
-        let doubled = many.iter().copied().chain(many.iter().copied());
+        let doubled = many.iter().cloned().chain(many.iter().cloned());
         assert_eq!(DialectSet::from_ids(doubled).len(), 64);
     }
 
@@ -330,9 +359,9 @@ mod tests {
         );
         assert_eq!(DialectSet::from_bools(true, true, true), DialectSet::all());
         let pg_mysql = DialectSet::from_bools(true, false, true);
-        assert!(pg_mysql.contains_id(POSTGRES));
-        assert!(pg_mysql.contains_id(MYSQL));
-        assert!(!pg_mysql.contains_id(SQLITE));
+        assert!(pg_mysql.contains_id(&POSTGRES));
+        assert!(pg_mysql.contains_id(&MYSQL));
+        assert!(!pg_mysql.contains_id(&SQLITE));
         assert_eq!(pg_mysql.len(), 2);
     }
 

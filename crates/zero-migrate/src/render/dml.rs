@@ -1402,13 +1402,16 @@ mod tests {
 
     #[test]
     fn dialectal_renders_the_target_dialects_own_leg() {
-        // dialect({ pg: A, sqlite: B, mysql: C }) renders A on PG, B on SQLite,
-        // C on MySQL — each target picks its OWN leg.
+        // dialect({ postgres: A, sqlite: B, mysql: C }) renders A on PostgreSQL,
+        // B on SQLite, and C on MySQL — each target picks its OWN leg.
         let expr = Expr::Dialectal {
-            default: None,
-            pg: Some(Box::new(lit_str("A"))),
-            sqlite: Some(Box::new(lit_str("B"))),
-            mysql: Some(Box::new(lit_str("C"))),
+            legs: [
+                (zero_migrate_ir::dialect::POSTGRES, Box::new(lit_str("A"))),
+                (zero_migrate_ir::dialect::SQLITE, Box::new(lit_str("B"))),
+                (zero_migrate_ir::dialect::MYSQL, Box::new(lit_str("C"))),
+            ]
+            .into_iter()
+            .collect(),
         };
         // Inline path: each leg is an inline string literal.
         assert_eq!(
@@ -1443,45 +1446,23 @@ mod tests {
     }
 
     #[test]
-    fn dialectal_falls_back_to_default_when_no_own_leg() {
-        // dialect({ default: D, pg: A }) renders A on PG (its own leg) but D on
-        // SQLite AND MySQL (fallback to default).
-        let expr = Expr::Dialectal {
-            default: Some(Box::new(lit_str("D"))),
-            pg: Some(Box::new(lit_str("A"))),
-            sqlite: None,
-            mysql: None,
-        };
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
-            "'A'",
-            "PG uses its own leg"
-        );
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
-            "'D'",
-            "SQLite falls back to default"
-        );
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
-            "_utf8mb4 X'44'",
-            "MySQL falls back to default"
-        );
-    }
-
-    #[test]
     fn dialectal_recurses_into_the_chosen_leg_expression() {
         // A leg is a full Expr, not just a literal — the chosen leg renders
-        // recursively (here a BETWEEN on PG vs a bare column on the default).
+        // recursively (here a BETWEEN on PostgreSQL vs a bare column on SQLite).
         let expr = Expr::Dialectal {
-            default: Some(Box::new(Expr::col("age"))),
-            pg: Some(Box::new(Expr::Between {
-                operand: Box::new(Expr::col("age")),
-                low: Box::new(lit_int(1)),
-                high: Box::new(lit_int(9)),
-            })),
-            sqlite: None,
-            mysql: None,
+            legs: [
+                (
+                    zero_migrate_ir::dialect::POSTGRES,
+                    Box::new(Expr::Between {
+                        operand: Box::new(Expr::col("age")),
+                        low: Box::new(lit_int(1)),
+                        high: Box::new(lit_int(9)),
+                    }),
+                ),
+                (zero_migrate_ir::dialect::SQLITE, Box::new(Expr::col("age"))),
+            ]
+            .into_iter()
+            .collect(),
         };
         assert_eq!(
             render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
@@ -1495,14 +1476,13 @@ mod tests {
 
     #[test]
     fn dialectal_with_no_leg_for_target_is_a_fail_closed_render_backstop() {
-        // A dialect({ pg: A }) (no default) has no SQLite leg — validate refuses
+        // A dialect({ postgres: A }) has no SQLite leg — validate refuses
         // this per-target BEFORE assembly, but the renderer is defensively
         // fail-closed rather than silently dropping the value.
         let expr = Expr::Dialectal {
-            default: None,
-            pg: Some(Box::new(lit_str("A"))),
-            sqlite: None,
-            mysql: None,
+            legs: [(zero_migrate_ir::dialect::POSTGRES, Box::new(lit_str("A")))]
+                .into_iter()
+                .collect(),
         };
         assert!(render_expr_inline(&expr, SqlDialect::Postgres).is_ok());
         let err = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap_err();

@@ -314,13 +314,8 @@ fn resolve_create_table_ops(
 ) -> Result<(), TableShapeError> {
     for op in ops {
         match op {
-            Op::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } => {
-                for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+            Op::Dialectal { legs } => {
+                for leg in legs.values_mut() {
                     resolve_create_table_ops(leg, effective, default_schema)?;
                 }
             }

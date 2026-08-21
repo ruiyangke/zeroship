@@ -219,10 +219,10 @@ export type Expr =
   | { node: "extract"; field: ExtractField; from: Expr }
   | { node: "pgExtract"; field: PgExtractField; from: Expr }
   | { node: "pgInterval"; duration: Duration }
-  // The one Layer-2 portability escape: a per-dialect value divergence.
-  // Legs serialize in canonical order (default, pg, sqlite, mysql); a `None` leg
-  // is skipped on the wire. Scope math is validated per-target by the engine.
-  | { node: "dialect"; default?: Expr | null; pg?: Expr | null; sqlite?: Expr | null; mysql?: Expr | null };
+  // The one Layer-2 portability escape: a per-backend value divergence. Legs
+  // are keyed by canonical DialectId strings; there is no alias or fallback.
+  // Scope math is validated per-target by the engine.
+  | { node: "dialect"; legs: { [dialectId: string]: Expr } };
 
 /** A DML cell in an insert row, ordinary update, trigger update, or
  *  `onConflict.doUpdate`: either a typed scalar literal or a closed expression
@@ -598,7 +598,7 @@ export type Op =
   | { op: "update"; table: string; set: { [column: string]: IrValue }; where?: Expr | null; schema?: string | null }
   | { op: "delete"; table: string; where: Expr; limit?: number | null; schema?: string | null }
   | { op: "backfill"; table: string; cursorColumns: [string, ...string[]]; cursorStability: CursorStability; batchSize: number; set: { [column: string]: BackfillSetValue }; filter?: Expr | null; name: string; schema?: string | null }
-  | { op: "dialectal"; default?: Op[] | null; pg?: Op[] | null; sqlite?: Op[] | null; mysql?: Op[] | null }
+  | { op: "dialectal"; legs: { [dialectId: string]: Op[] } }
   | { op: "createView"; name: string; schema?: string | null; columns?: string[] | null; query: ViewQuery; replace?: boolean | null; materialized?: boolean | null }
   | { op: "dropView"; name: string; schema?: string | null; existenceGuard?: ExistenceGuard | null; materialized?: boolean | null }
   | { op: "createEnum"; name: string; schema?: string | null; values: string[] }

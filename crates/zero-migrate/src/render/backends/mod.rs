@@ -190,7 +190,7 @@ mod tests {
         assert_eq!(registry.len(), 3);
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
             assert!(
-                registry.get(dialect.id()).is_some(),
+                registry.get(&dialect.id()).is_some(),
                 "{dialect:?} must be registered"
             );
         }

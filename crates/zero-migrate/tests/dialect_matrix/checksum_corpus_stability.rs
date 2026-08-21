@@ -102,17 +102,17 @@ fn corpus_checksums_are_byte_stable() {
     hasher.update(listing.as_bytes());
     let aggregate = hex::encode(hasher.finalize());
 
-    // Captured on `main` at 2e764660, BEFORE the `DialectId` /
-    // `BackendDescriptor` work. Any change to this value means an op's wire
-    // spelling moved and every deployed migration using that op now has a
-    // different identity checksum. That is a break, not a golden to re-record.
+    // Re-recorded when the pre-production Dialectal contract deliberately moved
+    // from closed `default`/`pg`/`sqlite`/`mysql` fields to a canonical
+    // `DialectId`-keyed `legs` map. There is no deployed-journal compatibility
+    // requirement, but every later wire change remains an explicit review gate.
     const EXPECTED_AGGREGATE: &str =
-        "65504d0ea9159e5a912f1d61888441e6377faebef87ae4fbc1cc8034d9de61d2";
+        "0590adee7a3048a19689e2f2632c860d59797afc5e72c3d19705dbc85f360471";
     assert_eq!(
         aggregate,
         EXPECTED_AGGREGATE,
-        "the op-list wire format moved: {} corpus rows re-hashed. \
-         Re-recording this constant invalidates every deployed journal.",
+        "the op-list wire format moved: {} corpus rows re-hashed. Review the \
+         exact wire diff before re-recording this constant.",
         rows.len()
     );
 }

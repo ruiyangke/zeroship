@@ -85,8 +85,8 @@
 //!   ERROR, never SQL bytes. Core deciding something about a vendor stays in
 //!   core, dialect-parameterized.
 //! - **IR leg selection.** `select_dialect_leg` reads the wire-pinned
-//!   `Expr::Dialectal { pg, sqlite, mysql }` shape. It cannot move; the shape is
-//!   a checksum input.
+//!   `Expr::Dialectal { legs }` map by the backend's own `DialectId`. It cannot
+//!   move; the shape is a checksum input.
 //! - **Everything entangled with `BindCtx`.** `push_scalar`'s bytes transport,
 //!   `render_on_conflict_mysql`, and the limited-`DELETE` arms all interleave
 //!   spelling with the bind accumulator, which is not part of the backend
@@ -1079,11 +1079,11 @@ fn render_split_part(
 }
 
 /// Select the [`Expr::Dialectal`] leg to render for `dialect`: the
-/// target dialect's OWN leg if present, else the `default` leg. Returns a borrow
-/// of the chosen leg. This is the one leg-selection rule shared by both the bound
+/// target dialect's OWN leg. Returns a borrow of the chosen leg. This is the one
+/// leg-selection rule shared by both the bound
 /// and inline render paths.
 ///
-/// A `Dialectal` with neither an own leg nor a `default` for the target is
+/// A `Dialectal` with no own leg for the target is
 /// UNREACHABLE here because [`crate::model::validate`] refuses it per-target
 /// (`EXPR_NOT_PORTABLE`) before assembly — but the seam is fail-closed
 /// defensively: it returns [`DmlError::UnrenderableExpr`] rather than silently
@@ -1091,37 +1091,17 @@ fn render_split_part(
 ///
 /// # Why this compares ids instead of matching a variant
 ///
-/// `dialect` is an OPEN [`DialectId`] now, so there is no exhaustive `match` to
-/// write. That is not a loss of safety here, because the three names on the
-/// right-hand side are not a closed vendor set core is choosing between: they are
-/// the three FIELD NAMES of [`Expr::Dialectal`], which is a WIRE contract with
-/// `deny_unknown_fields`. An authored `Dialectal` node can carry a `pg`, a
-/// `sqlite`, a `mysql` and a `default` leg and nothing else, whatever backend is
-/// rendering it, until the IR version that gives the node an open leg map.
-///
-/// So a fourth backend takes the `default` leg — the same leg PostgreSQL takes
-/// when the author wrote no `pg` leg — and gets the same fail-closed refusal when
-/// there is no `default`. It never silently renders another vendor's leg.
+/// `dialect` is an OPEN [`DialectId`], and the leg map is keyed by that same
+/// identity. A fourth backend therefore selects its own key without core naming
+/// it or silently borrowing another backend's value.
 fn select_dialect_leg<'a>(
     dialect: DialectId,
-    default: &'a Option<Box<Expr>>,
-    pg: &'a Option<Box<Expr>>,
-    sqlite: &'a Option<Box<Expr>>,
-    mysql: &'a Option<Box<Expr>>,
+    legs: &'a BTreeMap<DialectId, Box<Expr>>,
 ) -> Result<&'a Expr, DmlError> {
-    let own = if dialect == dialect_id::POSTGRES {
-        pg
-    } else if dialect == dialect_id::SQLITE {
-        sqlite
-    } else if dialect == dialect_id::MYSQL {
-        mysql
-    } else {
-        &None
-    };
-    own.as_deref().or(default.as_deref()).ok_or_else(|| {
+    legs.get(&dialect).map(Box::as_ref).ok_or_else(|| {
         DmlError::UnrenderableExpr(format!(
-            "dialect() has no leg for the {} target and no default — the \
-             structural validator must refuse this before assembly",
+            "dialect() has no leg for the {} target — the structural validator \
+             must refuse this before assembly",
             dialect.as_str()
         ))
     })
@@ -1210,16 +1190,9 @@ pub fn expr_column_refs_for_backend(
                     walk(delimiter, backend, out)?;
                 }
             }
-            Expr::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } => walk(
-                select_dialect_leg(backend.dialect(), default, pg, sqlite, mysql)?,
-                backend,
-                out,
-            )?,
+            Expr::Dialectal { legs } => {
+                walk(select_dialect_leg(backend.dialect(), legs)?, backend, out)?;
+            }
         }
         Ok(())
     }
@@ -1298,15 +1271,9 @@ fn mysql_expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlEr
                 false
             }
         }
-        Expr::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => mysql_expr_references_column(
-            select_dialect_leg(dialect_id::MYSQL, default, pg, sqlite, mysql)?,
-            column,
-        )?,
+        Expr::Dialectal { legs } => {
+            mysql_expr_references_column(select_dialect_leg(dialect_id::MYSQL, legs)?, column)?
+        }
     })
 }
 
@@ -1505,13 +1472,8 @@ pub fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlEr
             render_pg_extract(*field, &e, ctx.backend)?
         }
         Expr::PgInterval { duration } => render_pg_interval_literal(duration, ctx.backend)?,
-        Expr::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let leg = select_dialect_leg(ctx.backend.dialect(), default, pg, sqlite, mysql)?;
+        Expr::Dialectal { legs } => {
+            let leg = select_dialect_leg(ctx.backend.dialect(), legs)?;
             render_expr_bound(leg, ctx)?
         }
     })
@@ -1761,13 +1723,8 @@ where
             render_pg_extract(*field, &e, backend)?
         }
         Expr::PgInterval { duration } => render_pg_interval_literal(duration, backend)?,
-        Expr::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            let leg = select_dialect_leg(backend.dialect(), default, pg, sqlite, mysql)?;
+        Expr::Dialectal { legs } => {
+            let leg = select_dialect_leg(backend.dialect(), legs)?;
             render_expr_inline_walk_for_backend(leg, backend, col_ref)?
         }
     })

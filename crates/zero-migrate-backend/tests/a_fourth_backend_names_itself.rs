@@ -44,7 +44,7 @@ const DUCKDB: DialectId = DialectId::new("duckdb");
 /// the value both its identity and its capability answers are read off. Every
 /// item on the right-hand side is `const`, so an out-of-tree crate writes this at
 /// item scope exactly as it appears here.
-const DUCKDB_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
+static DUCKDB_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
     id: DUCKDB,
     display_name: "DuckDB",
     capabilities: CapabilitySet::empty()

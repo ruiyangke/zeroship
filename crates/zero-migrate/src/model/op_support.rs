@@ -48,9 +48,9 @@ pub fn support(op: &Op) -> crate::model::support::Support {
     // prose, so the ids are walked through the enum; `dialect_for_id` is the one
     // place that conversion happens, and it panics rather than guess.
     let dialects = crate::model::support::DialectSupport::from_cells(row.dispositions.iter().map(
-        |&(id, disposition)| {
+        |(id, disposition)| {
             let dialect = dialect_for_id(id, kind, variant);
-            (id, support_cell(op, disposition, dialect, variant))
+            (id.clone(), support_cell(op, *disposition, dialect, variant))
         },
     ));
     Support::new(support_tier(op), dialects, support_features(op))
@@ -69,13 +69,13 @@ pub fn support(op: &Op) -> crate::model::support::Support {
 /// fail-open the census floor in `model::support` exists to catch), and
 /// synthesizing a refusal would invent a verdict with no reason to show anyone.
 fn dialect_for_id(
-    id: zero_migrate_ir::dialect::DialectId,
+    id: &zero_migrate_ir::dialect::DialectId,
     kind: &str,
     variant: &str,
 ) -> crate::model::support::Dialect {
     use crate::model::support::Dialect;
     for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
-        if dialect.id() == id {
+        if &dialect.id() == id {
             return dialect;
         }
     }

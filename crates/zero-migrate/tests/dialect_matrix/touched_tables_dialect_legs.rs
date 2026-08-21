@@ -54,8 +54,8 @@ fn a_top_level_bare_name_drop_index_contributes_a_touched_entry() {
 fn a_bare_name_drop_index_inside_a_leg_contributes_the_same_entry() {
     let top = touched(r#"[{"op":"dropIndex","name":"orphan_idx"}]"#);
     let wrapped = touched(
-        r#"[{"op":"dialectal","sqlite":[
-              {"op":"dropIndex","name":"orphan_idx"}]}]"#,
+        r#"[{"op":"dialectal","legs":{"sqlite":[
+              {"op":"dropIndex","name":"orphan_idx"}]}}]"#,
     );
     assert_eq!(
         wrapped, top,
@@ -70,8 +70,8 @@ fn a_bare_name_drop_index_inside_a_leg_contributes_the_same_entry() {
 fn a_bare_name_drop_index_in_any_leg_contributes_the_same_entry() {
     let top = touched(r#"[{"op":"dropIndex","name":"orphan_idx"}]"#);
     let wrapped = touched(
-        r#"[{"op":"dialectal","pg":[
-              {"op":"dropIndex","name":"orphan_idx"}]}]"#,
+        r#"[{"op":"dialectal","legs":{"postgres":[
+              {"op":"dropIndex","name":"orphan_idx"}]}}]"#,
     );
     assert_eq!(
         wrapped, top,

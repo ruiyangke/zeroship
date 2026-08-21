@@ -164,20 +164,11 @@ pub fn migration_requires_approval(
 /// both judged per INNER op, where before a wrapper took one level from the default
 /// schema and applied it to `Op::is_destructive`'s union over every leg.
 fn op_requires_approval(effective: &EffectivePolicy, op: &Op, default_schema: &str) -> bool {
-    if let Op::Dialectal {
-        default,
-        pg,
-        sqlite,
-        mysql,
-    } = op
-    {
-        return [default, pg, sqlite, mysql]
-            .into_iter()
-            .flatten()
-            .any(|leg| {
-                leg.iter()
-                    .any(|inner| op_requires_approval(effective, inner, default_schema))
-            });
+    if let Op::Dialectal { legs } = op {
+        return legs.values().any(|leg| {
+            leg.iter()
+                .any(|inner| op_requires_approval(effective, inner, default_schema))
+        });
     }
     let object = object_for_op(op, default_schema);
     match require_approval_level(effective, &object) {
@@ -308,10 +299,13 @@ mod tests {
 
     fn dialectal(legs: (Option<Vec<Op>>, Option<Vec<Op>>)) -> Op {
         Op::Dialectal {
-            default: None,
-            pg: legs.0,
-            sqlite: None,
-            mysql: legs.1,
+            legs: [
+                legs.0.map(|ops| (crate::dialect::POSTGRES, ops)),
+                legs.1.map(|ops| (crate::dialect::MYSQL, ops)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
         }
     }
 

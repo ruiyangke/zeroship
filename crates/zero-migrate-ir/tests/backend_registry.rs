@@ -36,15 +36,15 @@ const fn descriptor(id: &'static str, display_name: &'static str) -> BackendDesc
 
 // Nine distinct, well-formed ids. Nine, not eight: eight would still fit the
 // bitset that used to back the set and would prove nothing.
-const B1: BackendDescriptor = descriptor("postgres", "PostgreSQL");
-const B2: BackendDescriptor = descriptor("sqlite", "SQLite");
-const B3: BackendDescriptor = descriptor("mysql", "MySQL");
-const B4: BackendDescriptor = descriptor("duckdb", "DuckDB");
-const B5: BackendDescriptor = descriptor("cockroachdb", "CockroachDB");
-const B6: BackendDescriptor = descriptor("clickhouse", "ClickHouse");
-const B7: BackendDescriptor = descriptor("mariadb", "MariaDB");
-const B8: BackendDescriptor = descriptor("libsql", "libSQL");
-const B9: BackendDescriptor = descriptor("spanner", "Cloud Spanner");
+static B1: BackendDescriptor = descriptor("postgres", "PostgreSQL");
+static B2: BackendDescriptor = descriptor("sqlite", "SQLite");
+static B3: BackendDescriptor = descriptor("mysql", "MySQL");
+static B4: BackendDescriptor = descriptor("duckdb", "DuckDB");
+static B5: BackendDescriptor = descriptor("cockroachdb", "CockroachDB");
+static B6: BackendDescriptor = descriptor("clickhouse", "ClickHouse");
+static B7: BackendDescriptor = descriptor("mariadb", "MariaDB");
+static B8: BackendDescriptor = descriptor("libsql", "libSQL");
+static B9: BackendDescriptor = descriptor("spanner", "Cloud Spanner");
 
 const NINE: &[&BackendDescriptor] = &[&B1, &B2, &B3, &B4, &B5, &B6, &B7, &B8, &B9];
 
@@ -65,12 +65,12 @@ fn a_registry_holds_more_than_eight_backends() {
 
     for descriptor in NINE {
         assert!(
-            ids.contains_id(descriptor.id),
+            ids.contains_id(&descriptor.id),
             "{} is registered but the id set does not contain it",
             descriptor.id
         );
         assert_eq!(
-            registry.get(descriptor.id).map(|d| d.display_name),
+            registry.get(&descriptor.id).map(|d| d.display_name),
             Some(descriptor.display_name),
             "{} must resolve back to its own descriptor",
             descriptor.id
@@ -88,10 +88,10 @@ fn an_unregistered_id_is_not_a_member() {
     for absent in ["oracle", "db2", "informix"] {
         let id = DialectId::new(absent);
         assert!(
-            !ids.contains_id(id),
+            !ids.contains_id(&id),
             "{absent} was never registered and must not be a member"
         );
-        assert!(registry.get(id).is_none(), "{absent} must not resolve");
+        assert!(registry.get(&id).is_none(), "{absent} must not resolve");
     }
 }
 
@@ -101,7 +101,7 @@ fn an_unregistered_id_is_not_a_member() {
 
 #[test]
 fn a_duplicate_id_is_refused_naming_both_registrants() {
-    const IMPOSTOR: BackendDescriptor = descriptor("postgres", "Postgres Compatible");
+    static IMPOSTOR: BackendDescriptor = descriptor("postgres", "Postgres Compatible");
     let err = BackendRegistry::build(&[&B1, &B2, &IMPOSTOR])
         .expect_err("two backends claiming one id is not a registry");
 
@@ -134,11 +134,11 @@ fn a_duplicate_id_is_refused_naming_both_registrants() {
     assert!(rendered.contains("postgres"), "{rendered}");
 }
 
-const BAD_UPPERCASE: BackendDescriptor = descriptor("Postgres", "Uppercase");
-const BAD_LEADING_DIGIT: BackendDescriptor = descriptor("1st", "Leading digit");
-const BAD_LEADING_UNDERSCORE: BackendDescriptor = descriptor("_pg", "Leading underscore");
-const BAD_DASH: BackendDescriptor = descriptor("cockroach-db", "Dash");
-const BAD_EMPTY: BackendDescriptor = descriptor("", "Empty");
+static BAD_UPPERCASE: BackendDescriptor = descriptor("Postgres", "Uppercase");
+static BAD_LEADING_DIGIT: BackendDescriptor = descriptor("1st", "Leading digit");
+static BAD_LEADING_UNDERSCORE: BackendDescriptor = descriptor("_pg", "Leading underscore");
+static BAD_DASH: BackendDescriptor = descriptor("cockroach-db", "Dash");
+static BAD_EMPTY: BackendDescriptor = descriptor("", "Empty");
 
 #[test]
 fn a_malformed_id_is_refused_at_registration() {
@@ -172,10 +172,10 @@ fn a_malformed_id_is_refused_at_registration() {
 #[test]
 fn every_distinct_well_formed_id_still_registers() {
     // Ids that LOOK adjacent but are distinct must all coexist.
-    const NEAR1: BackendDescriptor = descriptor("postgres", "PostgreSQL");
-    const NEAR2: BackendDescriptor = descriptor("postgres_xl", "Postgres-XL");
-    const NEAR3: BackendDescriptor = descriptor("postgres2", "PostgreSQL 2");
-    const NEAR4: BackendDescriptor = descriptor("p", "P");
+    static NEAR1: BackendDescriptor = descriptor("postgres", "PostgreSQL");
+    static NEAR2: BackendDescriptor = descriptor("postgres_xl", "Postgres-XL");
+    static NEAR3: BackendDescriptor = descriptor("postgres2", "PostgreSQL 2");
+    static NEAR4: BackendDescriptor = descriptor("p", "P");
     let registry = BackendRegistry::build(&[&NEAR1, &NEAR2, &NEAR3, &NEAR4])
         .expect("distinct ids that share a prefix are distinct backends");
     assert_eq!(registry.len(), 4);
@@ -195,7 +195,7 @@ fn the_shipping_registry_builds() {
         (SqlDialect::Mysql, MYSQL, "MySQL"),
     ] {
         assert_eq!(dialect.id(), id);
-        let descriptor = registry.get(id).expect("a shipping dialect resolves");
+        let descriptor = registry.get(&id).expect("a shipping dialect resolves");
         assert_eq!(descriptor.display_name, display_name);
         assert_eq!(
             descriptor,

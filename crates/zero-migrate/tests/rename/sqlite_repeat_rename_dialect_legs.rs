@@ -60,8 +60,8 @@ fn two_top_level_renames_of_one_table_are_refused() {
 fn a_repeat_rename_inside_the_selected_leg_is_refused() {
     let error = lower_error(
         r#"[{"op":"renameColumn","table":"notes","from":"a","to":"b","type":"text"},
-            {"op":"dialectal","sqlite":[
-              {"op":"renameColumn","table":"notes","from":"b","to":"c","type":"text"}]}]"#,
+            {"op":"dialectal","legs":{"sqlite":[
+              {"op":"renameColumn","table":"notes","from":"b","to":"c","type":"text"}]}}]"#,
     )
     .expect("a wrapper must not hide the second rename from the refusal");
     assert!(
@@ -75,9 +75,9 @@ fn a_repeat_rename_inside_the_selected_leg_is_refused() {
 #[test]
 fn two_renames_inside_one_leg_are_refused() {
     let error = lower_error(
-        r#"[{"op":"dialectal","sqlite":[
+        r#"[{"op":"dialectal","legs":{"sqlite":[
               {"op":"renameColumn","table":"notes","from":"a","to":"b","type":"text"},
-              {"op":"renameColumn","table":"notes","from":"b","to":"c","type":"text"}]}]"#,
+              {"op":"renameColumn","table":"notes","from":"b","to":"c","type":"text"}]}}]"#,
     )
     .expect("two renames inside one leg are still two rebuilds of one table");
     assert!(
@@ -101,8 +101,8 @@ fn two_renames_inside_one_leg_are_refused() {
 fn a_rename_in_an_unselected_leg_does_not_trigger_the_refusal() {
     let error = lower_error(
         r#"[{"op":"renameColumn","table":"notes","from":"a","to":"b","type":"text"},
-            {"op":"dialectal","pg":[
-              {"op":"renameColumn","table":"notes","from":"b","to":"c","type":"text"}]}]"#,
+            {"op":"dialectal","legs":{"postgres":[
+              {"op":"renameColumn","table":"notes","from":"b","to":"c","type":"text"}]}}]"#,
     )
     .unwrap_or_default();
     assert!(

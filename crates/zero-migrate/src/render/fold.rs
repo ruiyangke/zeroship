@@ -699,22 +699,14 @@ fn rewrite_incoming_fk_column_targets(
     }
 }
 
-/// The leg an `Op::Dialectal` contributes on `dialect`: its own, else `default`, else
-/// nothing. `pub(crate)` so callers outside the fold select legs the SAME way rather
-/// than re-deriving the own-then-default rule and drifting from it.
+/// The leg an `Op::Dialectal` contributes on `dialect`: its own, else nothing.
+/// `pub(crate)` so callers outside the fold select legs the SAME way rather than
+/// re-deriving the exact-id lookup and drifting from it.
 pub(crate) fn selected_dialectal_leg<'a>(
     dialect: SqlDialect,
-    default: &'a Option<Vec<Op>>,
-    pg: &'a Option<Vec<Op>>,
-    sqlite: &'a Option<Vec<Op>>,
-    mysql: &'a Option<Vec<Op>>,
+    legs: &'a std::collections::BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<Op>>,
 ) -> Option<&'a [Op]> {
-    let own = match dialect {
-        SqlDialect::Postgres => pg,
-        SqlDialect::Sqlite => sqlite,
-        SqlDialect::Mysql => mysql,
-    };
-    own.as_deref().or(default.as_deref())
+    legs.get(&dialect.id()).map(Vec::as_slice)
 }
 
 /// **The ONE rule for what an op does to the set of table NAMES a later op in the
@@ -757,15 +749,10 @@ pub(crate) fn advance_referenceable_tables(
 ) {
     match op {
         // Descend through the fold's OWN leg selector rather than restating the
-        // own-then-default rule, so a dialectal envelope cannot drift from the
+        // exact-id selection rule, so a dialectal envelope cannot drift from the
         // catalog half about which leg it is even talking about.
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            if let Some(leg) = selected_dialectal_leg(dialect, default, pg, sqlite, mysql) {
+        Op::Dialectal { legs } => {
+            if let Some(leg) = selected_dialectal_leg(dialect, legs) {
                 for nested in leg {
                     advance_referenceable_tables(nested, dialect, tables);
                 }
@@ -801,16 +788,11 @@ fn push_fold_op<'a>(
     inside_dialectal: bool,
 ) -> Result<(), FoldError> {
     match op {
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
+        Op::Dialectal { legs } => {
             if inside_dialectal {
                 return Err(FoldError::Unsupported("nested dialectal op reached fold"));
             }
-            if let Some(leg) = selected_dialectal_leg(dialect, default, pg, sqlite, mysql) {
+            if let Some(leg) = selected_dialectal_leg(dialect, legs) {
                 for inner in leg {
                     push_fold_op(out, inner, dialect, true)?;
                 }
@@ -828,10 +810,10 @@ fn push_fold_op<'a>(
 ///
 /// Answers "the dialect argument decides part of this history's content", which is
 /// the fact a caller needs in order to know whether the dialect it supplied mattered.
-/// Deliberately NOT "a leg was selected": a pg-only wrapper folded under SQLite
-/// matches no leg and has no `default`, so it contributes nothing and the fold
-/// succeeds - the dialect decided that op's entire content, and a selection-shaped
-/// answer would report `false` at the one moment the answer carries weight.
+/// Deliberately NOT "a leg was selected": a postgres-only wrapper folded under
+/// SQLite matches no leg, so it contributes nothing and the fold succeeds - the
+/// dialect decided that op's entire content, and a selection-shaped answer would
+/// report `false` at the one moment the answer carries weight.
 ///
 /// A TOP-LEVEL scan is complete because a leg cannot itself hold a wrapper: nesting
 /// is refused by the validator, and `push_fold_op` returns

@@ -7,7 +7,7 @@ use zero_migrate::model::expr::{
 use zero_migrate::model::ir::{IrScalar, IrValue};
 use zero_migrate::model::validate::{validate_expr, Dialect, TargetScope};
 use zero_migrate::render::dml::assemble_backfill_clauses;
-use zero_migrate::SqlDialect;
+use zero_migrate::{SqlDialect, POSTGRES};
 
 const EXPECTED_PORTABLE_EXPR_VARIANTS: &[&str] = &[
     "Agg",
@@ -425,10 +425,7 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
         },
         Expr::UuidV7,
         Expr::Dialectal {
-            default: None,
-            pg: Some(Box::new(lit_str("pg"))),
-            sqlite: None,
-            mysql: None,
+            legs: BTreeMap::from([(POSTGRES, Box::new(lit_str("postgres")))]),
         },
         Expr::Agg {
             func: AggFunc::StringAgg,

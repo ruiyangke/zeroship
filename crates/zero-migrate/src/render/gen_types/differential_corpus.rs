@@ -295,7 +295,7 @@ pub(super) const CASES: &[Stream] = &[
         // Postgres regardless of target.
         name: "c_dialectal_leg_selection",
         ops: r#"[
-  {"op":"dialectal","pg":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"pg_only","type":"text"}],"primaryKey":["id"],"runtimeOptions":{"softDelete":true,"versioning":false},"indexes":[{"name":"docs_pg_idx","columns":[{"kind":"column","name":"pg_only"}]}]}],"sqlite":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"sqlite_only","type":"text"}],"primaryKey":["id"]}],"mysql":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"mysql_only","type":"text"}],"primaryKey":["id"]}]}
+  {"op":"dialectal","legs":{"postgres":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"pg_only","type":"text"}],"primaryKey":["id"],"runtimeOptions":{"softDelete":true,"versioning":false},"indexes":[{"name":"docs_pg_idx","columns":[{"kind":"column","name":"pg_only"}]}]}],"sqlite":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"sqlite_only","type":"text"}],"primaryKey":["id"]}],"mysql":[{"op":"createTable","name":"docs","columns":[{"name":"id","type":"text","nullable":false},{"name":"mysql_only","type":"text"}],"primaryKey":["id"]}]}}
 ]"#,
     },
     Stream {
@@ -410,7 +410,7 @@ pub(super) const CASES: &[Stream] = &[
     Stream {
         name: "c_drop_column_cascade_dialectal_expr",
         ops: r#"[
-  {"op":"createTable","name":"legs","columns":[{"name":"id","type":"text","nullable":false},{"name":"kept","type":"int","nullable":false},{"name":"doomed","type":"int","nullable":false}],"primaryKey":["id"],"constraints":[{"name":"legs_leg_ck","kind":{"kind":"check","expr":{"node":"binOp","op":"gt","lhs":{"node":"dialect","pg":{"node":"colRef","name":"kept"},"sqlite":{"node":"colRef","name":"doomed"},"mysql":{"node":"colRef","name":"kept"}},"rhs":{"node":"literal","value":0}}}}]},
+  {"op":"createTable","name":"legs","columns":[{"name":"id","type":"text","nullable":false},{"name":"kept","type":"int","nullable":false},{"name":"doomed","type":"int","nullable":false}],"primaryKey":["id"],"constraints":[{"name":"legs_leg_ck","kind":{"kind":"check","expr":{"node":"binOp","op":"gt","lhs":{"node":"dialect","legs":{"postgres":{"node":"colRef","name":"kept"},"sqlite":{"node":"colRef","name":"doomed"},"mysql":{"node":"colRef","name":"kept"}}},"rhs":{"node":"literal","value":0}}}}]},
   {"op":"dropColumn","table":"legs","column":"doomed"}
 ]"#,
     },
@@ -1694,14 +1694,8 @@ fn the_corpus_constructs_every_op_variant() {
     let mut record = |ops: &[Op]| {
         for op in ops {
             seen.insert(variant(op));
-            if let Op::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } = op
-            {
-                for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+            if let Op::Dialectal { legs } = op {
+                for leg in legs.values() {
                     for inner in leg {
                         seen.insert(variant(inner));
                     }

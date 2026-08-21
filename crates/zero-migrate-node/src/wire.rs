@@ -692,11 +692,11 @@ pub struct GenArtifactsReply {
     /// falsiness, so neither a refusal nor an older addon that predates the field
     /// can pass as a clean result.
     ///
-    /// Reports PRESENCE, not selection. A pg-only wrapper folded under SQLite
-    /// selects no leg and no `default`, contributing nothing while the fold
-    /// succeeds - the case a caller most needs told about - so a selection-shaped
-    /// answer would be `false` exactly there. The descriptor source cannot carry a
-    /// wrapper at all and reports `false` by construction.
+    /// Reports PRESENCE, not selection. A postgres-only wrapper folded under SQLite
+    /// selects no leg, contributing nothing while the fold succeeds - the case a
+    /// caller most needs told about - so a selection-shaped answer would be `false`
+    /// exactly there. The descriptor source cannot carry a wrapper at all and
+    /// reports `false` by construction.
     ///
     /// `false` does NOT mean the artifacts are dialect-independent. The
     /// materialized enum/domain capability gates and the identity/primary-key reuse
@@ -924,8 +924,8 @@ pub struct GenArtifactsSource {
     /// The project's REAL target dialect: `"postgres" | "sqlite" | "mysql"`.
     ///
     /// REQUIRED, with no default. The fold selects `Op::Dialectal` legs, so a
-    /// history authored with `dialect({ pg, mysql })` yields a different column set
-    /// per target; generating a MySQL project's artifacts under Postgres names
+    /// history authored with `dialect({ postgres, mysql })` yields a different column
+    /// set per target; generating a MySQL project's artifacts under Postgres names
     /// columns its database does not have. Making the field optional would put that
     /// mistake back within reach, so omitting it is a type error rather than a
     /// silent Postgres fallback. This does not cover choosing the dialect for the

@@ -2417,44 +2417,54 @@ export function countStar(): ExprChainType {
 }
 
 /**
- * The one Layer-2 portability escape: either a per-dialect VALUE
- * divergence in an expression position, or a per-dialect OP sequence in statement
+ * The one Layer-2 portability escape: either a per-backend VALUE
+ * divergence in an expression position, or a per-backend OP sequence in statement
  * position. Expression legs are values (a `(col) => Expr` chain node, another
  * combinator, or a bare scalar), and the engine renders the leg matching the
- * target dialect — the dialect's own leg if present, else `default`:
+ * target dialect. Keys are canonical backend identities:
  *
  * ```ts
- * default(dialect({ pg: uuidV4(), sqlite: now(), mysql: myUuid }))
- * dialect({ default: lit(0), pg: col("n") })   // pg leg on PG, default(0) elsewhere
+ * table("audit").update({
+ *   set: {
+ *     actor: dialect({ postgres: currentUser(), sqlite: "system", mysql: "system" }),
+ *   },
+ * })
  * ```
  *
  * Op-level legs are thunks. Each present thunk records normal ops into a
- * sub-buffer that becomes a `dialectal` op leg. Missing own leg with no default
+ * sub-buffer that becomes a `dialectal` op leg. A missing own leg
  * is skipped on that target (unlike expression dialect(), which fails closed).
  *
- * At least one leg (`default`/`pg`/`sqlite`/`mysql`) must be present; the legs
- * record in full in the checksummed IR in canonical order.
- * The engine's validate applies the per-TARGET scope math: a target with no own
- * expression leg and no `default` is refused (`EXPR_NOT_PORTABLE`).
+ * At least one leg must be present; the legs record in full in the checksummed
+ * IR in lexical backend-id order. A target with no own expression leg is
+ * refused (`EXPR_NOT_PORTABLE`).
  */
 export function dialect(legs: DialectOpLegs): void;
 export function dialect(legs: DialectExprLegs): ExprChainType;
 export function dialect(legs: DialectExprLegs | DialectOpLegs): ExprChainType | void {
-  if (legs === null || typeof legs !== "object") {
+  if (!isPlainObject(legs)) {
     throw structuredError(
       "OP_INVALID",
-      "dialect(legs): legs must be an object with default/pg/sqlite/mysql expression or op thunk legs",
+      "dialect(legs): legs must be an object keyed by backend id with expression or op thunk legs",
     );
   }
-  const ordered = ["default", "pg", "sqlite", "mysql"] as const;
-  const present = ordered
+  const present = Object.keys(legs)
+    .sort()
     .map((leg) => [leg, (legs as Record<string, unknown>)[leg]] as const)
     .filter(([, value]) => value !== undefined);
   if (present.length === 0) {
     throw structuredError(
       "OP_INVALID",
-      "dialect(legs): at least one leg (default/pg/sqlite/mysql) must be present",
+      "dialect(legs): at least one leg must be present",
     );
+  }
+  for (const [leg] of present) {
+    if (!/^[a-z][a-z0-9_]*$/.test(leg)) {
+      throw structuredError(
+        "OP_INVALID",
+        `dialect(legs): backend id ${JSON.stringify(leg)} must match [a-z][a-z0-9_]*`,
+      );
+    }
   }
 
   const isOpThunk = (value: unknown): boolean => typeof value === "function" && nativeDbExprNode(value) === undefined;
@@ -2469,24 +2479,23 @@ export function dialect(legs: DialectExprLegs | DialectOpLegs): ExprChainType | 
   }
 
   if (firstIsThunk) {
-    const node: Node = {};
+    const recordedLegs: Record<string, Node[]> = {};
     for (const [leg, value] of present) {
       const thunk = value as () => void;
       const rec = recorder();
       const start = rec.ops.length;
       thunk();
-      node[leg] = rec.ops.splice(start);
+      setOwn(recordedLegs, leg, rec.ops.splice(start));
     }
-    emitDialectal(node);
+    emitDialectal({ legs: recordedLegs });
     return;
   }
 
-  const node: Node = { node: "dialect" };
-  // Canonical leg order: default, pg, sqlite, mysql (mirrors the IR field order).
+  const expressionLegs: Record<string, Node> = {};
   for (const [leg, value] of present) {
-    node[leg] = exprArg(value);
+    setOwn(expressionLegs, leg, exprArg(value));
   }
-  return chain(node);
+  return chain({ node: "dialect", legs: expressionLegs });
 }
 
 type AggFuncToken =
@@ -2825,8 +2834,11 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
         }
         return;
       case "dialect":
-        for (const leg of ["default", "pg", "sqlite", "mysql"] as const) {
-          if (n[leg] !== undefined && n[leg] !== null) walk(n[leg]);
+        if (!isPlainObject(n.legs)) {
+          rejectImmutableExpr(position, "dialect legs must be an object keyed by backend id");
+        }
+        for (const leg of Object.values(n.legs)) {
+          if (leg !== undefined && leg !== null) walk(leg);
         }
         return;
       default:

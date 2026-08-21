@@ -188,13 +188,8 @@ fn normalize_redundant_pg_default_casts(expr: &Expr) -> Expr {
                 }
             }
             Expr::InList { expr, .. } | Expr::PgRegexMatch { expr, .. } => visit(expr),
-            Expr::Dialectal {
-                default,
-                pg,
-                sqlite,
-                mysql,
-            } => {
-                for leg in [default, pg, sqlite, mysql].into_iter().flatten() {
+            Expr::Dialectal { legs } => {
+                for leg in legs.values_mut() {
                     visit(leg);
                 }
             }

@@ -1,6 +1,6 @@
 // Live-DB proof that `genArtifacts` folds under the PROJECT'S REAL target dialect.
 //
-// One authored history carries an op-level `dialect({ pg, mysql })` leg, so the
+// One authored history carries an op-level `dialect({ postgres, mysql })` leg, so the
 // column set the migration actually produces DIFFERS per target. The migration is
 // applied to a real server, the live catalog is read back, and the generated
 // `schema.runtime.json` field set is compared against that ground truth. An
@@ -69,7 +69,7 @@ const migration = {
   schema() {
     table("widgets").create({ columns: { label: t.text() } });
     dialect({
-      pg: () => table("widgets").column("pg_only").add({ type: t.text() }),
+      postgres: () => table("widgets").column("pg_only").add({ type: t.text() }),
       mysql: () => table("widgets").column("mysql_only").add({ type: t.text() }),
     });
   },

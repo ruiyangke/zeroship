@@ -75,8 +75,8 @@ const IX: &str =
     r#"{"op":"createIndex","name":"ix","table":"a","columns":[{"kind":"column","name":"v"}]}"#;
 const ADD_Z: &str = r#"{"op":"addColumn","table":"a","column":"z","type":"int","nullable":true}"#;
 
-fn pg_leg(inner: &str) -> String {
-    format!(r#"{{"op":"dialectal","pg":[{inner}]}}"#)
+fn postgres_leg(inner: &str) -> String {
+    format!(r#"{{"op":"dialectal","legs":{{"postgres":[{inner}]}}}}"#)
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +88,7 @@ fn a_nested_drop_table_vacates_the_name() {
     expect_refusal(
         &format!(
             r#"{A},{},{ADD_Z}"#,
-            pg_leg(r#"{"op":"dropTable","table":"a"}"#)
+            postgres_leg(r#"{"op":"dropTable","table":"a"}"#)
         ),
         "will not exist under that name",
         "the nested drop removed the table",
@@ -100,7 +100,7 @@ fn a_nested_rename_vacates_the_old_name() {
     expect_refusal(
         &format!(
             r#"{A},{},{ADD_Z}"#,
-            pg_leg(r#"{"op":"renameTable","table":"a","to":"a2"}"#)
+            postgres_leg(r#"{"op":"renameTable","table":"a","to":"a2"}"#)
         ),
         "will not exist under that name",
         "the nested rename moved the table",
@@ -112,7 +112,7 @@ fn a_nested_drop_column_registers() {
     expect_refusal(
         &format!(
             r#"{A},{},{IX}"#,
-            pg_leg(r#"{"op":"dropColumn","table":"a","column":"v"}"#)
+            postgres_leg(r#"{"op":"dropColumn","table":"a","column":"v"}"#)
         ),
         "names column",
         "the nested drop removed the column",
@@ -124,7 +124,7 @@ fn a_nested_drop_enum_registers() {
     expect_refusal(
         &format!(
             r#"{{"op":"createEnum","name":"e","values":["a","b"]}},{A},{},{{"op":"addColumn","table":"a","column":"z","type":{{"enum":{{"name":"e"}}}},"nullable":true}}"#,
-            pg_leg(r#"{"op":"dropEnum","name":"e"}"#)
+            postgres_leg(r#"{"op":"dropEnum","name":"e"}"#)
         ),
         "depends on enum",
         "the nested drop removed the enum",
@@ -136,7 +136,7 @@ fn a_nested_drop_role_registers() {
     expect_refusal(
         &format!(
             r#"{{"op":"createRole","name":"r"}},{A},{},{{"op":"grant","privileges":["select"],"on":{{"kind":"table","names":["a"]}},"to":["r"]}}"#,
-            pg_leg(r#"{"op":"dropRole","name":"r"}"#)
+            postgres_leg(r#"{"op":"dropRole","name":"r"}"#)
         ),
         "names grantee",
         "the nested drop removed the role",
@@ -150,7 +150,7 @@ fn a_nested_drop_role_registers() {
 #[test]
 fn a_nested_create_table_claims_the_name() {
     expect_refusal(
-        &format!("{A},{}", pg_leg(A)),
+        &format!("{A},{}", postgres_leg(A)),
         "this createTable claims",
         "the nested createTable retakes a live name",
     );
@@ -159,7 +159,7 @@ fn a_nested_create_table_claims_the_name() {
 #[test]
 fn a_nested_create_index_claims_the_index_name() {
     expect_refusal(
-        &format!("{A},{IX},{}", pg_leg(IX)),
+        &format!("{A},{IX},{}", postgres_leg(IX)),
         "created twice in this migration",
         "the nested createIndex retakes a live index name",
     );
@@ -175,7 +175,7 @@ fn a_nested_index_after_a_drop_is_still_allowed() {
     // working through a container.
     verdict(&format!(
         r#"{A},{IX},{{"op":"dropIndex","name":"ix","table":"a"}},{}"#,
-        pg_leg(IX)
+        postgres_leg(IX)
     ))
     .expect("the index name was freed before the nested create");
 }
@@ -186,7 +186,7 @@ fn a_leg_for_another_dialect_still_mutates_nothing() {
     // PostgreSQL the `sqlite` leg never runs, so a drop inside it must NOT
     // vacate anything. Expanding all legs would refuse this.
     verdict(&format!(
-        r#"{A},{{"op":"dialectal","sqlite":[{{"op":"dropTable","table":"a"}}]}},{ADD_Z}"#
+        r#"{A},{{"op":"dialectal","legs":{{"sqlite":[{{"op":"dropTable","table":"a"}}]}}}},{ADD_Z}"#
     ))
     .expect("the sqlite leg is not emitted on PostgreSQL");
 }
@@ -195,15 +195,16 @@ fn a_leg_for_another_dialect_still_mutates_nothing() {
 fn the_same_envelope_refuses_under_the_dialect_whose_leg_runs() {
     // The other half of that boundary, so the control above cannot pass merely
     // because nothing is expanded at all.
-    let ops =
-        format!(r#"{A},{{"op":"dialectal","sqlite":[{{"op":"dropTable","table":"a"}}]}},{ADD_Z}"#);
+    let ops = format!(
+        r#"{A},{{"op":"dialectal","legs":{{"sqlite":[{{"op":"dropTable","table":"a"}}]}}}},{ADD_Z}"#
+    );
     verdict_on(Dialect::Sqlite, &ops)
         .expect_err("under SQLite that leg runs, so the table really is gone");
 }
 
 #[test]
 fn a_nested_op_on_untouched_state_is_still_allowed() {
-    verdict(&format!("{A},{}", pg_leg(IX)))
+    verdict(&format!("{A},{}", postgres_leg(IX)))
         .expect("an ordinary nested index on a live column must pass");
 }
 
@@ -222,7 +223,7 @@ fn a_container_inside_a_container_is_refused_before_any_of_this_matters() {
     // one now pins the real reason instead of a fiction.
     let refusal = verdict(&format!(
         r#"{A},{},{ADD_Z}"#,
-        pg_leg(&pg_leg(r#"{"op":"dropTable","table":"a"}"#))
+        postgres_leg(&postgres_leg(r#"{"op":"dropTable","table":"a"}"#))
     ))
     .expect_err("a nested container is refused on its own");
     assert!(

@@ -116,7 +116,7 @@ pub type DialectCells = [(DialectId, SupportDecision); SHIPPING_DIALECTS.len()];
 /// `DialectId`'s derived `PartialEq` compares the STRING (see its own docs), but
 /// `str`'s `==` is not callable from a `const fn`, so the same comparison is
 /// spelled out over the bytes here.
-const fn id_eq(left: DialectId, right: DialectId) -> bool {
+const fn id_eq(left: &DialectId, right: &DialectId) -> bool {
     let (left, right) = (left.as_str().as_bytes(), right.as_str().as_bytes());
     if left.len() != right.len() {
         return false;
@@ -131,10 +131,10 @@ const fn id_eq(left: DialectId, right: DialectId) -> bool {
     true
 }
 
-const fn admits(admitted: &[DialectId], id: DialectId) -> bool {
+const fn admits(admitted: &[DialectId], id: &DialectId) -> bool {
     let mut i = 0;
     while i < admitted.len() {
-        if id_eq(admitted[i], id) {
+        if id_eq(&admitted[i], id) {
             return true;
         }
         i += 1;
@@ -148,20 +148,19 @@ const fn admits(admitted: &[DialectId], id: DialectId) -> bool {
 /// which decision they repeated three times.
 #[must_use]
 pub const fn on_every_dialect(decision: SupportDecision) -> DialectCells {
-    let mut cells = [(SHIPPING_DIALECTS[0], decision); SHIPPING_DIALECTS.len()];
-    let mut i = 0;
-    while i < SHIPPING_DIALECTS.len() {
-        cells[i] = (SHIPPING_DIALECTS[i], decision);
-        i += 1;
-    }
-    cells
+    [
+        (shipping_dialect(0), decision),
+        (shipping_dialect(1), decision),
+        (shipping_dialect(2), decision),
+    ]
 }
 
 /// `Supported { render }` on each admitted id, `refusal` on every other shipping
 /// dialect.
 ///
-/// Replaces the vendor-NAMED `postgres_only` helper. `admitting(&[POSTGRES], ..)`
-/// still names PostgreSQL — a PostgreSQL-only feature is a claim about
+/// Replaces the vendor-NAMED `postgres_only` helper. Admitting the
+/// `POSTGRES_ONLY` id slice still names PostgreSQL — a PostgreSQL-only feature
+/// is a claim about
 /// PostgreSQL, and saying so is honest — but it no longer names, or positionally
 /// implies, the dialects it refuses. A fourth backend lands in `refusal` with the
 /// reason its author already wrote, rather than needing a fourth argument.
@@ -171,18 +170,30 @@ pub const fn admitting(
     render: RenderMode,
     refusal: SupportDecision,
 ) -> DialectCells {
-    let mut cells = [(SHIPPING_DIALECTS[0], refusal); SHIPPING_DIALECTS.len()];
-    let mut i = 0;
-    while i < SHIPPING_DIALECTS.len() {
-        let id = SHIPPING_DIALECTS[i];
-        cells[i] = if admits(admitted, id) {
-            (id, supported(render))
-        } else {
-            (id, refusal)
-        };
-        i += 1;
-    }
-    cells
+    [
+        admission_cell(admitted, 0, render, refusal),
+        admission_cell(admitted, 1, render, refusal),
+        admission_cell(admitted, 2, render, refusal),
+    ]
+}
+
+const fn shipping_dialect(index: usize) -> DialectId {
+    DialectId::new(SHIPPING_DIALECTS[index].as_str())
+}
+
+const fn admission_cell(
+    admitted: &[DialectId],
+    index: usize,
+    render: RenderMode,
+    refusal: SupportDecision,
+) -> (DialectId, SupportDecision) {
+    let id = shipping_dialect(index);
+    let decision = if admits(admitted, &id) {
+        supported(render)
+    } else {
+        refusal
+    };
+    (id, decision)
 }
 
 /// The support decision for an op or feature, PER DIALECT.
@@ -229,8 +240,8 @@ impl DialectSupport {
     #[must_use]
     pub fn from_cells(cells: impl IntoIterator<Item = (DialectId, SupportDecision)>) -> Self {
         let mut decisions: Vec<(DialectId, SupportDecision)> = cells.into_iter().collect();
-        decisions.sort_by_key(|(id, _)| *id);
-        decisions.dedup_by_key(|(id, _)| *id);
+        decisions.sort_by(|(left, _), (right, _)| left.cmp(right));
+        decisions.dedup_by(|(left, _), (right, _)| left == right);
         Self {
             decisions: Cow::Owned(decisions),
         }
@@ -245,9 +256,9 @@ impl DialectSupport {
     /// [`crate::model::dialect_table::DispositionRow::disposition_for`] draws, for
     /// the same reason.
     #[must_use]
-    pub fn decision_for(&self, id: DialectId) -> Option<SupportDecision> {
+    pub fn decision_for(&self, id: &DialectId) -> Option<SupportDecision> {
         self.decisions
-            .binary_search_by_key(&id, |(dialect, _)| *dialect)
+            .binary_search_by(|(dialect, _)| dialect.cmp(id))
             .ok()
             .map(|i| self.decisions[i].1)
     }
@@ -263,13 +274,13 @@ impl DialectSupport {
     #[must_use]
     pub fn decision(&self, dialect: Dialect) -> SupportDecision {
         let id = dialect.id();
-        self.decision_for(id)
+        self.decision_for(&id)
             .unwrap_or_else(|| panic!("support declaration states no decision for {id}"))
     }
 
     /// The dialects this declaration states a decision for, in ascending id order.
     pub fn dialects(&self) -> impl Iterator<Item = DialectId> + '_ {
-        self.decisions.iter().map(|(id, _)| *id)
+        self.decisions.iter().map(|(id, _)| id.clone())
     }
 
     /// The subset of the stated dialects whose decision is supported.
@@ -289,7 +300,7 @@ impl DialectSupport {
         self.decisions
             .iter()
             .filter(|(_, decision)| decision.is_supported())
-            .map(|(id, _)| *id)
+            .map(|(id, _)| id.clone())
             .collect()
     }
 }
@@ -433,9 +444,22 @@ pub(crate) const CAP_RAW_MATERIALIZED_VIEW: &[VendorCapability] = &[
 ];
 
 const UNSUPPORTED: &str = crate::model::validate::CODE_UNSUPPORTED;
+static POSTGRES_ONLY: [DialectId; 1] = [DialectId::new("postgres")];
 
-const PG_ONLY_TABLE_LEVEL_CHECK: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+// A borrowed `DialectSupport` must point at an actual static now that
+// `DialectId` can own its wire spelling and therefore has a destructor. A
+// reference to an inline array in a `const` would otherwise ask const-eval to
+// drop the promoted ids. Each expansion gives the cells their own scoped
+// static, with no allocation or leaked input.
+macro_rules! declared {
+    ($cells:expr) => {{
+        static CELLS: DialectCells = $cells;
+        DialectSupport::declared(&CELLS)
+    }};
+}
+
+const PG_ONLY_TABLE_LEVEL_CHECK: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -443,8 +467,8 @@ const PG_ONLY_TABLE_LEVEL_CHECK: DialectSupport = DialectSupport::declared(&admi
     ),
 ));
 
-const PG_ONLY_SEQUENCE_DEFAULT: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_SEQUENCE_DEFAULT: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -452,17 +476,15 @@ const PG_ONLY_SEQUENCE_DEFAULT: DialectSupport = DialectSupport::declared(&admit
     ),
 ));
 
-const UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN: DialectSupport =
-    DialectSupport::declared(&on_every_dialect(unsupported(
-        UNSUPPORTED,
-        "foreign keys need at least one local column",
-    )));
+const UNSUPPORTED_ALL_FK_NO_LOCAL_COLUMN: DialectSupport = declared!(on_every_dialect(
+    unsupported(UNSUPPORTED, "foreign keys need at least one local column",)
+));
 
 const PORTABLE_FOREIGN_KEY: DialectSupport =
-    DialectSupport::declared(&on_every_dialect(supported(RenderMode::Offline)));
+    declared!(on_every_dialect(supported(RenderMode::Offline)));
 
-const PG_ONLY_CONSTRAINT_NOT_VALID: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_CONSTRAINT_NOT_VALID: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -470,8 +492,8 @@ const PG_ONLY_CONSTRAINT_NOT_VALID: DialectSupport = DialectSupport::declared(&a
     ),
 ));
 
-const PG_ONLY_SEQUENCE: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_SEQUENCE: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -479,8 +501,8 @@ const PG_ONLY_SEQUENCE: DialectSupport = DialectSupport::declared(&admitting(
     ),
 ));
 
-const PG_ONLY_COMMENT: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_COMMENT: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -488,8 +510,8 @@ const PG_ONLY_COMMENT: DialectSupport = DialectSupport::declared(&admitting(
     ),
 ));
 
-const PG_ONLY_MATERIALIZED_VIEW: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_MATERIALIZED_VIEW: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -497,8 +519,8 @@ const PG_ONLY_MATERIALIZED_VIEW: DialectSupport = DialectSupport::declared(&admi
     ),
 ));
 
-const PG_ONLY_EXCLUSION_CONSTRAINT: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_EXCLUSION_CONSTRAINT: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -506,14 +528,14 @@ const PG_ONLY_EXCLUSION_CONSTRAINT: DialectSupport = DialectSupport::declared(&a
     ),
 ));
 
-const PG_ONLY_INDEX_INCLUDE: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_INDEX_INCLUDE: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(UNSUPPORTED, "index INCLUDE columns are PostgreSQL-only"),
 ));
 
-const PG_ONLY_INDEX_STORAGE_PARAMS: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_INDEX_STORAGE_PARAMS: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -521,14 +543,14 @@ const PG_ONLY_INDEX_STORAGE_PARAMS: DialectSupport = DialectSupport::declared(&a
     ),
 ));
 
-const PG_ONLY_INDEX_ONLY: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_INDEX_ONLY: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(UNSUPPORTED, "CREATE INDEX ON ONLY is PostgreSQL-only"),
 ));
 
-const PG_ONLY_INDEX_NULLS_NOT_DISTINCT: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_INDEX_NULLS_NOT_DISTINCT: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -536,8 +558,8 @@ const PG_ONLY_INDEX_NULLS_NOT_DISTINCT: DialectSupport = DialectSupport::declare
     ),
 ));
 
-const PG_ONLY_INDEX_OPCLASS: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_INDEX_OPCLASS: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -545,8 +567,8 @@ const PG_ONLY_INDEX_OPCLASS: DialectSupport = DialectSupport::declared(&admittin
     ),
 ));
 
-const PG_ONLY_INDEX_COLLATION: DialectSupport = DialectSupport::declared(&admitting(
-    &[POSTGRES],
+const PG_ONLY_INDEX_COLLATION: DialectSupport = declared!(admitting(
+    &POSTGRES_ONLY,
     RenderMode::Offline,
     unsupported(
         UNSUPPORTED,
@@ -566,7 +588,7 @@ const PG_ONLY_INDEX_COLLATION: DialectSupport = DialectSupport::declared(&admitt
 /// DDL retains `DROP VIEW IF EXISTS` in addition to the catalog probe. Validation
 /// never gates on this feature: it is declared so the generated support matrix
 /// states the guard story per dialect.
-const EXISTENCE_GUARD_PROBE: DialectSupport = DialectSupport::declared(&[
+const EXISTENCE_GUARD_PROBE: DialectSupport = declared!([
     (
         MYSQL,
         unsupported(
@@ -591,7 +613,7 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::NonIdForeignKey, PORTABLE_FOREIGN_KEY),
     FeatureSupport::new(
         Feature::TableLevelUnique,
-        DialectSupport::declared(&[
+        declared!([
             (MYSQL, supported(RenderMode::Offline)),
             (POSTGRES, supported(RenderMode::Offline)),
             (
@@ -606,7 +628,7 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::ExclusionConstraint, PG_ONLY_EXCLUSION_CONSTRAINT),
     FeatureSupport::new(
         Feature::ExpressionIndex,
-        DialectSupport::declared(&[
+        declared!([
             (
                 MYSQL,
                 unsupported(
@@ -620,7 +642,7 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     ),
     FeatureSupport::new(
         Feature::PartialIndex,
-        DialectSupport::declared(&[
+        declared!([
             (
                 MYSQL,
                 unsupported(UNSUPPORTED, "MySQL does not support partial indexes"),
@@ -637,8 +659,8 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::IndexCollation, PG_ONLY_INDEX_COLLATION),
     FeatureSupport::new(
         Feature::NonBtreeIndexMethod,
-        DialectSupport::declared(&admitting(
-            &[POSTGRES],
+        declared!(admitting(
+            &POSTGRES_ONLY,
             RenderMode::Offline,
             unsupported(
                 UNSUPPORTED,
@@ -657,7 +679,7 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
     FeatureSupport::new(
         Feature::ExpressionIndex,
-        DialectSupport::declared(&[
+        declared!([
             (
                 MYSQL,
                 unsupported(
@@ -671,7 +693,7 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     ),
     FeatureSupport::new(
         Feature::PartialIndex,
-        DialectSupport::declared(&[
+        declared!([
             (
                 MYSQL,
                 unsupported(UNSUPPORTED, "MySQL does not support partial indexes"),
@@ -691,8 +713,8 @@ pub(crate) const CREATE_INDEX_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::IndexCollation, PG_ONLY_INDEX_COLLATION),
     FeatureSupport::new(
         Feature::NonBtreeIndexMethod,
-        DialectSupport::declared(&admitting(
-            &[POSTGRES],
+        declared!(admitting(
+            &POSTGRES_ONLY,
             RenderMode::Offline,
             unsupported(
                 UNSUPPORTED,
@@ -706,7 +728,7 @@ pub(crate) const PARTITION_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
     FeatureSupport::new(
         Feature::PartitionDdl,
-        DialectSupport::declared(&on_every_dialect(supported(RenderMode::Offline))),
+        declared!(on_every_dialect(supported(RenderMode::Offline))),
     ),
 ];
 
@@ -714,7 +736,7 @@ pub(crate) const ALTER_COLUMN_TYPE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::ExistenceGuardProbe, EXISTENCE_GUARD_PROBE),
     FeatureSupport::new(
         Feature::AlterColumnUsing,
-        DialectSupport::declared(&on_every_dialect(unsupported(
+        declared!(on_every_dialect(unsupported(
             UNSUPPORTED,
             "setColumnType.using expression rendering is deferred in the current engine",
         ))),
@@ -723,7 +745,7 @@ pub(crate) const ALTER_COLUMN_TYPE_FEATURES: &[FeatureSupport] = &[
 
 pub(crate) const RENAME_COLUMN_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::RenameColumnGuard,
-    DialectSupport::declared(&on_every_dialect(unsupported(
+    declared!(on_every_dialect(unsupported(
         UNSUPPORTED,
         "renameColumn ifExists guards cannot be attributed to a single migration unit today",
     ))),
@@ -741,8 +763,8 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::TableLevelCheck, PG_ONLY_TABLE_LEVEL_CHECK),
     FeatureSupport::new(
         Feature::ExclusionConstraint,
-        DialectSupport::declared(&admitting(
-            &[POSTGRES],
+        declared!(admitting(
+            &POSTGRES_ONLY,
             RenderMode::Offline,
             unsupported(
                 UNSUPPORTED,
@@ -759,18 +781,18 @@ pub(crate) const SET_COLUMN_DEFAULT_FEATURES: &[FeatureSupport] = &[
 
 pub(crate) const INSERT_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::InsertOnConflict,
-    DialectSupport::declared(&on_every_dialect(supported(RenderMode::Offline))),
+    declared!(on_every_dialect(supported(RenderMode::Offline))),
 )];
 
 pub(crate) const CREATE_VIEW_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(
         Feature::RawViewBody,
-        DialectSupport::declared(&on_every_dialect(supported(RenderMode::Offline))),
+        declared!(on_every_dialect(supported(RenderMode::Offline))),
     ),
     FeatureSupport::new(Feature::MaterializedView, PG_ONLY_MATERIALIZED_VIEW),
     FeatureSupport::new(
         Feature::CreateOrReplaceMaterializedView,
-        DialectSupport::declared(&on_every_dialect(unsupported(
+        declared!(on_every_dialect(unsupported(
             UNSUPPORTED,
             "Postgres has no CREATE OR REPLACE MATERIALIZED VIEW and the other dialects have no materialized views",
         ))),
@@ -780,8 +802,8 @@ pub(crate) const CREATE_VIEW_FEATURES: &[FeatureSupport] = &[
 pub(crate) const CREATE_TRIGGER_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(
         Feature::TriggerExecuteFunction,
-        DialectSupport::declared(&admitting(
-            &[POSTGRES],
+        declared!(admitting(
+            &POSTGRES_ONLY,
             RenderMode::Offline,
             unsupported(
                 UNSUPPORTED,
@@ -791,7 +813,7 @@ pub(crate) const CREATE_TRIGGER_FEATURES: &[FeatureSupport] = &[
     ),
     FeatureSupport::new(
         Feature::TriggerBody,
-        DialectSupport::declared(&[
+        declared!([
             (MYSQL, supported(RenderMode::Offline)),
             (
                 POSTGRES,
@@ -805,16 +827,16 @@ pub(crate) const CREATE_TRIGGER_FEATURES: &[FeatureSupport] = &[
     ),
     FeatureSupport::new(
         Feature::TriggerTruncateEvent,
-        DialectSupport::declared(&admitting(
-            &[POSTGRES],
+        declared!(admitting(
+            &POSTGRES_ONLY,
             RenderMode::Offline,
             unsupported(UNSUPPORTED, "SQLite/MySQL have no TRUNCATE trigger event"),
         )),
     ),
     FeatureSupport::new(
         Feature::TriggerStatementForEach,
-        DialectSupport::declared(&admitting(
-            &[POSTGRES],
+        declared!(admitting(
+            &POSTGRES_ONLY,
             RenderMode::Offline,
             unsupported(UNSUPPORTED, "SQLite/MySQL triggers are row-level only"),
         )),
@@ -827,7 +849,7 @@ pub(crate) const CREATE_TRIGGER_FEATURES: &[FeatureSupport] = &[
         // UPDATE`. Declaring SQLite supported meant the engine lowered the
         // PostgreSQL spelling and SQLite's parser rejected it AFTER the migration's
         // earlier statements had run - `near "OR": syntax error`, mid-deploy.
-        DialectSupport::declared(&[
+        declared!([
             (
                 MYSQL,
                 unsupported(
@@ -847,7 +869,7 @@ pub(crate) const CREATE_TRIGGER_FEATURES: &[FeatureSupport] = &[
     ),
     FeatureSupport::new(
         Feature::TriggerInsteadOfTiming,
-        DialectSupport::declared(&[
+        declared!([
             (
                 MYSQL,
                 unsupported(UNSUPPORTED, "MySQL does not support INSTEAD OF triggers"),
@@ -858,7 +880,7 @@ pub(crate) const CREATE_TRIGGER_FEATURES: &[FeatureSupport] = &[
     ),
     FeatureSupport::new(
         Feature::TriggerWhen,
-        DialectSupport::declared(&[
+        declared!([
             (
                 MYSQL,
                 unsupported(UNSUPPORTED, "MySQL triggers do not support WHEN predicates"),
@@ -869,7 +891,7 @@ pub(crate) const CREATE_TRIGGER_FEATURES: &[FeatureSupport] = &[
     ),
     FeatureSupport::new(
         Feature::TriggerRaiseIgnore,
-        DialectSupport::declared(&[
+        declared!([
             (
                 MYSQL,
                 unsupported(UNSUPPORTED, "MySQL cannot render RAISE IGNORE"),
@@ -894,8 +916,8 @@ pub(crate) const SEQUENCE_FEATURES: &[FeatureSupport] =
 
 pub(crate) const PG_RAW_FEATURES: &[FeatureSupport] = &[FeatureSupport::new(
     Feature::RawSql,
-    DialectSupport::declared(&admitting(
-        &[POSTGRES],
+    declared!(admitting(
+        &POSTGRES_ONLY,
         RenderMode::Offline,
         unsupported(UNSUPPORTED, "pgRaw statements are PostgreSQL-only"),
     )),
@@ -931,7 +953,7 @@ mod tests {
     #[test]
     fn the_shipping_census_is_the_engine_dialect_set() {
         assert_eq!(
-            SHIPPING_DIALECTS.iter().copied().collect::<DialectSet>(),
+            SHIPPING_DIALECTS.iter().cloned().collect::<DialectSet>(),
             DialectSet::all(),
             "SHIPPING_DIALECTS and DialectSet::all name different backends"
         );
@@ -971,7 +993,7 @@ mod tests {
             declarations.len()
         );
 
-        let census: BTreeSet<DialectId> = SHIPPING_DIALECTS.iter().copied().collect();
+        let census: BTreeSet<DialectId> = SHIPPING_DIALECTS.iter().cloned().collect();
         assert!(
             census.len() >= 3,
             "the shipping dialect census collapsed to {} ({census:?})",
@@ -981,7 +1003,7 @@ mod tests {
         for (label, support) in &declarations {
             let cells: Vec<DialectId> = support.dialects().collect();
             assert_eq!(
-                cells.iter().copied().collect::<BTreeSet<_>>(),
+                cells.iter().cloned().collect::<BTreeSet<_>>(),
                 census,
                 "{label} declares {cells:?}, not the shipping census {census:?} — a \
                  declaration that names fewer dialects makes no claim where it used to"
@@ -1003,7 +1025,7 @@ mod tests {
         );
         for (label, support) in declarations() {
             assert_eq!(
-                support.decision_for(duckdb),
+                support.decision_for(&duckdb),
                 None,
                 "{label} answers for a dialect it never declared; NO CLAIM and a \
                  refusal are different answers and only one of them is honest here"

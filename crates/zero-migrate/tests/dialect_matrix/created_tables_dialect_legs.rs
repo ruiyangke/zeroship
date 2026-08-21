@@ -75,9 +75,9 @@ fn a_top_level_create_is_registered_as_owned() {
 #[test]
 fn a_create_in_the_selected_leg_is_registered_as_owned() {
     let created = artifact_created_tables(
-        r#"[{"op":"dialectal","sqlite":[
+        r#"[{"op":"dialectal","legs":{"sqlite":[
               {"op":"createTable","name":"wrapped","columns":[
-                {"name":"title","type":"text","nullable":true}]}]}]"#,
+                {"name":"title","type":"text","nullable":true}]}]}}]"#,
     );
     assert!(
         created.iter().any(|table| table == "wrapped"),
@@ -92,9 +92,9 @@ fn a_create_in_the_selected_leg_is_registered_as_owned() {
 #[test]
 fn a_create_in_an_unselected_leg_is_registered_as_owned_too() {
     let created = artifact_created_tables(
-        r#"[{"op":"dialectal","pg":[
+        r#"[{"op":"dialectal","legs":{"postgres":[
               {"op":"createTable","name":"only_pg","columns":[
-                {"name":"title","type":"text","nullable":true}]}]}]"#,
+                {"name":"title","type":"text","nullable":true}]}]}}]"#,
     );
     assert!(
         created.iter().any(|table| table == "only_pg"),

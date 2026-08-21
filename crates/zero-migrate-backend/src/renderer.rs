@@ -133,7 +133,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// The direction stays one-way: an id does not convert back to a variant. See
     /// [`SqlDialect::id`].
     fn dialect(&self) -> DialectId {
-        self.descriptor().id
+        self.descriptor().id.clone()
     }
 
     /// What this backend IS: its id, its human-facing name, its capability set and

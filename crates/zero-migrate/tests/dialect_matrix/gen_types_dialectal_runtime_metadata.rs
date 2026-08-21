@@ -58,15 +58,16 @@ fn history() -> Vec<Op> {
       {"name":"body","type":"text","nullable":true}
     ],"primaryKey":["id"]},
     {"op":"dialectal",
-     "pg":[
-       {"op":"createIndex","table":"notes","name":"notes_pg_idx",
-        "columns":[{"kind":"column","name":"body"}]},
-       {"op":"setTableOptions","table":"notes","options":{"softDelete":true}}
-     ],
-     "sqlite":[
-       {"op":"createIndex","table":"notes","name":"notes_sqlite_idx",
-        "columns":[{"kind":"column","name":"body"}]}
-     ]}
+     "legs":{
+       "postgres":[
+         {"op":"createIndex","table":"notes","name":"notes_pg_idx",
+          "columns":[{"kind":"column","name":"body"}]},
+         {"op":"setTableOptions","table":"notes","options":{"softDelete":true}}
+       ],
+       "sqlite":[
+         {"op":"createIndex","table":"notes","name":"notes_sqlite_idx",
+          "columns":[{"kind":"column","name":"body"}]}
+       ]}}
   ]
 }"#;
     serde_json::from_str::<MigrationIr>(source)

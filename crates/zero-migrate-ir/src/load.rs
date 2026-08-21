@@ -202,22 +202,8 @@ pub fn op_created_table(op: &Op) -> Option<&str> {
 }
 
 fn collect_created_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
-    if let Op::Dialectal {
-        default,
-        pg,
-        sqlite,
-        mysql,
-    } = op
-    {
-        for leg in [
-            default.as_deref(),
-            pg.as_deref(),
-            sqlite.as_deref(),
-            mysql.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+    if let Op::Dialectal { legs } = op {
+        for leg in legs.values() {
             for inner in leg {
                 collect_created_tables(inner, out);
             }
@@ -330,22 +316,8 @@ fn op_target_table(op: &Op) -> Option<&str> {
 }
 
 fn collect_target_tables<'a>(op: &'a Op, out: &mut Vec<&'a str>) {
-    if let Op::Dialectal {
-        default,
-        pg,
-        sqlite,
-        mysql,
-    } = op
-    {
-        for leg in [
-            default.as_deref(),
-            pg.as_deref(),
-            sqlite.as_deref(),
-            mysql.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
+    if let Op::Dialectal { legs } = op {
+        for leg in legs.values() {
             for inner in leg {
                 collect_target_tables(inner, out);
             }
@@ -656,21 +628,8 @@ fn classify_forward_op(op: &Op, kinds: &mut ForwardOpKinds) {
         // `Dialectal` is an envelope around op lists, not an independently
         // executable DDL/vendor operation. Descend through EVERY leg so an
         // off-target leg cannot hide DML from this phase-free protocol gate.
-        Op::Dialectal {
-            default,
-            pg,
-            sqlite,
-            mysql,
-        } => {
-            for leg in [
-                default.as_deref(),
-                pg.as_deref(),
-                sqlite.as_deref(),
-                mysql.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            {
+        Op::Dialectal { legs } => {
+            for leg in legs.values() {
                 for inner in leg {
                     classify_forward_op(inner, kinds);
                 }
