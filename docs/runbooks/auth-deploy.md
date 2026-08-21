@@ -159,12 +159,18 @@ or base64url encoded.
 
    ```bash
    cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+   umask 077 && printf '%s' "$PLATFORM_ADMIN_DATABASE_URL" > ./migrate-dsn
    ./target/release/zeroship-platform-migrate \
-     --database-url "$PLATFORM_ADMIN_DATABASE_URL" \
+     --database-url-file ./migrate-dsn \
      --migrations-dir ./db/migrations-ts \
      --project-schema zeroship \
      --project-id zeroship
+   rm -f ./migrate-dsn
    ```
+
+   The admin DSN goes in a file, not in the argument list, and the file must be
+   owner-only: there is no `--database-url` value flag, and the reader refuses
+   any mode with a bit set in `0o077`.
 
 2. **Verify the auth role can connect**:
 

@@ -207,8 +207,8 @@ MIG_LOG="$WORK/platform-migrate.log"
 # Post-extraction: platform schema is applied by zeroship-platform-migrate
 # (adapter, platform-cli). It authors via its own built-in V8 (no recorder child)
 # and drives the published zero-migrate engine over CompioPgSession.
-"$BIN/zeroship-platform-migrate" \
-  --database-url "$DBURL" --migrations-dir "$ROOT/db/migrations-ts" \
+zs_platform_migrate "$BIN/zeroship-platform-migrate" "$DBURL" \
+  --migrations-dir "$ROOT/db/migrations-ts" \
   --project-schema zeroship --project-id zeroship > "$MIG_LOG" 2>&1 \
   && pass "zeroship platform migrations applied" || { fail "platform migrate"; tail -30 "$MIG_LOG"; exit 1; }
 

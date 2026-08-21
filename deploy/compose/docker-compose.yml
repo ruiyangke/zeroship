@@ -175,17 +175,23 @@ services:
     volumes:
       - ../../db/migrations-ts:/db/migrations-ts:ro
       # The privileged DSN, as a PATH like every other credential here. It was
-      # a `--database-url <dsn>` VALUE until 2026-08-16, which put a postgres
+      # a `--database-url` VALUE until 2026-08-16, which put a postgres
       # SUPERUSER password - not a scoped role - into this container's argv,
       # where `docker inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline
       # publish it to anything in the PID namespace. `zeroship dev init` writes
       # this file; deploy/scripts/deploy-remote.sh discovers it by grepping this
       # very mount, so no list anywhere needs updating.
+      #
+      # The value spelling no longer exists at all: the binary declares this DSN
+      # `Secret<String>` through `#[zeroship_config]`, and that class generates
+      # only a `-file` carrier. Passing the deleted value flag here would now
+      # fail the one-shot at parse time rather than leak.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/migrate-dsn:/etc/zeroship/secrets/migrate-dsn:ro
     command:
-      # NB: the bin's parser takes space-separated flag/value pairs only
-      # (no `--flag=value` form) - keep each flag and its value as separate
-      # list items.
+      # The parser is clap now (the generated `#[zeroship_config]` carrier), so
+      # `--flag=value` would also parse. The separate-item spelling is kept
+      # because every other service block here uses it and because the compose
+      # argv check (tests/config_name_alignment_gate.sh, check 6c) reads items.
       - zeroship-platform-migrate
       - --migrations-dir
       - /db/migrations-ts

@@ -204,19 +204,19 @@ OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
 
-**153 canonical settings**: 115 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
+**158 canonical settings**: 119 operational, 32 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
 
 ### shared (no scope prefix: read by more than one binary)
 
 | Canonical | Class | Environment | Overlay path | Flag by binary | Default |
 | --- | --- | --- | --- | --- | --- |
 | `blob_store` | operational | `ZEROSHIP_BLOB_STORE` | `blob_store` | zeroship-control `--blob-store`<br>zeroship-gate `--blob-store`<br>zeroship-worker `--blob-store` | `./bundles` |
-| `check_config` | command control | - | - | zeroship-auth `--check-config`<br>zeroship-control `--check-config`<br>zeroship-gate `--check-config`<br>zeroship-migrated `--check-config`<br>zeroship-worker `--check-config`<br>zeroship-workflow-scheduler `--check-config` | - |
-| `check_config_format` | command control | - | - | zeroship-auth `--check-config-format`<br>zeroship-control `--check-config-format`<br>zeroship-gate `--check-config-format`<br>zeroship-migrated `--check-config-format`<br>zeroship-worker `--check-config-format`<br>zeroship-workflow-scheduler `--check-config-format` | `CheckFormat::Text` |
-| `config` | bootstrap control | `ZEROSHIP_CONFIG` | - | zeroship-auth `--config`<br>zeroship-control `--config`<br>zeroship-gate `--config`<br>zeroship-migrated `--config`<br>zeroship-workflow-scheduler `--config` | - |
+| `check_config` | command control | - | - | zeroship-auth `--check-config`<br>zeroship-control `--check-config`<br>zeroship-gate `--check-config`<br>zeroship-migrated `--check-config`<br>zeroship-platform-migrate `--check-config`<br>zeroship-worker `--check-config`<br>zeroship-workflow-scheduler `--check-config` | - |
+| `check_config_format` | command control | - | - | zeroship-auth `--check-config-format`<br>zeroship-control `--check-config-format`<br>zeroship-gate `--check-config-format`<br>zeroship-migrated `--check-config-format`<br>zeroship-platform-migrate `--check-config-format`<br>zeroship-worker `--check-config-format`<br>zeroship-workflow-scheduler `--check-config-format` | `CheckFormat::Text` |
+| `config` | bootstrap control | `ZEROSHIP_CONFIG` | - | zeroship-auth `--config`<br>zeroship-control `--config`<br>zeroship-gate `--config`<br>zeroship-migrated `--config`<br>zeroship-platform-migrate `--config`<br>zeroship-workflow-scheduler `--config` | - |
 | `control_key` | secret | `ZEROSHIP_CONTROL_KEY` | `control_key` | zeroship-control `--control-key-file`<br>zeroship-gate `--control-key-file`<br>zeroship-migrated `--control-key-file`<br>zeroship-worker `--control-key-file` | - |
 | `control_url` | operational | `ZEROSHIP_CONTROL_URL` | `control_url` | zeroship-auth `--control-url`<br>zeroship-gate `--control-url`<br>zeroship-worker `--control-url` | `http://localhost:9090` |
-| `no_config` | bootstrap control | `ZEROSHIP_NO_CONFIG` | - | zeroship-auth `--no-config`<br>zeroship-control `--no-config`<br>zeroship-gate `--no-config`<br>zeroship-migrated `--no-config`<br>zeroship-workflow-scheduler `--no-config` | - |
+| `no_config` | bootstrap control | `ZEROSHIP_NO_CONFIG` | - | zeroship-auth `--no-config`<br>zeroship-control `--no-config`<br>zeroship-gate `--no-config`<br>zeroship-migrated `--no-config`<br>zeroship-platform-migrate `--no-config`<br>zeroship-workflow-scheduler `--no-config` | - |
 | `oauth_audience` | operational | `ZEROSHIP_OAUTH_AUDIENCE` | `oauth_audience` | zeroship-auth `--oauth-audience`<br>zeroship-control `--oauth-audience`<br>zeroship-migrated `--oauth-audience` | `control.zeroship.ai` |
 | `origin_scheme` | operational | `ZEROSHIP_ORIGIN_SCHEME` | `origin_scheme` | zeroship-control `--origin-scheme`<br>zeroship-gate `--origin-scheme` | `OriginScheme::Https` |
 | `pairwise_salt` | secret | `ZEROSHIP_PAIRWISE_SALT` | `pairwise_salt` | zeroship-control `--pairwise-salt-file`<br>zeroship-gate `--pairwise-salt-file` | - |
@@ -369,8 +369,18 @@ by the generator.
 
 | Canonical | Class | Environment | Overlay path | Flag by binary | Default |
 | --- | --- | --- | --- | --- | --- |
-| `observability.log_filter` | operational | `ZEROSHIP_OBSERVABILITY_LOG_FILTER` | `observability.log_filter` | zeroship-auth `--observability-log-filter`<br>zeroship-control `--observability-log-filter`<br>zeroship-gate `--observability-log-filter`<br>zeroship-migrated `--observability-log-filter`<br>zeroship-worker `--observability-log-filter`<br>zeroship-workflow-scheduler `--observability-log-filter` | `DEFAULT_LOG_FILTER` |
-| `observability.log_format` | operational | `ZEROSHIP_OBSERVABILITY_LOG_FORMAT` | `observability.log_format` | zeroship-auth `--observability-log-format`<br>zeroship-control `--observability-log-format`<br>zeroship-gate `--observability-log-format`<br>zeroship-migrated `--observability-log-format`<br>zeroship-worker `--observability-log-format`<br>zeroship-workflow-scheduler `--observability-log-format` | `LogFormat::Auto` |
+| `observability.log_filter` | operational | `ZEROSHIP_OBSERVABILITY_LOG_FILTER` | `observability.log_filter` | zeroship-auth `--observability-log-filter`<br>zeroship-control `--observability-log-filter`<br>zeroship-gate `--observability-log-filter`<br>zeroship-migrated `--observability-log-filter`<br>zeroship-platform-migrate `--observability-log-filter`<br>zeroship-worker `--observability-log-filter`<br>zeroship-workflow-scheduler `--observability-log-filter` | `DEFAULT_LOG_FILTER` |
+| `observability.log_format` | operational | `ZEROSHIP_OBSERVABILITY_LOG_FORMAT` | `observability.log_format` | zeroship-auth `--observability-log-format`<br>zeroship-control `--observability-log-format`<br>zeroship-gate `--observability-log-format`<br>zeroship-migrated `--observability-log-format`<br>zeroship-platform-migrate `--observability-log-format`<br>zeroship-worker `--observability-log-format`<br>zeroship-workflow-scheduler `--observability-log-format` | `LogFormat::Auto` |
+
+### platform-migrate
+
+| Canonical | Class | Environment | Overlay path | Flag by binary | Default |
+| --- | --- | --- | --- | --- | --- |
+| `platform_migrate.cluster_lock_database` | operational | `ZEROSHIP_PLATFORM_MIGRATE_CLUSTER_LOCK_DATABASE` | `platform_migrate.cluster_lock_database` | zeroship-platform-migrate `--cluster-lock-database` | `DEFAULT_CLUSTER_LOCK_DATABASE` |
+| `platform_migrate.database_url` | secret | `ZEROSHIP_PLATFORM_MIGRATE_DATABASE_URL` | `platform_migrate.database_url` | zeroship-platform-migrate `--database-url-file` | - |
+| `platform_migrate.migrations_dir` | operational | `ZEROSHIP_PLATFORM_MIGRATE_MIGRATIONS_DIR` | `platform_migrate.migrations_dir` | zeroship-platform-migrate `--migrations-dir` | `default_migrations_dir()` |
+| `platform_migrate.project_id` | operational | `ZEROSHIP_PLATFORM_MIGRATE_PROJECT_ID` | `platform_migrate.project_id` | zeroship-platform-migrate `--project-id` | `DEFAULT_PROJECT_ID` |
+| `platform_migrate.project_schema` | operational | `ZEROSHIP_PLATFORM_MIGRATE_PROJECT_SCHEMA` | `platform_migrate.project_schema` | zeroship-platform-migrate `--project-schema` | `DEFAULT_PROJECT_SCHEMA` |
 
 ### worker
 

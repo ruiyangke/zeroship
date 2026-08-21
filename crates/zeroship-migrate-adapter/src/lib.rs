@@ -112,6 +112,14 @@ use compio_postgres::types::{Kind, ToSql, Type};
 use compio_postgres::{Client, Error as PgError, Row as PgRow};
 use zero_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 
+/// The `zeroship-platform-migrate` one-shot's generated configuration.
+///
+/// NOT behind `platform-cli`: `crates/config-contract` links this crate to reach
+/// `PlatformMigrateSettings::SPECS`, and the declaration carries no V8, so
+/// keeping it out of the feature keeps `zeroship-runtime` off the contract
+/// checker's dependency graph.
+pub mod config;
+
 /// Phase F Stage 4a — the platform-schema migrate path on the published engine
 /// (author `db/migrations-ts/*.ts` via zeroship-runtime V8 → apply via
 /// zero-migrate over [`CompioPgSession`]). Feature-gated so the base library
