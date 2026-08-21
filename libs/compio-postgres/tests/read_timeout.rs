@@ -885,7 +885,9 @@ async fn copy_done_starts_a_deadline_for_the_final_server_response() {
             .expect_err("terminal-silent COPY ended the connection cleanly");
         assert!(driver_error.is_read_timeout());
         assert!(client.is_closed(), "timed-out COPY client remained usable");
-        drop(sink);
+        // `sink` is the `Pin<&mut _>` that `pin!` handed back, so dropping it
+        // would retire the pointer and not the sink; the sink itself lives in
+        // `pin!`'s hidden local and goes at the end of this block either way.
         drop(statement);
         drop(client);
         server.finish();
