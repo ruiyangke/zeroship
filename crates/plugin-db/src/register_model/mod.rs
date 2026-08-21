@@ -500,6 +500,28 @@ pub async fn apply_declared_schema_to_dev_sqlite_for_tests(
     sqlite_engine::run_sqlite_via_engine(backend, app_id, collection, schema, indexes, &[]).await
 }
 
+/// Translate ONE declared collection into the engine's `CollectionDescriptor`.
+///
+/// The Postgres apply-ahead a test needs cannot live in this crate the way the
+/// SQLite one above does: `run_sqlite_via_engine` is retired PRODUCTION code
+/// reused by a test, whereas nothing in production plans a declarative PG diff -
+/// the PG schema is applied by `crates/migrated` replaying authored envelopes at
+/// deploy. Adding a declarative PG applier to `src/` would invent a path with no
+/// production caller. So the driving lives in the test
+/// (`crates/plugin-db/tests/parity/mod.rs`) and only the TRANSLATION is exported
+/// here - the `refTarget` -> `ref` and `fields` -> `columns` re-keying - so a
+/// wire-key change cannot leave the two parity legs disagreeing about what the
+/// same declared schema means. It is dialect-neutral despite its module.
+#[cfg(feature = "test-helpers")]
+pub fn collection_descriptor_for_tests(
+    app_id: &str,
+    collection: &str,
+    schema: &Value,
+    indexes: &Value,
+) -> Result<zero_migrate::render::declarative::CollectionDescriptor, DbError> {
+    sqlite_engine::schema_to_descriptor(app_id, collection, schema, indexes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -137,6 +137,14 @@ zeroship-plugin-workflow = { workspace = true }
 # `hmac` is also unconditional now, but we keep the dev-dep pin so the
 # integration target still spells out its dependency explicitly.
 hmac = { workspace = true }
+# The Postgres leg of `tests/parity/` has to apply its table AHEAD of the
+# runtime, the way `crates/migrated` does at deploy, because `registerModel`
+# creates nothing on either dialect since d84cbbd84. The engine's PG apply path
+# is generic over `zero_migrate::driver::SqlSession`, and this crate is the one
+# `SqlSession` producer over compio-postgres in the tree (the orphan rule blocks
+# plugin-db from writing its own). DEV-only: no production plugin-db path plans a
+# declarative PG diff, and the adapter does not depend on plugin-db, so no cycle.
+zeroship-migrate-adapter = { workspace = true }
 
 [[bench]]
 name = "bench_query_build"

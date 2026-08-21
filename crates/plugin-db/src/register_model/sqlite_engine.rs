@@ -388,7 +388,7 @@ fn build_union_descriptors(
 /// `refTarget → ref` and injecting the field `name`, then deserializing through
 /// serde so every facet (vector/encrypted/mask/fts/enum/min/max/default/…) is
 /// carried verbatim by the existing `#[serde(rename)]` mapping.
-fn schema_to_descriptor(
+pub(crate) fn schema_to_descriptor(
     app_id: &str,
     collection: &str,
     schema: &Value,
