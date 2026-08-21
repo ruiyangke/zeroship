@@ -109,7 +109,7 @@ expect 0 "two distinct arm ids with the same counts pass" distinct_arms
 
 # --- the emission is a wire format, not prose -------------------------------
 #
-# crates/zeroship-gatekit's gate-arm-census parses these lines. If the shape
+# tests/gate_arm_census.sh parses these lines. If the shape
 # drifts, that consumer silently enumerates nothing - which is this repo's
 # founding bug, one level up. Pin the exact line.
 emit_out="$(. "$LIB"; gate_arms_init widget; gate_arm citations 85 40; gate_arms_finish)"
@@ -118,7 +118,7 @@ if printf '%s\n' "$emit_out" | grep -qx 'zsgate-arm gate=widget arm=citations ex
   echo "ok   - the per-arm census line has its documented shape"
 else
   fail=$((fail + 1))
-  echo "FAIL - the per-arm census line changed shape; gate-arm-census will parse nothing:" >&2
+  echo "FAIL - the per-arm census line changed shape; gate_arm_census.sh will parse nothing:" >&2
   printf '%s\n' "$emit_out" | sed 's/^/       /' >&2
 fi
 
@@ -143,35 +143,8 @@ else
   echo "FAIL - a refusing arm emitted no census line; the collapse is invisible" >&2
 fi
 
-# --- the delegate path ------------------------------------------------------
-#
-# A shim over a gate implemented elsewhere (tests/compose_secret_strength_gate.sh
-# over a Rust binary) has no counts of its own. It must still be held to the
-# contract, or "become a shim" is how a gate opts out of it. All three cases use
-# the same `sh -c` delegate and differ only in what it prints.
-delegate_silent() {
-  gate_arms_init shim
-  gate_arms_delegate sh -c 'echo "some human-readable output"'
-  gate_arms_finish
-}
-expect 1 "a delegate that emits no census line refuses" delegate_silent
-
-delegate_below() {
-  gate_arms_init shim
-  gate_arms_delegate sh -c 'echo "zsgate-arm gate=inner arm=rules examined=0 floor=4"'
-  gate_arms_finish
-}
-expect 1 "a delegate whose arm is under its floor refuses even if it exits 0" delegate_below
-
-delegate_clear() {
-  gate_arms_init shim
-  gate_arms_delegate sh -c 'echo "zsgate-arm gate=inner arm=rules examined=6 floor=4"'
-  gate_arms_finish
-}
-expect 0 "the same delegate above its floor passes" delegate_clear
-
 # --- anti-hollow guard for this file itself ---------------------------------
-EXPECTED=19
+EXPECTED=16
 total=$((pass + fail))
 if [ "$total" -ne "$EXPECTED" ]; then
   echo "SELF-TEST DID NOT RUN: expected $EXPECTED assertions, ran $total." >&2

@@ -118,7 +118,6 @@ For the long form with sequence diagrams, see `docs/architecture/distributed.md`
 ```
 crates/
 ├── core/             Inter-service wire types (RouteEntry, AppRecord, UsageReport, ControlEvent), typed_id, auth utils, observability
-+-- zeroship-secret-policy/ The platform secret table (PLATFORM_SECRETS), its strength rules and validators, the unset-credential sentinel, and secret-reference resolution. A LEAF: base64/hex/url/thiserror and nothing else. It is separate from core precisely so a reader of the policy does not link core's HTTP client (cyper -> hyper -> tokio). Callers name THIS crate; `zeroship_core::config` does not re-export it, so there is one public path per symbol. core depends on it too, because credential_gate consumes the table.
 ├── bundle/           .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
 ├── zeroship-schema/  Shared schema authority — DDL builders, diff classifier, live introspection, sentinel codec. Leaf (no v8/runtime); reused by the migration engine (write/diff) + plugin-db's data plane (read/introspect).
 ├── zeroship-migrate-adapter/ Bridges the vendored zero-migrate engine (third_party/zero-migrate submodule) to compio-postgres via a SqlSession newtype. PostgreSQL only — it applies pure DDL and REFUSES anything else, including the SQLite rebuild step. The engine is multi-dialect; this adapter is not, and nothing here drives its MySQL or SQLite backends.
@@ -141,17 +140,6 @@ crates/
 │ Tools
 +-- cli/              CLI: serve, deploy, migrate, config, login, logout, whoami, secret, var, dev
                       (no `build` — builds go through @zeroship/vite-plugin)
-+-- zeroship-gatekit/ Repository GATES as Rust: shared docker-compose model, the
-                      green/red/REFUSED verdict type, the META-gate
-                      (`gate-arm-census`, which checks that every gate declares
-                      per arm how much it examined), and the gates themselves.
-                      Not zeroship-test-support - that crate is the test-DATABASE
-                      substrate; these read files and link no driver.
-                      It links no HTTP stack either, as of 2026-08-21: its one
-                      product dependency is zeroship-secret-policy, the leaf
-                      above. `cargo tree -p zeroship-gatekit -i tokio -e normal`
-                      now reports no match. Reaching for zeroship-core again
-                      would silently restore the edge.
 ```
 
 **Writing or changing a gate.** Every arm of every gate declares the number of
@@ -163,17 +151,15 @@ ran" guard was green throughout one of them because three arms did run, one over
 an empty set. The floor lives beside the code that produces the number, never in
 a central table - a table of expected counts is a census, and stale censuses are
 how four OTHER gates went red the same week when two new crates landed.
-`cargo run -p zeroship-gatekit --bin gate-arm-census -- tests` checks that every
-gate participates; `--run <gate.sh>` also rules on the counts they emit.
+`tests/gate_arm_census.sh tests` checks that every gate participates; add
+`--run <gate.sh>` and it also rules on the counts those gates emit.
 
-A gate written in RUST declares the same arms through
-`zeroship_gatekit::arm_census::GateRun`, which refuses the report the moment an
-arm falls under its floor, and keeps a `tests/<name>_gate.sh` SHIM that execs
-the binary through `gate_arms_delegate`. The shim carries no rules; it exists
-because the census enumerates `tests/*_gate.sh`, so deleting it would take the
-gate out of the only check that it declares arms at all. Five compose gates are
-Rust today (`crates/zeroship-gatekit/src/{secret_strength,port_exposure,
-stateful_volume,backing_service_reach,workflow_advance_flag}.rs`).
+EVERY GATE IS A SHELL SCRIPT under `tests/`, and the census itself is one. Five
+compose gates and the census were Rust in a `zeroship-gatekit` crate for a week;
+all of it was deleted on 2026-08-21, the gates for the complexity they cost and
+the census because 959 lines of Rust to read shell scripts and enforce a shell
+convention is a workspace member paying for nothing. Write a new gate in shell,
+source `tests/lib/gate_arms.sh`, and give every arm a floor.
 
 Standalone, zeroship-independent driver libraries (own top-level `libs/`, publishable):
 
@@ -192,7 +178,7 @@ Per-crate READMEs (where present) carry the responsibility statement and list of
 
 These don't change. If you're about to violate one, stop and ask.
 
-- **Zero tokio in the stack.** Everything is compio/io_uring. Drivers are bespoke (`compio-postgres`, `compio-redis`). The rule holds for code we write: no crate here declares tokio, and every `tokio::` string in the tree is a comment saying what compio replaces. It does NOT yet hold for the dependency graph - `cyper` pulls `hyper`, which pulls tokio, so `libtokio-*.rlib` is built (re-measured 2026-08-21 via `cargo tree -i tokio -e normal`: the third-party carriers are `cyper`, `cyper-core`, `hyper`, `hyper-util`, and nine of our crates name `cyper` directly - both sets unchanged since 2026-08-20). Removing that is the `investigate/cyper-tokio-removal` branch. **That edge is LINKED, NOT DRIVEN, and this paragraph used to omit it** - which is how a task was dispatched on 2026-08-21 to hand-roll an HTTP/1.1 client purely to avoid "adding a tokio edge" that was never a running runtime. No tokio reactor starts on our paths. `cyper` and `cyper-core` contain zero `tokio` occurrences in their own source (`grep -rc tokio ~/.cargo/registry/src/*/cyper{,-core}-*/src/*.rs`), and cyper-core supplies `CompioExecutor` (`hyper::rt::Executor` over `compio::runtime::spawn`) and `CompioTimer` (`hyper::rt::Timer` over `compio::time::sleep`), which `cyper::ClientBuilder::build` installs alongside its own `Connector` - so hyper's spawn, timer and connect hooks all land on compio and hyper-util's tokio-based `HttpConnector` is never constructed. hyper itself declares only `tokio = { features = ["sync"] }`, which needs no reactor. The `net`/`mio` features come from `hyper-util/client` naming `tokio/net` outright, NOT from hyper-util defaults (`default = []` is empty), so `default-features = false` would change nothing and the edge cannot be flagged away without dropping `hyper_util::client::legacy::Client` - which cyper uses. Empirically, a `cyper` GET returns `Ok(200)` inside a bare `#[compio::test]` runtime; a live path touching `tokio::net` or `tokio::time` would panic there instead (that exercises connect plus one request, not pool-idle timers). Read the pinned carrier sets as "compiled in", never as "a second runtime is running". The closure BEHIND those sets can shrink without either set moving, and did: `crates/zeroship-secret-policy` split the secret table out of `zeroship-core` on 2026-08-21, taking `zeroship-gatekit` off the edge and the reachable count from 26 to 25. The gate is green either way, because gatekit reached tokio through core rather than by naming a carrier - so treat the two pinned sets as "has the accepted edge moved", never as a count of who is behind it. Do not read the exception as licence: adding a tokio-dependent crate still needs to be raised. **`tests/zero_tokio_gate.sh` now checks both halves** - it bans a tokio declaration in any manifest we own, and pins those two sets so the accepted edge cannot grow, shrink, or vanish without this paragraph changing in the same commit.
+- **Zero tokio in the stack.** Everything is compio/io_uring. Drivers are bespoke (`compio-postgres`, `compio-redis`). The rule holds for code we write: no crate here declares tokio, and every `tokio::` string in the tree is a comment saying what compio replaces. It does NOT yet hold for the dependency graph - `cyper` pulls `hyper`, which pulls tokio, so `libtokio-*.rlib` is built (re-measured 2026-08-21 via `cargo tree -i tokio -e normal`: the third-party carriers are `cyper`, `cyper-core`, `hyper`, `hyper-util`, and nine of our crates name `cyper` directly - both sets unchanged since 2026-08-20). Removing that is the `investigate/cyper-tokio-removal` branch. **That edge is LINKED, NOT DRIVEN, and this paragraph used to omit it** - which is how a task was dispatched on 2026-08-21 to hand-roll an HTTP/1.1 client purely to avoid "adding a tokio edge" that was never a running runtime. No tokio reactor starts on our paths. `cyper` and `cyper-core` contain zero `tokio` occurrences in their own source (`grep -rc tokio ~/.cargo/registry/src/*/cyper{,-core}-*/src/*.rs`), and cyper-core supplies `CompioExecutor` (`hyper::rt::Executor` over `compio::runtime::spawn`) and `CompioTimer` (`hyper::rt::Timer` over `compio::time::sleep`), which `cyper::ClientBuilder::build` installs alongside its own `Connector` - so hyper's spawn, timer and connect hooks all land on compio and hyper-util's tokio-based `HttpConnector` is never constructed. hyper itself declares only `tokio = { features = ["sync"] }`, which needs no reactor. The `net`/`mio` features come from `hyper-util/client` naming `tokio/net` outright, NOT from hyper-util defaults (`default = []` is empty), so `default-features = false` would change nothing and the edge cannot be flagged away without dropping `hyper_util::client::legacy::Client` - which cyper uses. Empirically, a `cyper` GET returns `Ok(200)` inside a bare `#[compio::test]` runtime; a live path touching `tokio::net` or `tokio::time` would panic there instead (that exercises connect plus one request, not pool-idle timers). Read the pinned carrier sets as "compiled in", never as "a second runtime is running". The closure BEHIND those sets can shrink without either set moving, and did: `zeroship-gatekit` dropped its last `zeroship-core` dependency on 2026-08-21 (before the crate itself was deleted), taking the reachable count from 26 to 25. The gate was green either way, because gatekit reached tokio through core rather than by naming a carrier - so treat the two pinned sets as "has the accepted edge moved", never as a count of who is behind it. Do not read the exception as licence: adding a tokio-dependent crate still needs to be raised. **`tests/zero_tokio_gate.sh` now checks both halves** - it bans a tokio declaration in any manifest we own, and pins those two sets so the accepted edge cannot grow, shrink, or vanish without this paragraph changing in the same commit.
 - **V8 per thread, one isolate per (app, live deploy) plus a bounded budget of pinned workflow isolates per app (`max_pinned_isolates_per_app`) for deploy-pinned workflow replay.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/worker/src/cache.rs`).
 - **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/core/src/typed_id.rs`.
 - **Wire formats are explicit contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.zship` archive layout, and RPC envelopes must be changed deliberately. Pre-launch can break them, but every producer, consumer, fixture, and reference doc changes in the same patch; no hidden compatibility shim.

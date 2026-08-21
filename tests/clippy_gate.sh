@@ -289,14 +289,19 @@ CARGO_ARGS=(clippy --workspace --all-targets "${FEATURE_ARGS[@]}")
 # the five numbers had drifted since, which is why they are dated and why none
 # of them is a floor - every floor below is either derived or set far under.
 #
-#   workspace members            31   (--audit-only, arm workspace_members)
-#                                     30 until crates/zeroship-secret-policy
-#   feature-enabled targets     172   (--audit-only, arm expected_targets)
-#                                     158 at the 2026-08-20 reading; that in
-#                                     turn was 148 under the two-feature list
-#                                     the --all-features switch replaced, the 10
-#                                     new ones being the targets whose
-#                                     required-features that list did not
+#   workspace members            29   (--audit-only, arm workspace_members)
+#                                     31 on 2026-08-21 before a secret-policy
+#                                     leaf was folded back into core and
+#                                     zeroship-gatekit was deleted
+#   feature-enabled targets     163   (--audit-only, arm expected_targets)
+#                                     172 before the five zeroship-gatekit
+#                                     compose-gate binaries, their two
+#                                     integration tests and finally the crate
+#                                     itself were deleted; 158 at the 2026-08-20
+#                                     reading; that in turn was 148 under the
+#                                     two-feature list the --all-features switch
+#                                     replaced, the 10 new ones being the targets
+#                                     whose required-features that list did not
 #                                     satisfy (arm-4 comment below)
 #   declared features            28   (--audit-only, arm declared_features)
 #   include_str! literals       246   (--preflight-only, arm preflight_include_str)
@@ -561,12 +566,12 @@ jq -r '
 # the constant 3 until 2026-08-20, chosen because clippy_gate_selftest.sh drives
 # every audit case over a three-package fixture; on this workspace's members
 # that passed while ruling on a tenth of them, and it would have kept passing at
-# 4 of 31. `.workspace_members | length` is the same number the join selects
+# 4 of 29. `.workspace_members | length` is the same number the join selects
 # against, so a join that stops matching a future cargo's shape shows up here as
-# 0 of 31 rather than as an empty green.
+# 0 of 29 rather than as an empty green.
 #
-# MEASURED 2026-08-21 via --audit-only: 31 members, and the arm line now reads
-# examined=31 floor=31 (30/30 until crates/zeroship-secret-policy). The floor
+# MEASURED 2026-08-21 by running this gate: 29 members, and the arm line reads
+# examined=29 floor=29 (31/31 earlier the same day). The floor
 # being DERIVED is what keeps this line from needing an edit per new crate; the
 # denominator is bounded by MIN_MEMBERS, without which a metadata blob that
 # collapsed would satisfy completeness with nothing in it.

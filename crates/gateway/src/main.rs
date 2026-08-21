@@ -9,8 +9,11 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ntex::web;
-use zeroship_core::config::{audit_credentials, bootstrap_or_exit, mark_dev_escape_active, BuildProfile, CheckConfigReport, CheckValue, CredentialPosture, CredentialVerdict, SubsystemCredential};
-use zeroship_secret_policy::{require_nonempty, validate_pairwise_salt, validate_stash_key};
+use zeroship_core::config::{
+    audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
+    validate_pairwise_salt, validate_stash_key, BuildProfile, CheckConfigReport, CheckValue,
+    CredentialPosture, CredentialVerdict, SubsystemCredential,
+};
 use zeroship_bundle::{build_blob_store, BlobStore, StoreUrl};
 use zeroship_gateway::config::{GateSettings, GateSettingsSources};
 use zeroship_gateway::{
@@ -727,8 +730,7 @@ fn main() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_core::config::{GeneratedConfig, SourceKind};
-    use zeroship_secret_policy::{SERVICE_CREDENTIAL_SENTINEL};
+    use zeroship_core::config::{GeneratedConfig, SourceKind, SERVICE_CREDENTIAL_SENTINEL};
 
     // WHAT LEFT THIS MODULE. The two tests that drove the ENVIRONMENT tier of
     // `GateSettings` moved to `crates/gateway/tests/config_env_tier.rs`. That

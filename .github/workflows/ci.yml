@@ -436,10 +436,11 @@ jobs:
       #
       # STATIC by design. The per-arm floors are enforced at the point of
       # measurement by tests/lib/gate_arms.sh, in each gate's own CI step above
-      # and below, which is where the diagnosis is. This is milliseconds and
-      # needs no docker, no database and no built workspace beyond cargo.
+      # and below, which is where the diagnosis is. This reads text: no docker,
+      # no database, no cargo. It was a 959-line Rust crate until 2026-08-21,
+      # which is a lot of workspace member to read shell scripts with.
       - name: Every gate declares how much each of its arms examined
-        run: cargo run -q -p zeroship-gatekit --bin gate-arm-census -- tests
+        run: tests/gate_arm_census.sh tests
       # NOTHING IN THIS REPO BUILDS THE PLATFORM IMAGE. Measured 2026-08-11:
       # grep over .github/workflows/*.yml for `deploy/Dockerfile`, `docker build`
       # and `docker compose` returns ZERO hits, so the deploy path AGENTS.md
@@ -454,30 +455,16 @@ jobs:
       # have caught the two defects that actually happened, in under a second.
       - name: deploy/Dockerfile COPY paths resolve
         run: tests/dockerfile_copy_paths_gate.sh
-      # The platform database had NO named volume until 2026-08-11 - PGDATA lived
-      # in the container's writable layer while the Redis cache and the Redpanda
-      # log both had durable volumes. Runs no docker.
+      # deploy/compose/docker-compose.yml HAS NO AUTOMATED CHECK as of
+      # 2026-08-21. Four steps stood here - named volumes on stateful services,
+      # 0.0.0.0 published only by the edge, secret strength, and the unsigned
+      # workflow-advance flag below - and were deleted with the
+      # crates/zeroship-gatekit gates behind them, as a complexity-budget
+      # decision about that crate rather than a finding that the checks were
+      # wrong. The properties they held are unguarded; each had caught a real
+      # defect (PGDATA in the container's writable layer; a 10-byte WORKER_KEY
+      # against a 32-byte minimum).
       #
-      # The script is now a SHIM over crates/zeroship-gatekit
-      # (compose-stateful-volume), so it needs cargo where it used to need only
-      # awk. This job already runs cargo for the arm census above.
-      - name: compose keeps stateful data on named volumes
-        run: tests/compose_stateful_volume_gate.sh
-      # Its sibling was NOT wired for a while: the note here said it was RED on
-      # the control plane's 0.0.0.0 publication. That stopped being true when
-      # control lost its host port, and the gate is now green on both sides of
-      # this change. It is wired because it is what pins the property this
-      # commit's series established: the Caddy control route is active ONLY
-      # while the compose control service carries no security-relaxation input.
-      # Discriminates -- adding `--dev-insecure` back to the control block takes
-      # it from 11 passed / 0 failed to 9 / 2, exit 1 (re-measured 2026-08-21
-      # against the Rust gate). Runs no docker.
-      #
-      # The script is now a SHIM over crates/zeroship-gatekit
-      # (compose-port-exposure), so it needs cargo where it used to need only
-      # awk and grep.
-      - name: compose exposes only the edge on 0.0.0.0
-        run: tests/compose_port_exposure_gate.sh
       # THE ONE STEP IN THIS JOB THAT USES DOCKER, and it has to.
       # crates/control/src/reserved_names.rs decides which app names creators
       # may not take by reading deploy/ops/caddy-claimed-hosts.json - the
@@ -493,11 +480,6 @@ jobs:
       # green as one that ran.
       - name: edge claimed-host artifact is what caddy makes of the Caddyfile
         run: deploy/ops/caddy-claimed-hosts.sh --check
-      # Derived from crates/zeroship-secret-policy/src/lib.rs: compose shipped a
-      # 10-byte WORKER_KEY and a 27-byte STASH_SIGNING_KEY against a 32-byte
-      # minimum, so worker and control refused to start. Text-only.
-      - name: compose secrets meet the enforced minimum
-        run: tests/compose_secret_strength_gate.sh
       # The boot gate against a silent weak service credential
       # (docs/proposals/2026-08-16-service-identity.md section 6.5.2, modelled
       # on Superset's fix for CVE-2023-27524). The unit tests all rule on the
@@ -546,21 +528,6 @@ jobs:
       # Text-only: no build, no database.
       - name: test code does not create its own databases
         run: tests/tests_do_not_create_databases_gate.sh
-      # A COUPLING TRIPWIRE, not a style rule. Measured 2026-08-12 by running
-      # tests/e2e_gateway_workflow_advance_authz.sh: the worker's 403 without
-      # --workflow-advance-unsigned is BOTH why durable workflows cannot run in
-      # the shipped compose AND why the #199 gateway authz gap is unreachable
-      # there. Adding that flag to deploy/ to fix the first arms the second, on
-      # the public listener, in the same change. Green at HEAD (deploy/ has zero
-      # matches), so this is wired; it fails only when someone crosses the
-      # coupling. It CANNOT detect that the gateway edge was fixed - retiring it
-      # is a human call for the commit that fixes it. Task #354.
-      #
-      # The script is now a SHIM over crates/zeroship-gatekit
-      # (compose-workflow-advance-flag), so it needs cargo where it used to need
-      # only grep and find.
-      - name: deploy does not arm the unsigned workflow-advance path
-        run: tests/compose_workflow_advance_flag_gate.sh
       # AGENTS.md's "zero tokio in the stack" invariant has never been checked by
       # anything. It is two claims: no manifest we own declares tokio (true, and
       # briefly false in b72fee096, caught by a human reading the diff), and the

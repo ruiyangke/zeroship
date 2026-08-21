@@ -29,7 +29,6 @@ uuid = { workspace = true }
 zeroship-authz = { workspace = true }
 zeroship-authn = { workspace = true }
 zeroship-core = { workspace = true }
-zeroship-secret-policy = { workspace = true }
 # Phase F Stage 3: this service consumes ONLY the published `zero-migrate` engine
 # (vendored as a submodule at third_party/zero-migrate) plus the monorepo's
 # `zeroship-migrate-adapter` (the `CompioPgSession` mapping the platform's io_uring
