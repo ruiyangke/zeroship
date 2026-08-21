@@ -833,7 +833,17 @@ jobs:
         if: always()
         run: |
           . tests/lib/skip_census.sh
-          zs_skip_census "$RUNNER_TEMP/rust-tests.log" || true
+          census_rc=0
+          zs_skip_census "$RUNNER_TEMP/rust-tests.log" || census_rc=$?
+          # `|| true` tolerates a SKIP COUNT, which is this step's whole point.
+          # It must not tolerate a REFUSAL: status 2 means the log every cargo
+          # step above tees to is missing or empty, so this step measured
+          # nothing and the notice below would be a claim made out of no
+          # evidence. That is the exact false green this arm exists to remove.
+          if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
+            echo "::error title=Skip census could not run::$RUNNER_TEMP/rust-tests.log is missing or empty; no census was taken over this job."
+            exit 1
+          fi
           if [ "${ZS_SKIP_COUNT:-0}" -gt 0 ]; then
             echo "::notice title=Skipped live-backend tests::${ZS_SKIP_COUNT} test(s) passed without exercising anything; see the Skip census step."
           fi
@@ -1575,12 +1585,25 @@ jobs:
         if: always()
         run: |
           . tests/lib/skip_census.sh
-          zs_skip_census "$RUNNER_TEMP/golden-path.log" || {
+          census_rc=0
+          zs_skip_census "$RUNNER_TEMP/golden-path.log" || census_rc=$?
+          # Both non-zero statuses are red here, but they are DIFFERENT reds and
+          # the message has to say which. 2 means the log is missing or empty -
+          # the harness never wrote one, so nothing is known about whether the
+          # deploy arm ran. Printing "the golden path announced a skipped arm"
+          # for that would send the reader to look for an announcement that was
+          # never made.
+          if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
+            echo "FAIL: the skip census refused $RUNNER_TEMP/golden-path.log - it is missing" >&2
+            echo "      or empty, so the harness produced no evidence about the deploy arm." >&2
+            exit 1
+          fi
+          if [ "$census_rc" -ne 0 ]; then
             echo "FAIL: the golden path announced a skipped arm. The line above names it." >&2
             echo "      A run that did not exercise \`zeroship deploy\` must not report as" >&2
             echo "      one that did; that is the whole reason the arm is an argument." >&2
             exit 1
-          }
+          fi
       # The .zship artifact contract, run over whatever the step above just
       # built. This job is the only one in the workflow that produces an
       # `examples/*/dist/app.zship`, which is why the check lives here rather
