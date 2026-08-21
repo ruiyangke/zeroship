@@ -23,7 +23,7 @@ pub trait GenericClient: private::Sealed {
     async fn execute_raw<P, I, T>(&self, statement: &T, params: I) -> Result<u64, Error>
     where
         T: ?Sized + ToStatement + Sync + Send,
-        P: BorrowToSql,
+        P: BorrowToSql + Sync + Send,
         I: IntoIterator<Item = P> + Sync + Send,
         I::IntoIter: ExactSizeIterator;
 
@@ -61,7 +61,7 @@ pub trait GenericClient: private::Sealed {
     async fn query_raw<T, P, I>(&self, statement: &T, params: I) -> Result<RowStream, Error>
     where
         T: ?Sized + ToStatement + Sync + Send,
-        P: BorrowToSql,
+        P: BorrowToSql + Sync + Send,
         I: IntoIterator<Item = P> + Sync + Send,
         I::IntoIter: ExactSizeIterator;
 
@@ -137,7 +137,7 @@ impl GenericClient for Client {
     async fn execute_raw<P, I, T>(&self, statement: &T, params: I) -> Result<u64, Error>
     where
         T: ?Sized + ToStatement + Sync + Send,
-        P: BorrowToSql,
+        P: BorrowToSql + Sync + Send,
         I: IntoIterator<Item = P> + Sync + Send,
         I::IntoIter: ExactSizeIterator,
     {
@@ -176,7 +176,7 @@ impl GenericClient for Client {
     async fn query_raw<T, P, I>(&self, statement: &T, params: I) -> Result<RowStream, Error>
     where
         T: ?Sized + ToStatement + Sync + Send,
-        P: BorrowToSql,
+        P: BorrowToSql + Sync + Send,
         I: IntoIterator<Item = P> + Sync + Send,
         I::IntoIter: ExactSizeIterator,
     {
@@ -260,7 +260,7 @@ impl GenericClient for Transaction<'_> {
     async fn execute_raw<P, I, T>(&self, statement: &T, params: I) -> Result<u64, Error>
     where
         T: ?Sized + ToStatement + Sync + Send,
-        P: BorrowToSql,
+        P: BorrowToSql + Sync + Send,
         I: IntoIterator<Item = P> + Sync + Send,
         I::IntoIter: ExactSizeIterator,
     {
@@ -299,7 +299,7 @@ impl GenericClient for Transaction<'_> {
     async fn query_raw<T, P, I>(&self, statement: &T, params: I) -> Result<RowStream, Error>
     where
         T: ?Sized + ToStatement + Sync + Send,
-        P: BorrowToSql,
+        P: BorrowToSql + Sync + Send,
         I: IntoIterator<Item = P> + Sync + Send,
         I::IntoIter: ExactSizeIterator,
     {

@@ -279,16 +279,43 @@ pub(crate) async fn prepare_cached(
     client: &Arc<InnerClient>,
     query: &str,
 ) -> Result<Statement, Error> {
+    Ok(prepare_cached_with_origin(client, query).await?.statement)
+}
+
+pub(crate) struct CachedStatement {
+    pub(crate) statement: Statement,
+    pub(crate) cache_hit: bool,
+}
+
+/// Prepare through the implicit cache while retaining whether the returned
+/// Statement was a cache winner rather than this call's cold candidate. Only
+/// a winner is stale-cache retry eligible; a fresh candidate's first failure
+/// belongs to that prepare.
+pub(crate) async fn prepare_cached_with_origin(
+    client: &Arc<InnerClient>,
+    query: &str,
+) -> Result<CachedStatement, Error> {
     if client.statement_cache_capacity() == 0 {
-        return prepare(client, query, &[]).await;
+        return Ok(CachedStatement {
+            statement: prepare(client, query, &[]).await?,
+            cache_hit: false,
+        });
     }
     if let Some(statement) = client.cached_statement(query) {
-        return Ok(statement);
+        return Ok(CachedStatement {
+            statement,
+            cache_hit: true,
+        });
     }
 
     let type_cache_generation = client.type_cache_generation();
     let statement = prepare(client, query, &[]).await?;
-    Ok(client.cache_statement(query, statement, type_cache_generation))
+    let candidate = statement.clone();
+    let statement = client.cache_statement(query, statement, type_cache_generation);
+    Ok(CachedStatement {
+        cache_hit: !statement.same_instance(&candidate),
+        statement,
+    })
 }
 
 /// Build an error describing a cycle in pg_catalog type resolution.

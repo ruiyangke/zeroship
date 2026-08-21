@@ -302,10 +302,14 @@ impl<'a> Transaction<'a> {
         I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
+        // Binding through Transaction can never replay safely after 0A000:
+        // PostgreSQL has already poisoned this transaction, so discard only
+        // the implicit cache provenance and keep the caller's Statement.
         let statement = statement
             .__convert()
             .into_statement(self.client.inner())
-            .await?;
+            .await?
+            .statement;
         bind::bind(self.client.inner(), statement, params).await
     }
 
