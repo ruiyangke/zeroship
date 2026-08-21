@@ -320,9 +320,9 @@ pub enum Host {
 /// * `port` - The port to connect to. Multiple ports can be specified, separated by commas. The number of ports must be
 ///     either 1, in which case it will be used for all hosts, or the same as the number of hosts. Defaults to 5432 if
 ///     omitted or the empty string.
-/// * `connect_timeout` - The time limit in seconds applied to each address-level connection sequence, including TLS
-///     negotiation, startup, and authentication. Hostnames can resolve to multiple IP addresses, and this limit is
-///     applied to each address. Defaults to no timeout.
+/// * `connect_timeout` - The time limit in seconds applied to each address tried, covering TLS negotiation, startup,
+///     and authentication, and applied once more to each host entry's name resolution. Hostnames can resolve to
+///     multiple IP addresses, and the limit restarts for each, as libpq's does. Defaults to no timeout.
 /// * `tcp_user_timeout` - The time limit that transmitted data may remain unacknowledged before a connection is forcibly closed.
 ///     This is ignored for Unix domain socket connections. It is only supported on systems where TCP_USER_TIMEOUT is available
 ///     and will default to the system default if omitted or set to 0; on other systems, it has no effect.
@@ -649,11 +649,13 @@ impl Config {
         &self.port
     }
 
-    /// Sets the timeout applied to each address-level connection sequence,
-    /// including TLS negotiation, startup, and authentication.
+    /// Sets the timeout applied to each address tried, covering TLS
+    /// negotiation, startup, and authentication.
     ///
-    /// Note that hostnames can resolve to multiple IP addresses, and this timeout will apply to each address of each
-    /// host separately. Defaults to no limit.
+    /// Hostnames can resolve to multiple IP addresses, and this timeout
+    /// restarts for each one, as libpq's does. It is also applied once to each
+    /// host entry's name resolution, which libpq leaves unbounded. Defaults to
+    /// no limit.
     pub fn connect_timeout(&mut self, connect_timeout: Duration) -> &mut Config {
         self.connect_timeout = Some(connect_timeout);
         self

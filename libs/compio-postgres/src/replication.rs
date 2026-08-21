@@ -61,19 +61,18 @@
 //!   and `src/backend/replication/pgoutput/pgoutput.c` (decoder).
 
 use crate::buf_stream::BufStream;
+use crate::client::Addr;
 use crate::codec::FrontendMessage;
-use crate::config::{Config, LoadBalanceHosts, ReplicationMode};
+use crate::config::{Config, ReplicationMode};
+use crate::connect::{Endpoint, Resolver, SystemResolver, endpoints, with_connect_timeout};
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::tls::MakeTlsConnect;
 use crate::{Error, Socket};
-use crate::client::Addr;
-use crate::config::Host;
 use bytes::{BufMut, BytesMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
-use rand::seq::SliceRandom;
 use postgres_protocol::message::backend::{DataRowBody, Message};
 use postgres_protocol::message::frontend;
 use std::collections::HashMap;
@@ -128,35 +127,7 @@ pub async fn connect_replication<T>(
 where
     T: MakeTlsConnect<Socket>,
 {
-    // Host selection is `connect.rs`'s, and deliberately so: a `Config` here
-    // is the same `Config` the query path takes, so a list of endpoints has to
-    // mean the same thing on both. This walked `get_hosts().first()` and
-    // stopped, which gave a multi-endpoint configuration no failover at all
-    // and - because the same `first()` was applied to DNS - made a name that
-    // resolves to an AAAA and an A record fail on the first address against a
-    // server bound only to IPv4.
-    if config.get_hosts().is_empty() && config.get_hostaddrs().is_empty() {
-        return Err(Error::config(
-            "replication: host or hostaddr is required".into(),
-        ));
-    }
-
-    if !config.get_hosts().is_empty()
-        && !config.get_hostaddrs().is_empty()
-        && config.get_hosts().len() != config.get_hostaddrs().len()
-    {
-        let msg = format!(
-            "number of hosts ({}) is different from number of hostaddrs ({})",
-            config.get_hosts().len(),
-            config.get_hostaddrs().len(),
-        );
-        return Err(Error::config(msg.into()));
-    }
-
-    let num_hosts = std::cmp::max(config.get_hosts().len(), config.get_hostaddrs().len());
-    if config.get_ports().len() > 1 && config.get_ports().len() != num_hosts {
-        return Err(Error::config("invalid number of ports".into()));
-    }
+    let endpoints = endpoints(config)?;
 
     // We need a Config with replication=database set. Most callers
     // already set it; tolerate both shapes and force-set as a defensive
@@ -166,98 +137,57 @@ where
         cfg.replication(ReplicationMode::Logical);
     }
 
-    let mut indices = (0..num_hosts).collect::<Vec<_>>();
-    if cfg.get_load_balance_hosts() == LoadBalanceHosts::Random {
-        indices.shuffle(&mut rand::rng());
-    }
-
+    let mut resolver = SystemResolver;
     let mut error = None;
-    for i in indices {
-        let host = config.get_hosts().get(i);
-        let hostaddr = config.get_hostaddrs().get(i).copied();
-        // libpq broadcasts a single port across every host and only demands
-        // one per host when more than one is given.
-        let port = config
-            .get_ports()
-            .get(i)
-            .or_else(|| config.get_ports().first())
-            .copied()
-            .unwrap_or(5432);
-        // `host` is the TLS validation hostname even when `hostaddr` supplies
-        // the address to dial.
-        let hostname = match host {
-            Some(Host::Tcp(host)) => Some(host.clone()),
-            #[cfg(unix)]
-            Some(Host::Unix(_)) => None,
-            None => None,
-        };
-
-        match connect_replication_host(host, hostaddr, hostname, port, &mut tls, &cfg).await {
+    for endpoint in endpoints {
+        match connect_replication_host(&endpoint, &mut resolver, &mut tls, &cfg).await {
             Ok(connection) => return Ok(connection),
             Err(e) => error = Some(e),
         }
     }
 
-    Err(error.expect("num_hosts > 0, so at least one endpoint was attempted"))
+    Err(error.expect("endpoints rejects an empty host list"))
 }
 
 /// Every address one configured endpoint denotes, in order, until one
 /// connects.
-async fn connect_replication_host<T>(
-    host: Option<&Host>,
-    hostaddr: Option<std::net::IpAddr>,
-    hostname: Option<String>,
-    port: u16,
+///
+/// The deadline is applied exactly as `connect::connect_host` applies it:
+/// once to resolution, then AFRESH per address. The two walks are the same
+/// walk, so they must budget the same way -- see that function for why
+/// per-address matches libpq and why bounding resolution does not.
+async fn connect_replication_host<T, R>(
+    endpoint: &Endpoint,
+    resolver: &mut R,
     tls: &mut T,
     cfg: &Config,
 ) -> Result<ReplicationConnection<Socket, T::Stream>, Error>
 where
     T: MakeTlsConnect<Socket>,
+    R: Resolver,
 {
-    // A numeric `hostaddr` is the address; `host` stays the name TLS
-    // validates against. There is nothing to resolve.
-    if let Some(ip) = hostaddr {
-        return connect_replication_addr(Addr::Tcp(ip), hostname.as_deref(), port, tls, cfg).await;
-    }
+    let timeout = cfg.get_connect_timeout().copied();
 
-    match host.expect("one of host / hostaddr is present at this index") {
-        Host::Tcp(host) => {
-            use compio::net::ToSocketAddrsAsync;
-            let mut addrs = (&**host, port)
-                .to_socket_addrs_async()
-                .await
-                .map_err(Error::connect)?
-                .collect::<Vec<_>>();
+    let addrs = with_connect_timeout(
+        timeout,
+        endpoint.addresses(resolver, cfg.get_load_balance_hosts()),
+    )
+    .await?;
 
-            if cfg.get_load_balance_hosts() == LoadBalanceHosts::Random {
-                addrs.shuffle(&mut rand::rng());
-            }
-
-            let mut error = None;
-            for addr in addrs {
-                match connect_replication_addr(
-                    Addr::Tcp(addr.ip()),
-                    hostname.as_deref(),
-                    port,
-                    tls,
-                    cfg,
-                )
-                .await
-                {
-                    Ok(connection) => return Ok(connection),
-                    Err(e) => error = Some(e),
-                }
-            }
-
-            Err(error.unwrap_or_else(|| {
-                Error::config("replication: DNS yielded no addresses".into())
-            }))
-        }
-        #[cfg(unix)]
-        Host::Unix(path) => {
-            connect_replication_addr(Addr::Unix(path.clone()), None, port, tls, cfg).await
+    let mut error = None;
+    for addr in addrs {
+        match with_connect_timeout(
+            timeout,
+            connect_replication_addr(addr, endpoint.hostname(), endpoint.port(), tls, cfg),
+        )
+        .await
+        {
+            Ok(connection) => return Ok(connection),
+            Err(e) => error = Some(e),
         }
     }
+
+    Err(error.expect("Endpoint::addresses rejects an empty address list"))
 }
 
 /// One address: a socket, one transport, one startup exchange.
@@ -274,7 +204,6 @@ where
     let socket = connect_socket(
         &addr,
         port,
-        cfg.get_connect_timeout().copied(),
         cfg.get_tcp_user_timeout().copied(),
         if cfg.get_keepalives() {
             Some(&cfg.keepalive_config)
@@ -1724,7 +1653,194 @@ pub mod pgoutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::NoTls;
+    use crate::config::{SslMode, SslRootCert};
+    use compio::io::{AsyncReadExt, AsyncWriteExt};
     use pgoutput::{PgOutputMessage, TupleColumn};
+    use std::error::Error as _;
+
+    fn startup_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(5 + body.len());
+        frame.push(tag);
+        frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    async fn scripted_replication_server() -> std::net::SocketAddr {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted replication server");
+        let addr = listener.local_addr().expect("scripted server address");
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept replication connection");
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            result.expect("read startup length");
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            assert!(length >= 4, "startup packet length includes its header");
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
+            result.expect("read startup body");
+
+            let mut response = startup_frame(b'R', &0u32.to_be_bytes());
+            response.extend_from_slice(&startup_frame(b'K', &[0; 8]));
+            response.extend_from_slice(&startup_frame(b'Z', b"I"));
+            let compio::BufResult(result, _) = socket.write_all(response).await;
+            result.expect("write successful startup response");
+            socket.flush().await.expect("flush startup response");
+        })
+        .detach();
+
+        addr
+    }
+
+    /// A replication server that accepts, reads the startup packet, and then
+    /// never answers. Bound to a caller-chosen address so two of them can
+    /// share one port across two loopback IPs -- `Endpoint::addresses`
+    /// discards the resolved port and the walk dials `endpoint.port()`.
+    async fn stalled_replication_server(
+        bind: std::net::SocketAddr,
+    ) -> (std::net::SocketAddr, futures_channel::oneshot::Receiver<()>) {
+        let listener = compio::net::TcpListener::bind(bind)
+            .await
+            .expect("bind stalled replication server");
+        let addr = listener.local_addr().expect("stalled server address");
+        let (startup_seen, startup_observed) = futures_channel::oneshot::channel();
+
+        compio::runtime::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+            result.expect("read startup length");
+            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
+            result.expect("read startup body");
+            let _ = startup_seen.send(());
+
+            // Never answer: the client must time out on THIS address and move
+            // on to the next one with a fresh budget.
+            let compio::BufResult(_, _) = socket.read(vec![0u8; 1]).await;
+        })
+        .detach();
+
+        (addr, startup_observed)
+    }
+
+    struct ListResolver(Vec<std::net::SocketAddr>);
+
+    impl Resolver for ListResolver {
+        async fn resolve(
+            &mut self,
+            _host: &str,
+            _port: u16,
+        ) -> std::io::Result<Vec<std::net::SocketAddr>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// The replication walk budgets `connect_timeout` per ADDRESS, exactly as
+    /// `connect::connect_host` does.
+    ///
+    /// This is the same walk over the same `Endpoint` list, so a divergence
+    /// here means a replication client and a query client disagree about what
+    /// `connect_timeout` means. It was wrapped once around the whole host walk,
+    /// which let the first stalled address consume the entire budget and
+    /// stranded every healthy address behind it.
+    #[compio::test]
+    async fn replication_connect_timeout_restarts_for_each_resolved_address() {
+        let (first, first_seen) =
+            stalled_replication_server("127.0.0.1:0".parse().unwrap()).await;
+        let second_bind = std::net::SocketAddr::from(([127, 0, 0, 2], first.port()));
+        let (second, second_seen) = stalled_replication_server(second_bind).await;
+
+        let mut config = Config::new();
+        config
+            .user("scripted-user")
+            .host("scripted.example")
+            .port(first.port())
+            .ssl_mode(SslMode::Disable)
+            .replication(ReplicationMode::Logical)
+            .connect_timeout(std::time::Duration::from_millis(150));
+
+        let endpoint = endpoints(&config)
+            .expect("one hostname is a valid endpoint list")
+            .pop()
+            .expect("the endpoint list contains the hostname");
+        let mut resolver = ListResolver(vec![first, second]);
+        let mut tls = NoTls;
+
+        let result = compio::time::timeout(
+            std::time::Duration::from_secs(10),
+            connect_replication_host(&endpoint, &mut resolver, &mut tls, &config),
+        )
+        .await
+        .expect("the outer watchdog expired, so some leg had no deadline at all");
+        assert!(
+            result.is_err(),
+            "both addresses stall forever, so this cannot connect"
+        );
+
+        // Bounded: an address that was never dialled leaves its server parked
+        // in `accept()` still holding the sender, so a bare await would hang.
+        async fn dialled(seen: futures_channel::oneshot::Receiver<()>) -> bool {
+            compio::time::timeout(std::time::Duration::from_secs(2), seen)
+                .await
+                .is_ok_and(|received| received.is_ok())
+        }
+
+        assert!(
+            dialled(first_seen).await,
+            "the first address was never dialled"
+        );
+        assert!(
+            dialled(second_seen).await,
+            "the second address was never dialled: one budget was shared across the whole \
+             host walk instead of restarting per address"
+        );
+    }
+
+    /// Every connection entry point rejects contradictory TLS settings before
+    /// it tries an endpoint. In particular, trusting the system roots without
+    /// verifying the hostname is invalid for replication just as it is for an
+    /// ordinary connection.
+    #[compio::test]
+    async fn replication_connect_rejects_system_roots_with_weak_sslmode() {
+        let addr = scripted_replication_server().await;
+
+        let mut config = Config::new();
+        config
+            .hostaddr(addr.ip())
+            .port(addr.port())
+            .ssl_mode(SslMode::Prefer)
+            .ssl_root_cert(SslRootCert::System)
+            .connect_timeout(std::time::Duration::from_millis(100));
+
+        let query_error = match config.connect(NoTls).await {
+            Ok(_) => panic!("ordinary connect accepted contradictory TLS settings"),
+            Err(error) => error,
+        };
+        assert_eq!(query_error.to_string(), "invalid configuration");
+
+        let replication_error = match compio::time::timeout(
+            std::time::Duration::from_secs(2),
+            connect_replication(NoTls, &config),
+        )
+        .await
+        .expect("replication validation or scripted startup hung")
+        {
+            Ok(_) => panic!("replication connect accepted contradictory TLS settings"),
+            Err(error) => error,
+        };
+        assert_eq!(replication_error.to_string(), "invalid configuration");
+        assert!(
+            replication_error
+                .source()
+                .is_some_and(|cause| cause.to_string().contains("sslrootcert=system")),
+            "the error must name the contradictory setting: {replication_error:?}"
+        );
+    }
 
     /// Build a whole `DataRow` WIRE MESSAGE and hand it to
     /// `Message::parse`, so the fixture is the shape production actually
