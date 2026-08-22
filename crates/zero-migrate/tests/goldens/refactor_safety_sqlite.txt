@@ -22,7 +22,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "created_at",
-            data_type: "timestamp with time zone",
+            data_type: "text",
             nullable: false,
             default: None,
             generated: None,
@@ -42,7 +42,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "created_by",
-            data_type: "character varying(255)",
+            data_type: "text",
             nullable: true,
             default: None,
             generated: None,
@@ -62,7 +62,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "deleted_at",
-            data_type: "timestamp with time zone",
+            data_type: "text",
             nullable: true,
             default: None,
             generated: None,
@@ -82,7 +82,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "id",
-            data_type: "character varying(255)",
+            data_type: "text",
             nullable: false,
             default: None,
             generated: None,
@@ -102,7 +102,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "secret",
-            data_type: "bytea",
+            data_type: "blob",
             nullable: true,
             default: None,
             generated: None,
@@ -184,7 +184,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "updated_at",
-            data_type: "timestamp with time zone",
+            data_type: "text",
             nullable: false,
             default: None,
             generated: None,
@@ -204,7 +204,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "updated_by",
-            data_type: "character varying(255)",
+            data_type: "text",
             nullable: true,
             default: None,
             generated: None,
@@ -244,7 +244,7 @@ TableSnapshot {
         },
         ColumnSnapshot {
             name: "views",
-            data_type: "double precision",
+            data_type: "real",
             nullable: true,
             default: Some(
                 "0",

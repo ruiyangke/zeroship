@@ -57,9 +57,44 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         }
     }
 
+    fn snapshot_data_type(&self, c: &ColumnSnapshot) -> String {
+        // Preserve the established first-class engine token even though the
+        // legacy SDK spelling table still has no `bytes` arm.
+        if c.type_def.as_ref().is_some_and(|def| {
+            def.get("type").and_then(serde_json::Value::as_str) == Some("bytes")
+                && def.get("encrypted").is_none()
+        }) {
+            return "bytea".to_string();
+        }
+
+        let ddl = self.column_type(c, false);
+        match ddl.to_ascii_uppercase().as_str() {
+            "TEXT" => "text".into(),
+            "DOUBLE PRECISION" => "double precision".into(),
+            "REAL" => "real".into(),
+            "BOOLEAN" => "boolean".into(),
+            "TIMESTAMPTZ" => "timestamp with time zone".into(),
+            "DATE" => "date".into(),
+            "JSONB" => "jsonb".into(),
+            "BYTEA" => "bytea".into(),
+            "NUMERIC" => "numeric".into(),
+            "INTEGER" => "integer".into(),
+            "SMALLINT" => "smallint".into(),
+            "BIGINT" => "bigint".into(),
+            "INET" => "inet".into(),
+            "TEXT[]" => "text[]".into(),
+            // Parameterised / extension types keep their DDL spelling.
+            _ => ddl,
+        }
+    }
+
     /// PostgreSQL has no separate vendor-only physical-type projection on the
     /// neutral snapshot; its retained `data_type`/override fields are complete.
-    fn finalize_column_snapshot(&self, _column: &mut ColumnSnapshot) {}
+    /// Consume the neutral definition after deriving that catalog spelling so
+    /// later DDL uses the established snapshot-native casing and aliases.
+    fn finalize_column_snapshot(&self, column: &mut ColumnSnapshot) {
+        column.type_def = None;
+    }
 
     /// PostgreSQL owns the derived `ivfflat`/GiST shape, so the index is already
     /// in its final catalog form.

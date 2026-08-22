@@ -73,8 +73,8 @@ pub enum ColumnRenameStrategy {
 /// all depend on vendor grammar. Keeping their bodies in the registering backend
 /// means core never dispatches on a closed vendor enum to answer them.
 pub trait SchemaRenderer: std::fmt::Debug + Sync {
-    /// Which vendor this is, as the OPEN [`DialectId`] rather than the closed
-    /// [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect).
+    /// Which vendor this is, as the OPEN [`DialectId`] rather than the former
+    /// closed dialect enum.
     ///
     /// The same signature change, and for the same reason, as
     /// [`DmlRenderer::dialect`](crate::renderer::DmlRenderer::dialect): a backend
@@ -111,6 +111,15 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     fn canonical_fk_target(&self, schema: &str, target: &str) -> String;
 
     fn column_type(&self, c: &ColumnSnapshot, inline_pk: bool) -> String;
+
+    /// Project a completed neutral column token into the spelling this backend's
+    /// catalog snapshot retains in [`ColumnSnapshot::data_type`].
+    ///
+    /// Required separately from [`Self::column_type`]: emitted DDL and catalog
+    /// introspection are not the same vocabulary (PostgreSQL emits `TIMESTAMPTZ`
+    /// but reports `timestamp with time zone`; SQLite reports a lowercased declared
+    /// type; MySQL canonicalizes `COLUMN_TYPE`). A new backend must state both.
+    fn snapshot_data_type(&self, c: &ColumnSnapshot) -> String;
 
     /// Finalize vendor-owned physical metadata after every neutral column facet
     /// has been applied.

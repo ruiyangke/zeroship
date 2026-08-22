@@ -56,12 +56,12 @@ use zero_migrate_ir::dialect::DialectId;
 /// # Who is allowed to call this
 ///
 /// It had eight callers and every one of them was a POINT-OF-USE lookup: an engine
-/// emitter deep in a call chain, holding a `dialect: SqlDialect` parameter, asking
+/// emitter deep in a call chain, holding a closed dialect parameter, asking
 /// the registry for a vendor at the moment it needed one spelling. One `CREATE TABLE`
 /// emit went through the registry five separate times for the same dialect.
 ///
 /// That is now zero. `schema::query`'s private emitters take
-/// `backend: &'static dyn SchemaRenderer` instead of `dialect: SqlDialect`, and the
+/// `backend: &'static dyn SchemaRenderer` instead of a closed dialect value, and the
 /// resolution happens ONCE per entry point. What remains is only BOUNDARIES (the
 /// `pub` surfaces whose callers hand in a dialect) and CALLER-FIXED TARGETS (the
 /// functions that name PostgreSQL because they ARE PostgreSQL).

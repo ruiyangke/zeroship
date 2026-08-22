@@ -99,20 +99,33 @@ use crate::render::declarative::{
 };
 use crate::render::lower::{
     author_type_override, create_index_snapshot, derived_check_constraint_name,
-    derived_constraint_name, derived_exclusion_constraint_name, enum_inline_check,
-    index_method_access, ir_column_to_field, ir_column_to_field_resolved_create, mysql_enum_type,
-    postgres_named_type_metadata, render_container_default_for_data_type, render_domain_check,
-    render_exclusion_constraint_body, render_ir_default, render_ir_default_for_type,
-    render_json_default_for_data_type, resolve_domain_base_type, resolve_encrypted_inner_domain,
-    resolve_encrypted_inner_domain_in_column, IrLowerError, NamedTypeRegistry,
+    derived_constraint_name, derived_exclusion_constraint_name, index_method_access,
+    ir_column_to_field, ir_column_to_field_resolved_create, render_container_default_for_data_type,
+    render_domain_check, render_exclusion_constraint_body, render_ir_default,
+    render_ir_default_for_type, render_json_default_for_data_type, resolve_domain_base_type,
+    resolve_encrypted_inner_domain, resolve_encrypted_inner_domain_in_column, IrLowerError,
+    NamedTypeRegistry,
 };
-use crate::render::renderer::{Capability, DialectSupports};
+use crate::render::renderer::Capability;
 use crate::render::value_format::{
     authored_id_default, authored_text_id_default, authored_uuid_id_default, catalog_id_default,
     catalog_uuid_id_default, column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
+#[cfg(test)]
+use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 use zero_migrate_policy::EffectivePolicy;
+
+fn fold_policy(dialect: &DialectId) -> &'static dyn zero_migrate_backend::fold::CatalogFoldPolicy {
+    crate::render::backends::vendor(dialect).catalog_fold
+}
+
+fn supports(dialect: &DialectId, capability: Capability) -> bool {
+    crate::render::backends::vendor(dialect)
+        .descriptor
+        .capabilities
+        .contains(capability)
+}
 
 /// Step 3 of `docs/proposals/single-fold-and-effects.md`: ONE traversal and four
 /// typed projections, proven equal to the four walkers before any consumer moves.
@@ -702,11 +715,11 @@ fn rewrite_incoming_fk_column_targets(
 /// The leg an `Op::Dialectal` contributes on `dialect`: its own, else nothing.
 /// `pub(crate)` so callers outside the fold select legs the SAME way rather than
 /// re-deriving the exact-id lookup and drifting from it.
-pub(crate) fn selected_dialectal_leg(
-    dialect: SqlDialect,
-    legs: &std::collections::BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<Op>>,
-) -> Option<&[Op]> {
-    legs.get(&dialect.id()).map(Vec::as_slice)
+pub(crate) fn selected_dialectal_leg<'a>(
+    dialect: &DialectId,
+    legs: &'a std::collections::BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<Op>>,
+) -> Option<&'a [Op]> {
+    legs.get(dialect).map(Vec::as_slice)
 }
 
 /// **The ONE rule for what an op does to the set of table NAMES a later op in the
@@ -744,7 +757,7 @@ pub(crate) fn selected_dialectal_leg(
 /// not a mirror of the fold's `tables` key set.
 pub(crate) fn advance_referenceable_tables(
     op: &Op,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     tables: &mut std::collections::BTreeSet<String>,
 ) {
     match op {
@@ -784,7 +797,7 @@ pub(crate) fn advance_referenceable_tables(
 fn push_fold_op<'a>(
     out: &mut Vec<&'a Op>,
     op: &'a Op,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     inside_dialectal: bool,
 ) -> Result<(), FoldError> {
     match op {
@@ -828,10 +841,10 @@ pub fn history_carries_dialectal_ops(ops: &[Op]) -> bool {
     ops.iter().any(|op| matches!(op, Op::Dialectal { .. }))
 }
 
-pub(crate) fn flatten_dialectal_ops(
-    ops: &[Op],
-    dialect: SqlDialect,
-) -> Result<Vec<&Op>, FoldError> {
+pub(crate) fn flatten_dialectal_ops<'a>(
+    ops: &'a [Op],
+    dialect: &DialectId,
+) -> Result<Vec<&'a Op>, FoldError> {
     let mut out = Vec::new();
     for op in ops {
         push_fold_op(&mut out, op, dialect, false)?;
@@ -898,60 +911,11 @@ fn has_exact_unique_candidate(
         })
 }
 
-fn reusable_postgres_primary_index(
-    snap: &TableSnapshot,
-    columns: &[String],
-    current_primary_key_name: Option<&str>,
-) -> Option<String> {
-    snap.indexes
-        .iter()
-        .find(|index| {
-            let constraint_owned = snap.constraints.iter().any(|constraint| {
-                constraint.name == index.name
-                    && matches!(
-                        constraint.kind.as_str(),
-                        "PRIMARY KEY" | "UNIQUE" | "EXCLUDE"
-                    )
-            });
-            index.name != current_primary_key_name.unwrap_or_default()
-                && !constraint_owned
-                && index.unique
-                && index.columns == columns
-                && index.access_method == "btree"
-                && index.predicate.is_none()
-                && index.include.is_empty()
-                && !index.only
-                && index.elements.len() == columns.len()
-                && index.elements.iter().all(|element| {
-                    matches!(
-                        element,
-                        IndexElementSnapshot::Column {
-                            order: None | Some(crate::model::ir::IndexSortOrder::Asc),
-                            opclass: None,
-                            collation: None,
-                            ..
-                        }
-                    )
-                })
-        })
-        .map(|index| index.name.clone())
-}
-
-fn sqlite_integer_storage_for_rowid(snap: &TableSnapshot, data_type: &str) -> bool {
-    if snap.stored_create_sql.is_some() {
-        data_type.trim().eq_ignore_ascii_case("INTEGER")
-    } else {
-        matches!(
-            data_type.trim().to_ascii_lowercase().as_str(),
-            "integer" | "int" | "bigint" | "smallint" | "boolean"
-        )
-    }
-}
-
-fn sqlite_folded_rowid_generation(
+fn folded_rowid_generation(
     snap: &TableSnapshot,
     old_columns: &[String],
     column: &str,
+    dialect: &DialectId,
 ) -> bool {
     if old_columns != [column] {
         return false;
@@ -963,61 +927,33 @@ fn sqlite_folded_rowid_generation(
     else {
         return false;
     };
-    if !sqlite_integer_storage_for_rowid(snap, &folded.data_type) {
+    let policy = fold_policy(dialect);
+    if !policy.rowid_storage_generates(snap.stored_create_sql.as_deref(), &folded.data_type) {
         return false;
     }
-    let stored_ddl = crate::render::backends::stored_ddl(&SqlDialect::Sqlite.id())
-        .expect("the SQLite renderer must provide stored-DDL analysis");
-    snap.stored_create_sql.as_deref().is_none_or(|stored| {
-        !stored_ddl.create_is_without_rowid(stored)
-            && !stored_ddl.inline_primary_key_is_desc(stored, column)
-    })
+    policy.stored_primary_key_allows_rowid(snap.stored_create_sql.as_deref(), column)
 }
 
-/// Allocate a PostgreSQL-generated name against the modeled relation namespace.
+/// Allocate a backend-generated name against the modeled relation namespace.
 ///
 /// HOLE: Relations created out of band are invisible to the folded IR, so this
 /// cannot reserve a suffix they already occupy. This is the same accepted limit
 /// as implicit primary-key allocation elsewhere in the fold.
 fn allocate_implicit_relation_name(
     default_name: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     tables: &BTreeMap<String, TableSnapshot>,
     partitions: &BTreeMap<String, PartitionSnapshot>,
     views: &BTreeMap<String, ViewSnapshot>,
     sequences: &BTreeMap<String, SequenceSnapshot>,
 ) -> String {
-    if dialect != SqlDialect::Postgres {
-        return default_name.to_string();
-    }
-
-    let name_is_taken = |candidate: &str| {
-        tables.contains_key(candidate)
-            || partitions.contains_key(candidate)
-            || views.contains_key(candidate)
-            || sequences.contains_key(candidate)
-            || tables
-                .values()
-                .any(|snapshot| snapshot.indexes.iter().any(|index| index.name == candidate))
-    };
-    let relation_count = tables.len()
-        + partitions.len()
-        + views.len()
-        + sequences.len()
-        + tables
-            .values()
-            .map(|snapshot| snapshot.indexes.len())
-            .sum::<usize>();
-    (0..=relation_count)
-        .map(|suffix| {
-            if suffix == 0 {
-                default_name.to_string()
-            } else {
-                format!("{default_name}{suffix}")
-            }
-        })
-        .find(|candidate| !name_is_taken(candidate))
-        .expect("one more implicit relation-name candidate than relations must leave a free name")
+    fold_policy(dialect).allocate_implicit_relation_name(
+        default_name,
+        tables,
+        partitions,
+        views,
+        sequences,
+    )
 }
 
 /// Allocate the name PostgreSQL gives an implicit PRIMARY KEY relation.
@@ -1026,7 +962,7 @@ fn allocate_implicit_relation_name(
 /// uniquify explicit constraint names or indexes adopted by `USING INDEX`.
 fn implicit_primary_key_name(
     table: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     tables: &BTreeMap<String, TableSnapshot>,
     partitions: &BTreeMap<String, PartitionSnapshot>,
     views: &BTreeMap<String, ViewSnapshot>,
@@ -1046,7 +982,7 @@ fn apply_fold_alter_primary_key(
     table: &str,
     snap: &mut TableSnapshot,
     action: &AlterPrimaryKeyAction,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     implicit_name: &str,
 ) -> Result<(), FoldError> {
     zero_migrate_ir::validate::validate_alter_primary_key_action(action)
@@ -1064,21 +1000,22 @@ fn apply_fold_alter_primary_key(
     }
 
     if let Some(target) = action.target_columns() {
-        if dialect.supports(Capability::IntegerPrimaryKeyRowidAlias)
+        if supports(dialect, Capability::IntegerPrimaryKeyRowidAlias)
             && target.len() == 1
             && snap
                 .columns
                 .iter()
                 .find(|column| column.name == target[0])
-                .is_some_and(|column| sqlite_integer_storage_for_rowid(snap, &column.data_type))
-            && snap.stored_create_sql.as_deref().is_none_or(|stored| {
-                !crate::render::backends::stored_ddl(&SqlDialect::Sqlite.id())
-                    .expect("the SQLite renderer must provide stored-DDL analysis")
-                    .create_is_without_rowid(stored)
-            })
+                .is_some_and(|column| {
+                    fold_policy(dialect).rowid_storage_generates(
+                        snap.stored_create_sql.as_deref(),
+                        &column.data_type,
+                    )
+                })
+            && fold_policy(dialect).stored_table_allows_rowid(snap.stored_create_sql.as_deref())
         {
             return Err(FoldError::Unsupported(
-                "alterPrimaryKey cannot introduce SQLite INTEGER PRIMARY KEY rowid generation",
+                "alterPrimaryKey cannot introduce INTEGER PRIMARY KEY rowid generation",
             ));
         }
         for column in target {
@@ -1123,8 +1060,8 @@ fn apply_fold_alter_primary_key(
                 column: column.clone(),
             })?;
         let generated = folded.identity.is_some()
-            || (dialect.supports(Capability::IntegerPrimaryKeyRowidAlias)
-                && sqlite_folded_rowid_generation(snap, old_columns, column));
+            || (supports(dialect, Capability::IntegerPrimaryKeyRowidAlias)
+                && folded_rowid_generation(snap, old_columns, column, dialect));
         if !generated {
             return Err(FoldError::InvalidPrimaryKeyIdentityTransition {
                 table: table.to_string(),
@@ -1146,16 +1083,10 @@ fn apply_fold_alter_primary_key(
                 });
             };
             let generated = folded.identity.is_some()
-                || (dialect.supports(Capability::IntegerPrimaryKeyRowidAlias)
-                    && sqlite_folded_rowid_generation(snap, old_columns, column));
-            let keeps_identity_contract = match dialect {
-                SqlDialect::Postgres => action
-                    .target_columns()
-                    .is_some_and(|target| target.contains(column)),
-                SqlDialect::Mysql | SqlDialect::Sqlite => action
-                    .target_columns()
-                    .is_some_and(|target| target == [column.as_str()]),
-            };
+                || (supports(dialect, Capability::IntegerPrimaryKeyRowidAlias)
+                    && folded_rowid_generation(snap, old_columns, column, dialect));
+            let keeps_identity_contract =
+                fold_policy(dialect).primary_key_keeps_identity(action.target_columns(), column);
             if generated && !keeps_identity_contract && !drop_identity_from.contains(column) {
                 return Err(FoldError::InvalidPrimaryKeyIdentityTransition {
                     table: table.to_string(),
@@ -1166,17 +1097,13 @@ fn apply_fold_alter_primary_key(
         }
     }
 
-    let reusable_candidate = (dialect == SqlDialect::Postgres)
-        .then(|| {
-            action.target_columns().and_then(|target| {
-                reusable_postgres_primary_index(
-                    snap,
-                    target,
-                    current.as_ref().map(|(name, _)| name.as_str()),
-                )
-            })
-        })
-        .flatten();
+    let reusable_candidate = action.target_columns().and_then(|target| {
+        fold_policy(dialect).reusable_primary_index(
+            snap,
+            target,
+            current.as_ref().map(|(name, _)| name.as_str()),
+        )
+    });
     let replacement_constraint_name = current.as_ref().map_or_else(
         || {
             reusable_candidate
@@ -1238,7 +1165,7 @@ fn apply_fold_alter_primary_key(
 /// See [`FoldError`] for the closed set of fail-closed conditions.
 pub fn fold_ops(
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
@@ -1283,7 +1210,7 @@ pub(crate) struct CatalogFold<'a> {
     /// The snapshot this fold CONTINUES. Read again at `finish` for the two decisions
     /// that depend on what the base already said rather than on what the ops said.
     base: &'a SchemaSnapshot,
-    dialect: SqlDialect,
+    dialect: &'a DialectId,
     project_schema: &'a str,
     effective: &'a EffectivePolicy,
     tables: BTreeMap<String, TableSnapshot>,
@@ -1317,7 +1244,7 @@ impl<'a> CatalogFold<'a> {
     /// Start a fold that CONTINUES `base`.
     pub(crate) fn seed(
         base: &'a SchemaSnapshot,
-        dialect: SqlDialect,
+        dialect: &'a DialectId,
         project_schema: &'a str,
         effective: &'a EffectivePolicy,
     ) -> Self {
@@ -1391,7 +1318,7 @@ impl<'a> CatalogFold<'a> {
                 named_types
                     .create_enum(name, project_schema, values)
                     .map_err(fold_named_type_error)?;
-                if dialect.supports(Capability::MaterializedEnumType) {
+                if supports(dialect, Capability::MaterializedEnumType) {
                     named_type_snapshots.insert(
                         name.clone(),
                         NamedTypeSnapshot {
@@ -1423,7 +1350,7 @@ impl<'a> CatalogFold<'a> {
                         not_null.unwrap_or(false),
                     )
                     .map_err(fold_named_type_error)?;
-                if dialect.supports(Capability::MaterializedDomainType) {
+                if supports(dialect, Capability::MaterializedDomainType) {
                     named_type_snapshots.insert(
                         name.clone(),
                         NamedTypeSnapshot {
@@ -1504,7 +1431,7 @@ impl<'a> CatalogFold<'a> {
                 // POSTGRESQL ONLY. SQLite and MySQL have no row-level security and
                 // their introspection leaves the map empty, so seeding there would
                 // make the folded snapshot differ from the live one for every table.
-                if matches!(dialect, SqlDialect::Postgres) {
+                if supports(dialect, Capability::PostgresVendorPrimitives) {
                     table_rls.insert(name.clone(), false);
                 }
                 if tables.contains_key(name) {
@@ -1914,29 +1841,7 @@ impl<'a> CatalogFold<'a> {
                 // so every MySQL deploy that renamed a table with a primary key drifted
                 // permanently from that moment on. Nothing could see it, because no
                 // Rust test had ever introspected a live MySQL server.
-                if matches!(dialect, SqlDialect::Mysql) {
-                    let renamed_pk = format!("{to}_pkey");
-                    // The index is matched by the constraint's OLD name rather than by
-                    // a second `format!`, so a primary key the author named something
-                    // else still moves together with its implicit index instead of
-                    // splitting into a renamed constraint and an orphaned index.
-                    let previous: Vec<String> = snap
-                        .constraints
-                        .iter()
-                        .filter(|constraint| constraint.kind == "PRIMARY KEY")
-                        .map(|constraint| constraint.name.clone())
-                        .collect();
-                    for constraint in &mut snap.constraints {
-                        if constraint.kind == "PRIMARY KEY" {
-                            constraint.name.clone_from(&renamed_pk);
-                        }
-                    }
-                    for index in &mut snap.indexes {
-                        if previous.contains(&index.name) {
-                            index.name.clone_from(&renamed_pk);
-                        }
-                    }
-                }
+                fold_policy(dialect).rename_primary_key_after_table_rename(&mut snap, to);
                 tables.insert(to.clone(), snap);
                 // Live PG/SQLite re-target every INCOMING FK to the renamed table by
                 // OID, so the FK `definition` in OTHER tables now reports the NEW
@@ -2162,7 +2067,7 @@ impl<'a> CatalogFold<'a> {
             Op::RenameColumn {
                 table, from, to, ..
             } => {
-                let schema_renderer = crate::render::backends::schema_renderer(&dialect.id());
+                let schema_renderer = crate::render::backends::schema_renderer(dialect);
                 let snap = table_mut(tables, table)?;
                 // A pure rename keeps the column's type/nullable/default/sentinels;
                 // only the NAME changes (the IR carries `ty` for the live-rename type
@@ -2443,7 +2348,7 @@ impl<'a> CatalogFold<'a> {
                 if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     match to_type {
                         ColType::Enum { name, .. }
-                            if !dialect.supports(Capability::MaterializedEnumType) =>
+                            if !supports(dialect, Capability::MaterializedEnumType) =>
                         {
                             return Err(FoldError::NamedTypeUnsupported {
                                 kind: "enum",
@@ -2452,7 +2357,7 @@ impl<'a> CatalogFold<'a> {
                             });
                         }
                         ColType::Domain { name, .. }
-                            if !dialect.supports(Capability::MaterializedDomainType) =>
+                            if !supports(dialect, Capability::MaterializedDomainType) =>
                         {
                             return Err(FoldError::NamedTypeUnsupported {
                                 kind: "domain",
@@ -2557,7 +2462,7 @@ impl<'a> CatalogFold<'a> {
                     ));
                 }
                 let source_was_native_uuid =
-                    dialect == SqlDialect::Postgres && col.data_type.eq_ignore_ascii_case("uuid");
+                    fold_policy(dialect).is_native_uuid_type(&col.data_type);
                 col.data_type = new_col.data_type;
                 col.ddl_type_override = new_col.ddl_type_override;
                 // The remaining TYPE-BOUND facets, taken from `new_col` rather than
@@ -2593,7 +2498,7 @@ impl<'a> CatalogFold<'a> {
                 //
                 // `mysql_physical_type` is NOT copied here, and that is the point of
                 // where it IS handled: it is a projection of the finished column, so
-                // `restamp_mysql_physical_types` re-derives it for every column this
+                // `finalize_physical_types` re-derives it for every column this
                 // replay decided, after every arm has stopped writing. Copying it
                 // from `new_col` would have been a second correct-looking spelling
                 // that the arms below (`ColType::Uuid`, `source_was_native_uuid`)
@@ -2832,7 +2737,7 @@ impl<'a> CatalogFold<'a> {
                 snap.constraints.retain(|c| &c.name != name);
                 let removed_constraint = snap.constraints.len() != before;
                 if !removed_constraint
-                    && !dialect.supports(Capability::UniqueConstraintDistinctFromIndex)
+                    && !supports(dialect, Capability::UniqueConstraintDistinctFromIndex)
                 {
                     // MySQL's catalog collapses a named table UNIQUE and its backing
                     // unique index into one key object. A catalog-seeded fold therefore
@@ -3256,9 +3161,9 @@ impl<'a> CatalogFold<'a> {
             triggers,
             ..
         } = self;
-        if dialect.supports(Capability::IntegerPrimaryKeyRowidAlias) {
+        if supports(dialect, Capability::IntegerPrimaryKeyRowidAlias) {
             for snap in tables.values_mut() {
-                apply_fold_sqlite_rowid_metadata(snap)?;
+                apply_fold_rowid_metadata(snap, dialect)?;
             }
         }
 
@@ -3280,8 +3185,8 @@ impl<'a> CatalogFold<'a> {
         // `synchronize_identity_fold_validates_target_without_changing_schema` folds a
         // PostgreSQL base under all three dialects and asserts the result is unchanged,
         // and the dialect test alone failed it on `None` against `Some({})`.
-        let speaks =
-            dialect.supports(Capability::PostgresVendorPrimitives) || base.vendor_objects.is_some();
+        let speaks = supports(dialect, Capability::PostgresVendorPrimitives)
+            || base.vendor_objects.is_some();
         let vendor_objects = speaks.then(|| VendorObjectIdentities {
             // The body comes from the SAME `functions` map the rollback history uses, so
             // a `CREATE OR REPLACE` that overwrote an entry above contributes the LAST
@@ -3300,7 +3205,7 @@ impl<'a> CatalogFold<'a> {
                 .collect(),
         });
 
-        restamp_mysql_physical_types(&mut tables, base, dialect);
+        finalize_physical_types(&mut tables, base, dialect);
 
         Ok(SchemaSnapshot {
             tables,
@@ -3340,7 +3245,7 @@ impl<'a> CatalogFold<'a> {
 pub fn fold_ops_onto(
     base: &SchemaSnapshot,
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
@@ -3403,14 +3308,13 @@ pub fn fold_ops_onto(
 /// field `None` - so populating it under another dialect would compare a contract
 /// against an absent one, which that function says "would report a difference that
 /// says nothing about the database".
-fn restamp_mysql_physical_types(
+fn finalize_physical_types(
     tables: &mut BTreeMap<String, TableSnapshot>,
     base: &SchemaSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) {
-    if !matches!(dialect, SqlDialect::Mysql) {
-        return;
-    }
+    let policy = fold_policy(dialect);
+    let schema_renderer = crate::render::backends::schema_renderer(dialect);
     for (name, table) in tables.iter_mut() {
         let base_table = base.tables.get(name);
         for column in &mut table.columns {
@@ -3421,36 +3325,19 @@ fn restamp_mysql_physical_types(
                         .iter()
                         .find(|candidate| candidate.name == column.name)
                 })
-                .is_some_and(|base_column| renders_the_same_mysql_type(base_column, column));
+                .is_some_and(|base_column| policy.physical_type_inputs_equal(base_column, column));
             if carried_through {
                 continue;
             }
-            crate::render::declarative::stamp_mysql_physical_type(column, dialect);
+            schema_renderer.finalize_column_snapshot(column);
         }
     }
 }
 
-/// Whether two columns feed the MySQL schema renderer identical type inputs, and
-/// therefore render to the same physical type.
-///
-/// `ddl_type_override` wins outright when present; the ephemeral `type_def` carrier
-/// has its own vendor table; otherwise `unbounded_text`, `case_sensitive`, and
-/// `data_type` select the vendor's base spelling.
-///
-/// Deliberately NOT `ColumnSnapshot`'s `PartialEq`, which EXCLUDES
-/// `ddl_type_override` - the single field most likely to have moved when a fold
-/// decides a column's MySQL type, and the one that would make this answer "unchanged"
-/// about a column whose rendered type changed completely.
-fn renders_the_same_mysql_type(left: &ColumnSnapshot, right: &ColumnSnapshot) -> bool {
-    left.data_type == right.data_type
-        && left.ddl_type_override == right.ddl_type_override
-        && left.case_sensitive == right.case_sensitive
-        && left.unbounded_text == right.unbounded_text
-        && left.type_def == right.type_def
-        && left.authored_type == right.authored_type
-}
-
-fn apply_fold_sqlite_rowid_metadata(snap: &mut TableSnapshot) -> Result<(), FoldError> {
+fn apply_fold_rowid_metadata(
+    snap: &mut TableSnapshot,
+    dialect: &DialectId,
+) -> Result<(), FoldError> {
     for column in &mut snap.columns {
         column.sqlite_rowid = false;
     }
@@ -3470,24 +3357,17 @@ fn apply_fold_sqlite_rowid_metadata(snap: &mut TableSnapshot) -> Result<(), Fold
             column: column_name.clone(),
         });
     };
-    let storage_generates =
-        sqlite_integer_storage_for_rowid(snap, &snap.columns[column_index].data_type)
-            || matches!(snap.columns[column_index].identity, Some(identity) if !identity.always);
-    let stored_ddl = crate::render::backends::stored_ddl(&SqlDialect::Sqlite.id())
-        .expect("the SQLite renderer must provide stored-DDL analysis");
-    let stored_shape_allows_rowid = snap.stored_create_sql.as_deref().is_none_or(|stored| {
-        !stored_ddl.create_is_without_rowid(stored)
-            && !stored_ddl.inline_primary_key_is_desc(stored, column_name)
-    });
+    let storage_generates = fold_policy(dialect).rowid_storage_generates(
+        snap.stored_create_sql.as_deref(),
+        &snap.columns[column_index].data_type,
+    ) || matches!(snap.columns[column_index].identity, Some(identity) if !identity.always);
+    let stored_shape_allows_rowid = fold_policy(dialect)
+        .stored_primary_key_allows_rowid(snap.stored_create_sql.as_deref(), column_name);
     let sqlite_rowid = storage_generates && stored_shape_allows_rowid;
     let column = &mut snap.columns[column_index];
     column.sqlite_rowid = sqlite_rowid;
     if column.sqlite_rowid {
-        column.id_default = Some(catalog_id_default(
-            column.default.as_deref(),
-            SqlDialect::Sqlite,
-            None,
-        ));
+        column.id_default = Some(catalog_id_default(column.default.as_deref(), dialect, None));
     }
     Ok(())
 }
@@ -3626,12 +3506,12 @@ fn add_column_snapshot(
     generated: Option<&crate::model::ir::GeneratedCol>,
     identity: Option<crate::model::ir::IdentityCol>,
     project_schema: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     effective: &EffectivePolicy,
 ) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), FoldError> {
-    if !dialect.supports(Capability::NonPkIdentity) && identity.is_some() {
+    if !supports(dialect, Capability::NonPkIdentity) && identity.is_some() {
         return Err(FoldError::Unsupported(
-            "addColumn identity on SQLite (non-PK identity has no sound SQLite emulation)",
+            "addColumn identity is unsupported when the target backend lacks non-PK identity",
         ));
     }
     let field = ir_column_to_field(&IrColumn {
@@ -3679,7 +3559,7 @@ fn apply_fold_author_type_overrides_to_snapshot(
     table: &str,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), FoldError> {
     for source in columns {
         if author_type_override(&source.ty, dialect).is_none() {
@@ -3703,7 +3583,7 @@ fn apply_fold_author_type_override_to_column(
     column: &str,
     ty: &ColType,
     col: &mut ColumnSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), FoldError> {
     let Some(type_override) = author_type_override(ty, dialect) else {
         return Ok(());
@@ -3729,7 +3609,7 @@ fn apply_fold_structured_defaults_to_snapshot(
     table: &str,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), FoldError> {
     for source in columns {
         let Some(
@@ -3770,7 +3650,7 @@ fn apply_fold_structured_default_to_column(
     ty: &ColType,
     default: Option<&IrDefault>,
     col: &mut ColumnSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), FoldError> {
     let Some(
         default @ (IrDefault::Expr { .. }
@@ -3800,7 +3680,7 @@ fn apply_fold_named_type_metadata(
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     named_types: &NamedTypeRegistry,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<(), FoldError> {
@@ -3840,7 +3720,7 @@ fn apply_fold_named_type_metadata(
 fn apply_fold_collation_metadata(
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), FoldError> {
     for source in columns {
         let Some(ColumnCollation::Bytewise) = source.collation else {
@@ -3853,8 +3733,7 @@ fn apply_fold_collation_metadata(
             .ok_or(FoldError::Unsupported("collated column folded away"))?;
         // The type spelling the renderer would have used, so the override REPLACES
         // that decision rather than guessing beside it.
-        let rendered =
-            crate::render::backends::schema_renderer(&dialect.id()).column_type(col, false);
+        let rendered = crate::render::backends::schema_renderer(dialect).column_type(col, false);
         let (ddl_type, collation) =
             crate::render::value_format::bytewise_column_metadata(&rendered, dialect);
         col.ddl_type_override = Some(ddl_type);
@@ -3866,7 +3745,7 @@ fn apply_fold_collation_metadata(
 fn apply_fold_value_format_metadata(
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
 ) -> Result<(), FoldError> {
     for source in columns {
@@ -3886,7 +3765,7 @@ fn apply_fold_value_format_metadata(
 fn apply_fold_id_default_metadata(
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
 ) -> Result<(), FoldError> {
     for source in columns {
@@ -3901,7 +3780,7 @@ fn apply_fold_id_default_metadata(
 fn apply_fold_id_default_column_metadata(
     source: &IrColumn,
     col: &mut ColumnSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
 ) {
     if source.identity.is_some() || matches!(source.default, Some(IrDefault::Nextval { .. })) {
@@ -3917,7 +3796,7 @@ fn apply_fold_id_default_column_metadata(
 fn apply_fold_uuid_metadata(
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
 ) -> Result<(), FoldError> {
     for source in columns {
@@ -3937,7 +3816,7 @@ fn apply_fold_uuid_metadata(
 fn apply_fold_uuid_column_metadata(
     source: &IrColumn,
     col: &mut ColumnSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
 ) -> Result<(), FoldError> {
     if !matches!(source.ty, ColType::Uuid) {
@@ -3965,7 +3844,7 @@ fn apply_fold_uuid_column_metadata(
 fn apply_fold_value_format_column_metadata(
     source: &IrColumn,
     col: &mut ColumnSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
 ) -> Result<(), FoldError> {
     let Some(value_format) = &source.value_format else {
@@ -3993,47 +3872,48 @@ fn apply_fold_named_type_column_metadata(
     source: &IrColumn,
     col: &mut ColumnSnapshot,
     named_types: &NamedTypeRegistry,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<(), FoldError> {
     match &source.ty {
-        ColType::Enum { name, .. } => match dialect {
-            SqlDialect::Postgres => {
-                let registry_schema = named_types.enum_schema_or(name, project_schema);
-                let (data_type, ddl_type) =
-                    postgres_named_type_metadata(&source.ty, registry_schema)
-                        .map_err(fold_named_type_error)?
-                        .ok_or(FoldError::Unsupported(
-                            "named enum metadata was not resolved",
-                        ))?;
+        ColType::Enum { name, .. } => {
+            let registry_schema = named_types.enum_schema_or(name, project_schema);
+            if let Some((data_type, ddl_type)) = fold_policy(dialect)
+                .materialized_named_type_metadata(&source.ty, registry_schema)
+                .map_err(fold_named_type_error)?
+            {
                 col.data_type = data_type;
                 col.ddl_type_override = Some(ddl_type);
+                return Ok(());
             }
-            SqlDialect::Sqlite => {
-                let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
+            let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
+            if let Some(check) = fold_policy(dialect)
+                .inline_enum_check(&source.name, &def.values)
+                .map_err(fold_named_type_error)?
+            {
                 col.data_type = "text".to_string();
-                col.inline_checks.push(
-                    enum_inline_check(&source.name, &def.values, dialect)
-                        .map_err(fold_named_type_error)?,
-                );
+                col.inline_checks.push(check);
+                return Ok(());
             }
-            SqlDialect::Mysql => {
-                let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
-                let ty = mysql_enum_type(&def.values);
+            if let Some(ty) = fold_policy(dialect).inline_enum_type(&def.values) {
                 col.data_type = ty.clone();
                 col.ddl_type_override = Some(ty);
+                return Ok(());
             }
-        },
+            return Err(FoldError::Unsupported(
+                "named enum representation was not resolved by the target backend",
+            ));
+        }
         ColType::Domain { name, .. } => {
-            if dialect.supports(Capability::MaterializedDomainType) {
+            if supports(dialect, Capability::MaterializedDomainType) {
                 let registry_schema = named_types.domain_schema_or(name, project_schema);
-                let (data_type, ddl_type) =
-                    postgres_named_type_metadata(&source.ty, registry_schema)
-                        .map_err(fold_named_type_error)?
-                        .ok_or(FoldError::Unsupported(
-                            "named domain metadata was not resolved",
-                        ))?;
+                let (data_type, ddl_type) = fold_policy(dialect)
+                    .materialized_named_type_metadata(&source.ty, registry_schema)
+                    .map_err(fold_named_type_error)?
+                    .ok_or(FoldError::Unsupported(
+                        "named domain metadata was not resolved",
+                    ))?;
                 col.data_type = data_type;
                 col.ddl_type_override = Some(ddl_type);
                 return Ok(());
@@ -4066,6 +3946,7 @@ fn apply_fold_named_type_column_metadata(
             col.data_type = base.data_type;
             col.ddl_type_override = base.ddl_type_override;
             col.unbounded_text = base.unbounded_text;
+            col.type_def = base.type_def;
             col.authored_type = base.authored_type;
             if def.not_null {
                 col.nullable = false;
@@ -4082,7 +3963,7 @@ fn apply_fold_named_type_column_metadata(
                 let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
                     "column",
                     &source.name,
-                    crate::render::backends::renderer(&dialect.id()),
+                    crate::render::backends::renderer(dialect),
                 )
                 .map_err(|e| FoldError::NamedTypeRender(e.to_string()))?;
                 let expr = render_domain_check(check, dialect, &value_sql)
@@ -4120,7 +4001,8 @@ fn apply_fold_named_type_column_metadata(
 /// Fail-closed parity with the lower:
 /// - a create-table PRIMARY KEY is carried by the op's top-level `primary_key`;
 ///   stale constraint-form PKs are ignored here after validation;
-/// - table-level CHECK folds only on PostgreSQL until the non-PG renderers land;
+/// - table-level CHECK folds only where the registered backend declares that the
+///   engine's snapshot scope models arbitrary authored CHECK identity;
 /// - table-level single- and multi-column FKs fold on all three targets;
 /// - target-specific partial/non-btree index features remain capability-gated;
 /// - on **SQLite**, a table-level UNIQUE and a non-btree index `using` are
@@ -4142,15 +4024,15 @@ fn fold_create_table_specs(
     snap: &mut TableSnapshot,
     constraints: &[IrConstraint],
     indexes: &[IrIndex],
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), FoldError> {
     let mut table_foreign_keys: Vec<(String, Vec<String>)> = Vec::new();
     for c in constraints {
         match &c.kind {
             IrConstraintKind::Check { expr, .. } => {
-                if !matches!(dialect, SqlDialect::Postgres) {
+                if !fold_policy(dialect).folds_check_constraint_identity() {
                     return Err(FoldError::Unsupported(
-                        "createTable table-level CHECK is PostgreSQL-only",
+                        "createTable table-level CHECK is outside this backend's folded catalog scope",
                     ));
                 }
                 let name = c.name.as_deref().map_or_else(
@@ -4189,7 +4071,7 @@ fn fold_create_table_specs(
                 initially_deferred,
                 not_valid: _,
             } => {
-                if !dialect.supports(Capability::TableLevelForeignKey) {
+                if !supports(dialect, Capability::TableLevelForeignKey) {
                     return Err(FoldError::Unsupported(
                         "createTable table-level FOREIGN KEY is unsupported by this dialect",
                     ));
@@ -4229,11 +4111,9 @@ fn fold_create_table_specs(
                 )?;
             }
             IrConstraintKind::Unique { columns } => {
-                if !dialect.supports(Capability::TableLevelUnique) {
+                if !supports(dialect, Capability::TableLevelUnique) {
                     return Err(FoldError::Unsupported(
-                        "createTable table-level UNIQUE on SQLite (the SQLite CREATE \
-                         renders from the descriptor; a table-level UNIQUE is not \
-                         threaded into the emitter)",
+                        "createTable table-level UNIQUE is outside this backend's emitted descriptor path",
                     ));
                 }
                 let name = c.name.as_deref().map_or_else(
@@ -4243,9 +4123,9 @@ fn fold_create_table_specs(
                 push_folded_constraint(table, snap, unique_constraint(&name, columns, dialect))?;
             }
             IrConstraintKind::Exclusion { elements, .. } => {
-                if !dialect.supports(Capability::ExclusionConstraint) {
+                if !supports(dialect, Capability::ExclusionConstraint) {
                     return Err(FoldError::Unsupported(
-                        "createTable exclusion constraint is PostgreSQL-only",
+                        "createTable exclusion constraint is unsupported by the target backend",
                     ));
                 }
                 let name = c.name.as_deref().map_or_else(
@@ -4279,9 +4159,9 @@ fn fold_create_table_specs(
     }
     for ix in indexes {
         let access = ix.using.map_or("btree", index_method_access);
-        if !dialect.supports(Capability::NonBtreeIndexMethod) && access != "btree" {
+        if !supports(dialect, Capability::NonBtreeIndexMethod) && access != "btree" {
             return Err(FoldError::Unsupported(
-                "createTable non-btree index `using` on SQLite (not yet supported)",
+                "createTable non-btree index `using` is unsupported by the target backend",
             ));
         }
         let mut snap_idx = create_index_snapshot(
@@ -4560,17 +4440,17 @@ fn rename_definition_column_group(
 /// `STATISTICS`/`SHOW INDEX` object, so its authoritative snapshot retains only the
 /// ordered unique index. Keeping a synthetic MySQL constraint here would make a
 /// clean apply report that constraint as missing on every re-introspection.
-fn unique_constraint(name: &str, columns: &[String], dialect: SqlDialect) -> FoldedConstraint {
+fn unique_constraint(name: &str, columns: &[String], dialect: &DialectId) -> FoldedConstraint {
     FoldedConstraint {
-        constraint: dialect
-            .supports(Capability::UniqueConstraintDistinctFromIndex)
-            .then(|| ConstraintSnapshot {
+        constraint: supports(dialect, Capability::UniqueConstraintDistinctFromIndex).then(|| {
+            ConstraintSnapshot {
                 name: name.to_string(),
                 kind: "UNIQUE".to_string(),
                 definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
                 comment: None,
                 cascade_columns: None,
-            }),
+            }
+        }),
         index: Some(IndexSnapshot::btree(
             name.to_string(),
             true,
@@ -4586,7 +4466,7 @@ fn add_constraint_snapshot(
     table: &str,
     project_schema: &str,
     constraint: &IrConstraint,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<FoldedConstraint, FoldError> {
     let name = constraint.name.as_deref();
     match &constraint.kind {
@@ -4637,9 +4517,9 @@ fn add_constraint_snapshot(
             Ok(unique_constraint(&cname, columns, dialect))
         }
         IrConstraintKind::Check { expr, .. } => {
-            if !matches!(dialect, SqlDialect::Postgres) {
+            if !fold_policy(dialect).folds_check_constraint_identity() {
                 return Err(FoldError::Unsupported(
-                    "addConstraint(check) is PostgreSQL-only",
+                    "addConstraint(check) is outside this backend's folded catalog scope",
                 ));
             }
             let cname = name.map_or_else(
@@ -4663,9 +4543,9 @@ fn add_constraint_snapshot(
             })
         }
         IrConstraintKind::Exclusion { elements, .. } => {
-            if !dialect.supports(Capability::ExclusionConstraint) {
+            if !supports(dialect, Capability::ExclusionConstraint) {
                 return Err(FoldError::Unsupported(
-                    "addConstraint exclusion constraint is PostgreSQL-only",
+                    "addConstraint exclusion constraint is unsupported by the target backend",
                 ));
             }
             let cname = name.map_or_else(
@@ -5814,20 +5694,20 @@ mod tests {
     use crate::model::table_shape::{
         effective_policy_from_charter_toml, resolve_create_table_policy,
     };
-    use crate::model::validate::{validate_ir_scoped, SqlDialect, UnsupportedKind, CODE_UNSUPPORTED};
+    use crate::model::validate::{validate_ir_scoped, UnsupportedKind, CODE_UNSUPPORTED};
 
     const SCHEMA: &str = "proj_test";
 
     fn fold(ops: &[Op]) -> Result<SchemaSnapshot, FoldError> {
         fold_ops(
             ops,
-            SqlDialect::Postgres,
+            &POSTGRES,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )
     }
 
-    fn validate_ops(ops: Vec<Op>, dialect: SqlDialect) -> crate::model::validate::AuthoringError {
+    fn validate_ops(ops: Vec<Op>, dialect: &DialectId) -> crate::model::validate::AuthoringError {
         let ir = crate::model::ir::MigrationIr {
             inverse_ops: None,
             irreversible: None,
@@ -5844,7 +5724,7 @@ mod tests {
         validate_ir_scoped(&ir, dialect, Some(&SchemaScope::Unconfined)).unwrap_err()
     }
 
-    fn assert_validate_ops_ok(ops: Vec<Op>, dialect: SqlDialect) {
+    fn assert_validate_ops_ok(ops: Vec<Op>, dialect: &DialectId) {
         let ir = crate::model::ir::MigrationIr {
             inverse_ops: None,
             irreversible: None,
@@ -5950,7 +5830,7 @@ mod tests {
         };
         let snap = fold_ops(
             &[op],
-            SqlDialect::Postgres,
+            &POSTGRES,
             SCHEMA,
             &crate::test_fixtures::no_inject("app"),
         )
@@ -6006,7 +5886,7 @@ mod tests {
 
         let snap = fold_ops(
             &[create_with_id, create_then_add, add_id],
-            SqlDialect::Postgres,
+            &POSTGRES,
             SCHEMA,
             &crate::test_fixtures::no_inject("app"),
         )
@@ -6066,7 +5946,7 @@ columns = [
         let resolved = resolve_create_table_policy(&raw, &effective, SCHEMA)
             .expect("the explicit schema selects the scoped inject");
 
-        let snapshot = fold_ops(&resolved.ops, SqlDialect::Postgres, SCHEMA, &effective)
+        let snapshot = fold_ops(&resolved.ops, &POSTGRES, SCHEMA, &effective)
             .expect("fold uses the create op's explicit schema");
         assert_eq!(
             snapshot.tables["events"]
@@ -6078,7 +5958,7 @@ columns = [
             "the scoped injected prefix is recognized by snapshot folding"
         );
 
-        let fields = field_defs_of(&resolved.ops, SqlDialect::Postgres, SCHEMA, &effective)
+        let fields = field_defs_of(&resolved.ops, &POSTGRES, SCHEMA, &effective)
             .expect("runtime recovery uses the create op's explicit schema");
         assert_eq!(fields["events"]["id"]["type"], serde_json::json!("id"));
         assert_eq!(
@@ -6114,7 +5994,7 @@ columns = [
         let projected = fold_ops_onto(
             &base,
             &tail,
-            SqlDialect::Postgres,
+            &POSTGRES,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )
@@ -6136,7 +6016,7 @@ columns = [
     #[test]
     fn set_column_default_preserves_id_surface_literal_semantics() {
         let upper_uuid = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
-        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+        for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
             let ops = vec![
                 create("members", vec![col("member_key", ColType::Uuid, false)]),
                 Op::SetColumnDefault {
@@ -6161,7 +6041,7 @@ columns = [
                 .iter()
                 .find(|column| column.name == "member_key")
                 .expect("UUID column survives");
-            let expected = if dialect == SqlDialect::Postgres {
+            let expected = if dialect == &POSTGRES {
                 IdDefaultSnapshot::UuidLiteral(format!("\"{}\"", upper_uuid.to_ascii_lowercase()))
             } else {
                 IdDefaultSnapshot::Literal(format!("\"{upper_uuid}\""))
@@ -6187,7 +6067,7 @@ columns = [
                     existence_guard: None,
                 },
             ],
-            SqlDialect::Mysql,
+            &MYSQL,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )
@@ -6214,7 +6094,7 @@ columns = [
             schema: None,
         };
 
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             let projected = fold_ops_onto(
                 &base,
                 std::slice::from_ref(&synchronize),
@@ -6239,7 +6119,7 @@ columns = [
             fold_ops_onto(
                 &base,
                 &[missing],
-                SqlDialect::Postgres,
+                &POSTGRES,
                 SCHEMA,
                 &crate::test_fixtures::confined_charter(),
             ),
@@ -6261,7 +6141,7 @@ columns = [
                     false,
                 )],
             )],
-            SqlDialect::Mysql,
+            &MYSQL,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )
@@ -6286,7 +6166,7 @@ columns = [
                     false,
                 )],
             )],
-            SqlDialect::Sqlite,
+            &SQLITE,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )
@@ -7664,7 +7544,7 @@ columns = [
                 existence_guard: None,
             },
         ];
-        assert_validate_ops_ok(pg_ops.clone(), SqlDialect::Postgres);
+        assert_validate_ops_ok(pg_ops.clone(), &POSTGRES);
         let folded = fold(&pg_ops).expect("PG table-level CHECK constraints fold");
         let users = folded.tables.get("users").expect("users table folded");
         for name in ["users_true", "age_pos"] {
@@ -7677,7 +7557,7 @@ columns = [
             assert_eq!(constraint.definition, "CHECK (TRUE)");
         }
 
-        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&SQLITE, &MYSQL] {
             let err = validate_ops(
                 vec![
                     create("users", vec![col("age", ColType::Int, false)]),
@@ -7953,7 +7833,7 @@ columns = [
                     schema: None,
                 },
             ],
-            SqlDialect::Postgres,
+            &POSTGRES,
             SCHEMA,
             &crate::test_fixtures::no_inject("app"),
         )
@@ -7985,7 +7865,7 @@ columns = [
         ];
         let sqlite = fold_ops(
             &sqlite_ops,
-            SqlDialect::Sqlite,
+            &SQLITE,
             SCHEMA,
             &crate::test_fixtures::no_inject("app"),
         )
@@ -8009,7 +7889,7 @@ columns = [
         assert!(matches!(
             fold_ops(
                 &missing_drop,
-                SqlDialect::Sqlite,
+                &SQLITE,
                 SCHEMA,
                 &crate::test_fixtures::no_inject("app"),
             ),
@@ -8377,7 +8257,7 @@ columns = [
         ];
         let snap = fold_ops(
             &ops,
-            SqlDialect::Postgres,
+            &POSTGRES,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )
@@ -8539,10 +8419,10 @@ columns = [
                 Vec::new(),
             ),
         ];
-        assert_validate_ops_ok(ops.clone(), SqlDialect::Sqlite);
+        assert_validate_ops_ok(ops.clone(), &SQLITE);
         let sqlite = fold_ops(
             &ops,
-            SqlDialect::Sqlite,
+            &SQLITE,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )
@@ -8572,7 +8452,7 @@ columns = [
             vec![unique_constraint(Some("t_handle_uq"), &["handle"])],
             Vec::new(),
         );
-        let err = validate_ops(vec![op], SqlDialect::Sqlite);
+        let err = validate_ops(vec![op], &SQLITE);
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("unique"));
@@ -8603,7 +8483,7 @@ columns = [
                 nulls_not_distinct: None,
             }],
         );
-        let err = validate_ops(vec![op], SqlDialect::Sqlite);
+        let err = validate_ops(vec![op], &SQLITE);
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("non-btree"));
@@ -8652,7 +8532,7 @@ columns = [
         build_table_snapshot(
             SCHEMA,
             &desc,
-            SqlDialect::Postgres,
+            &POSTGRES,
             &crate::test_fixtures::confined_charter(),
         )
         .unwrap()
@@ -8889,7 +8769,7 @@ columns = [
     /// answers and they still hold.
     fn field_defs_of(
         ops: &[Op],
-        dialect: SqlDialect,
+        dialect: &DialectId,
         schema: &str,
         effective: &EffectivePolicy,
     ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, FoldError> {
@@ -8899,7 +8779,7 @@ columns = [
     fn defs(ops: &[Op]) -> std::collections::BTreeMap<String, serde_json::Value> {
         field_defs_of(
             ops,
-            SqlDialect::Postgres,
+            &POSTGRES,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )
@@ -9386,7 +9266,7 @@ indexes = [
                 ..Default::default()
             }],
         );
-        let declarative = build_table_snapshot(SCHEMA, &authored, SqlDialect::Postgres, &effective)
+        let declarative = build_table_snapshot(SCHEMA, &authored, &POSTGRES, &effective)
             .expect("declarative snapshot builds from the custom policy");
 
         let resolved_ops =
@@ -9414,7 +9294,7 @@ indexes = [
         );
         assert_eq!(indexes, inject.indexes());
 
-        let folded = fold_ops(&resolved_ops, SqlDialect::Postgres, SCHEMA, &effective)
+        let folded = fold_ops(&resolved_ops, &POSTGRES, SCHEMA, &effective)
             .expect("resolved migration folds under the same custom policy");
         let migration = &folded.tables["entries"];
         assert_eq!(
@@ -9463,7 +9343,7 @@ indexes = [
             ],
         );
 
-        let declarative = build_table_snapshot(SCHEMA, &authored, SqlDialect::Postgres, &effective)
+        let declarative = build_table_snapshot(SCHEMA, &authored, &POSTGRES, &effective)
             .expect("no-inject declarative snapshot builds");
         assert_eq!(
             declarative
@@ -9485,7 +9365,7 @@ indexes = [
         let resolved_ops =
             descriptors_to_create_ops(std::slice::from_ref(&authored), SCHEMA, &effective)
                 .expect("no-inject migration producer preserves author shape");
-        let folded = fold_ops(&resolved_ops, SqlDialect::Postgres, SCHEMA, &effective)
+        let folded = fold_ops(&resolved_ops, &POSTGRES, SCHEMA, &effective)
             .expect("no-inject resolved migration folds");
         assert_eq!(
             format!("{:#?}", folded.tables["events"]),
@@ -9522,9 +9402,8 @@ indexes = [
         );
 
         for (kind, authored) in [("legacy prefix", prefixed_id), ("identity", identity_id)] {
-            let declarative_error =
-                build_table_snapshot(SCHEMA, &authored, SqlDialect::Postgres, &effective)
-                    .expect_err("an ordinary injected `id` must reject author collision");
+            let declarative_error = build_table_snapshot(SCHEMA, &authored, &POSTGRES, &effective)
+                .expect_err("an ordinary injected `id` must reject author collision");
             assert!(
                 declarative_error
                     .to_string()
@@ -9760,7 +9639,7 @@ indexes = [
             inject.indexes(),
             "producer carries resolved indexes"
         );
-        let defs = field_defs_of(&ops, SqlDialect::Postgres, SCHEMA, &effective).unwrap();
+        let defs = field_defs_of(&ops, &POSTGRES, SCHEMA, &effective).unwrap();
         let keys: Vec<&str> = defs["t"]
             .as_object()
             .unwrap()
@@ -9813,7 +9692,7 @@ columns = [
             ],
         );
         let ops = descriptors_to_create_ops(&[d], "app", &effective).expect("descriptor resolves");
-        let defs = field_defs_of(&ops, SqlDialect::Postgres, SCHEMA, &effective)
+        let defs = field_defs_of(&ops, &POSTGRES, SCHEMA, &effective)
             .expect("custom policy prefix recovers");
         let entries = defs["entries"].as_object().expect("entries FieldDef map");
         assert_eq!(
@@ -9905,7 +9784,7 @@ columns = [
         // End-to-end: the author indexes appear in the emitted v1 schema.runtime.json.
         let artifacts = crate::render_artifacts_from_descriptors(
             &[d],
-            SqlDialect::Postgres,
+            &POSTGRES,
             SCHEMA,
             &crate::test_fixtures::confined_charter(),
         )

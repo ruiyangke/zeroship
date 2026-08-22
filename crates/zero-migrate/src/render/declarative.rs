@@ -40,22 +40,26 @@ use crate::model::ir::{
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot,
-    IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, SchemaSnapshot, TableSnapshot,
+    IndexElementSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
 use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{ExpandContractAuthor, ExpandContractPlan, OnlineIntent};
 use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+#[cfg(test)]
+use zero_migrate_ir::dialect::{MYSQL, SQLITE};
 // The per-dialect DDL emission seam. Declared below the engine so the three impls
 // can leave it for the three vendor crates without Cargo seeing a cycle.
 // The column-clause spellings moved with it, for the same reason: all three impls
 // call every one of them, so a shared helper cannot stay above the vendors.
 use zero_migrate_backend::ddl::{
-    constraint_supports_fk_columns, fk_local_columns, fk_referenced_columns, fk_target_table,
-    index_supports_fk_columns, CreateTableRequest, DdlEmitter,
+    constraint_supports_fk_columns, fk_local_columns, fk_target_table, index_supports_fk_columns,
+    CreateTableRequest, DdlEmitter,
 };
-use zero_migrate_backend::schema::SchemaRenderer;
+use zero_migrate_backend::schema::{
+    ColumnRenameStrategy, ExistingColumnChangeStrategy, SchemaRenderer,
+};
 
 /// The PG keywords whose category is NOT `UNRESERVED` (i.e. reserved,
 /// type/function-name, or column-name keywords). `quote_identifier` — and thus
@@ -281,20 +285,6 @@ pub(crate) fn constraintdef_cols(cols: &[String]) -> String {
 
 // `sqlite_auto_increment_identity_pk` MOVED to `zero_migrate_sqlite::schema`,
 // shared by that backend's schema and DDL renderers.
-
-/// Whether `data_type` is one of the three types PostgreSQL lets an IDENTITY
-/// column have.
-///
-/// MEASURED on PostgreSQL 18.4, and the set is exactly three: `numeric(10,0)` is
-/// refused, and so is a DOMAIN over `integer` — the server checks the type itself,
-/// not what it is built on. So this compares the catalog spelling the snapshot
-/// carries rather than trying to reason about a type's underlying family.
-pub(crate) fn pg_identity_type(data_type: &str) -> bool {
-    matches!(
-        data_type.trim().to_ascii_lowercase().as_str(),
-        "smallint" | "integer" | "bigint" | "int2" | "int4" | "int8"
-    )
-}
 
 // `inline_checks_clause` MOVED to `zero_migrate_backend::ddl`.
 
@@ -1057,9 +1047,10 @@ fn mask_sibling_for_field(f: &FieldDescriptor) -> Option<String> {
 /// unrecognised type to text" guarantee, an UNKNOWN token whose shared mapping is
 /// the `TEXT` fallback (and which is not one of the engine's own text-spelled
 /// tokens) is rejected with [`DeclarativeError::UnsupportedType`].
-pub(crate) fn field_data_type(f: &FieldDescriptor) -> Result<String, DeclarativeError> {
-    use crate::schema::query::{def_to_column_type_for_dialect, SqlDialect};
-
+pub(crate) fn field_data_type(
+    f: &FieldDescriptor,
+    dialect: &DialectId,
+) -> Result<String, DeclarativeError> {
     // A bare `literal` with no value is malformed — the SDK never emits it, and
     // the shared map would degrade it to TEXT. Keep the engine's explicit error.
     if f.ty == "literal" && f.literal_value.is_none() {
@@ -1068,106 +1059,61 @@ pub(crate) fn field_data_type(f: &FieldDescriptor) -> Result<String, Declarative
         });
     }
 
-    // GAP (flagged): the shared kernel's `def_to_pg_type` has NO `bytes` arm — a
-    // bare `t.bytes()` token degrades to its `_ => TEXT` fallback there (plugin-db
-    // only ever reaches BYTEA via `encrypted`). The engine maps `t.bytes()` to
-    // `BYTEA` as a first-class type, so handle it here directly rather than letting
-    // it wrongly degrade to TEXT (and then be rejected by the fail-closed guard).
-    // When the shared crate grows a `bytes` arm this special-case can be deleted.
-    if f.ty == "bytes" && f.encrypted.is_none() {
-        return Ok("bytea".into());
-    }
-
-    // `int`/`integer` are now handled by the shared `def_to_pg_type` (it grew
-    // a first-class `INTEGER` arm), so they route through the shared map below like
-    // every other token: `INTEGER` → `ddl_to_information_schema` → `integer`. The
-    // engine no longer needs a special-case (the previous one papered over the
-    // shared PG map's missing int arm and applied to BOTH dialects' snapshots,
-    // which was correct for SQLite but produced a snapshot↔emitter drift on PG).
-    // The PG type *names* `bigint`/`int4`/`int8` remain NON-tokens: the shared map
-    // leaves them on the TEXT fallback, so they stay fail-closed-rejected as typos.
-
     let def = field_to_sdk_def(f);
-    let ddl = def_to_column_type_for_dialect(&def, SqlDialect::Postgres);
-
-    // fail-closed: the shared map returns `TEXT` for any unrecognised type
-    // token. The engine's set of types that LEGITIMATELY land on text is the
-    // closed set below (incl. the `actor`/`id` already folded to `string` by the
-    // caller, and a `literal` whose value is a string). Anything else mapping to
-    // `TEXT` is an unknown/typo'd token (`bigint`, `uuid`, `int4`, `__proto__`, …)
-    // and is rejected rather than silently degraded.
-    if ddl.eq_ignore_ascii_case("text") && !field_text_is_legitimate(f) {
+    if !field_type_token_is_supported(f) {
         return Err(DeclarativeError::UnsupportedType { ty: f.ty.clone() });
     }
 
-    Ok(ddl_to_information_schema(&ddl))
+    let token = crate::schema::query::column_snapshot_for_type_def(&def);
+    Ok(crate::render::backends::schema_renderer(dialect).snapshot_data_type(&token))
 }
 
-/// True if a field whose shared mapping is `TEXT` is one the engine accepts as a
-/// genuine text column (vs. an unknown token the shared map degraded). The text
-/// types are `string`/`ref` (and an encrypted column wrapping a string still maps
-/// to BYTEA, so it never reaches here), plus a `literal` whose value is a string.
-fn field_text_is_legitimate(f: &FieldDescriptor) -> bool {
-    match f.ty.as_str() {
-        // `string`/`ref` map to TEXT; `actor`/`id` are engine-only spellings of a
-        // text column (the actor stamp / the typed-id PK) that the shared SDK map
-        // does not name, so they also land on TEXT and are legitimate.
-        "string" | "ref" | "actor" | "id" => true,
-        "literal" => matches!(f.literal_value, Some(serde_json::Value::String(_))),
-        _ => false,
-    }
-}
-
-/// Translate the shared kernel's DDL type spelling (`TEXT`, `DOUBLE PRECISION`,
-/// `TIMESTAMPTZ`, `JSONB`, `BYTEA`, `vector(N)`, `geography(POINT, 4326)`, …) to
-/// the `information_schema.columns.data_type` spelling the snapshot stores, so a
-/// freshly-created table introspects to a byte-equal snapshot (the round-trip
-/// oracle). The twelve base types map to their canonical lowercase
-/// `information_schema` form; the parameterised extension types
-/// (`vector(N)`/`geography(...)`) keep their DDL spelling. `information_schema`
-/// reports `USER-DEFINED` for those, so `snapshot_schema` recovers their precise
-/// spelling from `pg_catalog.format_type` and canonicalises it back to this DDL
-/// form (see [`crate::apply::drift::snapshot_schema`] / `canonical_extension_type`) —
-/// the round-trip is real when the extension is installed.
-fn ddl_to_information_schema(ddl: &str) -> String {
-    match ddl.to_ascii_uppercase().as_str() {
-        "TEXT" => "text".into(),
-        "DOUBLE PRECISION" => "double precision".into(),
-        "REAL" => "real".into(),
-        "BOOLEAN" => "boolean".into(),
-        "TIMESTAMPTZ" => "timestamp with time zone".into(),
-        "DATE" => "date".into(),
-        "JSONB" => "jsonb".into(),
-        "BYTEA" => "bytea".into(),
-        "NUMERIC" => "numeric".into(),
-        "INTEGER" => "integer".into(),
-        "SMALLINT" => "smallint".into(),
-        "BIGINT" => "bigint".into(),
-        "INET" => "inet".into(),
-        "TEXT[]" => "text[]".into(),
-        // Parameterised / extension types (vector(N), geography(POINT,4326)) keep
-        // their DDL spelling — see the doc note.
-        _ => ddl.to_string(),
-    }
+/// The neutral descriptor vocabulary accepted before any backend translates it.
+/// This is token validation, not a SQL type table: every physical/catalog spelling
+/// comes from the registered [`SchemaRenderer`].
+fn field_type_token_is_supported(f: &FieldDescriptor) -> bool {
+    matches!(
+        f.ty.as_str(),
+        "string"
+            | "char"
+            | "number"
+            | "real"
+            | "int"
+            | "integer"
+            | "smallInt"
+            | "bigInt"
+            | "boolean"
+            | "date"
+            | "calendarDate"
+            | "json"
+            | "object"
+            | "array"
+            | "textArray"
+            | "ref"
+            | "inet"
+            | "union"
+            | "literal"
+            | "vector"
+            | "geoPoint"
+            | "bytes"
+            | "actor"
+            | "id"
+    )
 }
 
 /// Single-quote a SQL string literal (double embedded quotes). Mirrors
 /// plugin-db's `'{}'` formatting in `def_to_constraints` (`s.replace('\'', "''")`).
-fn sql_str(s: &str, dialect: SqlDialect) -> String {
-    match dialect {
-        // Declarative string defaults and enum members occupy MySQL grammar
-        // positions where a quoted token is required. The backend pins
-        // NO_BACKSLASH_ESCAPES before author DDL, making quote doubling stable.
-        SqlDialect::Mysql => crate::render::dml::mysql_grammar_string_literal(s),
-        SqlDialect::Postgres | SqlDialect::Sqlite => crate::render::dml::sql_string_literal(s),
-    }
+fn sql_str(s: &str, dialect: &DialectId) -> String {
+    // Declarative string defaults and enum members occupy grammar positions
+    // where a quoted token is required rather than a general expression.
+    crate::render::backends::schema_renderer(dialect).schema_grammar_string_literal(s)
 }
 
 /// Render a JSON scalar as a SQL literal for a CHECK / IN clause: a string is
 /// single-quoted, a number is its canonical form, a boolean is `true`/`false`.
 /// `None` for a non-scalar (null/array/object) — those never reach a literal/enum
 /// CHECK in plugin-db.
-fn json_scalar_sql(v: &serde_json::Value, dialect: SqlDialect) -> Option<String> {
+fn json_scalar_sql(v: &serde_json::Value, dialect: &DialectId) -> Option<String> {
     match v {
         serde_json::Value::String(s) => Some(sql_str(s, dialect)),
         serde_json::Value::Number(n) => Some(n.to_string()),
@@ -1201,7 +1147,7 @@ fn json_scalar_sql(v: &serde_json::Value, dialect: SqlDialect) -> Option<String>
 fn field_check_constraints(
     table: &str,
     f: &FieldDescriptor,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Vec<ConstraintSnapshot> {
     let mut out = Vec::new();
     let col = zero_migrate_backend::snapshot::quote_constraint_definition_ident(&f.name);
@@ -1325,7 +1271,7 @@ pub(crate) fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
 
 fn field_default_expr(
     f: &FieldDescriptor,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     synth_json_defaults: bool,
 ) -> Result<Option<String>, DeclarativeError> {
     if let Some(default) = &f.default {
@@ -1383,15 +1329,9 @@ fn field_default_expr(
     })
 }
 
-fn json_container_default_expr(kind: EmptyContainerKind, dialect: SqlDialect) -> &'static str {
-    match (kind, dialect) {
-        (EmptyContainerKind::Object, SqlDialect::Postgres) => "'{}'::jsonb",
-        (EmptyContainerKind::Array, SqlDialect::Postgres) => "'[]'::jsonb",
-        (EmptyContainerKind::Object, SqlDialect::Sqlite) => "'{}'",
-        (EmptyContainerKind::Array, SqlDialect::Sqlite) => "'[]'",
-        (EmptyContainerKind::Object, SqlDialect::Mysql) => "(JSON_OBJECT())",
-        (EmptyContainerKind::Array, SqlDialect::Mysql) => "(JSON_ARRAY())",
-    }
+fn json_container_default_expr(kind: EmptyContainerKind, dialect: &DialectId) -> &'static str {
+    crate::render::backends::schema_renderer(dialect)
+        .empty_json_expr(matches!(kind, EmptyContainerKind::Object))
 }
 
 /// Explicit empty-container defaults from the migration IR. These spellings must
@@ -1401,17 +1341,15 @@ fn json_container_default_expr(kind: EmptyContainerKind, dialect: SqlDialect) ->
 pub(crate) fn empty_container_default_expr_for_col_type(
     kind: EmptyContainerKind,
     ty: &ColType,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Option<&'static str> {
     match (kind, ty) {
         (EmptyContainerKind::Object | EmptyContainerKind::Array, ColType::Json) => {
             Some(json_container_default_expr(kind, dialect))
         }
-        (EmptyContainerKind::Array, ColType::TextArray) => match dialect {
-            SqlDialect::Postgres => Some("'{}'::text[]"),
-            SqlDialect::Sqlite => None,
-            SqlDialect::Mysql => Some("(JSON_ARRAY())"),
-        },
+        (EmptyContainerKind::Array, ColType::TextArray) => {
+            crate::render::backends::schema_renderer(dialect).empty_text_array_expr()
+        }
         _ => None,
     }
 }
@@ -1419,17 +1357,15 @@ pub(crate) fn empty_container_default_expr_for_col_type(
 pub(crate) fn empty_container_default_expr_for_data_type(
     kind: EmptyContainerKind,
     data_type: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Option<&'static str> {
     match (kind, data_type) {
         (EmptyContainerKind::Object | EmptyContainerKind::Array, "jsonb" | "json") => {
             Some(json_container_default_expr(kind, dialect))
         }
-        (EmptyContainerKind::Array, "text[]") => match dialect {
-            SqlDialect::Postgres => Some("'{}'::text[]"),
-            SqlDialect::Sqlite => None,
-            SqlDialect::Mysql => Some("(JSON_ARRAY())"),
-        },
+        (EmptyContainerKind::Array, "text[]") => {
+            crate::render::backends::schema_renderer(dialect).empty_text_array_expr()
+        }
         _ => None,
     }
 }
@@ -1437,7 +1373,7 @@ pub(crate) fn empty_container_default_expr_for_data_type(
 pub(crate) fn json_value_default_expr_for_col_type(
     value: &IrJsonValue,
     ty: &ColType,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Option<String> {
     matches!(ty, ColType::Json).then(|| json_value_default_expr(value, dialect))
 }
@@ -1445,28 +1381,14 @@ pub(crate) fn json_value_default_expr_for_col_type(
 pub(crate) fn json_value_default_expr_for_data_type(
     value: &IrJsonValue,
     data_type: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Option<String> {
     matches!(data_type, "jsonb" | "json").then(|| json_value_default_expr(value, dialect))
 }
 
-fn json_value_default_expr(value: &IrJsonValue, dialect: SqlDialect) -> String {
+fn json_value_default_expr(value: &IrJsonValue, dialect: &DialectId) -> String {
     let json = render_json_value_text(value);
-    match dialect {
-        // PG (`standard_conforming_strings=on`) and SQLite treat a backslash as a
-        // literal byte, so only single quotes need doubling.
-        SqlDialect::Postgres => {
-            format!("{}::jsonb", crate::render::dml::sql_string_literal(&json))
-        }
-        SqlDialect::Sqlite => crate::render::dml::sql_string_literal(&json),
-        // A UTF-8 hex expression is accepted by CAST and is independent of
-        // MySQL's inherited string-escape mode. This also keeps JSON backslashes
-        // byte-exact under the backend's pinned NO_BACKSLASH_ESCAPES session.
-        SqlDialect::Mysql => format!(
-            "(CAST({} AS JSON))",
-            crate::render::dml::inline_string_literal(&json, SqlDialect::Mysql)
-        ),
-    }
+    crate::render::backends::schema_renderer(dialect).json_value_default_expr(&json)
 }
 
 fn render_json_value_text(value: &IrJsonValue) -> String {
@@ -1506,7 +1428,7 @@ pub(crate) fn nextval_default_expr(sequence: &crate::model::ir::SequenceRef) -> 
 
 fn generated_column_snapshot(
     generated: &crate::model::ir::GeneratedCol,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<GeneratedColumnSnapshot, DeclarativeError> {
     if !generated.stored && !dialect.supports(Capability::VirtualGeneratedColumn) {
         return Err(DeclarativeError::Invalid(
@@ -1528,7 +1450,7 @@ fn generated_column_snapshot(
 /// Re-render a generated body from its (possibly just-rewritten) AST.
 fn rerender_generated(
     generated: &mut GeneratedColumnSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), DeclarativeError> {
     let Some(source) = generated.source.as_ref() else {
         return Ok(());
@@ -1564,7 +1486,7 @@ pub(crate) fn rename_column_in_generated_columns(
     table: &str,
     from: &str,
     to: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), DeclarativeError> {
     for column in &mut snapshot.columns {
         let Some(generated) = column.generated.as_mut() else {
@@ -1877,7 +1799,7 @@ pub(crate) fn rename_table_in_generated_columns(
     snapshot: &mut TableSnapshot,
     from: &str,
     to: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), DeclarativeError> {
     for column in &mut snapshot.columns {
         let Some(generated) = column.generated.as_mut() else {
@@ -1910,10 +1832,10 @@ pub(crate) fn is_engine_computed_column(column: &ColumnSnapshot) -> bool {
 
 pub(crate) fn column_snapshot_for_field(
     f: &FieldDescriptor,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     synth_json_defaults: bool,
 ) -> Result<ColumnSnapshot, DeclarativeError> {
-    let data_type = field_data_type(f)?;
+    let data_type = field_data_type(f, dialect)?;
     let default = field_default_expr(f, dialect, synth_json_defaults)?;
     let sdk_def = field_to_sdk_def(f);
     crate::schema::query::validate_encryption_sentinel_for_field(&sdk_def)
@@ -1921,13 +1843,13 @@ pub(crate) fn column_snapshot_for_field(
     let encryption_sentinel = crate::schema::query::encryption_sentinel_for_field(&sdk_def);
     let comment_sentinel = encryption_meta_for_field(&sdk_def)
         .map(|m| crate::schema::mask_codec::build_encryption_sentinel(&m));
-    // SqlDialect-blind, and it has to be. `ColumnSnapshot::case_sensitive` is documented
+    // Dialect-identity-blind, and it has to be. `ColumnSnapshot::case_sensitive` is documented
     // as "a drift-comparable catalog attribute on engines where the intent is
     // recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`, and MySQL
     // `information_schema.COLUMNS.COLLATION_NAME`)", and `diff_snapshots` compares it
     // with no dialect test at all.
     //
-    // It used to be suppressed on MySQL (`&& !matches!(dialect, SqlDialect::Mysql)`),
+    // It used to be suppressed on MySQL by an identity match,
     // which was true when it was written and stopped being true later: MySQL had NO
     // live introspection at the time, so nothing could disagree with the folded
     // `None`. `mysql/drift_sql.rs` later learned to recover the intent from
@@ -1973,6 +1895,11 @@ pub(crate) fn column_snapshot_for_field(
         nullable: !f.required,
         default: default.clone(),
         unbounded_text,
+        // Preserve the neutral authoring tokens all the way to the selected
+        // backend. `data_type` is the catalog comparison spelling; it cannot
+        // retain facets such as a VARCHAR bound, temporal precision, or the
+        // distinction between portable integer tokens.
+        type_def: Some(sdk_def),
         authored_type: true,
         generated: f
             .generated
@@ -1998,56 +1925,8 @@ pub(crate) fn column_snapshot_for_field(
         comment_sentinel,
         ..Default::default()
     };
-    stamp_mysql_physical_type(&mut column, dialect);
+    crate::render::backends::schema_renderer(dialect).finalize_column_snapshot(&mut column);
     Ok(column)
-}
-
-/// Stamp [`ColumnSnapshot::mysql_physical_type`] from the column's FINAL rendered
-/// type. A no-op off MySQL.
-///
-/// Derived from what the renderer DECIDES, not from `data_type`, so it accounts for
-/// `ddl_type_override` and the unbounded-text spelling the same way the emitted DDL
-/// does. Reading the renderer's input instead would describe a column this engine
-/// never creates.
-///
-/// `inline_pk` is false because it is read only on the SQLite rowid-alias leg
-/// (the SQLite vendor's `sqlite_auto_increment_identity_pk`); the MySQL arm never
-/// consults it.
-///
-/// The live side parses MySQL's own `COLUMN_TYPE` through the same function. That is
-/// what lets the two sides agree despite spelling apart: the renderer emits
-/// `DECIMAL(65, 30)` and MySQL stores `decimal(65,30)`, and both parse to the same
-/// values.
-///
-/// # Why this is a FUNCTION rather than three lines at the end of one builder
-///
-/// The field is a PROJECTION of the finished column, and this builder is not the last
-/// writer of what it projects. `data_type` and `ddl_type_override` are rewritten
-/// AFTER it returns by every facet the builder cannot see from a `FieldDescriptor`
-/// alone - the author type override (`numeric`/`DECIMAL(p, s)`), the UUID column
-/// metadata, the value-format metadata, the bytewise collation override, and the
-/// named-type metadata - in the fold replay and in the lowerer alike. A stamp taken
-/// before those ran describes the type the column briefly had.
-///
-/// MEASURED on live MySQL 8.4, through the real pipeline: a `createTable` carrying
-/// `decimal(12, 2)` folded `Plain { kind: "double" }` while the server held
-/// `Decimal { precision: 12, scale: 2 }`, and structural drift reported
-/// `column amount data_type expected "numeric" actual "decimal"` against a database
-/// that was exactly what had been deployed. A `uuid` column folded
-/// `Character { length: 191 }` against a live `Character { length: 36 }` at the same
-/// time. So the derivation has ONE spelling and gets applied wherever a column stops
-/// changing - see `render::fold::restamp_mysql_physical_types`.
-///
-/// **Only MySQL.** `apply::drift::column_data_types_eq` consults the contract only
-/// when BOTH sides carry one, and PostgreSQL/SQLite introspection leaves it `None`;
-/// filling it on either would compare a contract against an absent one.
-pub(crate) fn stamp_mysql_physical_type(column: &mut ColumnSnapshot, dialect: SqlDialect) {
-    if !matches!(dialect, SqlDialect::Mysql) {
-        return;
-    }
-    let rendered =
-        crate::render::backends::schema_renderer(&dialect.id()).column_type(column, false);
-    column.mysql_physical_type = Some(MysqlPhysicalType::parse(&rendered));
 }
 
 /// Stamp a named primary-key constraint and its backing index onto a snapshot.
@@ -2237,10 +2116,10 @@ pub fn desired_snapshot(
     // SQLite snapshot carries an unqualified canonical FK target (SQLite rejects a
     // schema-qualified REFERENCES target). Feeding this PG-default snapshot to a
     // SQLite author would therefore leak PG FK spelling into SQLite CREATE DDL.
-    desired_snapshot_for_dialect(project_schema, descriptors, SqlDialect::Postgres, effective)
+    desired_snapshot_for_dialect(project_schema, descriptors, &POSTGRES, effective)
 }
 
-/// SqlDialect-aware [`desired_snapshot`]. One piece of desired shape differs by
+/// Backend-aware [`desired_snapshot`]. One piece of desired shape differs by
 /// engine:
 ///
 /// - **Foreign keys** — PostgreSQL/MySQL snapshot definitions qualify the target
@@ -2258,7 +2137,7 @@ pub fn desired_snapshot(
 pub fn desired_snapshot_for_dialect(
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     effective: &zero_migrate_policy::EffectivePolicy,
 ) -> Result<DesiredSchema, DeclarativeError> {
     // First pass: accumulate EVERY declaration per table as (owner_app, shape),
@@ -2338,7 +2217,7 @@ pub fn desired_snapshot_for_dialect(
 pub(crate) fn build_table_snapshot(
     project_schema: &str,
     d: &CollectionDescriptor,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     effective: &zero_migrate_policy::EffectivePolicy,
 ) -> Result<TableSnapshot, DeclarativeError> {
     let inject = ResolvedInject::for_table(effective, project_schema, &d.name)
@@ -2349,7 +2228,7 @@ pub(crate) fn build_table_snapshot(
 fn build_table_snapshot_with_inject(
     project_schema: &str,
     d: &CollectionDescriptor,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     inject: &ResolvedInject,
 ) -> Result<TableSnapshot, DeclarativeError> {
     let carries_injected_columns = !inject.columns().is_empty();
@@ -2376,7 +2255,7 @@ fn build_table_snapshot_with_inject(
 pub(crate) fn build_resolved_table_snapshot(
     project_schema: &str,
     d: &CollectionDescriptor,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     inject: &ResolvedInject,
 ) -> Result<TableSnapshot, DeclarativeError> {
     let carries_injected_columns = carries_resolved_inject_prefix(d, inject);
@@ -2406,7 +2285,7 @@ fn carries_resolved_inject_prefix(d: &CollectionDescriptor, inject: &ResolvedInj
 
 fn injected_column_snapshot(
     column: &IrColumn,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<ColumnSnapshot, DeclarativeError> {
     let field = crate::render::lower::ir_column_to_field_resolved_create(column);
     let mut snapshot = column_snapshot_for_field(&field, dialect, false)?;
@@ -2473,7 +2352,7 @@ impl SnapshotResolvedShape {
     fn from_inject(
         table: &str,
         inject: &ResolvedInject,
-        dialect: SqlDialect,
+        dialect: &DialectId,
     ) -> Result<Self, DeclarativeError> {
         let columns = inject
             .columns()
@@ -2497,7 +2376,7 @@ impl SnapshotResolvedShape {
 fn build_table_snapshot_impl(
     project_schema: &str,
     d: &CollectionDescriptor,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     resolved_shape: SnapshotResolvedShape,
     column_order: SnapshotColumnOrder,
     synth_json_defaults: bool,
@@ -3313,7 +3192,7 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     deferrable: bool,
     initially_deferred: bool,
     not_valid: bool,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> ConstraintSnapshot {
     let name = explicit_name
         .map(ToString::to_string)
@@ -3517,36 +3396,11 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
 /// sentinel that no longer exists.
 fn fold_ann_index_for_dialect(
     mut idx: IndexSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Option<IndexSnapshot> {
-    if dialect == SqlDialect::Postgres {
-        return Some(idx);
-    }
-    // MySQL cannot build this index at all, so it is not emitted there.
-    //
-    // The author never asked for it: it is derived from the column type, to model
-    // what the PostgreSQL data plane creates. On MySQL the two types land as a
-    // `blob`, and a plain index over one is rejected outright -- `BLOB/TEXT column
-    // used in key specification without a key length` for a vector, and `All parts
-    // of a SPATIAL index must be NOT NULL` for a nullable geoPoint. Both refusals
-    // arrive at APPLY, after `lint --dialect mysql` has already reported the
-    // migration clean, so the cost was a green CI followed by a broken deploy.
-    //
-    // Dropping the index rather than the column keeps the declaration usable: the
-    // column is still created and still stores what the author writes to it. What
-    // is lost is an index the author never wrote and MySQL could not have had.
-    //
-    // SQLite KEEPS its index. `blob` is indexable there, both cases apply cleanly
-    // and the index is present in `sqlite_master` -- measured, not assumed, because
-    // "emit only where buildable" is a claim about each target rather than a
-    // shorthand for "PostgreSQL only". Removing a working index would be a
-    // gratuitous loss.
-    if dialect == SqlDialect::Mysql {
-        return None;
-    }
-    idx.access_method = "btree".to_string();
-    idx.opclass = None;
-    Some(idx)
+    crate::render::backends::schema_renderer(dialect)
+        .project_derived_ann_index(&mut idx)
+        .then_some(idx)
 }
 
 /// Validate a legacy internal platform-ID prefix.
@@ -3562,8 +3416,9 @@ fn validate_id_prefix(prefix: &str) -> Result<(), DeclarativeError> {
         .map_err(|e| DeclarativeError::Invalid(e.to_string()))
 }
 
-fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> &'static str {
-    crate::schema::query::normalize_fk_action_for_dialect(s, dialect)
+fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: &DialectId) -> &'static str {
+    let action = crate::schema::query::normalize_fk_action(s);
+    crate::render::backends::schema_renderer(dialect).canonical_fk_action(action)
 }
 
 /// Build a FOREIGN KEY definition body in the dialect's canonical catalog
@@ -3596,7 +3451,7 @@ fn fk_definition_for_dialect(
     deferrable: bool,
     initially_deferred: bool,
     not_valid: bool,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> String {
     use std::fmt::Write as _;
     // quote the referenced schema + table the SAME way
@@ -3618,18 +3473,10 @@ fn fk_definition_for_dialect(
     } else {
         references_columns.to_vec()
     };
-    let target_name = if matches!(dialect, SqlDialect::Sqlite) {
-        // SQLite foreign keys may not qualify the parent table with a schema
-        // name, even for the implicit `main` database. Both sides of an inline
-        // reference necessarily live in the same attached database.
-        quote_ident_if_needed(target)
-    } else {
-        format!(
-            "{}.{}",
-            quote_ident_if_needed(project_schema),
-            quote_ident_if_needed(target)
-        )
-    };
+    let target_name = crate::render::backends::schema_renderer(dialect).canonical_fk_target(
+        &quote_ident_if_needed(project_schema),
+        &quote_ident_if_needed(target),
+    );
     let mut def = format!(
         "FOREIGN KEY ({}) REFERENCES {}({})",
         constraintdef_cols(local_columns),
@@ -3692,7 +3539,7 @@ fn fk_definition_pg(
         deferrable,
         initially_deferred,
         false,
-        SqlDialect::Postgres,
+        &POSTGRES,
     )
 }
 
@@ -3940,7 +3787,7 @@ pub struct DeclarativeAuthor {
     /// - `Sqlite` (via [`Self::new_for_dialect`]) — the snapshot renderer emits
     ///   unqualified DDL into `main` (= the app file) under the `SqliteBackend`'s
     ///   hardened authorizer.
-    dialect: SqlDialect,
+    dialect: DialectId,
 }
 
 impl DeclarativeAuthor {
@@ -3953,18 +3800,18 @@ impl DeclarativeAuthor {
     /// Use [`Self::new_for_dialect`] for the Confined SQLite path.
     #[must_use]
     pub fn new(project_schema: impl Into<String>, owner_app: impl Into<String>) -> Self {
-        Self::new_for_dialect(project_schema, owner_app, SqlDialect::Postgres)
+        Self::new_for_dialect(project_schema, owner_app, POSTGRES)
     }
 
     /// Construct a declarative author for an explicit target `dialect`.
     ///
-    /// `SqlDialect::Sqlite` selects unqualified snapshot-rendered DDL that lands in
+    /// The SQLite identity selects unqualified snapshot-rendered DDL that lands in
     /// the app file's `main` namespace. The PG dialect is the original path.
     #[must_use]
     pub fn new_for_dialect(
         project_schema: impl Into<String>,
         owner_app: impl Into<String>,
-        dialect: SqlDialect,
+        dialect: DialectId,
     ) -> Self {
         Self {
             project_schema: project_schema.into(),
@@ -3975,8 +3822,8 @@ impl DeclarativeAuthor {
 
     /// The target SQL dialect this author emits.
     #[must_use]
-    pub fn dialect(&self) -> SqlDialect {
-        self.dialect
+    pub fn dialect(&self) -> &DialectId {
+        &self.dialect
     }
 
     /// a clone of this author bound to a different `project_schema`,
@@ -3991,7 +3838,7 @@ impl DeclarativeAuthor {
         Self {
             project_schema: schema.into(),
             owner_app: self.owner_app.clone(),
-            dialect: self.dialect,
+            dialect: self.dialect.clone(),
         }
     }
 
@@ -4017,11 +3864,11 @@ impl DeclarativeAuthor {
     /// made once by the [`VendorSet`](zero_migrate_backend::registry::VendorSet)
     /// lookup; core has no enum dispatch over vendor implementations.
     fn emitter(&self) -> Box<dyn DdlEmitter> {
-        crate::render::backends::ddl_emitter(&self.dialect.id(), &self.project_schema)
+        crate::render::backends::ddl_emitter(&self.dialect, &self.project_schema)
     }
 
     fn schema_renderer(&self) -> &'static dyn SchemaRenderer {
-        crate::render::backends::schema_renderer(&self.dialect.id())
+        crate::render::backends::schema_renderer(&self.dialect)
     }
 
     fn quote_ident(&self, ident: &str) -> String {
@@ -4226,7 +4073,9 @@ impl DeclarativeAuthor {
         // Author-boundary validation: every desired table/column/index name and
         // every column data_type must be safe BEFORE we render any SQL.
         Self::validate_desired(desired)?;
-        self.validate_mysql_key_storage(desired, live)?;
+        self.schema_renderer()
+            .validate_key_storage(desired, live)
+            .map_err(DeclarativeError::Invalid)?;
 
         // Cross-app FK: every FK target must exist in the UNION (it may be a
         // table owned by another app, but it must be declared by SOME member app)
@@ -4273,7 +4122,11 @@ impl DeclarativeAuthor {
         // SQLite has no `ALTER TABLE ADD CONSTRAINT` — FKs MUST be inline at CREATE
         // TABLE, so on SQLite a FK whose target is not yet available is a hard error
         // (handled per-table below), never a deferred ALTER.
-        let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
+        let column_change_strategy = self.schema_renderer().existing_column_change_strategy();
+        let uses_table_rebuild = matches!(
+            column_change_strategy,
+            ExistingColumnChangeStrategy::TableRebuild
+        );
 
         for table in &order {
             let t = &desired.tables[*table];
@@ -4332,11 +4185,7 @@ impl DeclarativeAuthor {
             // MySQL, "schema"."t" on PostgreSQL — so all three arms were re-deriving a
             // contract method byte-for-byte. Ask the contract instead of re-spelling it.
             let down = emitter.drop_table_up(table);
-            let up = match self.dialect {
-                SqlDialect::Sqlite => self.render_create_table_sqlite(table, desired_full)?,
-                SqlDialect::Mysql => emitter.create_table(&req).join(";\n"),
-                SqlDialect::Postgres => self.render_create_table(table, t, &inline_fks),
-            };
+            let up = emitter.create_table(&req).join(";\n");
             let mig = self.make(
                 &format!("create_table_{table}"),
                 up,
@@ -4410,7 +4259,7 @@ impl DeclarativeAuthor {
             // natively-expressible existing-table ops (ADD COLUMN, DROP COLUMN, DROP
             // INDEX, ADD INDEX) still flow through the per-op path when NO rebuild is
             // needed.
-            if is_sqlite {
+            if uses_table_rebuild {
                 if let Some(reason) =
                     self.sqlite_existing_table_needs_rebuild(table, lt, dt, &table_renames)
                 {
@@ -4454,7 +4303,10 @@ impl DeclarativeAuthor {
             // lane's `lower_ir_rename`, so an authored rename and a declarative one
             // refuse alike rather than one lane silently planning an apply that
             // cannot finish.
-            if self.dialect == SqlDialect::Mysql {
+            if matches!(
+                self.schema_renderer().column_rename_strategy(),
+                ColumnRenameStrategy::Refuse(_)
+            ) {
                 if let Some(r) = table_renames.first() {
                     return Err(DeclarativeError::MysqlRenameColumnUnsupported {
                         table: table.clone(),
@@ -4474,8 +4326,7 @@ impl DeclarativeAuthor {
                     table: table.clone(),
                     from: r.from.clone(),
                     to: r.to.clone(),
-                    ty: crate::render::backends::schema_renderer(&SqlDialect::Postgres.id())
-                        .column_type(&rename_column, false),
+                    ty: self.schema_renderer().column_type(&rename_column, false),
                 })?;
                 renames.push(plan);
             }
@@ -4508,7 +4359,7 @@ impl DeclarativeAuthor {
                         // PG `ALTER COLUMN` DDL, NEVER silently skip). The dialect-aware
                         // type compare uses the SAME registered SQLite canonicalizer
                         // the detector uses, so the two agree.
-                        if is_sqlite {
+                        if uses_table_rebuild {
                             if self.schema_renderer().canonical_type(&lc.data_type)
                                 != self.schema_renderer().canonical_type(&c.data_type)
                                 || lc.nullable != c.nullable
@@ -4530,16 +4381,18 @@ impl DeclarativeAuthor {
                         // authored change and a declarative one refuse alike rather
                         // than one lane silently planning invalid DDL.
                         // Compare the two sides in ONE vocabulary. The LIVE snapshot
-                        // arrives already folded by `mysql_canonical_type` (the catalog
-                        // reader applies it), while the DESIRED side carries the
+                        // arrives already folded by the vendor's `canonical_type` (the
+                        // catalog reader applies it), while the DESIRED side carries the
                         // dialect-neutral spelling — so a bounded `t.string({ length })`
                         // reads `character varying(191)` against a live `text` and every
                         // such column looks like a type change. Same idiom as
                         // `existence_probe`'s `dtypes_match`, which canonicalises both
-                        // sides before asking whether they differ.
+                        // sides before asking whether they differ. The RAW comparison
+                        // this replaces refused a live MySQL re-deploy of every bounded
+                        // string column.
                         let live_ct = self.schema_renderer().canonical_type(&lc.data_type);
                         let desired_ct = self.schema_renderer().canonical_type(&c.data_type);
-                        if self.dialect == SqlDialect::Mysql
+                        if matches!(column_change_strategy, ExistingColumnChangeStrategy::Refuse)
                             && (live_ct != desired_ct
                                 || lc.case_sensitive != c.case_sensitive
                                 || lc.nullable != c.nullable)
@@ -4564,14 +4417,15 @@ impl DeclarativeAuthor {
                             // statement about to be rendered runs against the column
                             // as it is now, and that is what the server checks.
                             if lc.identity.is_some()
-                                && !pg_identity_type(&c.data_type)
-                                && self.dialect == SqlDialect::Postgres
+                                && !self
+                                    .schema_renderer()
+                                    .identity_column_type_allowed(&c.data_type)
                             {
                                 return Err(DeclarativeError::IdentityColumnTypeUnsupported {
                                     table: table.clone(),
                                     column: c.name.clone(),
                                     to_type: crate::render::backends::schema_renderer(
-                                        &self.dialect.id(),
+                                        &self.dialect,
                                     )
                                     .column_type(c, false),
                                 });
@@ -4938,88 +4792,6 @@ impl DeclarativeAuthor {
         Ok(())
     }
 
-    /// Refuse every desired MySQL key whose rendered column storage is a LOB.
-    ///
-    /// InnoDB requires an index for BOTH sides of a foreign key and silently
-    /// synthesizes the child-side index when the author did not declare one. The
-    /// snapshot therefore has two key carriers to inspect: explicit/implicit
-    /// primary, unique, and ordinary indexes, plus each FOREIGN KEY's local and
-    /// referenced tuples. The IR has no prefix-length element, so none of these
-    /// can make a `TEXT`/`BLOB` key legal; letting one reach apply produces MySQL
-    /// error 1170 after earlier migration units may already have committed.
-    ///
-    /// Classification reads [`ColumnSnapshot::mysql_physical_type`], never the
-    /// neutral `data_type`: MySQL catalog normalization deliberately folds
-    /// `VARCHAR(n)` into `"text"`, while the physical contract preserves the
-    /// distinction between a bounded character column and a LOB.
-    fn validate_mysql_key_storage(
-        &self,
-        desired: &SchemaSnapshot,
-        live: &SchemaSnapshot,
-    ) -> Result<(), DeclarativeError> {
-        if !matches!(self.dialect, SqlDialect::Mysql) {
-            return Ok(());
-        }
-
-        let check =
-            |position: &str, table: &str, columns: &[String]| -> Result<(), DeclarativeError> {
-                let snapshot = desired.tables.get(table).or_else(|| live.tables.get(table));
-                let Some(snapshot) = snapshot else {
-                    return Ok(());
-                };
-                for name in columns {
-                    let Some(column) = snapshot.columns.iter().find(|column| column.name == *name)
-                    else {
-                        continue;
-                    };
-                    let Some(MysqlPhysicalType::Lob { tier }) = &column.mysql_physical_type else {
-                        continue;
-                    };
-                    return Err(DeclarativeError::Invalid(format!(
-                        "{position} keys {table}.{name}, which renders as MySQL {} storage; \
-                     MySQL refuses a key over a TEXT or BLOB column with no prefix length",
-                        tier.to_ascii_uppercase()
-                    )));
-                }
-                Ok(())
-            };
-
-        for (table, snapshot) in &desired.tables {
-            for index in &snapshot.indexes {
-                check(
-                    &format!("desired index {}", index.name),
-                    table,
-                    &index.columns,
-                )?;
-            }
-            for constraint in &snapshot.constraints {
-                match constraint.kind.as_str() {
-                    "PRIMARY KEY" | "UNIQUE" => check(
-                        &format!("desired {} constraint {}", constraint.kind, constraint.name),
-                        table,
-                        &fk_local_columns(&constraint.definition),
-                    )?,
-                    "FOREIGN KEY" => {
-                        check(
-                            &format!("desired foreign key {} local key", constraint.name),
-                            table,
-                            &fk_local_columns(&constraint.definition),
-                        )?;
-                        if let Some(target) = fk_target_table(&constraint.definition) {
-                            check(
-                                &format!("desired foreign key {} target key", constraint.name),
-                                &target,
-                                &fk_referenced_columns(&constraint.definition),
-                            )?;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Resolve + validate the [`RenameHint`]s against the desired/live snapshots.
     ///
     /// Each hint MUST match an actual drop+add pair: `from` present in the live
@@ -5166,48 +4938,6 @@ impl DeclarativeAuthor {
         Ok(resolved)
     }
 
-    /// Render the SQLite `CREATE TABLE` `up` for a new table from the resolved
-    /// snapshot and its explicit [`ResolvedInject`]. This is the same structural
-    /// renderer used by `IrAuthor`, so declarative and migration CREATEs are
-    /// byte-identical without re-resolving policy or reconstructing a second shape.
-    ///
-    /// FK emission uses `FkEmission::Inline`: [`Self::diff`] has ALREADY verified
-    /// that every FK on this table targets a table that is live or was created
-    /// earlier in this batch (else it returned
-    /// [`DeclarativeError::SqliteDeferredFkUnsupported`] — SQLite cannot ADD
-    /// CONSTRAINT later). The engine's topo order guarantees an in-batch FK target's
-    /// CREATE precedes this one, so inlining every FK is sound and matches SQLite's
-    /// "FKs must be declared at CREATE TABLE" constraint.
-    ///
-    /// # Errors
-    /// [`DeclarativeError::Invalid`] if the per-table snapshot or resolved inject is
-    /// absent (an engine invariant violation).
-    fn render_create_table_sqlite(
-        &self,
-        table: &str,
-        desired: &DesiredSchema,
-    ) -> Result<String, DeclarativeError> {
-        let snapshot = desired.snapshot.tables.get(table).ok_or_else(|| {
-            DeclarativeError::Invalid(format!("internal: no SQLite snapshot for table '{table}'"))
-        })?;
-        let inject = desired.resolved_injects.get(table).ok_or_else(|| {
-            DeclarativeError::Invalid(format!(
-                "internal: no resolved inject for SQLite table '{table}'"
-            ))
-        })?;
-        let injected_indexes = injected_index_names(table, snapshot, Some(inject));
-        Ok(self
-            .emitter()
-            .create_table(&CreateTableRequest {
-                table,
-                snapshot,
-                inline_fks: &[],
-                injected_indexes: &injected_indexes,
-                enum_check_names: enum_check_names(table, snapshot),
-            })
-            .join(";\n"))
-    }
-
     /// Render only the `CREATE TABLE` statement used as a SQLite rebuild target.
     ///
     /// Ordinary descriptor shapes use the lossless SDK-value emitter so the
@@ -5326,7 +5056,7 @@ impl DeclarativeAuthor {
                 table,
                 &schema,
                 &crate::schema::query::FkEmission::Inline,
-                SqlDialect::Sqlite,
+                &self.dialect,
                 true,
                 effective,
             )
@@ -5527,9 +5257,12 @@ impl DeclarativeAuthor {
         reason: String,
         inject: &ResolvedInject,
     ) -> Result<TableRebuild, DeclarativeError> {
-        if self.dialect != SqlDialect::Sqlite {
+        if !matches!(
+            self.schema_renderer().existing_column_change_strategy(),
+            ExistingColumnChangeStrategy::TableRebuild
+        ) {
             return Err(DeclarativeError::Invalid(format!(
-                "internal: requested a SQLite constraint rebuild from a {:?} author",
+                "internal: requested a table constraint rebuild from a {:?} author",
                 self.dialect
             )));
         }
@@ -5879,8 +5612,8 @@ impl DeclarativeAuthor {
         known_live_tables: &BTreeSet<String>,
         effective: &zero_migrate_policy::EffectivePolicy,
     ) -> Result<crate::render::step::RenameStep, DeclarativeError> {
-        match self.dialect {
-            SqlDialect::Postgres => {
+        match self.schema_renderer().column_rename_strategy() {
+            ColumnRenameStrategy::ExpandContract => {
                 // The PG expand-contract author IS the id authority: the
                 // declarative path calls the SAME `ExpandContractAuthor::author` with
                 // the SAME `OnlineIntent` fields, so the authored E1..C2 ids +
@@ -5900,7 +5633,7 @@ impl DeclarativeAuthor {
                     })?;
                 Ok(crate::render::step::RenameStep::ExpandContract(plan))
             }
-            SqlDialect::Sqlite => {
+            ColumnRenameStrategy::TableRebuild => {
                 let rebuild = self.sqlite_rename_rebuild(
                     table,
                     from,
@@ -5913,9 +5646,9 @@ impl DeclarativeAuthor {
                 )?;
                 Ok(crate::render::step::RenameStep::TableRebuild(rebuild))
             }
-            SqlDialect::Mysql => Err(DeclarativeError::UnsupportedInV1(
-                "renameColumn is render-only for MySQL, not live-rendered".to_string(),
-            )),
+            ColumnRenameStrategy::Refuse(reason) => {
+                Err(DeclarativeError::UnsupportedInV1(reason.to_string()))
+            }
         }
     }
 
@@ -5954,7 +5687,7 @@ impl DeclarativeAuthor {
         known_live_tables: &BTreeSet<String>,
         effective: &zero_migrate_policy::EffectivePolicy,
     ) -> Result<TableRebuild, DeclarativeError> {
-        let backend = crate::render::backends::schema_renderer(&self.dialect.id());
+        let backend = crate::render::backends::schema_renderer(&self.dialect);
         // ---- desired snapshot: live with `from`→`to` renamed (type unchanged) ----
         let mut desired_table = live_snapshot.clone();
         let mut found = false;
@@ -5978,7 +5711,7 @@ impl DeclarativeAuthor {
         // `GENERATED ALWAYS AS (("qty_on_hand" + 1))` for a table whose only such
         // column is now `quantity` - refused by SQLite inside the rebuild
         // transaction, so the migration cannot apply at all.
-        rename_column_in_generated_columns(&mut desired_table, table, from, to, self.dialect)?;
+        rename_column_in_generated_columns(&mut desired_table, table, from, to, &self.dialect)?;
         // The same hazard one field over, and it reaches the SAME emitter: an inline
         // CHECK body names the column it guards, so the rebuild emitted
         // `"state" TEXT NOT NULL CHECK ("status" IN (…))` for a column that is now
@@ -6041,7 +5774,7 @@ impl DeclarativeAuthor {
                 // equality the snapshot-path `RenameHintTypeMismatch` guard enforces
                 // (SQLite collapses `data_type` to affinity), failing closed on divergence
                 // instead of emitting a silent shape skew.
-                use crate::schema::query::{def_to_column_type_for_dialect, SqlDialect};
+                use crate::schema::query::def_to_column_type_for_backend;
                 let Some(live_from) = live_snapshot.columns.iter().find(|c| c.name == from) else {
                     // `found` above already proved `from` is present; defensive.
                     return Err(DeclarativeError::Invalid(format!(
@@ -6049,10 +5782,8 @@ impl DeclarativeAuthor {
                      rename-field check and the affinity guard (internal invariant)"
                     )));
                 };
-                let to_affinity = backend.canonical_type(&def_to_column_type_for_dialect(
-                    to_def,
-                    SqlDialect::Postgres,
-                ));
+                let to_type = def_to_column_type_for_backend(to_def, backend);
+                let to_affinity = backend.canonical_type(&to_type);
                 let from_affinity = backend.canonical_type(&live_from.data_type);
                 if to_affinity != from_affinity {
                     return Err(DeclarativeError::RenameHintTypeMismatch {
@@ -6060,7 +5791,7 @@ impl DeclarativeAuthor {
                         from: from.to_string(),
                         to: to.to_string(),
                         from_type: live_from.data_type.clone(),
-                        to_type: def_to_column_type_for_dialect(to_def, SqlDialect::Postgres),
+                        to_type,
                     });
                 }
                 // TIGHTEN past affinity to the FULL data-transforming facet
@@ -6209,31 +5940,12 @@ impl DeclarativeAuthor {
         fk: &ConstraintSnapshot,
         depends_on: Vec<MigrationId>,
     ) -> Migration {
-        let table_ref = match self.dialect {
-            SqlDialect::Postgres => self.qualified(table),
-            SqlDialect::Sqlite => self.quote_ident(table),
-            SqlDialect::Mysql => self.qualified(table),
-        };
+        let emitter = self.emitter();
+        let table_ref = emitter.alter_table_ref(table);
         let up = format!("ALTER TABLE {} ADD {}", table_ref, self.fk_clause(fk));
-        let down = match self.dialect {
-            SqlDialect::Mysql => format!(
-                "ALTER TABLE {} DROP FOREIGN KEY {}",
-                table_ref,
-                self.quote_ident(&fk.name)
-            ),
-            // Split from the PG arm not because the bytes differ — they do not —
-            // but so the SQLite leg's identifier is spelled by the SQLite backend.
-            SqlDialect::Sqlite => format!(
-                "ALTER TABLE {} DROP CONSTRAINT {}",
-                table_ref,
-                self.quote_ident(&fk.name)
-            ),
-            SqlDialect::Postgres => format!(
-                "ALTER TABLE {} DROP CONSTRAINT {}",
-                table_ref,
-                self.quote_ident(&fk.name)
-            ),
-        };
+        let down = emitter
+            .drop_foreign_key_up(table, &fk.name)
+            .expect("stand-alone FK addition requires a backend removal spelling");
         self.make(
             &format!("add_fk_{}_{}", table, fk.name),
             up,
@@ -6314,7 +6026,7 @@ impl DeclarativeAuthor {
     /// and the fold) and the structural kind (`generated_kind`, from the fold and
     /// the PostgreSQL catalog read).
     fn render_alter_column_type(&self, table: &str, c: &ColumnSnapshot) -> Migration {
-        let ty = crate::render::backends::schema_renderer(&self.dialect.id()).column_type(c, false);
+        let ty = crate::render::backends::schema_renderer(&self.dialect).column_type(c, false);
         let using = if is_engine_computed_column(c) {
             String::new()
         } else {
@@ -6424,7 +6136,7 @@ impl DeclarativeAuthor {
     /// silence is NOT a coverage hole — I asserted it was one and was wrong. Both
     /// `Op::SetColumnDefault` and `Op::DropColumnDefault` call
     /// `require_capability_for(Capability::NativeAlterColumn, …)`, and that
-    /// capability is FALSE for SQLite, so the `SqlDialect::Sqlite` arm of the
+    /// capability is FALSE for SQLite, so the SQLite leg of the
     /// `match` below is dead for the same reason the stand-alone constraint
     /// renderers' SQLite arms are dead: a gate several frames up, not the render.
     /// `pg_drift`'s silence is the real reportable one — that suite contains the
@@ -6435,11 +6147,7 @@ impl DeclarativeAuthor {
         col: &str,
         default_sql: Option<&str>,
     ) -> String {
-        let (table_ref, col_ref) = match self.dialect {
-            SqlDialect::Mysql => (self.qualified(table), self.quote_ident(col)),
-            SqlDialect::Postgres => (self.qualified(table), self.quote_ident(col)),
-            SqlDialect::Sqlite => (self.quote_ident(table), self.quote_ident(col)),
-        };
+        let (table_ref, col_ref) = self.emitter().alter_column_refs(table, col);
         let action = match default_sql {
             Some(default_sql) => format!("SET DEFAULT {default_sql}"),
             None => "DROP DEFAULT".to_string(),
@@ -6695,7 +6403,8 @@ impl DeclarativeAuthor {
         guard: Option<crate::model::probe::GuardDir>,
         inject: &ResolvedInject,
     ) -> Result<LoweredCreateTable, DeclarativeError> {
-        let is_sqlite = matches!(self.dialect, SqlDialect::Sqlite);
+        let supports_forward_inline_fk =
+            self.schema_renderer().supports_forward_inline_foreign_key();
         let mut inline_fks: Vec<&ConstraintSnapshot> = Vec::new();
         let mut deferred: Vec<(&ConstraintSnapshot, String)> = Vec::new();
         // Tracking-only entries: SQLite inline foreign keys whose target is not
@@ -6713,7 +6422,7 @@ impl DeclarativeAuthor {
             let target_is_settled = target
                 .as_deref()
                 .is_some_and(|tt| tt == table || live_tables.contains(tt));
-            let inlinable = target_is_settled || is_sqlite;
+            let inlinable = target_is_settled || supports_forward_inline_fk;
             if inlinable {
                 inline_fks.push(c);
                 // SQLite inlined a target that is NOT this table and NOT already
@@ -6722,7 +6431,7 @@ impl DeclarativeAuthor {
                 // the end-of-lowering drain refuses a target no operation creates.
                 // Without this, a dangling reference reached a real database and
                 // produced a table that could not accept a row (F673).
-                if is_sqlite && !target_is_settled {
+                if supports_forward_inline_fk && !target_is_settled {
                     if let Some(target) = target {
                         deferred_tracking.push(DeferredForeignKeyUnit {
                             target_table: target,
@@ -7070,21 +6779,10 @@ impl DeclarativeAuthor {
     /// the generic `CONSTRAINT` spelling. SQLite never reaches this renderer —
     /// its caller routes the operation through a structured table rebuild.
     pub(crate) fn lower_drop_fk(&self, table: &str, name: &str) -> LoweredUnit {
-        let up = match self.dialect {
-            SqlDialect::Mysql => format!(
-                "ALTER TABLE {} DROP FOREIGN KEY {}",
-                self.qualified(table),
-                self.quote_ident(name),
-            ),
-            SqlDialect::Postgres => format!(
-                "ALTER TABLE {} DROP CONSTRAINT {}",
-                self.qualified(table),
-                self.quote_ident(name),
-            ),
-            SqlDialect::Sqlite => {
-                unreachable!("SQLite foreign-key drops must lower through a table rebuild")
-            }
-        };
+        let up = self
+            .emitter()
+            .drop_foreign_key_up(table, name)
+            .expect("backend must route foreign-key drops through its supported path");
         single_stmt(self.make(
             &format!("drop_constraint_{table}_{name}"),
             up,
@@ -7315,9 +7013,9 @@ mod mysql_literal_safety_tests {
     #[test]
     fn field_and_migration_container_defaults_are_byte_identical_per_dialect() {
         for (dialect, object, array) in [
-            (SqlDialect::Postgres, "'{}'::jsonb", "'[]'::jsonb"),
-            (SqlDialect::Sqlite, "'{}'", "'[]'"),
-            (SqlDialect::Mysql, "(JSON_OBJECT())", "(JSON_ARRAY())"),
+            (&POSTGRES, "'{}'::jsonb", "'[]'::jsonb"),
+            (&SQLITE, "'{}'", "'[]'"),
+            (&MYSQL, "(JSON_OBJECT())", "(JSON_ARRAY())"),
         ] {
             let object_field = FieldDescriptor {
                 name: "object_value".to_string(),
@@ -7366,7 +7064,7 @@ mod mysql_literal_safety_tests {
             empty_container_default_expr_for_col_type(
                 EmptyContainerKind::Array,
                 &ColType::TextArray,
-                SqlDialect::Postgres,
+                &POSTGRES,
             ),
             Some("'{}'::text[]")
         );
@@ -7374,7 +7072,7 @@ mod mysql_literal_safety_tests {
             empty_container_default_expr_for_col_type(
                 EmptyContainerKind::Array,
                 &ColType::TextArray,
-                SqlDialect::Sqlite,
+                &SQLITE,
             ),
             None
         );
@@ -7382,7 +7080,7 @@ mod mysql_literal_safety_tests {
             empty_container_default_expr_for_col_type(
                 EmptyContainerKind::Array,
                 &ColType::TextArray,
-                SqlDialect::Mysql,
+                &MYSQL,
             ),
             Some("(JSON_ARRAY())")
         );
@@ -7434,7 +7132,7 @@ mod snapshot_builder_refactor_safety_tests {
         CreateTableRequest, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, ResolvedInject,
         TableRuntimeOptions, TableSnapshot,
     };
-    use crate::schema::query::SqlDialect;
+    use zero_migrate_ir::dialect::{POSTGRES, SQLITE};
 
     fn rich_descriptor() -> CollectionDescriptor {
         CollectionDescriptor {
@@ -7497,8 +7195,8 @@ mod snapshot_builder_refactor_safety_tests {
         }
         let d = rich_descriptor();
         let effective = confined_policy();
-        let pg = build_table_snapshot("app", &d, SqlDialect::Postgres, &effective).unwrap();
-        let sq = build_table_snapshot("app", &d, SqlDialect::Sqlite, &effective).unwrap();
+        let pg = build_table_snapshot("app", &d, &POSTGRES, &effective).unwrap();
+        let sq = build_table_snapshot("app", &d, &SQLITE, &effective).unwrap();
         std::fs::write(
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -7520,7 +7218,7 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn build_table_snapshot_is_byte_stable_pg() {
         let d = rich_descriptor();
-        let snap = build_table_snapshot("app", &d, SqlDialect::Postgres, &confined_policy())
+        let snap = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
             .expect("rich descriptor builds a snapshot");
         // Trailing newline tolerance: the golden file ends in a newline; the debug
         // print does not.
@@ -7530,7 +7228,7 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn build_table_snapshot_is_byte_stable_sqlite() {
         let d = rich_descriptor();
-        let snap = build_table_snapshot("app", &d, SqlDialect::Sqlite, &confined_policy())
+        let snap = build_table_snapshot("app", &d, &SQLITE, &confined_policy())
             .expect("rich descriptor builds a snapshot");
         assert_eq!(format!("{snap:#?}"), GOLDEN_SQLITE.trim_end_matches('\n'));
     }
@@ -7550,7 +7248,7 @@ mod snapshot_builder_refactor_safety_tests {
             runtime_options: Default::default(),
         };
         let effective = crate::test_fixtures::no_inject("app");
-        let snap = build_table_snapshot("app", &d, SqlDialect::Postgres, &effective)
+        let snap = build_table_snapshot("app", &d, &POSTGRES, &effective)
             .expect("author-owned updated_at is valid without injection");
 
         assert_eq!(snap.columns.len(), 1);
@@ -7576,7 +7274,7 @@ mod snapshot_builder_refactor_safety_tests {
             runtime_options: Default::default(),
         };
         let effective = crate::test_fixtures::no_inject("app");
-        build_table_snapshot("app", &d, SqlDialect::Postgres, &effective)
+        build_table_snapshot("app", &d, &POSTGRES, &effective)
             .expect_err("ID-prefix reservations are independent of table injection");
     }
 
@@ -7616,7 +7314,7 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn id_field_with_unique_is_rejected_not_silently_folded() {
         let d = id_descriptor(true, /* unique */ true, None);
-        let err = build_table_snapshot("app", &d, SqlDialect::Postgres, &confined_policy())
+        let err = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
             .expect_err("a unique modifier on the folded id must be rejected");
         let msg = format!("{err:?}");
         assert!(
@@ -7630,7 +7328,7 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn id_field_with_user_default_is_rejected_not_silently_folded() {
         let d = id_descriptor(true, false, Some(serde_json::json!("hardcoded")));
-        let err = build_table_snapshot("app", &d, SqlDialect::Postgres, &confined_policy())
+        let err = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
             .expect_err("a user default on the folded id must be rejected");
         let msg = format!("{err:?}");
         assert!(
@@ -7650,7 +7348,7 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn id_field_with_default_required_flag_still_folds() {
         let d = id_descriptor(/* required */ false, false, None);
-        let snap = build_table_snapshot("app", &d, SqlDialect::Postgres, &confined_policy())
+        let snap = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
             .expect("an internal ID descriptor with required:false still folds");
         let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
         assert_eq!(
@@ -7667,7 +7365,7 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn clean_id_field_still_folds_into_the_system_pk() {
         let d = id_descriptor(/* required */ true, false, None);
-        let snap = build_table_snapshot("app", &d, SqlDialect::Postgres, &confined_policy())
+        let snap = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
             .expect("a clean internal ID descriptor folds cleanly");
         let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
         assert_eq!(
@@ -7752,7 +7450,7 @@ mod snapshot_builder_refactor_safety_tests {
         );
 
         let pg_inject = no_inject("app", &d.name);
-        let pg_snap = build_resolved_table_snapshot("app", &d, SqlDialect::Postgres, &pg_inject)
+        let pg_snap = build_resolved_table_snapshot("app", &d, &POSTGRES, &pg_inject)
             .expect("PG snapshot builds");
         let pg_sql =
             DeclarativeAuthor::new("app", "app_test").render_create_table(&d.name, &pg_snap, &[]);
@@ -7762,11 +7460,10 @@ mod snapshot_builder_refactor_safety_tests {
         );
 
         let sqlite_inject = no_inject("app", &d.name);
-        let sqlite_snap =
-            build_resolved_table_snapshot("app", &d, SqlDialect::Sqlite, &sqlite_inject)
-                .expect("SQLite snapshot builds");
+        let sqlite_snap = build_resolved_table_snapshot("app", &d, &SQLITE, &sqlite_inject)
+            .expect("SQLite snapshot builds");
         let injected_indexes = injected_index_names(&d.name, &sqlite_snap, Some(&sqlite_inject));
-        let sqlite_sql = DeclarativeAuthor::new_for_dialect("app", "app_test", SqlDialect::Sqlite)
+        let sqlite_sql = DeclarativeAuthor::new_for_dialect("app", "app_test", SQLITE)
             .emitter()
             .create_table(&CreateTableRequest {
                 table: &d.name,
@@ -7801,7 +7498,7 @@ mod snapshot_builder_refactor_safety_tests {
             ],
         );
         let inject = no_inject("zero_migrate", &d.name);
-        let snap = build_resolved_table_snapshot("zero_migrate", &d, SqlDialect::Postgres, &inject)
+        let snap = build_resolved_table_snapshot("zero_migrate", &d, &POSTGRES, &inject)
             .expect("platform-exact JSON-backed table snapshot builds");
         assert_eq!(
             snap.columns
@@ -7841,7 +7538,7 @@ mod snapshot_builder_refactor_safety_tests {
         fields.push(field("payload", "json"));
         let d = resolved_descriptor("events", fields);
         let inject = confined_inject("app", &d.name);
-        let snap = build_resolved_table_snapshot("app", &d, SqlDialect::Postgres, &inject)
+        let snap = build_resolved_table_snapshot("app", &d, &POSTGRES, &inject)
             .expect("confined-resolved JSON table snapshot builds");
         assert_eq!(
             snap.columns
@@ -7873,7 +7570,7 @@ mod snapshot_builder_refactor_safety_tests {
             }],
         );
         let inject = no_inject("zero_migrate", &d.name);
-        let snap = build_resolved_table_snapshot("zero_migrate", &d, SqlDialect::Postgres, &inject)
+        let snap = build_resolved_table_snapshot("zero_migrate", &d, &POSTGRES, &inject)
             .expect("platform-exact explicit JSON default snapshot builds");
         assert_eq!(
             snap.columns
@@ -8186,7 +7883,7 @@ mod mysql_storage_agreement_tests {
     //! the refusal it depends on is pinned by
     //! [`a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it`].
     use super::{column_snapshot_for_field, FieldDescriptor, MysqlStorage};
-    use crate::schema::query::SqlDialect;
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     fn field(name: &str, ty: &str) -> FieldDescriptor {
         FieldDescriptor {
@@ -8270,10 +7967,10 @@ mod mysql_storage_agreement_tests {
         ];
 
         for (f, expected) in cases {
-            let snapshot = column_snapshot_for_field(&f, SqlDialect::Mysql, false)
+            let snapshot = column_snapshot_for_field(&f, &MYSQL, false)
                 .unwrap_or_else(|error| panic!("{:?} snapshots: {error}", f.name));
-            let rendered = crate::render::backends::schema_renderer(&SqlDialect::Mysql.id())
-                .column_type(&snapshot, false);
+            let rendered =
+                crate::render::backends::schema_renderer(&MYSQL).column_type(&snapshot, false);
             assert_eq!(
                 MysqlStorage::of(&rendered),
                 expected,
@@ -8319,7 +8016,7 @@ mod mysql_storage_agreement_tests {
     #[test]
     fn a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it() {
         use crate::model::ir::{ColType, IrColumn, MigrationIr, Op};
-        use crate::model::validate::{validate_ir, SqlDialect};
+        use crate::model::validate::validate_ir;
 
         let ci_column = |name: &str, ty: ColType| IrColumn {
             name: name.into(),
@@ -8341,7 +8038,7 @@ mod mysql_storage_agreement_tests {
 
         // Every dialect, because the rule is not dialect-gated and MySQL is only the
         // dialect where breaking it costs the width rather than the facet.
-        for dialect in [SqlDialect::Mysql, SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for dialect in [&MYSQL, &POSTGRES, &SQLITE] {
             let op = Op::CreateTable {
                 name: "things".into(),
                 columns: vec![bounded_ci_column()],
@@ -8404,10 +8101,11 @@ mod inline_check_rename_tests {
     //! make text surgery admissible here at all - literal vs identifier, exact vs
     //! prefix, quoted vs bare - and the refusal that keeps a body it cannot read STALE
     //! rather than CORRUPT. Every one of them is a way a plain substring swap is wrong.
-    use super::{rename_quoted_column_in_sql, SchemaRenderer, SqlDialect};
+    use super::{rename_quoted_column_in_sql, SchemaRenderer};
+    use zero_migrate_ir::dialect::{DialectId, MYSQL, SQLITE};
 
-    fn backend(dialect: SqlDialect) -> &'static dyn SchemaRenderer {
-        crate::render::backends::schema_renderer(&dialect.id())
+    fn backend(dialect: &DialectId) -> &'static dyn SchemaRenderer {
+        crate::render::backends::schema_renderer(dialect)
     }
 
     #[test]
@@ -8418,7 +8116,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status" IN ('UNCONFIRMED', 'status'))"#,
                 "status",
                 "state",
-                backend(SqlDialect::Sqlite),
+                backend(&SQLITE),
             )
             .as_deref(),
             Some(r#"CHECK ("state" IN ('UNCONFIRMED', 'status'))"#),
@@ -8432,7 +8130,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status_id" IS NOT NULL)"#,
                 "status",
                 "state",
-                backend(SqlDialect::Sqlite),
+                backend(&SQLITE),
             ),
             None,
             "an exact decoded match, not a prefix: no rewrite means the fragment is \
@@ -8447,7 +8145,7 @@ mod inline_check_rename_tests {
                 "CHECK (status IS NOT NULL)",
                 "status",
                 "state",
-                backend(SqlDialect::Sqlite),
+                backend(&SQLITE),
             ),
             None,
             "every producer of these fragments quotes; an unquoted word could as \
@@ -8462,7 +8160,7 @@ mod inline_check_rename_tests {
             r#"CHECK ("ref" IS NULL OR (typeof("ref") = 'text' AND length("ref") = 36))"#,
             "ref",
             "target",
-            backend(SqlDialect::Sqlite),
+            backend(&SQLITE),
         )
         .expect("the body names the column");
         assert_eq!(
@@ -8478,7 +8176,7 @@ mod inline_check_rename_tests {
                 "CHECK (`status` IS NOT NULL)",
                 "status",
                 "state",
-                backend(SqlDialect::Mysql),
+                backend(&MYSQL),
             )
             .as_deref(),
             Some("CHECK (`state` IS NOT NULL)"),
@@ -8488,7 +8186,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status" IS NOT NULL)"#,
                 "status",
                 "state",
-                backend(SqlDialect::Mysql),
+                backend(&MYSQL),
             ),
             None,
             "a double-quoted token is not an identifier on MySQL, so it is left alone",
@@ -8502,7 +8200,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status" <> 'unclosed)"#,
                 "status",
                 "state",
-                backend(SqlDialect::Sqlite),
+                backend(&SQLITE),
             ),
             None,
             "a body this walk cannot read is left STALE rather than half-rewritten",
@@ -8519,7 +8217,7 @@ mod inline_check_rename_tests {
                 r#"CHECK ("status" IN ('it''s', 'other'))"#,
                 "status",
                 "state",
-                backend(SqlDialect::Sqlite),
+                backend(&SQLITE),
             )
             .as_deref(),
             Some(r#"CHECK ("state" IN ('it''s', 'other'))"#),
@@ -8537,9 +8235,10 @@ mod derived_index_alias_tests {
     //! the whole alias rests on, and the ambiguity report.
     use super::{
         build_table_snapshot, derived_index_aliases_for, non_unique_index_name, pair_indexes,
-        CollectionDescriptor, FieldDescriptor, IndexSnapshot, SqlDialect,
+        CollectionDescriptor, FieldDescriptor, IndexSnapshot,
     };
     use std::collections::BTreeMap;
+    use zero_migrate_ir::dialect::{DialectId, MYSQL, POSTGRES, SQLITE};
 
     fn effective() -> zero_migrate_policy::EffectivePolicy {
         crate::test_fixtures::no_inject("app")
@@ -8643,8 +8342,8 @@ mod derived_index_alias_tests {
             3,
             "the unique, vector and geoPoint fields each derive one name: {aliases:#?}"
         );
-        let snap = build_table_snapshot("app", &d, SqlDialect::Postgres, &effective())
-            .expect("build_table_snapshot");
+        let snap =
+            build_table_snapshot("app", &d, &POSTGRES, &effective()).expect("build_table_snapshot");
         let emitted: Vec<&str> = snap.indexes.iter().map(|i| i.name.as_str()).collect();
         for key in aliases.keys() {
             assert!(
@@ -8679,7 +8378,7 @@ mod derived_index_alias_tests {
     #[test]
     fn derived_ann_index_is_emitted_only_where_the_dialect_can_build_it() {
         let d = descriptor_with_derived_indexes(8);
-        let derived_over_payload = |dialect: SqlDialect| -> Vec<String> {
+        let derived_over_payload = |dialect: &DialectId| -> Vec<String> {
             let snap = build_table_snapshot("app", &d, dialect, &effective())
                 .expect("build_table_snapshot");
             let mut methods: Vec<String> = snap
@@ -8693,18 +8392,18 @@ mod derived_index_alias_tests {
 
         // PostgreSQL keeps both native methods (plus the unique field's btree).
         assert_eq!(
-            derived_over_payload(SqlDialect::Postgres),
+            derived_over_payload(&POSTGRES),
             vec!["btree", "gist", "ivfflat"],
         );
         // SQLite folds them to a plain index it can actually create, and keeps all
         // three.
         assert_eq!(
-            derived_over_payload(SqlDialect::Sqlite),
+            derived_over_payload(&SQLITE),
             vec!["btree", "btree", "btree"],
         );
         // MySQL keeps ONLY the unique field's index: the two it cannot build are
         // gone. If this ever reads as three entries again, the false green is back.
-        assert_eq!(derived_over_payload(SqlDialect::Mysql), vec!["btree"]);
+        assert_eq!(derived_over_payload(&MYSQL), vec!["btree"]);
     }
 
     /// Below the disagreement window there is nothing to alias, so no provenance is

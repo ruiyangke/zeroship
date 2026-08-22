@@ -72,6 +72,10 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         }
     }
 
+    fn snapshot_data_type(&self, c: &ColumnSnapshot) -> String {
+        mysql_canonical_type(&self.column_type(c, false))
+    }
+
     /// Stamp [`ColumnSnapshot::mysql_physical_type`] from the column's FINAL rendered
     /// type. A no-op off MySQL.
     ///

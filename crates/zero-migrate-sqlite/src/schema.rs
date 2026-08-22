@@ -68,9 +68,22 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         }
     }
 
+    fn snapshot_data_type(&self, c: &ColumnSnapshot) -> String {
+        let rendered = self.column_type(c, false);
+        rendered
+            .split_once(" COLLATE ")
+            .map_or(rendered.as_str(), |(base, _)| base)
+            .trim()
+            .to_ascii_lowercase()
+    }
+
     /// SQLite compares its declared type through `canonical_type`; it carries no
     /// separate vendor-only physical-type projection on the neutral snapshot.
-    fn finalize_column_snapshot(&self, _column: &mut ColumnSnapshot) {}
+    /// Consume the neutral definition after deriving `data_type`; otherwise its
+    /// generic token spelling would outrank SQLite-only facets such as NOCASE.
+    fn finalize_column_snapshot(&self, column: &mut ColumnSnapshot) {
+        column.type_def = None;
+    }
 
     fn project_derived_ann_index(
         &self,

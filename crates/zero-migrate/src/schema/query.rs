@@ -17,6 +17,7 @@ use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex};
 use crate::model::table_shape::ResolvedInject;
 use crate::render::renderer::{Capability, DialectSupports};
+use zero_migrate_ir::dialect::{DialectId, POSTGRES};
 use zero_migrate_policy::EffectivePolicy;
 
 /// Errors from query building.
@@ -77,13 +78,6 @@ pub struct BuiltQuery {
     pub params: Vec<String>,
 }
 
-// The SQL deploy-target enum is a pure-data wire descriptor and lives in the
-// leaf `zero-migrate-ir` contract (so `zero-migrate-guard`, which is below the
-// engine, can name it without depending on the engine). Re-exported here so the
-// dialect-specific spelling machinery below — and every `crate::schema::query::
-// SqlDialect` caller — keeps a stable path.
-pub use zero_migrate_ir::dialect::SqlDialect;
-
 /// The schema/DDL half of the backend CONTRACT, and the spelling primitives its
 /// three vendor implementations call.
 ///
@@ -118,7 +112,7 @@ pub fn build_encryption_sentinel_comments(
         app_id,
         collection,
         schema,
-        renderer(&SqlDialect::Postgres.id()),
+        renderer(&POSTGRES),
     )
 }
 
@@ -134,7 +128,7 @@ pub fn build_mask_sentinel_comments(
         app_id,
         collection,
         schema,
-        renderer(&SqlDialect::Postgres.id()),
+        renderer(&POSTGRES),
     )
 }
 
@@ -154,7 +148,9 @@ pub use crate::schema::backends::renderer;
 /// preserved for the selected backend to interpret with its own moved table. The
 /// only projected facet is semantic unbounded text, because MySQL cannot infer it
 /// from `data_type == "text"` without confusing a live bounded `VARCHAR`.
-fn column_snapshot_for_type_def(def: &serde_json::Value) -> crate::model::snapshot::ColumnSnapshot {
+pub(crate) fn column_snapshot_for_type_def(
+    def: &serde_json::Value,
+) -> crate::model::snapshot::ColumnSnapshot {
     let legacy_bound = def
         .get("max")
         .and_then(serde_json::Value::as_u64)
@@ -177,25 +173,15 @@ fn column_snapshot_for_type_def(def: &serde_json::Value) -> crate::model::snapsh
 #[cfg(test)]
 mod schema_renderer_tests {
     use super::*;
+    use zero_migrate_ir::dialect::{MYSQL, SQLITE};
 
     #[test]
     fn dispatch_returns_expected_schema_renderer() {
-        // The renderer answers with an open `DialectId`, so the round trip is
-        // asserted through `SqlDialect::id` — the one-way bridge — rather than by
-        // comparing variants. A `DialectId -> SqlDialect` direction would make this
-        // read more naturally and is exactly what must not exist.
-        assert_eq!(
-            renderer(&SqlDialect::Postgres.id()).dialect(),
-            SqlDialect::Postgres.id()
-        );
-        assert_eq!(
-            renderer(&SqlDialect::Sqlite.id()).dialect(),
-            SqlDialect::Sqlite.id()
-        );
-        assert_eq!(
-            renderer(&SqlDialect::Mysql.id()).dialect(),
-            SqlDialect::Mysql.id()
-        );
+        // The renderer answers with an open `DialectId`, so compare it directly
+        // with the canonical IDs. No reverse identity conversion is needed.
+        assert_eq!(renderer(&POSTGRES).dialect(), POSTGRES.clone());
+        assert_eq!(renderer(&SQLITE).dialect(), SQLITE.clone());
+        assert_eq!(renderer(&MYSQL).dialect(), MYSQL.clone());
     }
 
     #[test]
@@ -205,12 +191,12 @@ mod schema_renderer_tests {
         // float, contradicting the documented exact-decimal-text guarantee and
         // diverging from the `t.numeric()` SQLite override (also TEXT).
         let def = serde_json::json!({ "type": "literal", "literalValue": 2.5 });
-        let render = |dialect: SqlDialect, def: &serde_json::Value| {
-            renderer(&dialect.id()).column_type(&column_snapshot_for_type_def(def), false)
+        let render = |dialect: &DialectId, def: &serde_json::Value| {
+            renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
         };
-        assert_eq!(render(SqlDialect::Sqlite, &def), "TEXT");
+        assert_eq!(render(&SQLITE, &def), "TEXT");
         // MySQL keeps exact fixed-precision; PG keeps `numeric`.
-        assert_eq!(render(SqlDialect::Mysql, &def), "DECIMAL(65, 30)");
+        assert_eq!(render(&MYSQL, &def), "DECIMAL(65, 30)");
     }
 
     /// **The three spellings a `number` field with a `precision` facet renders into.**
@@ -242,35 +228,35 @@ mod schema_renderer_tests {
     /// token changed.
     #[test]
     fn a_number_field_carrying_precision_renders_as_a_decimal_on_every_dialect() {
-        let render = |dialect: SqlDialect, def: &serde_json::Value| {
-            renderer(&dialect.id()).column_type(&column_snapshot_for_type_def(def), false)
+        let render = |dialect: &DialectId, def: &serde_json::Value| {
+            renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
         };
         let decimal = serde_json::json!({ "type": "number", "precision": 20, "scale": 4 });
-        assert_eq!(render(SqlDialect::Postgres, &decimal), "numeric(20, 4)");
-        assert_eq!(render(SqlDialect::Sqlite, &decimal), "TEXT");
-        assert_eq!(render(SqlDialect::Mysql, &decimal), "DECIMAL(20, 4)");
+        assert_eq!(render(&POSTGRES, &decimal), "numeric(20, 4)");
+        assert_eq!(render(&SQLITE, &decimal), "TEXT");
+        assert_eq!(render(&MYSQL, &decimal), "DECIMAL(20, 4)");
 
         // `scale` may be absent; `precision` alone still means fixed-precision.
         let scaleless = serde_json::json!({ "type": "number", "precision": 20 });
-        assert_eq!(render(SqlDialect::Mysql, &scaleless), "DECIMAL(20, 0)");
+        assert_eq!(render(&MYSQL, &scaleless), "DECIMAL(20, 0)");
 
         // The float half, unchanged. A `number` with no precision is `t.number()`, an
         // IEEE-754 double, and narrowing it to NUMERIC would break the decode path
         // `def_to_pg_type`'s own doc-comment warns about.
         let float = serde_json::json!({ "type": "number" });
-        assert_eq!(render(SqlDialect::Postgres, &float), "DOUBLE PRECISION");
-        assert_eq!(render(SqlDialect::Sqlite, &float), "REAL");
-        assert_eq!(render(SqlDialect::Mysql, &float), "DOUBLE");
+        assert_eq!(render(&POSTGRES, &float), "DOUBLE PRECISION");
+        assert_eq!(render(&SQLITE, &float), "REAL");
+        assert_eq!(render(&MYSQL, &float), "DOUBLE");
 
         // A zero precision is not a type any dialect accepts, so it falls back to the
         // float spelling rather than emitting DDL no server would take.
         let malformed = serde_json::json!({ "type": "number", "precision": 0, "scale": 4 });
-        assert_eq!(render(SqlDialect::Sqlite, &malformed), "REAL");
+        assert_eq!(render(&SQLITE, &malformed), "REAL");
     }
 
     #[test]
     fn sqlite_numeric_and_decimal_canonicalise_to_text_affinity() {
-        let backend = renderer(&SqlDialect::Sqlite.id());
+        let backend = renderer(&SQLITE);
         // The model's logical `numeric`/`decimal` type and a live SQLite column
         // (now declared TEXT) must canonicalise to the SAME affinity token, so a
         // numeric column no longer shows phantom snapshot<->introspection drift.
@@ -600,7 +586,7 @@ fn validate_schema(name: &str) -> Result<(), QueryError> {
  * Nothing here was mis-emitted. Every call site named MySQL in the callee's name,
  * so unlike the `quote_ident` case there was no unnamed vendor, and the
  * one-dialect-literal test passed because the reach was by function name rather
- * than a `SqlDialect::` literal. What it blocked was the crate split: the future
+ * than a closed-enum literal. What it blocked was the crate split: the future
  * `zero-migrate-mysql` would have needed core AT RUNTIME to spell an identifier.
  *
  * The bytes now live in `render::backends::mysql`'s own `quote_ident`, which core
@@ -670,7 +656,7 @@ pub fn build_create_table_with_fks_for_dialect(
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     effective: &EffectivePolicy,
 ) -> Result<String, QueryError> {
     // The stable entry point keeps the historical data-plane namespacing. The
@@ -699,7 +685,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     unqualified: bool,
     effective: &EffectivePolicy,
 ) -> Result<String, QueryError> {
@@ -735,7 +721,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     unqualified: bool,
     effective: &EffectivePolicy,
 ) -> Result<Vec<String>, QueryError> {
@@ -746,7 +732,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // that needs a vendor spelling receives THIS value; nothing under here asks
     // the registry again. `dialect` stays in scope for the remaining neutral
     // normalization keys, not for vendor spelling dispatch.
-    let backend = renderer(&dialect.id());
+    let backend = renderer(dialect);
     let inject = ResolvedInject::for_table(effective, app_id, collection).map_err(|error| {
         QueryError::InvalidFilter(format!(
             "active table injection for {app_id}.{collection} is not renderable: {error}"
@@ -971,9 +957,9 @@ fn build_injected_columns(
     // is a core, dialect-PARAMETERIZED helper (`render_ir_default_for_type`) that
     // still names the closed enum, so the enum
     // is threaded from the caller that already has one instead of being recovered
-    // from the renderer. No `DialectId -> SqlDialect` conversion exists, and this
+    // from the renderer. No open-id-to-closed-enum conversion exists, and this
     // is why none is needed.
-    dialect: SqlDialect,
+    dialect: &DialectId,
     backend: &'static dyn SchemaRenderer,
 ) -> Result<Vec<String>, QueryError> {
     let primary_key = inject.primary_key();
@@ -1053,7 +1039,7 @@ fn render_injected_default(
     ty: &ColType,
     // Threaded for `render_ir_default_for_type`, which is core and still
     // dialect-parameterized on the closed enum. See `build_injected_columns`.
-    dialect: SqlDialect,
+    dialect: &DialectId,
     backend: &'static dyn SchemaRenderer,
 ) -> Result<String, crate::render::lower::IrLowerError> {
     if matches!(
@@ -1177,7 +1163,7 @@ pub fn build_add_foreign_key(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&SqlDialect::Postgres.id());
+    let backend = renderer(&POSTGRES);
 
     let target = def
         .get("refTarget")
@@ -1189,15 +1175,7 @@ pub fn build_add_foreign_key(
         backend.quote_ident(app_id),
         backend.quote_ident(collection)
     );
-    let fk_clause = build_fk_clause(
-        app_id,
-        collection,
-        field,
-        def,
-        target,
-        SqlDialect::Postgres,
-        backend,
-    )?;
+    let fk_clause = build_fk_clause(app_id, collection, field, def, target, &POSTGRES, backend)?;
     Ok(format!("ALTER TABLE {table} ADD {fk_clause}"))
 }
 
@@ -1210,7 +1188,7 @@ pub fn build_drop_foreign_key(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&SqlDialect::Postgres.id());
+    let backend = renderer(&POSTGRES);
     let table = format!(
         "{}.{}",
         backend.quote_ident(app_id),
@@ -1248,7 +1226,7 @@ fn build_fk_clause(
     def: &serde_json::Value,
     target: &str,
     // Threaded, not derived. See `build_injected_columns`.
-    dialect: SqlDialect,
+    dialect: &DialectId,
     backend: &'static dyn SchemaRenderer,
 ) -> Result<String, QueryError> {
     validate_collection(target)?;
@@ -1328,9 +1306,9 @@ pub fn normalize_fk_action(s: Option<&str>) -> &'static str {
 /// `NO ACTION` are the same immediate-reject default. Keep them distinct on
 /// Postgres/SQLite, where the distinction is meaningful to their catalog/render
 /// forms.
-pub fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> &'static str {
+pub fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: &DialectId) -> &'static str {
     let action = normalize_fk_action_inner(s);
-    renderer(&dialect.id()).canonical_fk_action(action)
+    renderer(dialect).canonical_fk_action(action)
 }
 
 /// Build ALTER TABLE ADD COLUMN IF NOT EXISTS for a single field.
@@ -1342,7 +1320,7 @@ pub fn build_add_column(
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&SqlDialect::Postgres.id());
+    let backend = renderer(&POSTGRES);
 
     let table = format!(
         "{}.{}",
@@ -1497,7 +1475,7 @@ pub fn build_create_indexes(
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&SqlDialect::Postgres.id());
+    let backend = renderer(&POSTGRES);
 
     let mut out = Vec::new();
 
@@ -1732,7 +1710,7 @@ pub fn build_named_indexes(
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&SqlDialect::Postgres.id());
+    let backend = renderer(&POSTGRES);
 
     let mut out = Vec::new();
     let Some(arr) = indexes.as_array() else {
@@ -1916,7 +1894,7 @@ pub fn build_mask_sentinel_comment_for_field(
     field: &str,
     def: &serde_json::Value,
 ) -> Option<String> {
-    let backend = renderer(&SqlDialect::Postgres.id());
+    let backend = renderer(&POSTGRES);
     let sibling = mask_sibling_column_for_field(field, def)?;
     let sentinel = mask_sentinel_for_field(def)?;
     let escaped = sentinel.replace('\'', "''");
@@ -2071,8 +2049,15 @@ fn field_to_column_for_dialect(
 /// rejects those types again. The returned spelling is DDL (`vector(N)`,
 /// `DOUBLE PRECISION`, `TIMESTAMPTZ`, …); callers that need the
 /// `information_schema.data_type` spelling translate it themselves.
-pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: SqlDialect) -> String {
-    renderer(&dialect.id()).column_type(&column_snapshot_for_type_def(def), false)
+pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: &DialectId) -> String {
+    def_to_column_type_for_backend(def, renderer(dialect))
+}
+
+pub(crate) fn def_to_column_type_for_backend(
+    def: &serde_json::Value,
+    backend: &dyn SchemaRenderer,
+) -> String {
+    backend.column_type(&column_snapshot_for_type_def(def), false)
 }
 
 /// Emit per-variant CHECK constraints for a flat-expanded
@@ -2221,7 +2206,7 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
 fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
     // CALLER-FIXED TARGET: the sole caller is `build_add_column`, whose whole
     // The sole caller is PostgreSQL-only; it supplies that registered renderer.
-    def_to_constraints_for_dialect(field, def, renderer(&SqlDialect::Postgres.id()))
+    def_to_constraints_for_dialect(field, def, renderer(&POSTGRES))
 }
 
 fn def_to_constraints_for_dialect(
@@ -2406,6 +2391,7 @@ fn def_to_constraints_for_dialect(
 mod tests {
     use super::*;
     use serde_json::json;
+    use zero_migrate_ir::dialect::{MYSQL, SQLITE};
 
     fn confined_policy() -> EffectivePolicy {
         crate::test_fixtures::confined_charter()
@@ -2480,7 +2466,7 @@ columns = [
             collection,
             schema,
             fk_emit,
-            SqlDialect::Postgres,
+            &POSTGRES,
             &confined_policy(),
         )
     }
@@ -2490,7 +2476,7 @@ columns = [
         collection: &str,
         schema: &serde_json::Value,
         fk_emit: &FkEmission<'_>,
-        dialect: SqlDialect,
+        dialect: &DialectId,
     ) -> Result<String, QueryError> {
         super::build_create_table_with_fks_for_dialect(
             app_id,
@@ -2507,7 +2493,7 @@ columns = [
         collection: &str,
         schema: &serde_json::Value,
         fk_emit: &FkEmission<'_>,
-        dialect: SqlDialect,
+        dialect: &DialectId,
         unqualified: bool,
     ) -> Result<String, QueryError> {
         super::build_create_table_with_fks_for_dialect_scoped(
@@ -2528,16 +2514,11 @@ columns = [
     fn field_to_column_for_dialect(
         field: &str,
         def: &serde_json::Value,
-        dialect: SqlDialect,
+        dialect: &DialectId,
     ) -> Result<String, QueryError> {
         // A test names the dialect it is testing; the wrapper resolves it so the
         // cases below stay written in the dialect they mean.
-        super::field_to_column_for_dialect(
-            field,
-            def,
-            renderer(&dialect.id()),
-            &confined_inject("posts"),
-        )
+        super::field_to_column_for_dialect(field, def, renderer(dialect), &confined_inject("posts"))
     }
 
     // -----------------------------------------------------------------------
@@ -2958,7 +2939,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
             &no_inject_policy(),
         )
         .expect_err("ID-prefix reservations are independent of table injection");
@@ -3025,15 +3006,12 @@ columns = [
 
         for (dialect, expected) in [
             (
-                SqlDialect::Postgres,
+                &POSTGRES,
                 r#"CONSTRAINT "fk_custom" FOREIGN KEY ("accountId")"#,
             ),
+            (&MYSQL, "CONSTRAINT `fk_custom` FOREIGN KEY (`accountId`)"),
             (
-                SqlDialect::Mysql,
-                "CONSTRAINT `fk_custom` FOREIGN KEY (`accountId`)",
-            ),
-            (
-                SqlDialect::Sqlite,
+                &SQLITE,
                 r#"CONSTRAINT "fk_custom" FOREIGN KEY ("accountId")"#,
             ),
         ] {
@@ -3097,7 +3075,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Mysql,
+            &MYSQL,
         )
         .unwrap();
 
@@ -3154,7 +3132,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
         )
         .unwrap();
         assert!(sql.contains("FOREIGN KEY (\"authorId\")"), "{sql}");
@@ -3252,8 +3230,8 @@ columns = [
     #[test]
     fn fk_ref_field_emits_text_column_type_pg() {
         let def = json!({"type": "ref", "refTarget": "users"});
-        let pg_type = renderer(&SqlDialect::Postgres.id())
-            .column_type(&super::column_snapshot_for_type_def(&def), false);
+        let pg_type =
+            renderer(&POSTGRES).column_type(&super::column_snapshot_for_type_def(&def), false);
         assert_eq!(
             pg_type, "TEXT",
             "ref column type must cascade to TEXT to match the id TEXT PRIMARY KEY"
@@ -3287,7 +3265,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Deferred(&existing),
-            SqlDialect::Sqlite,
+            &SQLITE,
         )
         .expect("build sqlite DDL");
         assert!(
@@ -3353,7 +3331,7 @@ columns = [
             "users",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
         )
         .expect("build sqlite DDL");
         assert!(sql.contains("\"flag\" INTEGER NOT NULL"), "{sql}");
@@ -3636,7 +3614,7 @@ columns = [
             "apps",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Mysql,
+            &MYSQL,
         )
         .unwrap();
         assert!(
@@ -3697,7 +3675,7 @@ columns = [
             "literal_modes",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Mysql,
+            &MYSQL,
         )
         .expect("direct MySQL builder emits DDL");
 
@@ -4153,7 +4131,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect("build ok");
         for name in &names {
@@ -4193,7 +4171,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
         )
         .expect("build ok");
         for name in &names {
@@ -4219,11 +4197,8 @@ columns = [
     fn create_table_emits_id_bounded_string_primary_key() {
         let schema = serde_json::json!({});
         for (dialect, expected_id) in [
-            (
-                SqlDialect::Postgres,
-                "id character varying(255) PRIMARY KEY",
-            ),
-            (SqlDialect::Sqlite, "id TEXT PRIMARY KEY"),
+            (&POSTGRES, "id character varying(255) PRIMARY KEY"),
+            (&SQLITE, "id TEXT PRIMARY KEY"),
         ] {
             let sql = build_create_table_with_fks_for_dialect(
                 "app1",
@@ -4253,7 +4228,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
             &explicit_default_policy(),
         )
         .expect("build ok");
@@ -4276,7 +4251,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
             &explicit_default_policy(),
         )
         .expect("build ok");
@@ -4302,7 +4277,7 @@ columns = [
     /// A policy-authored integer default is identical on both backends.
     #[test]
     fn create_table_emits_version_default_one() {
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for dialect in [&POSTGRES, &SQLITE] {
             let sql = super::build_create_table_with_fks_for_dialect(
                 "app1",
                 "posts",
@@ -4330,7 +4305,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect("build ok");
         assert!(
@@ -4342,7 +4317,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
         )
         .expect("build ok");
         assert!(
@@ -4357,7 +4332,7 @@ columns = [
     #[test]
     fn create_table_emits_confined_policy_indexes() {
         let index_columns = confined_injected_index_columns("posts");
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for dialect in [&POSTGRES, &SQLITE] {
             let sql = build_create_table_with_fks_for_dialect(
                 "app1",
                 "posts",
@@ -4380,7 +4355,7 @@ columns = [
                 );
                 let rendered_columns = refs
                     .iter()
-                    .map(|column| renderer(&dialect.id()).quote_ident(column))
+                    .map(|column| renderer(dialect).quote_ident(column))
                     .collect::<Vec<_>>()
                     .join(", ");
                 assert!(sql.contains(&format!("({rendered_columns})")), "{sql}");
@@ -4398,7 +4373,7 @@ columns = [
             "posts",
             &serde_json::json!({}),
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect("build ok");
         let id_idx = index_name("posts", &["id"], false);
@@ -4417,7 +4392,7 @@ columns = [
             "posts",
             &serde_json::json!({}),
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect("build ok");
         let version_idx = index_name("posts", &["version"], false);
@@ -4439,7 +4414,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect("build ok");
         let last_system = sql.find("deleted_at").expect("deleted_at present");
@@ -4463,7 +4438,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect("build ok");
         assert!(
@@ -4491,7 +4466,7 @@ columns = [
             "posts",
             &serde_json::json!({}),
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
         )
         .expect("build ok");
         let idx = index_name("posts", &["deleted_at"], false);
@@ -4513,7 +4488,7 @@ columns = [
             "posts",
             &serde_json::json!({}),
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect("build ok");
         let idx = index_name("posts", &["deleted_at"], false);
@@ -4578,7 +4553,7 @@ columns = [
                 "posts",
                 &schema,
                 &FkEmission::Inline,
-                SqlDialect::Postgres,
+                &POSTGRES,
             )
             .expect_err("validator must reject system-field declaration");
             assert!(
@@ -4603,7 +4578,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect("pg ok");
         let sq = build_create_table_with_fks_for_dialect(
@@ -4611,7 +4586,7 @@ columns = [
             "posts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
         )
         .expect("sqlite ok");
 
@@ -4656,7 +4631,7 @@ columns = [
             "posts",
             &serde_json::json!({ "updated_at": { "type": "string" } }),
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
             &effective,
         )
         .expect("author-owned updated_at renders under no-inject policy");
@@ -4688,17 +4663,17 @@ columns = [
 
         for (dialect, keyword, mixed_case) in [
             (
-                SqlDialect::Postgres,
+                &POSTGRES,
                 r#""order" character varying(255) NOT NULL"#,
                 r#""CamelCase" character varying(255) NULL"#,
             ),
             (
-                SqlDialect::Sqlite,
+                &SQLITE,
                 r#""order" TEXT NOT NULL"#,
                 r#""CamelCase" TEXT NULL"#,
             ),
             (
-                SqlDialect::Mysql,
+                &MYSQL,
                 "`order` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NOT NULL",
                 "`CamelCase` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NULL",
             ),
@@ -4974,7 +4949,7 @@ columns = [
                 "wraps": "string"
             }
         });
-        let error = field_to_column_for_dialect("secret", &hostile, SqlDialect::Mysql)
+        let error = field_to_column_for_dialect("secret", &hostile, &MYSQL)
             .expect_err("hostile sentinel atom must be refused");
         assert!(
             error.to_string().contains("encrypted.keyId"),
@@ -4990,7 +4965,7 @@ columns = [
             }
         });
         assert!(
-            field_to_column_for_dialect("secret", &valid, SqlDialect::Mysql).is_ok(),
+            field_to_column_for_dialect("secret", &valid, &MYSQL).is_ok(),
             "documented safe key-id punctuation remains valid"
         );
     }
@@ -5061,7 +5036,7 @@ columns = [
             "posts",
             &json!({ "title": { "type": "string", "required": true } }),
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
             true,
         )
         .expect("build unqualified sqlite ddl");
@@ -5094,7 +5069,7 @@ columns = [
             "posts",
             &json!({ "title": { "type": "string", "required": true } }),
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
         )
         .expect("build default sqlite ddl");
         let scoped_sql = build_create_table_with_fks_for_dialect_scoped(
@@ -5102,7 +5077,7 @@ columns = [
             "posts",
             &json!({ "title": { "type": "string", "required": true } }),
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
             false,
         )
         .expect("build attach-alias sqlite ddl");
@@ -5134,7 +5109,7 @@ columns = [
             "accounts",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect("pg via stable entry");
         for unqualified in [false, true] {
@@ -5143,7 +5118,7 @@ columns = [
                 "accounts",
                 &schema,
                 &FkEmission::Inline,
-                SqlDialect::Postgres,
+                &POSTGRES,
                 unqualified,
             )
             .expect("pg via scoped entry");
@@ -5167,7 +5142,7 @@ columns = [
             "accounts",
             &goodies_schema(),
             &FkEmission::Inline,
-            SqlDialect::Sqlite,
+            &SQLITE,
             true,
         )
         .expect("build goodies sqlite ddl");
@@ -5204,7 +5179,8 @@ columns = [
 
 #[cfg(test)]
 mod hostile_identifier_quoting {
-    use super::{renderer, SqlDialect};
+    use super::renderer;
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES};
 
     /// Hostile-input coverage for the two identifier spellings this kernel can
     /// reach. It USED to say the schema kernel carries its own quoting primitives
@@ -5233,21 +5209,15 @@ mod hostile_identifier_quoting {
     /// inert inside backticks and a backtick is inert inside double quotes.
     #[test]
     fn a_quote_bearing_identifier_is_doubled_not_left_bare() {
-        assert_eq!(
-            renderer(&SqlDialect::Postgres.id()).quote_ident(r#"a"b"#),
-            r#""a""b""#
-        );
-        assert_eq!(
-            renderer(&SqlDialect::Mysql.id()).quote_ident("a`b"),
-            "`a``b`"
-        );
+        assert_eq!(renderer(&POSTGRES).quote_ident(r#"a"b"#), r#""a""b""#);
+        assert_eq!(renderer(&MYSQL).quote_ident("a`b"), "`a``b`");
     }
 
     #[test]
     fn an_injecting_identifier_stays_inside_its_quoting() {
         // The payload's own quote is doubled, so the `);` and everything after it
         // remain part of the identifier rather than becoming syntax.
-        let pg = renderer(&SqlDialect::Postgres.id()).quote_ident(r#"x"); DROP TABLE victim; --"#);
+        let pg = renderer(&POSTGRES).quote_ident(r#"x"); DROP TABLE victim; --"#);
         assert_eq!(pg, r#""x""); DROP TABLE victim; --""#);
         assert_eq!(
             pg.matches('"').count() % 2,
@@ -5255,7 +5225,7 @@ mod hostile_identifier_quoting {
             "an odd number of quotes means one of them closes the identifier: {pg}"
         );
 
-        let my = renderer(&SqlDialect::Mysql.id()).quote_ident("x`); DROP TABLE victim; -- ");
+        let my = renderer(&MYSQL).quote_ident("x`); DROP TABLE victim; -- ");
         assert_eq!(my, "`x``); DROP TABLE victim; -- `");
         assert_eq!(
             my.matches('`').count() % 2,
@@ -5268,13 +5238,7 @@ mod hostile_identifier_quoting {
     fn the_other_dialects_quote_character_needs_no_escaping() {
         // Each primitive must leave the OTHER dialect's quote alone: doubling it
         // would corrupt the name for no safety gain.
-        assert_eq!(
-            renderer(&SqlDialect::Postgres.id()).quote_ident("a`b"),
-            r#""a`b""#
-        );
-        assert_eq!(
-            renderer(&SqlDialect::Mysql.id()).quote_ident(r#"a"b"#),
-            r#"`a"b`"#
-        );
+        assert_eq!(renderer(&POSTGRES).quote_ident("a`b"), r#""a`b""#);
+        assert_eq!(renderer(&MYSQL).quote_ident(r#"a"b"#), r#"`a"b`"#);
     }
 }

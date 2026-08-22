@@ -3046,6 +3046,13 @@ impl IrAuthor {
         )?;
         self.apply_uuid_column_metadata(column, &mut snapshot)?;
         self.apply_value_format_column_metadata(column, &mut snapshot)?;
+        // This transient validation carrier retains authored integer width even
+        // on engines whose physical catalog spelling collapses every width. The
+        // backend policy decides whether the neutral token matters.
+        if matches!(column.ty, ColType::SmallInt | ColType::Int | ColType::BigInt) {
+            let (token, _) = col_type_to_token(&column.ty);
+            snapshot.type_def = Some(serde_json::json!({ "type": token }));
+        }
         Ok(snapshot)
     }
 
@@ -7133,6 +7140,7 @@ impl IrAuthor {
                 col.data_type = base.data_type;
                 col.ddl_type_override = base.ddl_type_override;
                 col.unbounded_text = base.unbounded_text;
+                col.type_def = base.type_def;
                 col.authored_type = base.authored_type;
                 if self.backend.supports(Capability::MaterializedDomainType) {
                     col.data_type = pg_type_data_type(&def.schema, name);
@@ -9763,6 +9771,10 @@ fn apply_author_type_override_to_column(
     }
     col.data_type = type_override.data_type;
     col.ddl_type_override = type_override.ddl_type;
+    // This policy answer exists precisely for types the neutral descriptor token
+    // cannot express. Once the selected backend supplies the replacement, the
+    // lossy token must not outrank it again during emission.
+    col.type_def = None;
     if type_override.quote_literal_default_as_text {
         col.default = col
             .default

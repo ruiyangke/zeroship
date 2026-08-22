@@ -27,7 +27,7 @@ use crate::support;
 use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::{fold_ops, PlanStep, RenameStep, SqlDialect};
+use zero_migrate::{fold_ops, PlanStep, RenameStep};
 
 const PROJECT: &str = "public";
 const APP: &str = "app_domain";
@@ -70,7 +70,7 @@ fn amounts_ir() -> MigrationIr {
     .expect("amounts IR deserializes")
 }
 
-fn lowered_sql(dialect: SqlDialect) -> String {
+fn lowered_sql(dialect: &zero_migrate::DialectId) -> String {
     IrAuthor::new(PROJECT, APP, dialect, &support::no_inject(PROJECT))
         .lower_steps(&amounts_ir(), &LiveSchema::default())
         .unwrap_or_else(|error| panic!("{dialect:?} lowers the domain table: {error}"))
@@ -88,7 +88,7 @@ fn lowered_sql(dialect: SqlDialect) -> String {
 /// put one there.
 #[test]
 fn a_native_domain_column_keeps_its_type_reference_and_gains_no_check() {
-    let sql = lowered_sql(SqlDialect::Postgres);
+    let sql = lowered_sql(&zero_migrate::POSTGRES);
     assert!(
         sql.contains(r#"CREATE DOMAIN "public"."positive_number" AS integer CHECK ((VALUE > 0))"#),
         "the domain is a native type over `integer`:\n{sql}"
@@ -119,7 +119,7 @@ fn a_native_domain_column_keeps_its_type_reference_and_gains_no_check() {
 /// the use-site column. That is the shape the runtime descriptor was contradicting.
 #[test]
 fn an_inlined_domain_column_stores_the_base_type_with_exactly_one_check() {
-    let sqlite = lowered_sql(SqlDialect::Sqlite);
+    let sqlite = lowered_sql(&zero_migrate::SQLITE);
     assert!(
         sqlite.contains(r#""amount" INTEGER NOT NULL CHECK (("amount" > 0))"#),
         "SQLite stores the base type and inlines the predicate once:\n{sqlite}"
@@ -135,7 +135,7 @@ fn an_inlined_domain_column_stores_the_base_type_with_exactly_one_check() {
         "the plain controls are untouched:\n{sqlite}"
     );
 
-    let mysql = lowered_sql(SqlDialect::Mysql);
+    let mysql = lowered_sql(&zero_migrate::MYSQL);
     assert!(
         mysql.contains("`amount` INT NOT NULL CHECK ((`amount` > 0))"),
         "MySQL does the same with its own spelling:\n{mysql}"
@@ -153,11 +153,12 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
 
     for (dialect, expected_data_type) in [
         // The inlining dialects render the BASE type into the column.
-        (SqlDialect::Sqlite, "integer"),
-        (SqlDialect::Mysql, "integer"),
+        (&zero_migrate::SQLITE, "integer"),
+        // MySQL's own catalog canonicalizes the emitted INT spelling to `int`.
+        (&zero_migrate::MYSQL, "int"),
         // PostgreSQL keeps the NAMED type; the descriptor's job is to say what that
         // name is a domain OVER.
-        (SqlDialect::Postgres, "public.positive_number"),
+        (&zero_migrate::POSTGRES, "public.positive_number"),
     ] {
         let snapshot = fold_ops(&ops, dialect, PROJECT, &effective).expect("the history folds");
         let column = snapshot.tables["amounts"]
@@ -206,10 +207,10 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
     let ops = amounts_ir().ops;
     let effective = support::no_inject(PROJECT);
     let snapshot =
-        fold_ops(&ops, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
+        fold_ops(&ops, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
-    live.sqlite_schemas = single_fold::fold(&ops, SqlDialect::Sqlite, PROJECT, &effective)
+    live.sqlite_schemas = single_fold::fold(&ops, &zero_migrate::SQLITE, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the field-def replay folds");
 
@@ -234,7 +235,7 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
         checksum: None,
     };
 
-    let steps = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &effective)
+    let steps = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective)
         .lower_steps(&rename, &live)
         .expect("the rename lowers to a rebuild");
     let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {

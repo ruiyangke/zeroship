@@ -1,11 +1,11 @@
-//! A backend crate that does NOT own `SqlDialect` can still say who it is.
+//! A backend crate that does not own a closed dialect enum can still say who it is.
 //!
 //! # What this test is for
 //!
 //! `DmlRenderer::dialect` and `SchemaRenderer::dialect` used to return
-//! [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect) — a CLOSED enum owned by
-//! `zero-migrate-ir`. A vendor crate cannot construct a variant of a closed enum
-//! it does not own, so the only body that type-checked in a fourth backend was
+//! a closed enum owned by `zero-migrate-ir`. A vendor crate cannot construct a
+//! variant of a closed enum it does not own, so the only body that type-checked
+//! in a fourth backend was
 //! `todo!()`: the crate compiled and then panicked the first time anything asked
 //! it who it was. That is not a registry problem — a stub fourth backend already
 //! registers and is REACHED through the real registry — it is a signature
@@ -15,8 +15,8 @@
 //! Both methods return [`DialectId`] now. This file is the proof: `DuckDb` below
 //! is a complete outsider. It is declared in a test binary, while the contract
 //! crate owns no shipping-descriptor list at all, and the whole file contains no
-//! mention of `SqlDialect` — the assertion at the bottom of the module enforces
-//! that by reading this source file back.
+//! mention of that removed closed enum — the assertion at the bottom of the
+//! module enforces that by reading this source file back.
 //!
 //! The spelling bodies are deliberately thin. The claim under test is IDENTITY,
 //! not fidelity: a fourth backend's `dialect()` has a real body, and everything
@@ -54,7 +54,7 @@ use zero_migrate_ir::validate::{
 };
 
 /// The outsider's own identity, declared at item scope in a crate that owns
-/// neither `SqlDialect` nor the shipping registry. `DialectId::new` is `const`,
+/// neither the closed dialect enum nor the shipping registry. `DialectId::new` is `const`,
 /// which is what makes this line possible at all.
 const DUCKDB: DialectId = DialectId::new("duckdb");
 
@@ -588,6 +588,10 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         }
     }
 
+    fn snapshot_data_type(&self, column: &ColumnSnapshot) -> String {
+        column.data_type.clone()
+    }
+
     fn finalize_column_snapshot(&self, _column: &mut ColumnSnapshot) {}
 
     fn project_derived_ann_index(
@@ -944,7 +948,7 @@ fn a_fourth_backend_validates_expressions_under_its_own_id() {
 
 /// The stub is only a proof if it never touches the closed enum.
 ///
-/// A test that demonstrated a fourth backend by NAMING `SqlDialect` somewhere
+/// A test that demonstrated a fourth backend by naming the removed closed enum somewhere
 /// would be demonstrating the opposite thing. This reads its own source back and
 /// refuses the mention, so the proof cannot rot into one by a later edit.
 ///
