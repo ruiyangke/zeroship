@@ -2,7 +2,10 @@ pub mod backend;
 pub mod baseline;
 pub mod drift;
 pub mod executor;
-pub mod journal;
+// The journal's dialect-neutral vocabulary moved down to the backend contract,
+// where the three per-vendor journal writers can see it. Re-exported so every
+// `crate::apply::journal::…` reference resolves unchanged.
+pub use zero_migrate_backend::journal;
 pub mod plan_precondition;
 pub mod precondition;
 pub mod role;

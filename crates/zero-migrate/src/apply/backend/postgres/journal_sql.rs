@@ -41,12 +41,6 @@ use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
 use zero_migrate_ir::dialect::DialectId;
 
-impl From<crate::driver::DbError> for JournalError {
-    fn from(error: crate::driver::DbError) -> Self {
-        Self::Db(error.into())
-    }
-}
-
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in
 /// double-quotes, so a schema name is never interpolated as raw SQL. Routes
 /// through the explicit backend seam

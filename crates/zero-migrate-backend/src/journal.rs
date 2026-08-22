@@ -47,7 +47,7 @@
 //! project namespace, so a creator migration confined to its own namespace
 //! cannot touch its own history. Each backend's bootstrap is idempotent.
 
-use crate::apply::executor::BackendError;
+use crate::executor::BackendError;
 
 /// A journal phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -411,9 +411,19 @@ pub enum JournalError {
     BadEventKind(String),
     /// An engine-supplied identifier (the meta schema or a derived trigger name)
     /// was not quotable (empty or NUL-bearing) at a render seam — fail-closed
-    /// rather than interpolate it. Maps [`crate::render::dml::IdentQuoteError`].
+    /// rather than interpolate it. Maps [`crate::dml::IdentQuoteError`].
     #[error("journal render: {0}")]
-    IdentQuote(#[from] crate::render::dml::IdentQuoteError),
+    IdentQuote(#[from] crate::dml::IdentQuoteError),
+}
+
+// This conversion used to sit in the PostgreSQL `journal_sql` module, which was
+// the only place that needed it. Both types are now foreign to that module, so
+// the impl is an orphan there; it belongs beside the error it constructs. Every
+// backend's journal reads through the same `DbError` seam, so one home is right.
+impl From<crate::driver::DbError> for JournalError {
+    fn from(error: crate::driver::DbError) -> Self {
+        Self::Db(error.into())
+    }
 }
 
 /// A net-rolled-back version: one whose **latest** event (on the native

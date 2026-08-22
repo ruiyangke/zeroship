@@ -88,9 +88,20 @@ pub mod dml;
 // over it. The engine re-exports it at `zero_migrate::driver`.
 pub mod driver;
 pub mod error;
+// The apply/rollback VOCABULARY (not an executor): `LockMode`, `ApplyOutcome`,
+// `BackendError`, `ApplyError`, `PreconditionVerdict` and the `Rollback*` set. The
+// generic orchestration stays in the engine; these are the types every
+// `MigrationBackend` signature names. The engine re-exports them at
+// `zero_migrate::apply::executor`.
+pub mod executor;
 pub mod existence_probe;
 pub mod fold;
 pub mod guard;
+// The migration journal's dialect-neutral vocabulary: the wire enums whose exact
+// literals are the CONTRACT between the three per-vendor journal writers, the row
+// shapes they read back, and the shared `JournalError`. It emits no SQL. The
+// engine re-exports it at `zero_migrate::apply::journal`.
+pub mod journal;
 pub mod mask_codec;
 pub mod mask_meta;
 pub mod registry;
