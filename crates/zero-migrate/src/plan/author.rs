@@ -2,7 +2,7 @@
 //!
 //! A migration's `up`/`down` SQL is produced by a pluggable **author**, then
 //! handed to the engine for the SAME `plan` (lint) → `gate` (approval) →
-//! [`executor::apply`](crate::apply::executor::apply) (guard + least-priv role)
+//! [`executor::apply`](crate::engine::MigrationEngine::apply) (guard + least-priv role)
 //! treatment regardless of where it came from. There are two authors:
 //!
 //! - [`DeterministicAuthor`] — a BOUNDED set of trivial **additive** ops

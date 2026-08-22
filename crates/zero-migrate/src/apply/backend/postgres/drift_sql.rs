@@ -58,7 +58,7 @@ use zero_migrate_ir::dialect::DialectId;
 /// rollback↔re-apply cycles (a re-applied migration's checksum is its newest
 /// incarnation, not a stale earlier one).
 ///
-/// This is the canonical comparison; [`apply`](crate::apply()) calls it as its
+/// This is the canonical comparison; [`apply`](crate::engine::MigrationEngine::apply) calls it as its
 /// abort-on-drift pre-check (it aborts if [`checksum_drift`](ChecksumDriftReport::checksum_drift)
 /// is non-empty), so the report and the apply gate cannot diverge.
 ///

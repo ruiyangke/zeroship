@@ -30,7 +30,7 @@
 //! migration in the supplied set is an **orphan** ([`OrphanJournal`]) — the
 //! bundle is missing a migration the database already has. This is the exact
 //! comparison the executor's apply flow does as its abort-on-drift pre-check;
-//! [`apply`](crate::apply()) calls this function and aborts
+//! [`apply`](crate::engine::MigrationEngine::apply) calls this function and aborts
 //! if it returns any [`ChecksumDrift`], so the report and the gate share one
 //! implementation.
 //!

@@ -987,3 +987,31 @@ fn drain_row_iter(mut iter: postgres::RowIter<'_>) -> Result<(Vec<Row>, u64), Db
     let affected = iter.rows_affected().unwrap_or(0);
     Ok((out, affected))
 }
+
+/// Apply a batch through the PostgreSQL backend over a `SqlSession`.
+///
+/// The executor's `apply` is generic over `MigrationBackend` and no longer builds
+/// a vendor for its caller — deciding that a session is a PostgreSQL session is
+/// the CALLER's knowledge, and in a `pg_*` suite that caller is this harness.
+/// Before, `executor::apply` constructed the `PostgresBackend` itself, which is
+/// exactly the vendor choice that had no business living in neutral orchestration.
+///
+/// The call sites read identically to the old free function on purpose: the PG
+/// suites import this as `apply`, so the ~70 live scenarios exercise the same
+/// path with the same arguments and remain a like-for-like regression bar.
+pub async fn apply_pg<D: zero_migrate::driver::SqlSession>(
+    conn: &D,
+    cfg: &zero_migrate::ExecutorConfig,
+    migrations: &[zero_migrate::Migration],
+    approval: zero_migrate::Approval,
+    applied_by: &str,
+) -> Result<zero_migrate::ApplyOutcome, zero_migrate::ApplyError> {
+    zero_migrate::apply(
+        &zero_migrate::PostgresBackend::new_generic(conn),
+        cfg,
+        migrations,
+        approval,
+        applied_by,
+    )
+    .await
+}

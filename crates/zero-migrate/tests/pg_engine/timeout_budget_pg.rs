@@ -28,10 +28,9 @@ use std::time::Duration;
 
 use crate::support::PgDevSession;
 
+use crate::support::apply_pg as apply;
 use zero_migrate::model::migration::Checksum;
-use zero_migrate::{
-    apply, Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId, Phase,
-};
+use zero_migrate::{Approval, ExecutorConfig, Migration, MigrationFlags, MigrationId, Phase};
 
 fn token() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};

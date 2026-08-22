@@ -13,7 +13,7 @@
 //! [`plan`](crate::engine::MigrationEngine::plan) →
 //! [`guard`](crate::guard::SqlGuard) →
 //! [`gate`](crate::engine::MigrationEngine::apply) →
-//! [`executor::apply`](crate::apply::executor::apply) pipeline. There is no DDL bypass.
+//! [`executor::apply`](crate::engine::MigrationEngine::apply) pipeline. There is no DDL bypass.
 //!
 //! # Trust boundary
 //!

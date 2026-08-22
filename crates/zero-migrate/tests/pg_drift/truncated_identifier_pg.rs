@@ -27,11 +27,12 @@ use crate::support;
 
 use crate::support::PgDevSession;
 
+use crate::support::apply_pg as apply;
 use zero_migrate::model::ir::ExistenceGuard;
 use zero_migrate::model::probe::{GuardDir, GuardProbe};
 use zero_migrate::render::existence_probe::{decide, GuardVerdict};
 use zero_migrate::{
-    apply, snapshot_schema, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase,
+    snapshot_schema, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase,
     POSTGRES,
 };
 

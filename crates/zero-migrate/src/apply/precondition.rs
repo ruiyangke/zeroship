@@ -42,7 +42,7 @@
 //!
 //! # Where this is evaluated — the backend seam (multi-engine abstraction)
 //!
-//! [`crate::apply::executor::apply`] evaluates a pending migration's preconditions
+//! [`MigrationEngine::apply`](crate::engine::MigrationEngine::apply) evaluates a pending migration's preconditions
 //! **inside the apply flow, under the project advisory lock**, immediately before
 //! the migration's `up` — so the state a precondition checks is stable for the
 //! apply. All evaluation is read-only (catalog reads + a single read-only

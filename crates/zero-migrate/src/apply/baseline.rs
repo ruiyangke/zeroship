@@ -7,7 +7,7 @@
 //! the schema already exists, so re-running `CREATE TABLE …` would error. The
 //! baseline's `up` *documents* the current schema (a FRESH rebuild could run it),
 //! but on the existing DB it is recorded-not-run. Future migrations then apply on
-//! top normally ([`crate::apply::executor::apply`]).
+//! top normally ([`MigrationEngine::apply`](crate::engine::MigrationEngine::apply)).
 //!
 //! # Safety
 //!
@@ -23,7 +23,7 @@
 //! - **Privileged.** Baseline is an operator/admin operation (not creator
 //! self-service): it runs as the ADMIN (it journals, which the migrator role has
 //! no grant for) under the project advisory lock, serialized against every other
-//! migration activity exactly like [`apply`](crate::apply::executor::apply).
+//! migration activity exactly like [`apply`](crate::engine::MigrationEngine::apply).
 //! - **Append-only journal preserved.** The baseline event is an ordinary
 //! immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
 //! deleted.

@@ -1,9 +1,9 @@
 //! The public `MigrationEngine` API — `plan` (lint/preview) → `gate` (approval)
-//! → [`executor::apply`] (guard + role).
+//! → `executor::apply_with_lock_backend` (guard + role).
 //!
 //! This is the surface a caller (control plane / CLI / builder) drives. The
 //! pieces beneath it — the [`SqlGuard`](crate::guard::SqlGuard), the Postgres
-//! [`apply`](crate::apply::executor::apply) flow, the least-privilege
+//! [`apply`](crate::engine::MigrationEngine::apply) flow, the least-privilege
 //! [`migrator` role](crate::apply::role) — are already built; the engine *composes*
 //! them into the documented pipeline:
 //!
@@ -14,10 +14,10 @@
 //!    are *denied* (un-appliable);
 //! 3. [`MigrationEngine::apply`] is the **gate**: it refuses a plan with any
 //!    denial, refuses a destructive plan without explicit [`Approval::Approved`],
-//!    and otherwise delegates to [`executor::apply`].
+//!    and otherwise delegates to `executor::apply_with_lock_backend`.
 //!
 //! **Defense in depth — the gate is additional, not a replacement.**
-//! [`executor::apply`] *re-runs* the guard over every
+//! `executor::apply_with_lock_backend` *re-runs* the guard over every
 //! pending `up` and runs the DDL under the least-privilege `migrator` role
 //! (the guard + role defense lines). The engine gate is a third check layered in front: even
 //! if a caller hand-built a plan, the executor still independently denies the
@@ -890,7 +890,7 @@ impl MigrationEngine {
         // Fix: acquire the lock ONCE here, drive every inner sub-batch with
         // `LockMode::AlreadyHeld` (skip their acquire/release), and release ONCE
         // on EVERY exit path below (success/error/early-return) — mirroring
-        // `executor::apply`'s release-on-every-path discipline. The lock is taken
+        // `executor::apply_with_lock_backend`'s release-on-every-path discipline. The lock is taken
         // exactly once and freed exactly once per declarative deploy; it is never
         // free between sub-batches.
         //
@@ -3213,7 +3213,7 @@ impl MigrationEngine {
     ///    (never apply — a denied batch applies *nothing*);
     /// 2. if [`MigrationPlan::requires_approval`] and `approval != Approved` ⇒
     ///    [`EngineError::ApprovalRequired`] (nothing applied);
-    /// 3. otherwise delegate to [`executor::apply`],
+    /// 3. otherwise delegate to `executor::apply_with_lock_backend`,
     ///    which **independently re-runs the guard** over every pending `up` and
     ///    runs the DDL under the least-privilege `migrator` role — defense in
     ///    depth, not bypassed by this gate.
@@ -3324,13 +3324,15 @@ impl MigrationEngine {
         // gate (defense in depth), so the gate here is additional,
         // not a replacement.
         //
-        // Call the dialect-generic `apply_with_lock_backend`
-        // with the supplied backend, instead of the PG-`&Client`-typed
-        // `executor::apply_with_lock`. For the PG backend this is byte-identical:
-        // `executor::apply_with_lock` itself just constructs `PostgresBackend::new`
-        // and calls `apply_with_lock_backend`, so going straight through the backend
-        // is the same code path (the guard re-run, least-privilege role, GUC hygiene,
-        // and the lock-mode discipline are all inside `apply_with_lock_backend`).
+        // Call the dialect-generic `apply_with_lock_backend` with the supplied
+        // backend. This is the ONLY apply route now. The executor used to also
+        // expose `apply_with_lock`/`apply_with_lock_mysql`, which built a
+        // `PostgresBackend`/`MysqlBackend` from a session and then called this same
+        // shell; both were dead and were deleted, because choosing a vendor is not
+        // the orchestration's knowledge to hold. Going straight through the backend
+        // was always the same code path anyway (the guard re-run, least-privilege
+        // role, GUC hygiene, and the lock-mode discipline are all inside
+        // `apply_with_lock_backend`).
         // Thread the caller's per-version `scope` into the executor gate. The
         // routine flat `apply`/`apply_with_lock` callers pass `ApprovalScope::All`;
         // the out-of-band approved `.sql` deploy surface
@@ -3353,7 +3355,7 @@ impl MigrationEngine {
     /// (the pre-apply gate).
     ///
     /// This is the trusted-deploy entry point. Before ANY apply work — before the
-    /// guard/approval gate, before [`executor::apply`]
+    /// guard/approval gate, before `executor::apply_with_lock_backend`
     /// acquires the project advisory lock, before a single statement of DDL runs —
     /// it recomputes the integrity manifest over the SUPPLIED `migrations` (in the
     /// given order) and compares it to `expected`:
@@ -3370,7 +3372,7 @@ impl MigrationEngine {
     /// # Order matters: verify BEFORE the lock
     ///
     /// The verification runs in THIS method, before `apply` (and therefore before
-    /// `executor::apply`'s `pg_advisory_lock`). A tampered set is rejected without
+    /// `executor::apply_with_lock_backend`'s `pg_advisory_lock`). A tampered set is rejected without
     /// ever contending for the lock or opening a transaction — the gate cannot be
     /// raced past, and a refusal leaves the database and journal completely
     /// untouched.
@@ -3491,7 +3493,7 @@ impl MigrationEngine {
     /// [`ShadowDryRun`](crate::apply::backend::ShadowDryRun) capability.
     ///
     /// Previews the FULL batch against a faithful copy (same `project_schema`
-    /// name, confined migrator role, the UNMODIFIED [`executor::apply`] path)
+    /// name, confined migrator role, the UNMODIFIED `executor::apply_with_lock_backend` path)
     /// without ever touching the real project DB, then tears the clone down on
     /// every path. The control plane decides WHEN to require a dry-run (the
     /// recommendation is mandatory for destructive / AI-authored sets); this

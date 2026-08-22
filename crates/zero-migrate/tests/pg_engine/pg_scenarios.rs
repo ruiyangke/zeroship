@@ -52,14 +52,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::support::PgDevSession;
 
+use crate::support::apply_pg as apply;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::model::migration::Checksum;
 use zero_migrate::{
-    apply, check_checksum_drift, ensure_journal, history, resolve_create_table_policy,
-    snapshot_schema, status, ApplyError, Approval, ApprovalScope, BackfillSpec, BindValue,
-    DeclarativeApplyError, EngineError, ExecutorConfig, ExpandContractAuthor, GuardConfig,
-    IrAuthor, LiveSchema, LockMode, Migration, MigrationEngine, MigrationFlags, MigrationId,
-    MigrationIr, OnlineIntent, PlanStep, PostgresBackend, RenameStep, Resolution, POSTGRES,
+    check_checksum_drift, ensure_journal, history, resolve_create_table_policy, snapshot_schema,
+    status, ApplyError, Approval, ApprovalScope, BackfillSpec, BindValue, DeclarativeApplyError,
+    EngineError, ExecutorConfig, ExpandContractAuthor, GuardConfig, IrAuthor, LiveSchema, LockMode,
+    Migration, MigrationEngine, MigrationFlags, MigrationId, MigrationIr, OnlineIntent, PlanStep,
+    PostgresBackend, RenameStep, Resolution, POSTGRES,
 };
 
 // ---------------------------------------------------------------------------

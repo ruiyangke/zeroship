@@ -6,9 +6,13 @@
 //! (`crates/zero-migrate/src/apply/backend/postgres/mod.rs`), but exercised through
 //! the *addon's* bridge types (`NapiHostSession` + `VerbDispatch`), so it proves:
 //!
-//! 1. `executor::apply::<NapiHostSession<MockDispatch>>` monomorphizes and runs the
-//!    whole DDL + lock + journal flow generically over the host bridge (the
-//!    convergence point) — a real behavioral assertion, not just "no error";
+//! 1. `executor::apply::<PostgresBackend<NapiHostSession<MockDispatch>>>`
+//!    monomorphizes and runs the whole DDL + lock + journal flow generically over
+//!    the host bridge (the convergence point) — a real behavioral assertion, not
+//!    just "no error". The backend wrapper is explicit at the call site because
+//!    `executor::apply` takes a `MigrationBackend`; it used to take the session and
+//!    build the PostgreSQL backend internally, which is the vendor choice that no
+//!    longer lives in the executor;
 //! 2. the recorded verb sequence contains the expected structural landmarks
 //!    (advisory lock acquire → confinement SET → the migration's `up` DDL →
 //!    journal write-back → advisory unlock), in order;
@@ -249,7 +253,7 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
         let version_str = migration.version.as_str().to_string();
 
         let result = apply(
-            &session,
+            &PostgresBackend::new_generic(&session),
             &cfg,
             std::slice::from_ref(&migration),
             Approval::None,
@@ -347,7 +351,7 @@ fn the_recorded_verb_sequence_has_the_expected_landmarks_in_order() {
         let migration = trivial_migration();
 
         apply(
-            &session,
+            &PostgresBackend::new_generic(&session),
             &cfg,
             std::slice::from_ref(&migration),
             Approval::None,

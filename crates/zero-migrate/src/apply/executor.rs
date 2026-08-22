@@ -1,7 +1,9 @@
 //! The versioned executor — the apply flow.
 //!
-//! The heart of the engine. Given a connection, an [`ExecutorConfig`], and the
-//! project's full migration set, [`apply`]:
+//! The heart of the engine. Given a backend, an [`ExecutorConfig`], and the
+//! project's full migration set, the apply shell
+//! ([`MigrationEngine::apply`](crate::engine::MigrationEngine::apply), which
+//! reaches `apply_with_lock_backend` below):
 //!
 //! 1. acquires the project advisory lock `pg_advisory_lock(hashtext(project_id))`
 //!    (serialize all migration activity; released at end);
@@ -41,14 +43,12 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::approval::Approval;
-// The generic executor entries below are driver-neutral; the dialect SQL leaves
-// the backend drives live in [`crate::apply::backend::postgres::session`].
+// The orchestration below is driver-neutral AND vendor-neutral: it names the
+// dialect seam and nothing behind it. A backend arrives as a `&B` parameter,
+// constructed by whoever knows which vendor this deploy targets — never here.
 use crate::apply::backend::MigrationBackend;
-use crate::apply::backend::MysqlBackend;
-use crate::apply::backend::PostgresBackend;
 use crate::apply::journal::{AppliedEntry, Phase};
 use crate::conn::ExecutorConfig;
-use crate::driver::SqlSession;
 use crate::model::migration::{Migration, MigrationId};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::PlanStep;
@@ -83,8 +83,13 @@ pub(crate) fn authorize_existence_guard_schema(
     })
 }
 
-/// Apply the project's pending migrations. Idempotent: a re-run
-/// with no new migrations is a no-op.
+/// Apply the project's pending migrations through a backend the CALLER built.
+/// Idempotent: a re-run with no new migrations is a no-op.
+///
+/// Takes the project lock for the batch ([`LockMode::Acquire`]) under the blanket
+/// [`ApprovalScope::All`](crate::approval::ApprovalScope::All); a caller that owns
+/// the lock or carries a per-version scope drives `apply_with_lock_backend`
+/// through the engine instead.
 ///
 /// `applied_by` is the actor recorded in the journal (`app/actor/AI`).
 ///
@@ -93,9 +98,16 @@ pub(crate) fn authorize_existence_guard_schema(
 /// flagged [`destructive`](crate::model::migration::MigrationFlags::destructive) and
 /// `approval != Approval::Approved`, the apply is refused with
 /// [`ApplyError::ApprovalRequired`] before any migration executes — independent
-/// of (and additional to) the engine's gate, so a caller driving [`apply`]
-/// directly cannot bypass approval. A non-destructive batch runs with
-/// [`Approval::None`].
+/// of (and additional to) the engine's gate, so a caller driving this directly
+/// cannot bypass approval. A non-destructive batch runs with [`Approval::None`].
+///
+/// # It takes a backend, not a session, and that is the point
+///
+/// This used to take `&D: SqlSession` and build a `PostgresBackend` from it, which
+/// made a neutral orchestration entry silently PostgreSQL-only — the dialect was
+/// decided here, by this file, for every caller. It now takes whatever backend the
+/// caller resolved. The body is otherwise byte-identical: same shell, same scope,
+/// same lock mode.
 ///
 /// # Errors
 /// - [`ApplyError::ApprovalRequired`] — a destructive migration without approval;
@@ -107,116 +119,37 @@ pub(crate) fn authorize_existence_guard_schema(
 /// - [`ApplyError::ChecksumDrift`] — an already-applied migration was tampered.
 /// - [`ApplyError::MigrationFailed`] — a migration's SQL failed (rolled back).
 /// - [`ApplyError::Db`] / [`ApplyError::Journal`] — infrastructure failures.
-pub async fn apply<D: SqlSession>(
-    conn: &D,
+pub async fn apply<B: MigrationBackend>(
+    backend: &B,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
     approval: Approval,
     applied_by: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
-    // Standalone callers own the lock: acquire it here, release it on exit.
-    apply_with_lock(
-        conn,
+    apply_with_lock_backend(
+        backend,
         cfg,
         migrations,
         approval,
+        &crate::approval::ApprovalScope::All,
         applied_by,
         LockMode::Acquire,
     )
     .await
 }
 
-/// [`apply`] with an explicit [`LockMode`].
-///
-/// Identical to [`apply`] except the caller chooses whether this sub-batch takes
-/// the project advisory lock itself ([`LockMode::Acquire`], the standalone case)
-/// or whether an OUTER operation already holds it ([`LockMode::AlreadyHeld`], the
-/// declarative-deploy sub-batches driven by
-/// [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative)).
-///
-/// `AlreadyHeld` skips ONLY the per-batch acquire/release; the per-batch session
-/// hygiene (GUC snapshot/restore + unconditional `RESET ROLE`) still runs, so an
-/// inner sub-batch never leaks its `search_path` / timeouts / role onto the
-/// session even though the lock is owned outside it.
-///
-/// # Errors
-/// Same as [`apply`].
-pub async fn apply_with_lock<D: SqlSession>(
-    conn: &D,
-    cfg: &ExecutorConfig,
-    migrations: &[Migration],
-    approval: Approval,
-    applied_by: &str,
-    lock_mode: LockMode,
-) -> Result<ApplyOutcome, ApplyError> {
-    // Drive the whole apply through the dialect seam. Postgres is the only
-    // backend; the public entry is now generic over the `SqlSession` seam (`&D`)
-    // so a host (napi) driver can drive it, while the apply body below is generic
-    // over `MigrationBackend` (no concrete client reaches `apply_locked`).
-    // The defense-in-depth approval gate lives in `apply_with_lock_backend` so it
-    // runs IDENTICALLY for both this entry and the generic engine path — a
-    // single source of the executor-layer gate.
-    //
-    // `new_generic` (not `new`) is used here: the apply path never reads the
-    // backend's `online`/`shadow` harnesses (those are exercised only via the
-    // separate `run_expand`/`dry_run` entries), so the
-    // constructed backend is behaviorally identical to a plain `new(conn)` —
-    // only the two unused `Option` fields differ (both stay `None`). This is what
-    // makes the `&Client → &D` generalization behavior-preserving.
-    //
-    // This entry keeps the BLANKET scope ([`ApprovalScope::All`]) — its
-    // callers (the expand-contract EXPAND apply, the flat `engine.apply` path) carry
-    // their own scope check at the engine layer when one is in play. A direct caller
-    // of `apply_with_lock` is the trusted single-actor `.sql` surface (no co-bundling
-    // of distinct reviewed version-ids), so `All` preserves byte-identical behavior.
-    let backend = PostgresBackend::new_generic(conn);
-    apply_with_lock_backend(
-        &backend,
-        cfg,
-        migrations,
-        approval,
-        &crate::approval::ApprovalScope::All,
-        applied_by,
-        lock_mode,
-    )
-    .await
-}
-
-/// The **MySQL** counterpart of [`apply_with_lock`]: drive the apply through the
-/// [`MysqlBackend`], which rides the SAME `driver::SqlSession` seam as Postgres but
-/// renders MySQL dialect SQL (`GET_LOCK` project lock, MySQL journal DDL, `?`
-/// placeholders, auto-committing two-phase apply). This is the dialect-selection
-/// entry: a caller that knows the target is MySQL constructs the MySQL backend
-/// here and reuses the identical generic `apply_with_lock_backend` orchestration
-/// shell — so the executor holds no dialect SQL and MySQL rides the same seam.
-///
-/// # Errors
-/// Same as [`apply`].
-pub async fn apply_with_lock_mysql<D: SqlSession>(
-    conn: &D,
-    cfg: &ExecutorConfig,
-    migrations: &[Migration],
-    approval: Approval,
-    applied_by: &str,
-    lock_mode: LockMode,
-) -> Result<ApplyOutcome, ApplyError> {
-    let backend = MysqlBackend::new_generic(conn);
-    apply_with_lock_backend(
-        &backend,
-        cfg,
-        migrations,
-        approval,
-        &crate::approval::ApprovalScope::All,
-        applied_by,
-        lock_mode,
-    )
-    .await
-}
-
 /// The lock + session-hygiene shell around [`apply_locked`], generic over the
-/// dialect seam. Both [`apply_with_lock`] (PG) and the generic engine declarative
-/// path construct/forward their backend and call this; the body is byte-identical to
-/// the pre-seam PG flow, now routed through [`MigrationBackend`].
+/// dialect seam. Every caller — the engine's declarative path, the engine's flat
+/// [`apply`](crate::engine::MigrationEngine::apply) path, and each backend's own
+/// tests — CONSTRUCTS or FORWARDS its backend and calls this.
+///
+/// It takes `&B` and never builds one. That is the whole reason this file names no
+/// vendor: choosing between PostgreSQL, MySQL and SQLite is knowledge about which
+/// vendors exist, and it lives with whoever knows the deploy's target — the host —
+/// not in the orchestration. Two `pub` entries used to sit here doing exactly that
+/// (`apply_with_lock` built a `PostgresBackend`, `apply_with_lock_mysql` built a
+/// `MysqlBackend`); both were dead, and deleting them is what made core neutral
+/// here. Do not reintroduce a vendor-constructing entry point in this module.
 pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
@@ -2044,7 +1977,8 @@ fn rollback_inverse_step_kind(step: &PlanStep) -> &'static str {
 
 /// Roll back migrations: plan every refusal, then run each `down` in order.
 ///
-/// The counterpart to [`apply`], and the driver [`plan_rollback`] was written for.
+/// The counterpart to the crate-private `apply_with_lock_backend` shell, and the
+/// driver [`plan_rollback`] was written for.
 /// Selection is all-or-nothing: [`plan_rollback`] decides approval, target
 /// resolution, `down` availability, checksum agreement, reversibility,
 /// transactionality, the guard over the `down` SQL, dependency coherence and

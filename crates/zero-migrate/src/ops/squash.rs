@@ -13,7 +13,7 @@
 //!   the effect is already present) and records the `S → v_i` supersession edges.
 //!   The old `v1..vN` events remain (immutable); `S` supersedes them.
 //! - **Fresh DB** (none of `[v1..vN]` applied) — an ordinary
-//!   [`apply`](crate::apply::executor::apply) of a set containing `S` runs `S.up` once and
+//!   [`apply`](crate::engine::MigrationEngine::apply) of a set containing `S` runs `S.up` once and
 //!   SKIPS `v1..vN` (the executor's pending computation treats a version superseded
 //!   by an applied/being-applied squash as satisfied — see
 //!   `crate::apply::executor::compute_superseded`). `v1..vN` are never double-applied,
@@ -25,7 +25,7 @@
 //! A squash is consistent only at the two extremes of its superseded set:
 //! - **ALL** of `[v1..vN]` net-applied ⇒ [`squash`] records the supersession
 //!   (baseline-style, no `up` run);
-//! - **NONE** applied ⇒ the fresh path through [`apply`](crate::apply::executor::apply)
+//! - **NONE** applied ⇒ the fresh path through [`apply`](crate::engine::MigrationEngine::apply)
 //!   runs `S.up`.
 //!
 //! A **partial** overlap (some but not all of `[v1..vN]` applied) is an
@@ -99,7 +99,7 @@ pub enum SquashError {
     /// Not every version in `supersedes` is net-applied — this is the existing-DB
     /// path, which records the supersession only when ALL `[v1..vN]` are already
     /// applied. NONE applied is the FRESH path (use
-    /// [`apply`](crate::apply::executor::apply), which runs `S.up`); a partial set is the
+    /// [`apply`](crate::engine::MigrationEngine::apply), which runs `S.up`); a partial set is the
     /// inconsistent [`PartialOverlap`](SquashError::PartialOverlap). Nothing was
     /// journaled.
     #[error(
@@ -141,7 +141,7 @@ pub enum SquashError {
 /// its `up` (the effect of `[v1..vN]` is already present), and records the `S →
 /// v_i` supersession edges — all as ADMIN, under the project advisory lock.
 /// Idempotent if `S` is already net-applied. Refuses unless ALL of
-/// `S.supersedes` are net-applied (NONE = use [`apply`](crate::apply::executor::apply);
+/// `S.supersedes` are net-applied (NONE = use [`apply`](crate::engine::MigrationEngine::apply);
 /// partial = inconsistent).
 ///
 /// `applied_by` is the actor recorded in the journal (operator / admin).

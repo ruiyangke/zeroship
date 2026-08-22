@@ -13,7 +13,7 @@
 //! deny-list / cross-schema confinement), and the **Postgres executor**:
 //! the append-only journal ([`apply::journal`]),
 //! the project advisory lock, and the apply flow
-//! ([`apply::executor::apply`]) — transactional + two-phase
+//! ([`MigrationEngine::apply`](crate::engine::MigrationEngine::apply)) — transactional + two-phase
 //! non-transactional with idempotent recovery, the guard wired in front of
 //! every `up`, and a drift/tamper checksum check — the least-privilege
 //! `migrator` role ([`apply::role`]), and the **public
@@ -23,7 +23,7 @@
 //! # The pipeline
 //!
 //! ```text
-//! author -> plan (lint) -> gate (approval) -> executor::apply (guard + role)
+//! author -> plan (lint) -> gate (approval) -> executor apply (guard + role)
 //! ```
 //!
 //! 1. an **author** ([`MigrationAuthor`]) produces versioned [`Migration`]s.
@@ -37,7 +37,7 @@
 //!    approval requirement, and guard *denials*.
 //! 3. [`MigrationEngine::apply`] is the **gate** ([`Approval`]): it refuses a
 //!    denied plan, refuses a destructive plan without approval, and otherwise
-//!    delegates to [`apply::executor::apply`] — which **independently re-runs the
+//!    delegates to the executor's apply shell — which **independently re-runs the
 //!    guard and the least-privilege `migrator` role** (defense in depth: the
 //!    engine gate is an additional check, not a replacement for lines 1 & 2).
 //!
@@ -184,13 +184,17 @@ pub use apply::executor::{
     RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
 // The rollback verb, and the planner that decides every refusal before it runs.
-// Generic over `MigrationBackend`, so unlike `apply` below it is not PG-gated.
+// Generic over `MigrationBackend`, so it runs on every dialect through one body.
 pub use apply::executor::{
     plan_rollback, plan_rollback_with_inverse_plans, rollback, rollback_with_lock,
     rollback_with_lock_and_inverse_plans, AppliedRecord, RollbackPlan,
 };
-// `apply` is generic over the `SqlSession` seam — on the whole PG
-// seam. `rollback` is still `&Client`-typed (out of v1 scope) — PG-only.
+// `apply` is generic over `MigrationBackend` too, exactly like `rollback` above.
+// It used to take the `SqlSession` seam and build a `PostgresBackend` inside the
+// executor, which made this "neutral" entry PostgreSQL-only by construction; the
+// caller now supplies the backend. Its two vendor-constructing siblings
+// (`apply_with_lock`, `apply_with_lock_mysql`) were deleted rather than converted
+// — nothing called them.
 pub use apply::executor::apply;
 // The OFFLINE ops→snapshot fold. Pure, no
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
