@@ -5,7 +5,10 @@
 //! **SQLite does NOT ride this seam** — it is an in-process `rusqlite` actor
 //! (`apply::backend::sqlite`) with no session object. The seam is therefore an
 //! implementation detail of the network backends, not a bound on the shared
-//! [`MigrationBackend`](crate::apply::backend::MigrationBackend) trait.
+//! `MigrationBackend` trait (`zero_migrate::apply::backend`). Plain code text
+//! rather than an intra-doc link: that trait lives in the engine, which depends
+//! on this crate, so the reference cannot point upward — the same reason
+//! `PostgresBackend` and `apply::backend::sqlite` above are unlinked.
 //!
 //! The trait is typed in DRIVER-NEUTRAL types ([`Bind`]/[`Value`]/[`Row`]/
 //! [`DbError`]), NOT any concrete driver's row/error/bind types. Such driver types

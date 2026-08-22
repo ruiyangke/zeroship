@@ -99,8 +99,15 @@ pub mod render;
 // in-process rusqlite actor). Gated on `pg_seam` (its only current implementor is
 // the host PG adapter, lit by the `host-pg` feature); a `--no-default-features`
 // build keeps a lean core.
+//
+// It LIVES in `zero-migrate-backend` — it is a contract, not engine logic, and its
+// only dependency was `std`. Re-exported under its historical `crate::driver` path
+// (the same shim idiom `model/mod.rs` uses for `zero_migrate_ir::ir`) so every
+// `crate::driver::…` and `zero_migrate::driver::…` reference resolves unchanged.
+// The `pg_seam` gate is kept on the RE-EXPORT: it is a fact about the engine's
+// public surface, and dropping it would widen a `--no-default-features` build.
 #[cfg(pg_seam)]
-pub mod driver;
+pub use zero_migrate_backend::driver;
 // The schema-authority core (DDL builders, diff classifier, sentinel codec,
 // schema-shape descriptors). The data-plane query language that used to ride
 // alongside had zero engine callers and was deleted; only the write/diff/describe

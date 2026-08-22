@@ -73,6 +73,11 @@ pub mod advisory;
 pub mod ddl;
 pub mod descriptors;
 pub mod dml;
+// The dialect-neutral network driver seam (`SqlSession`) and its conformance
+// suite. A CONTRACT with no vendor in it: `std` is its only dependency, it
+// spells no keyword and names no dialect, and the network backends are generic
+// over it. The engine re-exports it at `zero_migrate::driver`.
+pub mod driver;
 pub mod error;
 pub mod existence_probe;
 pub mod fold;

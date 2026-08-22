@@ -1,5 +1,5 @@
-//! A driver-neutral **conformance suite** for the [`SqlSession`](super::SqlSession)
-//! seam.
+//! A driver-neutral **conformance suite** for the
+//! [`SqlSession`](crate::driver::SqlSession) seam.
 //!
 //! Every host driver (the napi `pg`/`mysql2` shells, the in-crate `PgDevSession`
 //! test driver) claims to honour a small set of seam invariants the engine's apply
