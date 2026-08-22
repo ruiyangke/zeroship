@@ -133,14 +133,12 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const meaningful = (text: string): string => text.replace(/^WARNING.*$/gm, "").trim();
 
 test("apply waits for a held project lock, silently, and completes when it is released", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("applywait");
   const meta = `${schema}_migrations`;
   const work = project(schema);
-  const holder = await connectLivePg(ctx);
-  if (!holder) return;
+  const holder = await connectLivePg();
 
   let running: Running | undefined;
   try {
@@ -202,14 +200,12 @@ test("apply waits for a held project lock, silently, and completes when it is re
 });
 
 test("--query-timeout bounds the lock wait and names the lock in the error", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("applybound");
   const meta = `${schema}_migrations`;
   const work = project(schema);
-  const holder = await connectLivePg(ctx);
-  if (!holder) return;
+  const holder = await connectLivePg();
 
   try {
     await client.query(`CREATE SCHEMA "${schema}"`);

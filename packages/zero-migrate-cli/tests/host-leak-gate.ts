@@ -44,18 +44,24 @@
 // without failing, because failing on another job's namespace would make this gate
 // the flaky thing it exists to prevent.
 //
-// GATE: the same two variables the suite itself uses. `ZERO_MIGRATE_TEST_PG_URL`
-// (or the `docker-compose.test.yml` default) for PostgreSQL, `ZERO_MIGRATE_MYSQL_URL`
-// for MySQL. A server the suite will not touch is a server this gate does not
-// snapshot: with `ZERO_MIGRATE_MYSQL_URL` unset every MySQL test skips, so there is
-// nothing to leak there and nothing to count.
+// REQUIRES the same two variables the suite itself requires: `ZERO_MIGRATE_TEST_PG_URL`
+// for PostgreSQL and `ZERO_MIGRATE_MYSQL_URL` for MySQL. Neither has a fallback and
+// neither may be absent - with a DSN unset the suite this gate wraps fails outright,
+// so a gate that carried on with "nothing to count" would be measuring a run that
+// never happened.
 
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { liveDbGate, liveDbRequired, pgUrl, pgUrlFromEnv } from "./host/live-db.js";
+import {
+  MYSQL_URL_ENV,
+  liveDbGate,
+  pgUrl,
+  pgUrlFromEnv,
+  requireLiveDb,
+} from "./host/live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG = resolve(HERE, "..");
@@ -140,14 +146,13 @@ function runHostSuite(command: string): Promise<number> {
 }
 
 /**
- * Resolve the PostgreSQL DSN to snapshot, or null when this machine has no
- * PostgreSQL and the suite will skip its PostgreSQL coverage anyway.
+ * Resolve the PostgreSQL DSN to snapshot.
  *
- * Routed through the SAME `liveDbGate` the suite uses so a configured-but-broken
- * DSN fails here exactly as it fails there, instead of quietly becoming "no
- * PostgreSQL to count".
+ * Routed through the SAME `liveDbGate` the suite uses so a missing or
+ * configured-but-broken DSN fails here exactly as it fails there, instead of
+ * quietly becoming "no PostgreSQL to count".
  */
-async function pgTarget(): Promise<string | null> {
+async function pgTarget(): Promise<string> {
   const envDsn = pgUrlFromEnv();
   const dsn = pgUrl();
   let connectError: string | undefined;
@@ -156,11 +161,9 @@ async function pgTarget(): Promise<string | null> {
   } catch (e) {
     connectError = (e as Error).message;
   }
-  const gate = liveDbGate({ envDsn, required: liveDbRequired(), connectError });
-  if (gate.action === "run") return dsn;
+  const gate = liveDbGate({ envDsn, connectError });
   if (gate.action === "fail") throw new Error(gate.reason);
-  console.error(`leak gate: ${gate.reason}`);
-  return null;
+  return dsn;
 }
 
 function report(server: string, before: string[], after: string[], from: number, to: number) {
@@ -182,27 +185,22 @@ function report(server: string, before: string[], after: string[], from: number,
 }
 
 const pgDsn = await pgTarget();
-const mysqlDsn = process.env.ZERO_MIGRATE_MYSQL_URL?.trim() || null;
-if (mysqlDsn === null) {
-  console.error(
-    "leak gate: ZERO_MIGRATE_MYSQL_URL is unset, so every MySQL test skips and there is " +
-      "no MySQL state to count",
-  );
-}
+const mysqlDsn = process.env[MYSQL_URL_ENV]?.trim();
+requireLiveDb(mysqlDsn, MYSQL_URL_ENV, "MySQL");
 
-const pgBefore = pgDsn === null ? [] : await pgNamespaces(pgDsn);
-const mysqlBefore = mysqlDsn === null ? [] : await mysqlDatabases(mysqlDsn);
+const pgBefore = await pgNamespaces(pgDsn);
+const mysqlBefore = await mysqlDatabases(mysqlDsn);
 
 const from = Date.now() - WINDOW_SLACK_MS;
 const suiteExit = await runHostSuite(hostSuiteCommand());
 const to = Date.now() + WINDOW_SLACK_MS;
 
-const pgAfter = pgDsn === null ? [] : await pgNamespaces(pgDsn);
-const mysqlAfter = mysqlDsn === null ? [] : await mysqlDatabases(mysqlDsn);
+const pgAfter = await pgNamespaces(pgDsn);
+const mysqlAfter = await mysqlDatabases(mysqlDsn);
 
 const leaked = [
-  ...(pgDsn === null ? [] : report("postgresql", pgBefore, pgAfter, from, to)),
-  ...(mysqlDsn === null ? [] : report("mysql", mysqlBefore, mysqlAfter, from, to)),
+  ...report("postgresql", pgBefore, pgAfter, from, to),
+  ...report("mysql", mysqlBefore, mysqlAfter, from, to),
 ];
 
 // The suite's own verdict comes first: a red suite that also leaked is a red suite,

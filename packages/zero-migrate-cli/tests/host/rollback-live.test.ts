@@ -20,8 +20,8 @@
 //   4. a rollback with no target and one with no --approve are both refused, and
 //      the schema is untouched.
 //
-// GATING: PostgreSQL via `connectLivePg` (see `live-db.ts`); MySQL skips cleanly
-// unless `ZERO_MIGRATE_MYSQL_URL` is set. Runs under `node --import tsx --test`.
+// REQUIRES: PostgreSQL via `connectLivePg` (see `live-db.ts`); MySQL via
+// `ZERO_MIGRATE_MYSQL_URL`. Neither may be absent. Runs under `node --import tsx --test`.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -30,7 +30,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 import { createExtensionPolicy, createSchemaPolicy, noInjectPolicy } from "./policy.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -141,8 +141,7 @@ async function rollbackRoundTrip(
 }
 
 test("PostgreSQL: the CLI rolls an applied migration back and leaves it pending", async (t) => {
-  const client = await connectLivePg(t);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueSchema("rb_live_pg");
   const metaSchema = `${schema}_migrations`;
@@ -208,8 +207,7 @@ export default {
 }
 
 test("PostgreSQL: rolling back an unconsumed dropSequence is deliberately refused", async (t) => {
-  const client = await connectLivePg(t);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueSchema("rb_live_seq");
   const metaSchema = `${schema}_migrations`;
@@ -291,8 +289,7 @@ export default {
 }
 
 test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create authored", async (t) => {
-  const client = await connectLivePg(t);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schemaName = uniqueSchema("rb_live_sch");
   const metaSchema = `${schemaName}_migrations`;
@@ -383,8 +380,7 @@ export default {
 }
 
 test("PostgreSQL: rolling back a dropExtension reinstalls the extension its create authored", async (t) => {
-  const client = await connectLivePg(t);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schemaName = uniqueSchema("rb_live_ext");
   const metaSchema = `${schemaName}_migrations`;
@@ -470,8 +466,7 @@ export default {
 }
 
 test("PostgreSQL: a guarded create is not trusted to rebuild what a later drop removed", async (t) => {
-  const client = await connectLivePg(t);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schemaName = uniqueSchema("rb_live_grd");
   const metaSchema = `${schemaName}_migrations`;
@@ -518,16 +513,11 @@ test("PostgreSQL: a guarded create is not trusted to rebuild what a later drop r
 });
 
 test("PostgreSQL: a rollback whose project lock is held waits instead of failing", async (t) => {
-  const client = await connectLivePg(t);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueSchema("rb_lock_pg");
   const metaSchema = `${schema}_migrations`;
-  const holder = await connectLivePg(t);
-  if (!holder) {
-    await client.end().catch(() => {});
-    return;
-  }
+  const holder = await connectLivePg();
 
   let dir: string | undefined;
   try {
@@ -582,10 +572,7 @@ test("PostgreSQL: a rollback whose project lock is held waits instead of failing
 });
 
 test("MySQL: a rollback whose project lock is held fails with the holder named", async (t) => {
-  if (!MYSQL_URL) {
-    t.skip("ZERO_MIGRATE_MYSQL_URL unset - live-MySQL lock exclusion skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const schema = uniqueSchema("rb_lock_my");
   const metaSchema = `${schema}_migrations`;
@@ -643,10 +630,7 @@ test("MySQL: a rollback whose project lock is held fails with the holder named",
 });
 
 test("MySQL: the CLI rolls an applied migration back and leaves it pending", async (t) => {
-  if (!MYSQL_URL) {
-    t.skip("ZERO_MIGRATE_MYSQL_URL unset - live-MySQL rollback skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const schema = uniqueSchema("rb_live_my");
   const metaSchema = `${schema}_migrations`;

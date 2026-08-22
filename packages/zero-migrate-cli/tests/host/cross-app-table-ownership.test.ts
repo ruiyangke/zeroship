@@ -136,8 +136,7 @@ function apply(work: string, dir: string, schema: string, app: string) {
 }
 
 test("an app cannot migrate a table another app owns", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace();
   const meta = `${schema}_migrations`;

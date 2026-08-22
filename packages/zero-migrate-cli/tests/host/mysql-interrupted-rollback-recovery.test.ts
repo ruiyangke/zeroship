@@ -37,6 +37,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import "./addon.js";
+import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 
@@ -120,10 +121,7 @@ function cli(work: string, database: string, argv: string[]) {
 const UNWIND = ["rollback", "--steps", "1", "--approve", "--backup-acknowledged"];
 
 test("an interrupted MySQL unwind is refused on retry, and the printed repair works", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; interrupted-rollback coverage skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const connection = await mysql.createConnection({ uri: MYSQL_URL });
 

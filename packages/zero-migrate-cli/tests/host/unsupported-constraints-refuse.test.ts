@@ -39,7 +39,7 @@ import { table, t } from "zero-migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "zero-migrate/internal/recorder";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -166,10 +166,7 @@ test("SQLite refuses a table-level CHECK rather than emitting a table without it
 });
 
 test("MySQL refuses a table-level CHECK rather than emitting a table without it", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL unsupported-constraint arm skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("unsup_chk_my");
@@ -200,8 +197,7 @@ test("MySQL refuses a table-level CHECK rather than emitting a table without it"
 });
 
 test("PostgreSQL control: both shapes apply and the constraints are really enforced", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("unsup_ctl");
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };

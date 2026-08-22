@@ -27,7 +27,7 @@ import { table, t } from "zero-migrate";
 import { apply, rollback, status, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "zero-migrate/internal/recorder";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
@@ -108,8 +108,7 @@ async function withSchema<T>(
 }
 
 test("a recorded inverse is what a rollback runs", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   try {
@@ -201,8 +200,7 @@ test("a recorded inverse is what a rollback runs", async (ctx) => {
 });
 
 test("CONTROL: a data migration declaring irreversible is still refused", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   try {
@@ -264,10 +262,7 @@ test("CONTROL: a data migration declaring irreversible is still refused", async 
 });
 
 test("MySQL: a recorded inverse is what a rollback runs", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL rollback-inverse coverage skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL });
   const projectSchema = uniqueNamespace("rbinv_my");

@@ -44,6 +44,7 @@ import type { MigrationModule } from "zero-migrate/internal/recorder";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const OWNER_APP = "app_text_key";
@@ -84,10 +85,7 @@ function authored(name: string, schema: () => void): NamedMigration {
 }
 
 test("MySQL: a key over a t.text() column declared in the SAME migration is refused before the deploy", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL text-in-key boundary skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("textkey_my");
@@ -165,10 +163,7 @@ test("MySQL: a key over a t.text() column declared in the SAME migration is refu
 });
 
 test("MySQL: a key over a column an EARLIER migration created is refused at lower time, and a bounded one still applies", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL cross-migration text-in-key skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("textkey_my2");

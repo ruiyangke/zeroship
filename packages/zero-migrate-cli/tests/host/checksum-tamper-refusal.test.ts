@@ -48,7 +48,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -331,10 +331,7 @@ async function tamperScenario(dialect: Dialect): Promise<{ journal: string; set:
 }
 
 test("PostgreSQL refuses an edited already-applied migration, and lands nothing", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PG tamper arm skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const dialect = await postgres();
   try {
     await tamperScenario(dialect);
@@ -344,10 +341,7 @@ test("PostgreSQL refuses an edited already-applied migration, and lands nothing"
 });
 
 test("MySQL refuses an edited already-applied migration, and lands nothing", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL tamper arm skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const dialect = await mysql();
   try {
     await tamperScenario(dialect);
@@ -464,10 +458,7 @@ async function rollbackTamperScenario(dialect: Dialect): Promise<void> {
 }
 
 test("PostgreSQL refuses to roll back an edited migration, dropping nothing", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PG rollback tamper arm skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const dialect = await postgres();
   try {
     await rollbackTamperScenario(dialect);
@@ -477,10 +468,7 @@ test("PostgreSQL refuses to roll back an edited migration, dropping nothing", as
 });
 
 test("MySQL refuses to roll back an edited migration, dropping nothing", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL rollback tamper arm skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const dialect = await mysql();
   try {
     await rollbackTamperScenario(dialect);

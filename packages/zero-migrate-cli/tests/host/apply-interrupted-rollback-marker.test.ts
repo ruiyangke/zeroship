@@ -11,6 +11,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { ADDON_PATH } from "./addon.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
@@ -96,10 +97,7 @@ function applyReport(text: string): { applied: string[]; skipped: string[] } {
 }
 
 test("apply refuses a MySQL version with an interrupted-unwind marker", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; apply rollback-marker coverage skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const connection = await mysql.createConnection({ uri: MYSQL_URL });
   const database = uniqueNamespace("apply_unwind_my");
@@ -165,10 +163,7 @@ test("apply refuses a MySQL version with an interrupted-unwind marker", async (c
 });
 
 test("PostgreSQL re-apply is unaffected by MySQL rollback markers", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PostgreSQL control skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();
@@ -206,10 +201,7 @@ test("PostgreSQL re-apply is unaffected by MySQL rollback markers", async (ctx) 
 });
 
 test("status reports the interrupted unwind that apply refuses over", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; status marker coverage skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   // F661. apply and rollback both refuse over this marker. status said
   // "1 applied, 0 pending", exit 0 - so the two verbs contradicted each other on
   // the same database, and the verb an operator reaches for FIRST was the one

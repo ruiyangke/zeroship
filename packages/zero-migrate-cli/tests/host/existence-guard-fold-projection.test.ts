@@ -107,6 +107,7 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
@@ -327,10 +328,7 @@ async function withSeededTableOnly(
 }
 
 test("PostgreSQL: a guarded createTable over a matching live table survives the pending-schema projection", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; guarded projection e2e skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withAppliedBaseAndSeededTable(
     "guardfold_adopt_pg",
     "varchar(255)",
@@ -358,10 +356,7 @@ test("PostgreSQL: a guarded createTable over a matching live table survives the 
 });
 
 test("PostgreSQL: the same guarded createTable still refuses a divergent live table, naming the divergence", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; guarded projection divergence e2e skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withAppliedBaseAndSeededTable(
     "guardfold_drift_pg",
     "varchar(100)",
@@ -402,10 +397,7 @@ async function refusalOf(run: () => Promise<unknown>): Promise<string> {
 }
 
 test("PostgreSQL: the parity arm's two halves take DIFFERENT lowering branches", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; lowering-branch witness skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   // The witness for the arm below. A parity assertion is worth nothing if both halves
   // happen to run the same code: `apply()` forks on `prior_envelope_json.is_empty()`
   // alone (`verbs.rs`), and only the non-empty side builds a pending-schema projection.
@@ -442,10 +434,7 @@ test("PostgreSQL: the parity arm's two halves take DIFFERENT lowering branches",
 });
 
 test("PostgreSQL: a guarded createTable over an unregistered live table adopts identically with and without priors", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; guarded projection parity e2e skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   // One authored migration, one registry (`{}` -- the default state for every user who
   // never passes `--registry`), one live table seeded out of band, run down BOTH lowering
   // paths. The empty-priors path is the tested contract of
@@ -487,10 +476,7 @@ test("PostgreSQL: a guarded createTable over an unregistered live table adopts i
 });
 
 test("PostgreSQL: a guarded createTable is still refused when the registry names ANOTHER app as owner", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; guarded projection foreign-owner e2e skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withAppliedBaseAndSeededTable(
     "guardfold_foreign_pg",
     "varchar(255)",
@@ -525,10 +511,7 @@ test("PostgreSQL: a guarded createTable is still refused when the registry names
 });
 
 test("PostgreSQL control: an UNGUARDED createTable over an existing live table is still refused", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; unguarded projection control skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withAppliedBaseAndSeededTable(
     "guardfold_bare_pg",
     "varchar(255)",
@@ -556,10 +539,7 @@ test("PostgreSQL control: an UNGUARDED createTable over an existing live table i
 });
 
 test("MySQL: a guarded createTable over an existing live table is refused by the projection, unchanged", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL projection scope guard skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,

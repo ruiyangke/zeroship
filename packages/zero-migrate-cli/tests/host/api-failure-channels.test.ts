@@ -149,8 +149,7 @@ test("control: a valid migration returns ok:true, so neither channel fires by de
 });
 
 test("history() returns bigint eventSeq, so plain JSON.stringify throws", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const projectSchema = uniqueNamespace("failure_channels");
   const policy = [charter(projectSchema)];

@@ -76,8 +76,7 @@ const migration = {
 } as MigrationModule;
 
 test("a failed journal append takes the teardown down with it", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const projectSchema = uniqueNamespace("rb_atomic");
   const meta = `${projectSchema}_migrations`;

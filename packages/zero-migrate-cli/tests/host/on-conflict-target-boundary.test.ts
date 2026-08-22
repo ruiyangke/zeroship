@@ -41,7 +41,7 @@ import { table, t } from "zero-migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "zero-migrate/internal/recorder";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -102,8 +102,7 @@ function upsertMigration(target: readonly string[]): MigrationModule {
 }
 
 test("PostgreSQL: a matched target upserts; an unmatched one fails in the data migration", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   const run = async (target: readonly string[], schema: string) => {
@@ -184,10 +183,7 @@ test("PostgreSQL: a matched target upserts; an unmatched one fails in the data m
 });
 
 test("MySQL: the same unmatched target is refused before any data change", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL onConflict boundary skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("on_conflict_my");

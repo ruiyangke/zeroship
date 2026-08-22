@@ -156,8 +156,7 @@ test("--json is accepted by every command the usage block marks with it", () => 
 });
 
 test("with engine logging on, stdout is still exactly one JSON document", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const schema = uniqueNamespace("jsonc");
   const work = project(schema);
   try {

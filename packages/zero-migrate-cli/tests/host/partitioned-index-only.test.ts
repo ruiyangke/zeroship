@@ -72,8 +72,7 @@ function twoParentsOneAskingForOnly(): NamedMigration {
 }
 
 test("PostgreSQL renders ON ONLY for every partitioned-parent index, so the flag is not recoverable", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const projectSchema = uniqueNamespace("partonly_pg");
   const meta = `${projectSchema}_migrations`;

@@ -157,8 +157,7 @@ function apply(work: string, schema: string, approve: boolean) {
 }
 
 test("an unapproved later operation stops the whole data plan, including its approval-free first operation", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("preflight");
   const meta = `${schema}_migrations`;

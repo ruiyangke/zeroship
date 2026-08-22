@@ -43,6 +43,7 @@ import type { MigrationModule } from "zero-migrate/internal/recorder";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
@@ -207,10 +208,7 @@ test("SQLite control: the two facets the matrix declares supported apply and rea
 });
 
 test("MySQL refuses every index facet the matrix declares unsupported, leaving nothing behind", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL index-facet matrix skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("facet_my");

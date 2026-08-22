@@ -129,12 +129,9 @@ function startApply(work: string, schema: string): {
 }
 
 test("a write committed during the expand backfill is not overwritten by it", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
-  const writer = await connectLivePg(ctx);
-  if (!writer) return;
-  const sampler = await connectLivePg(ctx);
-  if (!sampler) return;
+  const client = await connectLivePg();
+  const writer = await connectLivePg();
+  const sampler = await connectLivePg();
 
   const schema = uniqueNamespace("renameconc");
   const meta = `${schema}_migrations`;

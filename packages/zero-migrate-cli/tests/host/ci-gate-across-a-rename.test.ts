@@ -142,8 +142,7 @@ function runCli(
 }
 
 test("the CI gate goes red for an open rename window and green again once it is committed", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("cirename");
   const work = project(schema);

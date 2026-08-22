@@ -132,8 +132,7 @@ function cli(
 }
 
 test("plan does not promise or render SQL for a drifted migration", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("planchk");
   const work = project();

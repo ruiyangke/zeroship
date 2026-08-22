@@ -33,7 +33,7 @@ import { table, t } from "zero-migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "zero-migrate/internal/recorder";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -82,8 +82,7 @@ function migrationNaming(column: string): MigrationModule {
 }
 
 test("PostgreSQL quotes an authored identifier rather than interpolating it", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   try {
@@ -138,10 +137,7 @@ test("PostgreSQL quotes an authored identifier rather than interpolating it", as
 });
 
 test("MySQL quotes an authored identifier rather than interpolating it", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL identifier quoting skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
 
   for (const [label, payload] of PAYLOADS) {

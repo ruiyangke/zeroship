@@ -38,6 +38,7 @@ import { fileURLToPath } from "node:url";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -198,10 +199,7 @@ test("an integer at or beyond 2^53 is still refused, and lint agrees", () => {
  *  partition -- just one whose boundary is in the wrong place, which is a data
  *  routing bug rather than an error. */
 test("a large integer partition bound reaches the catalog exactly", async (ctx) => {
-  if (!process.env.ZERO_MIGRATE_TEST_PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const { pgUrl } = await import("./live-db.js");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });

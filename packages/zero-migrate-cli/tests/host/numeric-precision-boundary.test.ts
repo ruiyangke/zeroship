@@ -59,8 +59,7 @@ scope = ${scope}
 }
 
 test("an exact int64 survives the whole stack, and an unsafe JS number is refused", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   const run = async (

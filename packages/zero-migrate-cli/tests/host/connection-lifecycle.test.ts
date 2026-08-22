@@ -72,8 +72,7 @@ function creates(index: number): NamedMigration {
 }
 
 test("repeated apply and status calls leave no database connections behind", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const projectSchema = uniqueNamespace("conn_lifecycle");
   const meta = `${projectSchema}_migrations`;

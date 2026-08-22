@@ -125,8 +125,7 @@ const EXPECTED: ReadonlyArray<readonly [number, string, number]> = [
 ];
 
 test("PostgreSQL: an authored update and delete change only the rows their predicate names", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("dmleff");
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
@@ -211,8 +210,7 @@ test("PostgreSQL: a predicate matching nothing changes nothing", async (ctx) => 
   // The control for the two above. They assert that rows CHANGED; this asserts
   // the engine is not simply rewriting the table on every DML step regardless of
   // the predicate, which would satisfy them both.
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("dmlnone");
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };

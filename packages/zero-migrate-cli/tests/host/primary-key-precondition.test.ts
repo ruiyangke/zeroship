@@ -38,7 +38,7 @@ import { table, t } from "zero-migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "zero-migrate/internal/recorder";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -120,8 +120,7 @@ async function livePgKey(client: import("pg").Client, schema: string): Promise<s
 }
 
 test("PostgreSQL refuses a primary-key replacement whose expected key is wrong", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   const withTable = async <T>(run: (schema: string) => Promise<T>): Promise<T> => {
@@ -209,10 +208,7 @@ test("PostgreSQL refuses a primary-key replacement whose expected key is wrong",
 });
 
 test("MySQL refuses the same mismatches, including column order", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL primary-key precondition skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
 
   const withTable = async <T>(

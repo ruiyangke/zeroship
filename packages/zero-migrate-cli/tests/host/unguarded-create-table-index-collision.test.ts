@@ -39,6 +39,7 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
 const OWNER_APP = "app_inline_index";
@@ -188,10 +189,7 @@ async function withPgSchema(
 }
 
 test("PostgreSQL: an unguarded createTable is refused when its inline index names another table's", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PostgreSQL inline-index e2e skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withPgSchema("inlineidx_taken_pg", async (client, schema) => {
     const base = baseMigration();
     const driver = { kind: "postgres" as const, url: PG_URL };
@@ -244,10 +242,7 @@ test("PostgreSQL: an unguarded createTable is refused when its inline index name
 });
 
 test("PostgreSQL control: the same createTable still runs when its inline index name is free", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PostgreSQL inline-index control skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withPgSchema("inlineidx_free_pg", async (client, schema) => {
     const base = baseMigration();
     const driver = { kind: "postgres" as const, url: PG_URL };

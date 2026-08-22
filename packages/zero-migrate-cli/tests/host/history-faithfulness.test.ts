@@ -38,7 +38,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -145,8 +145,7 @@ interface HistoryEvent {
 }
 
 test("history reports every journal event, in order, across a rollback and a re-apply", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("histfaith");
   const meta = `${schema}_migrations`;
@@ -240,10 +239,7 @@ test("history refuses a SQLite target by name rather than reporting an empty str
 });
 
 test("history refuses a MySQL target by name rather than reporting an empty stream", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL history boundary skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const database = uniqueNamespace("histmy");
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
@@ -279,8 +275,7 @@ test("history refuses a MySQL target by name rather than reporting an empty stre
 });
 
 test("status and history bootstrap the journal on a fresh project; plan and lint do not", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   // `docs/operations.md`: "do not assume the first call is physically
   // read-only". This pins which verbs that covers, because it decides whether

@@ -38,6 +38,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import "./addon.js";
+import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 
@@ -112,10 +113,7 @@ function apply(work: string, database: string) {
 }
 
 test("MySQL refuses UPDATE and DELETE on the journal, but cannot refuse TRUNCATE", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL journal-guard coverage skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const connection = await mysql.createConnection({ uri: MYSQL_URL });
 

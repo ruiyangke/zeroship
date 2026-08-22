@@ -155,8 +155,7 @@ function run(work: string, schema: string, argv: string[]) {
 }
 
 test("a file that fails partway leaves its earlier work applied, and the retry resumes", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("partial");
   const meta = `${schema}_migrations`;

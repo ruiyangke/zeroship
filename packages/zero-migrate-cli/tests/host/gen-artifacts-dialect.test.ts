@@ -24,7 +24,7 @@ import { dialect, table, t } from "zero-migrate";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
 import { apply, currentIrVersion } from "zero-migrate-cli";
 import { noInjectPolicy } from "./policy.js";
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 
 // The host suite's addon is resolved and freshness-checked in one place.
@@ -116,10 +116,7 @@ function assertArtifactsMatchLive(projectSchema: string, target: string, live: S
 }
 
 test("genArtifacts folds the MySQL target's own dialectal leg (matches the live MySQL catalog)", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset - live-MySQL artifact-dialect arm skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
@@ -168,8 +165,7 @@ test("genArtifacts folds the Postgres target's own dialectal leg (matches the li
   // `connectLivePg` owns the connect, so it can tell "this machine has no database"
   // (skip) from "a database was configured and did not work" (throw); the client it
   // hands back is closed here, and on a skip there is no client to close.
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
   const schema = uniqueName("gad_pg");
 
   try {

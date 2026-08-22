@@ -150,8 +150,7 @@ async function liveColumns(
 }
 
 test("a mandatory injection reaches both the preview and the applied table", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   try {
     await withProject(client, true, async (work, migrations, schema) => {

@@ -10,7 +10,7 @@ import {
 } from "zero-migrate-cli";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
 import { noInjectPolicy } from "./policy.js";
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 
 // The host suite's addon is resolved and freshness-checked in one place.
@@ -208,8 +208,7 @@ test("the shared migration pair authors the complete portable data flow", async 
 });
 
 test("PostgreSQL: create, insert, update, delete, and backfill apply in order and rerun safely", async (t) => {
-  const client = await connectLivePg(t);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const migrations = await loadMigrations();
   const projectSchema = uniqueName("e2e_dml_pg");
@@ -299,10 +298,7 @@ test("PostgreSQL: create, insert, update, delete, and backfill apply in order an
 });
 
 test("MySQL: create, insert, update, delete, and backfill apply in order and rerun safely", async (t) => {
-  if (!MYSQL_URL) {
-    t.skip("ZERO_MIGRATE_MYSQL_URL unset; live MySQL e2e skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({

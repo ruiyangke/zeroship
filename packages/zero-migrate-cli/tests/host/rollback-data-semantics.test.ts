@@ -80,8 +80,7 @@ function tableAndRow(): readonly [NamedMigration, NamedMigration] {
 }
 
 test("a rollback removes what a migration added and keeps the rows it did not touch", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const projectSchema = uniqueNamespace("rbdata_add");
   const meta = `${projectSchema}_migrations`;
@@ -157,8 +156,7 @@ test("a rollback removes what a migration added and keeps the rows it did not to
 });
 
 test("a rollback refuses a dropped column rather than handing back an empty one, and force skips instead of faking", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const projectSchema = uniqueNamespace("rbdata_drop");
   const meta = `${projectSchema}_migrations`;
@@ -257,8 +255,7 @@ test("only a migration that lowers to ONE journaled step can be rolled back", as
   //
   // The arms run against a live server because the refusal is raised while
   // reconciling the journal, not while lowering, so nothing offline reaches it.
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 

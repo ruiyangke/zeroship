@@ -29,6 +29,7 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 
@@ -106,10 +107,7 @@ const INVALID_ULIDS = [
 // when `ZERO_MIGRATE_MYSQL_URL` is unset.
 // ---------------------------------------------------------------------------
 test("Live MySQL apply: napi addon lowers + applies the authored IR over the mysql2 driver", async (t) => {
-  if (!MYSQL_URL) {
-    t.skip("ZERO_MIGRATE_MYSQL_URL unset — live-MySQL e2e skipped (DB-free CI stays green)");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   // The `mysql2` driver is an optionalDependency; fail the test loudly if the URL
   // is set but the driver is missing (a real misconfiguration, not a skip).
@@ -215,10 +213,7 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
 });
 
 test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix form", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset — live-MySQL TypeID fixtures skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
@@ -289,10 +284,7 @@ test("Live MySQL TypeID CHECK enforces the official fixtures and empty-prefix fo
 });
 
 test("Live MySQL ULID CHECK enforces canonical uppercase spelling and bounds", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset — live-MySQL ULID fixtures skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
@@ -357,10 +349,7 @@ test("Live MySQL ULID CHECK enforces canonical uppercase spelling and bounds", a
 });
 
 test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant bits", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset — live-MySQL UUIDv4 test skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
@@ -435,10 +424,7 @@ test("Live MySQL UUIDv4 default generates canonical RFC 9562 version and variant
 });
 
 test("Live MySQL onConflict updates only the authored target and journals only committed steps", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; live MySQL onConflict test skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
@@ -596,10 +582,7 @@ test("Live MySQL onConflict updates only the authored target and journals only c
 });
 
 test("Live MySQL onConflict rejects a non-unique authored target before mutation", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; live MySQL onConflict target proof skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
@@ -717,10 +700,7 @@ test("Live MySQL onConflict rejects a non-unique authored target before mutation
 // failure on the second apply while the first succeeds attributes the failure to
 // the default and not to the harness, the database, or the authoring shape.
 test("Live MySQL applies an expression column default, with a literal default as the control", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset - live-MySQL expression-default test skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({

@@ -64,8 +64,7 @@ function pgIdent(value: string): string {
 }
 
 test("during an online rename both names stay aligned, and the destination wins a tie", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const projectSchema = uniqueNamespace("coexist");
   const meta = `${projectSchema}_migrations`;
@@ -215,8 +214,7 @@ test("during an online rename both names stay aligned, and the destination wins 
 // asymmetry is measured rather than inferred.
 
 test("during coexistence the source's constraints still bind writes made through the destination", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const projectSchema = uniqueNamespace("coexist_constraints");
   const meta = `${projectSchema}_migrations`;

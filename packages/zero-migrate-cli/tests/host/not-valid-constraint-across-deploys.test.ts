@@ -121,8 +121,7 @@ function applyOne(
 }
 
 test("a NOT VALID foreign key carries the tail until a later deploy validates it", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const projectSchema = uniqueNamespace("adoption_pg");
   const meta = `${projectSchema}_migrations`;

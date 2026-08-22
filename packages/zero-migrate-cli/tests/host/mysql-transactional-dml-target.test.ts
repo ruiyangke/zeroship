@@ -34,6 +34,7 @@ import type { MigrationModule } from "zero-migrate/internal/recorder";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 const OWNER_APP = "app_dml_target";
@@ -76,10 +77,7 @@ function authored(name: string, schema: () => void): NamedMigration {
 const TARGETS = ["plain_rows", "myisam_rows", "triggered_rows"] as const;
 
 test("MySQL refuses a data migration whose target is non-InnoDB or carries a user trigger", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL data-target preconditions skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("dmltarget_my");

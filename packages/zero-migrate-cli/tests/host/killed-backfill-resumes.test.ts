@@ -35,7 +35,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -129,8 +129,7 @@ function argv(work: string, schema: string): string[] {
 const ENV = { ZERO_MIGRATE_ADDON_PATH: ADDON_PATH, DATABASE_URL: "" };
 
 test("a backfill killed mid-flight resumes without losing or repeating a row", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("killbf");
   const work = project();
@@ -247,10 +246,7 @@ test("MySQL: a backfill killed mid-flight resumes the same way", async (ctx) => 
   // journaled, and NO inflight marker - then the retry finished all 20,000
   // correctly.
   const url = process.env.ZERO_MIGRATE_MYSQL_URL;
-  if (!url) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset");
-    return;
-  }
+  requireLiveDb(url, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: url, multipleStatements: true });
   const database = `killbf_${Date.now().toString(36)}`;

@@ -83,8 +83,7 @@ const FULL_SHAPE =
   `PRIMARY KEY (id), CONSTRAINT items_name_key UNIQUE (name)`;
 
 test("guarded adoption refuses every column-shape difference it can see", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   const adoptOver = async (liveDdl: string): Promise<void> => {
@@ -152,8 +151,7 @@ test("guarded adoption refuses every column-shape difference it can see", async 
 });
 
 test("TODAY guarded adoption ignores a declared constraint the live table lacks", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   /** Adopt over `liveDdl` and report the live constraint kinds afterwards. */

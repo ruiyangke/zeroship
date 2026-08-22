@@ -145,8 +145,7 @@ function runCli(
 }
 
 test("plan separates work blocked by an outstanding online rename", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("f662");
   const work = project(schema);

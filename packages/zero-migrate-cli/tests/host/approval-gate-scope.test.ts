@@ -165,8 +165,7 @@ function run(work: string, schema: string, argv: string[]): { code: number | nul
 }
 
 test("the approval gate covers exactly the operations the documentation names", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const gatedButRan: string[] = [];
   const ungatedButRefused: string[] = [];

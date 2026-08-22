@@ -90,8 +90,7 @@ const dropped = {
 } as MigrationModule & { name: string };
 
 test("only the root charter can authorise a destructive operation", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 

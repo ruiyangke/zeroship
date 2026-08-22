@@ -20,9 +20,9 @@
 //   - drift/checksum: two applies of the identical artifact fold the SAME anchor
 //     (drift-free identity), a modified artifact folds a DIFFERENT anchor (drift).
 //
-// GATE: `connectLivePg` (see `live-db.ts`). An unset `ZERO_MIGRATE_TEST_PG_URL` with
-// no database on the compose default skips, so DB-free CI stays green; a configured
-// DSN that does not connect fails. Runs under `node --import tsx --test`.
+// REQUIRES `connectLivePg` (see `live-db.ts`), and so `ZERO_MIGRATE_TEST_PG_URL`.
+// An unset DSN and a DSN that does not connect both FAIL; neither skips. Runs under
+// `node --import tsx --test`.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

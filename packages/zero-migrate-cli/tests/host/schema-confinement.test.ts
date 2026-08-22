@@ -57,8 +57,7 @@ scope = ${scope}
 }
 
 test("a migration cannot reach outside its project schema unless the root charter says so", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 

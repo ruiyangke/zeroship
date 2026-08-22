@@ -1,49 +1,66 @@
-// The live-database gate the Postgres host suites share.
+// The live-database requirement the host suites share.
 //
-// A gated suite has three outcomes, and a skip and a pass print the same exit code,
-// so the gate has to keep them apart:
+// A gated suite used to have three outcomes, and a skip and a pass print the same
+// exit code. That is the whole problem: a run with no database reported exactly
+// like a run with one, so a machine that never started Docker and a machine that
+// exercised every verb produced the same green summary. `ZERO_MIGRATE_REQUIRE_LIVE_DB`
+// existed to turn the skip into a failure, but it was opt-IN, so the DEFAULT was a
+// suite that passed while testing nothing.
 //
-//   - `ZERO_MIGRATE_TEST_PG_URL` is set and connects -> run against it;
-//   - `ZERO_MIGRATE_TEST_PG_URL` is set and does NOT connect -> FAIL, carrying the
-//     driver's own message. A wrong password, a missing database and a driver
-//     regression are all "a database was configured and it did not work", which is
-//     a different thing from "this machine has no database". Swallowing the connect
-//     error into a skip makes a `pg` regression report exactly like a contributor
-//     who never started Docker;
-//   - `ZERO_MIGRATE_TEST_PG_URL` is unset -> fall back to the DSN
-//     `docker-compose.test.yml` serves, so the documented local setup gets real
-//     coverage without exporting anything, and skip (naming the coverage lost and
-//     how to get it back) when nothing answers there.
+// There are two outcomes now:
 //
-// `ZERO_MIGRATE_REQUIRE_LIVE_DB` turns that last skip into a failure, for runs that
-// are supposed to have a database: it demands an EXPLICIT DSN, because a default
-// that happens to answer on one machine is not evidence that a run was configured
-// for live coverage. `crates/zero-migrate/tests/support/mod.rs` gates the Rust
-// suites on the same two variables with the same asymmetry.
+//   - the DSN is set and connects -> run against it;
+//   - anything else               -> FAIL, carrying the reason. An unset DSN, a
+//     wrong password, a missing database and a driver regression are all "this run
+//     has no live coverage", and none of them may report green.
+//
+// There is also no compose-DSN fallback. A default that happens to answer on one
+// machine is not evidence that a run was configured for live coverage, and a
+// fallback is just a gate that decides silently. `crates/zero-migrate/tests/support/
+// mod.rs` holds the same requirement for the Rust side.
 
-import type { TestContext } from "node:test";
 import type { Client } from "pg";
+import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
-/** The DSN of the Postgres the gated suites run against. */
+/** The DSN of the PostgreSQL the gated suites run against. Required. */
 export const PG_URL_ENV = "ZERO_MIGRATE_TEST_PG_URL";
 
-/** Turns a missing-DSN skip into a failure, for runs expected to have a database. */
-export const REQUIRE_LIVE_DB_ENV = "ZERO_MIGRATE_REQUIRE_LIVE_DB";
+/** The DSN of the MySQL the gated suites run against. Required. */
+export const MYSQL_URL_ENV = "ZERO_MIGRATE_MYSQL_URL";
+
+/** What the requirement decided, and the text explaining it. */
+export type LiveDbGate = { action: "run"; dsn: string } | { action: "fail"; reason: string };
 
 /**
- * The DSN `docker-compose.test.yml` serves (`postgres` service: host port 5434,
- * `POSTGRES_PASSWORD: postgres`). It is the fallback so `docker compose -f
- * docker-compose.test.yml up -d` plus `pnpm test:host` is a complete local setup;
- * a fallback pointing anywhere else silently downgrades every gated suite to a skip
- * on a machine that has the database running.
+ * The failure text for a live-database variable that is unset or blank.
+ *
+ * Names the variable AND the server, so an operator reading it knows which service
+ * to start as well as which DSN to export.
  */
-export const DEFAULT_PG_URL = "postgres://postgres:postgres@127.0.0.1:5434/zero_migrate_test";
+export function missingLiveDbDsn(envVar: string, server: string): string {
+  return (
+    `${envVar} is unset, so this test has no live ${server} to run against and cannot ` +
+    `report coverage it never gathered. Start a ${server} and export ${envVar} with its ` +
+    `DSN (see CONTRIBUTING.md, "Live-database tests").`
+  );
+}
 
-/** What the gate decided, and the text explaining it. */
-export type LiveDbGate =
-  | { action: "run"; dsn: string }
-  | { action: "skip"; reason: string }
-  | { action: "fail"; reason: string };
+/**
+ * Require `dsn` to be a real DSN, throwing [`missingLiveDbDsn`] when it is not.
+ *
+ * An assertion signature rather than a `string` return, so the ~150 call sites that
+ * already hold the value in a module-level `const` keep their narrowing without
+ * rebinding it.
+ */
+export function requireLiveDb(
+  dsn: string | undefined,
+  envVar: string,
+  server: string,
+): asserts dsn is string {
+  if (dsn === undefined || dsn.trim() === "") {
+    throw new Error(missingLiveDbDsn(envVar, server));
+  }
+}
 
 /** The configured DSN, or undefined when unset or blank (a blank export is unset). */
 export function pgUrlFromEnv(): string | undefined {
@@ -51,84 +68,55 @@ export function pgUrlFromEnv(): string | undefined {
   return raw === undefined || raw.trim() === "" ? undefined : raw;
 }
 
-/** The DSN the gated suites use: the configured one, else the compose default. */
+/** The DSN the gated suites use. Throws when it is not configured. */
 export function pgUrl(): string {
-  return pgUrlFromEnv() ?? DEFAULT_PG_URL;
+  const dsn = pgUrlFromEnv();
+  requireLiveDb(dsn, PG_URL_ENV, "PostgreSQL");
+  return dsn;
 }
 
 /**
- * Whether this run declared that it must have a live database.
- *
- * Anything but unset, empty, `0`, `false` or `no` counts as a demand, matching the
- * Rust `live_db_required`.
- */
-export function liveDbRequired(): boolean {
-  const raw = process.env[REQUIRE_LIVE_DB_ENV];
-  if (raw === undefined) return false;
-  return !["", "0", "false", "no"].includes(raw.trim().toLowerCase());
-}
-
-/**
- * Decide run / skip / fail from the three facts the gate turns on, with no I/O so
- * every quadrant is testable on a machine that has a test Postgres running.
+ * Decide run / fail from the two facts the requirement turns on, with no I/O so
+ * every case is testable on a machine that has a test PostgreSQL running.
  *
  * @param envDsn the configured DSN, or undefined/blank when unset.
- * @param required whether `REQUIRE_LIVE_DB_ENV` demands live coverage.
  * @param connectError the driver's message when the connect failed, else undefined.
  */
 export function liveDbGate(input: {
   envDsn: string | undefined;
-  required: boolean;
   connectError: string | undefined;
 }): LiveDbGate {
   const configured =
     input.envDsn !== undefined && input.envDsn.trim() !== "" ? input.envDsn : undefined;
-  const dsn = configured ?? DEFAULT_PG_URL;
 
-  if (input.required && configured === undefined) {
+  if (configured === undefined) {
+    return { action: "fail", reason: missingLiveDbDsn(PG_URL_ENV, "PostgreSQL") };
+  }
+
+  if (input.connectError !== undefined) {
     return {
       action: "fail",
-      reason:
-        `${REQUIRE_LIVE_DB_ENV} demands a live database but ${PG_URL_ENV} is unset, so this ` +
-        `run has no live PostgreSQL coverage to offer; export ${PG_URL_ENV} or clear ` +
-        `${REQUIRE_LIVE_DB_ENV}`,
+      reason: `${PG_URL_ENV} is set to ${configured} but connecting to it failed: ${input.connectError}`,
     };
   }
 
-  if (input.connectError === undefined) return { action: "run", dsn };
-
-  if (configured !== undefined) {
-    return {
-      action: "fail",
-      reason: `${PG_URL_ENV} is set to ${dsn} but connecting to it failed: ${input.connectError}`,
-    };
-  }
-
-  return {
-    action: "skip",
-    reason:
-      `live PostgreSQL coverage skipped: ${PG_URL_ENV} is unset and the default ${dsn} ` +
-      `(the DSN docker-compose.test.yml serves) is unreachable: ${input.connectError}. Start it ` +
-      `with "docker compose -f docker-compose.test.yml up -d", export ${PG_URL_ENV}, or set ` +
-      `${REQUIRE_LIVE_DB_ENV}=1 to turn this skip into a failure`,
-  };
+  return { action: "run", dsn: configured };
 }
 
 /**
- * Connect the gated suites' Postgres client, or skip the calling test.
+ * Connect the gated suites' PostgreSQL client, or throw.
  *
- * Returns a connected `pg.Client` the caller owns (and must `end()`), or null after
- * marking the test skipped. Throws on the two cases a skip would hide: a configured
- * DSN that does not connect, and a demanded live database with no DSN configured.
+ * Returns a connected `pg.Client` the caller owns (and must `end()`). It never
+ * returns null, because the outcome null used to stand for - "no database here, so
+ * report a pass" - is the one this file exists to remove.
  *
- * The connect is attempted before the demanded-but-unconfigured check so one pure
- * `liveDbGate` call decides every case; the client is closed again on any non-run
- * outcome.
+ * The connect is attempted before the unconfigured check so one pure `liveDbGate`
+ * call decides both cases; the client is closed again on a failure.
  */
-export async function connectLivePg(t: TestContext): Promise<Client | null> {
+export async function connectLivePg(): Promise<Client> {
   const envDsn = pgUrlFromEnv();
   const pg = (await import("pg")).default;
-  const client = new pg.Client({ connectionString: envDsn ?? DEFAULT_PG_URL });
+  const client = new pg.Client({ connectionString: envDsn ?? "" });
 
   let connectError: string | undefined;
   try {
@@ -137,11 +125,9 @@ export async function connectLivePg(t: TestContext): Promise<Client | null> {
     connectError = (e as Error).message;
   }
 
-  const gate = liveDbGate({ envDsn, required: liveDbRequired(), connectError });
+  const gate = liveDbGate({ envDsn, connectError });
   if (gate.action === "run") return client;
 
   await client.end().catch(() => {});
-  if (gate.action === "fail") throw new Error(gate.reason);
-  t.skip(gate.reason);
-  return null;
+  throw new Error(gate.reason);
 }

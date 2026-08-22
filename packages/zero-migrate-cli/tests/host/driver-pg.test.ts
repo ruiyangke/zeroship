@@ -231,8 +231,7 @@ test("an array literal the seam cannot represent is a loud error, not a truncati
 test("poisoned global bool parser cannot flip false to true (oid 16 pinned)", async (t) => {
   // The gate's client is the reachability proof only: the arm drives its own
   // connection through `openPgSession`, which is the seam under test.
-  const probe = await connectLivePg(t);
-  if (!probe) return;
+  const probe = await connectLivePg();
   await probe.end();
 
   const restore = await poisonEveryGlobalParser();
@@ -268,8 +267,7 @@ test("poisoned global bool parser cannot flip false to true (oid 16 pinned)", as
 // rejects. The pinned parser must produce the array itself.
 // ---------------------------------------------------------------------------
 test("poisoned global array parsers cannot collapse text[]/name[]/int8[] to raw text", async (t) => {
-  const probe = await connectLivePg(t);
-  if (!probe) return;
+  const probe = await connectLivePg();
   await probe.end();
 
   const restore = await poisonEveryGlobalParser();
@@ -312,8 +310,7 @@ test("poisoned global array parsers cannot collapse text[]/name[]/int8[] to raw 
 test("apply survives a fully poisoned global pg.types map", async (t) => {
   // The gate's client doubles as the admin connection: it is opened before the
   // poison lands, exactly as the arm's own admin client used to be.
-  const adm = await connectLivePg(t);
-  if (!adm) return;
+  const adm = await connectLivePg();
 
   const restore = await poisonEveryGlobalParser();
 

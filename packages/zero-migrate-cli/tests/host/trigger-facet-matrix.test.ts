@@ -31,6 +31,7 @@ import type { MigrationModule } from "zero-migrate/internal/recorder";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OWNER_APP = "app_trigger_facet_matrix";
@@ -256,10 +257,7 @@ async function withMysqlDatabase<T>(
 }
 
 test("MySQL control: a structured trigger body really applies, so the refusals below mean something", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL trigger matrix skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   // The arm that corrects the earlier misreading. `Structured trigger body`
   // declares MySQL Yes; this proves it, by finding the trigger in the catalog.
   await withMysqlDatabase("trig_my_ok", async (admin, database, driver) => {
@@ -292,10 +290,7 @@ test("MySQL control: a structured trigger body really applies, so the refusals b
 });
 
 test("MySQL refuses the trigger facets the matrix declares unsupported", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL trigger matrix skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   for (const [facet, args] of [
     ["truncate_event", { timing: "before", events: ["truncate"], forEach: "statement", body: mysqlBody }],
     ["statement_level", { timing: "before", events: ["insert"], forEach: "statement", body: mysqlBody }],

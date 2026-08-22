@@ -62,8 +62,7 @@ scope = ${scope}
 }
 
 test("the journal refuses UPDATE, DELETE and TRUNCATE from plain SQL", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const projectSchema = uniqueNamespace("append_only");
   const meta = `${projectSchema}_migrations`;

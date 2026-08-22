@@ -46,6 +46,7 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
@@ -213,10 +214,7 @@ async function withPgSchema(
 }
 
 test("PostgreSQL: an unguarded createIndex is refused, not silently skipped, when another table owns the name", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PostgreSQL unguarded-index e2e skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withPgSchema("bareidx_taken_pg", async (client, schema) => {
     const base = baseMigration();
     const driver = { kind: "postgres" as const, url: PG_URL };
@@ -274,10 +272,7 @@ test("PostgreSQL: an unguarded createIndex is refused, not silently skipped, whe
 });
 
 test("PostgreSQL control: the same unguarded createIndex still runs when the name is free", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PostgreSQL unguarded-index control skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withPgSchema("bareidx_free_pg", async (client, schema) => {
     const base = baseMigration();
     const driver = { kind: "postgres" as const, url: PG_URL };
@@ -297,10 +292,7 @@ test("PostgreSQL control: the same unguarded createIndex still runs when the nam
 });
 
 test("MySQL: an unguarded createIndex lands on its own table under a name another table also uses", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL unguarded-index e2e skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({
     uri: MYSQL_URL,

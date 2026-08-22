@@ -30,7 +30,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -152,10 +152,7 @@ const CASES: readonly Case[] = [
 ];
 
 test("PostgreSQL enforces enum and domain constraints", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   for (const testCase of CASES) {
     const namespace = uniqueNamespace("logical_pg");
@@ -190,10 +187,7 @@ test("PostgreSQL enforces enum and domain constraints", async (ctx) => {
 });
 
 test("MySQL enforces enum and domain constraints without native domains", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const driver = (await import("mysql2/promise")).default;
   const base = String(MYSQL_URL).replace(/\/[^/]*$/, "");
   for (const testCase of CASES) {

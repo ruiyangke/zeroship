@@ -171,8 +171,7 @@ type Body = (work: string, schema: string) => Promise<void>;
 
 /** Fresh schema + project per scenario, torn down whatever happens. */
 async function scenario(ctx: Parameters<typeof connectLivePg>[0], body: Body): Promise<void> {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const schema = uniqueNamespace("resolvelife");
   const work = project(schema);
   try {
@@ -192,8 +191,7 @@ async function scenario(ctx: Parameters<typeof connectLivePg>[0], body: Body): P
 
 test("--commit keeps the new column, drops the old one, and carries the values", async (ctx) => {
   await scenario(ctx, async (work, schema) => {
-    const client = await connectLivePg(ctx);
-    if (!client) return;
+    const client = await connectLivePg();
     try {
       const applied = await runCli(work, schema, ["apply", "--approve"]);
       assert.equal(applied.code, 0, `apply must succeed; ${applied.err}`);
@@ -232,8 +230,7 @@ test("--commit keeps the new column, drops the old one, and carries the values",
 
 test("--rollback keeps the old column, drops the new one, and leaves the values", async (ctx) => {
   await scenario(ctx, async (work, schema) => {
-    const client = await connectLivePg(ctx);
-    if (!client) return;
+    const client = await connectLivePg();
     try {
       const applied = await runCli(work, schema, ["apply", "--approve"]);
       assert.equal(applied.code, 0, `apply must succeed; ${applied.err}`);

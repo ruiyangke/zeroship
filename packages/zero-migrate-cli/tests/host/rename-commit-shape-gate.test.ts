@@ -183,12 +183,10 @@ async function rowState(
 }
 
 async function withWindow(
-  ctx: Parameters<typeof connectLivePg>[0],
   prefix: string,
   body: (client: Client, work: string, schema: string, trigger: string) => Promise<void>,
-): Promise<boolean> {
-  const client = await connectLivePg(ctx);
-  if (!client) return false;
+): Promise<void> {
+  const client = await connectLivePg();
   const schema = uniqueNamespace(prefix);
   const work = project(schema);
   try {
@@ -205,11 +203,10 @@ async function withWindow(
     await client.end().catch(() => {});
     rmSync(work, { recursive: true, force: true });
   }
-  return true;
 }
 
 test("the commit refuses a window whose columns have diverged, and keeps the old one", async (ctx) => {
-  const ran = await withWindow(ctx, "shapeval", async (client, work, schema, trigger) => {
+  await withWindow("shapeval", async (client, work, schema, trigger) => {
     // Diverge the DATA while leaving the trigger installed and enabled, so the
     // values arm is the only one that can answer. A write with the trigger live
     // would be mirrored and there would be nothing to detect.
@@ -243,11 +240,10 @@ test("the commit refuses a window whose columns have diverged, and keeps the old
       "the refused commit must not drop the column holding the surviving value",
     );
   });
-  if (!ran) return;
 });
 
 test("the commit refuses a window whose dual-write trigger is gone", async (ctx) => {
-  const ran = await withWindow(ctx, "shapetrg", async (client, work, schema, trigger) => {
+  await withWindow("shapetrg", async (client, work, schema, trigger) => {
     // Drop the trigger and write NOTHING. The values stay synchronized, so the
     // earlier arm of the chain cannot answer and only the trigger check can.
     await client.query(`DROP TRIGGER "${trigger}" ON "${schema}".users`);
@@ -273,14 +269,13 @@ test("the commit refuses a window whose dual-write trigger is gone", async (ctx)
     const after = await rowState(client, schema);
     assert.equal(after.display_name, "ada", "the refused commit must not drop the old column");
   });
-  if (!ran) return;
 });
 
 test("the commit refuses a window whose trigger is merely DISABLED", async (ctx) => {
   // A disabled trigger is the quieter half: it is still in `pg_trigger`, so a
   // check that only asked whether the trigger EXISTS would pass it, and the window
   // would commit having mirrored nothing since the moment it was disabled.
-  const ran = await withWindow(ctx, "shapedis", async (client, work, schema, trigger) => {
+  await withWindow("shapedis", async (client, work, schema, trigger) => {
     await client.query(`ALTER TABLE "${schema}".users DISABLE TRIGGER "${trigger}"`);
     // Scoped to THIS schema's table. `tgname` alone is not unique across the
     // server: every fixture that opens a rename window on a `users` table gets the
@@ -308,11 +303,10 @@ test("the commit refuses a window whose trigger is merely DISABLED", async (ctx)
     const after = await rowState(client, schema);
     assert.equal(after.display_name, "ada", "the refused commit must not drop the old column");
   });
-  if (!ran) return;
 });
 
 test("an untouched window still commits, so the three refusals mean something", async (ctx) => {
-  const ran = await withWindow(ctx, "shapectl", async (client, work, schema) => {
+  await withWindow("shapectl", async (client, work, schema) => {
     const committed = await runCli(work, schema, [
       "resolve", RENAME_MIGRATION, "--commit", "--approve",
     ]);
@@ -332,5 +326,4 @@ test("an untouched window still commits, so the three refusals mean something", 
     );
     assert.equal(value[0].full_name, "ada", "and the value survives the drop");
   });
-  if (!ran) return;
 });

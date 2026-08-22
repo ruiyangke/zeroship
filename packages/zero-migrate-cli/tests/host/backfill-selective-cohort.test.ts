@@ -36,7 +36,7 @@ import { table, t } from "zero-migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "zero-migrate/internal/recorder";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -106,8 +106,7 @@ const SEED_ITEMS = {
 } as MigrationModule & { name: string };
 
 test("a backfill transforms every selected row and leaves every other row alone", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("bfsel");
   const meta = `${schema}_migrations`;
@@ -222,8 +221,7 @@ test("a backfill whose predicate matches nothing completes and records nothing",
   // a build that recorded a constant. Here the cohort is empty, so the same field
   // must read zero - and the backfill must still COMPLETE rather than stall
   // waiting for a batch that never arrives.
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("bfnone");
   const meta = `${schema}_migrations`;
@@ -311,10 +309,7 @@ test("MySQL: the same selective backfill reaches the same rows", async (ctx) => 
   // Running the SAME authored migration as the PostgreSQL arm is the point: it
   // shows the two engines AGREE, rather than each doing something locally
   // reasonable with the predicate.
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL selective backfill skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const database = uniqueNamespace("bfselmy");
   const meta = `${database}_migrations`;

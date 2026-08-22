@@ -32,7 +32,7 @@ import { table } from "zero-migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "zero-migrate/internal/recorder";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -99,8 +99,7 @@ const GENERATED_DDL =
 const GENERATED_SEED = `INSERT INTO @T (id, val) VALUES (1,0),(2,0),(3,0)`;
 
 test("PostgreSQL refuses a generated cursor column and accepts a plain one", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   const run = async (ddl: string, seed: string): Promise<void> => {
@@ -145,10 +144,7 @@ test("PostgreSQL refuses a generated cursor column and accepts a plain one", asy
 });
 
 test("MySQL refuses generated and ON UPDATE cursor columns, and accepts a plain one", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL cursor-kind arms skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
 
   const run = async (ddl: string, seed: string): Promise<void> => {

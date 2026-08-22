@@ -117,8 +117,7 @@ function runCli(
 const triggerFunctionOf = (meta: string): string => `${meta}_schema_migrations_immutable`;
 
 test("re-bootstrapping an existing journal rewrites no catalog row", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("rebootstrap_noop");
   const meta = `${schema}_migrations`;
@@ -180,8 +179,7 @@ test("re-bootstrapping an existing journal rewrites no catalog row", async (ctx)
 });
 
 test("concurrent invocations against a bootstrapped journal report no catalog error", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("rebootstrap_race");
   const meta = `${schema}_migrations`;

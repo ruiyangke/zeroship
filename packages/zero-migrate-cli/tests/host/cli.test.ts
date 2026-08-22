@@ -26,7 +26,7 @@ import {
   loadZeroMigrateConfig,
   resolveCliConfig,
 } from "../../src/config.js";
-import { connectLivePg, liveDbRequired, pgUrl, REQUIRE_LIVE_DB_ENV } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
 import {
   currentIrVersion,
@@ -325,8 +325,7 @@ test("CLI value-taking flags reject a following flag as their value", () => {
 // leak. Only a crash of the test process itself would leave `<schema>_migrations`
 // behind, which is the exposure every live arm in this suite already carries.
 test("CLI scaffold under an inline dash-leading --dir applies to live PostgreSQL", async (t) => {
-  const client = await connectLivePg(t);
-  if (client === null) return;
+  const client = await connectLivePg();
   const cwd = temporaryDirectory(".cli-inline-dash-live-");
   const schema = `zm_inline_dash_${Date.now().toString(36)}`;
   try {
@@ -1584,8 +1583,7 @@ test("live plan connect failures are clean, warned, and redacted", () => {
 // wants to fail on contention opts in through the machine-readable `busy` flag in
 // the `--json` reply, which is why that flag is asserted here too.
 test("CLI status and plan answer while a peer holds the project lock", async (t) => {
-  const holder = await connectLivePg(t);
-  if (holder === null) return;
+  const holder = await connectLivePg();
   const cwd = temporaryDirectory(".cli-lock-busy-");
   const schema = `zm_lock_busy_${Date.now().toString(36)}`;
   let held = false;
@@ -1706,8 +1704,7 @@ test("CLI status and plan answer while a peer holds the project lock", async (t)
 // document to stdout under `--json` and callers parse it, so diagnostics on that
 // stream would corrupt the reply.
 test("ZERO_MIGRATE_LOG shows a real cleanup failure on stderr", async (t) => {
-  const holder = await connectLivePg(t);
-  if (holder === null) return;
+  const holder = await connectLivePg();
   const cwd = temporaryDirectory(".cli-log-cleanup-");
   const schema = `zm_log_cleanup_${Date.now().toString(36)}`;
   let held = false;
@@ -1824,16 +1821,7 @@ test("ZERO_MIGRATE_LOG shows a real cleanup failure on stderr", async (t) => {
 // `resolve` has no arm here: it refuses any non-PostgreSQL driver before it reads,
 // so there is no MySQL busy path to assert.
 test("MySQL: CLI status and plan answer while a peer holds the project lock", async (t) => {
-  if (!MYSQL_URL) {
-    if (liveDbRequired()) {
-      throw new Error(
-        `${REQUIRE_LIVE_DB_ENV} demands a live database but ZERO_MIGRATE_MYSQL_URL is unset, ` +
-          "so this run has no live MySQL project-lock coverage to offer",
-      );
-    }
-    t.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL project-lock contention arm skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const mysql = (await import("mysql2/promise")).default;
   const holder = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });

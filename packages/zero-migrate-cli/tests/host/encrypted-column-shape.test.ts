@@ -44,7 +44,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -131,10 +131,7 @@ function apply(
 }
 
 test("PostgreSQL creates the companion column and records both sentinels", async (ctx) => {
-  if (!process.env.ZERO_MIGRATE_TEST_PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -206,10 +203,7 @@ test("SQLite carries both sentinels inline, having no comment feature", () => {
 
 test("MySQL creates both columns but records NEITHER sentinel", async (ctx) => {
   const mysqlUrl = process.env.ZERO_MIGRATE_MYSQL_URL;
-  if (!mysqlUrl) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset");
-    return;
-  }
+  requireLiveDb(mysqlUrl, MYSQL_URL_ENV, "MySQL");
   const driver = (await import("mysql2/promise")).default;
   const admin = await driver.createConnection({ uri: String(mysqlUrl) });
   const base = String(mysqlUrl).replace(/\/[^/]*$/, "");

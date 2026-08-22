@@ -49,6 +49,7 @@ import { fileURLToPath } from "node:url";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -260,10 +261,7 @@ function uniqueNamespace(prefix: string): string {
  *  than 20 wherever it happens. What differs per dialect is whether apply STOPS,
  *  which is what these arms measure. */
 test("a PostgreSQL schema whose journal schema was dropped refuses, and re-runs nothing", async (ctx) => {
-  if (!process.env.ZERO_MIGRATE_TEST_PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   const { pgUrl } = await import("./live-db.js");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
@@ -304,10 +302,7 @@ test("a PostgreSQL schema whose journal schema was dropped refuses, and re-runs 
 
 test("a MySQL database whose journal database was dropped refuses, and re-runs nothing", async (ctx) => {
   const mysqlUrl = process.env.ZERO_MIGRATE_MYSQL_URL;
-  if (!mysqlUrl) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset");
-    return;
-  }
+  requireLiveDb(mysqlUrl, MYSQL_URL_ENV, "MySQL");
   const driver = (await import("mysql2/promise")).default;
   const admin = await driver.createConnection({ uri: String(mysqlUrl) });
   const base = String(mysqlUrl).replace(/\/[^/]*$/, "");

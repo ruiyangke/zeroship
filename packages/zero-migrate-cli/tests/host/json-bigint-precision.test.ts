@@ -113,8 +113,7 @@ function run(work: string, schema: string, argv: string[]): { code: number | nul
 }
 
 test("history --json carries an event_seq beyond 2^53 exactly", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("jsonbig");
   const meta = `${schema}_migrations`;

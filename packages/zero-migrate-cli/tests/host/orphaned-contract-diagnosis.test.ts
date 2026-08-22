@@ -141,8 +141,7 @@ function runCli(work: string, schema: string, argv: string[]) {
 }
 
 test("a deleted rename file leaves an orphaned contract that status names and resolve cannot fix", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("orphan");
   const { work, renameFile } = project(schema);

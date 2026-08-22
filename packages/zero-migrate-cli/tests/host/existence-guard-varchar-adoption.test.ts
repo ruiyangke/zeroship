@@ -69,6 +69,7 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
 const OWNER_APP = "app_guard_varchar_adopt";
@@ -168,10 +169,7 @@ async function withSeededTable(
 }
 
 test("PostgreSQL: a guarded createTable adopts an existing length-qualified varchar column", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; varchar adoption e2e skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withSeededTable("guardvarchar_adopt_pg", "varchar(255)", async (client, schema, driver) => {
     assert.deepEqual(
       await pgColumnType(client, schema, "body"),
@@ -196,10 +194,7 @@ test("PostgreSQL: a guarded createTable adopts an existing length-qualified varc
 });
 
 test("PostgreSQL control: the same guarded createTable adopts an existing text column", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; text adoption control skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withSeededTable("guardvarchar_text_pg", "text", async (client, schema, driver) => {
     // The ONLY difference from the arm above is the column type -- an unqualified one.
     // This arm passing while that one fails is what proves the LENGTH QUALIFIER is the
@@ -220,10 +215,7 @@ test("PostgreSQL control: the same guarded createTable adopts an existing text c
 });
 
 test("PostgreSQL: a guarded createTable still fails closed on a genuinely divergent varchar length", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; varchar divergence e2e skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withSeededTable("guardvarchar_drift_pg", "varchar(255)", async (client, schema, driver) => {
     // Live varchar(255), declared varchar(100). Recovering the length is only a fix if
     // a DIFFERENT length is still a refusal: a "fix" that stopped comparing `data_type`,
@@ -338,10 +330,7 @@ async function mysqlColumnType(
 }
 
 test("MySQL: a guarded createTable refuses a divergent varchar width fail-closed", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL guarded adoption skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   await withSeededMysqlTable("guard_my_drift", "varchar(255)", async (admin, database, driver) => {
     await assert.rejects(
       applyGuarded(
@@ -361,10 +350,7 @@ test("MySQL: a guarded createTable refuses a divergent varchar width fail-closed
 });
 
 test("MySQL: the SAME guard refuses even when the declared type matches exactly", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL guarded adoption skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   // The arm that carries the finding. A refusal here cannot be a comparison
   // deciding the types differ, because they do not - it is the absence of any
   // comparison, failing closed. Nothing else in this suite says that.

@@ -136,8 +136,7 @@ function start(work: string, schema: string, argv: string[]) {
 }
 
 test("commit racing abort on the same rename leaves exactly one column", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("resolverace");
   const work = project(schema);

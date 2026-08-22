@@ -43,7 +43,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { pgUrl } from "./live-db.js";
+import { PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -155,10 +155,7 @@ async function run(
 }
 
 test("a create-time unique facet can be dropped by its derived name", async (ctx) => {
-  if (!process.env.ZERO_MIGRATE_TEST_PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   await run(
     `table("${TABLE}").create({
        columns: { id: t.int().notNull(), e: t.text().unique() },
@@ -186,10 +183,7 @@ test("a create-time unique facet can be dropped by its derived name", async (ctx
 });
 
 test("CONTROL: the addColumn route still drops by the same name", async (ctx) => {
-  if (!process.env.ZERO_MIGRATE_TEST_PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   // This route already produced a real constraint, so it must keep working -- the
   // tolerant path must not disturb the case that was never broken.
   await run(
@@ -206,10 +200,7 @@ test("CONTROL: the addColumn route still drops by the same name", async (ctx) =>
 });
 
 test("CONTROL: a name that is neither constraint nor index is STILL refused", async (ctx) => {
-  if (!process.env.ZERO_MIGRATE_TEST_PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(process.env.ZERO_MIGRATE_TEST_PG_URL, PG_URL_ENV, "PostgreSQL");
   // Without this, "tolerant" would mean "never fails", and every mistyped name
   // would become a silent no-op -- a far worse defect than the one being fixed.
   await run(

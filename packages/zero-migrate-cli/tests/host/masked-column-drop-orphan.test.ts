@@ -35,6 +35,7 @@ import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
+import { PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const PG_URL = process.env.ZERO_MIGRATE_TEST_PG_URL;
 const OWNER_APP = "app_masked_drop";
@@ -167,10 +168,7 @@ async function withPgSchema(
 }
 
 test("PostgreSQL: dropping a masked column takes its _masked sibling with it", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PostgreSQL masked-drop e2e skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   await withPgSchema("maskeddrop_pg", async (client, schema) => {
     const base = createMasked();
     const driver = { kind: "postgres" as const, url: PG_URL };

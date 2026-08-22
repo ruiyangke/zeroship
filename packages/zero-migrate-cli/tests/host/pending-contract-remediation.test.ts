@@ -160,8 +160,7 @@ function runBare(work: string, argv: string[]): Promise<Outcome> {
 }
 
 test("the pending-contract refusal names a command that exists and actually works", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("pendrem");
   const work = project(schema);
@@ -237,8 +236,7 @@ test("the pending-contract refusal names a command that exists and actually work
 });
 
 test("the verb the refusal used to name is still rejected, so the fix was not cosmetic", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("pendctl");
   const work = project(schema);

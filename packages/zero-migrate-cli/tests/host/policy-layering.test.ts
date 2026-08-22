@@ -73,8 +73,7 @@ const migration = {
 } as MigrationModule & { name: string };
 
 test("a later policy layer cannot remove, mandate, widen, or contradict the root", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 

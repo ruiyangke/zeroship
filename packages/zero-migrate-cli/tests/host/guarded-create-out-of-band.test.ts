@@ -35,6 +35,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import "./addon.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -113,10 +114,7 @@ function apply(work: string, url: string, namespace: string) {
 }
 
 test("MySQL refuses a guarded create of an out-of-band table during projection", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL out-of-band guard arm skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const connection = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
   const database = uniqueNamespace("oobguard_my");
@@ -155,10 +153,7 @@ test("MySQL refuses a guarded create of an out-of-band table during projection",
 });
 
 test("PostgreSQL absorbs the same out-of-band guarded create, the control for the MySQL arm", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset; PG out-of-band guard arm skipped");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: PG_URL });
   await client.connect();

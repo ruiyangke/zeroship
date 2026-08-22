@@ -147,8 +147,7 @@ function runCli(
 }
 
 test("writes through either column reach the other while the rename window is open", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("dualwrite");
   const work = project(schema);
@@ -240,8 +239,7 @@ test("the dual-write trigger is really what carries it, not a default or a copy 
   // commit step. Dropping the trigger and repeating one write separates those:
   // with the trigger gone the mirror must NOT happen, which is the only thing
   // that proves the trigger was doing the work.
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("dualctl");
   const work = project(schema);

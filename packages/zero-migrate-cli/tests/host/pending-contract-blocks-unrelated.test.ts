@@ -158,8 +158,7 @@ function runCli(work: string, schema: string, argv: string[]) {
 }
 
 test("TODAY an open rename window blocks a deploy on an unrelated table", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("unrelated");
   const work = project(schema);

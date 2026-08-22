@@ -128,8 +128,7 @@ function apply(work: string, schema: string) {
 }
 
 test("a misspelled foreign-key option applies clean and lands no constraint", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   // `foriegnKeys` is the transposition a real author makes; `fk` is the plausible
   // abbreviation. Both are silently accepted today.
@@ -244,8 +243,7 @@ test("a misspelled foreign-key option applies clean and lands no constraint", as
 // Same inverted-style contract as the test above: it pins CURRENT behaviour and
 // fails when the runtime starts rejecting unknown keys.
 test("a misspelled existence guard applies unguarded and fails on an existing object", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const results: Record<string, { code: number | null; err: string }> = {};
   for (const spelling of ["ifNotExists", "ifNotExist"]) {

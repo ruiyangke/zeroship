@@ -9,9 +9,10 @@ import {
 import type { JsReply, JsRequest } from "../../src/addon.js";
 import { history } from "../../src/index.js";
 import { noInjectPolicy } from "./policy.js";
+import { MYSQL_URL_ENV, requireLiveDb } from "./live-db.js";
 
-// Gate the live-server test on the same env var the neighbouring MySQL host tests
-// use, so a contributor without MySQL skips instead of failing.
+// The live-server test REQUIRES the same env var the neighbouring MySQL host tests
+// require: an unset DSN fails it rather than reporting a pass it never earned.
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 
 test("MySQL exact integers remain numeric parameters", () => {
@@ -62,10 +63,7 @@ function driveVerb(
 // the SERVER reports both modes. This fails if the pin statement is never issued,
 // which asserting on the constant alone cannot detect.
 test("Live MySQL host session reports both pinned sql_mode modes back from the server", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset -- live MySQL session sql_mode read-back skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
 
   const session = await openMysqlSession(MYSQL_URL);
   try {

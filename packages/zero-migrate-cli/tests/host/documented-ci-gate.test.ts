@@ -115,10 +115,8 @@ function busyGatePasses(document: string): boolean {
 }
 
 test("the documented CI gate passes when idle and fails while a deploy runs", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
-  const holder = await connectLivePg(ctx);
-  if (!holder) return;
+  const client = await connectLivePg();
+  const holder = await connectLivePg();
 
   const schema = uniqueNamespace("cigate");
   const work = project(schema);

@@ -158,8 +158,7 @@ async function withSchema<T>(
 }
 
 test("a table rename reaches the view body a rollback re-creates from", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   // `connectLivePg` registers no teardown, so the client has to be closed here. An

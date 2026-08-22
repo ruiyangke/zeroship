@@ -143,8 +143,7 @@ function start(work: string, schema: string, argv: string[]) {
 }
 
 test("apply racing rollback leaves a journal and a schema that agree", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("raceroll");
   const meta = `${schema}_migrations`;

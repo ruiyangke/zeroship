@@ -168,8 +168,7 @@ test("plan authors once and validates the envelope it returns", () => {
 // `connectLivePg`.
 // ---------------------------------------------------------------------------
 test("Node-native apply: napi addon lowers + applies the authored IR over the pg driver", async (t) => {
-  const probe = await connectLivePg(t);
-  if (!probe) return;
+  const probe = await connectLivePg();
 
   const mig = await loadMigration();
   const schema = uniqueSchema("node_authoring");

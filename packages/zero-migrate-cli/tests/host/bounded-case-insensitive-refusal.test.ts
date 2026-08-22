@@ -60,8 +60,7 @@ function migrationDeclaring(name: string, column: () => unknown): NamedMigration
 }
 
 test("a bounded string cannot be case-insensitive, and the refusal names the facet", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const projectSchema = uniqueNamespace("boundedci_pg");
   const meta = `${projectSchema}_migrations`;

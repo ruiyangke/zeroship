@@ -73,8 +73,7 @@ function uniqueNamespace(prefix: string): string {
 }
 
 test("status --strict watches the journal, not the live schema", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("strict_scope");
   const work = mkdtempSync(join(HERE, "strict-scope-"));

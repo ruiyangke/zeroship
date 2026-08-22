@@ -87,8 +87,7 @@ scope = "all"
 }
 
 test("a backfill visits every row exactly once, whatever its cursor values sort like", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
@@ -226,8 +225,7 @@ test("a backfill visits every row exactly once, whatever its cursor values sort 
 // component, then both - because a fix that aliased only the leading key would
 // pass a test that only ever inverted the leading one.
 test("a composite cursor visits every row exactly once under the same inversions", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 

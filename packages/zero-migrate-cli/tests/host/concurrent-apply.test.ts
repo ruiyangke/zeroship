@@ -151,8 +151,7 @@ function spawnVerb(
 }
 
 test("racing applies never double-apply: one wins, the journal holds each version once", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("concurrent_safe");
   const meta = `${schema}_migrations`;
@@ -197,8 +196,7 @@ test("racing applies never double-apply: one wins, the journal holds each versio
 });
 
 test("a racing first deploy no longer fails with a raw PostgreSQL catalog error", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("concurrent_boot");
   const meta = `${schema}_migrations`;
@@ -276,8 +274,7 @@ test("a racing first deploy no longer fails with a raw PostgreSQL catalog error"
  *  What may NOT happen is either process surfacing PostgreSQL's own catalog error,
  *  and the deploy must still land its table. */
 test("a status racing a first deploy breaks neither", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("concurrent_status");
   const meta = `${schema}_migrations`;

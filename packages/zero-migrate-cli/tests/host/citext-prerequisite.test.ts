@@ -65,8 +65,7 @@ function caseInsensitiveMigration(): NamedMigration {
 }
 
 test("the documented case-insensitive spelling fails at apply when citext is not installed", async (ctx) => {
-  const admin = await connectLivePg(ctx);
-  if (!admin) return;
+  const admin = await connectLivePg();
 
   // The whole arm is meaningless on a database that already has the extension, and
   // silently meaningless is the failure mode worth avoiding: it would pass by

@@ -16,7 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
@@ -118,8 +118,7 @@ async function withProject(
   prefix: string,
   body: (client: NonNullable<Awaited<ReturnType<typeof connectLivePg>>>, schema: string) => Promise<void>,
 ): Promise<void> {
-  const client = await connectLivePg(t);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueSchema(prefix);
   const meta = `${schema}_migrations`;
@@ -312,10 +311,7 @@ test("F658: MySQL stores the reverse too, read back from the journal itself", as
   // MySQL journals through CompletedRecord, a different path from the PostgreSQL
   // insert, so "PostgreSQL stores it" was never evidence for MySQL.
   const url = process.env.ZERO_MIGRATE_MYSQL_URL;
-  if (!url) {
-    t.skip("ZERO_MIGRATE_MYSQL_URL unset");
-    return;
-  }
+  requireLiveDb(url, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const admin = await mysql.createConnection({ uri: url, multipleStatements: true });
   const database = `f658_${Date.now().toString(36)}`;

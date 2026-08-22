@@ -93,8 +93,7 @@ function runCli(
 }
 
 test("the shipped hr-system example applies and its rename resolves, carrying the data", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("hrexample");
   try {

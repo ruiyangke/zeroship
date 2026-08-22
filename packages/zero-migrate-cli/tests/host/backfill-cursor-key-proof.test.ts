@@ -215,8 +215,7 @@ async function runCase(
 
 for (const testCase of REFUSED) {
   test(`PostgreSQL refuses a backfill cursored on ${testCase.label}`, async (ctx) => {
-    const client = await connectLivePg(ctx);
-    if (!client) return;
+    const client = await connectLivePg();
     try {
       const { error, values } = await runCase(client, testCase);
 
@@ -256,8 +255,7 @@ for (const testCase of REFUSED) {
 /** The control. Without it every arm above would pass against a planner that
  *  refused all backfills, and the six refusals would say nothing. */
 test("PostgreSQL accepts a backfill cursored on an exact primary key", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   try {
     const { error, values } = await runCase(client, {
       label: "exact primary key",

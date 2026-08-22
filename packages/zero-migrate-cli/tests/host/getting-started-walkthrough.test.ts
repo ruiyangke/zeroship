@@ -154,8 +154,7 @@ function run(work: string, argv: string[]): { code: number | null; out: string; 
 }
 
 test("the documented walkthrough runs end to end, in order, with the documented files", async (ctx) => {
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace("walkthrough");
   const work = project(schema);

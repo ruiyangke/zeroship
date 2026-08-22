@@ -34,7 +34,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -137,10 +137,7 @@ function apply(
 }
 
 test("collapse leaves PostgreSQL genuinely partitioned", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const client = new pg.Client({ connectionString: pgUrl() });
   await client.connect();
@@ -177,10 +174,7 @@ test("collapse leaves PostgreSQL genuinely partitioned", async (ctx) => {
 });
 
 test("collapse produces a single table on MySQL", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const driver = (await import("mysql2/promise")).default;
   const connection = await driver.createConnection({ uri: String(MYSQL_URL) });
   const namespace = uniqueNamespace("pcollapse_my");

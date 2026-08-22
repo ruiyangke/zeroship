@@ -90,8 +90,7 @@ function diagnosedStepIds(result: { stdout: string; stderr: string }): string[] 
 // that lost a file must name that file's journal step exactly once. Splitting it
 // would make the second arm re-run the first as unasserted setup.
 test("CLI apply names a deleted migration's journal step once, and only it", async (t) => {
-  const client = await connectLivePg(t);
-  if (client === null) return;
+  const client = await connectLivePg();
   const cwd = temporaryDirectory(".cli-orphan-journal-");
   const schema = uniqueSchema("zm_orphan");
   try {
@@ -184,8 +183,7 @@ test("CLI apply names a deleted migration's journal step once, and only it", asy
 // the old step and the deploy is asked to apply a migration whose prefix no longer
 // accounts for it.
 test("CLI apply refuses a pending migration when a completed step has no file", async (t) => {
-  const client = await connectLivePg(t);
-  if (client === null) return;
+  const client = await connectLivePg();
   const cwd = temporaryDirectory(".cli-missing-prefix-");
   const schema = uniqueSchema("zm_prefix");
   try {

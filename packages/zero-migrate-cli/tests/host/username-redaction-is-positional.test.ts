@@ -49,7 +49,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, PG_URL_ENV, pgUrl, requireLiveDb } from "./live-db.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";
@@ -150,10 +150,7 @@ const ROLE = TABLE;
 const ROLE_PASSWORD = "Zm0nlyForThisTest";
 
 test("a username matching a word in the diagnostic does not eat that word", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const admin = new pg.Client({ connectionString: pgUrl() });
   await admin.connect();
@@ -254,10 +251,7 @@ test("a username matching a word in the diagnostic does not eat that word", asyn
  *  Nothing caught it: the sibling suite asserts the password never leaks, and the
  *  password does not appear there. */
 test("the username is still redacted where the text marks it as one", async (ctx) => {
-  if (!PG_URL) {
-    ctx.skip("ZERO_MIGRATE_TEST_PG_URL unset");
-    return;
-  }
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   // Deliberately a user that does not exist: the server rejects the credentials
   // and names the user back, without needing any role to be provisioned.
   const GHOST = "zm_ghost_user";
@@ -315,10 +309,7 @@ test("the username is still redacted where the text marks it as one", async (ctx
  *  correction to this fix still left MySQL leaking, so both are pinned. */
 test("MySQL's access-denied message does not echo the username either", async (ctx) => {
   const mysqlUrl = process.env.ZERO_MIGRATE_MYSQL_URL;
-  if (!mysqlUrl) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset");
-    return;
-  }
+  requireLiveDb(mysqlUrl, MYSQL_URL_ENV, "MySQL");
   const GHOST = "zm_ghost_my";
   const GHOST_PASSWORD = "WrongPass123";
   const target = new URL(mysqlUrl);

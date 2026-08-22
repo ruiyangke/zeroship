@@ -157,9 +157,8 @@ function lintDialect(unique: boolean, dialect: "postgres" | "mysql" | "sqlite"):
   }
 }
 
-async function plan(t: TestContext, unique: boolean): Promise<CliResult | null> {
-  const client = await connectLivePg(t);
-  if (!client) return null;
+async function plan(unique: boolean): Promise<CliResult> {
+  const client = await connectLivePg();
 
   const schema = uniqueNamespace(unique ? "lock_adv_unique" : "lock_adv_plain");
   const work = baseProject();
@@ -195,13 +194,13 @@ test("lint --explain control: a plain addColumn surfaces no locking advisory", (
 });
 
 test("plan surfaces the unique addColumn ACCESS EXCLUSIVE advisory without gating", async (t) => {
-  const result = await plan(t, true);
-  if (result) assertLockAdvisory(result, "plan");
+  const result = await plan(true);
+  assertLockAdvisory(result, "plan");
 });
 
 test("plan control: a plain addColumn surfaces no locking advisory", async (t) => {
-  const result = await plan(t, false);
-  if (result) assertNoLockAdvisory(result, "plan");
+  const result = await plan(false);
+  assertNoLockAdvisory(result, "plan");
 });
 
 test("F657: a dialect the analyzer cannot read says so instead of reporting clean", () => {

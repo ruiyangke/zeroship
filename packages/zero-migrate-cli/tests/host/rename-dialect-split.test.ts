@@ -34,7 +34,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { connectLivePg, pgUrl } from "./live-db.js";
+import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI_BIN = resolve(HERE, "../../src/cli-bin.ts");
@@ -201,8 +201,7 @@ test("SQLite completes the rename in one deploy, values intact", () => {
 test("PostgreSQL opens a window instead: both columns, values in both", async (ctx) => {
   // The contrast that makes the SQLite arm mean something. Same authored line,
   // and the old column is still there afterwards.
-  const client = await connectLivePg(ctx);
-  if (!client) return;
+  const client = await connectLivePg();
   const schema = uniqueNamespace("renamesplit");
   const work = project(schema);
   try {
@@ -240,10 +239,7 @@ test("PostgreSQL opens a window instead: both columns, values in both", async (c
 });
 
 test("MySQL refuses the rename at apply, leaving the table as it was", async (ctx) => {
-  if (!MYSQL_URL) {
-    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; MySQL rename refusal skipped");
-    return;
-  }
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const mysql = (await import("mysql2/promise")).default;
   const database = uniqueNamespace("renamesplitmy");
   const admin = await mysql.createConnection({ uri: MYSQL_URL, multipleStatements: true });
