@@ -39,6 +39,7 @@
 //! filed by each descriptor, so the contract contains no enum match and a fourth
 //! backend requires no contract edit. Engine callers pass that open id directly.
 
+use crate::advisory::OperationalAdvisor;
 use crate::ddl::DdlEmitter;
 use crate::existence_probe::ExistenceProbePolicy;
 use crate::fold::CatalogFoldPolicy;
@@ -78,10 +79,10 @@ pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
 /// # Every field is REQUIRED, and `guard` is why that matters
 ///
 /// This struct derives no `Default`, has no `Default` impl, and is not
-/// `#[non_exhaustive]`. All nine fields must be written out in a struct literal at the
-/// vendor's own definition site. A new backend that ships no DDL emitter or no guard
-/// therefore fails to compile **in its own crate, named** — E0063 for the missing
-/// field — rather than picking one up by omission.
+/// `#[non_exhaustive]`. All ten fields must be written out in a struct literal at the
+/// vendor's own definition site. A new backend that ships no DDL emitter, no guard or
+/// no advisor therefore fails to compile **in its own crate, named** — E0063 for the
+/// missing field — rather than picking one up by omission.
 ///
 /// That is the whole point of the field. It replaced a `guard_for(cfg)` function whose
 /// match on the former closed dialect enum handed both descriptor-only dialects one shared
@@ -138,6 +139,22 @@ pub struct BackendVendor {
     ///
     /// [`GuardOutcome`]: crate::guard::GuardOutcome
     pub guard: GuardFactory,
+    /// What this vendor says about a migration's OPERATIONAL risk — the advisory
+    /// half of the contract, next to `guard`'s security half.
+    ///
+    /// Required, never defaulted, for the same reason `guard` is. A backend that
+    /// ships no analyzer must say so by returning
+    /// [`AdvisoryVerdict::NotAnalyzed`](crate::advisory::AdvisoryVerdict::NotAnalyzed)
+    /// with its own reason — visible in the diff, attributable to the vendor, and
+    /// impossible to acquire by forgetting something. An `Option` here, or a default
+    /// body on either trait method, would hand a future backend a SILENTLY empty
+    /// advisory report, which is exactly the "unchecked reads as clean" defect
+    /// [`AnalyzerAbsent`](crate::advisory::AnalyzerAbsent) documents.
+    ///
+    /// A `&'static dyn` rather than a factory because an analyzer is stateless: it
+    /// reads SQL and nothing else. `guard` is a `fn` pointer only because it carries
+    /// the per-migration [`GuardConfig`] it decides against.
+    pub advisor: &'static dyn OperationalAdvisor,
 }
 
 /// The "a vendor that ships no guard does not compile" property, pinned as a
@@ -170,6 +187,7 @@ pub struct BackendVendor {
 /// use zero_migrate_backend::registry::BackendVendor;
 /// use zero_migrate_backend::registry::DdlFactory;
 /// use zero_migrate_backend::renderer::DmlRenderer;
+/// use zero_migrate_backend::advisory::OperationalAdvisor;
 /// use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
 /// use zero_migrate_backend::fold::CatalogFoldPolicy;
 /// use zero_migrate_backend::schema::SchemaRenderer;
@@ -185,6 +203,7 @@ pub struct BackendVendor {
 ///     catalog_fold: &'static dyn CatalogFoldPolicy,
 ///     validation: &'static dyn ValidationPolicy,
 ///     ddl: DdlFactory,
+///     advisor: &'static dyn OperationalAdvisor,
 /// ) -> BackendVendor {
 ///     BackendVendor {
 ///         descriptor,
@@ -195,6 +214,7 @@ pub struct BackendVendor {
 ///         catalog_fold,
 ///         validation,
 ///         ddl,
+///         advisor,
 ///     }
 /// }
 /// ```
@@ -206,6 +226,57 @@ pub struct BackendVendor {
 /// ```compile_fail
 /// struct TrustsEverything;
 /// impl zero_migrate_backend::guard::MigrationGuard for TrustsEverything {}
+/// ```
+///
+/// (3) The same property for `advisor`, which is a SEPARATE block precisely because
+/// each of these must fail for exactly one reason. Here `guard` IS supplied and
+/// `advisor` is the only omission, so this block goes green the moment the advisor
+/// field acquires a `Default`, an `Option`, or a `#[non_exhaustive]` escape hatch —
+/// which is the failure mode it exists to catch:
+///
+/// ```compile_fail
+/// use zero_migrate_backend::registry::BackendVendor;
+/// use zero_migrate_backend::registry::{DdlFactory, GuardFactory};
+/// use zero_migrate_backend::renderer::DmlRenderer;
+/// use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
+/// use zero_migrate_backend::fold::CatalogFoldPolicy;
+/// use zero_migrate_backend::schema::SchemaRenderer;
+/// use zero_migrate_backend::value_format::ValueFormatRenderer;
+/// use zero_migrate_backend::validation::ValidationPolicy;
+/// use zero_migrate_ir::backend::BackendDescriptor;
+/// fn vendor(
+///     descriptor: &'static BackendDescriptor,
+///     dml: &'static dyn DmlRenderer,
+///     schema: &'static dyn SchemaRenderer,
+///     value_format: &'static dyn ValueFormatRenderer,
+///     existence_probe: &'static dyn ExistenceProbePolicy,
+///     catalog_fold: &'static dyn CatalogFoldPolicy,
+///     validation: &'static dyn ValidationPolicy,
+///     ddl: DdlFactory,
+///     guard: GuardFactory,
+/// ) -> BackendVendor {
+///     BackendVendor {
+///         descriptor,
+///         dml,
+///         schema,
+///         value_format,
+///         existence_probe,
+///         catalog_fold,
+///         validation,
+///         ddl,
+///         guard,
+///     }
+/// }
+/// ```
+///
+/// (4) And an `OperationalAdvisor` impl that supplies no method MUST fail to
+/// compile — E0046, for the same reason as (2): no default body, so "this backend
+/// ships no analyzer" cannot be inherited in silence.
+///
+/// ```compile_fail
+/// #[derive(Debug)]
+/// struct AnalyzesNothing;
+/// impl zero_migrate_backend::advisory::OperationalAdvisor for AnalyzesNothing {}
 /// ```
 #[cfg(doctest)]
 struct VendorWithoutAGuardCompileFail;

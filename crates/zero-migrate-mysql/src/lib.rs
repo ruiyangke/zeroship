@@ -22,6 +22,7 @@
 //! `zero_migrate_backend::dml`'s header carries the numbers. The identifier seam
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
+mod advisory;
 pub mod collation;
 mod ddl;
 mod descriptor;
@@ -45,9 +46,10 @@ use zero_migrate_backend::registry::BackendVendor;
 /// in-crate `match` used to give for free and which `pub` statics would have thrown
 /// away at exactly the moment the vendor became separately linkable.
 ///
-/// `value_format`, `validation`, `ddl`, and `guard` are REQUIRED. Delete any line and this literal stops
+/// `value_format`, `validation`, `ddl`, `guard` and `advisor` are REQUIRED. Delete any line and this literal stops
 /// compiling, here, with this crate named — which is the point: a backend cannot
-/// inherit another backend's DDL or acquire a trusting guard by omission. See
+/// inherit another backend's DDL, acquire a trusting guard, or acquire a silently
+/// empty advisory report by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.
 pub static VENDOR: BackendVendor = BackendVendor {
     descriptor: &descriptor::MYSQL_DESCRIPTOR,
@@ -59,4 +61,5 @@ pub static VENDOR: BackendVendor = BackendVendor {
     validation: &validation::POLICY,
     ddl: ddl::emitter,
     guard: guard::guard,
+    advisor: &advisory::ADVISOR,
 };
