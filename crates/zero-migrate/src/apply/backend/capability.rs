@@ -2,114 +2,18 @@
 
 use crate::analysis::analyze::Advisory;
 use crate::apply::drift::{DriftError, StructuralDrift};
-use crate::apply::journal::JournalError;
 use crate::apply::role::RoleError;
 use crate::conn::{ConnectError, ExecutorConfig};
 use crate::engine::{DeclarativeDeployPlan, EngineError, OnlineError};
-use crate::guard::GuardError;
 use crate::model::migration::{Migration, MigrationId};
 use crate::render::declarative::{DeclarativeError, DesiredSchema};
 use crate::render::expand_contract::OnlineIntent;
 
-pub use crate::model::backfill::BackfillSpec;
-
-/// What a Postgres backfill run did.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackfillOutcome {
-    /// The backfill's stable id (the progress-row key).
-    pub backfill_id: String,
-    /// Number of batches committed **this run**.
-    pub batches: u64,
-    /// Number of rows updated **this run**.
-    pub rows_updated: u64,
-    /// `true` if a prior progress row was found and this run resumed.
-    pub resumed: bool,
-    /// `true` when the backfill reached the end of the table.
-    pub complete: bool,
-}
-
-/// Error from a backend backfill executor.
-#[derive(Debug, thiserror::Error)]
-pub enum BackfillError {
-    /// A progress / journal-schema operation failed.
-    #[error(transparent)]
-    Journal(#[from] JournalError),
-    /// A test-only injected fault at a batch boundary.
-    #[error("backfill fault-injection: {0}")]
-    Fault(String),
-    /// A backfill mutates table data and requires explicit approval.
-    #[error("backfill requires Approval::Approved (it mutates table data) but it was not given")]
-    ApprovalRequired,
-    /// A stable backfill step was resumed with different authored content.
-    #[error("checksum drift on backfill {version}: progress has {recorded}, plan has {expected}")]
-    ChecksumDrift {
-        /// The stable plan-step version.
-        version: String,
-        /// The checksum stored with the progress row.
-        recorded: String,
-        /// The checksum supplied by the current plan.
-        expected: String,
-    },
-    /// A bare SQL identifier in the spec is invalid.
-    #[error("invalid identifier for {what}: {value:?} (must be a bare [A-Za-z_][A-Za-z0-9_]* identifier)")]
-    InvalidIdentifier {
-        /// Which field was invalid.
-        what: &'static str,
-        /// The offending value.
-        value: String,
-    },
-    /// A structured backfill specification is internally inconsistent.
-    #[error("invalid backfill specification: {0}")]
-    InvalidSpec(String),
-    /// [`BackfillSpec::batch_size`] was zero.
-    #[error("batch_size must be non-zero")]
-    InvalidBatchSize,
-    /// The assembled statement was denied by the SQL guard.
-    #[error("backfill assembled statement denied by guard: {source}")]
-    Guard {
-        /// The underlying guard rejection.
-        #[source]
-        source: GuardError,
-    },
-    /// The target table or one of the cursor components cannot be resolved.
-    #[error("backfill target not found: {0}")]
-    TargetNotFound(String),
-    /// The ordered cursor tuple is not a usable unique, non-null paging key.
-    #[error(
-        "cursorColumns {cursor_columns:?} on {table:?} cannot provide a stable resumable \
-         backfill cursor ({reason}); choose a one-shot update under a maintenance window, a \
-         target-specific rebuild or temporary surrogate, or creation of a stable unique cursor \
-         in an earlier migration"
-    )]
-    CursorTupleUnavailable {
-        /// The target table.
-        table: String,
-        /// The offending ordered cursor tuple.
-        cursor_columns: Vec<String>,
-        /// Why it was rejected.
-        reason: String,
-    },
-    /// The authored transform mutates a cursor component.
-    #[error(
-        "backfill transform assigns cursor component {cursor_component:?}; no cursorColumns \
-         component may change while the operation pages"
-    )]
-    CursorComponentMutated {
-        /// The cursor component the transform illegally assigns.
-        cursor_component: String,
-    },
-    /// A paged backfill batch failed after the last committed cursor.
-    #[error("backfill batch failed at cursor {at_cursor:?}: {source_msg}")]
-    BatchFailedAtCursor {
-        /// The last committed cursor when the failing batch started.
-        at_cursor: Option<String>,
-        /// The backend error message from the failed batch.
-        source_msg: String,
-    },
-    /// The SQLite migration connection can no longer be safely reused.
-    #[error("sqlite backfill connection poisoned: {0}")]
-    SqlitePoisoned(String),
-}
+// ── What a backfill IS, what running one produces, and how one refuses: all four
+// now live with the backend contract, beside the `BackfillSpec` a vendor executor
+// is handed. Re-exported so `capability::{BackfillSpec, BackfillOutcome,
+// BackfillError}` still resolve.
+pub use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillSpec};
 
 /// The online schema-change capability — the dialect-neutral seam the generic
 /// declarative apply path uses to drive a zero-downtime online operation.
@@ -226,28 +130,4 @@ pub trait ShadowDryRun {
         shadow_cfg: &'a ShadowConfig,
         applied_by: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<DryRunReport, DryRunError>> + 'a>>;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::BackfillError;
-
-    /// "A paged batch failed after the last committed cursor" is engine-independent
-    /// — PostgreSQL reports the same condition as an unprefixed "batch failed after
-    /// cursor ...". The variant name is compiler-checked, but this operator-facing
-    /// string is not, and nothing else in the tree pins it, so a drift back to a
-    /// vendor spelling would otherwise be silent.
-    #[test]
-    fn batch_failure_message_names_no_engine() {
-        let rendered = BackfillError::BatchFailedAtCursor {
-            at_cursor: Some("[1]".to_string()),
-            source_msg: "disk I/O error".to_string(),
-        }
-        .to_string();
-
-        assert_eq!(
-            rendered,
-            "backfill batch failed at cursor Some(\"[1]\"): disk I/O error"
-        );
-    }
 }

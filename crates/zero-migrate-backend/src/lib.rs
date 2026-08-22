@@ -82,6 +82,11 @@ pub mod backfill;
 pub mod ddl;
 pub mod descriptors;
 pub mod dml;
+// The drift-report VOCABULARY a backend's drift query hands back: the checksum /
+// tamper / orphan shapes, the structural-divergence shapes, their aggregate and
+// the shared `DriftError`. The comparison algorithms that produce them stay in
+// the engine. The engine re-exports these at `zero_migrate::apply::drift`.
+pub mod drift;
 // The dialect-neutral network driver seam (`SqlSession`) and its conformance
 // suite. A CONTRACT with no vendor in it: `std` is its only dependency, it
 // spells no keyword and names no dialect, and the network backends are generic

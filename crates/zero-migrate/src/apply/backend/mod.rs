@@ -56,6 +56,10 @@ pub use mysql::{
     MysqlInflightResolution,
 };
 pub use postgres::PostgresBackend;
+// The progress row a resumable backfill reads back. It moved down beside the
+// `BackfillSpec` it describes progress THROUGH; re-exported so
+// `apply::backend::BackfillProgressEntry` resolves unchanged.
+pub use zero_migrate_backend::backfill::BackfillProgressEntry;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -118,23 +122,6 @@ pub enum PlaceholderStyle {
     Numbered,
     /// MySQL: the anonymous positional `?` (order-of-appearance binding).
     Question,
-}
-
-/// Read-only progress evidence for one resumable plan backfill.
-///
-/// `version` is the stable journal/progress identity of the lowered backfill
-/// step. `checksum` is optional for compatibility with progress tables created
-/// before the checksum column existed; a missing value is treated as drift by
-/// plan-status reconciliation. `complete` does not by itself mean applied: the
-/// ordinary `schema_migrations` completed event remains the source of truth.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackfillProgressEntry {
-    /// Stable plan-step identity stored as `backfill_id`.
-    pub version: String,
-    /// Authoritative artifact checksum recorded when the backfill began.
-    pub checksum: Option<String>,
-    /// Whether the progress row reached its tail.
-    pub complete: bool,
 }
 
 impl PlaceholderStyle {

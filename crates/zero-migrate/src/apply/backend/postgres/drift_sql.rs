@@ -42,12 +42,6 @@ use crate::render::value_format::{
 };
 use zero_migrate_ir::dialect::DialectId;
 
-impl From<crate::driver::DbError> for DriftError {
-    fn from(error: crate::driver::DbError) -> Self {
-        Self::Db(error.into())
-    }
-}
-
 /// Compare the journal's NET-applied checksums against the supplied migration
 /// set.
 ///
