@@ -24,6 +24,7 @@
 
 use zero_migrate_backend::dml::DmlError;
 use zero_migrate_backend::error::IrLowerError;
+use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{ColumnCollationSnapshot, ColumnSnapshot, IdDefaultSnapshot};
@@ -69,6 +70,27 @@ struct DuckDbSchemaRenderer;
 
 #[derive(Debug)]
 struct DuckDbValueFormatRenderer;
+
+#[derive(Debug)]
+struct DuckDbExistenceProbePolicy;
+
+impl ExistenceProbePolicy for DuckDbExistenceProbePolicy {
+    fn unique_index_carries_constraint_identity(&self) -> bool {
+        false
+    }
+
+    fn unresolved_constraint_drop_reason(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn normalize_constraint_definition(&self, definition: &str) -> String {
+        definition.to_string()
+    }
+
+    fn truncated_identifier(&self, _authored: &str) -> Option<String> {
+        None
+    }
+}
 
 impl DmlRenderer for DuckDbDmlRenderer {
     fn descriptor(&self) -> &'static BackendDescriptor {
@@ -513,6 +535,7 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     let dml: &dyn DmlRenderer = &DuckDbDmlRenderer;
     let schema: &dyn SchemaRenderer = &DuckDbSchemaRenderer;
     let value_format: &dyn ValueFormatRenderer = &DuckDbValueFormatRenderer;
+    let existence_probe: &dyn ExistenceProbePolicy = &DuckDbExistenceProbePolicy;
 
     assert_eq!(dml.dialect(), DUCKDB);
     assert_eq!(schema.dialect(), DUCKDB);
@@ -529,6 +552,13 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
         ("VARCHAR".to_string(), None),
         "the outsider writes its own value-format refusal/pass-through"
     );
+    assert!(!existence_probe.unique_index_carries_constraint_identity());
+    assert_eq!(existence_probe.unresolved_constraint_drop_reason(), None);
+    assert_eq!(
+        existence_probe.normalize_constraint_definition("CHECK (x > 0)"),
+        "CHECK (x > 0)"
+    );
+    assert_eq!(existence_probe.truncated_identifier("duckdb_name"), None);
 
     // Capabilities come off the outsider's OWN descriptor, so the answers are the
     // ones it declared — not the "no to everything" a core-owned id->capability

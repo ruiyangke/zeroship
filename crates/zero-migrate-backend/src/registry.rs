@@ -41,6 +41,7 @@
 //! still convert their target to that id until the enum is deleted.
 
 use crate::ddl::DdlEmitter;
+use crate::existence_probe::ExistenceProbePolicy;
 use crate::guard::{GuardConfig, MigrationGuard};
 use crate::renderer::DmlRenderer;
 use crate::schema::SchemaRenderer;
@@ -76,7 +77,7 @@ pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
 /// # Every field is REQUIRED, and `guard` is why that matters
 ///
 /// This struct derives no `Default`, has no `Default` impl, and is not
-/// `#[non_exhaustive]`. All six fields must be written out in a struct literal at the
+/// `#[non_exhaustive]`. All seven fields must be written out in a struct literal at the
 /// vendor's own definition site. A new backend that ships no DDL emitter or no guard
 /// therefore fails to compile **in its own crate, named** — E0063 for the missing
 /// field — rather than picking one up by omission.
@@ -103,6 +104,13 @@ pub struct BackendVendor {
     /// Required, never defaulted. Catalog normalization is a vendor fact just as
     /// surely as emitted DDL is; a future backend must write its own answer.
     pub value_format: &'static dyn ValueFormatRenderer,
+    /// How this vendor's catalog identities behave under existence probes.
+    ///
+    /// Required, never defaulted. A future backend must explicitly state whether
+    /// unique indexes carry constraint identity, whether a constraint miss proves
+    /// absence, how constraint definitions normalize, and whether its catalog
+    /// silently truncates identifiers.
+    pub existence_probe: &'static dyn ExistenceProbePolicy,
     /// How this vendor spells schema-changing statements.
     ///
     /// Required, never defaulted. A vendor cannot silently inherit another backend's
@@ -149,6 +157,7 @@ pub struct BackendVendor {
 /// use zero_migrate_backend::registry::BackendVendor;
 /// use zero_migrate_backend::registry::DdlFactory;
 /// use zero_migrate_backend::renderer::DmlRenderer;
+/// use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
 /// use zero_migrate_backend::schema::SchemaRenderer;
 /// use zero_migrate_backend::value_format::ValueFormatRenderer;
 /// use zero_migrate_ir::backend::BackendDescriptor;
@@ -157,6 +166,7 @@ pub struct BackendVendor {
 ///     dml: &'static dyn DmlRenderer,
 ///     schema: &'static dyn SchemaRenderer,
 ///     value_format: &'static dyn ValueFormatRenderer,
+///     existence_probe: &'static dyn ExistenceProbePolicy,
 ///     ddl: DdlFactory,
 /// ) -> BackendVendor {
 ///     BackendVendor {
@@ -164,6 +174,7 @@ pub struct BackendVendor {
 ///         dml,
 ///         schema,
 ///         value_format,
+///         existence_probe,
 ///         ddl,
 ///     }
 /// }

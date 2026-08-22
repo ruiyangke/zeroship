@@ -723,7 +723,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         match crate::render::existence_probe::decide(
             probe,
             &live,
-            crate::schema::query::SqlDialect::Postgres,
+            &zero_migrate_ir::dialect::POSTGRES,
         ) {
             crate::render::existence_probe::GuardVerdict::RunBare => { /* fall through */ }
             crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {
@@ -1065,7 +1065,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
         match crate::render::existence_probe::decide(
             probe,
             &live,
-            crate::schema::query::SqlDialect::Postgres,
+            &zero_migrate_ir::dialect::POSTGRES,
         ) {
             crate::render::existence_probe::GuardVerdict::RunBare => { /* continue below */ }
             crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {

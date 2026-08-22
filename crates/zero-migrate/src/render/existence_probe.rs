@@ -101,9 +101,9 @@
 
 use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::plan::author::pg_max_ident_bytes;
-use crate::render::renderer::{Capability, DialectSupports};
-use crate::schema::query::SqlDialect;
+use crate::render::renderer::Capability;
+use zero_migrate_backend::registry::BackendVendor;
+use zero_migrate_ir::dialect::DialectId;
 
 // `GuardProbe::schema()` now lives on the type itself in `zero_migrate_ir::probe`
 // (the type moved into the leaf wire-contract crate — an inherent `impl` here would
@@ -143,9 +143,8 @@ pub enum GuardVerdict {
 /// See the module docs for the per-variant fail-closed rules.
 ///
 /// `dialect` is the backend the LIVE snapshot was introspected from. It is the
-/// caller-known fact (the PG executor passes [`SqlDialect::Postgres`], the SQLite
-/// backend passes [`SqlDialect::Sqlite`], and the MySQL backend passes
-/// [`SqlDialect::Mysql`]), NOT carried on the wire-serialized probe.
+/// caller-known open identity used to resolve that backend's registered probe
+/// policy, NOT carried on the wire-serialized probe.
 ///
 /// **F1** — the declared probe `data_type` is ALWAYS the PG `information_schema`
 /// spelling (the snapshot builder maps via the PG dialect, dialect-agnostically),
@@ -159,14 +158,15 @@ pub enum GuardVerdict {
 /// `createTable`/`addColumn` re-run is idempotent for every type, while a real
 /// affinity change still diverges.
 #[must_use]
-pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) -> GuardVerdict {
+pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: &DialectId) -> GuardVerdict {
+    let vendor = crate::render::backends::vendor(dialect);
     match probe {
         GuardProbe::Table {
             table,
             direction,
             expect_columns,
             ..
-        } => decide_table(table, *direction, expect_columns, live, dialect),
+        } => decide_table(table, *direction, expect_columns, live, vendor),
         GuardProbe::Partition {
             name,
             of,
@@ -180,7 +180,7 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             direction,
             expect,
             ..
-        } => decide_column(table, column, *direction, expect.as_ref(), live, dialect),
+        } => decide_column(table, column, *direction, expect.as_ref(), live, vendor),
         GuardProbe::Index {
             table,
             name,
@@ -195,7 +195,7 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             expect.as_ref(),
             *ownership_only,
             live,
-            dialect,
+            vendor,
         ),
         GuardProbe::Constraint {
             table,
@@ -211,7 +211,7 @@ pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: SqlDialect) ->
             expect_kind.as_deref(),
             expect_definition.as_deref(),
             live,
-            dialect,
+            vendor,
         ),
         GuardProbe::View {
             name, direction, ..
@@ -420,7 +420,7 @@ fn decide_table(
     direction: GuardDir,
     expect_columns: &[ExpectColumn],
     live: &SchemaSnapshot,
-    dialect: SqlDialect,
+    vendor: &BackendVendor,
 ) -> GuardVerdict {
     let present = live.tables.contains_key(table);
     match direction {
@@ -458,7 +458,7 @@ fn decide_table(
                             expect_nullable: ec.nullable,
                             live_dtype: &live_col.data_type,
                             live_nullable: live_col.nullable,
-                            dialect,
+                            vendor,
                         }) {
                             return v;
                         }
@@ -487,7 +487,7 @@ fn decide_column(
     direction: GuardDir,
     expect: Option<&(String, bool)>,
     live: &SchemaSnapshot,
-    dialect: SqlDialect,
+    vendor: &BackendVendor,
 ) -> GuardVerdict {
     let present = column_present(live, table, column);
     match direction {
@@ -534,7 +534,7 @@ fn decide_column(
                 expect_nullable: *nullable,
                 live_dtype: &live_col.data_type,
                 live_nullable: live_col.nullable,
-                dialect,
+                vendor,
             })
             .unwrap_or(GuardVerdict::SatisfiedNoop)
         }
@@ -545,8 +545,8 @@ fn decide_column(
 /// seam takes one argument instead of eight positional scalars (the two callers —
 /// `decide_table` per declared column, `decide_column` for the stand-alone
 /// addColumn — build it inline). `expect_*` is the declared shape; `live_*` is the
-/// introspected catalog shape; `dialect` selects the compare (raw on PG, canonical
-/// affinity-fold on SQLite).
+/// introspected catalog shape; `vendor` selects the registered catalog
+/// canonicalization policy.
 struct ExpectColumnShape<'a> {
     table: &'a str,
     column: &'a str,
@@ -554,7 +554,7 @@ struct ExpectColumnShape<'a> {
     expect_nullable: bool,
     live_dtype: &'a str,
     live_nullable: bool,
-    dialect: SqlDialect,
+    vendor: &'a BackendVendor,
 }
 
 /// Compare a declared column shape against the live one. Returns a `FailDrift`
@@ -597,14 +597,14 @@ fn column_shape_divergence(shape: &ExpectColumnShape<'_>) -> Option<GuardVerdict
         expect_nullable,
         live_dtype,
         live_nullable,
-        dialect,
+        vendor,
     } = *shape;
     // **F1** — on SQLite, compare the canonical AFFINITY (PG-spelled snapshot folded
     // to the SQLite affinity the emitter would have written, AND the already-SQLite
     // live token folded to the same canonical form). On PG, compare the raw
     // `information_schema` spellings unchanged.
-    let backend = crate::render::backends::schema_renderer(&dialect.id());
-    let dtypes_match = backend.canonical_type(expect_dtype) == backend.canonical_type(live_dtype);
+    let dtypes_match =
+        vendor.schema.canonical_type(expect_dtype) == vendor.schema.canonical_type(live_dtype);
     if !dtypes_match {
         return Some(drift(
             &format!("column {table}.{column}"),
@@ -631,7 +631,7 @@ fn decide_index(
     expect: Option<&(bool, Vec<String>)>,
     ownership_only: bool,
     live: &SchemaSnapshot,
-    dialect: SqlDialect,
+    vendor: &BackendVendor,
 ) -> GuardVerdict {
     // Look up the index under the probe's table first. A same-name index on a
     // DIFFERENT table means different things per dialect, so the wider scan is
@@ -651,7 +651,10 @@ fn decide_index(
     // (`apply::backend::postgres::session`), and the fold's `DuplicateIndex` check
     // keys on the target table's own index list, never on which OTHER table owns a
     // name. Noted, not silently narrowed.
-    let schema_wide = dialect.supports(Capability::SchemaWideIndexNames);
+    let schema_wide = vendor
+        .descriptor
+        .capabilities
+        .contains(Capability::SchemaWideIndexNames);
     let on_probe_table = |candidate: &str| {
         live.tables
             .get(table)
@@ -700,7 +703,7 @@ fn decide_index(
         };
     }
     if let Some(verdict) =
-        truncated_identifier_backstop("index", name, direction, dialect, |candidate| {
+        truncated_identifier_backstop("index", name, direction, vendor, |candidate| {
             on_probe_table(candidate).is_some() || other_owner(candidate).is_some()
         })
     {
@@ -797,7 +800,7 @@ fn decide_constraint(
     expect_kind: Option<&str>,
     expect_definition: Option<&str>,
     live: &SchemaSnapshot,
-    dialect: SqlDialect,
+    vendor: &BackendVendor,
 ) -> GuardVerdict {
     let find = |candidate: &str| {
         let table = live.tables.get(table)?;
@@ -811,7 +814,9 @@ fn decide_constraint(
         // MySQL's catalog collapses a named table UNIQUE and its backing index
         // into one key object. Resolve constraints first because PRIMARY KEY is
         // filed in both buckets.
-        if matches!(dialect, SqlDialect::Mysql)
+        if vendor
+            .existence_probe
+            .unique_index_carries_constraint_identity()
             && table
                 .indexes
                 .iter()
@@ -822,7 +827,7 @@ fn decide_constraint(
         None
     };
     if let Some(verdict) =
-        truncated_identifier_backstop("constraint", name, direction, dialect, |candidate| {
+        truncated_identifier_backstop("constraint", name, direction, vendor, |candidate| {
             find(candidate).is_some()
         })
     {
@@ -834,15 +839,16 @@ fn decide_constraint(
             // dropConstraint: presence-only on the constraint name.
             if live_con.is_some() {
                 GuardVerdict::RunBare
-            } else if matches!(dialect, SqlDialect::Mysql) {
-                // MySQL's snapshot retains no CHECK constraint identity. A miss
-                // cannot prove absence, and a no-op could skip a real DROP while
-                // journaling the migration as completed.
+            } else if let Some(reason) = vendor.existence_probe.unresolved_constraint_drop_reason()
+            {
+                // This backend's registered snapshot scope cannot prove absence.
+                // A no-op could skip a real DROP while journaling the migration as
+                // completed, so preserve the fail-closed conclusion.
                 drift(
                     &format!("constraint {name}"),
                     "presence",
                     "<absent>",
-                    "<unknown: MySQL's snapshot retains no CHECK constraint identity at all, so not found does not prove absent>",
+                    reason,
                 )
             } else {
                 GuardVerdict::SatisfiedNoop
@@ -867,7 +873,8 @@ fn decide_constraint(
             // succeeds instead of hard-FailDrift), and a divergent one (a re-pointed
             // FK target / changed column / ON-DELETE) is a real divergence we still
             // refuse, naming `definition`. The compare normalizes the referenced-table
-            // SCHEMA QUALIFIER out of both sides ([`normalize_fk_definition`]): the
+            // SCHEMA QUALIFIER out of both sides through the registered backend
+            // policy: the
             // declared side is always `REFERENCES <schema>.<table>` but
             // `pg_get_constraintdef` OMITS the schema when the referenced table is in
             // the live `search_path` (it is — same project schema, cross-app FKs are
@@ -875,7 +882,13 @@ fn decide_constraint(
             // Every MATERIAL divergence (target table, columns, ON DELETE/UPDATE,
             // DEFERRABLE) survives the normalization and is still caught.
             if let Some(decl_def) = expect_definition {
-                if normalize_fk_definition(decl_def) == normalize_fk_definition(live_definition) {
+                if vendor
+                    .existence_probe
+                    .normalize_constraint_definition(decl_def)
+                    == vendor
+                        .existence_probe
+                        .normalize_constraint_definition(live_definition)
+                {
                     return GuardVerdict::SatisfiedNoop;
                 }
                 return drift(
@@ -911,79 +924,8 @@ fn decide_constraint(
     }
 }
 
-/// Normalize a FOREIGN KEY `pg_get_constraintdef` body for a search_path-invariant
-/// structural compare (F2): strip the referenced-table SCHEMA QUALIFIER that appears
-/// right after `REFERENCES `. The declared side (`fk_definition_pg`) ALWAYS qualifies
-/// the target (`REFERENCES "schema".people(id)` or `REFERENCES schema.people(id)`),
-/// but `pg_get_constraintdef` OMITS the schema when the referenced table is in the
-/// live `search_path` (`REFERENCES people(id)`). The qualifier is the ONLY
-/// search_path-sensitive token; collapsing it makes the byte-compare stable while
-/// every material divergence (the referenced TABLE name, the column lists, the ON
-/// DELETE/UPDATE actions, the DEFERRABLE clause) is preserved.
-///
-/// A cross-schema FK is rejected at author time (`reject_cross_app_ref`), so the
-/// referenced table is always in the project schema — there is no case where dropping
-/// the schema would conflate two different targets.
-fn normalize_fk_definition(def: &str) -> String {
-    const NEEDLE: &str = "REFERENCES ";
-    let Some(pos) = def.find(NEEDLE) else {
-        return def.to_string();
-    };
-    let after = pos + NEEDLE.len();
-    let rest = &def[after..];
-    // The referenced object reference runs up to the opening `(` of its column list.
-    let Some(paren_rel) = rest.find('(') else {
-        return def.to_string();
-    };
-    let obj = &rest[..paren_rel]; // e.g. `"schema".people` / `schema.people` / `people`
-                                  // Keep only the FINAL dotted segment (the table), dropping any `<schema>.` prefix.
-                                  // Handles quoted identifiers by splitting on the last `.`.
-                                  //
-                                  // **SAFE post-validation** — `rsplit('.')` would mis-split a referenced table
-                                  // whose own (quoted) identifier contained a literal dot (e.g. `"a.b"`). That
-                                  // case is UNREACHABLE here: the declared side is built by
-                                  // [`crate::render::declarative::fk_definition_pg`] from a `target` that has already
-                                  // passed `validate_ident` (rejects `.` in identifiers) and `reject_cross_app_ref`
-                                  // (rejects dotted FK targets, `declarative.rs`), so the referenced table is
-                                  // ALWAYS a single dot-free segment. The live side comes from
-                                  // `pg_get_constraintdef`, which double-quotes such a name — but the catalog only
-                                  // ever holds names this same author path created, so it is dot-free too. The
-                                  // debug_assert pins that invariant; if identifier rules ever loosen this must
-                                  // become a quote-aware split.
-    let table_seg = obj.rsplit('.').next().unwrap_or(obj).trim();
-    debug_assert!(
-        !table_seg.trim_matches('"').contains('.'),
-        "FK referenced table segment must be dot-free post-validation (validate_ident / \
-         reject_cross_app_ref); got {table_seg:?} from {def:?}"
-    );
-    let mut out = String::with_capacity(def.len());
-    out.push_str(&def[..after]);
-    out.push_str(table_seg);
-    out.push_str(&rest[paren_rel..]);
-    out
-}
-
-/// PostgreSQL's OWN spelling of an over-long identifier: the longest prefix of WHOLE
-/// characters that fits in [`pg_max_ident_bytes`].
-///
-/// The budget is bytes (NAMEDATALEN) but the clip is on a character boundary — verified
-/// against a live PostgreSQL 18 server, where a 62-ASCII-byte prefix plus a two-byte
-/// character (64 bytes) becomes the 62 ASCII bytes rather than a 63rd byte that would
-/// split the codepoint. Mirrors the char-boundary discipline of
-/// [`crate::plan::author::cap_ident_name`].
-fn pg_truncated_identifier(name: &str) -> String {
-    let mut out = String::with_capacity(pg_max_ident_bytes());
-    for ch in name.chars() {
-        if out.len() + ch.len_utf8() > pg_max_ident_bytes() {
-            break;
-        }
-        out.push(ch);
-    }
-    out
-}
-
-/// Refuse a guarded op whose authored name PostgreSQL cannot hold, so the verdict can
-/// never be a no-op the journal then records as done work.
+/// Refuse a guarded op whose authored name the selected backend silently truncates,
+/// so the verdict can never be a no-op the journal then records as done work.
 ///
 /// A migration carrying a probe can reach the executor without lowering ever having run
 /// — `Migration::existence_guard` is a public field on a struct that is not
@@ -1000,28 +942,25 @@ fn pg_truncated_identifier(name: &str) -> String {
 /// - `IfNotExists` — refuse before the lookup, because `RunBare` would CREATE an object
 ///   under the truncated name while the engine carries the authored one.
 ///
-/// PostgreSQL ONLY. SQLite caps identifiers not at all and MySQL caps them at 64
-/// CHARACTERS rather than bytes, so an over-long name can name a real object in either
-/// catalog and applying the byte rule there would strand it.
+/// Whether truncation occurs, and the catalog spelling it produces, are required
+/// answers on the selected backend's [`ExistenceProbePolicy`](zero_migrate_backend::existence_probe::ExistenceProbePolicy).
 fn truncated_identifier_backstop(
     kind: &str,
     name: &str,
     direction: GuardDir,
-    dialect: SqlDialect,
+    vendor: &BackendVendor,
     present: impl Fn(&str) -> bool,
 ) -> Option<GuardVerdict> {
-    if !matches!(dialect, SqlDialect::Postgres) || name.len() <= pg_max_ident_bytes() {
-        return None;
-    }
-    let truncated = pg_truncated_identifier(name);
+    let truncated = vendor.existence_probe.truncated_identifier(name)?;
     match direction {
         GuardDir::IfNotExists => Some(drift(
             &format!("{kind} {name}"),
             "name",
             name,
             &format!(
-                "<{} bytes; PostgreSQL would create {truncated:?} instead>",
-                name.len()
+                "<{} bytes; {} would create {truncated:?} instead>",
+                name.len(),
+                vendor.descriptor.display_name
             ),
         )),
         GuardDir::IfExists => present(&truncated).then(|| {
@@ -1061,20 +1000,27 @@ mod tests {
         ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot, TableSnapshot,
     };
     use std::collections::BTreeMap;
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     /// `decide` on the PG leg (raw `information_schema` compare).
     fn decide_pg(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
-        decide(probe, live, SqlDialect::Postgres)
+        decide(probe, live, &POSTGRES)
     }
 
     /// `decide` on the SQLite leg (affinity-fold compare — F1).
     fn decide_sqlite(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
-        decide(probe, live, SqlDialect::Sqlite)
+        decide(probe, live, &SQLITE)
     }
 
     /// `decide` on the MySQL leg (constraint-first catalog resolution).
     fn decide_mysql(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
-        decide(probe, live, SqlDialect::Mysql)
+        decide(probe, live, &MYSQL)
+    }
+
+    fn normalize_pg_constraint_definition(definition: &str) -> String {
+        crate::render::backends::vendor(&POSTGRES)
+            .existence_probe
+            .normalize_constraint_definition(definition)
     }
 
     fn col(name: &str, dtype: &str, nullable: bool) -> ColumnSnapshot {
@@ -1453,11 +1399,7 @@ mod tests {
         let mut live = snapshot_with("users", table_owning("idx_shared"));
         live.tables.insert("orders".to_string(), empty_table());
         assert_eq!(
-            decide(
-                &ownership_probe("orders", "idx_shared"),
-                &live,
-                SqlDialect::Mysql
-            ),
+            decide(&ownership_probe("orders", "idx_shared"), &live, &MYSQL),
             GuardVerdict::RunBare
         );
     }
@@ -1467,7 +1409,10 @@ mod tests {
         // The truncation backstop refuses EVERY over-long `IfNotExists` name. An
         // unguarded create carries no author request to be refused on a name
         // PostgreSQL accepts today, so the ownership path returns before it.
-        let long = "i".repeat(pg_max_ident_bytes() + 8);
+        // Reads PostgreSQL's DECLARED cap off its descriptor rather than restating
+        // `63`. A test that hardcodes the number still passes against a stale value
+        // if the declared limit ever moves, which is the drift decision 3 closed.
+        let long = "i".repeat(crate::plan::author::pg_max_ident_bytes() + 8);
         let live = snapshot_with("users", empty_table());
         assert_eq!(
             decide_pg(&ownership_probe("users", &long), &live),
@@ -1536,7 +1481,7 @@ mod tests {
                 assert_eq!(divergence.expected, "<absent>");
                 assert_eq!(
                     divergence.actual,
-                    "<unknown: MySQL's snapshot retains no CHECK constraint identity at all, so not found does not prove absent>"
+                    "<unknown: the MySQL snapshot's constraint scope excludes arbitrary CHECK identities, so not found does not prove absent>"
                 );
             }
             verdict => panic!("expected FailDrift(presence), got {verdict:?}"),
@@ -1807,14 +1752,15 @@ mod tests {
     #[test]
     fn normalize_fk_definition_strips_referenced_schema_qualifier() {
         // Quoted, bare, and already-unqualified targets all normalize to the same form.
-        let a = normalize_fk_definition(
+        let a = normalize_pg_constraint_definition(
             "FOREIGN KEY (owner) REFERENCES \"app\".people(id) ON DELETE RESTRICT",
         );
-        let b = normalize_fk_definition(
+        let b = normalize_pg_constraint_definition(
             "FOREIGN KEY (owner) REFERENCES app.people(id) ON DELETE RESTRICT",
         );
-        let c =
-            normalize_fk_definition("FOREIGN KEY (owner) REFERENCES people(id) ON DELETE RESTRICT");
+        let c = normalize_pg_constraint_definition(
+            "FOREIGN KEY (owner) REFERENCES people(id) ON DELETE RESTRICT",
+        );
         assert_eq!(a, c);
         assert_eq!(b, c);
         assert!(
@@ -1822,7 +1768,7 @@ mod tests {
             "table + columns preserved: {c}"
         );
         // A re-pointed target survives normalization → still DIFFERENT.
-        let d = normalize_fk_definition(
+        let d = normalize_pg_constraint_definition(
             "FOREIGN KEY (owner) REFERENCES app.companies(id) ON DELETE RESTRICT",
         );
         assert_ne!(
@@ -1840,9 +1786,10 @@ mod tests {
         // segment is the dot-free table. A quoted reserved-word SCHEMA qualifier must
         // still strip cleanly to the dot-free table, MATCHING the bare-schema and
         // already-unqualified forms (the debug_assert must NOT fire on this path).
-        let quoted_schema =
-            normalize_fk_definition("FOREIGN KEY (owner) REFERENCES \"order\".people(id)");
-        let bare = normalize_fk_definition("FOREIGN KEY (owner) REFERENCES people(id)");
+        let quoted_schema = normalize_pg_constraint_definition(
+            "FOREIGN KEY (owner) REFERENCES \"order\".people(id)",
+        );
+        let bare = normalize_pg_constraint_definition("FOREIGN KEY (owner) REFERENCES people(id)");
         assert_eq!(
             quoted_schema, bare,
             "a quoted schema qualifier over a dot-free table normalizes to the bare form"

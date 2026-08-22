@@ -1365,7 +1365,7 @@ fn projection_guard_verdict(
                 zero_migrate::PlanStep::Ddl(migration) => migration.existence_guard.as_ref(),
                 _ => None,
             };
-            match probe.map(|probe| decide(probe, snapshot, dialect)) {
+            match probe.map(|probe| decide(probe, snapshot, &dialect.id())) {
                 Some(GuardVerdict::SatisfiedNoop) => {}
                 Some(GuardVerdict::FailDrift(found)) => {
                     all_satisfied = false;

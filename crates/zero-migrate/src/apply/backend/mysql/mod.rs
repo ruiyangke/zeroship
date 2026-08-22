@@ -5067,7 +5067,7 @@ mod render_tests {
                 assert_eq!(field, "presence");
                 assert_eq!(expected, "<absent>");
                 assert!(
-                    actual.contains("retains no CHECK constraint identity"),
+                    actual.contains("constraint scope excludes arbitrary CHECK identities"),
                     "{actual}"
                 );
             }

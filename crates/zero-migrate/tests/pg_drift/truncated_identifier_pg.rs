@@ -32,7 +32,7 @@ use zero_migrate::model::probe::{GuardDir, GuardProbe};
 use zero_migrate::render::existence_probe::{decide, GuardVerdict};
 use zero_migrate::{
     apply, snapshot_schema, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase,
-    SqlDialect,
+    SqlDialect, POSTGRES,
 };
 
 /// PostgreSQL's NAMEDATALEN-derived identifier bound, in bytes.
@@ -218,7 +218,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
         expect_kind: None,
         expect_definition: None,
     };
-    match decide(&probe, &live, SqlDialect::Postgres) {
+    match decide(&probe, &live, &POSTGRES) {
         GuardVerdict::FailDrift(divergence) => assert_eq!(
             divergence.actual, truncated,
             "the verdict must name the truncated spelling the catalog holds"
@@ -240,7 +240,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
         .as_ref()
         .expect("the guarded drop carries a probe");
     assert_eq!(
-        decide(remedy_probe, &live, SqlDialect::Postgres),
+        decide(remedy_probe, &live, &POSTGRES),
         GuardVerdict::RunBare,
         "the catalog's own spelling matches, so the drop runs"
     );

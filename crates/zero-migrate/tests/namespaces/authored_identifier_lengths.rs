@@ -623,7 +623,7 @@ fn assert_ifexists_miss(
 ) {
     let mysql_constraint =
         matches!(dialect, SqlDialect::Mysql) && matches!(probe, GuardProbe::Constraint { .. });
-    let verdict = decide(probe, live, dialect);
+    let verdict = decide(probe, live, &dialect.id());
     if mysql_constraint {
         match verdict {
             GuardVerdict::FailDrift(divergence) => {
@@ -631,8 +631,8 @@ fn assert_ifexists_miss(
                 assert!(
                     divergence
                         .actual
-                        .contains("retains no CHECK constraint identity"),
-                    "{label} ifExists on MySQL names the snapshot ambiguity"
+                        .contains("constraint scope excludes arbitrary CHECK identities"),
+                    "{label} ifExists on MySQL names the engine snapshot scope"
                 );
             }
             verdict => panic!(
@@ -659,7 +659,7 @@ fn an_over_long_if_exists_name_whose_truncation_is_live_fails_closed_on_postgres
         match decide(
             &probe(&authored, GuardDir::IfExists),
             &live(&truncated),
-            SqlDialect::Postgres,
+            &POSTGRES,
         ) {
             GuardVerdict::FailDrift(divergence) => assert_eq!(
                 divergence.actual, truncated,
@@ -691,7 +691,7 @@ fn the_derived_truncation_clips_on_a_character_boundary() {
         match decide(
             &probe(&authored, GuardDir::IfExists),
             &live(&truncated),
-            SqlDialect::Postgres,
+            &POSTGRES,
         ) {
             GuardVerdict::FailDrift(divergence) => assert_eq!(divergence.actual, truncated),
             verdict => panic!("{label}: expected a fail-closed verdict, got {verdict:?}"),
@@ -710,7 +710,7 @@ fn an_over_long_if_exists_name_absent_in_every_spelling_still_noops() {
             decide(
                 &probe(&authored, GuardDir::IfExists),
                 &empty_live(),
-                SqlDialect::Postgres
+                &POSTGRES,
             ),
             GuardVerdict::SatisfiedNoop,
             "{label}: a genuinely absent object is what ifExists is for"
@@ -727,7 +727,7 @@ fn an_over_long_if_not_exists_name_fails_closed_on_postgres() {
         match decide(
             &probe(&authored, GuardDir::IfNotExists),
             &empty_live(),
-            SqlDialect::Postgres,
+            &POSTGRES,
         ) {
             GuardVerdict::FailDrift(_) => {}
             verdict => panic!(
@@ -746,7 +746,11 @@ fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
     for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
         for (label, probe, live) in probe_cases() {
             assert_eq!(
-                decide(&probe(&name, GuardDir::IfExists), &live(&name), dialect),
+                decide(
+                    &probe(&name, GuardDir::IfExists),
+                    &live(&name),
+                    &dialect.id(),
+                ),
                 GuardVerdict::RunBare,
                 "{label} ifExists on {dialect:?}: a live object still runs the drop"
             );
@@ -758,7 +762,11 @@ fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
                 "an absent object still no-ops",
             );
             assert_eq!(
-                decide(&probe(&name, GuardDir::IfNotExists), &empty_live(), dialect),
+                decide(
+                    &probe(&name, GuardDir::IfNotExists),
+                    &empty_live(),
+                    &dialect.id(),
+                ),
                 GuardVerdict::RunBare,
                 "{label} ifNotExists on {dialect:?}: an absent object still creates"
             );
@@ -779,7 +787,7 @@ fn an_over_long_name_is_not_truncated_on_mysql_or_sqlite() {
                 decide(
                     &probe(&authored, GuardDir::IfExists),
                     &live(&authored),
-                    dialect
+                    &dialect.id(),
                 ),
                 GuardVerdict::RunBare,
                 "{label} ifExists on {dialect:?}: the catalog can hold the full name"
@@ -795,7 +803,7 @@ fn an_over_long_name_is_not_truncated_on_mysql_or_sqlite() {
                 decide(
                     &probe(&authored, GuardDir::IfNotExists),
                     &empty_live(),
-                    dialect
+                    &dialect.id(),
                 ),
                 GuardVerdict::RunBare,
                 "{label} ifNotExists on {dialect:?}: an absent object still creates"

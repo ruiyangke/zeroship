@@ -636,7 +636,11 @@ impl MigrationBackend for SqliteBackend {
                 .map_err(|e| {
                     ApplyError::Backend(format!("sqlite existence-guard snapshot failed: {e}"))
                 })?;
-            match crate::render::existence_probe::decide(probe, &live, SqlDialect::Sqlite) {
+            match crate::render::existence_probe::decide(
+                probe,
+                &live,
+                &zero_migrate_ir::dialect::SQLITE,
+            ) {
                 crate::render::existence_probe::GuardVerdict::RunBare => {
                     return journal_sql::apply_one_additive(&self.actor, m, applied_by)
                         .await

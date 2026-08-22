@@ -943,7 +943,7 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
         match crate::render::existence_probe::decide(
             probe,
             &live,
-            crate::schema::query::SqlDialect::Mysql,
+            &zero_migrate_ir::dialect::MYSQL,
         ) {
             crate::render::existence_probe::GuardVerdict::RunBare => {}
             crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {
