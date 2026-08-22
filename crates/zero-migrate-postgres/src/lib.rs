@@ -26,6 +26,7 @@ mod ddl;
 mod descriptor;
 mod dml;
 mod existence_probe;
+mod fold;
 pub mod guard;
 mod schema;
 mod value_format;
@@ -73,6 +74,7 @@ pub static VENDOR: BackendVendor = BackendVendor {
     schema: &schema::RENDERER,
     value_format: &value_format::RENDERER,
     existence_probe: &existence_probe::POLICY,
+    catalog_fold: &fold::POLICY,
     ddl: ddl::emitter,
     guard: guard::guard,
 };

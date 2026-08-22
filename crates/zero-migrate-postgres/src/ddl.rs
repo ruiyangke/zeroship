@@ -212,6 +212,22 @@ impl DdlEmitter for PgEmitter {
         PgEmitter::fk_clause(self, fk)
     }
 
+    fn alter_table_ref(&self, table: &str) -> String {
+        self.qualified(table)
+    }
+
+    fn drop_foreign_key_up(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            self.qualified(table),
+            quote_ident(name),
+        ))
+    }
+
+    fn alter_column_refs(&self, table: &str, column: &str) -> (String, String) {
+        (self.qualified(table), quote_ident(column))
+    }
+
     fn indexes_inlined_by_create(&self, _req: &CreateTableRequest<'_>) -> Vec<String> {
         Vec::new()
     }

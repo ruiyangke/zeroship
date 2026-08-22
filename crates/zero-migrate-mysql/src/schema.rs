@@ -5,7 +5,7 @@ use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{
     char_len, decimal_precision_scale, def_case_sensitive, SchemaRenderer,
 };
-use zero_migrate_backend::snapshot::ColumnSnapshot;
+use zero_migrate_backend::snapshot::{ColumnSnapshot, MysqlPhysicalType};
 use zero_migrate_ir::dialect::{DialectId, MYSQL};
 
 /// This module's own vendor identity.
@@ -39,6 +39,10 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         format!("{}.{}", self.quote_ident(app_id), self.quote_ident(target))
     }
 
+    fn canonical_fk_target(&self, schema: &str, target: &str) -> String {
+        format!("{schema}.{target}")
+    }
+
     fn column_type(&self, c: &ColumnSnapshot, _inline_pk: bool) -> String {
         if let Some(ty) = &c.ddl_type_override {
             return mysql_pin_native_enum_collation(ty, c.case_sensitive);
@@ -66,6 +70,158 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         } else {
             mysql_pin_native_enum_collation(&rendered, c.case_sensitive)
         }
+    }
+
+    /// Stamp [`ColumnSnapshot::mysql_physical_type`] from the column's FINAL rendered
+    /// type. A no-op off MySQL.
+    ///
+    /// Derived from what the renderer DECIDES, not from `data_type`, so it accounts for
+    /// `ddl_type_override` and the unbounded-text spelling the same way the emitted DDL
+    /// does. Reading the renderer's input instead would describe a column this engine
+    /// never creates.
+    ///
+    /// `inline_pk` is false because it is read only on the SQLite rowid-alias leg
+    /// (the SQLite vendor's `sqlite_auto_increment_identity_pk`); the MySQL arm never
+    /// consults it.
+    ///
+    /// The live side parses MySQL's own `COLUMN_TYPE` through the same function. That is
+    /// what lets the two sides agree despite spelling apart: the renderer emits
+    /// `DECIMAL(65, 30)` and MySQL stores `decimal(65,30)`, and both parse to the same
+    /// values.
+    ///
+    /// # Why this is a FUNCTION rather than three lines at the end of one builder
+    ///
+    /// The field is a PROJECTION of the finished column, and this builder is not the last
+    /// writer of what it projects. `data_type` and `ddl_type_override` are rewritten
+    /// AFTER it returns by every facet the builder cannot see from a `FieldDescriptor`
+    /// alone - the author type override (`numeric`/`DECIMAL(p, s)`), the UUID column
+    /// metadata, the value-format metadata, the bytewise collation override, and the
+    /// named-type metadata - in the fold replay and in the lowerer alike. A stamp taken
+    /// before those ran describes the type the column briefly had.
+    ///
+    /// MEASURED on live MySQL 8.4, through the real pipeline: a `createTable` carrying
+    /// `decimal(12, 2)` folded `Plain { kind: "double" }` while the server held
+    /// `Decimal { precision: 12, scale: 2 }`, and structural drift reported
+    /// `column amount data_type expected "numeric" actual "decimal"` against a database
+    /// that was exactly what had been deployed. A `uuid` column folded
+    /// `Character { length: 191 }` against a live `Character { length: 36 }` at the same
+    /// time. So the derivation has ONE spelling and gets applied wherever a column stops
+    /// changing - see `render::fold::restamp_mysql_physical_types`.
+    ///
+    /// **Only MySQL.** `apply::drift::column_data_types_eq` consults the contract only
+    /// when BOTH sides carry one, and PostgreSQL/SQLite introspection leaves it `None`;
+    /// filling it on either would compare a contract against an absent one.
+    fn finalize_column_snapshot(&self, column: &mut ColumnSnapshot) {
+        let rendered = self.column_type(column, false);
+        column.mysql_physical_type = Some(MysqlPhysicalType::parse(&rendered));
+    }
+
+    /// MySQL cannot build the derived indexes over these BLOB-backed columns
+    /// without additional author choices, so it explicitly omits them.
+    fn project_derived_ann_index(
+        &self,
+        _index: &mut zero_migrate_backend::snapshot::IndexSnapshot,
+    ) -> bool {
+        false
+    }
+
+    /// Refuse every desired MySQL key whose rendered column storage is a LOB.
+    ///
+    /// InnoDB requires an index for BOTH sides of a foreign key and silently
+    /// synthesizes the child-side index when the author did not declare one. The
+    /// snapshot therefore has two key carriers to inspect: explicit/implicit
+    /// primary, unique, and ordinary indexes, plus each FOREIGN KEY's local and
+    /// referenced tuples. The IR has no prefix-length element, so none of these
+    /// can make a `TEXT`/`BLOB` key legal; letting one reach apply produces MySQL
+    /// error 1170 after earlier migration units may already have committed.
+    ///
+    /// Classification reads [`ColumnSnapshot::mysql_physical_type`], never the
+    /// neutral `data_type`: MySQL catalog normalization deliberately folds
+    /// `VARCHAR(n)` into `"text"`, while the physical contract preserves the
+    /// distinction between a bounded character column and a LOB.
+    fn validate_key_storage(
+        &self,
+        desired: &zero_migrate_backend::snapshot::SchemaSnapshot,
+        live: &zero_migrate_backend::snapshot::SchemaSnapshot,
+    ) -> Result<(), String> {
+        use zero_migrate_backend::ddl::{fk_local_columns, fk_referenced_columns, fk_target_table};
+
+        let check = |position: &str, table: &str, columns: &[String]| -> Result<(), String> {
+            let snapshot = desired.tables.get(table).or_else(|| live.tables.get(table));
+            let Some(snapshot) = snapshot else {
+                return Ok(());
+            };
+            for name in columns {
+                let Some(column) = snapshot.columns.iter().find(|column| column.name == *name)
+                else {
+                    continue;
+                };
+                let Some(MysqlPhysicalType::Lob { tier }) = &column.mysql_physical_type else {
+                    continue;
+                };
+                return Err(format!(
+                    "{position} keys {table}.{name}, which renders as MySQL {} storage; \
+                     MySQL refuses a key over a TEXT or BLOB column with no prefix length",
+                    tier.to_ascii_uppercase()
+                ));
+            }
+            Ok(())
+        };
+
+        for (table, snapshot) in &desired.tables {
+            for index in &snapshot.indexes {
+                check(
+                    &format!("desired index {}", index.name),
+                    table,
+                    &index.columns,
+                )?;
+            }
+            for constraint in &snapshot.constraints {
+                match constraint.kind.as_str() {
+                    "PRIMARY KEY" | "UNIQUE" => check(
+                        &format!("desired {} constraint {}", constraint.kind, constraint.name),
+                        table,
+                        &fk_local_columns(&constraint.definition),
+                    )?,
+                    "FOREIGN KEY" => {
+                        check(
+                            &format!("desired foreign key {} local key", constraint.name),
+                            table,
+                            &fk_local_columns(&constraint.definition),
+                        )?;
+                        if let Some(target) = fk_target_table(&constraint.definition) {
+                            check(
+                                &format!("desired foreign key {} target key", constraint.name),
+                                &target,
+                                &fk_referenced_columns(&constraint.definition),
+                            )?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn existing_column_change_strategy(
+        &self,
+    ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {
+        zero_migrate_backend::schema::ExistingColumnChangeStrategy::Refuse
+    }
+
+    fn column_rename_strategy(&self) -> zero_migrate_backend::schema::ColumnRenameStrategy {
+        zero_migrate_backend::schema::ColumnRenameStrategy::Refuse(
+            "renameColumn is render-only for MySQL, not live-rendered",
+        )
+    }
+
+    fn supports_forward_inline_foreign_key(&self) -> bool {
+        false
+    }
+
+    fn identity_column_type_allowed(&self, _data_type: &str) -> bool {
+        true
     }
 
     fn canonical_type(&self, raw: &str) -> String {
@@ -105,6 +261,29 @@ impl SchemaRenderer for MysqlSchemaRenderer {
 
     fn schema_string_literal(&self, value: &str) -> String {
         format!("_utf8mb4 X'{}'", hex::encode(value.as_bytes()))
+    }
+
+    fn schema_grammar_string_literal(&self, value: &str) -> String {
+        zero_migrate_backend::dml::mysql_grammar_string_literal(value)
+    }
+
+    fn empty_json_expr(&self, object: bool) -> &'static str {
+        if object {
+            "(JSON_OBJECT())"
+        } else {
+            "(JSON_ARRAY())"
+        }
+    }
+
+    fn empty_text_array_expr(&self) -> Option<&'static str> {
+        Some("(JSON_ARRAY())")
+    }
+
+    fn json_value_default_expr(&self, json: &str) -> String {
+        format!(
+            "(CAST({} AS JSON))",
+            crate::dml::RENDERER.inline_string_literal(json)
+        )
     }
 
     fn injected_column_ident(&self, name: &str, _canonical_bare: bool) -> String {

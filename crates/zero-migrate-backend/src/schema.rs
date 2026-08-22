@@ -26,8 +26,24 @@
 //! backend that owns them. This is the boundary rule stated at length in
 //! `zero_migrate::render::backends`.
 //!
-use crate::snapshot::ColumnSnapshot;
+use crate::snapshot::{ColumnSnapshot, IndexSnapshot, SchemaSnapshot};
 use zero_migrate_ir::dialect::DialectId;
+
+/// How a backend reconciles an existing column whose type/nullability changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExistingColumnChangeStrategy {
+    Native,
+    TableRebuild,
+    Refuse,
+}
+
+/// How a backend lowers a column rename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnRenameStrategy {
+    ExpandContract,
+    TableRebuild,
+    Refuse(&'static str),
+}
 
 /// Dialect-specific schema/DDL spelling.
 ///
@@ -88,7 +104,43 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     fn stored_ddl(&self) -> Option<&'static dyn crate::stored_ddl::StoredDdl>;
 
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
+
+    /// Compose a snapshot-normalized foreign-key target from already canonical
+    /// identifier tokens. Some catalogs retain a namespace qualifier and some
+    /// grammars prohibit one.
+    fn canonical_fk_target(&self, schema: &str, target: &str) -> String;
+
     fn column_type(&self, c: &ColumnSnapshot, inline_pk: bool) -> String;
+
+    /// Finalize vendor-owned physical metadata after every neutral column facet
+    /// has been applied.
+    ///
+    /// Required even for backends with no extra physical carrier: a new backend
+    /// must state whether the completed column needs a vendor-specific projection
+    /// instead of inheriting another engine's answer.
+    fn finalize_column_snapshot(&self, column: &mut ColumnSnapshot);
+
+    /// Project a derived vector/geospatial index into this backend's desired
+    /// catalog shape. Return false when this backend cannot build the derived
+    /// index at all.
+    fn project_derived_ann_index(&self, index: &mut IndexSnapshot) -> bool;
+
+    /// Validate vendor-specific physical key-storage restrictions after the
+    /// neutral desired shape is complete.
+    fn validate_key_storage(
+        &self,
+        desired: &SchemaSnapshot,
+        live: &SchemaSnapshot,
+    ) -> Result<(), String>;
+
+    /// Required structural strategies used by the neutral declarative planner.
+    fn existing_column_change_strategy(&self) -> ExistingColumnChangeStrategy;
+    fn column_rename_strategy(&self) -> ColumnRenameStrategy;
+    fn supports_forward_inline_foreign_key(&self) -> bool;
+
+    /// Whether this backend's identity-column implementation accepts the target
+    /// catalog type. Backends without this restriction explicitly return true.
+    fn identity_column_type_allowed(&self, data_type: &str) -> bool;
 
     /// Fold a raw catalog/DDL type spelling to this backend's drift-comparison
     /// token.
@@ -116,6 +168,21 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// Required because string-escape modes and literal carriers are vendor
     /// grammar, even when two vendors currently share quote doubling.
     fn schema_string_literal(&self, value: &str) -> String;
+
+    /// Render an author-controlled string where the vendor grammar requires a
+    /// quoted string token rather than a general string-valued expression.
+    fn schema_grammar_string_literal(&self, value: &str) -> String;
+
+    /// Spell an empty JSON object/array expression. `object` distinguishes the
+    /// two neutral container values without importing a core enum.
+    fn empty_json_expr(&self, object: bool) -> &'static str;
+
+    /// Spell an empty text-array expression, or explicitly refuse when this
+    /// backend has no text-array storage type.
+    fn empty_text_array_expr(&self) -> Option<&'static str>;
+
+    /// Spell one already-serialized JSON value as a column-default expression.
+    fn json_value_default_expr(&self, json: &str) -> String;
 
     /// Render one policy-owned injected column identifier.
     ///

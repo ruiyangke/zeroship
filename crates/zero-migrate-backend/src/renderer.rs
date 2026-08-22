@@ -131,6 +131,26 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// the value rather than deriving them from a name it recognises.
     fn descriptor(&self) -> &'static zero_migrate_ir::backend::BackendDescriptor;
 
+    /// Statements a copied offline preview must run before author SQL so its
+    /// grammar matches this backend's apply session.
+    fn preview_session_prologue(&self) -> &'static [&'static str];
+
+    /// Statements that restore session state after an executable preview.
+    fn preview_session_epilogue(&self) -> &'static [&'static str];
+
+    /// An optional backend-owned limitation sentence inserted into guarded-DDL
+    /// preview labels. The empty answer must be stated explicitly by each backend.
+    fn guarded_ddl_preview_limitation(&self) -> Option<&'static str>;
+
+    /// Whether ALTER-shaped schema operations require a live table projection
+    /// before this backend can render them.
+    fn alter_ops_require_live_schema(&self) -> bool;
+
+    /// A backend-owned authoring refusal for this concrete op shape. `None`
+    /// explicitly delegates to the neutral op-level reason table; core treats a
+    /// missing answer for a backend-specific branch as an internal defect.
+    fn op_support_refusal(&self, op: &Op, variant: &str) -> Option<&'static str>;
+
     /// Ask THIS backend a capability question.
     ///
     /// `supports` never branches on the vendor: it reads this vendor's descriptor,

@@ -254,6 +254,22 @@ impl DdlEmitter for MysqlEmitter {
         MysqlEmitter::fk_clause(self, fk)
     }
 
+    fn alter_table_ref(&self, table: &str) -> String {
+        self.qualified(table)
+    }
+
+    fn drop_foreign_key_up(&self, table: &str, name: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {} DROP FOREIGN KEY {}",
+            self.qualified(table),
+            mysql_quote_ident(name),
+        ))
+    }
+
+    fn alter_column_refs(&self, table: &str, column: &str) -> (String, String) {
+        (self.qualified(table), mysql_quote_ident(column))
+    }
+
     fn indexes_inlined_by_create(&self, req: &CreateTableRequest<'_>) -> Vec<String> {
         mysql_inline_fk_supporting_indexes(req.snapshot, req.inline_fks)
             .into_iter()

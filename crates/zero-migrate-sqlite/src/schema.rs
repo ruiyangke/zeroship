@@ -47,6 +47,11 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         self.quote_ident(target)
     }
 
+    /// SQLite REFERENCES grammar prohibits the database/schema qualifier.
+    fn canonical_fk_target(&self, _schema: &str, target: &str) -> String {
+        target.to_string()
+    }
+
     fn column_type(&self, c: &ColumnSnapshot, inline_pk: bool) -> String {
         if let Some(ty) = &c.ddl_type_override {
             ty.clone()
@@ -61,6 +66,46 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         } else {
             sqlite_ddl_type(&c.data_type).to_string()
         }
+    }
+
+    /// SQLite compares its declared type through `canonical_type`; it carries no
+    /// separate vendor-only physical-type projection on the neutral snapshot.
+    fn finalize_column_snapshot(&self, _column: &mut ColumnSnapshot) {}
+
+    fn project_derived_ann_index(
+        &self,
+        index: &mut zero_migrate_backend::snapshot::IndexSnapshot,
+    ) -> bool {
+        index.access_method = "btree".to_string();
+        index.opclass = None;
+        true
+    }
+
+    /// SQLite has no additional key-storage restriction at this seam.
+    fn validate_key_storage(
+        &self,
+        _desired: &zero_migrate_backend::snapshot::SchemaSnapshot,
+        _live: &zero_migrate_backend::snapshot::SchemaSnapshot,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn existing_column_change_strategy(
+        &self,
+    ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {
+        zero_migrate_backend::schema::ExistingColumnChangeStrategy::TableRebuild
+    }
+
+    fn column_rename_strategy(&self) -> zero_migrate_backend::schema::ColumnRenameStrategy {
+        zero_migrate_backend::schema::ColumnRenameStrategy::TableRebuild
+    }
+
+    fn supports_forward_inline_foreign_key(&self) -> bool {
+        true
+    }
+
+    fn identity_column_type_allowed(&self, _data_type: &str) -> bool {
+        true
     }
 
     fn canonical_type(&self, raw: &str) -> String {
@@ -115,6 +160,28 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
     fn schema_string_literal(&self, value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn schema_grammar_string_literal(&self, value: &str) -> String {
+        zero_migrate_backend::dml::sql_string_literal(value)
+    }
+
+    fn empty_json_expr(&self, object: bool) -> &'static str {
+        if object {
+            "'{}'"
+        } else {
+            "'[]'"
+        }
+    }
+
+    /// SQLite has no text-array storage type, so an empty text-array default is
+    /// explicitly unavailable rather than inherited from another backend.
+    fn empty_text_array_expr(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn json_value_default_expr(&self, json: &str) -> String {
+        zero_migrate_backend::dml::sql_string_literal(json)
     }
 
     fn injected_column_ident(&self, name: &str, canonical_bare: bool) -> String {

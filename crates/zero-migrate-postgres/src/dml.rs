@@ -89,6 +89,31 @@ impl DmlRenderer for PostgresDmlRenderer {
         &crate::descriptor::POSTGRES_DESCRIPTOR
     }
 
+    fn preview_session_prologue(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn preview_session_epilogue(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn guarded_ddl_preview_limitation(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn alter_ops_require_live_schema(&self) -> bool {
+        false
+    }
+
+    fn op_support_refusal(&self, op: &Op, _variant: &str) -> Option<&'static str> {
+        match op {
+            Op::CreateTrigger { action, .. } if matches!(action, TriggerAction::Body { .. }) => {
+                Some("Postgres triggers must execute a named trigger function")
+            }
+            _ => None,
+        }
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         zero_migrate_backend::spelling::ansi_double_quote_ident(ident)
     }

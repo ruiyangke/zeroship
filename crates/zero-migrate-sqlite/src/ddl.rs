@@ -126,6 +126,20 @@ impl DdlEmitter for SqliteEmitter {
         )
     }
 
+    fn alter_table_ref(&self, table: &str) -> String {
+        sqlite_ident(table)
+    }
+
+    /// SQLite cannot remove one foreign key with `ALTER TABLE`; its caller must
+    /// use the structured table-rebuild path.
+    fn drop_foreign_key_up(&self, _table: &str, _name: &str) -> Option<String> {
+        None
+    }
+
+    fn alter_column_refs(&self, table: &str, column: &str) -> (String, String) {
+        (sqlite_ident(table), sqlite_ident(column))
+    }
+
     fn indexes_inlined_by_create(&self, req: &CreateTableRequest<'_>) -> Vec<String> {
         req.injected_indexes.to_vec()
     }

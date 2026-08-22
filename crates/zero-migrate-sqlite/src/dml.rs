@@ -208,6 +208,61 @@ impl DmlRenderer for SqliteDmlRenderer {
         &crate::descriptor::SQLITE_DESCRIPTOR
     }
 
+    fn preview_session_prologue(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn preview_session_epilogue(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn guarded_ddl_preview_limitation(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn alter_ops_require_live_schema(&self) -> bool {
+        true
+    }
+
+    fn op_support_refusal(&self, op: &Op, _variant: &str) -> Option<&'static str> {
+        match op {
+            Op::CreateIndex { .. } => {
+                Some("createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on SQLite")
+            }
+            Op::SetColumnType { .. }
+            | Op::SetColumnDefault { .. }
+            | Op::SetColumnNotNull { .. }
+            | Op::DropColumnNotNull { .. }
+            | Op::DropColumnDefault { .. } => Some(
+                "SQLite has no ALTER COLUMN: this change is applied only by the declarative \
+                 differ's 12-step table rebuild, which needs the whole table definition — \
+                 express it as a schema change rather than a stand-alone op",
+            ),
+            Op::CreateTrigger {
+                events,
+                for_each,
+                action,
+                ..
+            } => {
+                if matches!(action, TriggerAction::ExecuteFunction { .. }) {
+                    Some("SQLite has no CREATE TRIGGER EXECUTE FUNCTION form")
+                } else if events.len() != 1 {
+                    Some("SQLite CREATE TRIGGER accepts exactly one trigger event")
+                } else if events
+                    .iter()
+                    .any(|event| matches!(event, TriggerEvent::Truncate))
+                {
+                    Some("SQLite has no TRUNCATE trigger event")
+                } else if matches!(for_each, ForEach::Statement) {
+                    Some("SQLite triggers are row-level only")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn quote_ident(&self, ident: &str) -> String {
         zero_migrate_backend::spelling::ansi_double_quote_ident(ident)
     }

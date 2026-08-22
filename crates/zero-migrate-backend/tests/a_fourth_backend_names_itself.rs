@@ -22,12 +22,17 @@
 //! not fidelity: a fourth backend's `dialect()` has a real body, and everything
 //! that asks a renderer who it is gets an honest answer instead of a panic.
 
+use std::collections::BTreeMap;
 use zero_migrate_backend::dml::DmlError;
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
+use zero_migrate_backend::fold::CatalogFoldPolicy;
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::SchemaRenderer;
-use zero_migrate_backend::snapshot::{ColumnCollationSnapshot, ColumnSnapshot, IdDefaultSnapshot};
+use zero_migrate_backend::snapshot::{
+    ColumnCollationSnapshot, ColumnSnapshot, IdDefaultSnapshot, PartitionSnapshot,
+    SequenceSnapshot, TableSnapshot, ViewSnapshot,
+};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
@@ -38,7 +43,7 @@ use zero_migrate_ir::backend::{
 };
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
-use zero_migrate_ir::ir::{IrScalar, Op, TableRef, ValueFormat};
+use zero_migrate_ir::ir::{ColType, IrScalar, Op, TableRef, ValueFormat};
 use zero_migrate_ir::validate::{
     validate_expr, ExprDialectFeature, ExprDialectRejection, ExprDialectValidator,
     ExprDialectValidatorSet, TargetScope,
@@ -77,6 +82,85 @@ struct DuckDbValueFormatRenderer;
 
 #[derive(Debug)]
 struct DuckDbExistenceProbePolicy;
+
+#[derive(Debug)]
+struct DuckDbCatalogFoldPolicy;
+
+impl CatalogFoldPolicy for DuckDbCatalogFoldPolicy {
+    fn allocate_implicit_relation_name(
+        &self,
+        default_name: &str,
+        _tables: &BTreeMap<String, TableSnapshot>,
+        _partitions: &BTreeMap<String, PartitionSnapshot>,
+        _views: &BTreeMap<String, ViewSnapshot>,
+        _sequences: &BTreeMap<String, SequenceSnapshot>,
+    ) -> String {
+        default_name.to_string()
+    }
+
+    fn rowid_storage_generates(&self, _stored_create_sql: Option<&str>, _data_type: &str) -> bool {
+        false
+    }
+
+    fn stored_table_allows_rowid(&self, _stored_create_sql: Option<&str>) -> bool {
+        false
+    }
+
+    fn stored_primary_key_allows_rowid(
+        &self,
+        _stored_create_sql: Option<&str>,
+        _column: &str,
+    ) -> bool {
+        false
+    }
+
+    fn primary_key_keeps_identity(&self, target_columns: Option<&[String]>, column: &str) -> bool {
+        target_columns.is_some_and(|target| target.iter().any(|candidate| candidate == column))
+    }
+
+    fn reusable_primary_index(
+        &self,
+        _snapshot: &TableSnapshot,
+        _columns: &[String],
+        _current_primary_key_name: Option<&str>,
+    ) -> Option<String> {
+        None
+    }
+
+    fn rename_primary_key_after_table_rename(&self, _snapshot: &mut TableSnapshot, _to: &str) {}
+
+    fn is_native_uuid_type(&self, data_type: &str) -> bool {
+        data_type.eq_ignore_ascii_case("uuid")
+    }
+
+    fn materialized_named_type_metadata(
+        &self,
+        _ty: &ColType,
+        _default_schema: &str,
+    ) -> Result<Option<(String, String)>, IrLowerError> {
+        Ok(None)
+    }
+
+    fn inline_enum_check(
+        &self,
+        _column: &str,
+        _values: &[String],
+    ) -> Result<Option<String>, IrLowerError> {
+        Ok(None)
+    }
+
+    fn inline_enum_type(&self, _values: &[String]) -> Option<String> {
+        None
+    }
+
+    fn folds_check_constraint_identity(&self) -> bool {
+        false
+    }
+
+    fn physical_type_inputs_equal(&self, _left: &ColumnSnapshot, _right: &ColumnSnapshot) -> bool {
+        false
+    }
+}
 
 impl ExistenceProbePolicy for DuckDbExistenceProbePolicy {
     fn unique_index_carries_constraint_identity(&self) -> bool {
@@ -160,6 +244,26 @@ impl DmlRenderer for DuckDbDmlRenderer {
 
     fn descriptor(&self) -> &'static BackendDescriptor {
         &DUCKDB_DESCRIPTOR
+    }
+
+    fn preview_session_prologue(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn preview_session_epilogue(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn guarded_ddl_preview_limitation(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn alter_ops_require_live_schema(&self) -> bool {
+        false
+    }
+
+    fn op_support_refusal(&self, _op: &Op, _variant: &str) -> Option<&'static str> {
+        Some("DuckDB backend test refusal")
     }
 
     fn quote_ident(&self, ident: &str) -> String {
@@ -369,12 +473,53 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         format!("\"{app_id}\".\"{target}\"")
     }
 
+    fn canonical_fk_target(&self, schema: &str, target: &str) -> String {
+        format!("{schema}.{target}")
+    }
+
     fn column_type(&self, column: &ColumnSnapshot, _inline_pk: bool) -> String {
         match column.data_type.as_str() {
             "double precision" => "DOUBLE".to_string(),
             "boolean" => "BOOLEAN".to_string(),
             _ => "VARCHAR".to_string(),
         }
+    }
+
+    fn finalize_column_snapshot(&self, _column: &mut ColumnSnapshot) {}
+
+    fn project_derived_ann_index(
+        &self,
+        _index: &mut zero_migrate_backend::snapshot::IndexSnapshot,
+    ) -> bool {
+        false
+    }
+
+    fn validate_key_storage(
+        &self,
+        _desired: &zero_migrate_backend::snapshot::SchemaSnapshot,
+        _live: &zero_migrate_backend::snapshot::SchemaSnapshot,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn existing_column_change_strategy(
+        &self,
+    ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {
+        zero_migrate_backend::schema::ExistingColumnChangeStrategy::Refuse
+    }
+
+    fn column_rename_strategy(&self) -> zero_migrate_backend::schema::ColumnRenameStrategy {
+        zero_migrate_backend::schema::ColumnRenameStrategy::Refuse(
+            "DuckDB rename lowering is outside this stub",
+        )
+    }
+
+    fn supports_forward_inline_foreign_key(&self) -> bool {
+        false
+    }
+
+    fn identity_column_type_allowed(&self, _data_type: &str) -> bool {
+        true
     }
 
     fn canonical_type(&self, raw: &str) -> String {
@@ -417,6 +562,26 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
 
     fn schema_string_literal(&self, value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn schema_grammar_string_literal(&self, value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn empty_json_expr(&self, object: bool) -> &'static str {
+        if object {
+            "'{}'"
+        } else {
+            "'[]'"
+        }
+    }
+
+    fn empty_text_array_expr(&self) -> Option<&'static str> {
+        Some("[]")
+    }
+
+    fn json_value_default_expr(&self, json: &str) -> String {
+        format!("'{}'", json.replace('\'', "''"))
     }
 
     fn injected_column_ident(&self, name: &str, canonical_bare: bool) -> String {
@@ -601,6 +766,7 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     let schema: &dyn SchemaRenderer = &DuckDbSchemaRenderer;
     let value_format: &dyn ValueFormatRenderer = &DuckDbValueFormatRenderer;
     let existence_probe: &dyn ExistenceProbePolicy = &DuckDbExistenceProbePolicy;
+    let catalog_fold: &dyn CatalogFoldPolicy = &DuckDbCatalogFoldPolicy;
 
     assert_eq!(dml.dialect(), DUCKDB);
     assert_eq!(schema.dialect(), DUCKDB);
@@ -624,6 +790,17 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
         "CHECK (x > 0)"
     );
     assert_eq!(existence_probe.truncated_identifier("duckdb_name"), None);
+    assert_eq!(
+        catalog_fold.allocate_implicit_relation_name(
+            "items_pkey",
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        ),
+        "items_pkey",
+        "the outsider writes its own catalog-fold policy instead of inheriting one"
+    );
 
     // Capabilities come off the outsider's OWN descriptor, so the answers are the
     // ones it declared — not the "no to everything" a core-owned id->capability

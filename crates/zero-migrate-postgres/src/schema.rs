@@ -39,6 +39,10 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         format!("{}.{}", self.quote_ident(app_id), self.quote_ident(target))
     }
 
+    fn canonical_fk_target(&self, schema: &str, target: &str) -> String {
+        format!("{schema}.{target}")
+    }
+
     fn column_type(&self, c: &ColumnSnapshot, _inline_pk: bool) -> String {
         if let Some(ty) = &c.ddl_type_override {
             ty.clone()
@@ -51,6 +55,56 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         } else {
             ddl_type(&c.data_type).to_string()
         }
+    }
+
+    /// PostgreSQL has no separate vendor-only physical-type projection on the
+    /// neutral snapshot; its retained `data_type`/override fields are complete.
+    fn finalize_column_snapshot(&self, _column: &mut ColumnSnapshot) {}
+
+    /// PostgreSQL owns the derived `ivfflat`/GiST shape, so the index is already
+    /// in its final catalog form.
+    fn project_derived_ann_index(
+        &self,
+        _index: &mut zero_migrate_backend::snapshot::IndexSnapshot,
+    ) -> bool {
+        true
+    }
+
+    /// PostgreSQL has no additional key-storage restriction at this seam.
+    fn validate_key_storage(
+        &self,
+        _desired: &zero_migrate_backend::snapshot::SchemaSnapshot,
+        _live: &zero_migrate_backend::snapshot::SchemaSnapshot,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn existing_column_change_strategy(
+        &self,
+    ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {
+        zero_migrate_backend::schema::ExistingColumnChangeStrategy::Native
+    }
+
+    fn column_rename_strategy(&self) -> zero_migrate_backend::schema::ColumnRenameStrategy {
+        zero_migrate_backend::schema::ColumnRenameStrategy::ExpandContract
+    }
+
+    fn supports_forward_inline_foreign_key(&self) -> bool {
+        false
+    }
+
+    /// Whether `data_type` is one of the three types PostgreSQL lets an IDENTITY
+    /// column have.
+    ///
+    /// MEASURED on PostgreSQL 18.4, and the set is exactly three: `numeric(10,0)` is
+    /// refused, and so is a DOMAIN over `integer` — the server checks the type itself,
+    /// not what it is built on. So this compares the catalog spelling the snapshot
+    /// carries rather than trying to reason about a type's underlying family.
+    fn identity_column_type_allowed(&self, data_type: &str) -> bool {
+        matches!(
+            data_type.trim().to_ascii_lowercase().as_str(),
+            "smallint" | "integer" | "bigint" | "int2" | "int4" | "int8"
+        )
     }
 
     /// PostgreSQL's desired and catalog spellings are already compared in their
@@ -92,6 +146,29 @@ impl SchemaRenderer for PostgresSchemaRenderer {
 
     fn schema_string_literal(&self, value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn schema_grammar_string_literal(&self, value: &str) -> String {
+        zero_migrate_backend::dml::sql_string_literal(value)
+    }
+
+    fn empty_json_expr(&self, object: bool) -> &'static str {
+        if object {
+            "'{}'::jsonb"
+        } else {
+            "'[]'::jsonb"
+        }
+    }
+
+    fn empty_text_array_expr(&self) -> Option<&'static str> {
+        Some("'{}'::text[]")
+    }
+
+    fn json_value_default_expr(&self, json: &str) -> String {
+        format!(
+            "{}::jsonb",
+            zero_migrate_backend::dml::sql_string_literal(json)
+        )
     }
 
     fn injected_column_ident(&self, name: &str, canonical_bare: bool) -> String {

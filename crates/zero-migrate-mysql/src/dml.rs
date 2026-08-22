@@ -30,6 +30,13 @@ use zero_migrate_ir::validate::{
 /// what keeps that from being a hard-coded vendor name inside a vendor module.
 const DIALECT: DialectId = MYSQL;
 
+const PREVIEW_SESSION_PROLOGUE: &[&str] = &[
+    "SET @__zero_migrate_preview_saved_sql_mode = @@SESSION.sql_mode;",
+    "SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES', 'NO_AUTO_VALUE_ON_ZERO');",
+];
+const PREVIEW_SESSION_EPILOGUE: &[&str] =
+    &["SET SESSION sql_mode = @__zero_migrate_preview_saved_sql_mode;"];
+
 #[derive(Debug)]
 pub(super) struct MysqlDmlRenderer;
 
@@ -125,6 +132,95 @@ impl DmlRenderer for MysqlDmlRenderer {
 
     fn descriptor(&self) -> &'static BackendDescriptor {
         &crate::descriptor::MYSQL_DESCRIPTOR
+    }
+
+    fn preview_session_prologue(&self) -> &'static [&'static str] {
+        PREVIEW_SESSION_PROLOGUE
+    }
+
+    fn preview_session_epilogue(&self) -> &'static [&'static str] {
+        PREVIEW_SESSION_EPILOGUE
+    }
+
+    fn guarded_ddl_preview_limitation(&self) -> Option<&'static str> {
+        Some(
+            "present createTable/addColumn is refused until MySQL column-type equality is implemented; ",
+        )
+    }
+
+    fn alter_ops_require_live_schema(&self) -> bool {
+        false
+    }
+
+    fn op_support_refusal(&self, op: &Op, _variant: &str) -> Option<&'static str> {
+        match op {
+            Op::CreateIndex {
+                columns, r#where, ..
+            } => {
+                if columns.iter().any(|element| {
+                    matches!(element, zero_migrate_ir::ir::IndexElement::Expr { .. })
+                }) {
+                    Some("createIndex expression elements are not supported on MySQL")
+                } else if r#where.is_some() {
+                    Some(
+                        "createIndex partial predicates require partial-index support; MySQL does not support partial indexes",
+                    )
+                } else {
+                    Some("createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on MySQL")
+                }
+            }
+            Op::SetColumnType { .. }
+            | Op::SetColumnDefault { .. }
+            | Op::SetColumnNotNull { .. }
+            | Op::DropColumnNotNull { .. }
+            | Op::DropColumnDefault { .. } => Some(
+                "MySQL restates the whole column definition in MODIFY COLUMN, which this op \
+                 does not carry, and this engine does not yet read the live definition back for \
+                 a nullability change the way it does for a retype — express it as a schema \
+                 change rather than a stand-alone op",
+            ),
+            Op::CreateTrigger {
+                timing,
+                events,
+                for_each,
+                action,
+                when,
+                ..
+            } => {
+                if matches!(action, TriggerAction::ExecuteFunction { .. }) {
+                    Some("MySQL has no CREATE TRIGGER EXECUTE FUNCTION form")
+                } else if events.len() != 1 {
+                    Some("MySQL CREATE TRIGGER accepts exactly one trigger event")
+                } else if events
+                    .iter()
+                    .any(|event| matches!(event, TriggerEvent::Truncate))
+                {
+                    Some("MySQL has no TRUNCATE trigger event")
+                } else if matches!(timing, TriggerTiming::InsteadOf) {
+                    Some("MySQL does not support INSTEAD OF triggers")
+                } else if matches!(for_each, ForEach::Statement) {
+                    Some("MySQL triggers are row-level only")
+                } else if when.is_some() {
+                    Some("MySQL triggers do not support WHEN predicates")
+                } else if let TriggerAction::Body { statements } = action {
+                    statements
+                        .iter()
+                        .any(|statement| {
+                            matches!(
+                                statement,
+                                TriggerStmt::Raise {
+                                    level: RaiseLevel::Ignore,
+                                    ..
+                                }
+                            )
+                        })
+                        .then_some("MySQL cannot render RAISE IGNORE")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
     }
 
     /// THE single physical home of MySQL's backtick identifier spelling: double

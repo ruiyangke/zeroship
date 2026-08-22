@@ -160,6 +160,17 @@ pub trait DdlEmitter {
     /// stand-alone `ADD CONSTRAINT` unreachable must state its own clause spelling.
     fn fk_clause(&self, fk: &ConstraintSnapshot) -> String;
 
+    /// Render this backend's table reference for an `ALTER TABLE` statement.
+    fn alter_table_ref(&self, table: &str) -> String;
+
+    /// Render the vendor-specific removal of a named foreign key, or explicitly
+    /// refuse when this backend must rebuild a table instead.
+    fn drop_foreign_key_up(&self, table: &str, name: &str) -> Option<String>;
+
+    /// Render the table and column identifier references used by a neutral
+    /// `ALTER TABLE … ALTER COLUMN …` statement.
+    fn alter_column_refs(&self, table: &str, column: &str) -> (String, String);
+
     /// Names of snapshot indexes this vendor emits inside [`Self::create_table`]
     /// rather than as follow-on `CREATE INDEX` units.
     ///

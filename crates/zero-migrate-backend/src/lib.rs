@@ -14,12 +14,13 @@
 //! | [`renderer::DmlRenderer`] | how does this vendor spell DML, views and triggers |
 //! | [`schema::SchemaRenderer`] | how does this vendor spell column types and collations |
 //! | [`ddl::DdlEmitter`] | how does this vendor spell schema-changing statements |
+//! | [`fold::CatalogFoldPolicy`] | how does this vendor shape shared catalog replay |
 //! | [`existence_probe::ExistenceProbePolicy`] | how do this vendor's catalog identities behave under guarded probes |
 //! | [`guard::MigrationGuard`] | what does this vendor REFUSE to run |
 //! | [`stored_ddl::StoredDdl`] | how does this vendor parse catalog-stored table DDL |
 //! | [`value_format::ValueFormatRenderer`] | how does this vendor render and normalize ID formats |
 //!
-//! The same dependency rule governs all seven: a trait declared in the engine would
+//! The same dependency rule governs all eight: a trait declared in the engine would
 //! force every vendor to depend on the engine, which already depends on every vendor.
 //!
 //! ```text
@@ -74,6 +75,7 @@ pub mod descriptors;
 pub mod dml;
 pub mod error;
 pub mod existence_probe;
+pub mod fold;
 pub mod guard;
 pub mod mask_codec;
 pub mod mask_meta;
