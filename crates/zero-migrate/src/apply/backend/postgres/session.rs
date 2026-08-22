@@ -708,22 +708,25 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     //                     silent skip over a divergence).
     let mut skip_up = false;
     if let Some(probe) = &m.existence_guard {
-        let live =
-            match crate::apply::drift::snapshot_schema_for(conn, probe.schema(), &super::DIALECT)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = conn.batch("ROLLBACK").await;
-                    // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
-                    return Err(match e {
-                        crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
-                        crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
-                        crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
-                        crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
-                    });
-                }
-            };
+        let live = match super::drift_sql::snapshot_schema_for(
+            conn,
+            probe.schema(),
+            &super::DIALECT,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = conn.batch("ROLLBACK").await;
+                // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
+                return Err(match e {
+                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
+                    crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
+                    crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                });
+            }
+        };
         match crate::render::existence_probe::decide(
             probe,
             &live,
@@ -1064,20 +1067,23 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     if let Some(probe) = &m.existence_guard {
         authorize_existence_guard_schema(cfg, m, probe.schema(), &super::DIALECT)?;
         let probe_started = Instant::now();
-        let live =
-            match crate::apply::drift::snapshot_schema_for(conn, probe.schema(), &super::DIALECT)
-                .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    return Err(match e {
-                        crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
-                        crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
-                        crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
-                        crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
-                    });
-                }
-            };
+        let live = match super::drift_sql::snapshot_schema_for(
+            conn,
+            probe.schema(),
+            &super::DIALECT,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(match e {
+                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
+                    crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                    crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
+                    crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                });
+            }
+        };
         match crate::render::existence_probe::decide(
             probe,
             &live,

@@ -183,7 +183,9 @@ pub use render::expand_contract::{
 // authored view body through the server so `diff_snapshots` has the same
 // representation on both sides. See its own docs for why no offline pass can.
 #[cfg(pg_seam)]
-pub use apply::drift::{check_checksum_drift, resolve_view_bodies, snapshot_schema};
+pub use apply::backend::postgres::drift_sql::{
+    check_checksum_drift, resolve_view_bodies, snapshot_schema,
+};
 pub use apply::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict, RollbackError,
     RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,

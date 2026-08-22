@@ -1931,7 +1931,7 @@ impl DesiredSchema {
 /// - **indexes** carry the policy-resolved indexes, the declared named indexes,
 ///   and a unique index per `unique: true` field.
 ///
-/// The snapshot is the same shape [`snapshot_schema`](crate::apply::drift::snapshot_schema)
+/// The snapshot is the same shape [`snapshot_schema`](crate::snapshot_schema)
 /// produces from the live DB, so a freshly-created table introspects to a
 /// byte-equal snapshot (zero drift) — that equality is the type-fidelity
 /// proof.

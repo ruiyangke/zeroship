@@ -25,7 +25,7 @@
 //! - **drift schema introspection** — `snapshot_schema` over
 //!   `information_schema`/`pg_catalog` (PG) vs `sqlite_master` + PRAGMAs (SQLite);
 //!   the checksum/tamper comparison itself is dialect-agnostic and stays generic
-//!   ([`crate::apply::drift::check_checksum_drift`]).
+//!   ([`check_checksum_drift`](crate::check_checksum_drift)).
 //!
 //! [`PostgresBackend`], [`sqlite::SqliteBackend`], and [`MysqlBackend`] are the live
 //! implementations. Postgres remains the richest regression bar; SQLite and MySQL

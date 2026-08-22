@@ -1024,7 +1024,7 @@ async fn apply_locked<B: MigrationBackend>(
 
     // Drift / tamper check: every migration in the set that
     // the journal records as net-applied must still match its recorded checksum.
-    // This is the SHARED comparison — `crate::apply::drift::check_checksum_drift` builds
+    // This is the SHARED comparison — `crate::apply::drift::compare_applied_to_set` builds
     // the full report (used read-only by the status/drift API), and apply aborts
     // on the FIRST checksum mismatch it surfaces. One implementation, two callers:
     // the report and the abort-on-drift gate cannot diverge.

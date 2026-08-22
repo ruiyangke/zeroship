@@ -8,6 +8,11 @@
 use crate::driver::SqlSession;
 
 mod backfill_sql;
+/// The Postgres catalog reads behind drift: the `pg_catalog`/`information_schema`
+/// introspection, the catalog-text parsers, and the PG journal read the checksum
+/// comparison runs on. `pub(crate)` because the crate root re-exports its three
+/// public entry points at their historical `zero_migrate::…` paths.
+pub(crate) mod drift_sql;
 mod identity_sql;
 mod primary_key_sql;
 /// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
@@ -283,11 +288,11 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         cfg: &ExecutorConfig,
         migrations: &[Migration],
     ) -> Result<crate::apply::drift::ChecksumDriftReport, DriftError> {
-        crate::apply::drift::check_checksum_drift(&DIALECT, self.conn, cfg, migrations).await
+        drift_sql::check_checksum_drift(&DIALECT, self.conn, cfg, migrations).await
     }
 
     async fn snapshot_schema(&self, cfg: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError> {
-        crate::apply::drift::snapshot_schema_for(self.conn, &cfg.project_schema, &DIALECT).await
+        drift_sql::snapshot_schema_for(self.conn, &cfg.project_schema, &DIALECT).await
     }
 
     async fn evaluate_preconditions(
