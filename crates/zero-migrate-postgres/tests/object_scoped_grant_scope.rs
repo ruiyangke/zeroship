@@ -14,9 +14,10 @@
 
 mod support;
 
-use zero_migrate_guard::guard::denylist::rule;
-use zero_migrate_guard::guard::{GuardConfig, GuardError, SqlGuard};
+use zero_migrate_backend::guard::{GuardConfig, GuardError};
 use zero_migrate_ir::dialect::POSTGRES;
+use zero_migrate_postgres::guard::denylist::rule;
+use zero_migrate_postgres::guard::SqlGuard;
 
 /// A charter owning the `app` schema, plus whatever grant text an arm supplies.
 fn charter(grant: &str) -> String {

@@ -1,5 +1,5 @@
+use crate::guard::{check_raw_view_body, RawViewBodyDefect};
 use zero_migrate_backend::validation::{Disposition, ValidationPolicy, ValidationRefusal};
-use zero_migrate_guard::guard::{check_raw_view_body, RawViewBodyDefect};
 use zero_migrate_ir::capability::VendorCapability;
 use zero_migrate_ir::ir::ColType;
 use zero_migrate_ir::policy::SchemaScope;

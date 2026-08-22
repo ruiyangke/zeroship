@@ -29,7 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::guard::{GuardConfig, GuardError, MigrationGuard, SqlGuard};
+use crate::guard::{GuardConfig, GuardError, MigrationGuard};
 use crate::model::backfill::{
     CursorColumnContract, CursorComparison, CursorContract, CursorScalarType,
 };
@@ -6057,7 +6057,6 @@ impl IrAuthor {
         .map_err(|error| IrLowerError::KeyStorage(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
         let guard = guard_for(guard_cfg);
-        let raw_island_guard = SqlGuard::new(guard_cfg.clone());
         let guard_scope = guard_cfg.schema_scope();
         let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
@@ -6068,18 +6067,20 @@ impl IrAuthor {
         let mut named_types = NamedTypeRegistry::default();
         let mut pending_foreign_keys: Vec<PendingGuardedForeignKey> = Vec::new();
 
-        crate::guard::check_ir_data_security_policy(guard_cfg, ir).map_err(|err| {
-            let op_kind = ir
-                .ops
-                .get(err.op_index)
-                .map(op_kind_tag)
-                .unwrap_or("unknown");
-            FragmentGuardDenied {
-                op_index: err.op_index,
-                op_kind,
-                source: err.source,
-            }
-        })?;
+        crate::guard::check_ir_data_security_policy(guard_cfg, ir, guard.as_ref()).map_err(
+            |err| {
+                let op_kind = ir
+                    .ops
+                    .get(err.op_index)
+                    .map(op_kind_tag)
+                    .unwrap_or("unknown");
+                FragmentGuardDenied {
+                    op_index: err.op_index,
+                    op_kind,
+                    source: err.source,
+                }
+            },
+        )?;
 
         let mut plan_index = 0usize;
         for op in &ir.ops {
@@ -6096,7 +6097,6 @@ impl IrAuthor {
                 &mut pending_foreign_keys,
                 guard_scope.as_ref(),
                 guard.as_ref(),
-                &raw_island_guard,
                 guard_cfg.skips_denylist_belt(),
             )?;
         }
@@ -6122,7 +6122,6 @@ impl IrAuthor {
         steps: &mut Vec<PlanStep>,
         fragments: &mut Vec<GuardedFragment>,
         guard: &dyn MigrationGuard,
-        raw_island_guard: &SqlGuard,
         skips_static_guard: bool,
     ) -> Result<(), IrGuardedLowerError> {
         let (migration, statements) = unit;
@@ -6132,8 +6131,8 @@ impl IrAuthor {
             let mut advisories = Vec::new();
             if skips_static_guard {
                 match op {
-                    Op::PgRaw { .. } => raw_island_guard
-                        .check_raw_island_sql_backstop(statement)
+                    Op::PgRaw { .. } => guard
+                        .check_raw_island_sql(statement)
                         .map_err(|source| FragmentGuardDenied {
                             op_index,
                             op_kind,
@@ -6149,8 +6148,8 @@ impl IrAuthor {
                                 })
                         })
                         .map(|outcome| advisories.extend(outcome.advisories))?,
-                    Op::CreateFunction { body, .. } => raw_island_guard
-                        .check_raw_island_body_backstop(body, statement)
+                    Op::CreateFunction { body, .. } => guard
+                        .check_raw_island_body(body, statement)
                         .map_err(|source| FragmentGuardDenied {
                             op_index,
                             op_kind,
@@ -6223,7 +6222,6 @@ impl IrAuthor {
         pending_foreign_keys: &mut Vec<PendingGuardedForeignKey>,
         guard_scope: Option<&crate::model::policy::SchemaScope>,
         guard: &dyn MigrationGuard,
-        raw_island_guard: &SqlGuard,
         // The Trusted (dbmate-like) posture skips the static parse-time belt — the
         // the root/host-set `GuardMode::Off` grant. When set, raw islands still run the
         // deny-list backstop so embedded arbitrary SQL cannot host-reach.
@@ -6251,7 +6249,6 @@ impl IrAuthor {
                     pending_foreign_keys,
                     guard_scope,
                     guard,
-                    raw_island_guard,
                     skips_static_guard,
                 )?;
             }
@@ -6287,7 +6284,6 @@ impl IrAuthor {
                         steps,
                         fragments,
                         guard,
-                        raw_island_guard,
                         skips_static_guard,
                     )?;
                 }
@@ -6331,7 +6327,6 @@ impl IrAuthor {
                                 steps,
                                 fragments,
                                 guard,
-                                raw_island_guard,
                                 skips_static_guard,
                             )?;
                             op_spans[pending.op_span_index]
@@ -6412,7 +6407,6 @@ impl IrAuthor {
                 steps,
                 fragments,
                 guard,
-                raw_island_guard,
                 skips_static_guard,
             )?;
         }

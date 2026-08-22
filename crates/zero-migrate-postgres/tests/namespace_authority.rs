@@ -10,8 +10,9 @@
 
 mod support;
 
-use zero_migrate_guard::guard::{namespace_rule, GuardConfig, GuardError, SqlGuard};
+use zero_migrate_backend::guard::{GuardConfig, GuardError};
 use zero_migrate_ir::dialect::POSTGRES;
+use zero_migrate_postgres::guard::{namespace_rule, SqlGuard};
 
 /// A confined guard over the composed policy, pinned to project schema `app`.
 fn guard_with(charter_toml: &str) -> SqlGuard {

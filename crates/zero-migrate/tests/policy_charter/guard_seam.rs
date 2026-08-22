@@ -21,8 +21,9 @@
 
 use crate::support;
 
-use zero_migrate::guard::{GuardConfig, GuardError, MigrationGuard, SqlGuard};
+use zero_migrate::guard::{GuardConfig, GuardError, MigrationGuard};
 use zero_migrate::guard_for;
+use zero_migrate_postgres::guard::SqlGuard;
 
 /// A realistic PG project guard: project schema `project_acme`, extension
 /// allowlist = `pgcrypto` + `uuid-ossp` (mirrors the `guard_security` matrix).

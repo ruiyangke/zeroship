@@ -116,24 +116,39 @@ const CRATES_THAT_MAY_SPELL: &[&str] = &[
 /// The engine and the non-vendor libraries. Named rather than inferred, so that a
 /// RENAME goes red instead of quietly moving a crate from "denied" to "unknown".
 ///
-/// `zero-migrate` is the one the lost visibility was actually about. The other four
+/// `zero-migrate` is the one the lost visibility was actually about. The other three
 /// are here because the same argument applies verbatim: none of them is a vendor, so
 /// none of them has a vendor to name, so a raw spelling in any of them is bytes
 /// emitted on behalf of nobody.
+///
+/// `zero-migrate-guard` came OFF this list when it was dissolved. It is not a rename:
+/// its contents moved into `zero-migrate-postgres`, which sits on
+/// [`CRATES_THAT_MAY_SPELL`] above — so the code did not become unclassified, it
+/// changed classification, from "must not spell" to "may spell for itself". That is
+/// correct rather than a loosening: every line of that crate parsed PostgreSQL with
+/// `libpg_query`, so it was always one vendor's bytes filed under a neutral-sounding
+/// name.
 const CRATES_THAT_MUST_NOT_SPELL: &[&str] = &[
     "zero-migrate",
-    "zero-migrate-guard",
     "zero-migrate-ir",
     "zero-migrate-node",
     "zero-migrate-policy",
 ];
 
-/// The census floor for the walk, and it is the SAME nine roots
+/// The census floor for the walk, and it is the SAME eight roots
 /// `sqlite_trigger_quoting_reaches_postgres.rs` walks, for the same reason.
 ///
 /// Raise it when a crate is ADDED. If one is genuinely removed, lower it deliberately
 /// and say so — never to get green.
-const WORKSPACE_CRATE_FLOOR: usize = 9;
+///
+/// LOWERED 9 → 8: `zero-migrate-guard` was dissolved. Every line of it needed
+/// `libpg_query` to parse PostgreSQL, so all of it was one vendor's code; it moved
+/// into `zero-migrate-postgres` (`guard/sql.rs`, `guard/denylist.rs`, `analysis/`) and
+/// the crate was deleted from the workspace. The walk still reaches the same source —
+/// it is under a different root — so this is the count following a real removal, not
+/// a narrowed discovery. The `crates/` listing itself is the check: eight entries,
+/// nine before.
+const WORKSPACE_CRATE_FLOOR: usize = 8;
 
 /// The NEEDLE-LIVENESS floor: the calls the vendors are known to make today.
 ///

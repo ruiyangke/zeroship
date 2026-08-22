@@ -7,9 +7,11 @@
 
 use crate::support;
 
-use zero_migrate::analyze::{analyze, rule, Severity};
-use zero_migrate::guard::{GuardConfig, SqlGuard};
-use zero_migrate::{analyze_migration, Advisory};
+use zero_migrate::guard::GuardConfig;
+use zero_migrate::Advisory;
+use zero_migrate_backend::advisory::{rule, Severity};
+use zero_migrate_postgres::analysis::analyze::{analyze, analyze_migration};
+use zero_migrate_postgres::guard::SqlGuard;
 
 // ---------------------------------------------------------------------------
 // helpers

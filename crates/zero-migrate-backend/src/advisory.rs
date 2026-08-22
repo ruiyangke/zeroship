@@ -17,11 +17,11 @@
 //! [`OperationalAdvisor`] is the seam that makes that true rather than merely
 //! stated. It is a REQUIRED [`crate::registry::BackendVendor`] field, so each
 //! backend files its own answer and the engine reaches an analysis by asking the
-//! registered vendor — never by naming one. Today PostgreSQL's implementation
-//! delegates to the `zero-migrate-guard` crate, which still holds the
-//! `libpg_query` analyzers; that crate is being folded into
-//! `zero-migrate-postgres`, and this contract is what lets it move without core
-//! following it there.
+//! registered vendor — never by naming one. PostgreSQL's implementation delegates to
+//! its own `analysis::analyze` module, which holds the `libpg_query` analyzers. Those
+//! analyzers used to sit in a separate `zero-migrate-guard` crate that core depended
+//! on directly; this contract is what let them move into the vendor without core
+//! following them there.
 //!
 //! # These are ADVISORY, NEVER load-bearing for security
 //!

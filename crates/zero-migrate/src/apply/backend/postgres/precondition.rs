@@ -19,7 +19,7 @@
 //! - **[`Precondition::SqlBoolean`]** is UNTRUSTED creator/AI SQL. It is the
 //! escape hatch for assertions the structured checks cannot express, and it is
 //! confined three ways before it is allowed to run:
-//! 1. it MUST pass the [`SqlGuard`] (read-only SELECT;
+//! 1. it MUST pass the registered line-1 guard (read-only SELECT;
 //! a cross-schema / file / network / dangerous precondition is denied — the
 //! same line-1 defense the `up` gets);
 //! 2. it MUST pass the **shape gate** (`validate_single_select`): a SINGLE
@@ -68,12 +68,12 @@ use crate::driver::SqlSession;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
 
-use crate::analysis::tree_walk::first_dml_node;
 use crate::apply::executor::{unmet_halt_error, ApplyError, PreconditionVerdict};
 use crate::conn::ExecutorConfig;
-use crate::guard::{GuardError, SqlGuard};
+use crate::guard::GuardError;
 use crate::model::migration::Migration;
 use crate::model::precondition::{OnUnmet, Precondition};
+use crate::render::backends::guard_for;
 use zero_migrate_ir::dialect::DialectId;
 
 /// Sequence-mutating and lock-acquiring builtins a read-only precondition may
@@ -529,6 +529,42 @@ fn validate_single_select(sql: &str) -> Result<(), PreconditionError> {
 
 /// True if any object node in the serialized tree carries `key` (used to detect a
 /// `LockingClause` node anywhere — top-level or in a sub-select).
+/// The first data-modifying statement node key found anywhere in the serialized
+/// parse tree, or `None`. DML nodes serialize as the `PascalCase` variant keys
+/// `InsertStmt`/`UpdateStmt`/`DeleteStmt`/`MergeStmt` (e.g. a `DeleteStmt` nested in a
+/// CTE's `with_clause`), so walking the serialized tree is what catches a
+/// data-modifying CTE that a hand-written traversal would miss.
+///
+/// This sits beside [`tree_has_key`] rather than in `zero-migrate-postgres` on
+/// purpose. It is PostgreSQL parse-tree code, and so is every other line of this
+/// file — the shape gate above already calls `pg_query::parse` directly. Importing it
+/// from the vendor crate would make neutral core NAME a vendor crate for a
+/// twelve-line local tree walk while changing nothing about the coupling that is
+/// actually here. The honest fix is relocating this whole file into
+/// `zero-migrate-postgres`, which is tracked on `crates/zero-migrate/Cargo.toml`'s
+/// `pg_query` entry; until then the helper lives with its only caller.
+fn first_dml_node(v: &Value) -> Option<&'static str> {
+    fn first_matching(v: &Value) -> Option<&'static str> {
+        match v {
+            Value::Object(map) => {
+                for key in map.keys() {
+                    match key.as_str() {
+                        "InsertStmt" => return Some("InsertStmt"),
+                        "UpdateStmt" => return Some("UpdateStmt"),
+                        "DeleteStmt" => return Some("DeleteStmt"),
+                        "MergeStmt" => return Some("MergeStmt"),
+                        _ => {}
+                    }
+                }
+                map.values().find_map(first_matching)
+            }
+            Value::Array(items) => items.iter().find_map(first_matching),
+            _ => None,
+        }
+    }
+    first_matching(v)
+}
+
 fn tree_has_key(v: &Value, key: &str) -> bool {
     match v {
         Value::Object(map) => map.contains_key(key) || map.values().any(|c| tree_has_key(c, key)),
@@ -588,7 +624,7 @@ async fn evaluate_sql_boolean<D: SqlSession>(
     // Platform ⇒ the operator allowlist. Latent for the port (the loader sets
     // `preconditions = []`), but threaded so it is correct the day a platform
     // precondition is written.
-    let guard = SqlGuard::new(cfg.guard_config_for(dialect));
+    let guard = guard_for(&cfg.guard_config_for(dialect));
     guard.check(sql)?;
 
     // 2. Shape gate (THE pre-execution line): a single SELECT with no DML

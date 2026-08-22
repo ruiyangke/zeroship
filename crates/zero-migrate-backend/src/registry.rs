@@ -219,9 +219,11 @@ pub struct BackendVendor {
 /// }
 /// ```
 ///
-/// (2) And a `MigrationGuard` impl that supplies no `check` MUST fail to compile —
-/// E0046. The trait method has no default body, so trusting the input cannot be
-/// inherited; it has to be written:
+/// (2) And an EMPTY `MigrationGuard` impl MUST fail to compile — E0046. Not one of
+/// the trait's methods has a default body, so no part of a security posture can be
+/// inherited by omission; every one has to be written. That covers `check`, both raw
+/// island backstops, the `require_rls` raw-door question, and the SQL flag
+/// derivation — a vendor that stays silent on any of them does not build:
 ///
 /// ```compile_fail
 /// struct TrustsEverything;

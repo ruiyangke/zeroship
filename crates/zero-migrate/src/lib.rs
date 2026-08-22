@@ -33,7 +33,7 @@
 //!    hook** — the AI/builder generates complex migrations (renames, type
 //!    changes, backfills, expand-contract) *externally* and this engine
 //!    validates + executes them. The engine never calls an LLM.
-//! 2. [`MigrationEngine::plan`] runs the [`guard::SqlGuard`] read-only and
+//! 2. [`MigrationEngine::plan`] runs the registered [`guard::MigrationGuard`] read-only and
 //!    returns a [`MigrationPlan`] (the dry-run/preview): destructive flags,
 //!    approval requirement, and guard *denials*.
 //! 3. [`MigrationEngine::apply`] is the **gate** ([`Approval`]): it refuses a
@@ -51,7 +51,7 @@
 //!
 //! Defense is in depth:
 //!
-//! - **Line 1 — this guard ([`guard::SqlGuard`]).** Every statement is parsed
+//! - **Line 1 — the registered backend's guard ([`guard::MigrationGuard`]).** Every statement is parsed
 //!   with the *real* Postgres parser (`pg_query`/`libpg_query` — chosen over a
 //!   pure-Rust parser precisely so a deny-list cannot be bypassed by exotic
 //!   syntax it would misparse) and checked against a hard deny-list. Dangerous
@@ -67,11 +67,20 @@
 //! so it is plain synchronous logic — no async runtime — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
-// The SQL security layer (`analysis` + `guard`) lives in the `zero-migrate-guard`
-// crate. Re-export its modules under their historical
-// `crate::{analysis,guard}` paths so the engine's ~dozens of
-// `crate::guard::…` / `crate::analysis::…` references keep resolving unchanged.
-pub use zero_migrate_guard::{analysis, guard};
+// The NEUTRAL guard seam — `GuardConfig`, `GuardMode`, `GuardError`, `GuardOutcome`,
+// `MigrationGuard` and the structured-IR data-security walk. Re-exported under the
+// historical `crate::guard::…` path so the engine's dozens of references keep
+// resolving unchanged.
+//
+// This used to read `pub use zero_migrate_guard::{analysis, guard};`, and that one
+// line was the engine's whole coupling to a PostgreSQL parser: `zero-migrate-guard`
+// was the `libpg_query` deny-list + classifier + analyzers, and re-exporting it here
+// put `SqlGuard`, `DdlKind` and `analyze` on the neutral engine's PUBLIC API. The
+// crate is gone — all of it needed `libpg_query`, so all of it was PostgreSQL's, and
+// it now lives in `zero-migrate-postgres`. Core reaches a guard the same way it
+// reaches a renderer: `render::backends::guard_for`, through the registry, by open
+// dialect id.
+pub use zero_migrate_backend::guard;
 pub mod apply;
 // The caller's approval decision now lives with the backend contract, whose
 // `OnlineSchemaChange::run_online` names it. Re-exported here so every
@@ -113,30 +122,33 @@ pub use zero_migrate_backend::driver;
 // layer the engine uses survives here.
 pub mod schema;
 
-// The guard behaviour-lock suite — an in-crate test module so it can drive
-// the guard through the engine's `render::lower` / `conn` internals.
-#[cfg(test)]
-mod guard_vendor_lower_tests;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
-
-pub use analysis::{analyze, classify};
 
 // ---------------------------------------------------------------------------
 // Public API surface — re-exports.
 // ---------------------------------------------------------------------------
 
-pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
+// `Advisory` and `Severity` are the NEUTRAL advisory vocabulary and come from the
+// backend contract, which is where they are defined. The `analyze` /
+// `analyze_migration` free functions that used to sit beside them are GONE from this
+// root: they ran the `libpg_query` analyzers on whatever they were handed, so a MySQL
+// or SQLite statement came back as a parse failure reported as a clean, empty
+// advisory list. `advisories_for_sql` below is the replacement — it asks the
+// REGISTERED backend, and a backend with no analyzer answers `NotAnalyzed` rather
+// than "nothing found". PostgreSQL's analyzers are still exactly where they were, at
+// `zero_migrate_postgres::analysis::analyze`.
 pub use approval::{Approval, ApprovalScope};
+pub use zero_migrate_backend::advisory::{Advisory, Severity};
 // The ADVISORY seam: ask the registered backend for an analysis, never a vendor by
 // name. `advisories_for_sql` and `analyzer_absence` are the two entry points a host
 // needs; the verdict types come with them because a caller cannot handle
 // `NotAnalyzed` without being able to name it.
 //
-// This is what `analyze` above is being retired in favour of. `analyze` runs the
-// `libpg_query` analyzers on whatever it is handed, which on a MySQL or SQLite
-// statement is a parse failure reported as a clean, empty advisory list. It is still
-// exported because `zero-migrate-guard` has not moved yet; when it does, it goes.
+// This is what the old root-level `analyze` was retired in favour of, and the
+// retirement is now complete: `zero-migrate-guard` has moved into
+// `zero-migrate-postgres`, so the parser-bearing entry point is gone from this root
+// exactly as this comment said it would be.
 pub use render::backends::{advisories_for_sql, analyzer_absence};
 pub use zero_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
@@ -159,10 +171,14 @@ pub use apply::backend::PostgresBackend;
 // and so error consumers read the neutral `DbError` (SQLSTATE in `.sqlstate`). The
 // napi addon is the primary consumer of these neutral types. MySQL rides the same
 // seam; SQLite does NOT (in-process rusqlite).
-pub use analysis::classify::{
-    classify, drop_index_targets, relations_touched, DdlKind, DropIndexTarget, OwnershipNeed,
-    ParseError, StatementClass, TouchedRelation,
-};
+// `ParseError` is the NEUTRAL parse-failure vocabulary and stays. The statement
+// CLASSIFIER that used to be re-exported beside it does not: `classify`, `DdlKind`,
+// `StatementClass`, `TouchedRelation`, `OwnershipNeed`, `DropIndexTarget`,
+// `relations_touched` and `drop_index_targets` are all `libpg_query` vocabulary that
+// only PostgreSQL can populate, so putting them on the neutral engine's public API
+// invited exactly one reading — that a `DdlKind` describes any backend's statement.
+// They live at `zero_migrate_postgres::analysis::classify`, which says whose they
+// are.
 pub use apply::backend::{RebuildError, SqliteActorError, SqliteBackend};
 pub use apply::baseline::{BaselineError, BaselineOutcome};
 pub use apply::drift::{
@@ -187,6 +203,7 @@ pub use render::declarative::{
 pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
+pub use zero_migrate_backend::guard::ParseError;
 // `check_checksum_drift`, `snapshot_schema` and `resolve_view_bodies` are NOT
 // re-exported here. They read `pg_catalog`/`information_schema` and drive a
 // PostgreSQL savepoint probe; promising them at the crate root said the engine
@@ -215,10 +232,15 @@ pub use apply::executor::apply;
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
 // the offline companion of `snapshot_schema`. The type-generation path emits the
 // `env.db` types + runtime descriptor from this. See `fold.rs`.
-pub use guard::{
-    flags_for, GuardConfig, GuardError, GuardMode, GuardOutcome, GuardReport, MigrationGuard,
-    SqlGuard,
-};
+// The NEUTRAL guard vocabulary only. `SqlGuard`, `GuardReport` and `flags_for` came
+// off this list when `zero-migrate-guard` dissolved: all three are `libpg_query`
+// machinery, and re-exporting them here made the neutral engine's public API hand out
+// PostgreSQL's parser to every downstream caller — the same shape, and the same
+// mistake, as the `MysqlGuard`/`PgGuard`/`SqliteGuard` re-exports described below.
+// They are reachable at `zero_migrate_postgres::guard`, which says whose they are.
+// A caller that wants "this project's line-1" rather than "PostgreSQL's" asks the
+// registry through `render::backends::guard_for`.
+pub use guard::{GuardConfig, GuardError, GuardMode, GuardOutcome, MigrationGuard};
 // ── The three per-vendor guard TYPES are NOT re-exported here any more.
 //
 // `MysqlGuard`, `PgGuard` and `SqliteGuard` were `pub use`d at this crate root, and

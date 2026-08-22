@@ -111,10 +111,6 @@ scope = {{ include = [{schema}] }}
     effective_policy_from_charter_toml(&toml).expect("explicit no-inject test charter composes")
 }
 
-pub(crate) fn operator_no_inject(schema: &str) -> EffectivePolicy {
-    operator_with_data_security(&[schema], &[], false, DestructiveOps::Allow)
-}
-
 pub(crate) fn operator_with_data_security(
     schemas: &[&str],
     extensions: &[&str],

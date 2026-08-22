@@ -1,11 +1,27 @@
-//! Guard behaviour-lock suite — lives here rather than in `zero-migrate-guard`'s
-//! `guard/mod.rs`.
+//! Guard behaviour-lock suite — PostgreSQL's line-1, driven through the engine.
 //!
 //! These scenarios drive the SQL guard THROUGH the engine's IR-lower pipeline
-//! (`render::lower::IrAuthor` / `conn::ExecutorConfig`), so they must live in the
-//! engine crate (which depends on `zero-migrate-guard`), not in the leaf guard
-//! crate (which deliberately cannot depend on the engine). They exercise the
-//! guard's public API + engine internals together.
+//! (`render::lower::IrAuthor` / `conn::ExecutorConfig`), so they need both the engine
+//! and the vendor that owns the parser. They exercise the guard's public API and the
+//! engine's lowering together.
+//!
+//! # Why this is an integration test and not an in-`src` module
+//!
+//! It used to be `crates/zero-migrate/src/guard_vendor_lower_tests.rs`, included as a
+//! `#[cfg(test)] mod` so it could reach engine internals. It cannot stay there: the
+//! assertions below name PostgreSQL's deny-list rule ids
+//! (`zero_migrate_postgres::guard::denylist::rule`), and
+//! `dialect_matrix/core_names_no_vendor_crate.rs` forbids ANY file under
+//! `crates/zero-migrate/src` from naming a vendor crate — a test asserting one
+//! vendor's rule ids is exactly the coupling that census exists to catch, whether or
+//! not it is `#[cfg(test)]`.
+//!
+//! Nothing was weakened to move it. Everything it needed from the engine
+//! (`render::lower`, `conn::ExecutorConfig`, `model::*`) is already `pub`; the only
+//! genuinely crate-private dependency was the `#[cfg(test)] pub(crate) test_fixtures`
+//! module, whose four charter builders are mirrored in `tests/support/mod.rs` — they
+//! are built from the PUBLIC `effective_policy_from_charter_toml`, so the mirror is a
+//! second CALLER of the public API rather than a second copy of engine logic.
 //!
 //! Coverage map:
 //!   - capability minting is named-seam-only by convention.
@@ -16,20 +32,17 @@
 //!   - the SchemaScope swap is byte-identical under Single for the
 //!     func-def-target + literal-schema-ref read sites.
 
-//! Included as an in-crate `#[cfg(test)] mod` from `lib.rs`, so `crate::…` paths
-//! reach the engine's internals (`render::lower`, `conn::ExecutorConfig`) that an
-//! external `tests/` crate could not.
-
-// Many types below are named via full `crate::…` paths (matching the original
+// Many types below are named via full `zero_migrate::…` paths (matching the original
 // in-module code); only the bare-referenced names are imported here.
-use crate::guard::denylist::rule;
-use crate::guard::{
-    check_ir_data_security_policy, data_security_rule, flags_for, GuardConfig, GuardError, SqlGuard,
+use zero_migrate::guard::{
+    check_ir_data_security_policy, data_security_rule, GuardConfig, GuardError, MigrationGuard,
 };
-use crate::model::capability::OperatorCapability;
-use crate::model::ir::{MigrationIr, Op};
-use crate::model::policy::{DestructiveOps, SchemaScope};
-use crate::{DialectId, GuardMode, MYSQL, POSTGRES, SQLITE};
+use zero_migrate::model::capability::OperatorCapability;
+use zero_migrate::model::ir::{MigrationIr, Op};
+use zero_migrate::model::policy::{DestructiveOps, SchemaScope};
+use zero_migrate::{DialectId, GuardMode, MYSQL, POSTGRES, SQLITE};
+use zero_migrate_postgres::guard::denylist::rule;
+use zero_migrate_postgres::guard::{flags_for, SqlGuard};
 
 /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
 /// the two ported extensions. Minted via the `for_test` seam, a named alias for
@@ -49,7 +62,7 @@ fn platform_guard_config_with_data(
     destructive_ops: DestructiveOps,
 ) -> GuardConfig {
     GuardConfig::from_policy(
-        crate::test_fixtures::operator_with_data_security(
+        crate::support::operator_with_data_security(
             &["zero_migrate", "public"],
             &["citext", "uuid-ossp"],
             require_rls,
@@ -60,7 +73,7 @@ fn platform_guard_config_with_data(
 }
 
 fn confined_guard_config() -> GuardConfig {
-    GuardConfig::from_policy(crate::test_fixtures::no_inject("zero_migrate"), POSTGRES)
+    GuardConfig::from_policy(crate::support::no_inject("zero_migrate"), POSTGRES)
 }
 
 fn confined_guard() -> SqlGuard {
@@ -118,7 +131,7 @@ fn create_table(name: &str) -> Op {
 #[test]
 fn destructive_ops_forbid_denies_structured_destructive_sql_classes() {
     let confined = SqlGuard::new(GuardConfig::from_policy(
-        crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
         POSTGRES,
     ));
     for sql in [
@@ -167,7 +180,7 @@ fn destructive_ops_forbid_denies_structured_destructive_sql_classes() {
 #[test]
 fn destructive_ops_forbid_denies_dml_holes_and_unknowns_fail_closed() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
-        crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
         POSTGRES,
     ));
 
@@ -211,7 +224,7 @@ fn destructive_ops_forbid_denies_dml_holes_and_unknowns_fail_closed() {
 #[test]
 fn destructive_ops_warn_allows_and_records_structured_warning() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
-        crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Warn),
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Warn),
         POSTGRES,
     ));
 
@@ -225,7 +238,7 @@ fn destructive_ops_warn_allows_and_records_structured_warning() {
 
         assert!(
             report.advisories.iter().any(|a| {
-                a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+                a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
             }),
             "warn must record advisory for {sql}: {:?}",
             report.advisories
@@ -237,7 +250,7 @@ fn destructive_ops_warn_allows_and_records_structured_warning() {
         .expect("warn permits non-destructive DROP INDEX SQL");
     assert!(
         !report.advisories.iter().any(|a| {
-            a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+            a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
         }),
         "plain DROP INDEX must not record a destructive_ops warning: {:?}",
         report.advisories
@@ -247,7 +260,7 @@ fn destructive_ops_warn_allows_and_records_structured_warning() {
 #[test]
 fn destructive_ops_warn_allows_and_records_unknown_warning() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
-        crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Warn),
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Warn),
         POSTGRES,
     ));
 
@@ -257,7 +270,7 @@ fn destructive_ops_warn_allows_and_records_unknown_warning() {
 
     assert!(
         report.advisories.iter().any(|a| {
-            a.rule == crate::analysis::analyze::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN
+            a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_UNCLASSIFIED_OPS_WARN
         }),
         "warn must record advisory for unclassified SQL: {:?}",
         report.advisories
@@ -267,7 +280,7 @@ fn destructive_ops_warn_allows_and_records_unknown_warning() {
 #[test]
 fn destructive_ops_allow_is_silent_for_policy_warning() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
-        crate::test_fixtures::no_inject("public"),
+        crate::support::no_inject("public"),
         POSTGRES,
     ));
 
@@ -275,16 +288,15 @@ fn destructive_ops_allow_is_silent_for_policy_warning() {
         .check("DROP TABLE users")
         .expect("allow permits the drop");
 
-    assert!(!report
-        .advisories
-        .iter()
-        .any(|a| { a.rule == crate::analysis::analyze::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN }));
+    assert!(!report.advisories.iter().any(|a| {
+        a.rule == zero_migrate_backend::advisory::rule::DATA_SECURITY_DESTRUCTIVE_OPS_WARN
+    }));
 }
 
 #[test]
 fn destructive_ops_forbid_allows_clearly_non_destructive_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
-        crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
+        crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
         POSTGRES,
     ));
 
@@ -330,7 +342,8 @@ fn require_rls_rejects_create_table_without_same_migration_enable() {
     let cfg = platform_guard_config_with_data(true, DestructiveOps::Allow);
     let ir = ir_with(vec![create_table("users")]);
 
-    let err = check_ir_data_security_policy(&cfg, &ir).unwrap_err();
+    let err = check_ir_data_security_policy(&cfg, &ir, zero_migrate::guard_for(&cfg).as_ref())
+        .unwrap_err();
 
     assert_eq!(err.op_index, 0);
     assert!(matches!(
@@ -355,7 +368,8 @@ fn require_rls_accepts_create_table_with_same_migration_enable() {
         },
     ]);
 
-    check_ir_data_security_policy(&cfg, &ir).expect("matching setRls satisfies require_rls");
+    check_ir_data_security_policy(&cfg, &ir, zero_migrate::guard_for(&cfg).as_ref())
+        .expect("matching setRls satisfies require_rls");
 }
 
 #[test]
@@ -377,7 +391,8 @@ fn require_rls_rejects_create_enable_disable_net_off() {
         },
     ]);
 
-    let err = check_ir_data_security_policy(&cfg, &ir).unwrap_err();
+    let err = check_ir_data_security_policy(&cfg, &ir, zero_migrate::guard_for(&cfg).as_ref())
+        .unwrap_err();
 
     assert_eq!(err.op_index, 2);
     assert!(matches!(
@@ -407,7 +422,12 @@ fn require_rls_rejects_standalone_disable_and_no_force() {
             forced: Some(false),
         },
     ] {
-        let err = check_ir_data_security_policy(&cfg, &ir_with(vec![op])).unwrap_err();
+        let err = check_ir_data_security_policy(
+            &cfg,
+            &ir_with(vec![op]),
+            zero_migrate::guard_for(&cfg).as_ref(),
+        )
+        .unwrap_err();
         assert_eq!(err.op_index, 0);
         assert!(matches!(
             err.source,
@@ -431,9 +451,9 @@ fn require_rls_rejects_pg_raw_table_creation_island_fail_closed() {
     match author.lower_guarded(
         &vendor_ir(op),
         &cfg,
-        &crate::render::lower::LiveSchema::default(),
+        &zero_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "pgRaw");
             assert!(matches!(
                 denial.source,
@@ -452,12 +472,12 @@ fn require_rls_rejects_pg_raw_table_creation_island_fail_closed() {
 /// guard varies (`require_rls`, `destructive_ops`) carry no vendor capability, so the
 /// author holds them at their guard-neutral values. The guarded lower derives its
 /// confinement scope from the guard config, so nothing widens the author by hand.
-fn platform_author() -> crate::render::lower::IrAuthor {
-    crate::render::lower::IrAuthor::new(
+fn platform_author() -> zero_migrate::render::lower::IrAuthor {
+    zero_migrate::render::lower::IrAuthor::new(
         "zero_migrate",
         "app_corpus",
         &POSTGRES,
-        &crate::test_fixtures::operator_with_data_security(
+        &crate::support::operator_with_data_security(
             &["zero_migrate", "public"],
             &["citext", "uuid-ossp"],
             false,
@@ -720,9 +740,9 @@ fn m2_stage2_site_1209_raw_island_body_backstop_behavior_lock() {
     match author.lower_guarded(
         &vendor_ir(op),
         &cfg,
-        &crate::render::lower::LiveSchema::default(),
+        &zero_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "createFunction");
             assert!(
                 matches!(
@@ -789,10 +809,8 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
     // The token grants a Platform GuardConfig + ExecutorConfig. The Platform posture
     // is now identified by its PDP shape: a schema allowlist scope + the full belt
     // (it does NOT skip the static guard — only Trusted does).
-    let gcfg = GuardConfig::from_policy(
-        crate::test_fixtures::operator_no_inject("zero_migrate"),
-        POSTGRES,
-    );
+    let gcfg =
+        GuardConfig::from_policy(crate::support::operator_no_inject("zero_migrate"), POSTGRES);
     assert_eq!(
         gcfg.schema_scope(),
         Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
@@ -801,11 +819,11 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
         !gcfg.skips_denylist_belt(),
         "Platform runs the full static belt"
     );
-    let ecfg = crate::conn::ExecutorConfig::platform(
+    let ecfg = zero_migrate::conn::ExecutorConfig::platform(
         &cap,
         "platform",
         "zero_migrate",
-        crate::test_fixtures::operator_no_inject("zero_migrate"),
+        crate::support::operator_no_inject("zero_migrate"),
     );
     assert_eq!(
         ecfg.guard_config_for(&POSTGRES).schema_scope(),
@@ -816,7 +834,7 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
     // additive feature) `for_test`, so any dependent crate can mint one. Nothing
     // reads it. The boundary that is actually pinned is the unforgeable
     // `EffectivePolicy`, held by the T8 `compile_fail` doctests in
-    // `zero_migrate_guard::guard` - there is no `tests/trybuild_*` and never was.
+    // `zero_migrate_backend::guard` - there is no `tests/trybuild_*` and never was.
 }
 
 // ---- Platform widening is correct AND bounded ----------------------
@@ -1034,7 +1052,7 @@ fn vendor_if_not_exists_superuser_role_op_is_refused_under_platform() {
     match author.lower_guarded(
         &vendor_ir(op),
         &guard_cfg,
-        &crate::render::lower::LiveSchema::default(),
+        &zero_migrate::render::lower::LiveSchema::default(),
     ) {
         Err(_) => {}
         Ok((_steps, fragments)) => panic!(
@@ -1105,9 +1123,9 @@ fn vendor_create_function_body_rce_is_denied_under_platform_guard() {
     match author.lower_guarded(
         &vendor_ir(op),
         &guard_cfg,
-        &crate::render::lower::LiveSchema::default(),
+        &zero_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "createFunction");
             assert!(
                 matches!(
@@ -1146,7 +1164,7 @@ fn vendor_create_function_benign_body_is_allowed_under_platform_guard() {
         .lower_guarded(
             &vendor_ir(op),
             &guard_cfg,
-            &crate::render::lower::LiveSchema::default(),
+            &zero_migrate::render::lower::LiveSchema::default(),
         )
         .expect("benign vendor createFunction body must pass the Platform guard");
     assert_eq!(fragments.len(), 1);
@@ -1170,9 +1188,9 @@ fn vendor_pg_raw_rce_is_denied_under_platform_guard() {
     match author.lower_guarded(
         &vendor_ir(op),
         &guard_cfg,
-        &crate::render::lower::LiveSchema::default(),
+        &zero_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "pgRaw");
             assert!(
                 matches!(
@@ -1193,11 +1211,11 @@ fn vendor_pg_raw_rce_is_denied_under_platform_guard() {
 #[test]
 fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
     let guard_cfg = confined_guard_config();
-    let author = crate::render::lower::IrAuthor::new(
+    let author = zero_migrate::render::lower::IrAuthor::new(
         "zero_migrate",
         "app_corpus",
         &POSTGRES,
-        &crate::test_fixtures::no_inject("app"),
+        &crate::support::no_inject("app"),
     );
     let op = zero_migrate_ir::ir::Op::CreateRole {
         name: "zero_migrate_auth".into(),
@@ -1215,10 +1233,10 @@ fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
     match author.lower_guarded(
         &vendor_ir(op),
         &guard_cfg,
-        &crate::render::lower::LiveSchema::default(),
+        &zero_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(crate::render::lower::IrGuardedLowerError::Lower(
-            crate::render::lower::IrLowerError::VendorCapabilityDenied { op, capability },
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Lower(
+            zero_migrate::render::lower::IrLowerError::VendorCapabilityDenied { op, capability },
         )) => {
             assert_eq!(op, "createRole");
             assert_eq!(
@@ -1235,11 +1253,11 @@ fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
 #[test]
 fn benign_vendor_policy_is_refused_at_lower_without_capability() {
     let guard_cfg = confined_guard_config();
-    let author = crate::render::lower::IrAuthor::new(
+    let author = zero_migrate::render::lower::IrAuthor::new(
         "zero_migrate",
         "app_corpus",
         &POSTGRES,
-        &crate::test_fixtures::no_inject("app"),
+        &crate::support::no_inject("app"),
     );
     let op = zero_migrate_ir::ir::Op::CreatePolicy {
         name: "tenant_isolation".into(),
@@ -1258,9 +1276,9 @@ fn benign_vendor_policy_is_refused_at_lower_without_capability() {
             author.lower_guarded(
                 &vendor_ir(op),
                 &guard_cfg,
-                &crate::render::lower::LiveSchema::default(),
+                &zero_migrate::render::lower::LiveSchema::default(),
             ),
-            Err(crate::render::lower::IrGuardedLowerError::Lower(_))
+            Err(zero_migrate::render::lower::IrGuardedLowerError::Lower(_))
         ),
         "lower_guarded must re-enforce the vendor capability gate before rendering; \
          the SQL guard alone would allow a benign same-schema CREATE POLICY"
@@ -1332,7 +1350,7 @@ fn trusted_guard() -> SqlGuard {
 
 fn trusted_guard_config() -> GuardConfig {
     GuardConfig::from_policy_with_mode(
-        crate::test_fixtures::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
+        crate::support::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
         POSTGRES,
         GuardMode::Off,
     )
@@ -1341,12 +1359,12 @@ fn trusted_guard_config() -> GuardConfig {
 /// The Trusted peer of [`platform_author`]: the author composes the same unconfined
 /// operator charter `trusted_guard_config` does, because the charter is what grants a
 /// vendor capability.
-fn trusted_author() -> crate::render::lower::IrAuthor {
-    crate::render::lower::IrAuthor::new(
+fn trusted_author() -> zero_migrate::render::lower::IrAuthor {
+    zero_migrate::render::lower::IrAuthor::new(
         "public",
         "app_corpus",
         &POSTGRES,
-        &crate::test_fixtures::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
+        &crate::support::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
     )
 }
 
@@ -1416,9 +1434,9 @@ fn trusted_pg_raw_still_runs_raw_island_denylist_backstop() {
     match author.lower_guarded(
         &vendor_ir(bad),
         &cfg,
-        &crate::render::lower::LiveSchema::default(),
+        &zero_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "pgRaw");
             assert!(
                 matches!(
@@ -1443,7 +1461,7 @@ fn trusted_pg_raw_still_runs_raw_island_denylist_backstop() {
         .lower_guarded(
             &vendor_ir(clean),
             &cfg,
-            &crate::render::lower::LiveSchema::default(),
+            &zero_migrate::render::lower::LiveSchema::default(),
         )
         .expect("clean Trusted pgRaw should pass the raw-island backstop");
 }
@@ -1466,9 +1484,9 @@ fn trusted_create_function_body_still_runs_raw_island_denylist_backstop() {
     match author.lower_guarded(
         &vendor_ir(bad),
         &cfg,
-        &crate::render::lower::LiveSchema::default(),
+        &zero_migrate::render::lower::LiveSchema::default(),
     ) {
-        Err(crate::render::lower::IrGuardedLowerError::Denied(denial)) => {
+        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
             assert_eq!(denial.op_kind, "createFunction");
             assert!(
                 matches!(
@@ -1499,7 +1517,7 @@ fn trusted_create_function_body_still_runs_raw_island_denylist_backstop() {
         .lower_guarded(
             &vendor_ir(clean),
             &cfg,
-            &crate::render::lower::LiveSchema::default(),
+            &zero_migrate::render::lower::LiveSchema::default(),
         )
         .expect("clean Trusted createFunction body should pass the raw-island backstop");
 }
@@ -1559,6 +1577,37 @@ fn trusted_early_return_is_gated_on_trust_trusted_only() {
 /// assertion: this arm must NOT fire there, because PostgreSQL's denial comes from the
 /// text guard. A change that made the arm fire for every dialect would satisfy the loop
 /// and fail the control.
+/// A stand-in for a backend nobody has written yet — the guard a fourth vendor would
+/// have to supply, since `MigrationGuard` has no default body on any method.
+///
+/// Every method panics rather than answering. The walk under test reaches the
+/// destructive-posture gate before it consults a guard at all, so a correct
+/// implementation calls NONE of these; a panic here means the walk started asking a
+/// vendor questions on a path that is supposed to be decided from the structured IR
+/// alone.
+struct FourthBackendGuard;
+
+impl MigrationGuard for FourthBackendGuard {
+    fn check(&self, _up: &str) -> Result<zero_migrate::guard::GuardOutcome, GuardError> {
+        unreachable!("the destructive-posture gate decides before any SQL text is vetted")
+    }
+    fn check_raw_island_sql(&self, _sql: &str) -> Result<(), GuardError> {
+        unreachable!("this IR carries no raw island")
+    }
+    fn check_raw_island_body(&self, _body: &str, _raw: &str) -> Result<(), GuardError> {
+        unreachable!("this IR carries no raw function body")
+    }
+    fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
+        unreachable!("this IR carries no raw island, and no require_rls obligation")
+    }
+    fn flags_for_sql(
+        &self,
+        _up: &str,
+    ) -> Result<zero_migrate::model::migration::MigrationFlags, GuardError> {
+        unreachable!("the IR walk never derives flags from SQL text")
+    }
+}
+
 #[test]
 fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
     let ir = ir_with(vec![Op::DropTable {
@@ -1567,13 +1616,23 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
         existence_guard: None,
         cascade: None,
     }]);
-    let policy = || {
-        crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Forbid)
-    };
+    let policy =
+        || crate::support::no_inject_with_data_security("public", false, DestructiveOps::Forbid);
 
     for dialect in [SQLITE, MYSQL, DialectId::new("duckdb")] {
         let cfg = GuardConfig::from_policy(policy(), dialect.clone());
-        let err = check_ir_data_security_policy(&cfg, &ir).expect_err(
+        // `duckdb` is not a REGISTERED backend — that is the point of including it. It
+        // stands for a fourth backend that has not been written yet, and it proves the
+        // gate below is an OPEN `!= POSTGRES` comparison rather than a closed match
+        // over the three shipping ids. The registry cannot resolve it (`guard_for`
+        // panics on an unregistered id), so it brings the guard a fourth backend would
+        // have to write for itself.
+        let guard: Box<dyn MigrationGuard> = if dialect == DialectId::new("duckdb") {
+            Box::new(FourthBackendGuard)
+        } else {
+            zero_migrate::guard_for(&cfg)
+        };
+        let err = check_ir_data_security_policy(&cfg, &ir, guard.as_ref()).expect_err(
             "a trusting MigrationGuard means this IR walk is the dialect's ONLY \
              destructive_ops=forbid enforcement - it must deny a dropTable",
         );
@@ -1593,7 +1652,7 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
 
     let pg = GuardConfig::from_policy(policy(), POSTGRES);
     assert!(
-        check_ir_data_security_policy(&pg, &ir).is_ok(),
+        check_ir_data_security_policy(&pg, &ir, zero_migrate::guard_for(&pg).as_ref()).is_ok(),
         "the IR arm is for the dialects whose guard cannot read the knob; PostgreSQL's \
          denial comes from SqlGuard::check over the rendered SQL"
     );

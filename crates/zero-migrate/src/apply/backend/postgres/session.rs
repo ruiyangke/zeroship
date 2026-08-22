@@ -523,7 +523,7 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
 ///
 /// Cluster-wide statements are not this function's business either. The line-1 guard
 /// runs over the same `down` before the `BEGIN` and denies `ALTER SYSTEM`
-/// (`zero_migrate_guard::guard`, `rule::ALTER_SYSTEM`) and `CREATE`/`DROP DATABASE`
+/// (`zero_migrate_postgres::guard`, `rule::ALTER_SYSTEM`) and `CREATE`/`DROP DATABASE`
 /// (`rule::DATABASE_MANAGEMENT`) already.
 ///
 /// # Unparseable SQL

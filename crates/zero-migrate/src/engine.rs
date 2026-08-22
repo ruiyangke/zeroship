@@ -2,7 +2,8 @@
 //! → `executor::apply_with_lock_backend` (guard + role).
 //!
 //! This is the surface a caller (control plane / CLI / builder) drives. The
-//! pieces beneath it — the [`SqlGuard`](crate::guard::SqlGuard), the Postgres
+//! pieces beneath it — the line-1 guard
+//! ([`MigrationGuard`](crate::guard::MigrationGuard)), the Postgres
 //! [`apply`](crate::engine::MigrationEngine::apply) flow, the least-privilege
 //! `migrator` role (derived in the PostgreSQL backend crate) — are already built;
 //! the engine *composes*
@@ -62,9 +63,9 @@ pub struct PlannedMigration {
     /// The migration itself (clone of the input).
     pub migration: Migration,
     /// Its passing **neutral** guard outcome — the destructive flag + operational
-    /// [`Advisory`](crate::analyze::Advisory)s the engine consumes. The
+    /// [`Advisory`](crate::Advisory)s the engine consumes. The
     /// PG-specific statement `classes` stay inside the PG guard
-    /// ([`SqlGuard`](crate::guard::SqlGuard)/[`GuardReport`](crate::guard::GuardReport))
+    /// (`SqlGuard`/`GuardReport`, in `zero-migrate-postgres`)
     /// and are not surfaced here — the engine seam is dialect-neutral.
     pub report: GuardOutcome,
 }
@@ -659,7 +660,7 @@ impl MigrationEngine {
     /// Lint + preview a migration set **read-only** (no DB) — the dry-run /
     /// plan phase.
     ///
-    /// Runs the [`crate::guard::SqlGuard`] over every migration's `up`. A guard **denial** is
+    /// Runs the registered backend's [`MigrationGuard`](crate::guard::MigrationGuard) over every migration's `up`. A guard **denial** is
     /// recorded in [`MigrationPlan::denied`] (and the migration is *not* added to
     /// `items`), so a caller sees **every** problem in the set at once rather
     /// than aborting on the first. `destructive` / `requires_approval` are `true`
@@ -3886,7 +3887,7 @@ impl DeclarativeDeployPlan {
     /// in memory and no serialization is needed. If they are split across a
     /// boundary, the plan must be carried as-is; note that
     /// [`DeclarativeDeployPlan`] is deliberately NOT `serde`-serializable today
-    /// (its [`crate::guard::GuardReport`]/[`BackfillSpec`](crate::model::backfill::BackfillSpec) members
+    /// (its PostgreSQL `GuardReport`/[`BackfillSpec`](crate::model::backfill::BackfillSpec) members
     /// are not, and deriving it would
     /// cascade invasively) — so a split-boundary control plane either keeps the
     /// generated plan in a server-side store keyed by an opaque token, or

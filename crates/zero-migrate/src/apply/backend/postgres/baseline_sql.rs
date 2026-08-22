@@ -17,8 +17,8 @@ use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::journal::{self, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
-use crate::guard::SqlGuard;
 use crate::model::migration::Migration;
+use crate::render::backends::guard_for;
 
 use super::journal_sql;
 
@@ -56,7 +56,7 @@ pub(crate) async fn baseline<B: crate::apply::backend::MigrationBackend, D: SqlS
 ) -> Result<BaselineOutcome, BaselineError> {
     // GUARD (defense in depth) — BEFORE the lock, no DB needed. A baseline that
     // carries a denied/cross-schema construct is refused even though it never runs.
-    let guard = SqlGuard::new(cfg.guard_config_for(dialect));
+    let guard = guard_for(&cfg.guard_config_for(dialect));
     guard
         .check(&baseline_migration.up)
         .map_err(|source| BaselineError::Guard {

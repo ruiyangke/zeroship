@@ -410,7 +410,7 @@ onto the catalog snapshot and refuses anything the fold cannot resolve, reportin
 `failed to project pending schema after envelope "<name>": ...`. A host embedding
 `zero-migrate` directly never builds one: `ProjectionGuardVerdict` exists only in
 `crates/zero-migrate-node/src/lower.rs`, and nothing in `zero-migrate`,
-`zero-migrate-guard`, `zero-migrate-ir` or `zero-migrate-policy` references it.
+`zero-migrate-postgres`, `zero-migrate-ir` or `zero-migrate-policy` references it.
 
 That is a difference in strategy rather than a missing check. `MigrationEngine`
 re-reads the live catalog as it goes, so it decides each envelope against the

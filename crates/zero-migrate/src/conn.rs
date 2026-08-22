@@ -243,8 +243,8 @@ pub struct ExecutorConfig {
     /// lock (`pg_advisory_lock(hashtext(project_id))`).
     pub project_id: String,
     /// The one schema this project's migrations own and may touch. Pinned into
-    /// `search_path` for every apply, and the [`crate::guard::SqlGuard`]'s
-    /// confinement target.
+    /// `search_path` for every apply, and the registered line-1
+    /// guard's confinement target.
     pub project_schema: String,
     /// The **confinement parameters** — the journal's meta schema and the three
     /// timeout budgets, each read by more than one dialect, plus the
@@ -384,7 +384,7 @@ impl ExecutorConfig {
     // `#[cfg(test)]` below plus `pub(crate)`, not the capability token it takes -
     // that token is freely mintable and authorises nothing. The unforgeable input is
     // the composed `EffectivePolicy`, pinned by the T8 `compile_fail` doctests in
-    // `zero_migrate_guard::guard` (NOT by any `tests/trybuild_*`, which has never
+    // `zero_migrate_backend::guard` (NOT by any `tests/trybuild_*`, which has never
     // existed here).
     #[must_use]
     #[cfg(test)]

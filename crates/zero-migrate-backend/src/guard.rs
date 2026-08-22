@@ -16,34 +16,38 @@
 //! and the engine composes them. That is the same reason
 //! [`crate::registry::BackendVendor`] lives here.
 //!
-//! # What moved here, and what deliberately did NOT
+//! # What lives here
 //!
-//! What moved is the SEAM: [`GuardConfig`], [`GuardMode`], [`GuardError`],
-//! [`GuardOutcome`], [`ParseError`] and [`IrDataSecurityError`], plus
-//! [`crate::advisory`]. Every vendor's guard is configured by the same unforgeable
-//! [`EffectivePolicy`] and reports in the same vocabulary, so the seam is genuinely
-//! neutral and belongs below every vendor.
+//! The SEAM: [`GuardConfig`], [`GuardMode`], [`GuardError`], [`GuardOutcome`],
+//! [`ParseError`] and [`IrDataSecurityError`], plus [`crate::advisory`]. Every
+//! vendor's guard is configured by the same unforgeable [`EffectivePolicy`] and
+//! reports in the same vocabulary, so the seam is genuinely neutral and belongs below
+//! every vendor.
 //!
-//! What did NOT move is `zero-migrate-guard` itself, and that is a MEASURED refusal
-//! rather than an unfinished job. The obvious next step — dissolve that crate into
-//! the vendors so each ships its own line-1 — does not decompose:
+//! [`check_ir_data_security_policy`] lives here too, and getting it here is what
+//! dissolved the old `zero-migrate-guard` crate. The obstacle was real and is worth
+//! recording, because the shape recurs:
 //!
-//! - `check_ir_data_security_policy` is the ONLY `destructive_ops = forbid`
-//!   enforcement SQLite and MySQL have. Its gate is literally
-//!   `if cfg.dialect() != &POSTGRES`, and its own comment says
-//!   why: the descriptor guard those two dialects run is constructed without the
-//!   policy and cannot read the knob at all.
-//! - That same function reaches `pg_query::parse` for `Op::PgRaw` islands, because a
-//!   raw island's net table state is not enumerable without a parser.
+//! - It is the ONLY `destructive_ops = forbid` enforcement SQLite and MySQL have. Its
+//!   gate is literally `if cfg.dialect() != &POSTGRES`, because the descriptor guard
+//!   those two dialects run is constructed without the policy and cannot read the
+//!   knob at all.
+//! - Yet it reached `pg_query::parse` for `Op::PgRaw` islands, because a raw island's
+//!   net table state is not enumerable without a parser.
 //!
-//! So the function that enforces SQLite's and MySQL's posture needs PostgreSQL's
-//! parser. Putting it in `zero-migrate-postgres` would file two dialects' only
-//! data-security enforcement under a third dialect's crate; putting it HERE would
-//! push `libpg_query` beneath `zero-migrate-sqlite` and `zero-migrate-mysql`, which
-//! today build without it. Both are worse than leaving it where it is. The smallest
-//! change that WOULD free it is a per-vendor "can you enumerate this raw island's net
-//! table state?" hook, so a descriptor-only vendor can answer "I have no raw door"
-//! without anyone parsing anything — a behaviour change, not a move.
+//! So the function enforcing SQLite's and MySQL's posture needed PostgreSQL's parser.
+//! Filing it under `zero-migrate-postgres` would have put two dialects' only
+//! data-security enforcement in a third dialect's crate; putting it here as it stood
+//! would have pushed `libpg_query` beneath `zero-migrate-sqlite` and
+//! `zero-migrate-mysql`, which build without it.
+//!
+//! Neither was necessary, because the parser was answering ONE question. The walk
+//! now asks it through [`MigrationGuard::raw_island_escapes_rls_net_state`]: a vendor
+//! with a raw door answers from its parser, and a descriptor-only vendor answers "I
+//! have no raw door" without anyone parsing anything. Everything else the walk
+//! decides is read off a structured [`Op`], which needs no grammar. That is the
+//! general move — when neutral code seems to need a vendor's tool, find the single
+//! question it is using the tool to answer and make THAT the vendor's method.
 //!
 //! # A vendor that ships no guard does not compile
 //!
@@ -63,9 +67,11 @@
 //! not `#[non_exhaustive]`, and its `guard` field is not an `Option` — each of those
 //! would reintroduce exactly the silent grant of trust this removes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_ir::ir::{MigrationIr, Op};
+use zero_migrate_ir::migration::MigrationFlags;
 use zero_migrate_ir::policy::DestructiveOps;
 use zero_migrate_ir::policy::SchemaScope;
 use zero_migrate_ir::policy_registry;
@@ -684,7 +690,7 @@ pub struct GuardOutcome {
 ///
 /// The empty outcome is not the whole story for a descriptor-only vendor.
 /// `data_security.destructive_ops = forbid` is enforced for SQLite and MySQL by
-/// `zero_migrate_guard::guard::check_ir_data_security_policy`, over the structured IR
+/// [`check_ir_data_security_policy`], over the structured IR
 /// rather than over SQL text, precisely BECAUSE their guard here is empty and is
 /// constructed without the policy. Reading only this trait would leave you believing
 /// those two dialects have no data-security posture at all. They do; it is enforced
@@ -702,6 +708,65 @@ pub trait MigrationGuard {
     /// [`GuardError::CrossSchema`] / [`GuardError::Parse`]; the descriptor-only
     /// vendors do not deny (they trust), so their `check` is infallible in practice.
     fn check(&self, up: &str) -> Result<GuardOutcome, GuardError>;
+
+    /// Line-1 BACKSTOP over one rendered raw-SQL island, for the posture that has
+    /// already skipped the deny-list belt ([`GuardConfig::skips_denylist_belt`]).
+    ///
+    /// The belt-skipping posture is a trusted one: the operator has granted raw SQL,
+    /// so the ordinary statement-kind gate is off. This is what still runs — the
+    /// narrower "even trusted text may not do THIS" set. A vendor that answers `Ok`
+    /// unconditionally is granting the trusted posture an unchecked raw door, and
+    /// must say so in its own doc.
+    ///
+    /// # Errors
+    /// Vendor-specific, in the same vocabulary as [`MigrationGuard::check`].
+    fn check_raw_island_sql(&self, sql: &str) -> Result<(), GuardError>;
+
+    /// Line-1 BACKSTOP over one raw FUNCTION BODY under the same trusted posture as
+    /// [`MigrationGuard::check_raw_island_sql`].
+    ///
+    /// A body is not a statement list: a procedural body is only best-effort
+    /// parseable, so a vendor's answer here is generally a token/literal scan rather
+    /// than a parse. `raw` is the rendered statement the body came from, carried so a
+    /// denial can name the text the operator wrote.
+    ///
+    /// # Errors
+    /// Vendor-specific, in the same vocabulary as [`MigrationGuard::check`].
+    fn check_raw_island_body(&self, body: &str, raw: &str) -> Result<(), GuardError>;
+
+    /// Can this vendor NOT enumerate the net table state of a raw SQL island — i.e.
+    /// does the island escape [`check_ir_data_security_policy`]'s `safety.require_rls`
+    /// net-state walk?
+    ///
+    /// This is the hook that lets the neutral walk stay neutral. The walk decides
+    /// `require_rls` over structured ops, which it can do for every dialect; a raw
+    /// island is the one op whose net table state is not derivable from the IR. Only
+    /// the vendor that owns the raw door can answer, and a vendor with NO raw door
+    /// answers `false` without anyone parsing anything.
+    ///
+    /// `true` means "refuse this island" — either because it reaches an obligated
+    /// relation or because the vendor cannot attribute it at all. Answering `false`
+    /// unconditionally while the vendor DOES accept raw text would let raw SQL create
+    /// an RLS-less table behind the obligation's back, so a vendor that answers
+    /// `false` must state which of the two reasons it is.
+    fn raw_island_escapes_rls_net_state(&self, sql: &str) -> bool;
+
+    /// Derive a migration's [`MigrationFlags`] from its `up` SQL.
+    ///
+    /// The raw-SQL author hands the engine pre-generated SQL and no flags, so the
+    /// destructive / non-transactional / approval facets have to be read back OUT of
+    /// the text. Only a vendor that can classify its own statements can do that, and
+    /// what "destructive" or "non-transactional" means is that vendor's grammar.
+    ///
+    /// A *denial* is not this method's to raise — the engine's `plan()` re-runs the
+    /// guard and reports denials so a caller sees every problem at once. A vendor
+    /// that cannot classify a denied-but-parseable statement should return
+    /// conservative flags (`requires_approval: true`) rather than an error.
+    ///
+    /// # Errors
+    /// Only when `up` cannot be classified at all (a parse failure), which is an
+    /// authoring-time error the author surfaces immediately.
+    fn flags_for_sql(&self, up: &str) -> Result<MigrationFlags, GuardError>;
 }
 
 /// A data-security policy failure attributed to an IR op index.
@@ -711,6 +776,286 @@ pub struct IrDataSecurityError {
     pub op_index: usize,
     /// The guard policy error.
     pub source: GuardError,
+}
+
+/// The per-table RLS net state the [`check_ir_data_security_policy`] walk accumulates.
+#[derive(Debug, Clone)]
+struct RlsTableState {
+    exists_after: bool,
+    rls_enabled: bool,
+    last_op_index: usize,
+    table: String,
+}
+
+/// Does a `safety.require_rls` obligation cover the table this policy key names?
+///
+/// [`table_key_for_policy`] yields an EMPTY schema for an unqualified table under a
+/// charter with no unique owned schema, and no `ObjectName` can be built from `.users`.
+/// [`GuardConfig::requires_rls_at_table`] is where that fall-back-closed rule lives,
+/// so the declarative path resolves the obligation the same way this walk does.
+fn require_rls_covers(cfg: &GuardConfig, key: &(String, String)) -> bool {
+    let (schema, table) = key;
+    cfg.requires_rls_at_table(schema, table)
+}
+
+fn table_key_for_policy(
+    cfg: &GuardConfig,
+    schema: &Option<String>,
+    table: &str,
+) -> (String, String) {
+    let effective_schema = schema.clone().unwrap_or_else(|| {
+        // An unqualified table resolves to the config's sole owned schema (the pinned
+        // project schema); no unique owned schema ⇒ empty.
+        match owned_schemas_from_effective(cfg.effective()).as_slice() {
+            [one] => one.clone(),
+            _ => String::new(),
+        }
+    });
+    (effective_schema, table.to_string())
+}
+
+/// Enforce data-security knobs that require the structured IR op set.
+///
+/// `require_rls` is a cross-op obligation over the migration's final table RLS
+/// state, not a textual co-occurrence rule. Any table this migration creates and
+/// leaves present must end RLS-enabled; any attempt to turn RLS/force off is refused
+/// outright. Raw SQL islands are rejected because the guard cannot enumerate their
+/// net table state fail-closed.
+///
+/// `safety.require_rls` is registered `ObjectModel::PerTable`, so every one of those
+/// decisions resolves at the CONCRETE table it is about, the same way
+/// `zero_migrate_ir::policy_approval` resolves its sibling `safety.require_approval`.
+/// The net-state walk therefore runs unconditionally: whether an obligation covers a
+/// table is a property of that table, not of the migration.
+///
+/// # Why this is neutral, and where the one vendor question went
+///
+/// Every decision below is read off a structured [`Op`] — a create, a drop, a rename,
+/// a `setRls` — which every dialect emits and none of them needs a parser to
+/// understand. The single exception is the raw island: `Op::PgRaw` carries text, and
+/// text's net table state is not derivable from the IR. That one question is asked of
+/// `guard` through [`MigrationGuard::raw_island_escapes_rls_net_state`], so the vendor
+/// that owns the raw door answers it and a descriptor-only vendor answers "I have no
+/// raw door" without anyone parsing anything.
+///
+/// This is what lets the walk live below every vendor: it is the ONLY
+/// `destructive_ops = forbid` enforcement SQLite and MySQL have (their line-1 guard is
+/// the empty trusting one and is constructed without the policy), and it now reaches
+/// no parser to provide it.
+///
+/// # Errors
+/// [`IrDataSecurityError`] naming the op index that violated the policy.
+pub fn check_ir_data_security_policy(
+    cfg: &GuardConfig,
+    ir: &MigrationIr,
+    guard: &dyn MigrationGuard,
+) -> Result<(), IrDataSecurityError> {
+    fn push_policy_ops<'a>(
+        cfg: &GuardConfig,
+        op_index: usize,
+        op: &'a Op,
+        out: &mut Vec<(usize, &'a Op)>,
+    ) {
+        if let Op::Dialectal { legs } = op {
+            if let Some(leg) = legs.get(cfg.dialect()) {
+                for inner in leg {
+                    push_policy_ops(cfg, op_index, inner, out);
+                }
+            }
+        } else {
+            out.push((op_index, op));
+        }
+    }
+
+    let mut policy_ops = Vec::new();
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        push_policy_ops(cfg, op_index, op, &mut policy_ops);
+    }
+
+    // The destructive posture is a property of the OPERATION, not of any SQL text,
+    // so it is enforced here, where every dialect can see it.
+    //
+    // PostgreSQL reads the same knob in its SQL-text guard and refuses there with
+    // its own rendered statement, so this pass skips it: a second, earlier denial
+    // would change a refusal that existing assertions pin, for no behavioural gain.
+    //
+    // MySQL and SQLite run a guard constructed WITHOUT the policy, which therefore
+    // cannot read this knob at all. Before this pass the posture was silently inert
+    // on both: a `DROP TABLE` applied under the default `forbid`, while the registry
+    // classified the knob `Enforcement::Enforced` ("a guard, executor or validator
+    // path reads them and they do what they say"). `Enforcement` has no dialect
+    // dimension, so the load-time refusal that protects `DeclaredOnly` knobs could
+    // not fire either.
+    //
+    // `policy_ops` is used rather than `ir.ops` so a `Dialectal` op is judged by
+    // the leg THIS dialect will actually run.
+    // NOT `Op::is_destructive` on its own. That is the APPROVAL notion, and it is
+    // wider on purpose: `safety.require_approval = on_destructive` reasonably wants
+    // a human to look at row-affecting DML. The POSTURE must match what PostgreSQL
+    // actually denies, which was measured rather than read off the classifier -
+    // `destructive_update_operation` returns `Some("UPDATE")` unconditionally, yet
+    // PostgreSQL applies a bounded `update` under the default `forbid`, because DML
+    // lowers to a bound `PlanStep::Dml` that the SQL-text guard never inspects.
+    //
+    // Enforcing the wider notion here made MySQL and SQLite STRICTER than
+    // PostgreSQL - an `update` that PostgreSQL applies was refused - which is a
+    // regression, not parity. Row DML is therefore excluded, leaving the
+    // object-drop and lossy-DDL family that PostgreSQL's guard does deny.
+    //
+    // `PgRaw` is excluded because it cannot reach these dialects at all: PostgreSQL's
+    // line-1 refuses non-Postgres raw text outright.
+    let posture_denies = |op: &Op| {
+        op.is_destructive()
+            && !matches!(
+                op,
+                Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } | Op::PgRaw { .. }
+            )
+    };
+    if cfg.dialect() != &POSTGRES && matches!(cfg.destructive_ops(), DestructiveOps::Forbid) {
+        if let Some(&(op_index, _)) = policy_ops.iter().find(|(_, op)| posture_denies(op)) {
+            return Err(IrDataSecurityError {
+                op_index,
+                source: GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
+                    statement: "destructive operation denied while \
+                                data_security.destructive_ops=forbid"
+                        .to_string(),
+                },
+            });
+        }
+    }
+
+    let mut tables: BTreeMap<(String, String), RlsTableState> = BTreeMap::new();
+    for (op_index, op) in policy_ops {
+        match op {
+            Op::CreateTable { name, schema, .. } | Op::CreatePartition { name, schema, .. } => {
+                let key = table_key_for_policy(cfg, schema, name);
+                tables.insert(
+                    key,
+                    RlsTableState {
+                        exists_after: true,
+                        rls_enabled: false,
+                        last_op_index: op_index,
+                        table: name.clone(),
+                    },
+                );
+            }
+            Op::SetRls {
+                table,
+                schema,
+                enabled,
+                forced,
+            } => {
+                // Turning RLS or its force flag off is refused at the table THIS op
+                // names, not at the migration: an obligation over `app.users` says
+                // nothing about `app.audit`.
+                let obligated = require_rls_covers(cfg, &table_key_for_policy(cfg, schema, table));
+                if obligated && enabled == &Some(false) {
+                    return Err(IrDataSecurityError {
+                        op_index,
+                        source: GuardError::DataSecurityPolicy {
+                            rule: data_security_rule::REQUIRE_RLS,
+                            statement: format!(
+                                "setRls {table:?} enabled:false is forbidden while data_security.require_rls=true"
+                            ),
+                        },
+                    });
+                }
+                if obligated && forced == &Some(false) {
+                    return Err(IrDataSecurityError {
+                        op_index,
+                        source: GuardError::DataSecurityPolicy {
+                            rule: data_security_rule::REQUIRE_RLS,
+                            statement: format!(
+                                "setRls {table:?} forced:false is forbidden while data_security.require_rls=true"
+                            ),
+                        },
+                    });
+                }
+                if enabled == &Some(true) {
+                    let key = table_key_for_policy(cfg, schema, table);
+                    tables
+                        .entry(key)
+                        .and_modify(|state| {
+                            state.exists_after = true;
+                            state.rls_enabled = true;
+                            state.last_op_index = op_index;
+                            state.table = table.clone();
+                        })
+                        .or_insert_with(|| RlsTableState {
+                            exists_after: true,
+                            rls_enabled: true,
+                            last_op_index: op_index,
+                            table: table.clone(),
+                        });
+                }
+            }
+            Op::AttachPartition { .. } | Op::DetachPartition { .. } => {}
+            Op::DropTable { table, schema, .. }
+            | Op::DropPartition {
+                name: table,
+                schema,
+                ..
+            } => {
+                let key = table_key_for_policy(cfg, schema, table);
+                tables
+                    .entry(key)
+                    .and_modify(|state| {
+                        state.exists_after = false;
+                        state.rls_enabled = false;
+                        state.last_op_index = op_index;
+                        state.table = table.clone();
+                    })
+                    .or_insert_with(|| RlsTableState {
+                        exists_after: false,
+                        rls_enabled: false,
+                        last_op_index: op_index,
+                        table: table.clone(),
+                    });
+            }
+            Op::RenameTable {
+                table, to, schema, ..
+            } => {
+                let from = table_key_for_policy(cfg, schema, table);
+                let to_key = table_key_for_policy(cfg, schema, to);
+                if let Some(mut state) = tables.remove(&from) {
+                    state.last_op_index = op_index;
+                    state.table = to.clone();
+                    tables.insert(to_key, state);
+                }
+            }
+            Op::PgRaw { sql, .. }
+                if cfg.require_rls_authored_anywhere()
+                    && guard.raw_island_escapes_rls_net_state(sql) =>
+            {
+                return Err(IrDataSecurityError {
+                    op_index,
+                    source: GuardError::DataSecurityPolicy {
+                        rule: data_security_rule::REQUIRE_RLS,
+                        statement: "pgRaw is forbidden while data_security.require_rls=true because raw SQL can create tables outside the structured RLS net-state check".to_string(),
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+
+    for (key, state) in &tables {
+        if state.exists_after && !state.rls_enabled && require_rls_covers(cfg, key) {
+            return Err(IrDataSecurityError {
+                op_index: state.last_op_index,
+                source: GuardError::DataSecurityPolicy {
+                    rule: data_security_rule::REQUIRE_RLS,
+                    statement: format!(
+                        "table {:?} must end this migration with row level security enabled",
+                        state.table
+                    ),
+                },
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// A stable concrete object for a Global-model capability query. Every Global grant

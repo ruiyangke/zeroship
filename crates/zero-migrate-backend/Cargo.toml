@@ -16,7 +16,7 @@ zero-migrate-ir = { workspace = true }
 # obligations / the KnobKey-KnobValue vocabulary / the `ObjectName` object model).
 # The config is what a vendor's `MigrationGuard` is configured by, so it sits with
 # the trait, below every vendor. No SQL parser comes with it - the deny-walk that
-# READS these answers stays in `zero-migrate-guard`.
+# READS these answers stays in the vendor crate that owns a parser.
 zero-migrate-policy = { workspace = true }
 # `serde_json::Value` IS the schema-field shape `SchemaRenderer` reads: the DDL
 # surface takes the SDK's field definitions as JSON, not as a Rust type.

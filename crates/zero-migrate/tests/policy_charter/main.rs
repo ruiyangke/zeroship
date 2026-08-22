@@ -15,6 +15,7 @@ mod charter_root_bound;
 mod declarative_require_rls_pg;
 mod guard_seam;
 mod guard_security;
+mod guard_vendor_lower;
 mod layered_policy;
 mod pg_fail_closed_coverage;
 mod split_part_grammar_boundary;

@@ -11,11 +11,12 @@
 
 mod support;
 
-use zero_migrate_guard::guard::{
+use zero_migrate_backend::guard::{
     check_ir_data_security_policy, data_security_rule, GuardConfig, GuardError,
 };
 use zero_migrate_ir::dialect::POSTGRES;
 use zero_migrate_ir::ir::{MigrationIr, Op};
+use zero_migrate_postgres::guard::PgGuard;
 
 /// A charter granting the `app` schema everything the data-security walk needs, plus
 /// whatever `require`/`default_scope` text an arm supplies.
@@ -101,7 +102,7 @@ fn unprotected_create_ir() -> MigrationIr {
 
 #[track_caller]
 fn assert_require_rls_refused(cfg: &GuardConfig, ir: &MigrationIr, want_op_index: usize) {
-    match check_ir_data_security_policy(cfg, ir) {
+    match check_ir_data_security_policy(cfg, ir, &PgGuard::from_config(cfg.clone())) {
         Err(err) => {
             assert_eq!(err.op_index, want_op_index, "op index");
             assert!(
@@ -122,7 +123,7 @@ fn assert_require_rls_refused(cfg: &GuardConfig, ir: &MigrationIr, want_op_index
 
 #[track_caller]
 fn assert_admitted(cfg: &GuardConfig, ir: &MigrationIr) {
-    if let Err(err) = check_ir_data_security_policy(cfg, ir) {
+    if let Err(err) = check_ir_data_security_policy(cfg, ir, &PgGuard::from_config(cfg.clone())) {
         panic!("expected admission, got {err:?}");
     }
 }

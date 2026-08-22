@@ -14,13 +14,13 @@ use crate::apply::timeout::resolve_timeout_ms;
 use crate::approval::Approval;
 use crate::conn::ExecutorConfig;
 use crate::driver::{Bind, Row, SqlSession};
-use crate::guard::SqlGuard;
 use crate::model::backfill::{
     generate_per_row_value, CursorColumnContract, CursorComparison, CursorContract,
     CursorScalarType, CursorTuple,
 };
 use crate::model::ir::{CursorStability, IrScalar, PerRowGenerator};
 use crate::model::migration::{Checksum, MigrationId};
+use crate::render::backends::guard_for;
 
 use super::session::AUTHOR_SQL_LITERAL_MODE;
 
@@ -2357,7 +2357,7 @@ pub(super) async fn run_backfill<D: SqlSession>(
         });
     }
 
-    let guard = SqlGuard::new(cfg.guard_config_for(&super::DIALECT));
+    let guard = guard_for(&cfg.guard_config_for(&super::DIALECT));
     let end_sql = build_end_cursor_sql(spec, &cursor)?;
     guard
         .check(&end_sql)

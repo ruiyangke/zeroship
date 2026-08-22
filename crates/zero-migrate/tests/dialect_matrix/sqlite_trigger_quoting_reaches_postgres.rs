@@ -100,7 +100,12 @@ const FORMER_SUBJECT_FILE: &str = "zero-migrate/src/render/lower.rs";
 /// So the walk covers every crate, and this floor asserts the walk FOUND them. Raise
 /// it when a crate is added. If one is genuinely removed, lower it deliberately and
 /// say so — never to get green.
-const WORKSPACE_CRATE_FLOOR: usize = 9;
+///
+/// LOWERED 9 → 8: `zero-migrate-guard` was dissolved into `zero-migrate-postgres`
+/// (all of it needed `libpg_query`, so all of it was one vendor's) and deleted from
+/// the workspace. The walk still reaches every line it used to reach, at a different
+/// root — this is a real removal, not a narrowed discovery.
+const WORKSPACE_CRATE_FLOOR: usize = 8;
 
 /// The subject itself. `render_sqlite_trigger_op` is the entry point
 /// `SqliteDmlRenderer::render_trigger_op` calls, and the two helpers under it are

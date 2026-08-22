@@ -67,7 +67,7 @@ scope = "all"
  * The value is the allowlist, not a toggle: the guard reads the `StrSet` grant and
  * treats a non-empty list AS the capability, so naming zero extensions grants
  * nothing (`granted_extension_capability` at
- * crates/zero-migrate-guard/src/guard/mod.rs:379). `FORBIDDEN_EXTENSIONS` overrides
+ * crates/zero-migrate-postgres/src/guard/sql.rs). `FORBIDDEN_EXTENSIONS` overrides
  * the allowlist regardless, so a name from that denylist cannot be granted here -
  * `citext` is not on it.
  *

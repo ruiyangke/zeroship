@@ -22,8 +22,9 @@
 //! and [`RawSqlAuthor`] runs the guard to *flag* (not gate — that is the
 //! engine's job in [`crate::engine`]) its output.
 
-use crate::guard::{GuardConfig, GuardError, SqlGuard};
+use crate::guard::{GuardConfig, GuardError};
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
+use crate::render::backends::guard_for;
 use crate::EffectivePolicy;
 use zero_migrate_ir::dialect::DialectId;
 
@@ -401,10 +402,10 @@ impl MigrationAuthor for DeterministicAuthor {
 ///
 /// The AI/builder produces the SQL for non-trivial migrations (renames, type
 /// changes, backfills, expand-contract sequences); the engine does **not** call
-/// an LLM. This author takes that pre-generated SQL, runs the [`SqlGuard`] over
+/// an LLM. This author takes that pre-generated SQL, runs the registered line-1 guard over
 /// the `up` to derive the [`MigrationFlags`] (destructive ⇒ `requires_approval`;
 /// any non-transactional statement ⇒ transactional=false) via
-/// [`flags_for`](crate::guard::flags_for), and mints a versioned migration. The
+/// [`MigrationGuard::flags_for_sql`](crate::guard::MigrationGuard::flags_for_sql), and mints a versioned migration. The
 /// output then gets the SAME guard + role treatment in the pipeline — untrusted
 /// AI SQL is gated exactly like any other.
 ///
@@ -448,25 +449,21 @@ impl RawSqlAuthor {
     /// [`AuthorError::Guard`] if `up` is unparseable (the guard cannot classify
     /// it). A *denial* is deferred to [`plan`](crate::engine::MigrationEngine::plan).
     pub fn wrap(&self, name: &str, up: &str, down: Option<&str>) -> Result<Migration, AuthorError> {
-        let guard = SqlGuard::new(GuardConfig::from_policy(
+        // The flags are read back OUT of the supplied text, so only the vendor whose
+        // grammar the text is written in can derive them. Resolved through the
+        // registry rather than by constructing a parser here: what "destructive" or
+        // "non-transactional" means is that vendor's answer, and a vendor that cannot
+        // classify text says so in its own `flags_for_sql` doc rather than inheriting
+        // a PostgreSQL classification of MySQL DDL.
+        //
+        // A *denial* is not raised here (a denied-but-parseable migration is still
+        // minted so `plan` can report the denial precisely); only an UNPARSEABLE `up`
+        // errors at authoring time.
+        let guard = guard_for(&GuardConfig::from_policy(
             self.effective.clone(),
             self.dialect.clone(),
         ));
-        // Derive flags from a guard pass when it succeeds; on a *denial* keep
-        // conservative defaults but err only if UNPARSEABLE (a denial is the
-        // engine plan's to surface, not authoring's). A denied-but-parseable
-        // migration is still minted so plan can report the denial precisely.
-        let flags = match guard.check(up) {
-            Ok(report) => crate::guard::flags_for(&report),
-            Err(GuardError::Parse(e)) => return Err(AuthorError::Guard(GuardError::Parse(e))),
-            // Denied/cross-schema: parseable but dangerous. Mint with
-            // conservative flags; plan() re-runs the guard and records the denial.
-            Err(_) => MigrationFlags {
-                // Conservative: treat as requiring approval until plan/gate decides.
-                requires_approval: true,
-                ..MigrationFlags::default()
-            },
-        };
+        let flags = guard.flags_for_sql(up).map_err(AuthorError::Guard)?;
         let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
             up,
             down,

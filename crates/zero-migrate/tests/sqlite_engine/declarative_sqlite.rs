@@ -17,8 +17,11 @@ use tempfile::TempDir;
 use zero_migrate::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
     DesiredSchema, EffectivePolicy, FieldDescriptor, GuardConfig, GuardError, IndexDescriptor,
-    Migration, MigrationEngine, SchemaSnapshot, SqlGuard, SqliteBackend,
+    Migration, MigrationEngine, SchemaSnapshot, SqliteBackend,
 };
+// PostgreSQL's line-1, named at the vendor that owns it: these arms assert that a
+// PG guard handed a SQLite config refuses rather than mis-vetting SQLite text.
+use zero_migrate_postgres::guard::SqlGuard;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";

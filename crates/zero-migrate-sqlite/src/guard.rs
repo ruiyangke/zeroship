@@ -14,7 +14,7 @@
 //!
 //! Reading only this file would suggest SQLite has no data-security posture at all.
 //! It does. `data_security.destructive_ops = forbid` is enforced for SQLite by
-//! `zero_migrate_guard::guard::check_ir_data_security_policy`, over the structured IR
+//! `zero_migrate_backend::guard::check_ir_data_security_policy`, over the structured IR
 //! rather than over SQL text, and its gate is written
 //! `if cfg.dialect() != &POSTGRES` — i.e. it exists precisely
 //! BECAUSE the guard here is empty and is handed no policy. Enforcement over the IR is
@@ -31,6 +31,7 @@
 //! MySQL's.
 
 use zero_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
+use zero_migrate_ir::migration::MigrationFlags;
 
 /// SQLite's line-1: trust the descriptor-diff output.
 #[derive(Debug, Clone, Copy, Default)]
@@ -51,6 +52,63 @@ impl MigrationGuard for SqliteGuard {
         // Destructive/approval flags come from the migration's OWN author flags,
         // combined by the engine's `plan()`, not from here.
         Ok(GuardOutcome::default())
+    }
+
+    /// REFUSED, not waved through.
+    ///
+    /// A raw island is `Op::PgRaw` — PostgreSQL text. `libpg_query` cannot parse
+    /// SQLite and SQLite has no raw author, so an island arriving here is a
+    /// mis-dispatch rather than a trusted operation. Returning `Ok` would grant SQLite
+    /// an unchecked raw door that no SQLite author can open, so this refuses with
+    /// SQLite's own id.
+    fn check_raw_island_sql(&self, _sql: &str) -> Result<(), GuardError> {
+        Err(GuardError::RawSqlRejected {
+            dialect: zero_migrate_ir::dialect::SQLITE,
+        })
+    }
+
+    /// REFUSED, for the same reason as [`SqliteGuard::check_raw_island_sql`]: a raw
+    /// function body reaching this vendor is PostgreSQL text on the wrong path.
+    fn check_raw_island_body(&self, _body: &str, _raw: &str) -> Result<(), GuardError> {
+        Err(GuardError::RawSqlRejected {
+            dialect: zero_migrate_ir::dialect::SQLITE,
+        })
+    }
+
+    /// `false` because SQLite HAS NO RAW DOOR, not because raw SQL is trusted here.
+    ///
+    /// This is the "I have no raw door" answer the neutral net-state walk asks for.
+    /// SQLite migrations are produced ONLY by the declarative differ, and
+    /// [`SqliteGuard::check_raw_island_sql`] above refuses an island outright, so there
+    /// is no island whose net table state could escape the walk — and establishing
+    /// that costs no parse, which is the point of asking the vendor rather than
+    /// reaching for `libpg_query` from neutral code.
+    ///
+    /// What this consequently does NOT check: nothing. Every SQLite op the walk sees
+    /// is structured, and the walk reads all of them.
+    fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
+        false
+    }
+
+    /// CONSERVATIVE, because SQLite cannot classify SQL text at all.
+    ///
+    /// `libpg_query` parses PostgreSQL, and there is no SQLite parser here, so no
+    /// `destructive` / `non_transactional` / rename facet can be READ OUT of an `up`
+    /// blob. Rather than return the default flag set — which would silently assert
+    /// "not destructive, no approval needed" about text nobody inspected — this
+    /// returns `requires_approval: true`.
+    ///
+    /// What is NO LONGER CHECKED, stated plainly: a raw-SQL-authored SQLite migration
+    /// gets NO destructive classification, NO non-transactional detection and NO
+    /// bare-rename or `SET NOT NULL` gate. It is gated on approval instead, so a human
+    /// looks at every one. SQLite's real posture is the descriptor-diff path, the
+    /// backend's runtime authorizer, and `check_ir_data_security_policy` over the
+    /// structured IR; the raw-SQL author is not a SQLite authoring route.
+    fn flags_for_sql(&self, _up: &str) -> Result<MigrationFlags, GuardError> {
+        Ok(MigrationFlags {
+            requires_approval: true,
+            ..MigrationFlags::default()
+        })
     }
 }
 

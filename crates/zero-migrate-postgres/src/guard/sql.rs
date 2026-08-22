@@ -19,9 +19,7 @@
 //! **Deny-by-default:** an unrecognized statement that *could* be dangerous is
 //! denied, not waved through.
 
-pub mod denylist;
-
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use pg_query::protobuf::node::Node as NodeEnum;
 use pg_query::protobuf::{self, ConstrType, ObjectType};
@@ -30,34 +28,35 @@ use pg_query::protobuf::AlterTableType;
 
 use crate::analysis::analyze::Advisory;
 use crate::analysis::classify::{classify, DataSecurityClass, DdlKind, ParseError, StatementClass};
-use denylist::rule;
+use crate::guard::denylist::rule;
 use serde_json::Value;
 use zero_migrate_ir::dialect::POSTGRES;
-use zero_migrate_ir::ir::{MigrationIr, Op};
 use zero_migrate_ir::migration::MigrationFlags;
 use zero_migrate_ir::policy::DestructiveOps;
 use zero_migrate_ir::policy::SchemaScope;
 use zero_migrate_ir::policy_registry;
 use zero_migrate_policy::{normalize_pg_identifier, GrantRegion, ObjectName, ShapeElement};
 
-// The NEUTRAL guard seam now lives in the backend contract crate, below every
-// vendor, so a vendor crate can implement `MigrationGuard` without depending on the
-// engine that composes it. What stayed HERE is everything that needs a PostgreSQL
-// parser: `SqlGuard`, the deny-walk, the classifier, the analyzers — and
-// `check_ir_data_security_policy`, which is dialect-neutral enforcement that
-// nevertheless reaches `pg_query::parse` for a raw island. See
-// `zero_migrate_backend::guard` for why that last one blocks the rest of this crate
-// from dissolving into the vendors.
+// The NEUTRAL guard seam lives in the backend contract crate, below every vendor, so
+// a vendor crate can implement `MigrationGuard` without depending on the engine that
+// composes it. What is left HERE is everything that needs a PostgreSQL parser:
+// `SqlGuard`, the deny-walk, the classifier, the analyzers.
 //
-// These are re-exported below so `zero_migrate_guard::guard::<Name>` keeps resolving
-// for every existing caller.
-pub use zero_migrate_backend::advisory::{rule as advisory_rule, Severity};
-pub use zero_migrate_backend::guard::{
-    data_security_rule, GuardConfig, GuardError, GuardMode, GuardOutcome, IrDataSecurityError,
-    MigrationGuard,
-};
+// `check_ir_data_security_policy` used to be the exception that pinned this crate in
+// place — dialect-neutral enforcement that nevertheless reached `pg_query::parse` for
+// a raw island. It now lives in the backend contract and asks the vendor that owns
+// the raw door, through `MigrationGuard::raw_island_escapes_rls_net_state`. The
+// PostgreSQL answer is `SqlGuard::raw_island_within_require_rls` below.
+//
+// These are IMPORTED, not re-exported. This module's signatures name them, but a
+// caller wanting the neutral vocabulary must reach `zero_migrate_backend::guard` for
+// it. They were `pub use` while this file lived in `zero-migrate-guard`, where the
+// engine depended on that crate directly and the re-export was how
+// `zero_migrate_guard::guard::GuardConfig` resolved. Keeping it here would have a
+// VENDOR crate handing out the neutral seam under its own name, which is the exact
+// confusion this move exists to remove - and it was measured to have no caller.
 use zero_migrate_backend::guard::{
-    owned_schemas_from_effective, DeclaredCreateShape, InjectedCreateShape,
+    data_security_rule, DeclaredCreateShape, GuardConfig, GuardError, InjectedCreateShape,
 };
 
 /// Stable NAMESPACE-authority policy rule ids (II.2.5 / II.2.6). These are the
@@ -705,6 +704,57 @@ impl SqlGuard {
     pub fn check_raw_island_body_backstop(&self, body: &str, raw: &str) -> Result<(), GuardError> {
         self.refuse_non_postgres_raw_sql()?;
         self.walker().check_body_text(body, raw)
+    }
+
+    /// Is a raw island inside the reach of a `safety.require_rls` obligation?
+    ///
+    /// This is PostgreSQL's answer to
+    /// [`MigrationGuard::raw_island_escapes_rls_net_state`]. The neutral net-state
+    /// walk in `zero_migrate_backend::guard::check_ir_data_security_policy` decides
+    /// `require_rls` over structured ops for every dialect; the raw island is the one
+    /// op whose net table state is not derivable from the IR, so it is asked HERE,
+    /// where the parser is.
+    ///
+    /// The guard cannot enumerate a raw island's net table state, so an island the
+    /// obligation reaches is refused, as it always has been. The REACH is per
+    /// relation: each statement is attributed to the relations its parse names,
+    /// resolved by `raw_relation_target` exactly as a raw create target is, and an
+    /// island naming only relations the obligation does not cover is admitted.
+    ///
+    /// Three cases carry no usable attribution and are treated as inside the reach:
+    /// SQL the Postgres parser rejects, a relation with no schema the config can pin,
+    /// and a statement naming no relation at all (`SET`, `DO`, `CALL`: a body that can
+    /// create a table this parse never shows us). All three are only refused when an
+    /// obligation is authored to refuse them against.
+    #[must_use]
+    pub fn raw_island_within_require_rls(&self, sql: &str) -> bool {
+        let cfg = &self.cfg;
+        if !cfg.require_rls_authored_anywhere() {
+            return false;
+        }
+        let Ok(parsed) = pg_query::parse(sql) else {
+            return true;
+        };
+        for raw_stmt in &parsed.protobuf.stmts {
+            let Ok(json) = serde_json::to_value(raw_stmt) else {
+                return true;
+            };
+            let mut named_a_relation = false;
+            let mut within = false;
+            walk_range_vars(&json, &mut |schemaname, relname| {
+                named_a_relation = true;
+                within = match raw_relation_target(cfg, schemaname, relname) {
+                    RawRelationTarget::Resolved(object) => cfg.requires_rls_at(&object),
+                    RawRelationTarget::UnpinnedSchema | RawRelationTarget::Unattributable => true,
+                };
+                within
+            });
+            if within || !named_a_relation {
+                return true;
+            }
+        }
+        // An island of zero statements names nothing to refuse.
+        false
     }
 }
 
@@ -1401,7 +1451,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 self.check_func_def_target(&f.funcname, raw)?;
                 // Untrusted language (plpythonu/plperlu/c/…) — RCE.
                 if let Some(lang) = function_language(&f.options) {
-                    if !denylist::is_trusted_language(&lang) {
+                    if !crate::guard::denylist::is_trusted_language(&lang) {
                         return Err(denied(rule::UNTRUSTED_LANGUAGE, raw));
                     }
                 }
@@ -1435,7 +1485,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 let name = e.extname.to_ascii_lowercase();
                 // FORBIDDEN_EXTENSIONS is a non-grant HARD DENY in BOTH profiles,
                 // overriding any allowlist grant.
-                if denylist::list_contains_ci(denylist::FORBIDDEN_EXTENSIONS, &name) {
+                if crate::guard::denylist::list_contains_ci(crate::guard::denylist::FORBIDDEN_EXTENSIONS, &name) {
                     return Err(denied(rule::FORBIDDEN_EXTENSION, raw));
                 }
                 // The per-name allowlist is the `code.extension` StrSet grant value.
@@ -1450,7 +1500,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             }
             NodeEnum::VariableSetStmt(s) => {
                 let name = s.name.to_ascii_lowercase();
-                if denylist::list_contains_ci(denylist::FORBIDDEN_SET_PARAMS, &name) {
+                if crate::guard::denylist::list_contains_ci(crate::guard::denylist::FORBIDDEN_SET_PARAMS, &name) {
                     return Err(denied(rule::FORBIDDEN_SET, raw));
                 }
                 // SET ROLE / SET SESSION AUTHORIZATION carry an empty `name`
@@ -1659,7 +1709,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             // absent `LANGUAGE` is plpgsql, which is trusted.
             NodeEnum::DoStmt(d) => {
                 if let Some(lang) = function_language(&d.args) {
-                    if !denylist::is_trusted_language(&lang) {
+                    if !crate::guard::denylist::is_trusted_language(&lang) {
                         return Err(denied(rule::UNTRUSTED_LANGUAGE, raw));
                     }
                 }
@@ -1766,11 +1816,17 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     fn check_dangerous_functions(json: &Value, raw: &str) -> Result<(), GuardError> {
         let mut found: Option<&'static str> = None;
         walk_func_names(json, &mut |name| {
-            if denylist::list_contains_ci(denylist::FILE_ACCESS_FUNCTIONS, name) {
+            if crate::guard::denylist::list_contains_ci(
+                crate::guard::denylist::FILE_ACCESS_FUNCTIONS,
+                name,
+            ) {
                 found = Some(rule::FILE_ACCESS_FUNCTION);
                 return true;
             }
-            if denylist::list_contains_ci(denylist::NETWORK_FUNCTIONS, name) {
+            if crate::guard::denylist::list_contains_ci(
+                crate::guard::denylist::NETWORK_FUNCTIONS,
+                name,
+            ) {
                 found = Some(rule::NETWORK_FUNCTION);
                 return true;
             }
@@ -1791,11 +1847,17 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     fn check_regproc_casts(json: &Value, raw: &str) -> Result<(), GuardError> {
         let mut found: Option<&'static str> = None;
         walk_regproc_casts(json, &mut |fname| {
-            if denylist::list_contains_ci(denylist::FILE_ACCESS_FUNCTIONS, fname) {
+            if crate::guard::denylist::list_contains_ci(
+                crate::guard::denylist::FILE_ACCESS_FUNCTIONS,
+                fname,
+            ) {
                 found = Some(rule::FILE_ACCESS_FUNCTION);
                 return true;
             }
-            if denylist::list_contains_ci(denylist::NETWORK_FUNCTIONS, fname) {
+            if crate::guard::denylist::list_contains_ci(
+                crate::guard::denylist::NETWORK_FUNCTIONS,
+                fname,
+            ) {
                 found = Some(rule::NETWORK_FUNCTION);
                 return true;
             }
@@ -1868,14 +1930,17 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     /// param = value`. The structural [`NodeEnum::VariableSetStmt`] gate denies
     /// a `SET search_path`/`role`/`session_authorization`, but a `FuncCall`
     /// slips past it — so the call form is denied identically by matching the
-    /// first string-literal argument against [`denylist::FORBIDDEN_SET_PARAMS`].
+    /// first string-literal argument against [`crate::guard::denylist::FORBIDDEN_SET_PARAMS`].
     /// A benign GUC (`statement_timeout`) stays allowed, mirroring the
     /// structural SET allowance. (Runtime-constructed param names are not
     /// literals and are out of parse-time scope — the line-2 role defense.)
     fn check_set_config_calls(json: &Value, raw: &str) -> Result<(), GuardError> {
         let mut denied_param = false;
         walk_set_config_calls(json, &mut |param| {
-            if denylist::list_contains_ci(denylist::FORBIDDEN_SET_PARAMS, param) {
+            if crate::guard::denylist::list_contains_ci(
+                crate::guard::denylist::FORBIDDEN_SET_PARAMS,
+                param,
+            ) {
                 denied_param = true;
                 return true;
             }
@@ -1889,7 +1954,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
 
     /// Deny dangerous SQL hidden in a `query_to_xml`-family string-literal arg.
     ///
-    /// The XML-emitting table functions ([`denylist::SQL_STRING_ARG_FUNCTIONS`])
+    /// The XML-emitting table functions ([`crate::guard::denylist::SQL_STRING_ARG_FUNCTIONS`])
     /// take a free-form SQL string as their first argument that the server then
     /// executes. The structural func-walk and cross-schema walk are blind to it
     /// (the SQL lives in an `A_Const` text literal, not a parse subtree). We
@@ -1966,12 +2031,12 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         // (c) Token-scan backstop — catch dangerous names a partial parse of a
         //     PL/pgSQL body would never surface as a FuncCall/Stmt node.
         let lower = body.to_ascii_lowercase();
-        for &f in denylist::FILE_ACCESS_FUNCTIONS {
+        for &f in crate::guard::denylist::FILE_ACCESS_FUNCTIONS {
             if word_present(&lower, f) {
                 return Err(denied(rule::BODY_INSPECTION, raw));
             }
         }
-        for &f in denylist::NETWORK_FUNCTIONS {
+        for &f in crate::guard::denylist::NETWORK_FUNCTIONS {
             if word_present(&lower, f) {
                 return Err(denied(rule::BODY_INSPECTION, raw));
             }
@@ -2264,7 +2329,7 @@ fn foreign_schema_literal_in_body(body: &str, permits: &dyn Fn(&str) -> bool) ->
         //     backstop fires for any schema in PLATFORM_SCHEMAS that the scope
         //     did NOT permit (port schemas `zero_migrate`/`public`
         //     are not in PLATFORM_SCHEMAS, so they already pass).
-        if denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, lit) {
+        if crate::guard::denylist::list_contains_ci(crate::guard::denylist::PLATFORM_SCHEMAS, lit) {
             return Some(lit.to_string());
         }
         // (2) bare identifier reaching another schema under an %I template.
@@ -2293,7 +2358,8 @@ fn is_bare_identifier(s: &str) -> bool {
 /// false-positives on legitimate seed data passed through `%I`-bearing bodies.
 fn looks_like_schema_name(s: &str) -> bool {
     let l = s.to_ascii_lowercase();
-    denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, &l) || l.starts_with("project_")
+    crate::guard::denylist::list_contains_ci(crate::guard::denylist::PLATFORM_SCHEMAS, &l)
+        || l.starts_with("project_")
 }
 
 /// Scan a body string for a `<schema>.<object>` qualifier that names a known
@@ -2328,7 +2394,10 @@ fn foreign_schema_in_body(body: &str, permits: &dyn Fn(&str) -> bool) -> Option<
                 // fires for any non-permitted schema in PLATFORM_SCHEMAS (the port
                 // schemas are not in it).
                 if !permits(schema)
-                    && denylist::list_contains_ci(denylist::PLATFORM_SCHEMAS, schema)
+                    && crate::guard::denylist::list_contains_ci(
+                        crate::guard::denylist::PLATFORM_SCHEMAS,
+                        schema,
+                    )
                 {
                     return Some(schema.to_string());
                 }
@@ -2399,305 +2468,6 @@ pub fn flags_for(report: &GuardReport) -> MigrationFlags {
         // would take regardless -- stated rather than inherited.
         engine_goodie_ddl: false,
     }
-}
-
-/// Enforce data-security knobs that require the structured IR op set.
-///
-/// `require_rls` is a cross-op obligation over the migration's final table RLS
-/// state, not a textual co-occurrence rule. Any table this migration creates and
-/// leaves present must end RLS-enabled; any attempt to turn RLS/force off is refused
-/// outright. Raw SQL islands are rejected because the guard cannot enumerate their
-/// net table state fail-closed.
-///
-/// `safety.require_rls` is registered `ObjectModel::PerTable`, so every one of those
-/// decisions resolves at the CONCRETE table it is about, the same way
-/// `zero_migrate_ir::policy_approval` resolves its sibling `safety.require_approval`.
-/// The net-state walk therefore runs unconditionally: whether an obligation covers a
-/// table is a property of that table, not of the migration.
-pub fn check_ir_data_security_policy(
-    cfg: &GuardConfig,
-    ir: &MigrationIr,
-) -> Result<(), IrDataSecurityError> {
-    fn push_policy_ops<'a>(
-        cfg: &GuardConfig,
-        op_index: usize,
-        op: &'a Op,
-        out: &mut Vec<(usize, &'a Op)>,
-    ) {
-        if let Op::Dialectal { legs } = op {
-            if let Some(leg) = legs.get(cfg.dialect()) {
-                for inner in leg {
-                    push_policy_ops(cfg, op_index, inner, out);
-                }
-            }
-        } else {
-            out.push((op_index, op));
-        }
-    }
-
-    let mut policy_ops = Vec::new();
-    for (op_index, op) in ir.ops.iter().enumerate() {
-        push_policy_ops(cfg, op_index, op, &mut policy_ops);
-    }
-
-    // The destructive posture is a property of the OPERATION, not of any SQL text,
-    // so it is enforced here, where every dialect can see it.
-    //
-    // PostgreSQL reads the same knob in its SQL-text guard and refuses there with
-    // its own rendered statement, so this pass skips it: a second, earlier denial
-    // would change a refusal that existing assertions pin, for no behavioural gain.
-    //
-    // MySQL and SQLite are served by `SqliteDescriptorGuard`, which `guard_for`
-    // constructs WITHOUT the policy and which therefore cannot read this knob at
-    // all. Before this pass the posture was silently inert on both: a `DROP TABLE`
-    // applied under the default `forbid`, while the registry classified the knob
-    // `Enforcement::Enforced` ("a guard, executor or validator path reads them and
-    // they do what they say"). `Enforcement` has no dialect dimension, so the
-    // load-time refusal that protects `DeclaredOnly` knobs could not fire either.
-    //
-    // `policy_ops` is used rather than `ir.ops` so a `Dialectal` op is judged by
-    // the leg THIS dialect will actually run.
-    // NOT `Op::is_destructive` on its own. That is the APPROVAL notion, and it is
-    // wider on purpose: `safety.require_approval = on_destructive` reasonably wants
-    // a human to look at row-affecting DML. The POSTURE must match what PostgreSQL
-    // actually denies, which was measured rather than read off the classifier -
-    // `destructive_update_operation` returns `Some("UPDATE")` unconditionally, yet
-    // PostgreSQL applies a bounded `update` under the default `forbid`, because DML
-    // lowers to a bound `PlanStep::Dml` that the SQL-text guard never inspects.
-    //
-    // Enforcing the wider notion here made MySQL and SQLite STRICTER than
-    // PostgreSQL - an `update` that PostgreSQL applies was refused - which is a
-    // regression, not parity. Row DML is therefore excluded, leaving the
-    // object-drop and lossy-DDL family that PostgreSQL's guard does deny.
-    //
-    // `PgRaw` is excluded because it cannot reach these dialects at all:
-    // `SqlGuard::check` refuses non-Postgres raw text outright.
-    let posture_denies = |op: &Op| {
-        op.is_destructive()
-            && !matches!(
-                op,
-                Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } | Op::PgRaw { .. }
-            )
-    };
-    if cfg.dialect() != &POSTGRES && matches!(cfg.destructive_ops(), DestructiveOps::Forbid) {
-        if let Some(&(op_index, _)) = policy_ops.iter().find(|(_, op)| posture_denies(op)) {
-            return Err(IrDataSecurityError {
-                op_index,
-                source: GuardError::DataSecurityPolicy {
-                    rule: data_security_rule::DESTRUCTIVE_OPS_FORBID,
-                    statement: "destructive operation denied while \
-                                data_security.destructive_ops=forbid"
-                        .to_string(),
-                },
-            });
-        }
-    }
-
-    let mut tables: BTreeMap<(String, String), RlsTableState> = BTreeMap::new();
-    for (op_index, op) in policy_ops {
-        match op {
-            Op::CreateTable { name, schema, .. } | Op::CreatePartition { name, schema, .. } => {
-                let key = table_key_for_policy(cfg, schema, name);
-                tables.insert(
-                    key,
-                    RlsTableState {
-                        exists_after: true,
-                        rls_enabled: false,
-                        last_op_index: op_index,
-                        table: name.clone(),
-                    },
-                );
-            }
-            Op::SetRls {
-                table,
-                schema,
-                enabled,
-                forced,
-            } => {
-                // Turning RLS or its force flag off is refused at the table THIS op
-                // names, not at the migration: an obligation over `app.users` says
-                // nothing about `app.audit`.
-                let obligated = require_rls_covers(cfg, &table_key_for_policy(cfg, schema, table));
-                if obligated && enabled == &Some(false) {
-                    return Err(IrDataSecurityError {
-                        op_index,
-                        source: GuardError::DataSecurityPolicy {
-                            rule: data_security_rule::REQUIRE_RLS,
-                            statement: format!(
-                                "setRls {table:?} enabled:false is forbidden while data_security.require_rls=true"
-                            ),
-                        },
-                    });
-                }
-                if obligated && forced == &Some(false) {
-                    return Err(IrDataSecurityError {
-                        op_index,
-                        source: GuardError::DataSecurityPolicy {
-                            rule: data_security_rule::REQUIRE_RLS,
-                            statement: format!(
-                                "setRls {table:?} forced:false is forbidden while data_security.require_rls=true"
-                            ),
-                        },
-                    });
-                }
-                if enabled == &Some(true) {
-                    let key = table_key_for_policy(cfg, schema, table);
-                    tables
-                        .entry(key)
-                        .and_modify(|state| {
-                            state.exists_after = true;
-                            state.rls_enabled = true;
-                            state.last_op_index = op_index;
-                            state.table = table.clone();
-                        })
-                        .or_insert_with(|| RlsTableState {
-                            exists_after: true,
-                            rls_enabled: true,
-                            last_op_index: op_index,
-                            table: table.clone(),
-                        });
-                }
-            }
-            Op::AttachPartition { .. } | Op::DetachPartition { .. } => {}
-            Op::DropTable { table, schema, .. }
-            | Op::DropPartition {
-                name: table,
-                schema,
-                ..
-            } => {
-                let key = table_key_for_policy(cfg, schema, table);
-                tables
-                    .entry(key)
-                    .and_modify(|state| {
-                        state.exists_after = false;
-                        state.rls_enabled = false;
-                        state.last_op_index = op_index;
-                        state.table = table.clone();
-                    })
-                    .or_insert_with(|| RlsTableState {
-                        exists_after: false,
-                        rls_enabled: false,
-                        last_op_index: op_index,
-                        table: table.clone(),
-                    });
-            }
-            Op::RenameTable {
-                table, to, schema, ..
-            } => {
-                let from = table_key_for_policy(cfg, schema, table);
-                let to_key = table_key_for_policy(cfg, schema, to);
-                if let Some(mut state) = tables.remove(&from) {
-                    state.last_op_index = op_index;
-                    state.table = to.clone();
-                    tables.insert(to_key, state);
-                }
-            }
-            Op::PgRaw { sql, .. } if raw_island_within_require_rls(cfg, sql) => {
-                return Err(IrDataSecurityError {
-                    op_index,
-                    source: GuardError::DataSecurityPolicy {
-                        rule: data_security_rule::REQUIRE_RLS,
-                        statement: "pgRaw is forbidden while data_security.require_rls=true because raw SQL can create tables outside the structured RLS net-state check".to_string(),
-                    },
-                });
-            }
-            _ => {}
-        }
-    }
-
-    for (key, state) in &tables {
-        if state.exists_after && !state.rls_enabled && require_rls_covers(cfg, key) {
-            return Err(IrDataSecurityError {
-                op_index: state.last_op_index,
-                source: GuardError::DataSecurityPolicy {
-                    rule: data_security_rule::REQUIRE_RLS,
-                    statement: format!(
-                        "table {:?} must end this migration with row level security enabled",
-                        state.table
-                    ),
-                },
-            });
-        }
-    }
-
-    Ok(())
-}
-
-/// Does a `safety.require_rls` obligation cover the table this policy key names?
-///
-/// [`table_key_for_policy`] yields an EMPTY schema for an unqualified table under a
-/// charter with no unique owned schema, and no `ObjectName` can be built from `.users`.
-/// [`GuardConfig::requires_rls_at_table`] is where that fall-back-closed rule lives,
-/// so the declarative path resolves the obligation the same way this walk does.
-fn require_rls_covers(cfg: &GuardConfig, key: &(String, String)) -> bool {
-    let (schema, table) = key;
-    cfg.requires_rls_at_table(schema, table)
-}
-
-/// Is a raw island inside the reach of a `safety.require_rls` obligation?
-///
-/// The guard cannot enumerate a raw island's net table state, so an island the
-/// obligation reaches is refused, as it always has been. What is new is the REACH:
-/// each statement is attributed to the relations its parse names, resolved by
-/// [`raw_relation_target`] exactly as a raw create target is, and an island naming
-/// only relations the obligation does not cover is admitted.
-///
-/// Three cases carry no usable attribution and are treated as inside the reach: SQL
-/// the Postgres parser rejects, a relation with no schema the config can pin, and a
-/// statement naming no relation at all (`SET`, `DO`, `CALL`: a body that can create a
-/// table this parse never shows us). All three are only refused when an obligation is
-/// authored to refuse them against.
-fn raw_island_within_require_rls(cfg: &GuardConfig, sql: &str) -> bool {
-    if !cfg.require_rls_authored_anywhere() {
-        return false;
-    }
-    let Ok(parsed) = pg_query::parse(sql) else {
-        return true;
-    };
-    for raw_stmt in &parsed.protobuf.stmts {
-        let Ok(json) = serde_json::to_value(raw_stmt) else {
-            return true;
-        };
-        let mut named_a_relation = false;
-        let mut within = false;
-        walk_range_vars(&json, &mut |schemaname, relname| {
-            named_a_relation = true;
-            within = match raw_relation_target(cfg, schemaname, relname) {
-                RawRelationTarget::Resolved(object) => cfg.requires_rls_at(&object),
-                RawRelationTarget::UnpinnedSchema | RawRelationTarget::Unattributable => true,
-            };
-            within
-        });
-        if within || !named_a_relation {
-            return true;
-        }
-    }
-    // An island of zero statements names nothing to refuse.
-    false
-}
-
-#[derive(Debug, Clone)]
-struct RlsTableState {
-    exists_after: bool,
-    rls_enabled: bool,
-    last_op_index: usize,
-    table: String,
-}
-
-fn table_key_for_policy(
-    cfg: &GuardConfig,
-    schema: &Option<String>,
-    table: &str,
-) -> (String, String) {
-    let effective_schema = schema.clone().unwrap_or_else(|| {
-        // An unqualified table resolves to the config's sole owned schema (the pinned
-        // project schema); no unique owned schema ⇒ empty.
-        match owned_schemas_from_effective(cfg.effective()).as_slice() {
-            [one] => one.clone(),
-            _ => String::new(),
-        }
-    });
-    (effective_schema, table.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -2847,7 +2617,7 @@ fn role_spec_names_privileged_role(role: &protobuf::RoleSpec) -> bool {
 }
 
 fn is_privileged_role_name(name: &str) -> bool {
-    denylist::list_contains_ci(denylist::PRIVILEGED_ROLES, name)
+    crate::guard::denylist::list_contains_ci(crate::guard::denylist::PRIVILEGED_ROLES, name)
 }
 
 /// True if a CREATE FUNCTION carries the `security` definer option.
@@ -2885,14 +2655,17 @@ fn alter_function_sets_forbidden_param(actions: &[protobuf::Node]) -> bool {
 }
 
 /// A function `DefElem` of the form `SET <param> = …` whose param is in
-/// [`denylist::FORBIDDEN_SET_PARAMS`] (e.g. `SET search_path = control`). The
+/// [`crate::guard::denylist::FORBIDDEN_SET_PARAMS`] (e.g. `SET search_path = control`). The
 /// nested arg is a `VariableSetStmt` carrying the target param name.
 fn def_elem_is_forbidden_set(d: &protobuf::DefElem) -> bool {
     if !d.defname.eq_ignore_ascii_case("set") {
         return false;
     }
     if let Some(NodeEnum::VariableSetStmt(v)) = d.arg.as_ref().and_then(|a| a.node.as_ref()) {
-        return denylist::list_contains_ci(denylist::FORBIDDEN_SET_PARAMS, &v.name);
+        return crate::guard::denylist::list_contains_ci(
+            crate::guard::denylist::FORBIDDEN_SET_PARAMS,
+            &v.name,
+        );
     }
     false
 }
@@ -2985,9 +2758,9 @@ fn walk_regproc_casts(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
 
 /// Walk the ENTIRE serialized parse tree for the two string-literal-carried
 /// schema leaks and invoke `visit` with the literal text:
-///   - a `TypeCast` to any [`denylist::REG_TYPES`] member whose argument is a
+///   - a `TypeCast` to any [`crate::guard::denylist::REG_TYPES`] member whose argument is a
 ///     string literal (`'control.users'::regclass`);
-///   - a `FuncCall` to any [`denylist::NAME_RESOLVER_FUNCTIONS`] member whose
+///   - a `FuncCall` to any [`crate::guard::denylist::NAME_RESOLVER_FUNCTIONS`] member whose
 ///     FIRST argument is a string literal (`nextval('control.s')`,
 ///     `pg_get_serial_sequence('control.t','id')`).
 ///
@@ -3063,7 +2836,8 @@ fn walk_literal_schema_refs(v: &Value, visit: &mut dyn FnMut(&str, bool) -> bool
 fn reg_family_name(type_name: Option<&Value>) -> Option<String> {
     let parts = qualified_list_parts(type_name.and_then(|t| t.get("names")))?;
     let last = parts.last()?;
-    denylist::list_contains_ci(denylist::REG_TYPES, last).then(|| last.clone())
+    crate::guard::denylist::list_contains_ci(crate::guard::denylist::REG_TYPES, last)
+        .then(|| last.clone())
 }
 
 /// `funcname`'s trailing (bare) name if it is a name-resolving builtin
@@ -3071,7 +2845,8 @@ fn reg_family_name(type_name: Option<&Value>) -> Option<String> {
 fn name_resolver_func(funcname: Option<&Value>) -> Option<String> {
     let parts = qualified_list_parts(funcname)?;
     let last = parts.last()?;
-    denylist::list_contains_ci(denylist::NAME_RESOLVER_FUNCTIONS, last).then(|| last.clone())
+    crate::guard::denylist::list_contains_ci(crate::guard::denylist::NAME_RESOLVER_FUNCTIONS, last)
+        .then(|| last.clone())
 }
 
 /// Is `funcname`'s trailing (bare) name an object-address resolver whose schema
@@ -3081,9 +2856,12 @@ fn func_is_object_address(funcname: Option<&Value>) -> bool {
     let Some(parts) = qualified_list_parts(funcname) else {
         return false;
     };
-    parts
-        .last()
-        .is_some_and(|f| denylist::list_contains_ci(denylist::OBJECT_ADDRESS_FUNCTIONS, f))
+    parts.last().is_some_and(|f| {
+        crate::guard::denylist::list_contains_ci(
+            crate::guard::denylist::OBJECT_ADDRESS_FUNCTIONS,
+            f,
+        )
+    })
 }
 
 /// Is `funcname`'s trailing (bare) name a stat/predicate builtin whose first
@@ -3093,9 +2871,12 @@ fn func_is_text_relation_name(funcname: Option<&Value>) -> bool {
     let Some(parts) = qualified_list_parts(funcname) else {
         return false;
     };
-    parts
-        .last()
-        .is_some_and(|f| denylist::list_contains_ci(denylist::TEXT_RELATION_NAME_FUNCTIONS, f))
+    parts.last().is_some_and(|f| {
+        crate::guard::denylist::list_contains_ci(
+            crate::guard::denylist::TEXT_RELATION_NAME_FUNCTIONS,
+            f,
+        )
+    })
 }
 
 /// Is `funcname`'s trailing (bare) name a schema-export builtin whose first
@@ -3105,9 +2886,12 @@ fn func_is_namespace_name(funcname: Option<&Value>) -> bool {
     let Some(parts) = qualified_list_parts(funcname) else {
         return false;
     };
-    parts
-        .last()
-        .is_some_and(|f| denylist::list_contains_ci(denylist::NAMESPACE_NAME_FUNCTIONS, f))
+    parts.last().is_some_and(|f| {
+        crate::guard::denylist::list_contains_ci(
+            crate::guard::denylist::NAMESPACE_NAME_FUNCTIONS,
+            f,
+        )
+    })
 }
 
 /// The schema element of an object-address call's name array: the SECOND
@@ -3187,7 +2971,7 @@ fn walk_set_config_calls(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool
 }
 
 /// Walk the tree for `query_to_xml`-family calls (and the rest of
-/// [`denylist::SQL_STRING_ARG_FUNCTIONS`]), invoking `visit` with the first
+/// [`crate::guard::denylist::SQL_STRING_ARG_FUNCTIONS`]), invoking `visit` with the first
 /// string-literal argument (the embedded SQL). `visit` returns `true` to
 /// short-circuit.
 fn walk_sql_string_arg_calls(v: &Value, visit: &mut dyn FnMut(&str) -> bool) -> bool {
@@ -3215,9 +2999,12 @@ fn func_is_sql_string_arg(funcname: Option<&Value>) -> bool {
     let Some(parts) = qualified_list_parts(funcname) else {
         return false;
     };
-    parts
-        .last()
-        .is_some_and(|f| denylist::list_contains_ci(denylist::SQL_STRING_ARG_FUNCTIONS, f))
+    parts.last().is_some_and(|f| {
+        crate::guard::denylist::list_contains_ci(
+            crate::guard::denylist::SQL_STRING_ARG_FUNCTIONS,
+            f,
+        )
+    })
 }
 
 /// Is `funcname`'s trailing (bare) name `set_config`? (`pg_catalog.set_config`
@@ -3228,7 +3015,7 @@ fn func_is_set_config(funcname: Option<&Value>) -> bool {
     };
     parts
         .last()
-        .is_some_and(|f| f.eq_ignore_ascii_case(denylist::SET_CONFIG_FUNCTION))
+        .is_some_and(|f| f.eq_ignore_ascii_case(crate::guard::denylist::SET_CONFIG_FUNCTION))
 }
 
 /// The string-literal value of a `FuncCall.args[0]` (`A_Const { Sval }`), if the

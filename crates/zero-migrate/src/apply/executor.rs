@@ -2241,7 +2241,7 @@ async fn rollback_locked<B: MigrationBackend>(
 // under an additive feature a downstream can turn on, and the token authorises
 // nothing anyway. The external boundary that is genuinely pinned is the unforgeable
 // `EffectivePolicy`, held by the T8 `compile_fail` doctests in
-// `zero_migrate_guard::guard`.
+// `zero_migrate_backend::guard`.
 //
 // They run the FULL `executor::apply` path under a Trusted `ExecutorConfig` and
 // prove (a) SQL the Confined guard hard-denies APPLIES, and (b) a destructive op
@@ -2283,6 +2283,30 @@ mod rollback_selection_tests {
         fn check(&self, _up: &str) -> Result<crate::guard::GuardOutcome, crate::guard::GuardError> {
             Ok(crate::guard::GuardOutcome::default())
         }
+
+        // The gate tests drive `apply`/`rollback`, which never lower a raw island and
+        // never derive flags from SQL text — those run in `render::lower` and
+        // `plan::author`. Panicking rather than answering keeps this double from
+        // silently standing in for a posture it was never written to express.
+        fn check_raw_island_sql(&self, _sql: &str) -> Result<(), crate::guard::GuardError> {
+            unreachable!("gate tests never lower a raw island")
+        }
+        fn check_raw_island_body(
+            &self,
+            _body: &str,
+            _raw: &str,
+        ) -> Result<(), crate::guard::GuardError> {
+            unreachable!("gate tests never lower a raw function body")
+        }
+        fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
+            unreachable!("gate tests never run the require_rls net-state walk")
+        }
+        fn flags_for_sql(
+            &self,
+            _up: &str,
+        ) -> Result<crate::model::migration::MigrationFlags, crate::guard::GuardError> {
+            unreachable!("gate tests supply flags directly; they never derive them from SQL")
+        }
     }
 
     /// A guard that refuses everything, to prove the `down` is guarded at all.
@@ -2292,6 +2316,30 @@ mod rollback_selection_tests {
             Err(crate::guard::GuardError::RawSqlRejected {
                 dialect: zero_migrate_ir::dialect::MYSQL,
             })
+        }
+
+        // The gate tests drive `apply`/`rollback`, which never lower a raw island and
+        // never derive flags from SQL text — those run in `render::lower` and
+        // `plan::author`. Panicking rather than answering keeps this double from
+        // silently standing in for a posture it was never written to express.
+        fn check_raw_island_sql(&self, _sql: &str) -> Result<(), crate::guard::GuardError> {
+            unreachable!("gate tests never lower a raw island")
+        }
+        fn check_raw_island_body(
+            &self,
+            _body: &str,
+            _raw: &str,
+        ) -> Result<(), crate::guard::GuardError> {
+            unreachable!("gate tests never lower a raw function body")
+        }
+        fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
+            unreachable!("gate tests never run the require_rls net-state walk")
+        }
+        fn flags_for_sql(
+            &self,
+            _up: &str,
+        ) -> Result<crate::model::migration::MigrationFlags, crate::guard::GuardError> {
+            unreachable!("gate tests supply flags directly; they never derive them from SQL")
         }
     }
 
@@ -2944,6 +2992,30 @@ mod rollback_selection_ordering_tests {
     impl crate::guard::MigrationGuard for PermissiveGuard {
         fn check(&self, _up: &str) -> Result<crate::guard::GuardOutcome, crate::guard::GuardError> {
             Ok(crate::guard::GuardOutcome::default())
+        }
+
+        // The gate tests drive `apply`/`rollback`, which never lower a raw island and
+        // never derive flags from SQL text — those run in `render::lower` and
+        // `plan::author`. Panicking rather than answering keeps this double from
+        // silently standing in for a posture it was never written to express.
+        fn check_raw_island_sql(&self, _sql: &str) -> Result<(), crate::guard::GuardError> {
+            unreachable!("gate tests never lower a raw island")
+        }
+        fn check_raw_island_body(
+            &self,
+            _body: &str,
+            _raw: &str,
+        ) -> Result<(), crate::guard::GuardError> {
+            unreachable!("gate tests never lower a raw function body")
+        }
+        fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
+            unreachable!("gate tests never run the require_rls net-state walk")
+        }
+        fn flags_for_sql(
+            &self,
+            _up: &str,
+        ) -> Result<crate::model::migration::MigrationFlags, crate::guard::GuardError> {
+            unreachable!("gate tests supply flags directly; they never derive them from SQL")
         }
     }
 

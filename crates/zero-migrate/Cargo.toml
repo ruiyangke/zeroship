@@ -28,7 +28,7 @@ description = "Portable, security-first, multi-dialect DB migration engine — d
 # Parse SQL with the REAL Postgres parser (libpg_query bindings) so the security
 # PRECONDITION shape-gate + the idempotence/txn scans see exactly what Postgres
 # would execute. The parse-time SQL security GUARD (deny-list, classify, advisories)
-# lives in the `zero-migrate-guard` crate.
+# lives in the `zero-migrate-postgres` crate, behind the `MigrationGuard` contract.
 #
 # COUNT THE CALL SITES BEFORE EDITING THIS COMMENT. It previously named three
 # "engine still parses directly here" paths and two of them had already moved; a
@@ -103,19 +103,6 @@ zero-migrate-backend = { workspace = true }
 zero-migrate-postgres = { workspace = true }
 zero-migrate-sqlite = { workspace = true }
 zero-migrate-mysql = { workspace = true }
-# The SQL security layer: the `pg_query`-backed parse-time
-# deny-list, cross-schema confinement, statement classification, and operational
-# advisories (`SqlGuard`, `GuardConfig`, `analyze`, `classify`, `Advisory`,
-# `Severity`, the `flags_for`/`guard_for` free fns, `check_ir_data_security_policy`,
-# the `tree_walk` shape helpers). The engine re-exports this surface at its root so
-# `zero_migrate::{SqlGuard, GuardConfig, …}` names are unchanged.
-#
-# `check_raw_view_body_text` / `check_raw_view_body` are deliberately NOT on that
-# list any more. They are PostgreSQL-internal: `zero-migrate-postgres` calls them
-# from its `ValidationPolicy::raw_view_body_refusal`, and the engine reaches them
-# only through that vendor seam. Calling them from here again would re-introduce
-# PostgreSQL's grammar as the judge of every backend's view bodies.
-zero-migrate-guard = { workspace = true }
 # The Policy Decision Point (PDP): the scope lattice + composition algebra +
 # unforgeable `EffectivePolicy`. `resolve_create_table_policy` drives its
 # column/index/PK injection off `EffectivePolicy::injects_for(object)` (the

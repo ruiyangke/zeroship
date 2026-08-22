@@ -2,8 +2,9 @@
 //!
 //! This is the vendor half of `zero_migrate_backend::advisory::OperationalAdvisor`.
 //! The analyzers themselves — the Atlas-style advisory lint suite that reads a
-//! `libpg_query` parse tree — live in `zero-migrate-guard` alongside the parser they
-//! depend on. What lives HERE is the adapter that files them under this vendor's
+//! `libpg_query` parse tree — live in [`crate::analysis::analyze`], alongside the
+//! parser they depend on. What lives HERE is the adapter that files them under this
+//! vendor's
 //! `BackendVendor`, so the engine reaches an analysis the same way it reaches this
 //! vendor's guard and its renderers: through the registry, never by naming a dialect.
 //!
@@ -14,8 +15,10 @@
 //! through a re-export straight into the `libpg_query` crate — so the engine ran the
 //! PostgreSQL parser over MySQL and SQLite DDL and reported the resulting parse
 //! failures as an empty, clean-looking advisory list. That coupling is also what
-//! pinned `zero-migrate-guard` in place: the analyzers cannot move under this vendor
-//! while core calls them by name, because core naming a vendor crate is forbidden.
+//! pinned `zero-migrate-guard` in place: the analyzers could not move under this
+//! vendor while core called them by name, because core naming a vendor crate is
+//! forbidden. With this adapter in place they did move — that crate is gone, and
+//! `crate::analysis` is where its analyzers landed.
 //!
 //! # This module names no dialect
 //!
@@ -24,10 +27,10 @@
 //! The two backends that do refuse carry their own `DIALECT` const for exactly that
 //! provenance.
 
+use crate::analysis::analyze::{analyze, fk_columns_needing_index, indexed_columns};
 use zero_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
 };
-use zero_migrate_guard::analysis::analyze::{analyze, fk_columns_needing_index, indexed_columns};
 
 /// PostgreSQL's operational analyzers.
 ///

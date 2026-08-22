@@ -191,7 +191,7 @@ pub(crate) fn ddl_emitter(dialect: &DialectId, project_schema: &str) -> Box<dyn 
 
 /// The LINE-1 guard for a config's dialect — this vendor's, built by this vendor.
 ///
-/// This replaced `zero_migrate_guard::guard::guard_for`, which was a second
+/// This replaced the old `guard_for` free function in the since-dissolved guard crate, which was a second
 /// closed identity match living in the guard crate and mapping BOTH
 /// descriptor-only dialects onto one shared `SqliteDescriptorGuard`. Two consequences
 /// of folding it into the vendor registry are worth stating:

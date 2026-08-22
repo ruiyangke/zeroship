@@ -16,7 +16,7 @@
 //! # This is not the whole of MySQL's data security
 //!
 //! `data_security.destructive_ops = forbid` IS enforced for MySQL, by
-//! `zero_migrate_guard::guard::check_ir_data_security_policy`, over the structured IR.
+//! `zero_migrate_backend::guard::check_ir_data_security_policy`, over the structured IR.
 //! Its gate reads `if cfg.dialect() != &POSTGRES` — it exists
 //! because the guard here is empty and is handed no policy. Do not read the empty
 //! outcome below as "MySQL enforces nothing"; read it as "MySQL enforces at the IR,
@@ -30,6 +30,7 @@
 //! silently become a change to the other's.
 
 use zero_migrate_backend::guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
+use zero_migrate_ir::migration::MigrationFlags;
 
 /// MySQL's line-1: trust the descriptor output.
 #[derive(Debug, Clone, Copy, Default)]
@@ -48,6 +49,61 @@ impl MigrationGuard for MysqlGuard {
         // Descriptor-generated DDL is trusted at the author boundary; there is no
         // MySQL parser to vet text with. The empty clean outcome.
         Ok(GuardOutcome::default())
+    }
+
+    /// REFUSED, not waved through.
+    ///
+    /// A raw island is `Op::PgRaw` — PostgreSQL text. Reaching MySQL with it is a
+    /// mis-dispatch, not a trusted operation, so this refuses with MySQL's own id
+    /// rather than returning `Ok`. Returning `Ok` here would grant MySQL an unchecked
+    /// raw door that no MySQL author can even open.
+    fn check_raw_island_sql(&self, _sql: &str) -> Result<(), GuardError> {
+        Err(GuardError::RawSqlRejected {
+            dialect: zero_migrate_ir::dialect::MYSQL,
+        })
+    }
+
+    /// REFUSED, for the same reason as [`MysqlGuard::check_raw_island_sql`]: a raw
+    /// function body reaching this vendor is PostgreSQL text on the wrong path.
+    fn check_raw_island_body(&self, _body: &str, _raw: &str) -> Result<(), GuardError> {
+        Err(GuardError::RawSqlRejected {
+            dialect: zero_migrate_ir::dialect::MYSQL,
+        })
+    }
+
+    /// `false` because MySQL HAS NO RAW DOOR, not because raw SQL is trusted here.
+    ///
+    /// This is the "I have no raw door" answer the neutral net-state walk asks for.
+    /// `Op::PgRaw` cannot reach a MySQL apply: [`MysqlGuard::check_raw_island_sql`]
+    /// above refuses it, and there is no MySQL raw author to emit one. So there is no
+    /// island whose net table state could escape the walk, and nothing needs parsing
+    /// to establish that.
+    ///
+    /// What this consequently does NOT check: nothing. Every MySQL op the walk sees is
+    /// structured, and the walk reads all of them.
+    fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
+        false
+    }
+
+    /// CONSERVATIVE, because MySQL cannot classify SQL text at all.
+    ///
+    /// There is no MySQL parser in this workspace, so no `destructive` /
+    /// `non_transactional` / rename facet can be READ OUT of a `up` blob. Rather than
+    /// return the default flag set — which would silently assert "not destructive, no
+    /// approval needed" about text nobody inspected — this returns
+    /// `requires_approval: true`.
+    ///
+    /// What is NO LONGER CHECKED, stated plainly: a raw-SQL-authored MySQL migration
+    /// gets NO destructive classification, NO non-transactional detection and NO
+    /// bare-rename or `SET NOT NULL` gate. It is gated on approval instead, so a human
+    /// looks at every one. MySQL's real posture is the descriptor path plus
+    /// `check_ir_data_security_policy` over the structured IR; the raw-SQL author is
+    /// not a MySQL authoring route.
+    fn flags_for_sql(&self, _up: &str) -> Result<MigrationFlags, GuardError> {
+        Ok(MigrationFlags {
+            requires_approval: true,
+            ..MigrationFlags::default()
+        })
     }
 }
 

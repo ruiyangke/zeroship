@@ -349,7 +349,7 @@ test("PostgreSQL: rolling back a dropSchema rebuilds the schema its create autho
  *
  *  `citext` rather than `pgcrypto` or `hstore` for no reason beyond it being available
  *  and absent in the container, so the create is real and the drop leaves no residue.
- *  It is not on FORBIDDEN_EXTENSIONS (crates/zero-migrate-guard/src/guard/denylist.rs:18),
+ *  It is not on FORBIDDEN_EXTENSIONS (crates/zero-migrate-postgres/src/guard/denylist.rs:18),
  *  which the guard applies over the allowlist regardless of any grant. */
 function scaffoldExtensionDrop(projectSchema: string, extensionName: string): string {
   const dir = mkdtempSync(join(HERE, "rollback-live-ext-"));

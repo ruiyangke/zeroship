@@ -32,8 +32,9 @@
 
 mod support;
 
-use zero_migrate_guard::guard::{GuardConfig, SqlGuard};
+use zero_migrate_backend::guard::GuardConfig;
 use zero_migrate_ir::dialect::POSTGRES;
+use zero_migrate_postgres::guard::SqlGuard;
 
 fn confined() -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(

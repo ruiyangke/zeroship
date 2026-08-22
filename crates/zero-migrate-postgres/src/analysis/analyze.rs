@@ -39,7 +39,7 @@ use zero_migrate_ir::migration::Migration;
 // `zero_migrate_backend::guard::GuardOutcome` — the neutral seam every vendor's guard
 // returns — carries `Vec<Advisory>`, so the type has to sit below every vendor. The
 // ANALYZERS did not move: they read a `libpg_query` parse tree and belong with the
-// parser. Re-exported so `zero_migrate_guard::analysis::analyze::{Advisory, Severity,
+// parser. Re-exported so `zero_migrate_postgres::analysis::analyze::{Advisory, Severity,
 // rule}` keeps resolving.
 pub use zero_migrate_backend::advisory::{rule, Advisory, Severity};
 

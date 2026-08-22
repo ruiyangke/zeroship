@@ -28,7 +28,7 @@
 //!
 //! GATE: `ZERO_MIGRATE_TEST_PG_URL`.
 
-use zero_migrate_guard::analysis::analyze::analyze;
+use zero_migrate_postgres::analysis::analyze::analyze;
 
 /// Does any advisory tell the operator this statement rewrites the table?
 ///

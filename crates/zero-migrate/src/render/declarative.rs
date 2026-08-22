@@ -11,7 +11,7 @@
 //! The differ is a new **author**, not a new executor: every [`Migration`] it
 //! produces still flows through the unchanged
 //! [`plan`](crate::engine::MigrationEngine::plan) →
-//! [`guard`](crate::guard::SqlGuard) →
+//! [`guard`](crate::guard::MigrationGuard) →
 //! [`gate`](crate::engine::MigrationEngine::apply) →
 //! [`executor::apply`](crate::engine::MigrationEngine::apply) pipeline. There is no DDL bypass.
 //!
@@ -7162,7 +7162,7 @@ mod snapshot_builder_refactor_safety_tests {
 #[cfg(test)]
 mod advisory_seam_tests {
     use super::*;
-    use crate::analysis::analyze::rule;
+    use zero_migrate_backend::advisory::rule;
 
     /// Build a minimal plain migration carrying `up` SQL (advisory analysis only
     /// reads `up`; the other fields are inert for this seam).

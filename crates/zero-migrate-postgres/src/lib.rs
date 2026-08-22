@@ -23,6 +23,7 @@
 //! (`*_for_dialect(.., DIALECT)`) is how this crate stays clear of it.
 
 mod advisory;
+pub mod analysis;
 mod ddl;
 mod descriptor;
 mod dml;

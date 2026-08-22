@@ -3,20 +3,34 @@ name = "zero-migrate-postgres"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The PostgreSQL backend for zero-migrate: this vendor's DML, schema, DDL, value-format and guard behavior. Implements the zero-migrate-backend contract; does NOT depend on the engine."
+description = "The PostgreSQL backend for zero-migrate: this vendor's DML, schema, DDL, value-format and guard behavior, including the pg_query(libpg_query)-backed parse-time deny-list, cross-schema confinement, statement classification and operational advisories. Implements the zero-migrate-backend contract; does NOT depend on the engine."
 
 [dependencies]
+# Parse SQL with the REAL Postgres parser (libpg_query bindings) so this vendor's
+# guard sees exactly what Postgres would execute. A deny-list must not misparse or
+# miss a dangerous statement; a pure-Rust parser (sqlparser-rs) is incomplete for
+# exotic PG syntax, which is a security gap. pg_query carries a C build dep
+# (libpg_query).
+#
+# This crate is NOT the only owner of that C dep. `crates/zero-migrate/Cargo.toml`
+# declares `pg_query` independently for the shape gates under
+# `apply/backend/postgres/**`, so the engine pulls libpg_query in whether or not it
+# goes through this crate. Two crates declare it; no other crate in the workspace
+# does. Sole ownership is a GOAL, and reaching it means those remaining direct parse
+# calls relocate into this crate.
+pg_query = "6"
+# The guard walks the serialized `pg_query` parse tree and builds structured
+# advisory/classification values as JSON-ish data.
+serde = { workspace = true }
+# The Policy Decision Point: the unforgeable EffectivePolicy the guard queries
+# (grants/obligations) for its capability + data-security gate, plus the KnobKey/
+# KnobValue vocabulary and the object model (ObjectName).
+zero-migrate-policy = { workspace = true }
 # The CONTRACT: the required renderer traits, the render errors their signatures name,
 # the identifier/expression spelling seam this vendor calls, and the VendorSet shape
 # `VENDOR` below is registered through. This is the ONLY zero-migrate crate a
 # backend may depend on - depending on the engine is the cycle the split removed.
 zero-migrate-backend = { workspace = true }
-# This vendor's LINE-1 guard. `PgGuard` is a seven-line adapter over `SqlGuard`, and
-# `SqlGuard` is the libpg_query deny-list, which stays in its own crate: it is 6,700
-# lines and it also holds `check_ir_data_security_policy`, which enforces the
-# data-security posture for SQLite and MySQL as well. Only THIS vendor pulls it in, so
-# the other two still build without libpg_query.
-zero-migrate-guard = { workspace = true }
 # The closed `Op` / `Expr` / `IrScalar` vocabulary the trait methods are handed, plus
 # open dialect identity and this vendor's `BackendDescriptor`.
 zero-migrate-ir = { workspace = true }

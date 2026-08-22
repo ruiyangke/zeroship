@@ -1,20 +1,19 @@
-//! Focused public-API smoke tests for the extracted `zero-migrate-guard` crate.
+//! Focused public-API smoke tests for this vendor's SQL guard.
 //!
 //! The exhaustive guard behaviour-lock suite (Platform/Trusted widening, vendor
 //! lowering, the data-security IR gate) lives in the engine crate, because those
 //! scenarios drive the guard THROUGH the engine's `render::lower` / `conn` apply
-//! pipeline (which this leaf crate deliberately cannot depend on). These smoke
+//! pipeline (which this backend crate deliberately cannot depend on). These smoke
 //! tests pin the guard's own public surface: the confined deny-list, the
 //! cross-schema confinement, the string-literal extractor, and the analysis
 //! re-exports.
 
 mod support;
 
-use zero_migrate_guard::guard::{
-    check_raw_view_body_text, extract_string_literals, GuardConfig, GuardError, GuardMode, SqlGuard,
-};
+use zero_migrate_backend::guard::{GuardConfig, GuardError, GuardMode};
 use zero_migrate_ir::dialect::{DialectId, POSTGRES, SQLITE};
 use zero_migrate_ir::policy::SchemaScope;
+use zero_migrate_postgres::guard::{check_raw_view_body_text, extract_string_literals, SqlGuard};
 
 const DUCKDB: DialectId = DialectId::new("duckdb");
 
@@ -169,10 +168,11 @@ fn non_ascii_relation_name_reaches_a_verdict_instead_of_panicking() {
 
 #[test]
 fn analysis_reexports_are_reachable() {
-    // The engine re-exports these through the guard crate; assert they resolve.
-    let advisories = zero_migrate_guard::analyze::analyze("CREATE INDEX i ON app1.t (a)");
+    // This vendor owns the analyzers now; assert they resolve at its own paths.
+    let advisories =
+        zero_migrate_postgres::analysis::analyze::analyze("CREATE INDEX i ON app1.t (a)");
     let _ = advisories; // shape-only: analysis never denies.
-    let classified = zero_migrate_guard::classify::classify("SELECT 1");
+    let classified = zero_migrate_postgres::analysis::classify::classify("SELECT 1");
     assert!(
         classified.is_ok(),
         "a plain SELECT must classify without a parse error"
