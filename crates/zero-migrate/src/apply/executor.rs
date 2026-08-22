@@ -50,6 +50,7 @@ use crate::apply::backend::MigrationBackend;
 use crate::apply::journal::{AppliedEntry, Phase};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Migration, MigrationId};
+use crate::model::precondition::Precondition;
 use crate::render::plan::AppliedPlan;
 use crate::render::step::PlanStep;
 
@@ -81,6 +82,33 @@ pub(crate) fn authorize_existence_guard_schema(
         version: migration.version.as_str().to_string(),
         probe_schema: probe_schema.to_string(),
     })
+}
+
+/// The refusal an unmet
+/// [`OnUnmet::Halt`](crate::model::precondition::OnUnmet::Halt) check produces.
+///
+/// Shared by the per-migration seam and the plan-wide preflight so that moving
+/// WHEN a refusal fires never changes WHAT the operator reads.
+///
+/// It is dialect-neutral and belongs here despite having spent a while inside the
+/// PostgreSQL precondition evaluator: it formats a [`Precondition`] and a blocker
+/// list into an [`ApplyError`] and touches no database at all. It ended up there
+/// because it happened to sit in a file that moved wholesale, which is the general
+/// hazard — a whole-file move classifies by FILE BOUNDARY, and any neutral code the
+/// file happens to contain rides across the boundary silently and starts looking
+/// like the vendor's.
+pub(crate) fn unmet_halt_error(
+    version: &str,
+    check: &Precondition,
+    blockers: Option<&[String]>,
+) -> ApplyError {
+    let blocker_detail = blockers.map_or_else(String::new, |blockers| {
+        format!(": blocking dependents {blockers:?}")
+    });
+    ApplyError::PreconditionFailed {
+        version: version.to_string(),
+        which: format!("{check:?} is unmet (OnUnmet::Halt){blocker_detail}"),
+    }
 }
 
 /// Apply the project's pending migrations through a backend the CALLER built.

@@ -69,7 +69,7 @@ use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
 
 use crate::analysis::tree_walk::first_dml_node;
-use crate::apply::executor::{ApplyError, PreconditionVerdict};
+use crate::apply::executor::{unmet_halt_error, ApplyError, PreconditionVerdict};
 use crate::conn::ExecutorConfig;
 use crate::guard::{GuardError, SqlGuard};
 use crate::model::migration::Migration;
@@ -342,24 +342,6 @@ pub(crate) async fn evaluate_one<D: SqlSession>(
                 .map_err(inevaluable)?;
             Ok((met, None))
         }
-    }
-}
-
-/// The refusal an unmet [`OnUnmet::Halt`] check produces.
-///
-/// Shared by the per-migration seam and the plan-wide preflight so that moving
-/// WHEN a refusal fires never changes WHAT the operator reads.
-pub(crate) fn unmet_halt_error(
-    version: &str,
-    check: &Precondition,
-    blockers: Option<&[String]>,
-) -> ApplyError {
-    let blocker_detail = blockers.map_or_else(String::new, |blockers| {
-        format!(": blocking dependents {blockers:?}")
-    });
-    ApplyError::PreconditionFailed {
-        version: version.to_string(),
-        which: format!("{check:?} is unmet (OnUnmet::Halt){blocker_detail}"),
     }
 }
 

@@ -134,9 +134,12 @@ pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
     MigrationBackend, MigrationResult, OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
-// PG re-exports: `PostgresSessionSnapshot` is a pure-`String` struct, but its only
-// consumers are the PG session leaves.
-pub use apply::backend::postgres::PostgresSessionSnapshot;
+// `PostgresBackend` comes from the backend composition root, which is how a host
+// names the engine it wants. `PostgresSessionSnapshot` used to be re-exported beside
+// it and no longer is: it had zero consumers outside `apply/backend/postgres/`, and
+// aliasing one vendor's type at the crate root made the neutral root name a vendor
+// module. It is still reachable, at the path that says whose it is —
+// `apply::backend::postgres::PostgresSessionSnapshot`.
 pub use apply::backend::PostgresBackend;
 // The driver-neutral `SqlSession` seam types (the engine-root `crate::driver`
 // module). Public so a host (napi) driver can construct return values / binds,
@@ -432,13 +435,17 @@ pub use render::step::{
     tables_touched_by, AlterPrimaryKeyStep, BindValue, DialectScope, PlanStep, RenameStep,
     StepReversibility, SynchronizeIdentityStep,
 };
+// The precondition VOCABULARY is neutral and stays exported. Its PostgreSQL
+// EVALUATOR is not exported: `evaluate` and `PreconditionError` used to be aliased
+// here as `evaluate_precondition`, promising one vendor's implementation as neutral
+// crate API. Both had zero consumers, and a caller wanting to evaluate a
+// precondition should go through `MigrationBackend::evaluate_preconditions`, which
+// is what routes to the registered backend.
+pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 // The OFFLINE `--sql` plan preview. A pure,
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
 // lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never
 // fabricated.
-pub use apply::backend::postgres::precondition::evaluate as evaluate_precondition;
-pub use apply::backend::postgres::precondition::PreconditionError;
-pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 pub use render::sql_preview::{
     render_ir_envelope_sql, render_ir_envelope_sql_onto, render_ir_envelope_sql_statements,
     render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,

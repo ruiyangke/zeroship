@@ -613,7 +613,8 @@ pub trait MigrationBackend {
     /// Evaluate a migration's preconditions read-only under the apply lock.
     /// Behind the trait so the generic body never holds a concrete connection;
     /// the PG impl delegates to
-    /// [`crate::apply::backend::postgres::precondition::evaluate`].
+    /// `apply::backend::postgres::precondition::evaluate`. Named in prose rather
+    /// than linked: it is crate-private, and this method is the public way in.
     async fn evaluate_preconditions(
         &self,
         cfg: &ExecutorConfig,

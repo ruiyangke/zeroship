@@ -2959,7 +2959,7 @@ impl MigrationEngine {
                     column: column.clone(),
                     blockers,
                 },
-                check => crate::apply::backend::postgres::precondition::unmet_halt_error(
+                check => crate::apply::executor::unmet_halt_error(
                     hoisted.version,
                     check,
                     Some(&blockers),
