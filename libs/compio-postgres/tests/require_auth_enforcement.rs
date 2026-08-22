@@ -1,11 +1,27 @@
-//! `require_auth` is a SECURITY CONTROL, and nothing tested that it enforces.
+//! `require_auth` enforcement, for the policy shapes the in-src tests do not
+//! cover.
 //!
-//! `tests/libpq_parameter_parity.rs` proves the DSN key is accepted. That is a
-//! different claim from the policy being applied, and for a security setting
+//! THIS FILE'S ORIGINAL HEADER CLAIMED `require_auth` HAD ZERO TESTS. That was
+//! wrong, and the mistake is worth recording because it is cheap to repeat: a
+//! grep of `tests/` found nothing, and I concluded untested without looking in
+//! `src/`. `src/connect_raw.rs` already carries
+//! `require_scram_refuses_cleartext_without_sending_the_password` and
+//! `require_scram_refuses_authentication_ok_without_an_exchange` - and the
+//! second one covers the downgrade-to-trust case this file was written for,
+//! under `require_auth=scram-sha-256`.
+//!
+//! What is genuinely added here is the OTHER policy shapes. The in-src pair
+//! exercises `Require(scram-sha-256)`; these exercise `Require(password)` and
+//! `Reject(password)`, so the "policy names a method the server did not offer"
+//! and "policy rejects the method the server DID offer" arms both run. Each is
+//! paired with a control differing only in the policy, which the in-src tests do
+//! not have.
+//!
+//! `tests/libpq_parameter_parity.rs` proves the DSN key is accepted, which is a
+//! different claim again from the policy being applied. For a security setting
 //! "accepted but not enforced" is the dangerous state: the connection string
 //! looks hardened, the driver reports success, and nothing was checked.
-//! `check_require_auth` has seven call sites in `src/connect_raw.rs` and, before
-//! this file, zero tests.
+//! `check_require_auth` has seven call sites in `src/connect_raw.rs`.
 //!
 //! THE CASE THAT MATTERS is `AuthMethod::None`, whose failure text is "server
 //! did not complete authentication". A hostile or man-in-the-middle server can
