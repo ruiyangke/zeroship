@@ -43,18 +43,13 @@ use std::error::Error;
 use std::fmt;
 
 use crate::approval::Approval;
-// The generic `PostgresBackend` compiles on the PG seam cfg (`pg_seam`, from
-// `host-pg`) — the generic executor entries below are driver-neutral, and the
-// dialect SQL leaves the backend drives live in
-// [`crate::apply::backend::postgres::session`].
+// The generic executor entries below are driver-neutral; the dialect SQL leaves
+// the backend drives live in [`crate::apply::backend::postgres::session`].
 use crate::apply::backend::MigrationBackend;
-#[cfg(pg_seam)]
 use crate::apply::backend::MysqlBackend;
-#[cfg(pg_seam)]
 use crate::apply::backend::PostgresBackend;
 use crate::apply::journal::{AppliedEntry, JournalError, Phase};
 use crate::conn::ExecutorConfig;
-#[cfg(pg_seam)]
 use crate::driver::SqlSession;
 use crate::guard::GuardError;
 use crate::model::migration::{Migration, MigrationId};
@@ -151,7 +146,6 @@ impl Error for BackendError {
     }
 }
 
-#[cfg(pg_seam)]
 impl From<crate::driver::DbError> for BackendError {
     fn from(error: crate::driver::DbError) -> Self {
         Self::new(error)
@@ -605,7 +599,6 @@ pub(crate) fn authorize_existence_guard_schema(
     })
 }
 
-#[cfg(pg_seam)]
 impl From<crate::driver::DbError> for ApplyError {
     fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
@@ -636,7 +629,6 @@ impl From<crate::driver::DbError> for ApplyError {
 /// - [`ApplyError::ChecksumDrift`] — an already-applied migration was tampered.
 /// - [`ApplyError::MigrationFailed`] — a migration's SQL failed (rolled back).
 /// - [`ApplyError::Db`] / [`ApplyError::Journal`] — infrastructure failures.
-#[cfg(pg_seam)]
 pub async fn apply<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -671,7 +663,6 @@ pub async fn apply<D: SqlSession>(
 ///
 /// # Errors
 /// Same as [`apply`].
-#[cfg(pg_seam)]
 pub async fn apply_with_lock<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -723,7 +714,6 @@ pub async fn apply_with_lock<D: SqlSession>(
 ///
 /// # Errors
 /// Same as [`apply`].
-#[cfg(pg_seam)]
 pub async fn apply_with_lock_mysql<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -2328,7 +2318,6 @@ pub enum RollbackError {
     },
 }
 
-#[cfg(pg_seam)]
 impl From<crate::driver::DbError> for RollbackError {
     fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())

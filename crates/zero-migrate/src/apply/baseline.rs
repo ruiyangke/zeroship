@@ -28,7 +28,6 @@
 //! immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
 //! deleted.
 
-#[cfg(pg_seam)]
 use crate::driver::SqlSession;
 
 use crate::apply::journal::{self, JournalError};
@@ -51,7 +50,6 @@ pub struct BaselineOutcome {
 pub enum BaselineError {
     /// A database error outside a guarded/journaled step.
     #[error("db error: {0}")]
-    #[cfg(pg_seam)]
     Db(#[from] crate::driver::DbError),
     /// Taking or releasing the project lock failed.
     ///
@@ -62,7 +60,6 @@ pub enum BaselineError {
     /// lock here would take the lock without the compensation, which is what it
     /// used to do.
     #[error(transparent)]
-    #[cfg(pg_seam)]
     Lock(#[from] crate::apply::executor::ApplyError),
     /// A journal operation failed.
     #[error(transparent)]
@@ -143,7 +140,6 @@ pub enum BaselineError {
 /// migrations (not a first-entry DB).
 /// - [`BaselineError::ConflictingBaseline`] — a different baseline already exists.
 /// - [`BaselineError::Db`] / [`BaselineError::Journal`] — infrastructure failures.
-#[cfg(pg_seam)]
 pub(crate) async fn baseline<B: crate::apply::backend::MigrationBackend, D: SqlSession>(
     backend: &B,
     conn: &D,
@@ -179,7 +175,6 @@ pub(crate) async fn baseline<B: crate::apply::backend::MigrationBackend, D: SqlS
 }
 
 /// The baseline body, run while holding the project advisory lock.
-#[cfg(pg_seam)]
 async fn baseline_locked<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -249,7 +244,6 @@ async fn baseline_locked<D: SqlSession>(
 }
 
 /// The version of the earliest recorded `kind='baseline'` event, if any.
-#[cfg(pg_seam)]
 async fn first_baseline_version<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,

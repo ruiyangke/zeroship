@@ -1,8 +1,8 @@
 // Addon loader — resolve + load the prebuilt N-API `.node` from
 // `crates/zero-migrate-node` and type its exposed surface.
 //
-// The addon is the V8-free Rust core (`host-pg` + bundled rusqlite, no compio, no
-// io_uring, cross-platform). It exposes:
+// The addon is the V8-free Rust core (host-driven PG/MySQL over the `SqlSession`
+// seam + bundled rusqlite, no compio, no io_uring, cross-platform). It exposes:
 //  - sync, DB-free: `irVersion()`, `loadVerify(...)`
 //  - async, host-driven (fire-and-resolve over a `hostDriver` TSFN): `applyIr(...)`,
 //    `apply(...)`, `status(...)`, `history(...)`

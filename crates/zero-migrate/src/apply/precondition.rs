@@ -62,9 +62,7 @@
 //! `information_schema` / `&Client` appears in the generic executor body — it is
 //! all contained here, the PG leaf.
 
-#[cfg(pg_seam)]
 use crate::apply::backend::{MigrationBackend, PostgresBackend};
-#[cfg(pg_seam)]
 use crate::driver::SqlSession;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
@@ -106,7 +104,6 @@ const MUTATING_OR_LOCK_BUILTINS: &[&str] = &[
 pub enum PreconditionError {
     /// A database error while running a (structured or `SqlBoolean`) check.
     #[error("precondition db error: {0}")]
-    #[cfg(pg_seam)]
     Db(#[from] crate::driver::DbError),
     /// A structured check named an identifier that is not a bare SQL identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`) — a schema-qualified name, a quoted-injection
@@ -164,7 +161,7 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), PreconditionErr
 /// Double-quote a validated identifier (belt-and-suspenders; the value has passed
 /// [`validate_ident`] so it has no `"`).
 ///
-/// The only caller is the `#[cfg(pg_seam)]` `row_count` probe. Its owning
+/// The only caller is the `row_count` probe. Its owning
 /// backend supplies the dialect explicitly rather than this core module assuming
 /// one; the renderer registered for that dialect owns the emitted spelling.
 fn quote_ident(ident: &str, dialect: &DialectId) -> String {
@@ -191,7 +188,6 @@ fn quote_ident(ident: &str, dialect: &DialectId) -> String {
 /// - [`PreconditionError::NotABooleanSelect`] — a `SqlBoolean` is not a single
 /// boolean-returning `SELECT`.
 /// - [`PreconditionError::Db`] — a query failed.
-#[cfg(pg_seam)]
 pub async fn evaluate<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -263,7 +259,6 @@ pub async fn evaluate<D: SqlSession>(
 /// `Halt` is evaluated first-failure-wins: the first unmet/inevaluable Halt check
 /// stops evaluation and aborts. A `Skip` verdict is returned only when no Halt
 /// check failed and at least one `Skip` check is unmet.
-#[cfg(pg_seam)]
 pub(crate) async fn evaluate_all<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -316,7 +311,6 @@ pub(crate) async fn evaluate_all<D: SqlSession>(
 ///
 /// # Errors
 /// [`ApplyError::PreconditionFailed`] when the check cannot be evaluated.
-#[cfg(pg_seam)]
 pub(crate) async fn evaluate_one<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -371,7 +365,6 @@ pub(crate) fn unmet_halt_error(
 /// Ask the PostgreSQL backend's measured dependency predicate which objects block
 /// a bare drop. Keeping this as a backend call avoids a third SQL spelling whose
 /// behavior could drift independently from the rename guard and its live oracle.
-#[cfg(pg_seam)]
 async fn drop_column_blockers<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -396,7 +389,6 @@ async fn drop_column_blockers<D: SqlSession>(
 /// routing this variant through the drop question would refuse retypes PostgreSQL
 /// accepts (a column an inbound FOREIGN KEY names) and admit retypes it rejects (a
 /// partition-key column, an inherited column).
-#[cfg(pg_seam)]
 async fn retype_column_blockers<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -413,7 +405,6 @@ async fn retype_column_blockers<D: SqlSession>(
 
 /// `information_schema.tables` lookup: a base table OR a view named `table` in the
 /// project schema. Schema + table are BOUND ($1/$2), never interpolated.
-#[cfg(pg_seam)]
 async fn table_exists<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -433,7 +424,6 @@ async fn table_exists<D: SqlSession>(
 
 /// `information_schema.columns` lookup: a column named `column` on the
 /// project-schema table `table`. All three are BOUND, never interpolated.
-#[cfg(pg_seam)]
 async fn column_exists<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -460,7 +450,6 @@ async fn column_exists<D: SqlSession>(
 /// [`validate_ident`] (the schema is the engine-owned `cfg.project_schema`, the
 /// table has passed `validate_ident`). This mirrors `backfill::build_batch_sql`,
 /// which quotes the same validated identifiers into relation position.
-#[cfg(pg_seam)]
 async fn row_count<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -603,7 +592,6 @@ fn last_string_part(parts: &[Value]) -> Option<String> {
 
 /// Evaluate an untrusted `SqlBoolean` precondition: guard → shape gate → run
 /// under the migrator role in a READ ONLY transaction → read one boolean.
-#[cfg(pg_seam)]
 async fn evaluate_sql_boolean<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -656,7 +644,6 @@ async fn evaluate_sql_boolean<D: SqlSession>(
 /// The body of [`evaluate_sql_boolean`] run INSIDE the `BEGIN READ ONLY`
 /// transaction: pin the project `search_path`, drop to the migrator role (both
 /// `SET LOCAL`, transaction-scoped), then run the `SELECT` and read one boolean.
-#[cfg(pg_seam)]
 async fn run_sql_boolean_in_txn<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,

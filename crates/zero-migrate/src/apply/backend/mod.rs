@@ -37,17 +37,13 @@
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
 pub mod capability;
-// The PG backend module compiles on the PG seam cfg (`pg_seam`, emitted by build.rs
-// from `host-pg`): its generic core (`PostgresBackend<D>` + the `SqlSession` trait +
+// The PG backend's generic core (`PostgresBackend<D>` + the `SqlSession` trait +
 // the neutral seam types) names no driver-concrete type — a host driver (the napi
 // `pg` shell) supplies the `SqlSession` impl.
-#[cfg(pg_seam)]
 pub mod postgres;
-// The MySQL backend rides the SAME `driver::SqlSession` seam as Postgres (only its
-// dialect SQL differs), so it compiles on the seam cfg (`pg_seam`, emitted by
-// build.rs from `host-pg`). SQLite, by contrast, is in-process (`rusqlite`) and is
-// always present.
-#[cfg(pg_seam)]
+// The MySQL backend rides the SAME `driver::SqlSession` seam as Postgres; only its
+// dialect SQL differs. SQLite, by contrast, is in-process (`rusqlite`) and rides no
+// network seam at all.
 pub mod mysql;
 pub mod sqlite;
 
@@ -55,12 +51,10 @@ pub use capability::{
     BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
     OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
-#[cfg(pg_seam)]
 pub use mysql::{
     MysqlBackend, MysqlInflightDdlMarker, MysqlInflightRecoveryError, MysqlInflightRecoveryOutcome,
     MysqlInflightResolution,
 };
-#[cfg(pg_seam)]
 pub use postgres::PostgresBackend;
 
 use std::future::Future;
@@ -247,12 +241,10 @@ pub trait CrossDeployObligations {
 /// FIXED and small on purpose: retrying until the lock is free is the unbounded
 /// wait the non-blocking acquisition exists to avoid, only spelled with more round
 /// trips.
-#[cfg(pg_seam)]
 pub(crate) const PROJECT_LOCK_TRY_ATTEMPTS: u32 = 3;
 
 /// How long a non-blocking acquisition pauses between those attempts. Sized to
 /// cover the gap between two of a deploy's statements, not the deploy.
-#[cfg(pg_seam)]
 pub(crate) const PROJECT_LOCK_TRY_BACKOFF: std::time::Duration =
     std::time::Duration::from_millis(200);
 

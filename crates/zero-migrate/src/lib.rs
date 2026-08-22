@@ -96,17 +96,12 @@ pub mod render;
 // The dialect-neutral network driver seam (`SqlSession`) — the ONE injected
 // runtime dependency the network-dialect backends (`PostgresBackend`, and the
 // forthcoming `MysqlBackend`) are generic over. SQLite does NOT ride it (it is an
-// in-process rusqlite actor). Gated on `pg_seam` (its only current implementor is
-// the host PG adapter, lit by the `host-pg` feature); a `--no-default-features`
-// build keeps a lean core.
+// in-process rusqlite actor). Its only current implementor is the host PG adapter.
 //
 // It LIVES in `zero-migrate-backend` — it is a contract, not engine logic, and its
 // only dependency was `std`. Re-exported under its historical `crate::driver` path
 // (the same shim idiom `model/mod.rs` uses for `zero_migrate_ir::ir`) so every
 // `crate::driver::…` and `zero_migrate::driver::…` reference resolves unchanged.
-// The `pg_seam` gate is kept on the RE-EXPORT: it is a fact about the engine's
-// public surface, and dropping it would widen a `--no-default-features` build.
-#[cfg(pg_seam)]
 pub use zero_migrate_backend::driver;
 // The schema-authority core (DDL builders, diff classifier, sentinel codec,
 // schema-shape descriptors). The data-plane query language that used to ride
@@ -135,17 +130,14 @@ pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
     MigrationBackend, MigrationResult, OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
-// PG-seam re-exports (consumer-based gate: `PgSessionSnapshot` is a pure-`String`
-// struct, but its only consumers are the PG session leaves). Behind the PG seam
-// (`host-pg`) — the generic `PostgresBackend<D>` compiles there.
-#[cfg(pg_seam)]
+// PG re-exports: `PgSessionSnapshot` is a pure-`String` struct, but its only
+// consumers are the PG session leaves.
 pub use apply::backend::{PgSessionSnapshot, PostgresBackend};
 // The driver-neutral `SqlSession` seam types (the engine-root `crate::driver`
 // module). Public so a host (napi) driver can construct return values / binds,
-// and so error consumers read the neutral `DbError` (SQLSTATE in `.sqlstate`). On
-// the whole PG seam — the addon (`host-pg`) is the primary consumer of these
-// neutral types. MySQL will ride the same seam; SQLite does NOT (in-process
-// rusqlite).
+// and so error consumers read the neutral `DbError` (SQLSTATE in `.sqlstate`). The
+// napi addon is the primary consumer of these neutral types. MySQL rides the same
+// seam; SQLite does NOT (in-process rusqlite).
 pub use analysis::classify::{
     classify, drop_index_targets, relations_touched, DdlKind, DropIndexTarget, OwnershipNeed,
     ParseError, StatementClass, TouchedRelation,
@@ -157,7 +149,6 @@ pub use apply::drift::{
     ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
 pub use conn::{ConfinementConfig, ConnectError, ExecutorConfig, PostgresConfinement};
-#[cfg(pg_seam)]
 pub use driver::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
 pub use engine::{
     recognizes_contract_apply, AggregateOutcome, DeclarativeApplyError, DeclarativeDeployOutcome,
@@ -182,7 +173,6 @@ pub use render::expand_contract::{
 // make a comparison POSSIBLE rather than to read a catalog: it re-prints an
 // authored view body through the server so `diff_snapshots` has the same
 // representation on both sides. See its own docs for why no offline pass can.
-#[cfg(pg_seam)]
 pub use apply::backend::postgres::drift_sql::{
     check_checksum_drift, resolve_view_bodies, snapshot_schema,
 };
@@ -198,7 +188,6 @@ pub use apply::executor::{
 };
 // `apply` is generic over the `SqlSession` seam — on the whole PG
 // seam. `rollback` is still `&Client`-typed (out of v1 scope) — PG-only.
-#[cfg(pg_seam)]
 pub use apply::executor::apply;
 // The OFFLINE ops→snapshot fold. Pure, no
 // DB: replay an ordered `Op` list into the EXISTING `SchemaSnapshot` (drift.rs),
@@ -324,7 +313,6 @@ pub use apply::journal::{
 // The PG journal free functions (each takes a `&D: SqlSession` connection), from
 // the PG backend's own `postgres/journal_sql.rs`. MySQL and SQLite have their
 // peer `journal_sql.rs` modules. On the whole PG seam.
-#[cfg(pg_seam)]
 pub use apply::backend::postgres::journal_sql::{
     applied, applied_count, ensure_journal, history as journal_history, latest_completed_checksums,
     net_rolled_back, outstanding_pending_contracts, record_baseline, record_completed,
@@ -347,7 +335,6 @@ pub use plan::pending::{
 };
 // `history` / `status` are generic over the `SqlSession` seam —
 // on the whole PG seam so a host driver can drive the pending-migrations flow.
-#[cfg(pg_seam)]
 pub use ops::status::{history, status};
 // The confined submit path is PG-only; gated with `mod ops::submit`.
 pub use model::migration::{
@@ -442,7 +429,6 @@ pub use render::step::{
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
 // lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never
 // fabricated.
-#[cfg(pg_seam)]
 pub use apply::precondition::evaluate as evaluate_precondition;
 pub use apply::precondition::PreconditionError;
 pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};

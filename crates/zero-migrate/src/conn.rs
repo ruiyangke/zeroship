@@ -119,7 +119,7 @@ pub struct ConfinementConfig {
 /// The confinement settings **only the PostgreSQL backend reads**.
 ///
 /// Measured: every field below is referenced solely from
-/// `apply/backend/postgres/` and the `#[cfg(pg_seam)]` precondition evaluator.
+/// `apply/backend/postgres/` and the precondition evaluator.
 /// The MySQL and SQLite backends read none of them, and would have nothing to do
 /// with them if they did — MySQL has no `SET ROLE`-per-transaction confinement
 /// model and SQLite has neither roles nor schemas.

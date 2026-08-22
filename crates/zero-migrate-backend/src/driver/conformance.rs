@@ -34,8 +34,7 @@
 //!
 //! Postgres-flavoured by design (it issues `BEGIN`/`ROLLBACK`, a `TEMP TABLE`, and a
 //! text→timestamptz coercion). A MySQL conformance profile would render the dialect
-//! equivalents; the shape (four checks, one verdict) is the same. Gated on
-//! `pg_seam` because it names the `SqlSession` seam.
+//! equivalents; the shape (four checks, one verdict) is the same.
 
 use super::{Bind, DbError, SqlSession};
 

@@ -14,9 +14,8 @@
 // Nothing in this repository collects that orphan. The declarative differ would
 // propose dropping it (`schema/diff.rs` classifies a live-but-undeclared column as a
 // destructive DropColumn), but that differ does not run here: its live-schema reader
-// `read_live_schema` sits behind `#[cfg(feature = "introspect")]`, a feature
-// deliberately never declared (`crates/zero-migrate/build.rs:16-24` calls those
-// helpers "permanently-off dead code"), and `compute_diff` has no caller outside its
+// `read_live_schema` was permanently-off dead code naming a driver this workspace
+// does not depend on, and has been deleted; `compute_diff` has no caller outside its
 // own in-module tests. So the orphan is permanent.
 //
 // Both halves are asserted, because either alone is the wrong story: the catalog

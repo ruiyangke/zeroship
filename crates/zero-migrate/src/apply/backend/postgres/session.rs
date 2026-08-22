@@ -56,7 +56,6 @@ pub(super) const AUTHOR_SQL_LITERAL_MODE: &str = "SET LOCAL standard_conforming_
 /// since each apply still operates strictly within its own meta + project
 /// schema. Acceptable for v1. Revisit at scale with a 64-bit key
 /// (`pg_advisory_lock(int4, int4)` from a SHA-256 prefix, or two keys).
-#[cfg(pg_seam)]
 pub(crate) async fn acquire_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
@@ -107,7 +106,6 @@ pub(crate) async fn acquire_project_lock<D: SqlSession>(
 /// PostgreSQL only, deliberately. MySQL's `GET_LOCK` grants nothing when it
 /// returns 0 or errors, and SQLite's project lock is a local file try_lock, so
 /// neither has a grant to compensate for and neither gets this call.
-#[cfg(pg_seam)]
 async fn drop_grant_from_failed_acquire<D: SqlSession>(conn: &D, project_id: &str) {
     if let Err(error) = release_project_lock(conn, project_id).await {
         tracing::warn!(
@@ -132,7 +130,6 @@ async fn drop_grant_from_failed_acquire<D: SqlSession>(conn: &D, project_id: &st
 /// # Errors
 /// [`ApplyError::Db`] on a driver failure, [`ApplyError::Backend`] if the boolean
 /// result cannot be decoded.
-#[cfg(pg_seam)]
 pub(crate) async fn try_acquire_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
@@ -178,7 +175,6 @@ pub(crate) async fn try_acquire_project_lock<D: SqlSession>(
 ///
 /// # Errors
 /// [`ApplyError::Db`] on a driver failure.
-#[cfg(pg_seam)]
 pub(crate) async fn project_lock_holders<D: SqlSession>(
     conn: &D,
     project_id: &str,
@@ -205,7 +201,6 @@ pub(crate) async fn project_lock_holders<D: SqlSession>(
         .collect()
 }
 
-#[cfg(pg_seam)]
 pub(crate) async fn release_project_lock<D: SqlSession>(
     conn: &D,
     project_id: &str,
@@ -222,7 +217,6 @@ pub(crate) async fn release_project_lock<D: SqlSession>(
 /// `180000` for PostgreSQL 18). Feature gates use this value instead of probing
 /// for a function name whose availability could be changed by extensions or
 /// `search_path`.
-#[cfg(pg_seam)]
 pub(crate) async fn server_version_num<D: SqlSession>(conn: &D) -> Result<i32, ApplyError> {
     let row = conn
         .query_one(
@@ -241,7 +235,6 @@ pub(crate) async fn server_version_num<D: SqlSession>(conn: &D) -> Result<i32, A
 /// Read the session GUCs we are about to override, so they can be restored when
 /// `apply` finishes. Uses `current_setting(name)` (text form, exactly what `SET`
 /// round-trips).
-#[cfg(pg_seam)]
 pub(crate) async fn snapshot_session<D: SqlSession>(
     conn: &D,
 ) -> Result<PgSessionSnapshot, ApplyError> {
@@ -264,7 +257,6 @@ pub(crate) async fn snapshot_session<D: SqlSession>(
 /// value, false)` so the *value* is a bound literal, not interpolated SQL
 /// (the snapshot strings are server-provided, but we keep the parameterized
 /// path regardless).
-#[cfg(pg_seam)]
 pub(crate) async fn restore_session<D: SqlSession>(
     conn: &D,
     snap: &PgSessionSnapshot,
@@ -454,7 +446,6 @@ fn dml_set_local_session_sql(cfg: &ExecutorConfig, version: &str) -> Result<Stri
 /// in [`apply_non_transactional`]. `search_path` is the project schema
 /// **only** — the meta schema is off the migration-time path so an unqualified
 /// name in the `up` can never resolve to the journal.
-#[cfg(pg_seam)]
 pub(crate) async fn configure_session_non_txn<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -652,7 +643,6 @@ const fn dml_keyword(node: &NodeEnum) -> &'static str {
 /// caller passes it explicitly — the journaled kind is the tamper anchor, so it is
 /// never inferred from anything the migration set supplies at apply time. A debug
 /// assertion ties `'squash'` ⇔ non-empty `supersedes`.
-#[cfg(pg_seam)]
 pub(crate) async fn apply_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -903,7 +893,6 @@ fn postgres_dml_params(
 /// [`ApplyError::MigrationFailed`] if the DML failed (rolled back, nothing
 /// journaled); [`ApplyError::Db`]/[`ApplyError::Journal`] on infrastructure
 /// failure.
-#[cfg(pg_seam)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_dml_transactional<D: SqlSession>(
     conn: &D,
@@ -1019,7 +1008,6 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
 /// the caller has open — the txn apply path calls this INSIDE its `BEGIN…COMMIT`
 /// so the edges are atomic with `S`'s `completed` row. No-op for a non-squash
 /// (`supersedes` empty). Admin write (the migrator has no meta-schema grant).
-#[cfg(pg_seam)]
 async fn insert_supersedes_edges<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1049,7 +1037,6 @@ async fn insert_supersedes_edges<D: SqlSession>(
 /// marker, plus the idempotent recovery path.
 ///
 /// Returns `true` if this was a recovery (a prior `started` marker existed).
-#[cfg(pg_seam)]
 pub(crate) async fn apply_non_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1207,7 +1194,6 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
 /// them.
 ///
 /// Runs as the admin: the migrator's meta-schema grant is revoked.
-#[cfg(pg_seam)]
 async fn finalize_non_txn<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1278,7 +1264,6 @@ async fn finalize_non_txn<D: SqlSession>(
 /// Runs as the **admin**: it is called BEFORE the `<up>`'s `SET ROLE`, and the
 /// admin is privileged over the project schema, so the `DROP INDEX` succeeds
 /// without the migrator role.
-#[cfg(pg_seam)]
 async fn recover_non_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1461,7 +1446,6 @@ fn index_names_in_up(up: &str) -> Vec<String> {
 /// crash leaves either both (rolled back + recorded) or neither. The `down` runs
 /// under the migrator role; the journal append runs as admin (the migrator has no
 /// meta grant), exactly mirroring [`apply_transactional`].
-#[cfg(pg_seam)]
 pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1585,7 +1569,6 @@ async fn append_rolled_back<D: SqlSession>(
 
 /// Run a lowered recorded inverse through PostgreSQL's native text-bind DML seam,
 /// then journal the FORWARD identity as rolled back in the same transaction.
-#[cfg(pg_seam)]
 pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,

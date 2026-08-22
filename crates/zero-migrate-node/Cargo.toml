@@ -35,7 +35,7 @@ napi = ["dep:napi", "dep:napi-derive"]
 # The core engine, host-callback path ONLY: NO compio (→ no io_uring → the .node
 # is cross-platform), NO embedded V8. SQLite stays native (rusqlite bundled) inside
 # the core; the host supplies PG/MySQL over the seam.
-zero-migrate = { path = "../zero-migrate", default-features = false, features = ["host-pg"] }
+zero-migrate = { path = "../zero-migrate" }
 
 # N-API 3, TOKIO-FREE by construction: default-features = false drops the
 # ergonomic tokio-backed async (`async`/`tokio_rt`). `napi4` supplies the

@@ -40,19 +40,17 @@ use zero_migrate_ir::dialect::{DialectId, POSTGRES};
 
 pub(crate) const DIALECT: DialectId = POSTGRES;
 
-/// The generic Postgres [`MigrationBackend`] implementation on the host-pg build.
+/// The generic Postgres [`MigrationBackend`] implementation.
 ///
 /// Generic over the [`SqlSession`] driver seam. Online expand-contract work uses
 /// the same generic DDL, backfill, journal, and lock primitives as ordinary host
 /// apply. Shadow-database dry runs still require a separate provisioning harness
 /// and therefore remain unavailable on this backend.
-#[cfg(pg_seam)]
 #[derive(Debug)]
 pub struct PostgresBackend<'a, D: SqlSession> {
     conn: &'a D,
 }
 
-#[cfg(pg_seam)]
 impl<'a, D: SqlSession> PostgresBackend<'a, D> {
     /// Wrap any [`SqlSession`] driver as the PostgreSQL backend. Ordinary apply,
     /// schema snapshots, and online expand/backfill execution use this generic

@@ -17,8 +17,8 @@
 //      the authoritative `Checksum::of_ir`), then drives `executor::apply` over the
 //      chosen host driver (`driver-pg.ts` / `driver-mysql2.ts`).
 //
-// NO `dryRun` verb in v1: the host-side shadow harness is deferred; on the
-// `host-pg` addon build `backend.shadow()` is `None`, so a shadow dry-run would
+// NO `dryRun` verb in v1: the host-side shadow harness is deferred; for the
+// host-driven backends `backend.shadow()` is `None`, so a shadow dry-run would
 // return `DryRunError::ShadowUnsupported`. `plan`/`validate` (the DB-free
 // pre-checks) ARE provided.
 

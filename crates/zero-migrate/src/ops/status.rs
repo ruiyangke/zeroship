@@ -15,8 +15,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 // `status`/`history`/`read_status_snapshot` are generic over the `SqlSession` seam
 // (`&D`), so a host (napi) driver can drive the "show me pending migrations" flow.
-// They compile on the whole PG seam (`host-pg`).
-#[cfg(pg_seam)]
 use crate::driver::SqlSession;
 
 use crate::apply::backend::{BackfillProgressEntry, ProjectLockAcquisition, ProjectLockHolder};
@@ -1164,7 +1162,6 @@ fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, 
 /// - [`StatusError::Journal`] on a journal read/bootstrap failure.
 /// - [`StatusError::Ordering`] if the supplied set's `depends_on` is
 ///   unsatisfiable or cyclic (the same fault apply would surface).
-#[cfg(pg_seam)]
 pub async fn status<D: SqlSession>(
     dialect: &zero_migrate_ir::dialect::DialectId,
     conn: &D,
@@ -1183,7 +1180,6 @@ pub async fn status<D: SqlSession>(
     finish_status_snapshot(conn, snapshot).await
 }
 
-#[cfg(pg_seam)]
 async fn finish_status_snapshot<D: SqlSession, T>(
     conn: &D,
     snapshot: Result<T, StatusError>,
@@ -1213,7 +1209,7 @@ async fn finish_status_snapshot<D: SqlSession, T>(
     }
 }
 
-#[cfg(all(test, pg_seam))]
+#[cfg(test)]
 mod legacy_snapshot_transaction_tests {
     use super::*;
     use crate::driver::{Bind, DbError, Row};
@@ -1465,7 +1461,6 @@ async fn status_via_backend_locked_inner<B: crate::apply::backend::MigrationBack
 
 /// The body of [`status`]'s consistent-snapshot read: both journal reads + the
 /// derived fields, run inside the caller's open `REPEATABLE READ READ ONLY` txn.
-#[cfg(pg_seam)]
 async fn read_status_snapshot<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
@@ -1656,7 +1651,6 @@ fn derive_pending_contract_status_for_plans(
 ///
 /// # Errors
 /// [`StatusError::Journal`] on a journal read/bootstrap failure.
-#[cfg(pg_seam)]
 pub async fn history<D: SqlSession>(
     dialect: &zero_migrate_ir::dialect::DialectId,
     conn: &D,

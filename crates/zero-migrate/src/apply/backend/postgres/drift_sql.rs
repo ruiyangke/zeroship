@@ -9,13 +9,10 @@
 //! `sqlite::drift_sql` already sit on, so all three introspectors hand the neutral
 //! differ the same `SchemaSnapshot` shape.
 //!
-//! Nothing in this module carries its own `#[cfg(pg_seam)]`: `backend::postgres` is
-//! gated as a whole, so the gate the moved items used to spell individually is now
-//! the module's. Measured on the tree this moved from,
-//! `cargo check -p zero-migrate --no-default-features` reported 17 `never used`
-//! warnings for the ungated helpers below — PostgreSQL parsers that a PG-omitted
-//! build compiled and could not reach. Those 17 warnings are gone because the code
-//! is now behind the same gate as its only caller.
+//! The helpers below are PostgreSQL catalog parsers, and `backend::postgres` is
+//! their only caller. They live beside that caller rather than in core precisely
+//! so the module boundary — not a build flag — is what keeps them off the neutral
+//! path.
 
 use std::collections::BTreeMap;
 
@@ -45,7 +42,6 @@ use crate::render::value_format::{
 };
 use zero_migrate_ir::dialect::DialectId;
 
-#[cfg(pg_seam)]
 impl From<crate::driver::DbError> for DriftError {
     fn from(error: crate::driver::DbError) -> Self {
         Self::Db(error.into())
@@ -76,7 +72,6 @@ impl From<crate::driver::DbError> for DriftError {
 ///
 /// # Errors
 /// [`DriftError::Journal`] if the journal read fails.
-#[cfg(pg_seam)]
 pub async fn check_checksum_drift<D: SqlSession>(
     dialect: &DialectId,
     conn: &D,
@@ -392,7 +387,6 @@ fn parse_index_storage_params_pg(
     Ok((!params.is_empty()).then_some(params))
 }
 
-#[cfg(pg_seam)]
 pub async fn snapshot_schema<D: SqlSession>(
     dialect: &DialectId,
     conn: &D,
@@ -403,12 +397,10 @@ pub async fn snapshot_schema<D: SqlSession>(
 
 /// The savepoint the view-body probe rolls back to. One name, reused per view,
 /// because each probe is released before the next is taken.
-#[cfg(pg_seam)]
 const VIEW_BODY_PROBE_SAVEPOINT: &str = "zm_view_body_probe";
 
 /// The temp view the probe re-prints through. Lives inside a savepoint that is
 /// always rolled back, so it never outlives one iteration.
-#[cfg(pg_seam)]
 const VIEW_BODY_PROBE_VIEW: &str = "zm_view_body_probe";
 
 /// Put a COMPARABLE view body on both sides of a drift check, using the server as
@@ -468,7 +460,6 @@ const VIEW_BODY_PROBE_VIEW: &str = "zm_view_body_probe";
 /// on both sides are probed. An adopted view - one introspected rather than authored
 /// - has no typed body anywhere in the history, so there is nothing to compare it
 /// against and it stays uncompared.
-#[cfg(pg_seam)]
 pub async fn resolve_view_bodies<D: SqlSession>(
     dialect: &DialectId,
     conn: &D,
@@ -519,7 +510,6 @@ pub async fn resolve_view_bodies<D: SqlSession>(
 
 /// The body of [`resolve_view_bodies`], running with a transaction already open so
 /// every per-view failure has a savepoint to fall back to.
-#[cfg(pg_seam)]
 async fn resolve_view_bodies_in_transaction<D: SqlSession>(
     conn: &D,
     schema: &str,
@@ -595,14 +585,13 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
 /// Spell the `<schema>.<view>` argument of the `pg_get_viewdef` probe below.
 ///
 /// PostgreSQL, named rather than assumed: `pg_get_viewdef` is a PG catalog
-/// function and this whole probe is `#[cfg(pg_seam)]`. It used to call the crate's
-/// raw escape primitive, which produced correct bytes for no stated dialect.
-#[cfg(pg_seam)]
+/// function and this whole probe lives in the PostgreSQL backend. It used to call
+/// the crate's raw escape primitive, which produced correct bytes for no stated
+/// dialect.
 fn pg_view_ident(ident: &str, dialect: &DialectId) -> String {
     crate::render::dml::escape_quote_ident_for_dialect(ident, dialect)
 }
 
-#[cfg(pg_seam)]
 async fn probe_one_view_body<D: SqlSession>(
     conn: &D,
     view_schema: &str,
@@ -697,7 +686,6 @@ async fn probe_one_view_body<D: SqlSession>(
 ///    each child of a partitioned table. Measured: a single `REFERENCES` produced
 ///    four internal triggers, and one trigger on a partitioned parent produced one
 ///    visible clone per child.
-#[cfg(pg_seam)]
 async fn snapshot_vendor_objects_pg<D: SqlSession>(
     conn: &D,
     schema: &str,
@@ -824,7 +812,6 @@ async fn snapshot_vendor_objects_pg<D: SqlSession>(
 /// An unknown code is an ERROR, not a default. PostgreSQL defines exactly these
 /// five; guessing `ALL` for a sixth would silently claim a policy is broader than
 /// it is, which is the wrong direction for a security facet.
-#[cfg(pg_seam)]
 fn policy_cmd_from_polcmd(cmd: &str, policy: &str) -> Result<PolicyCmd, DriftError> {
     match cmd {
         "*" => Ok(PolicyCmd::All),
@@ -840,7 +827,6 @@ fn policy_cmd_from_polcmd(cmd: &str, policy: &str) -> Result<PolicyCmd, DriftErr
 
 /// `pg_trigger.tgtype` bit 6 (`INSTEAD OF`) then bit 1 (`BEFORE`), else `AFTER`.
 /// The bit values are PostgreSQL's `TRIGGER_TYPE_*` constants.
-#[cfg(pg_seam)]
 fn trigger_timing_from_tgtype(tgtype: i32) -> TriggerTiming {
     if tgtype & 0x40 != 0 {
         TriggerTiming::InsteadOf
@@ -852,7 +838,6 @@ fn trigger_timing_from_tgtype(tgtype: i32) -> TriggerTiming {
 }
 
 /// The `tgtype` event bits, in the one canonical order both sides normalise to.
-#[cfg(pg_seam)]
 fn trigger_events_from_tgtype(tgtype: i32) -> Vec<TriggerEvent> {
     let mut events = Vec::new();
     if tgtype & 0x04 != 0 {
@@ -870,7 +855,6 @@ fn trigger_events_from_tgtype(tgtype: i32) -> Vec<TriggerEvent> {
     TriggerIdentity::sorted_events(events)
 }
 
-#[cfg(pg_seam)]
 pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     conn: &D,
     schema: &str,
