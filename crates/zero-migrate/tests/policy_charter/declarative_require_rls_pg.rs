@@ -162,7 +162,7 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 }
 
 fn guard_cfg(policy: &EffectivePolicy) -> GuardConfig {
-    GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES.clone())
+    GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES)
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {

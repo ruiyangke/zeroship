@@ -122,7 +122,7 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        zero_migrate::POSTGRES.clone(),
+        zero_migrate::POSTGRES,
     )
 }
 

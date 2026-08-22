@@ -59,7 +59,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 /// A SQLite-dialect declarative author.
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE.clone())
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE)
 }
 
 /// A single-collection descriptor: a plain field + a masked field + an encrypted
@@ -353,7 +353,7 @@ async fn sqlite_deferred_fk_is_typed_error() {
 fn confined_sqlite_guard_rejects_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
-        zero_migrate::SQLITE.clone(),
+        zero_migrate::SQLITE,
     ));
     // A perfectly benign-looking raw string is still refused — the SQLite Confined
     // path is descriptor-diff-only (no untrusted raw SQL).
@@ -376,7 +376,7 @@ fn confined_sqlite_guard_rejects_raw_sql() {
 fn confined_pg_guard_still_checks_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
-        zero_migrate::POSTGRES.clone(),
+        zero_migrate::POSTGRES,
     ));
     let report = guard
         .check(r#"CREATE TABLE "prj_demo"."users" (id text primary key)"#)
@@ -392,8 +392,8 @@ fn platform_fails_closed_to_confined_on_sqlite() {
     // SQLite. (The Platform constructor is operator-gated; `for_dialect` is the
     // dialect-selection seam any caller uses, and Confined→Sqlite is the same
     // fail-closed mapping Platform→Sqlite takes.)
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::POSTGRES.clone())
-        .for_dialect(zero_migrate::SQLITE.clone());
+    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::POSTGRES)
+        .for_dialect(zero_migrate::SQLITE);
     let guard = SqlGuard::new(cfg);
     let err = guard
         .check("SELECT 1")
@@ -409,8 +409,8 @@ fn platform_fails_closed_to_confined_on_sqlite() {
 
     // And `for_dialect(Postgres)` is identity — the PG guard still checks raw SQL.
     let pg = SqlGuard::new(
-        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::POSTGRES.clone())
-            .for_dialect(zero_migrate::POSTGRES.clone()),
+        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::POSTGRES)
+            .for_dialect(zero_migrate::POSTGRES),
     );
     assert!(pg
         .check(r#"CREATE TABLE "prj_demo"."t" (id text primary key)"#)
@@ -963,7 +963,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 
     // plan_declarative now CARRIES the rebuild (no error) — the fail-close is gone.
     let engine = MigrationEngine::new();
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
+    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE);
     let plan = engine
         .plan_declarative(
             &desired2,

@@ -151,7 +151,7 @@ impl DialectSupport {
     /// `op_support_matrix::support_declarations_cover_every_op_and_dialect` reads
     /// this and says "DialectSet must agree with per-dialect decisions", which
     /// reads like a cross-check of the membership. It is not, and that was
-    /// MEASURED, not inferred: returning `DialectSet::all()` for every op that
+    /// MEASURED, not inferred: returning every registered dialect for each op that
     /// supports anything — wrong members for `pgRaw` and every other PG-only op,
     /// right emptiness bit — leaves the lib suite and the whole `dialect_matrix`
     /// suite reporting clean. Predates this shape (the same hole existed when

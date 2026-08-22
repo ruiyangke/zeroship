@@ -194,7 +194,7 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
     let err = validate_expr(&expr, &zero_migrate::SQLITE, &scope, 0)
         .expect_err("regex must fail closed on SQLite");
     assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
-    assert_eq!(err.dialect, zero_migrate::SQLITE.clone());
+    assert_eq!(err.dialect, zero_migrate::SQLITE);
     assert!(err.reason.contains("SQLite"), "got: {err}");
 }
 

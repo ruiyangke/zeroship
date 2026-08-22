@@ -321,6 +321,10 @@ pub struct GeneratedColumnSnapshot {
     pub stored: bool,
 }
 
+// This hand-written representation is part of byte-pinned diagnostic goldens.
+// `authored_type` is lowering provenance, not snapshot content for humans, so adding
+// it here would turn an internal carrier into an emitted-byte change.
+#[allow(clippy::missing_fields_in_debug)]
 impl std::fmt::Debug for ColumnSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("ColumnSnapshot");
@@ -349,9 +353,6 @@ impl std::fmt::Debug for ColumnSnapshot {
         }
         if self.type_def.is_some() {
             s.field("type_def", &self.type_def);
-        }
-        if self.authored_type {
-            s.field("authored_type", &self.authored_type);
         }
         if self.catalog_uuid_format_check {
             s.field("catalog_uuid_format_check", &self.catalog_uuid_format_check);

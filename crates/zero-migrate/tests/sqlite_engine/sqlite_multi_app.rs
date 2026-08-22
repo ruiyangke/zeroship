@@ -59,7 +59,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 /// A `SQLite` author deploying AS `owner_app`.
 fn author_as(owner_app: &str) -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, owner_app, zero_migrate::SQLITE.clone())
+    DeclarativeAuthor::new_for_dialect(PROJECT, owner_app, zero_migrate::SQLITE)
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {

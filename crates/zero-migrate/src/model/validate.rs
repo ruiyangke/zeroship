@@ -389,7 +389,7 @@ fn validate_authored_identifier_lengths_op(
             // against this target's catalog, so bounding it would refuse an IR that is
             // correct here. `dialectal` inside `dialectal` is refused elsewhere, so one
             // level of descent covers the shape.
-            for inner in dialectal_leg(target_dialect, legs) {
+            for inner in dialectal_leg(target_dialect, legs, op_index)? {
                 validate_authored_identifier_lengths_op(inner, target_dialect, op_index)?;
             }
         }
@@ -1378,7 +1378,7 @@ fn validate_per_row_op(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs) {
+            for inner in dialectal_leg(target_dialect, legs, op_index)? {
                 validate_per_row_op(
                     inner,
                     target_dialect,
@@ -1771,15 +1771,22 @@ fn replay_logical_declarations_for_lower(
 fn collect_logical_declarations_op(
     op: &crate::model::ir::Op,
     target_dialect: &DialectId,
+    op_index: usize,
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
-) {
+) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs) {
-                collect_logical_declarations_op(inner, target_dialect, declared, schema_mode);
+            for inner in dialectal_leg(target_dialect, legs, op_index)? {
+                collect_logical_declarations_op(
+                    inner,
+                    target_dialect,
+                    op_index,
+                    declared,
+                    schema_mode,
+                )?;
             }
         }
         Op::CreateTable {
@@ -1946,6 +1953,7 @@ fn collect_logical_declarations_op(
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn logical_reference_types_match(
@@ -2221,7 +2229,7 @@ fn validate_column_references_op(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs) {
+            for inner in dialectal_leg(target_dialect, legs, op_index)? {
                 validate_column_references_op(
                     inner,
                     target_dialect,
@@ -2288,8 +2296,8 @@ fn validate_column_references(
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
-    for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_column_references_op(
@@ -2326,8 +2334,8 @@ fn validate_vendor_key_storage(
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
-    for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_vendor_key_storage_op(
@@ -2378,8 +2386,8 @@ pub(crate) fn validate_vendor_key_storage_for_lower(
         default_schema,
     };
     let mut declared = seed.clone();
-    for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_vendor_key_storage_op(
@@ -2475,7 +2483,7 @@ fn validate_vendor_key_storage_op(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs) {
+            for inner in dialectal_leg(target_dialect, legs, op_index)? {
                 validate_vendor_key_storage_op(
                     inner,
                     target_dialect,
@@ -2655,8 +2663,8 @@ pub(crate) fn validate_column_references_for_lower(
         default_schema,
     };
     let mut declared = seed.clone();
-    for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_column_references_op(
@@ -2828,7 +2836,7 @@ fn validate_no_column_uses_a_dropped_named_object(
 
     let mut dropped: BTreeSet<(&'static str, &str)> = BTreeSet::new();
 
-    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect)? {
         // Recreating an object restores the name, so creates are handled first.
         match op {
             Op::CreateEnum { name, .. } => {
@@ -3220,7 +3228,7 @@ fn validate_no_name_is_claimed_twice(
     let mut roles: BTreeSet<&str> = BTreeSet::new();
     let mut policy_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
-    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect)? {
         match op {
             Op::CreateTable {
                 name,
@@ -4297,7 +4305,7 @@ fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'
 fn effective_ops<'a>(
     ops: &'a [crate::model::ir::Op],
     target_dialect: &DialectId,
-) -> Vec<(usize, &'a crate::model::ir::Op)> {
+) -> Result<Vec<(usize, &'a crate::model::ir::Op)>, AuthoringError> {
     use crate::model::ir::Op;
 
     fn push<'a>(
@@ -4305,30 +4313,31 @@ fn effective_ops<'a>(
         index: usize,
         op: &'a Op,
         target_dialect: &DialectId,
-    ) {
+    ) -> Result<(), AuthoringError> {
         if let Op::Dialectal { legs } = op {
-            for nested in dialectal_leg(target_dialect, legs) {
-                push(out, index, nested, target_dialect);
+            for nested in dialectal_leg(target_dialect, legs, index)? {
+                push(out, index, nested, target_dialect)?;
             }
         } else {
             out.push((index, op));
         }
+        Ok(())
     }
 
     let mut out = Vec::new();
     for (index, op) in ops.iter().enumerate() {
-        push(&mut out, index, op, target_dialect);
+        push(&mut out, index, op, target_dialect)?;
     }
-    out
+    Ok(out)
 }
 
 /// The nested op sequence a [`Op::Dialectal`] container emits for one target.
 ///
 /// Descending into a leg that will NOT run would refuse a migration on a
 /// reference the server never sees, so the choice is made here once and shared.
-/// A missing own leg has already been refused by [`validate_dialectal_op`]; the
-/// `expect` below keeps that invariant fail-closed if validation ordering ever
-/// changes instead of silently treating absence as an empty leg.
+/// A missing own leg is refused here too. Semantic walks are reachable directly
+/// from lowering, so none may rely on an earlier structural validation pass or
+/// turn absence into either an empty leg or a panic.
 /// DELEGATES to [`crate::render::fold::selected_dialectal_leg`] rather than
 /// repeating the exact-id lookup, because that helper is `pub(crate)` for
 /// exactly this reason - its doc comment asks callers outside the fold to select
@@ -4343,9 +4352,24 @@ fn effective_ops<'a>(
 fn dialectal_leg<'a>(
     target_dialect: &DialectId,
     legs: &'a BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
-) -> &'a [crate::model::ir::Op] {
-    crate::render::fold::selected_dialectal_leg(target_dialect, legs)
-        .expect("validate_dialectal_op must refuse a missing target leg before semantic walks")
+    op_index: usize,
+) -> Result<&'a [crate::model::ir::Op], AuthoringError> {
+    crate::render::fold::selected_dialectal_leg(target_dialect, legs).ok_or_else(|| {
+        AuthoringError {
+            code: CODE_OP_INVALID.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            dialect: target_dialect.clone(),
+            // Preserve lower/fold's established refusal text. This semantic gate is
+            // earlier on direct lowering paths, but must not turn a panic repair into
+            // an unrelated diagnostic-byte change.
+            reason: "dialectal op has no leg for target dialect".to_string(),
+            suggested_fix: Some(format!(
+                "add a {} leg to the dialectal op",
+                target_dialect.as_str()
+            )),
+        }
+    })
 }
 
 /// Refuse an operation that names a column an earlier `dropColumn` removed.
@@ -4370,7 +4394,7 @@ fn validate_no_op_references_a_dropped_column(
 
     let mut dropped: BTreeSet<(&str, &str)> = BTreeSet::new();
 
-    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect)? {
         // An `addColumn` brings the name back, and a `createTable` redefines the
         // whole table, so both are handled before the check.
         match op {
@@ -4515,7 +4539,7 @@ fn validate_no_op_targets_a_renamed_away_table(
     // operations naming a relation the server will not find.
     let mut vacated: BTreeMap<&str, Option<&str>> = BTreeMap::new();
 
-    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect)? {
         // A `createTable` RECLAIMS the name rather than requiring it to be there,
         // so it is handled before the check — `touched_table` reports the table an
         // op operates on, and for a create that is the name being defined.
@@ -4669,7 +4693,7 @@ fn validate_index_names_across_ops(
         Ok(())
     }
 
-    for (op_index, op) in effective_ops(&ir.ops, target_dialect) {
+    for (op_index, op) in effective_ops(&ir.ops, target_dialect)? {
         match op {
             Op::CreateTable {
                 name,
@@ -5061,7 +5085,7 @@ fn validate_table_foreign_keys_op(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs) {
+            for inner in dialectal_leg(target_dialect, legs, op_index)? {
                 validate_table_foreign_keys_op(
                     inner,
                     target_dialect,
@@ -5204,8 +5228,8 @@ fn validate_table_foreign_keys(
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
-    for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_table_foreign_keys_op(
@@ -5239,8 +5263,8 @@ pub(crate) fn validate_table_foreign_keys_for_lower(
         default_schema,
     };
     let mut declared = seed.clone();
-    for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
+    for (op_index, op) in ir.ops.iter().enumerate() {
+        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_table_foreign_keys_op(
@@ -5266,7 +5290,7 @@ fn validate_online_rename_isolation_op<'a>(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs) {
+            for inner in dialectal_leg(target_dialect, legs, op_index)? {
                 validate_online_rename_isolation_op(inner, target_dialect, op_index, seen)?;
             }
         }
@@ -5510,18 +5534,7 @@ fn validate_partition_recording(
     //
     // The dialect is already load-bearing in this function rather than decorative: an
     // unknown parent is tolerated on PostgreSQL and refused elsewhere, a few lines below.
-    let effective: Vec<(usize, &Op)> = ir
-        .ops
-        .iter()
-        .enumerate()
-        .flat_map(|(op_index, op)| match op {
-            Op::Dialectal { legs } => dialectal_leg(target_dialect, legs)
-                .iter()
-                .map(|inner| (op_index, inner))
-                .collect::<Vec<_>>(),
-            other => vec![(op_index, other)],
-        })
-        .collect();
+    let effective = effective_ops(&ir.ops, target_dialect)?;
 
     for (op_index, op) in effective {
         match op {
@@ -9128,7 +9141,7 @@ pub fn validate_op_resolved(
         //
         // One level deep is complete: a leg cannot hold a wrapper.
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs) {
+            for inner in dialectal_leg(target_dialect, legs, op_index)? {
                 validate_op_resolved(inner, target_dialect, live_columns, op_index)?;
             }
         }
@@ -9611,7 +9624,7 @@ mod tests {
             .expect_err("regex match must fail closed on SQLite");
         assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        assert_eq!(err.dialect, SQLITE.clone());
+        assert_eq!(err.dialect, SQLITE);
         assert!(err.reason.contains("SQLite"), "got: {err}");
     }
 
@@ -9689,7 +9702,7 @@ mod tests {
         let err = validate_expr(&split(", ", 1), &SQLITE, &sc, 2).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
         assert_eq!(err.op_index, 2);
-        assert_eq!(err.dialect, SQLITE.clone());
+        assert_eq!(err.dialect, SQLITE);
         assert!(err.suggested_fix.is_some());
         // The structured payload leads with suggested_fix.
         let json = err.to_json();
@@ -9724,7 +9737,7 @@ mod tests {
             err.code, CODE_EXPR_NOT_PORTABLE,
             "the same node must be EXPR_NOT_PORTABLE on a SQLite target"
         );
-        assert_eq!(err.dialect, SQLITE.clone());
+        assert_eq!(err.dialect, SQLITE);
 
         // Likewise n>8 and a non-ASCII delim: PG-renderable, SQLite-rejected.
         for node in [split(" ", 9), split("·", 1)] {

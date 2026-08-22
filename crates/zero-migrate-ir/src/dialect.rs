@@ -1,21 +1,9 @@
-//! Dialect IDENTITY: the closed `SqlDialect` enum and the open [`DialectId`].
+//! Open SQL backend identity.
 //!
-//! `SqlDialect` names which SQL engine a migration is being rendered/applied
-//! for. It is a wire-level target descriptor (three closed variants, no
-//! behaviour of its own), so it lives in the leaf `zero-migrate-ir` contract
-//! rather than the engine: both the engine's schema-render layer
-//! (`zero_migrate::schema::query`, which re-exports it) and the SQL security
-//! layer (`zero-migrate-guard`, which is below the engine) name it, and neither
-//! may depend on the other.
-//!
-//! The *dialect-specific spelling* (the `SchemaRenderer` trait, the DDL builders,
-//! canonical type maps) lives engine-side in `zero_migrate::schema::query`; this
-//! enum carries only the identity of the target.
-//!
-//! [`DialectId`] is the OPEN identity that replaces the closed enum's role as a
-//! set/map key. A backend crate declares its own — `DialectId::new("duckdb")` —
-//! without editing anything here, which is the whole point: a closed enum cannot
-//! grow a variant from a crate that does not own it.
+//! [`DialectId`] is the stable wire, registry, set, and map key. A backend crate
+//! declares its own — `DialectId::new("duckdb")` — without editing this crate.
+//! Backend spellings, capabilities, validation, guards, and refusal policy live
+//! behind the registered backend contracts rather than an identity match here.
 
 use core::fmt;
 use std::borrow::Cow;
@@ -23,47 +11,12 @@ use std::borrow::Cow;
 use schemars::JsonSchema;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-/// The SQL dialect a migration renders/applies against.
-///
-/// A closed enum: adding a fourth dialect breaks the exhaustive dispatch matches
-/// (e.g. `zero_migrate::schema::query::renderer`) at compile time, forcing every
-/// dialect-specific spelling to be wired before the crate can build.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SqlDialect {
-    /// Postgres dialect: binary DML values wrap their text placeholder with
-    /// `decode($N, 'base64')` so a `BYTEA` column receives the original bytes.
-    Postgres,
-    /// `SQLite` dialect: binary DML values use a numbered `?N` placeholder and
-    /// are bound directly as a `BLOB` by the in-process SQLite actor.
-    Sqlite,
-    /// `MySQL` dialect: binary DML values wrap their text placeholder with
-    /// `FROM_BASE64(?)` so a binary column receives the original bytes.
-    Mysql,
-}
-
 /// The canonical id of the PostgreSQL backend.
 pub const POSTGRES: DialectId = DialectId::new("postgres");
 /// The canonical id of the `SQLite` backend.
 pub const SQLITE: DialectId = DialectId::new("sqlite");
 /// The canonical id of the `MySQL` backend.
 pub const MYSQL: DialectId = DialectId::new("mysql");
-
-impl SqlDialect {
-    /// The open [`DialectId`] this closed variant denotes.
-    ///
-    /// The bridge between the enum the engine still matches on and the id every
-    /// set/map/descriptor is keyed by. It is deliberately one-way: an id does
-    /// NOT convert back to a variant, because that direction is exactly what a
-    /// fourth backend cannot satisfy.
-    #[must_use]
-    pub const fn id(self) -> DialectId {
-        match self {
-            Self::Postgres => POSTGRES,
-            Self::Sqlite => SQLITE,
-            Self::Mysql => MYSQL,
-        }
-    }
-}
 
 /// An opaque dialect identity with a stable string name.
 ///
@@ -197,28 +150,6 @@ impl DialectSet {
         Self(Cow::Borrowed(&[]))
     }
 
-    /// Every dialect the engine currently ships.
-    #[must_use]
-    pub fn all() -> Self {
-        Self::from_ids([POSTGRES, SQLITE, MYSQL])
-    }
-
-    /// Build from the three per-dialect support booleans of the closed-enum era.
-    #[must_use]
-    pub fn from_bools(postgres: bool, sqlite: bool, mysql: bool) -> Self {
-        let mut ids = Vec::with_capacity(3);
-        if postgres {
-            ids.push(POSTGRES);
-        }
-        if sqlite {
-            ids.push(SQLITE);
-        }
-        if mysql {
-            ids.push(MYSQL);
-        }
-        Self::from_ids(ids)
-    }
-
     /// Build from an arbitrary run of dialect identities. Duplicates collapse.
     #[must_use]
     pub fn from_ids(ids: impl IntoIterator<Item = DialectId>) -> Self {
@@ -226,12 +157,6 @@ impl DialectSet {
         members.sort_unstable();
         members.dedup();
         Self(Cow::Owned(members))
-    }
-
-    /// Whether the temporary closed SQL target is a member.
-    #[must_use]
-    pub fn contains(&self, dialect: SqlDialect) -> bool {
-        self.contains_id(&dialect.id())
     }
 
     /// Whether an id is a member.
@@ -332,26 +257,5 @@ mod tests {
         // Duplicates collapse.
         let doubled = many.iter().cloned().chain(many.iter().cloned());
         assert_eq!(DialectSet::from_ids(doubled).len(), 64);
-    }
-
-    #[test]
-    fn from_bools_agrees_with_the_ids_it_names() {
-        assert_eq!(
-            DialectSet::from_bools(false, false, false),
-            DialectSet::empty()
-        );
-        assert_eq!(DialectSet::from_bools(true, true, true), DialectSet::all());
-        let pg_mysql = DialectSet::from_bools(true, false, true);
-        assert!(pg_mysql.contains_id(&POSTGRES));
-        assert!(pg_mysql.contains_id(&MYSQL));
-        assert!(!pg_mysql.contains_id(&SQLITE));
-        assert_eq!(pg_mysql.len(), 2);
-    }
-
-    #[test]
-    fn sql_dialect_maps_onto_its_id() {
-        assert_eq!(SqlDialect::Postgres.id().as_str(), "postgres");
-        assert_eq!(SqlDialect::Sqlite.id().as_str(), "sqlite");
-        assert_eq!(SqlDialect::Mysql.id().as_str(), "mysql");
     }
 }

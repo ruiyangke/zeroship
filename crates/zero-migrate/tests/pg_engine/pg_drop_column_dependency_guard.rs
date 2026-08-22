@@ -99,7 +99,7 @@ async fn lower_drop_steps(
     let authored: MigrationIr = serde_json::from_str(&source).expect("parse dropColumn IR");
     let registry = BTreeMap::from([(table.to_string(), OWNER.to_string())]);
     let policy = support::no_inject(&cfg.project_schema);
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES.clone());
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
     IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy)
         .load_and_lower_guarded(
             &serde_json::to_string(&authored).expect("serialize dropColumn IR"),

@@ -293,7 +293,7 @@ fn support_declarations_cover_every_op_and_dialect() {
             support.supported_dialects().is_empty(),
             DIALECTS
                 .iter()
-                .all(|dialect| !support.decision(*dialect).is_supported()),
+                .all(|dialect| !support.decision(dialect).is_supported()),
             "{tag}: DialectSet must agree with per-dialect decisions"
         );
 

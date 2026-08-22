@@ -316,7 +316,7 @@ const ALLOWANCES: &[Allowance] = &[
         variant: "bodySimple",
         dialect: "mysql",
         observed: Outcome::RefusedByCapability,
-        words: "trigger facet/action \"selectStatement\" is unsupported on Mysql",
+        words: "trigger facet/action \"selectStatement\" is unsupported on mysql",
         why: "(A) the representative's body is a bare SELECT, the one trigger \
                statement MySQL cannot host. It was a ServerError until the engine \
                learned to refuse it; it is not a wrong declaration.",

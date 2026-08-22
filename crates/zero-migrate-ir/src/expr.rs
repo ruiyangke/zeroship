@@ -627,17 +627,22 @@ mod dialectal_tests {
         }
     }
 
-    fn literal(value: &str) -> Box<Expr> {
-        Box::new(Expr::lit(IrScalar::Str(value.to_string())))
-    }
-
     #[test]
     fn wire_uses_a_nested_lexically_sorted_dialect_id_map() {
         let expr = Expr::Dialectal {
             legs: [
-                (DialectId::new("sqlite"), Box::new(literal("s"))),
-                (DialectId::new("postgres"), Box::new(literal("p"))),
-                (DialectId::new("mysql"), Box::new(literal("m"))),
+                (
+                    DialectId::new("sqlite"),
+                    Box::new(Expr::lit(IrScalar::Str("s".to_string()))),
+                ),
+                (
+                    DialectId::new("postgres"),
+                    Box::new(Expr::lit(IrScalar::Str("p".to_string()))),
+                ),
+                (
+                    DialectId::new("mysql"),
+                    Box::new(Expr::lit(IrScalar::Str("m".to_string()))),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -695,9 +700,12 @@ mod dialectal_tests {
         assert_eq!(err.code, CODE_UNSUPPORTED);
 
         let typo = Expr::Dialectal {
-            legs: [(DialectId::new("postgre"), Box::new(literal("p")))]
-                .into_iter()
-                .collect(),
+            legs: [(
+                DialectId::new("postgre"),
+                Box::new(Expr::lit(IrScalar::Str("p".to_string()))),
+            )]
+            .into_iter()
+            .collect(),
         };
         let err = validate_expr(&typo, &POSTGRES, &Validators, &scope, 4).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);

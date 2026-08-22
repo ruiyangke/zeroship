@@ -60,7 +60,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE.clone())
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE)
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -70,7 +70,7 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone())
+    GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE)
 }
 
 fn effective_policy() -> EffectivePolicy {

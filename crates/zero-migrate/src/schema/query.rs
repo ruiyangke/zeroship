@@ -150,9 +150,9 @@ mod schema_renderer_tests {
     fn dispatch_returns_expected_schema_renderer() {
         // The renderer answers with an open `DialectId`, so compare it directly
         // with the canonical IDs. No reverse identity conversion is needed.
-        assert_eq!(renderer(&POSTGRES).dialect(), POSTGRES.clone());
-        assert_eq!(renderer(&SQLITE).dialect(), SQLITE.clone());
-        assert_eq!(renderer(&MYSQL).dialect(), MYSQL.clone());
+        assert_eq!(renderer(&POSTGRES).dialect(), POSTGRES);
+        assert_eq!(renderer(&SQLITE).dialect(), SQLITE);
+        assert_eq!(renderer(&MYSQL).dialect(), MYSQL);
     }
 
     #[test]

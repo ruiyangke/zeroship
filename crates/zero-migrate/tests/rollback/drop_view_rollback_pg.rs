@@ -262,7 +262,7 @@ async fn rolling_back_a_dropped_view_restores_it_on_postgres() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                zero_migrate::POSTGRES.clone(),
+                zero_migrate::POSTGRES,
             ))
             .as_ref(),
         )
@@ -494,7 +494,7 @@ async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                zero_migrate::POSTGRES.clone(),
+                zero_migrate::POSTGRES,
             ))
             .as_ref(),
         )
@@ -653,7 +653,7 @@ async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refus
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 policy.clone(),
-                zero_migrate::POSTGRES.clone(),
+                zero_migrate::POSTGRES,
             ))
             .as_ref(),
         )
@@ -774,7 +774,7 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                zero_migrate::POSTGRES.clone(),
+                zero_migrate::POSTGRES,
             ))
             .as_ref(),
         )

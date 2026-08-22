@@ -124,7 +124,7 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
     let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &pol);
-    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate::POSTGRES.clone());
+    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate::POSTGRES);
     let folded = fold_ops(history, &zero_migrate::POSTGRES, &cfg.project_schema, &pol)
         .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
@@ -175,7 +175,7 @@ async fn live_extension(
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         policy(&cfg.project_schema),
-        zero_migrate::POSTGRES.clone(),
+        zero_migrate::POSTGRES,
     ))
 }
 
@@ -224,7 +224,7 @@ async fn unguarded_drop_extension_from_folded_history_has_create_inverse() {
     );
     guard_for(&GuardConfig::from_policy(
         policy(PROJECT_SCHEMA),
-        zero_migrate::POSTGRES.clone(),
+        zero_migrate::POSTGRES,
     ))
     .as_ref()
     .check(migration.down.as_deref().expect("the inverse exists"))

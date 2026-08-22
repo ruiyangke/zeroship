@@ -57,7 +57,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE.clone())
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE)
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {

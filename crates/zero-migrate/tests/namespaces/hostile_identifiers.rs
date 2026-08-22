@@ -192,7 +192,7 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
                 APP,
                 &BTreeMap::new(),
                 &LiveSchema::default(),
-                &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone()),
+                &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE),
             )
         .unwrap_or_else(|e| {
             // NOT a `continue`. SQLite is the dialect that ESCAPES these, so a
@@ -300,7 +300,7 @@ async fn an_awkward_identifier_survives_a_real_database_unchanged() {
                 APP,
                 &BTreeMap::new(),
                 &LiveSchema::default(),
-                &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone()),
+                &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE),
             )
             .expect("lower for apply");
 

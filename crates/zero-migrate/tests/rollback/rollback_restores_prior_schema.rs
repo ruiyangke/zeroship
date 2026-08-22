@@ -93,8 +93,7 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
             &zero_migrate::SQLITE,
             &support::confined_charter(),
         );
-        let gc =
-            GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
+        let gc = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE);
         if needs_seed {
             let s = format!(r#"{{"ir_version":1,"name":"seed","ops":[{seed}]}}"#);
             let a = author

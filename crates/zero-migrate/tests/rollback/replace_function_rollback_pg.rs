@@ -269,7 +269,7 @@ async fn rolling_back_a_function_replace_on_postgres() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::operator_charter(&cfg.project_schema),
-                zero_migrate::POSTGRES.clone(),
+                zero_migrate::POSTGRES,
             ))
             .as_ref(),
         )

@@ -622,7 +622,7 @@ async fn is_autocommit_detects_open_transaction() {
 async fn reports_sqlite_dialect() {
     let p = paths("dialect");
     let be = backend(&p);
-    assert_eq!(MigrationBackend::dialect(&be), zero_migrate::SQLITE.clone());
+    assert_eq!(MigrationBackend::dialect(&be), zero_migrate::SQLITE);
     // ensure_journal through the trait works and applied() is empty initially.
     let c = cfg();
     MigrationBackend::ensure_journal(&be, &c)

@@ -102,7 +102,7 @@ async fn apply_doc(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL.clone());
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL);
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;

@@ -132,7 +132,7 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
         .to_string();
 
         let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES.clone());
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
         let base = fold_ops(&[], &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);

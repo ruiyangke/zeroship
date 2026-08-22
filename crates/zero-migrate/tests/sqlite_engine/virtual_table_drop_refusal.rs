@@ -106,7 +106,7 @@ async fn diff_with_total_ownership(
         .keys()
         .map(|t| (t.clone(), APP.to_string()))
         .collect();
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE.clone()).diff(
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE).diff(
         &desired,
         &live,
         &ownership,
