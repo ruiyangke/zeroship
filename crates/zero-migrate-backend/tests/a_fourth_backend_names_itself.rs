@@ -194,6 +194,22 @@ impl ValidationPolicy for DuckDbValidationPolicy {
             suggested_fix: "remove identity".to_string(),
         })
     }
+
+    /// The outsider states its own raw-view-body posture. It owns no parser, and
+    /// unlike the two shipping descriptor backends it declines rather than trusts —
+    /// which is the point of the method being required: BOTH answers are writable,
+    /// and neither is inheritable. A fourth backend that supplied nothing would fail
+    /// to compile here, in its own file, naming this method.
+    fn raw_view_body_refusal(
+        &self,
+        _sql: &str,
+        _scope: Option<&zero_migrate_ir::policy::SchemaScope>,
+    ) -> Option<ValidationRefusal> {
+        Some(ValidationRefusal {
+            reason: "DuckDB stub has no parser and refuses raw view bodies".to_string(),
+            suggested_fix: "use the structured SelectAst view builder".to_string(),
+        })
+    }
 }
 
 impl CatalogFoldPolicy for DuckDbCatalogFoldPolicy {
@@ -1208,6 +1224,15 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
         validation.op_disposition("futureOperation", "futureVariant"),
         Disposition::Unsupported,
         "an unfamiliar operation shape fails closed in the outsider's own policy"
+    );
+    assert_eq!(
+        validation
+            .raw_view_body_refusal("SELECT 1", None)
+            .map(|refusal| refusal.reason),
+        Some("DuckDB stub has no parser and refuses raw view bodies".to_string()),
+        "the outsider states its OWN raw-view-body posture; it cannot inherit \
+         PostgreSQL's parser-backed gate, and it cannot inherit the two shipping \
+         descriptor backends' blanket trust either"
     );
     assert_eq!(
         value_format.bytewise_column_metadata("VARCHAR"),

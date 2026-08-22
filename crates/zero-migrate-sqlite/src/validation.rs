@@ -1,6 +1,7 @@
 use zero_migrate_backend::validation::{Disposition, ValidationPolicy, ValidationRefusal};
 use zero_migrate_ir::capability::VendorCapability;
 use zero_migrate_ir::ir::ColType;
+use zero_migrate_ir::policy::SchemaScope;
 
 #[derive(Debug)]
 pub(crate) struct SqliteValidationPolicy;
@@ -269,5 +270,47 @@ impl ValidationPolicy for SqliteValidationPolicy {
             ),
             fix,
         ))
+    }
+
+    /// SQLite BYPASSES the raw-view-body gate. This is a deliberate WIDENING, and it
+    /// is written here so nobody has to infer it.
+    ///
+    /// # What used to be checked, and is not any more
+    ///
+    /// Until this seam existed, a SQLite raw view body went through the engine's
+    /// `pg_query::parse` and the PostgreSQL body scanner, so it had to survive:
+    ///
+    /// - the shape gate — exactly one top-level statement, that statement a
+    ///   `SELECT`, no semicolon-chained second statement, no `SELECT INTO`;
+    /// - the deny-list — `pg_read_file`, `COPY PROGRAM`, network functions,
+    ///   dynamic-SQL string literals, and references outside the confined schema.
+    ///
+    /// Returning `None` removes ALL of it. `None` was never SAFE; it was CHOSEN,
+    /// knowingly, while there are no users, because the alternative was keeping a
+    /// PostgreSQL parser as the judge of SQLite grammar — which was its own defect
+    /// (a bracket-quoted identifier, SQLite's own native quoting, was refused on
+    /// SQLite).
+    ///
+    /// # This one is narrower than it looks, but not by policy
+    ///
+    /// The declarative differ never emits a `ViewQuery::Raw`, so on the descriptor
+    /// path there is nothing here to admit. That is a property of who CALLS the
+    /// author today, not a gate — an operator holding `sql.raw_view_body` and
+    /// building IR directly reaches this method, and gets `None`. Do not read the
+    /// descriptor path as the reason this is acceptable.
+    ///
+    /// # What a real implementation owes
+    ///
+    /// The deny-list half was PostgreSQL-specific and does not transfer. The shape
+    /// half was dialect-neutral INTENT wearing PostgreSQL's grammar: "one statement,
+    /// a SELECT, read-only, no host reach" is true of a SQLite view body too. A real
+    /// SQLite implementation should restore that half against SQLite's own grammar.
+    /// Until then this is a hole, and it is this vendor's hole.
+    fn raw_view_body_refusal(
+        &self,
+        _sql: &str,
+        _scope: Option<&SchemaScope>,
+    ) -> Option<ValidationRefusal> {
+        None
     }
 }

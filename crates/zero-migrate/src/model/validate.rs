@@ -49,7 +49,9 @@
 //! lives in the [`zero_migrate_ir::validate`] leaf crate. It carries no
 //! [`SchemaScope`](crate::model::policy::SchemaScope) dependency and no `pg_query`.
 //! THIS module keeps the policy-bound layer: the `SchemaScope`-threaded op/IR
-//! validators, the vendor-capability gate, the raw-view-body `pg_query` scan, and
+//! validators, the vendor-capability gate, the raw-view-body hand-off to the target
+//! backend's `ValidationPolicy` (this module no longer parses SQL itself — it holds
+//! the authoring envelope and the vendor holds the grammar), and
 //! the pure primary-key validation. (Author-PK CONFORMANCE against the operator's
 //! injected shape is owned by the injection resolver, not this validator.) The
 //! structural surface is re-exported below so callers name it unchanged.
@@ -61,7 +63,6 @@ use zero_migrate_ir::dialect::DialectId;
 // snapshot value types, whose `canonical_pg_signature_type` is its other caller;
 // re-imported here under its historical name so this module's two call sites and
 // `crate::apply::drift` read unchanged.
-use pg_query::protobuf::node::Node as NodeEnum;
 use std::collections::{BTreeMap, BTreeSet};
 pub(crate) use zero_migrate_backend::snapshot::canonical_pg_arg_type;
 
@@ -7587,86 +7588,40 @@ fn validate_function_type_refs(
     Ok(())
 }
 
-fn view_body_error(
-    target_dialect: &DialectId,
-    op_index: usize,
-    reason: String,
-    suggested_fix: &'static str,
-) -> AuthoringError {
-    AuthoringError {
-        code: CODE_UNSUPPORTED.to_string(),
-        kind: Some(UnsupportedKind::Op),
-        op_index,
-        dialect: target_dialect.clone(),
-        reason,
-        suggested_fix: Some(suggested_fix.to_string()),
-    }
-}
-
-/// Validate a raw view body before it is admitted by `ViewQuery::Raw`.
+/// Validate a raw view body before it is admitted by `ViewQuery::Raw`, by asking
+/// the TARGET BACKEND to vet it in its own grammar.
 ///
-/// The raw surface is deliberately narrow: it must be exactly one
-/// top-level `SELECT` (no DDL/DML utility statement, no semicolon-chained second
-/// statement, no `SELECT INTO`) and then it is fed through the same body
-/// reparse/string-literal/token deny-list used for function bodies.
+/// Core owns the envelope — which op, which dialect, which error code, what to
+/// suggest — and owns nothing else here. It deliberately does NOT parse: this
+/// function used to call `pg_query::parse` itself, which meant a MySQL or SQLite
+/// raw view body was judged by PostgreSQL's grammar, and each dialect's own native
+/// identifier quoting (`` `id` ``, `[id]`) was refused on its own dialect with a
+/// PostgreSQL syntax error.
+///
+/// What each backend actually does with the text is that backend's stated posture:
+/// PostgreSQL keeps the full shape gate plus the deny-list scan; MySQL and SQLite
+/// currently ADMIT EVERYTHING, which each says in its own
+/// `ValidationPolicy::raw_view_body_refusal` along with what that costs.
 pub(crate) fn validate_raw_view_body_sql(
     sql: &str,
     target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
-    let parsed = pg_query::parse(sql).map_err(|e| {
-        view_body_error(
-            target_dialect,
+    let refusal = registered_vendor(target_dialect, op_index)?
+        .validation
+        .raw_view_body_refusal(sql, schema_scope);
+    match refusal {
+        None => Ok(()),
+        Some(refusal) => Err(AuthoringError {
+            code: CODE_UNSUPPORTED.to_string(),
+            kind: Some(UnsupportedKind::Op),
             op_index,
-            format!("raw viewBody SQL must parse as exactly one top-level SELECT: {e}"),
-            "rewrite the view body as a single SELECT, or use the structured SelectAst builder",
-        )
-    })?;
-    if parsed.protobuf.stmts.len() != 1 {
-        return Err(view_body_error(
-            target_dialect,
-            op_index,
-            format!(
-                "raw viewBody SQL must contain exactly one top-level SELECT statement; parsed {} statements",
-                parsed.protobuf.stmts.len()
-            ),
-            "remove semicolon-chained statements from the view body",
-        ));
+            dialect: target_dialect.clone(),
+            reason: refusal.reason,
+            suggested_fix: Some(refusal.suggested_fix),
+        }),
     }
-    let stmt = parsed
-        .protobuf
-        .stmts
-        .first()
-        .and_then(|raw| raw.stmt.as_ref())
-        .and_then(|stmt| stmt.node.as_ref());
-    let Some(NodeEnum::SelectStmt(select)) = stmt else {
-        return Err(view_body_error(
-            target_dialect,
-            op_index,
-            "raw viewBody SQL must be a single top-level SELECT; DDL, DML, COPY, and utility statements are refused".to_string(),
-            "rewrite the view body as a SELECT, or use the structured SelectAst builder",
-        ));
-    };
-    if select.into_clause.is_some() {
-        return Err(view_body_error(
-            target_dialect,
-            op_index,
-            "raw viewBody SQL uses SELECT INTO, which creates a table and is not a read-only view body".to_string(),
-            "drop the INTO clause; a view body must be read-only",
-        ));
-    }
-    // LAYERING EXCEPTION (A3): keep the deny-list scanner in `guard`; duplicating
-    // or moving that security policy into `model` would be the worse boundary.
-    crate::guard::check_raw_view_body_text(sql, sql, schema_scope).map_err(|e| {
-        view_body_error(
-            target_dialect,
-            op_index,
-            format!("raw viewBody SQL failed the read-only body scanner: {e}"),
-            "remove host/file/network/dynamic-SQL escape tokens from the view body",
-        )
-    })?;
-    Ok(())
 }
 
 fn validate_table_ref(

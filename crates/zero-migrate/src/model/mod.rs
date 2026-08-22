@@ -15,7 +15,7 @@ pub mod support;
 pub(crate) mod support_matrix;
 pub mod table_shape;
 // The POLICY validator (`validate_ir`/`validate_op`, the vendor-capability gate,
-// the raw-view-body `pg_query` scan). It re-exports the STRUCTURAL validator from
+// the raw-view-body vendor hand-off). It re-exports the STRUCTURAL validator from
 // `zero_migrate_ir::validate`, so `crate::model::validate::{AuthoringError,
 // validate_expr, CODE_*, …}` still resolve.
 pub mod validate;

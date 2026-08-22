@@ -1,6 +1,7 @@
 use zero_migrate_backend::validation::{Disposition, ValidationPolicy, ValidationRefusal};
 use zero_migrate_ir::capability::VendorCapability;
 use zero_migrate_ir::ir::ColType;
+use zero_migrate_ir::policy::SchemaScope;
 
 #[derive(Debug)]
 pub(crate) struct MysqlValidationPolicy;
@@ -263,5 +264,40 @@ impl ValidationPolicy for MysqlValidationPolicy {
             ),
             fix,
         ))
+    }
+
+    /// MySQL BYPASSES the raw-view-body gate. This is a deliberate WIDENING, and it
+    /// is written here so nobody has to infer it.
+    ///
+    /// # What used to be checked, and is not any more
+    ///
+    /// Until this seam existed, a MySQL raw view body went through the engine's
+    /// `pg_query::parse` and the PostgreSQL body scanner, so it had to survive:
+    ///
+    /// - the shape gate — exactly one top-level statement, that statement a
+    ///   `SELECT`, no semicolon-chained second statement, no `SELECT INTO`;
+    /// - the deny-list — `pg_read_file`, `COPY PROGRAM`, network functions,
+    ///   dynamic-SQL string literals, and references outside the confined schema.
+    ///
+    /// Returning `None` removes ALL of it. An operator granted `sql.raw_view_body`
+    /// can now put any text whatsoever into a MySQL view body and the engine will
+    /// not object. `None` was never SAFE; it was CHOSEN, knowingly, while there are
+    /// no users, because the alternative was keeping a PostgreSQL parser as the
+    /// judge of MySQL grammar — which was its own defect (a backtick-quoted
+    /// identifier, MySQL's own native quoting, was refused on MySQL).
+    ///
+    /// # What a real implementation owes
+    ///
+    /// The deny-list half was PostgreSQL-specific and does not transfer. The shape
+    /// half was dialect-neutral INTENT wearing PostgreSQL's grammar: "one statement,
+    /// a SELECT, read-only, no host reach" is true of a MySQL view body too. A real
+    /// MySQL implementation should restore that half against MySQL's own grammar.
+    /// Until then this is a hole, and it is this vendor's hole.
+    fn raw_view_body_refusal(
+        &self,
+        _sql: &str,
+        _scope: Option<&SchemaScope>,
+    ) -> Option<ValidationRefusal> {
+        None
     }
 }

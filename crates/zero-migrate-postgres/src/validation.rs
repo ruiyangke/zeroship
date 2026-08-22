@@ -1,6 +1,8 @@
 use zero_migrate_backend::validation::{Disposition, ValidationPolicy, ValidationRefusal};
+use zero_migrate_guard::guard::{check_raw_view_body, RawViewBodyDefect};
 use zero_migrate_ir::capability::VendorCapability;
 use zero_migrate_ir::ir::ColType;
+use zero_migrate_ir::policy::SchemaScope;
 
 #[derive(Debug)]
 pub(crate) struct PostgresValidationPolicy;
@@ -234,5 +236,46 @@ impl ValidationPolicy for PostgresValidationPolicy {
         _is_add_column: bool,
     ) -> Option<ValidationRefusal> {
         None
+    }
+
+    /// PostgreSQL keeps the full gate: `libpg_query` proves the body is exactly one
+    /// top-level `SELECT` with no `INTO`, then the read-only body scanner runs the
+    /// deny-list over it.
+    ///
+    /// The five messages below are the ones the engine's `validate_raw_view_body_sql`
+    /// emitted inline before this seam existed, moved verbatim. They live here now
+    /// because they are all PARSER-derived facts, and the parser is this vendor's.
+    fn raw_view_body_refusal(
+        &self,
+        sql: &str,
+        scope: Option<&SchemaScope>,
+    ) -> Option<ValidationRefusal> {
+        let defect = check_raw_view_body(sql, scope).err()?;
+        Some(match defect {
+            RawViewBodyDefect::Unparseable(error) => refusal(
+                format!("raw viewBody SQL must parse as exactly one top-level SELECT: {error}"),
+                "rewrite the view body as a single SELECT, or use the structured SelectAst builder"
+                    .to_string(),
+            ),
+            RawViewBodyDefect::NotExactlyOneStatement(count) => refusal(
+                format!(
+                    "raw viewBody SQL must contain exactly one top-level SELECT statement; parsed {count} statements"
+                ),
+                "remove semicolon-chained statements from the view body".to_string(),
+            ),
+            RawViewBodyDefect::NotASelect => refusal(
+                "raw viewBody SQL must be a single top-level SELECT; DDL, DML, COPY, and utility statements are refused".to_string(),
+                "rewrite the view body as a SELECT, or use the structured SelectAst builder"
+                    .to_string(),
+            ),
+            RawViewBodyDefect::SelectInto => refusal(
+                "raw viewBody SQL uses SELECT INTO, which creates a table and is not a read-only view body".to_string(),
+                "drop the INTO clause; a view body must be read-only".to_string(),
+            ),
+            RawViewBodyDefect::BodyScanner(error) => refusal(
+                format!("raw viewBody SQL failed the read-only body scanner: {error}"),
+                "remove host/file/network/dynamic-SQL escape tokens from the view body".to_string(),
+            ),
+        })
     }
 }

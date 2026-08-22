@@ -8,6 +8,7 @@
 
 use zero_migrate_ir::capability::VendorCapability;
 use zero_migrate_ir::ir::ColType;
+use zero_migrate_ir::policy::SchemaScope;
 
 /// One backend's disposition for a closed operation-shape token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,5 +95,30 @@ pub trait ValidationPolicy: std::fmt::Debug + Sync {
         always: bool,
         primary_key_columns: Option<&[String]>,
         is_add_column: bool,
+    ) -> Option<ValidationRefusal>;
+
+    /// Vet a `ViewQuery::Raw` body in THIS backend's grammar. `None` admits it.
+    ///
+    /// The engine holds the authoring envelope — which op, which dialect, which
+    /// error code — but it must not hold a parser. Until this method existed it
+    /// did: `validate_raw_view_body_sql` called `pg_query::parse` directly, so a
+    /// MySQL or SQLite raw view body was vetted against PostgreSQL's grammar and a
+    /// backtick- or bracket-quoted identifier was refused on its own dialect with a
+    /// PostgreSQL syntax error. That is the defect this method removes.
+    ///
+    /// `scope` is the authoring-time schema confinement, threaded so a backend that
+    /// scans for cross-schema reach can honour it.
+    ///
+    /// # This is where trust is granted, so it is required
+    ///
+    /// Like every other method here, this one has no default body. A backend with
+    /// no parser must WRITE `None`, which is a visible grant of trust attributable
+    /// to that vendor, rather than inherit one by omission. Returning `None` means
+    /// the body is admitted with no shape gate and no deny-list scan at all — see
+    /// each vendor's impl for what that specifically costs there.
+    fn raw_view_body_refusal(
+        &self,
+        sql: &str,
+        scope: Option<&SchemaScope>,
     ) -> Option<ValidationRefusal>;
 }

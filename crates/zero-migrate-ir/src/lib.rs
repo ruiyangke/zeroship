@@ -21,7 +21,7 @@
 //!   the engine-owned portability tables and lives in
 //!   `zero_migrate::model::op_support` (free functions over `&Op`).
 //! - **The POLICY validator** (`validate_ir`/`validate_op`, the vendor-capability
-//!   gate, the raw-view-body `pg_query` scan) threads an explicit composed policy
+//!   gate, the raw-view-body vendor hand-off) threads an explicit composed policy
 //!   and schema scope and stays engine-side in `zero_migrate::model::validate`.
 //!   Only the STRUCTURAL allow-list walk lives here in [`validate`].
 //! - **`load_ir_document`** (the full fail-closed load gate) calls the POLICY
