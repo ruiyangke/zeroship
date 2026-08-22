@@ -4,7 +4,8 @@
 //! This is the surface a caller (control plane / CLI / builder) drives. The
 //! pieces beneath it — the [`SqlGuard`](crate::guard::SqlGuard), the Postgres
 //! [`apply`](crate::engine::MigrationEngine::apply) flow, the least-privilege
-//! [`migrator` role](crate::apply::role) — are already built; the engine *composes*
+//! `migrator` role (derived in the PostgreSQL backend crate) — are already built;
+//! the engine *composes*
 //! them into the documented pipeline:
 //!
 //! 1. an **author** (see [`crate::plan::author`]) produces the [`Migration`]s;

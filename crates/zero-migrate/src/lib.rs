@@ -16,7 +16,8 @@
 //! ([`MigrationEngine::apply`](crate::engine::MigrationEngine::apply)) — transactional + two-phase
 //! non-transactional with idempotent recovery, the guard wired in front of
 //! every `up`, and a drift/tamper checksum check — the least-privilege
-//! `migrator` role ([`apply::role`]), and the **public
+//! `migrator` role (this vendor's, so its derivation lives in the PostgreSQL
+//! backend crate rather than here), and the **public
 //! authoring pipeline + engine API** ([`plan::author`] +
 //! [`engine`]).
 //!
@@ -443,9 +444,6 @@ pub use render::sql_preview::{
     render_ir_envelope_sql, render_ir_envelope_sql_onto, render_ir_envelope_sql_statements,
     render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
-// `migrator_role_name` / `RoleError` are pure (identifier derivation + a shared
-// error enum); the provisioning fns run over a PG `admin: &Client` — PG-only.
-pub use apply::role::{migrator_role_name, RoleError};
 
 /// Compiles the Rust examples in `docs/embedding.md` as doctests.
 ///

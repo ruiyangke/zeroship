@@ -23,6 +23,13 @@ zero-migrate-ir = { workspace = true }
 # The schema-field shape `SchemaRenderer` reads is the SDK's field JSON.
 serde_json = { workspace = true }
 uuid = { workspace = true }
+# The migrator role name's disambiguating suffix is a base62 SHA-256 of the RAW
+# project id (`role.rs`), so two project ids that collapse to one string under the
+# lossy sanitize-to-`[a-z0-9_]` step still get two distinct roles.
+sha2 = { workspace = true }
+# `RoleError` — the one error enum this crate defines rather than reads off the
+# contract crate.
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

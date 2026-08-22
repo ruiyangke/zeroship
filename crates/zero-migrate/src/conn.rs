@@ -130,8 +130,8 @@ pub struct PostgresConfinement {
     /// DB-privilege defense layer). `None` runs as the connecting
     /// (admin) role — used only by tests / single-tenant dev where the role
     /// model is not provisioned. In the platform this is always `Some`, matching
-    /// the deterministic name returned by [`crate::apply::role::migrator_role_name`]
-    /// and provisioned by the host.
+    /// the deterministic name returned by the PostgreSQL backend crate's
+    /// `role::migrator_role_name` and provisioned by the host.
     pub migrator_role: Option<String>,
     /// The schema(s) that host shared **extension types/functions** the engine
     /// emits UNQUALIFIED (e.g. pgvector's `vector(N)`, `PostGIS`'s

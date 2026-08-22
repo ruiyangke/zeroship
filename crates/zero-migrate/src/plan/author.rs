@@ -177,7 +177,8 @@ pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
 /// derivations. Within that set an over-long generated index name cannot desync
 /// `up`/`down`/on-disk (which would cause CREATE/DROP churn - the emitted full name
 /// != the server-truncated live name on a re-diff). Mirrors the sanitize/truncate
-/// discipline of [`crate::apply::role::migrator_role_name`].
+/// discipline of the PostgreSQL backend crate's `role::migrator_role_name`, which
+/// reads the same declared cap off the same descriptor.
 ///
 /// It is NOT the only capping scheme in the tree. [`crate::schema::query`] - the
 /// schema-authority kernel that also serves the out-of-repo data plane - caps

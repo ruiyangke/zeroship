@@ -255,11 +255,19 @@ mod tests {
         assert_eq!(quote_ident_checked("a\"b").unwrap(), "\"a\"\"b\"");
     }
 
-    /// The four engine peer seams (`author`/`backfill`/`role`/`journal`)
+    /// The engine peer seams (`author`/`backfill`/`journal`)
     /// now all route through `quote_ident_checked`, so they emit BYTE-IDENTICAL
     /// output for the same quote-bearing schema (the "uniform render seam"
     /// requirement). The peers wrap the shared helper, so comparing each to the
-    /// canonical helper proves the uniformity for all five.
+    /// canonical helper proves the uniformity for all of them.
+    ///
+    /// `role` USED TO BE A LEG HERE and is not one any more, because the migrator
+    /// role name derivation left this crate for the PostgreSQL backend. The leg
+    /// went WITH it — `zero_migrate_postgres::role::tests::
+    /// the_role_seam_renders_uniformly_and_fails_closed` asserts the same two
+    /// facts (byte-identical escape-and-quote, fail-closed on empty/NUL) against
+    /// the same shared helper. The invariant did not get dropped; it got a home
+    /// next to its subject, which is the only place it can still see it.
     #[test]
     fn all_engine_seams_render_uniformly() {
         let schema = "ap\"p"; // a quote-bearing engine schema
@@ -270,16 +278,11 @@ mod tests {
             canonical
         );
         assert_eq!(
-            crate::apply::role::quote_ident_for_test(schema).unwrap(),
-            canonical
-        );
-        assert_eq!(
             crate::apply::backend::postgres::journal_sql::quote_ident_for_test(schema).unwrap(),
             canonical
         );
         // …and they fail closed uniformly on a NUL too.
         assert!(crate::plan::author::quote_ident_for_test("a\0b").is_err());
-        assert!(crate::apply::role::quote_ident_for_test("a\0b").is_err());
         assert!(
             crate::apply::backend::postgres::journal_sql::quote_ident_for_test("a\0b").is_err()
         );

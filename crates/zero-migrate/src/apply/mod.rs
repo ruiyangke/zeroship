@@ -8,7 +8,10 @@ pub mod executor;
 pub use zero_migrate_backend::journal;
 pub mod plan_precondition;
 pub mod precondition;
-pub mod role;
+// The least-privilege `migrator` role name derivation was PostgreSQL's alone — the
+// `NOLOGIN` + `SET ROLE` model, the `[a-z0-9_]` charset, and the 63-BYTE cap this
+// vendor declares (MySQL's is 64 CHARACTERS; SQLite has no roles at all). It lives
+// in the PostgreSQL backend crate now and the engine no longer surfaces it.
 // The finite-timeout-budget rule moved down to the backend contract, where the
 // vendors that resolve a budget can see it. Re-exported so
 // `crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError, TimeoutOrigin}`

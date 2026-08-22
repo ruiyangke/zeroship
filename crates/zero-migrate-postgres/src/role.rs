@@ -1,7 +1,7 @@
 //! The least-privilege per-project `migrator` role — **second-line DB-privilege
 //! defense**.
 //!
-//! The SQL guard ([`crate::guard::SqlGuard`]) is the first line: it parses every `up`
+//! The SQL guard ([`crate::guard::PgGuard`]) is the first line: it parses every `up`
 //! and denies the dangerous surface at submission. But a parser can be evaded
 //! by **runtime-constructed SQL** — e.g. `DO $$ … EXECUTE format('… %I …', s) …`
 //! where the target schema is computed at execution and never appears as a
@@ -88,8 +88,23 @@
 //! (re-granting an existing grant is a no-op, re-altering `search_path` is a no-op).
 //! Schema ownership is only (re)assigned when it differs.
 
-use crate::id::base62_encode_bytes;
 use sha2::{Digest, Sha256};
+use zero_migrate_backend::dml::IdentQuoteError;
+use zero_migrate_ir::backend::IdentifierLimit;
+use zero_migrate_ir::id::base62_encode_bytes;
+
+/// This vendor's DECLARED identifier byte cap, read off its own
+/// [`BackendDescriptor`](zero_migrate_ir::backend::BackendDescriptor) rather than
+/// restated, so the number the role name truncates to and the number this backend
+/// declares cannot drift apart. The `Bytes` arm is not incidental: MySQL's cap is 64
+/// CHARACTERS and SQLite has none, which is why this bound is PostgreSQL's and not
+/// everyone's — and it is one more reason the derivation belongs here.
+const IDENT_MAX_BYTES: usize = match crate::descriptor::POSTGRES_DESCRIPTOR.limits.identifier {
+    IdentifierLimit::Bytes(n) => n,
+    IdentifierLimit::Unbounded | IdentifierLimit::Characters(_) => {
+        panic!("PostgreSQL declares a BYTE identifier cap")
+    }
+};
 
 /// Error provisioning or deprovisioning a migrator role.
 #[derive(Debug, thiserror::Error)]
@@ -100,29 +115,26 @@ pub enum RoleError {
     /// An engine-supplied identifier (role / project schema / meta schema /
     /// extension schema) was not quotable (empty or NUL-bearing) at a render
     /// seam — fail-closed rather than interpolate it. Maps
-    /// [`crate::render::dml::IdentQuoteError`].
+    /// [`IdentQuoteError`].
     #[error("role provisioning: {0}")]
-    IdentQuote(#[from] crate::render::dml::IdentQuoteError),
+    IdentQuote(#[from] IdentQuoteError),
 }
 
 /// Quote a SQL identifier (double embedded quotes, wrap in `"`), so a schema /
 /// role name is never interpolated as raw SQL. Routes through the ONE crate-shared
 /// explicit backend seam
-/// ([`crate::render::dml::quote_ident_checked_for_dialect`]) — byte-identical to (and
-/// uniformly self-defending with) `author`/`backfill`/`journal`/`dml`: fail-closed
-/// on an empty / NUL identifier.
+/// ([`quote_ident_checked_for_backend`](zero_migrate_backend::dml::quote_ident_checked_for_backend))
+/// — byte-identical to (and uniformly self-defending with)
+/// `author`/`backfill`/`journal`/`dml`: fail-closed on an empty / NUL identifier.
+///
+/// It takes this vendor's own `dml::RENDERER` rather than a dialect id, so this
+/// module names no dialect literal at all.
 #[cfg(test)]
 fn quote_ident(ident: &str) -> Result<String, RoleError> {
-    Ok(crate::render::dml::quote_ident_checked_for_dialect(
+    Ok(zero_migrate_backend::dml::quote_ident_checked_for_backend(
         ident,
-        &crate::apply::backend::postgres::DIALECT,
+        &crate::dml::RENDERER,
     )?)
-}
-
-/// Test seam (see `dml::tests::all_engine_seams_render_uniformly`).
-#[cfg(test)]
-pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, RoleError> {
-    quote_ident(ident)
 }
 
 /// Derive the deterministic migrator role name for a project.
@@ -153,7 +165,7 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
     const SEP_LEN: usize = 1;
     // Was a third literal `63`. It now reads the one definition, which resolves
     // the DECLARED identifier cap off the backend's descriptor.
-    let prefix_budget = crate::plan::author::GENERATED_IDENT_MAX_BYTES
+    let prefix_budget = IDENT_MAX_BYTES
         .saturating_sub(PREFIX.len())
         .saturating_sub(SEP_LEN)
         .saturating_sub(suffix.len());
@@ -166,7 +178,20 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
 
 #[cfg(test)]
 mod tests {
-    use super::migrator_role_name;
+    use super::{migrator_role_name, quote_ident};
+
+    /// The leg `zero-migrate`'s `dml::tests::all_engine_seams_render_uniformly`
+    /// used to hold for this seam, moved here with the seam. It cannot stay in the
+    /// engine: `quote_ident` is crate-private and this crate is no longer part of
+    /// that one. The invariant is unchanged — the role seam renders BYTE-IDENTICALLY
+    /// to a bare escape-and-quote and fails closed on a NUL.
+    #[test]
+    fn the_role_seam_renders_uniformly_and_fails_closed() {
+        let schema = "ap\"p"; // a quote-bearing engine schema
+        assert_eq!(quote_ident(schema).unwrap(), "\"ap\"\"p\"");
+        assert!(quote_ident("a\0b").is_err());
+        assert!(quote_ident("").is_err());
+    }
 
     #[test]
     fn migrator_role_name_is_injective_across_lossy_sanitization() {

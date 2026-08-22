@@ -28,6 +28,7 @@ mod dml;
 mod existence_probe;
 mod fold;
 pub mod guard;
+pub mod role;
 mod schema;
 mod validation;
 mod value_format;
