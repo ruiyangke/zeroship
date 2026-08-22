@@ -25,13 +25,33 @@ description = "Portable, security-first, multi-dialect DB migration engine — d
 # structurally, so there is no build configuration left to select.
 
 [dependencies]
-# Parse SQL with the REAL Postgres parser (libpg_query bindings) so the
-# security PRECONDITION shape-gate + the idempotence/txn scans see exactly what
-# Postgres would execute. The parse-time SQL security GUARD (deny-list, classify,
-# advisories) now lives in the `zero-migrate-guard` crate; the
-# engine still parses directly here for the precondition boolean-SELECT gate, the
-# non-transactional idempotence scan (executor), and the raw-view-body validate
-# scan. pg_query carries a C build dep (libpg_query).
+# Parse SQL with the REAL Postgres parser (libpg_query bindings) so the security
+# PRECONDITION shape-gate + the idempotence/txn scans see exactly what Postgres
+# would execute. The parse-time SQL security GUARD (deny-list, classify, advisories)
+# lives in the `zero-migrate-guard` crate.
+#
+# COUNT THE CALL SITES BEFORE EDITING THIS COMMENT. It previously named three
+# "engine still parses directly here" paths and two of them had already moved; a
+# comment naming paths that do not exist is a false map. What is true today, all of
+# it PostgreSQL-only and NONE of it in neutral core:
+#
+#   - `apply/backend/postgres/session.rs` — the non-transactional idempotence scan,
+#     the non-txn `down` reason, and the crash-recovery replayability/index-name
+#     scans. Reached only through `MigrationBackend`; MySQL and SQLite each write
+#     their own answer and never touch this.
+#   - `apply/backend/postgres/backfill_sql.rs` — the assembled-backfill cursor
+#     mutation check.
+#   - `apply/precondition.rs` — the `SqlBoolean` boolean-SELECT shape gate. Despite
+#     the neutral-looking path this is a PostgreSQL leaf too, reached only via
+#     `PostgresBackend::evaluate_preconditions`; both other backends refuse a
+#     migration that declares a precondition.
+#
+# The raw-view-body scan is NO LONGER on this list: it goes through
+# `ValidationPolicy::raw_view_body_refusal` so each backend vets its own grammar.
+#
+# This dependency cannot leave until `apply/backend/postgres/**` and
+# `apply/precondition.rs` relocate into `zero-migrate-postgres`. pg_query carries a
+# C build dep (libpg_query).
 pg_query = "6"
 sha2 = { workspace = true }
 hmac = { workspace = true }
@@ -86,9 +106,14 @@ zero-migrate-mysql = { workspace = true }
 # deny-list, cross-schema confinement, statement classification, and operational
 # advisories (`SqlGuard`, `GuardConfig`, `analyze`, `classify`, `Advisory`,
 # `Severity`, the `flags_for`/`guard_for` free fns, `check_ir_data_security_policy`,
-# `check_raw_view_body_text`, the `tree_walk` shape helpers). The engine
-# re-exports this surface at its root so `zero_migrate::{SqlGuard, GuardConfig, …}`
-# names are unchanged.
+# the `tree_walk` shape helpers). The engine re-exports this surface at its root so
+# `zero_migrate::{SqlGuard, GuardConfig, …}` names are unchanged.
+#
+# `check_raw_view_body_text` / `check_raw_view_body` are deliberately NOT on that
+# list any more. They are PostgreSQL-internal: `zero-migrate-postgres` calls them
+# from its `ValidationPolicy::raw_view_body_refusal`, and the engine reaches them
+# only through that vendor seam. Calling them from here again would re-introduce
+# PostgreSQL's grammar as the judge of every backend's view bodies.
 zero-migrate-guard = { workspace = true }
 # The Policy Decision Point (PDP): the scope lattice + composition algebra +
 # unforgeable `EffectivePolicy`. `resolve_create_table_policy` drives its
