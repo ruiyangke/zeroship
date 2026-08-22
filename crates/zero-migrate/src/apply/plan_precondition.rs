@@ -80,7 +80,7 @@
 //! three are gone:
 //!
 //! 1. it made core code hold a VENDOR PARSER and apply it dialect-blind, in a module
-//!    with no [`SqlDialect`](crate::SqlDialect) reference of its own;
+//!    with no backend-identity reference of its own;
 //! 2. it needed a whitelist at all, because a parse tree cannot tell `CREATE VIEW`
 //!    from `CREATE OR REPLACE VIEW` - the shape that silently recomputes a view's
 //!    dependency edges and so removes a column's blocker with no `DROP` anywhere;

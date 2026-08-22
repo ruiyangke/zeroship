@@ -37,7 +37,7 @@ use zero_migrate::model::ir::Op;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
-    Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, SqlDialect, SqliteBackend,
+    Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, SqliteBackend,
 };
 
 const PROJECT: &str = "replace_view_rollback";
@@ -155,20 +155,15 @@ async fn apply_doc(
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
-    let document = zero_migrate::model::load::load_ir_document(
-        ir,
-        APP,
-        zero_migrate::model::validate::SqlDialect::Sqlite,
-        reg,
-        None,
-    )
-    .expect("load gate (sqlite)");
+    let document =
+        zero_migrate::model::load::load_ir_document(ir, APP, &zero_migrate::SQLITE, reg, None)
+            .expect("load gate (sqlite)");
     let folded = zero_migrate::fold_ops(
         history,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         PROJECT,
         &support::confined_charter(),
     )

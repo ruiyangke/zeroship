@@ -884,7 +884,7 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
     };
 
     if let Some(probe) = &m.existence_guard {
-        authorize_existence_guard_schema(cfg, m, probe.schema())?;
+        authorize_existence_guard_schema(cfg, m, probe.schema(), &super::DIALECT)?;
         let probe_started = Instant::now();
         let live = super::drift_sql::snapshot_schema_for(conn, probe.schema())
             .await
@@ -940,11 +940,8 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
             });
         }
 
-        match crate::render::existence_probe::decide(
-            probe,
-            &live,
-            &zero_migrate_ir::dialect::MYSQL,
-        ) {
+        match crate::render::existence_probe::decide(probe, &live, &zero_migrate_ir::dialect::MYSQL)
+        {
             crate::render::existence_probe::GuardVerdict::RunBare => {}
             crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {
                 let exec_ms =

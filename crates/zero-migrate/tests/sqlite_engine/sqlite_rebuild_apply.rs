@@ -25,7 +25,6 @@ use serde_json::json;
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, IrAuthor,
     LiveSchema, Migration, MigrationIr, PlanStep, RebuildError, RenameStep, SchemaSnapshot,
@@ -58,7 +57,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite)
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE.clone())
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
@@ -73,7 +72,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         effective,
     )
 }
@@ -193,9 +192,14 @@ fn drop_composite_fk_ir() -> MigrationIr {
 }
 
 fn lower_sqlite_rebuild(ir: &MigrationIr, live: &LiveSchema) -> TableRebuild {
-    let steps = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject("app"))
-        .lower_steps(ir, live)
-        .expect("SQLite composite FK lifecycle lowers");
+    let steps = IrAuthor::new(
+        PROJECT,
+        APP,
+        &zero_migrate::SQLITE,
+        &support::no_inject("app"),
+    )
+    .lower_steps(ir, live)
+    .expect("SQLite composite FK lifecycle lowers");
     assert_eq!(steps.len(), 1, "one FK change is one atomic rebuild");
     match steps.into_iter().next().expect("one step") {
         PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) => rebuild,

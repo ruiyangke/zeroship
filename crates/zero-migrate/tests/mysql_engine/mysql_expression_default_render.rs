@@ -40,7 +40,7 @@ use crate::support;
 use zero_migrate::render::lower::IrAuthor;
 use zero_migrate::{
     ColType, Expr, IrDefault, IrFlagsOverride, IrScalar, LiveSchema, MigrationIr, Op, ScalarFn,
-    SqlDialect, SynthFn, CURRENT_IR_VERSION,
+    SynthFn, CURRENT_IR_VERSION,
 };
 
 const PROJECT: &str = "app";
@@ -93,7 +93,7 @@ fn rendered_up(ir: &MigrationIr) -> String {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &support::confined_charter(),
     );
     let steps = author

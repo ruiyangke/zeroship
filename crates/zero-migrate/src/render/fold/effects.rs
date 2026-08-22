@@ -57,7 +57,9 @@ use zero_migrate_policy::EffectivePolicy;
 use crate::model::ir::{MigrationIr, Op};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::fold::{fold_ops_onto, FoldError};
-use crate::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
+#[cfg(test)]
+use zero_migrate_ir::dialect::POSTGRES;
 
 /// The state the plan's `n`th step will meet: the live schema at step 0, advanced by
 /// the ops the first `n` steps replay.
@@ -80,7 +82,7 @@ pub fn state_at(
     base: &SchemaSnapshot,
     ops: &[Op],
     n: usize,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
@@ -99,7 +101,7 @@ pub fn ir_state_at(
     base: &SchemaSnapshot,
     ir: &MigrationIr,
     n: usize,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
@@ -368,7 +370,7 @@ mod tests {
             base,
             ops,
             n,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "public",
             &crate::test_fixtures::no_inject("public"),
         )

@@ -76,17 +76,25 @@ use serde_json::Value;
 
 use zero_migrate::manifest_entry::sha256_hex;
 use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::{render_artifacts, EffectivePolicy, SqlDialect};
+use zero_migrate::{render_artifacts, EffectivePolicy};
 
 const SCHEMA: &str = "public";
 
-const DIALECTS: [SqlDialect; 3] = [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql];
+const DIALECTS: [&zero_migrate::DialectId; 3] = [
+    &zero_migrate::POSTGRES,
+    &zero_migrate::SQLITE,
+    &zero_migrate::MYSQL,
+];
 
 fn parse(ops: &str) -> Vec<Op> {
     serde_json::from_str(ops).expect("the stream parses")
 }
 
-fn artifacts(ops: &[Op], dialect: SqlDialect, policy: &EffectivePolicy) -> (Value, String) {
+fn artifacts(
+    ops: &[Op],
+    dialect: &zero_migrate::DialectId,
+    policy: &EffectivePolicy,
+) -> (Value, String) {
     let rendered =
         render_artifacts(ops, dialect, SCHEMA, policy).expect("the stream renders artifacts");
     let runtime =
@@ -645,10 +653,19 @@ fn corpus_lines(
     stem: &str,
     ops: &[Op],
     policy: &EffectivePolicy,
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
     out: &mut Vec<String>,
 ) {
-    let d = format!("{dialect:?}");
+    // Preserve the closed enum's historical debug labels because these strings
+    // are part of the corpus golden wire, not merely assertion context.
+    let d = if dialect == &zero_migrate::POSTGRES {
+        "Postgres"
+    } else if dialect == &zero_migrate::SQLITE {
+        "Sqlite"
+    } else {
+        assert_eq!(dialect, &zero_migrate::MYSQL);
+        "Mysql"
+    };
     let rendered = match render_artifacts(ops, dialect, SCHEMA, policy) {
         Ok(rendered) => rendered,
         Err(error) => {
@@ -1074,7 +1091,7 @@ fn the_refusal_probes_still_exercise_the_named_type_arms() {
             .iter()
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| panic!("probe `{name}` exists"));
-        render_artifacts(&parse(source), SqlDialect::Postgres, SCHEMA, &open)
+        render_artifacts(&parse(source), &zero_migrate::POSTGRES, SCHEMA, &open)
             .map(|_| "rendered".to_string())
             .unwrap_or_else(|e| e.to_string())
     };

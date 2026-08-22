@@ -12,7 +12,7 @@
 //!
 //! - [`query`] — the DSL→SQL **DDL builders** (CREATE TABLE / index / FK /
 //!   constraints; vector / geoPoint / encrypted-column / mask-sibling;
-//!   policy-injected columns; [`query::SqlDialect`]), the neutral field-definition
+//!   policy-injected columns), the neutral field-definition
 //!   lowering ([`query::def_to_column_type_for_dialect`]), the encryption + mask
 //!   sentinel builders, and the identifier/field validators. Vendor type
 //!   canonicalization is reached through

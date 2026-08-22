@@ -29,7 +29,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::{render_artifacts, SqlDialect, SQLITE};
+use zero_migrate::{render_artifacts, SQLITE};
 
 const SCHEMA: &str = "public";
 
@@ -62,7 +62,7 @@ fn history() -> Vec<Op> {
 fn field_names(collection: &str) -> BTreeSet<String> {
     let artifacts = render_artifacts(
         &history(),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -112,9 +112,9 @@ fn a_table_created_inside_a_leg_gets_the_same_injected_shape() {
 }
 
 /// EVERY leg is resolved, not the one some target would select - and the artifact
-/// cannot show this, which is why the oracle here is the resolved IR itself. A table
-/// declared in the SQLite leg contributes nothing to a PostgreSQL fold, so it never
-/// reaches `schema.runtime.json` on any run the arms above make.
+/// cannot show this, which is why the oracle here is the resolved IR itself. This test
+/// inspects resolution before target selection; a SQLite-only wrapper would be refused
+/// by a PostgreSQL fold because it has no PostgreSQL leg.
 ///
 /// The property matters because `resolve_create_table_policy` takes NO dialect: its
 /// output is what the checksum is folded over. Resolving only a selected leg would

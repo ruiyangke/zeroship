@@ -180,7 +180,7 @@ use crate::render::gen_types::{
     RuntimeCollectionMetadata, RuntimeIndexDescriptor,
 };
 use crate::render::lower::{resolve_encrypted_inner_domain_in_column, NamedTypeRegistry};
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_policy::EffectivePolicy;
 
 // ---------------------------------------------------------------------------
@@ -274,7 +274,7 @@ pub struct FoldedSchema {
 /// behaviour `docs/review-log.md` records for the two fold-backed walkers.
 pub fn fold(
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<FoldedSchema, FoldError> {
@@ -308,14 +308,14 @@ pub fn fold(
 }
 
 /// The authored half's accumulator.
-struct AuthoredState {
+struct AuthoredState<'a> {
     tables: BTreeMap<String, AuthoredTable>,
     named_types: NamedTypeRegistry,
-    dialect: SqlDialect,
+    dialect: &'a DialectId,
     project_schema: String,
 }
 
-impl AuthoredState {
+impl AuthoredState<'_> {
     /// Advance the authored half by ONE op.
     ///
     /// The match is EXHAUSTIVE with no `_` arm, which is section H's op-exhaustiveness

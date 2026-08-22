@@ -6,6 +6,7 @@
 //! schema, and the mandatory `statement_timeout` / `lock_timeout` budgets).
 
 use std::time::Duration;
+use zero_migrate_ir::dialect::DialectId;
 
 /// Error opening a migrator connection.
 ///
@@ -281,8 +282,7 @@ impl ExecutorConfig {
     }
 
     /// Build the [`GuardConfig`](crate::guard::GuardConfig) every executor-path
-    /// guard site uses (the two static first-passes + rollback + the
-    /// precondition evaluator).
+    /// guard site uses for an explicitly selected backend.
     ///
     /// The caller-authored policy is preserved exactly. Trusted test configs differ
     /// only by their explicit host-selected [`GuardMode`](crate::guard::GuardMode).
@@ -293,12 +293,15 @@ impl ExecutorConfig {
     /// policy would drop the host-selected mode, and the resulting guard would
     /// admit what the executor's own guard sites deny.
     #[must_use]
-    pub fn guard_config(&self) -> crate::guard::GuardConfig {
+    pub fn guard_config_for(&self, dialect: &DialectId) -> crate::guard::GuardConfig {
         crate::guard::GuardConfig::from_policy_with_mode(
             self.effective.clone(),
-            crate::SqlDialect::Postgres.id(),
+            dialect.clone(),
             self.guard_mode,
         )
+        // Keep the security-critical fail-safe in GuardConfig: every non-Postgres
+        // id forces Enforced even when a trusted host selected belt-off mode.
+        .for_dialect(dialect.clone())
     }
 
     /// Build a **Platform** executor config. REQUIRES a
@@ -370,7 +373,7 @@ impl ExecutorConfig {
     ) -> Self {
         let mut cfg = Self::new(project_id, project_schema, effective);
         // The belt-skip is not a grant. It is the root/host-set `GuardMode::Off`
-        // stamped here, which `guard_config()` threads into every guard this config
+        // stamped here, which `guard_config_for()` threads into every guard this config
         // builds.
         cfg.guard_mode = crate::guard::GuardMode::Off;
         // `migrator_role` stays `None` (the `new()` default): Trusted runs as the
@@ -410,7 +413,8 @@ impl ExecutorConfig {
     ///
     /// Every element is an **engine-supplied** identifier (project schema, platform
     /// schemas, extension schemas), so each is rendered through the ONE shared
-    /// engine seam ([`crate::render::dml::quote_ident_checked`]) — fail-closed on an empty
+    /// explicit backend seam
+    /// ([`crate::render::dml::quote_ident_checked_for_dialect`]) — fail-closed on an empty
     /// / NUL name, byte-identical to the prior `escape_quote_ident` for every real
     /// schema. So the whole quoting surface (not just the DDL/journal seams) is
     /// uniformly self-defending.
@@ -420,8 +424,11 @@ impl ExecutorConfig {
     /// [`crate::render::dml::IdentQuoteError`] if any configured schema is empty or carries
     /// a NUL byte (an engine-internal misconfiguration; never reachable from a
     /// well-formed `ExecutorConfig`).
-    pub(crate) fn search_path_clause(&self) -> Result<String, crate::render::dml::IdentQuoteError> {
-        let quote = |s: &str| crate::render::dml::quote_ident_checked(s);
+    pub(crate) fn search_path_clause(
+        &self,
+        dialect: &DialectId,
+    ) -> Result<String, crate::render::dml::IdentQuoteError> {
+        let quote = |s: &str| crate::render::dml::quote_ident_checked_for_dialect(s, dialect);
         if policy_grants_bool(
             &self.effective,
             zero_migrate_ir::policy_registry::KEY_ACCESS_ROLE,

@@ -109,7 +109,7 @@ pub enum VendorError {
     /// # Why this carries a `DialectId` and not the enum
     ///
     /// This is PROVENANCE — data recording WHICH backend refused — and it never
-    /// dispatches on the value. Typing it as the closed `SqlDialect` meant a
+    /// dispatches on the value. Typing it as the former closed dialect enum meant a
     /// fourth backend could not state its own refusal at all: it has no variant
     /// to name itself with, so the required method it must implement had no
     /// value it could legally return. The stub in

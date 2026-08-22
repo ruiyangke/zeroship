@@ -37,8 +37,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::{
-    apply::executor::LockMode, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, SqlDialect, SqliteBackend,
+    apply::executor::LockMode, Approval, DialectId, ExecutorConfig, GuardConfig, IrAuthor,
+    LiveSchema, MigrationEngine, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_ir";
@@ -80,14 +80,14 @@ fn open_db(tag: &str) -> Db {
     Db { _dir: dir, backend }
 }
 
-fn lower_for(dialect: SqlDialect, bytes: &str) -> Result<zero_migrate::LoweredArtifact, String> {
+fn lower_for(dialect: &DialectId, bytes: &str) -> Result<zero_migrate::LoweredArtifact, String> {
     IrAuthor::new(PROJECT, APP, dialect, &support::confined_charter())
         .load_and_lower_guarded(
             bytes,
             APP,
             &registry(),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), dialect.id()),
+            &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone()),
         )
         .map_err(|e| format!("{e:?}"))
 }
@@ -98,7 +98,7 @@ fn a_foreign_key_target_that_is_never_created_is_refused_on_every_dialect() {
 
     // PostgreSQL and MySQL already refuse this, and are quoted here so the SQLite
     // arm is measured against its own engine's behaviour rather than my opinion.
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::POSTGRES, &zero_migrate::MYSQL] {
         let refusal = lower_for(dialect, &bytes).expect_err(&format!(
             "{dialect:?} must refuse a foreign key to a table nothing creates"
         ));
@@ -108,7 +108,7 @@ fn a_foreign_key_target_that_is_never_created_is_refused_on_every_dialect() {
         );
     }
 
-    let refusal = lower_for(SqlDialect::Sqlite, &bytes).expect_err(
+    let refusal = lower_for(&zero_migrate::SQLITE, &bytes).expect_err(
         "SQLite must refuse a foreign key whose target no operation creates and no live \
          schema holds. Inlining it produces a table that cannot accept a row: the applied \
          schema references p(c0), and INSERT INTO k fails with `no such table: main.p`",
@@ -127,7 +127,7 @@ async fn a_forward_reference_still_lowers_and_applies_on_sqlite() {
     // on SQLite".
     let bytes = envelope(&[create_k_referencing_p(), create_p()]);
 
-    let artifact = lower_for(SqlDialect::Sqlite, &bytes)
+    let artifact = lower_for(&zero_migrate::SQLITE, &bytes)
         .expect("a forward reference whose target IS created later must still lower on SQLite");
 
     let db = open_db("fk-forward");

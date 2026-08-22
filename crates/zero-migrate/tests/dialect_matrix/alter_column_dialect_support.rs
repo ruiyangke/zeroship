@@ -33,29 +33,29 @@
 //! assertions while breaking the dialect that supports them.
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir, SqlDialect};
+use zero_migrate::model::validate::validate_ir;
 
 /// The three operations whose alter-column rendering the lowerer gates, paired
 /// with the dialects that refuse them.
-const REFUSED: &[(&str, &[SqlDialect], &str)] = &[
+const REFUSED: &[(&str, &[&zero_migrate::DialectId], &str)] = &[
     (
         "setColumnNotNull",
-        &[SqlDialect::Sqlite, SqlDialect::Mysql],
+        &[&zero_migrate::SQLITE, &zero_migrate::MYSQL],
         r#"{"op":"setColumnNotNull","table":"t","column":"c1"}"#,
     ),
     (
         "dropColumnNotNull",
-        &[SqlDialect::Sqlite, SqlDialect::Mysql],
+        &[&zero_migrate::SQLITE, &zero_migrate::MYSQL],
         r#"{"op":"dropColumnNotNull","table":"t","column":"c1"}"#,
     ),
     (
         "dropColumnDefault",
-        &[SqlDialect::Sqlite],
+        &[&zero_migrate::SQLITE],
         r#"{"op":"dropColumnDefault","table":"t","column":"c1"}"#,
     ),
 ];
 
-fn gate(op: &str, dialect: SqlDialect) -> Result<(), String> {
+fn gate(op: &str, dialect: &zero_migrate::DialectId) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("envelope parses");
     validate_ir(&ir, dialect).map_err(|e| e.code)
@@ -64,8 +64,8 @@ fn gate(op: &str, dialect: SqlDialect) -> Result<(), String> {
 #[test]
 fn the_gate_refuses_alter_column_ops_on_dialects_whose_lowerer_refuses_them() {
     for (name, dialects, op) in REFUSED {
-        for dialect in *dialects {
-            let verdict = gate(op, *dialect);
+        for &dialect in *dialects {
+            let verdict = gate(op, dialect);
             assert!(
                 verdict.is_err(),
                 "{name} on {dialect:?}: the gate accepted an operation the lowerer refuses \
@@ -82,7 +82,7 @@ fn postgresql_still_accepts_every_one_of_them() {
     // CONTROL. These operations are genuinely portable on PostgreSQL. Without
     // this arm, refusing them on all three dialects would pass the test above.
     for (name, _, op) in REFUSED {
-        gate(op, SqlDialect::Postgres)
+        gate(op, &zero_migrate::POSTGRES)
             .unwrap_or_else(|code| panic!("{name} must still pass the gate on PostgreSQL: {code}"));
     }
 }

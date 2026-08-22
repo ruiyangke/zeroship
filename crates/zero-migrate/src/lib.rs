@@ -161,9 +161,9 @@ pub use plan::author::{
     AuthorError, AuthorRequest, Column, DeterministicAuthor, MigrationAuthor, RawSqlAuthor,
 };
 pub use render::declarative::{
-    desired_snapshot, desired_snapshot_for_dialect, AcceptedIndexAlias, CollectionDescriptor,
-    DeclarativeAuthor, DeclarativeError, DeclarativePlan, DesiredSchema, FieldDescriptor,
-    IndexDescriptor, RenameHint, TableRebuild,
+    desired_snapshot_for_dialect, AcceptedIndexAlias, CollectionDescriptor, DeclarativeAuthor,
+    DeclarativeError, DeclarativePlan, DesiredSchema, FieldDescriptor, IndexDescriptor, RenameHint,
+    TableRebuild,
 };
 pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
@@ -229,12 +229,12 @@ pub use guard::{
 /// Kept as a crate-root function because it is public API: the napi addon calls
 /// `zero_migrate::guard_for` across the crate boundary, and the vendor registry it now
 /// delegates to is `pub(crate)`. What changed is not the signature but the OWNER of
-/// the dispatch — it is no longer a second `SqlDialect` match inside the guard crate,
+/// the dispatch — it is no longer a second closed-identity match inside the guard crate,
 /// able to disagree with the renderer registry, and it is no longer able to hand a
 /// dialect a guard that dialect did not write.
 ///
 /// # Errors
-/// None; selection is total over the closed `SqlDialect`.
+/// None; registration guarantees a guard for each shipping backend.
 #[must_use]
 pub fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
     render::backends::guard_for(cfg)
@@ -273,9 +273,6 @@ pub use render::gen_types::{
     GeneratedArtifacts, SchemaExport, DEFAULT_PROJECT_SCHEMA, ENV_DTS_FILE,
     RUNTIME_DESCRIPTOR_FILE,
 };
-// The deploy-target dialect — re-exported so an embedding host's deploy
-// path can thread it into `IrAuthor::new`.
-pub use schema::query::SqlDialect;
 // The OPEN dialect identity and the backend contract keyed by it. A backend is
 // named by a `DialectId`, describes itself with a `BackendDescriptor`, and is
 // admitted by a `BackendRegistry` that refuses a duplicate id rather than
@@ -291,7 +288,7 @@ pub use zero_migrate_ir::dialect::{DialectId, DialectSet, MYSQL, POSTGRES, SQLIT
 /// The vendors are separate crates now (`zero-migrate-postgres`,
 /// `zero-migrate-sqlite`, `zero-migrate-mysql`) and this engine names each of them
 /// exactly once, in `render::backends::VENDORS`. That list is what replaced the
-/// hard-coded three-arm `match` over `SqlDialect`; this function is how a host asks
+/// hard-coded three-arm identity match; this function is how a host asks
 /// what it got, and it answers by running the leaf crate's own
 /// [`BackendRegistry::build`] over the shipping descriptors rather than by restating
 /// the id rule here.
@@ -310,7 +307,7 @@ pub fn shipping_backends() -> BackendRegistry {
         .descriptors()
         .expect("the shipping backend crates must declare well-formed, distinct dialect ids")
 }
-// SqlDialect-neutral journal types (the SQLite path constructs/imports these too).
+// Dialect-neutral journal types (the SQLite path constructs/imports these too).
 pub use apply::journal::{
     AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,
     PendingContractRecord, PendingState, Phase, Resolution, RolledBackEntry,
@@ -408,10 +405,10 @@ pub use model::expr::{
 // No parser, no fuzzer — a pure allow-list walk.
 pub use model::validate::{
     validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
-    AuthoringError, LogicalColumnContract, LogicalColumnContracts,
-    LogicalColumnKey, TargetScope, UnsupportedKind, CODE_COLUMN_FACET_CONFLICT,
-    CODE_DIALECT_SCOPE_PGONLY, CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE,
-    CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED, CODE_PARTITION_BOUNDS_NOT_TOTAL,
+    AuthoringError, LogicalColumnContract, LogicalColumnContracts, LogicalColumnKey, TargetScope,
+    UnsupportedKind, CODE_COLUMN_FACET_CONFLICT, CODE_DIALECT_SCOPE_PGONLY,
+    CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE, CODE_OP_OUTSIDE_RECORDER,
+    CODE_PARTITION_BOUNDS_ILL_FORMED, CODE_PARTITION_BOUNDS_NOT_TOTAL,
     CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, CODE_PARTITION_HASH_DROP_UNDERIVABLE,
     CODE_PARTITION_KEY_COVERAGE, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, CODE_UNSUPPORTED,
 };

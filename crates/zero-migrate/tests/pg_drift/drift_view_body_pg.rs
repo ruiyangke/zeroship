@@ -62,7 +62,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
     diff_snapshots, fold_ops, resolve_view_bodies, snapshot_schema, IrAuthor, LiveSchema,
-    SchemaSnapshot, SqlDialect, StructuralDrift,
+    SchemaSnapshot, StructuralDrift,
 };
 
 const OWNER: &str = "app_drift_view_body";
@@ -206,13 +206,19 @@ async fn snapshot_after_mutation(
         return Err(format!("apply drift mutation `{mutation}`: {error}"));
     }
     let resolved = async {
-        let mut actual = snapshot_schema(session, schema)
+        let mut actual = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, schema)
             .await
             .map_err(|error| format!("snapshot after `{mutation}`: {error}"))?;
         let mut expected = expected.clone();
-        resolve_view_bodies(session, schema, &mut expected, &mut actual)
-            .await
-            .map_err(|error| format!("resolve view bodies after `{mutation}`: {error}"))?;
+        resolve_view_bodies(
+            &zero_migrate_ir::dialect::POSTGRES,
+            session,
+            schema,
+            &mut expected,
+            &mut actual,
+        )
+        .await
+        .map_err(|error| format!("resolve view bodies after `{mutation}`: {error}"))?;
         Ok::<_, String>((expected, actual))
     }
     .await;
@@ -233,7 +239,7 @@ async fn install(session: &support::PgDevSession, schema: &str) -> Result<Schema
     let ir = fixture(schema);
     let expected = fold_ops(
         &ir.ops,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         schema,
         &support::no_inject(schema),
     )
@@ -241,7 +247,7 @@ async fn install(session: &support::PgDevSession, schema: &str) -> Result<Schema
     let migrations = IrAuthor::new(
         schema,
         OWNER,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject(schema),
     )
     .lower(&ir, &LiveSchema::default())
@@ -316,7 +322,7 @@ async fn both_sides_of_a_view_body_are_measured() {
 
     let result: Result<(), String> = async {
         let expected = install(&session, &schema).await?;
-        let actual = snapshot_schema(&session, &schema)
+        let actual = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("introspect clean view-body fixture: {error}"))?;
 
@@ -413,13 +419,19 @@ async fn live_postgres_reports_view_body_drift() {
         // This leg runs OUTSIDE a transaction block, which exercises the other half
         // of `resolve_view_bodies`: the `SAVEPOINT` probe fails, it opens and rolls
         // back its own transaction, and the session survives to be used again below.
-        let mut clean = snapshot_schema(&session, &schema)
+        let mut clean = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("introspect clean view-body fixture: {error}"))?;
         let mut clean_expected = expected.clone();
-        resolve_view_bodies(&session, &schema, &mut clean_expected, &mut clean)
-            .await
-            .map_err(|error| format!("resolve clean view bodies: {error}"))?;
+        resolve_view_bodies(
+            &zero_migrate_ir::dialect::POSTGRES,
+            &session,
+            &schema,
+            &mut clean_expected,
+            &mut clean,
+        )
+        .await
+        .map_err(|error| format!("resolve clean view bodies: {error}"))?;
 
         // The resolve must actually have RESOLVED something. Without this the whole
         // suite could pass vacuously: a probe that declined every view would leave

@@ -7,7 +7,7 @@ use crate::support;
 
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::{IrAuthor, LiveSchema, SqlDialect};
+use zero_migrate::{IrAuthor, LiveSchema};
 
 fn uuid_v4_ir(table: &str) -> MigrationIr {
     serde_json::from_value(serde_json::json!({
@@ -59,7 +59,7 @@ fn sqlite_uuid_v4_default_generates_exact_rfc_9562_values() {
     let migrations = IrAuthor::new(
         "main",
         "app_uuid_samples",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("app"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -95,7 +95,7 @@ fn mysql_uuid_v4_default_uses_exact_random_bytes_expression() {
     let migrations = IrAuthor::new(
         "app",
         "app_uuid_samples",
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &support::no_inject("app"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -150,7 +150,7 @@ async fn postgres_uuid_v4_default_generates_exact_rfc_9562_values() {
         let migrations = IrAuthor::new(
             &schema,
             "app_uuid_samples",
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())

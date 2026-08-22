@@ -7,7 +7,7 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::{DbError, SqlSession};
 use zero_migrate::{
     ApplyError, Approval, EngineError, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr,
-    PostgresBackend, SqlDialect,
+    PostgresBackend, POSTGRES,
 };
 
 const OWNER: &str = "app_test";
@@ -230,7 +230,7 @@ async fn measure_qualified_ref(url: &str, other_present: bool) -> BoundaryResult
                 &[ir],
                 &backend,
                 &policy,
-                SqlDialect::Postgres,
+                &POSTGRES,
                 &cfg.project_schema,
                 OWNER,
                 &registry,
@@ -297,7 +297,7 @@ async fn measure_aggregate_update(url: &str) -> BoundaryResult {
                 &[ir],
                 &backend,
                 &policy,
-                SqlDialect::Postgres,
+                &POSTGRES,
                 &cfg.project_schema,
                 OWNER,
                 &registry,

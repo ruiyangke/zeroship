@@ -48,7 +48,8 @@ use super::{MysqlInflightDdlMarker, MysqlInflightResolution};
 const IMMUTABLE_TRG_PREFIX: &str = "zm_immutable";
 
 /// Quote a MySQL identifier with backticks, and fail-closed on an empty /
-/// NUL-bearing name — the MySQL analogue of the shared `quote_ident_checked` seam
+/// NUL-bearing name — the MySQL analogue of the shared
+/// `quote_ident_checked_for_dialect` seam
 /// (which emits Postgres double-quotes). A schema / table / trigger name is NEVER
 /// interpolated as raw SQL.
 ///
@@ -77,7 +78,7 @@ pub(crate) fn quote_ident_mysql(ident: &str) -> Result<String, JournalError> {
     }
     Ok(crate::render::dml::escape_quote_ident_for_dialect(
         ident,
-        crate::schema::query::SqlDialect::Mysql,
+        &super::DIALECT,
     ))
 }
 

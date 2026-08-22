@@ -27,9 +27,10 @@
 //! check on UNIQUE constraints.
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir, SqlDialect};
+use zero_migrate::model::validate::validate_ir;
+use zero_migrate::DialectId;
 
-fn verdict(op: &str, dialect: SqlDialect) -> Result<(), String> {
+fn verdict(op: &str, dialect: &DialectId) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     validate_ir(&ir, dialect).map_err(|e| format!("{}: {}", e.code, e.reason))
@@ -39,7 +40,11 @@ const TWO_INDEXES_ONE_NAME: &str = r#"{"op":"createTable","name":"a","columns":[
 
 #[test]
 fn two_indexes_sharing_a_name_are_refused_on_every_dialect() {
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::SQLITE,
+        &zero_migrate::MYSQL,
+    ] {
         let refusal = verdict(TWO_INDEXES_ONE_NAME, dialect).expect_err(&format!(
             "{dialect:?}: both indexes lower to CREATE INDEX IF NOT EXISTS under the \
              same name, so the second is SKIPPED with a notice and the apply \
@@ -57,7 +62,11 @@ fn two_indexes_sharing_a_name_are_refused_on_every_dialect() {
 fn two_indexes_with_distinct_names_are_still_allowed() {
     // The control. Refusing every multi-index createTable would satisfy the test
     // above while breaking ordinary migrations.
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::SQLITE,
+        &zero_migrate::MYSQL,
+    ] {
         verdict(
             r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"d","type":"int","nullable":true}],"primaryKey":["c"],"indexes":[{"name":"ix_c","columns":[{"kind":"column","name":"c"}]},{"name":"ix_d","columns":[{"kind":"column","name":"d"}]}]}"#,
             dialect,
@@ -72,7 +81,7 @@ fn one_index_is_still_allowed() {
     // over-eager duplicate scan.
     verdict(
         r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false}],"primaryKey":["c"],"indexes":[{"name":"ix","columns":[{"kind":"column","name":"c"}]}]}"#,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     )
     .expect("a single index must pass");
 }
@@ -81,7 +90,7 @@ fn one_index_is_still_allowed() {
 // The same fail-open across OPS, which the first fix did not cover.
 // ---------------------------------------------------------------------------
 
-fn verdict_envelope(ops: &str, dialect: SqlDialect) -> Result<(), String> {
+fn verdict_envelope(ops: &str, dialect: &DialectId) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     validate_ir(&ir, dialect).map_err(|e| format!("{}: {}", e.code, e.reason))
@@ -97,7 +106,7 @@ fn two_create_index_ops_sharing_a_name_are_refused() {
     let ops = format!(
         r#"{TABLE},{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"c"}}]}},{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"d"}}]}}"#
     );
-    let refusal = verdict_envelope(&ops, SqlDialect::Postgres).expect_err(
+    let refusal = verdict_envelope(&ops, &zero_migrate::POSTGRES).expect_err(
         "two createIndex ops under one name lower to two CREATE INDEX IF NOT EXISTS, \
          so the second is skipped with a notice and the apply succeeds without the \
          index the author declared",
@@ -118,7 +127,7 @@ fn reusing_an_index_name_after_dropping_it_is_still_allowed() {
     let ops = format!(
         r#"{TABLE},{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"c"}}]}},{{"op":"dropIndex","name":"ix","table":"a"}},{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"d"}}]}}"#
     );
-    verdict_envelope(&ops, SqlDialect::Postgres)
+    verdict_envelope(&ops, &zero_migrate::POSTGRES)
         .expect("recreating an index after dropping it must remain allowed");
 }
 
@@ -127,7 +136,7 @@ fn an_index_op_colliding_with_an_inline_index_is_refused() {
     // The two routes crossing: a name declared inline on createTable and again by
     // a standalone createIndex.
     let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"d","type":"int","nullable":true}],"primaryKey":["c"],"indexes":[{"name":"ix","columns":[{"kind":"column","name":"c"}]}]},{"op":"createIndex","name":"ix","table":"a","columns":[{"kind":"column","name":"d"}]}"#;
-    let refusal = verdict_envelope(ops, SqlDialect::Postgres)
+    let refusal = verdict_envelope(ops, &zero_migrate::POSTGRES)
         .expect_err("an inline index and a later createIndex under one name collide the same way");
     assert!(
         refusal.contains(r#"index "ix" is created twice"#),
@@ -153,7 +162,7 @@ fn an_explicit_index_colliding_with_a_derived_unique_name_is_refused() {
     // This route was invisible to the first two fixes because one of the two
     // names never appears in the IR — it is derived during lowering.
     let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"v","type":"int","nullable":true,"unique":true},{"name":"w","type":"int","nullable":true}],"primaryKey":["c"],"indexes":[{"name":"a_v_key","columns":[{"kind":"column","name":"w"}]}]}"#;
-    let refusal = verdict_envelope(ops, SqlDialect::Postgres).expect_err(
+    let refusal = verdict_envelope(ops, &zero_migrate::POSTGRES).expect_err(
         "an explicit index named exactly what the unique column derives is silently \
          skipped at apply, leaving the declared index absent",
     );
@@ -168,7 +177,7 @@ fn a_unique_column_alongside_a_differently_named_index_is_still_allowed() {
     // The control: the derived name and the explicit name do not collide, which
     // is the ordinary case and must not be swept up.
     let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"v","type":"int","nullable":true,"unique":true},{"name":"w","type":"int","nullable":true}],"primaryKey":["c"],"indexes":[{"name":"a_w_idx","columns":[{"kind":"column","name":"w"}]}]}"#;
-    verdict_envelope(ops, SqlDialect::Postgres)
+    verdict_envelope(ops, &zero_migrate::POSTGRES)
         .expect("a unique column and an unrelated index name must coexist");
 }
 
@@ -176,5 +185,6 @@ fn a_unique_column_alongside_a_differently_named_index_is_still_allowed() {
 fn two_unique_columns_are_still_allowed() {
     // Each derives its own name, so they cannot collide with each other.
     let ops = r#"{"op":"createTable","name":"a","columns":[{"name":"c","type":"int","nullable":false},{"name":"v","type":"int","nullable":true,"unique":true},{"name":"w","type":"int","nullable":true,"unique":true}],"primaryKey":["c"]}"#;
-    verdict_envelope(ops, SqlDialect::Postgres).expect("two unique columns derive distinct names");
+    verdict_envelope(ops, &zero_migrate::POSTGRES)
+        .expect("two unique columns derive distinct names");
 }

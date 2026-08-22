@@ -3,7 +3,7 @@
 // The single source is `crates/zero-migrate/dialect-support.toml`; the
 // generator (`scripts/gen-dialect-table.mjs`) emits BOTH the committed TS mirror
 // (`src/generated/dialect-table.ts`) and the committed Rust table
-// (`crates/zero-migrate/src/model/dialect_table.rs`). This test is the
+// (`crates/zero-migrate/tests/dialect_matrix/dialect_table.rs`). This test is the
 // "regenerate + diff" freshness gate (the same shape as ir-types-drift's enums
 // gate): re-run the generator into temp files and assert byte-equality with both
 // committed artifacts, so neither can silently go stale vs the sidecar. It also
@@ -26,7 +26,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const sidecarPath = resolve(here, "../../../crates/zero-migrate/dialect-support.toml");
 const genScript = resolve(here, "../scripts/gen-dialect-table.mjs");
 const committedTs = resolve(here, "../src/generated/dialect-table.ts");
-const committedRust = resolve(here, "../../../crates/zero-migrate/src/model/dialect_table.rs");
+const committedRust = resolve(here, "../../../crates/zero-migrate/tests/dialect_matrix/dialect_table.rs");
 
 const DISPOSITIONS = new Set(["portable", "transparentDegradable", "vendor", "unsupported"]);
 
@@ -227,6 +227,6 @@ test("committed generated dialect tables (TS + Rust) are up to date (regenerate 
   assert.equal(
     readFileSync(rustTmp, "utf8"),
     readFileSync(committedRust, "utf8"),
-    "crates/zero-migrate/src/model/dialect_table.rs is stale — run `pnpm --filter zero-migrate gen:dialect-table`",
+    "crates/zero-migrate/tests/dialect_matrix/dialect_table.rs is stale — run `pnpm --filter zero-migrate gen:dialect-table`",
   );
 });

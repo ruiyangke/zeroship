@@ -11,7 +11,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
     diff_snapshots, fold_ops, fold_ops_onto, snapshot_schema, validate_ir, IrAuthor, LiveSchema,
-    MysqlTextStorageSnapshot, PlanStep, RenameStep, SqlDialect,
+    MysqlTextStorageSnapshot, PlanStep, RenameStep,
 };
 
 const PROJECT_SCHEMA: &str = "app";
@@ -166,16 +166,20 @@ fn canonical_fixture(name: &str) -> MigrationIr {
 
 fn create_sql<'a>(
     migrations: &'a [zero_migrate::Migration],
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
     table: &str,
 ) -> &'a str {
-    let markers = match dialect {
-        SqlDialect::Postgres => vec![format!("CREATE TABLE \"{PROJECT_SCHEMA}\".\"{table}\"")],
-        SqlDialect::Mysql => vec![format!("CREATE TABLE `{PROJECT_SCHEMA}`.`{table}`")],
-        SqlDialect::Sqlite => vec![
+    let markers = if dialect == &zero_migrate::POSTGRES {
+        vec![format!("CREATE TABLE \"{PROJECT_SCHEMA}\".\"{table}\"")]
+    } else if dialect == &zero_migrate::MYSQL {
+        vec![format!("CREATE TABLE `{PROJECT_SCHEMA}`.`{table}`")]
+    } else if dialect == &zero_migrate::SQLITE {
+        vec![
             format!("CREATE TABLE \"{table}\""),
             format!("CREATE TABLE IF NOT EXISTS \"{table}\""),
-        ],
+        ]
+    } else {
+        panic!("unregistered test dialect {dialect}")
     };
     migrations
         .iter()
@@ -189,15 +193,11 @@ fn create_sql<'a>(
         .as_str()
 }
 
-fn validator_dialect(dialect: SqlDialect) -> SqlDialect {
-    match dialect {
-        SqlDialect::Postgres => SqlDialect::Postgres,
-        SqlDialect::Mysql => SqlDialect::Mysql,
-        SqlDialect::Sqlite => SqlDialect::Sqlite,
-    }
+fn validator_dialect(dialect: &zero_migrate::DialectId) -> &zero_migrate::DialectId {
+    dialect
 }
 
-fn assert_tuple_order(sql: &str, dialect: SqlDialect) {
+fn assert_tuple_order(sql: &str, dialect: &zero_migrate::DialectId) {
     let fk = &sql[sql
         .find("FOREIGN KEY")
         .unwrap_or_else(|| panic!("missing FOREIGN KEY on {dialect:?}: {sql}"))..];
@@ -221,7 +221,11 @@ fn assert_tuple_order(sql: &str, dialect: SqlDialect) {
 fn create_time_composite_fk_lowers_inline_with_order_actions_and_supporting_index_everywhere() {
     let ir = canonical_fixture("portable_composite_fk");
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
+    ] {
         let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &LiveSchema::default())
             .unwrap_or_else(|error| {
@@ -234,7 +238,7 @@ fn create_time_composite_fk_lowers_inline_with_order_actions_and_supporting_inde
         assert!(child.contains("ON UPDATE CASCADE"), "{child}");
         assert!(child.contains("ON DELETE SET NULL"), "{child}");
         assert!(!child.contains("MATCH FULL"), "{child}");
-        if dialect == SqlDialect::Sqlite {
+        if dialect == &zero_migrate::SQLITE {
             assert!(
                 !child.contains(&format!("REFERENCES {PROJECT_SCHEMA}."))
                     && !child.contains(&format!("REFERENCES \"{PROJECT_SCHEMA}\".")),
@@ -242,7 +246,7 @@ fn create_time_composite_fk_lowers_inline_with_order_actions_and_supporting_inde
             );
         }
 
-        let supporting_sql = if dialect == SqlDialect::Mysql {
+        let supporting_sql = if dialect == &zero_migrate::MYSQL {
             let key_start = child
                 .find("KEY `children_parent_fk_idx`")
                 .unwrap_or_else(|| {
@@ -316,7 +320,11 @@ fn an_exact_ordered_composite_unique_index_is_a_candidate_key_on_every_dialect()
         false,
     );
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
+    ] {
         validate_ir(&ir, validator_dialect(dialect)).unwrap_or_else(|error| {
             panic!("ordered unique candidate must validate on {dialect:?}: {error}")
         });
@@ -438,7 +446,11 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
     }));
     let constraint_ir = lifecycle_ir("ordered_unique_constraint_then_fk", constraint_ops);
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
+    ] {
         validate_ir(&index_ir, validator_dialect(dialect)).unwrap_or_else(|error| {
             panic!("create unique index then FK must validate on {dialect:?}: {error}")
         });
@@ -475,7 +487,7 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
         // agree from here: both refuse. The candidate-key replay this test is about
         // keeps its executable all-target coverage from the unique-INDEX artifact
         // above, which IS portable on SQLite.
-        if dialect == SqlDialect::Sqlite {
+        if dialect == &zero_migrate::SQLITE {
             let error = validate_ir(&constraint_ir, validator_dialect(dialect))
                 .expect_err("addConstraint(unique) is not authorable on SQLite");
             assert!(
@@ -546,16 +558,16 @@ fn dropping_the_only_ordered_candidate_key_before_a_composite_fk_is_rejected_eve
     let constraint_ir = lifecycle_ir("drop_unique_constraint_then_fk", constraint_ops);
 
     for dialect in [
-        SqlDialect::Postgres,
-        SqlDialect::Mysql,
-        SqlDialect::Sqlite,
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
     ] {
         // The UNIQUE-CONSTRAINT artifact is PostgreSQL/MySQL-only. `addConstraint`
         // of a unique constraint is declared `unsupported` on SQLite (there is no
         // in-place ADD CONSTRAINT), so on SQLite that IR is refused at its FIRST op
         // and never reaches the candidate-key check this test exists to pin. The
         // unique-INDEX artifact is portable on all three and carries SQLite here.
-        let artifacts: Vec<(&str, &MigrationIr)> = if matches!(dialect, SqlDialect::Sqlite) {
+        let artifacts: Vec<(&str, &MigrationIr)> = if dialect == &zero_migrate::SQLITE {
             vec![("drop unique index", &index_ir)]
         } else {
             vec![
@@ -608,7 +620,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
     .expect("base fixture deserializes");
     let live_snapshot = fold_ops(
         &base.ops,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         PROJECT_SCHEMA,
         &support::no_inject("app"),
     )
@@ -632,7 +644,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
     let added = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &no_inject_policy(),
     )
     .lower(&add, &live)
@@ -665,7 +677,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
     let folded_after = fold_ops_onto(
         &live_snapshot,
         &add.ops,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         PROJECT_SCHEMA,
         &support::no_inject("app"),
     )
@@ -683,7 +695,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
     let declared = canonical_fixture("mysql_drop_composite_fk_base");
     let declared_snapshot = fold_ops(
         &declared.ops,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         PROJECT_SCHEMA,
         &support::no_inject("app"),
     )
@@ -703,7 +715,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
     let dropped = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &no_inject_policy(),
     )
     .lower(&drop, &declared_live)
@@ -751,7 +763,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
     .expect("base fixture deserializes");
     let mut snapshot = fold_ops(
         &base.ops,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         PROJECT_SCHEMA,
         &support::no_inject("app"),
     )
@@ -803,7 +815,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
     let error = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &no_inject_policy(),
     )
     .lower(&add, &live)
@@ -821,7 +833,7 @@ fn sqlite_drop_then_add_change_uses_the_prior_rebuild_shape() {
     let declared = canonical_fixture("sqlite_changed_fk_base");
     let live_snapshot = fold_ops(
         &declared.ops,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         PROJECT_SCHEMA,
         &support::no_inject("app"),
     )
@@ -857,7 +869,7 @@ fn sqlite_drop_then_add_change_uses_the_prior_rebuild_shape() {
     let steps = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &no_inject_policy(),
     )
     .lower_steps(&changed, &live)
@@ -882,9 +894,9 @@ fn sqlite_drop_then_add_change_uses_the_prior_rebuild_shape() {
 
 fn assert_rejected_on_every_dialect(label: &str, ir: &MigrationIr) {
     for dialect in [
-        SqlDialect::Postgres,
-        SqlDialect::Mysql,
-        SqlDialect::Sqlite,
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
     ] {
         let Err(error) = validate_ir(ir, dialect) else {
             panic!("{label} must be rejected on {dialect:?}");
@@ -1071,7 +1083,7 @@ fn sqlite_observes_match_simple_for_partially_null_local_tuples() {
     let migrations = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &no_inject_policy(),
     )
     .lower(&ir, &LiveSchema::default())
@@ -1175,7 +1187,11 @@ fn repeated_column_level_references_remain_independent_single_column_constraints
     }))
     .expect("column-reference fixture must deserialize");
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
+    ] {
         let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &LiveSchema::default())
             .unwrap_or_else(|error| panic!("column references lower on {dialect:?}: {error}"));
@@ -1225,7 +1241,7 @@ async fn live_postgres_composite_fk_introspection_and_policy_drift() {
         let migrations = IrAuthor::new(
             &schema,
             OWNER,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())
@@ -1237,7 +1253,7 @@ async fn live_postgres_composite_fk_introspection_and_policy_drift() {
                 .map_err(|error| format!("apply {}: {error}", migration.name))?;
         }
 
-        let expected = snapshot_schema(&session, &schema)
+        let expected = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("introspect composite FK: {error}"))?;
         let foreign_key = expected
@@ -1273,7 +1289,7 @@ async fn live_postgres_composite_fk_introspection_and_policy_drift() {
             ))
             .await
             .map_err(|error| format!("mutate composite FK policy: {error}"))?;
-        let actual = snapshot_schema(&session, &schema)
+        let actual = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("re-introspect changed composite FK: {error}"))?;
         let drift = diff_snapshots(&expected, &actual);

@@ -30,7 +30,7 @@ use tempfile::TempDir;
 use zero_migrate::apply::executor::{RollbackOptions, RollbackTarget};
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::{MigrationEngine, MigrationIr, SqlDialect, SqliteBackend};
+use zero_migrate::{MigrationEngine, MigrationIr, SqliteBackend, SQLITE};
 
 use zero_migrate_node::verbs::rollback_with_locked_backend;
 
@@ -154,7 +154,7 @@ async fn deploy(be: &SqliteBackend, envelopes: &[&str]) -> Vec<String> {
             &parsed,
             be,
             &policy,
-            SqlDialect::Sqlite,
+            &SQLITE,
             PROJECT_SCHEMA,
             OWNER_APP,
             &BTreeMap::new(),

@@ -19,11 +19,9 @@ use zero_migrate::model::expr::{BinaryOp, Expr};
 use zero_migrate::model::ir::{
     ColType, IrColumn, IrConstraint, IrConstraintKind, IrScalar, MigrationIr, Op,
 };
-use zero_migrate::model::support::SqlDialect;
 use zero_migrate::model::validate::validate_ir_scoped;
-use zero_migrate::{
-    IrAuthor, IrFlagsOverride, LiveSchema, SchemaScope, CURRENT_IR_VERSION,
-};
+use zero_migrate::DialectId;
+use zero_migrate::{IrAuthor, IrFlagsOverride, LiveSchema, SchemaScope, CURRENT_IR_VERSION};
 
 fn ir(op: Op) -> MigrationIr {
     MigrationIr {
@@ -45,7 +43,7 @@ fn pg_sql(op: Op) -> Vec<String> {
     IrAuthor::new(
         "app",
         "app_nv",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject("app"),
     )
     .lower(&ir(op), &LiveSchema::default())
@@ -55,7 +53,7 @@ fn pg_sql(op: Op) -> Vec<String> {
     .collect()
 }
 
-fn validates(op: Op, dialect: SqlDialect) -> bool {
+fn validates(op: Op, dialect: &DialectId) -> bool {
     validate_ir_scoped(&ir(op), dialect, Some(&SchemaScope::Unconfined)).is_ok()
 }
 
@@ -165,26 +163,35 @@ fn pg_validate_constraint_renders_validate_constraint() {
 
 #[test]
 fn not_valid_fk_is_postgres_only() {
-    assert!(validates(fk_not_valid(Some(true)), SqlDialect::Postgres));
-    assert!(!validates(fk_not_valid(Some(true)), SqlDialect::Sqlite));
-    assert!(!validates(fk_not_valid(Some(true)), SqlDialect::Mysql));
+    assert!(validates(fk_not_valid(Some(true)), &zero_migrate::POSTGRES));
+    assert!(!validates(fk_not_valid(Some(true)), &zero_migrate::SQLITE));
+    assert!(!validates(fk_not_valid(Some(true)), &zero_migrate::MYSQL));
     // A plain FK (no notValid) is still portable to PG + MySQL.
-    assert!(validates(fk_not_valid(None), SqlDialect::Postgres));
-    assert!(validates(fk_not_valid(None), SqlDialect::Mysql));
+    assert!(validates(fk_not_valid(None), &zero_migrate::POSTGRES));
+    assert!(validates(fk_not_valid(None), &zero_migrate::MYSQL));
 }
 
 #[test]
 fn not_valid_check_is_postgres_only() {
-    assert!(validates(check_not_valid(Some(true)), SqlDialect::Postgres));
-    assert!(!validates(check_not_valid(Some(true)), SqlDialect::Sqlite));
-    assert!(!validates(check_not_valid(Some(true)), SqlDialect::Mysql));
+    assert!(validates(
+        check_not_valid(Some(true)),
+        &zero_migrate::POSTGRES
+    ));
+    assert!(!validates(
+        check_not_valid(Some(true)),
+        &zero_migrate::SQLITE
+    ));
+    assert!(!validates(
+        check_not_valid(Some(true)),
+        &zero_migrate::MYSQL
+    ));
 }
 
 #[test]
 fn validate_constraint_op_is_postgres_only() {
-    assert!(validates(validate_constraint(), SqlDialect::Postgres));
-    assert!(!validates(validate_constraint(), SqlDialect::Sqlite));
-    assert!(!validates(validate_constraint(), SqlDialect::Mysql));
+    assert!(validates(validate_constraint(), &zero_migrate::POSTGRES));
+    assert!(!validates(validate_constraint(), &zero_migrate::SQLITE));
+    assert!(!validates(validate_constraint(), &zero_migrate::MYSQL));
 }
 
 #[test]
@@ -216,7 +223,7 @@ fn not_valid_on_create_time_constraint_is_refused_everywhere() {
         schema: None,
         existence_guard: None,
     };
-    assert!(!validates(create(Some(true)), SqlDialect::Postgres));
+    assert!(!validates(create(Some(true)), &zero_migrate::POSTGRES));
 
     // This CHECK fixture cannot carry the `Some(false)` half or an absent control:
     // its body references `qty`, which the table never declares, so validate refuses
@@ -277,7 +284,7 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
 
     for spelling in [Some(true), Some(false)] {
         assert!(
-            !validates(create(spelling), SqlDialect::Postgres),
+            !validates(create(spelling), &zero_migrate::POSTGRES),
             "createTable FOREIGN KEY notValid={spelling:?} must be refused at validate"
         );
     }
@@ -286,7 +293,7 @@ fn create_time_not_valid_is_refused_in_both_spellings_by_validate() {
     // the facet absent clears validate. Without it, both lines above would pass on a
     // fixture that validate rejects for some unrelated reason.
     assert!(
-        validates(create(None), SqlDialect::Postgres),
+        validates(create(None), &zero_migrate::POSTGRES),
         "the same createTable without the facet must clear validate"
     );
 }

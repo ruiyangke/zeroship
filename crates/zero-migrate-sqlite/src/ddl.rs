@@ -340,4 +340,32 @@ impl DdlEmitter for SqliteEmitter {
         // unqualified `DROP INDEX <name>` so the index is ACTUALLY dropped.
         format!("DROP INDEX {}", sqlite_ident(idx_name))
     }
+
+    fn create_partition(
+        &self,
+        _name: &str,
+        _of: &str,
+        _bounds: &zero_migrate_ir::ir::PartitionBounds,
+    ) -> Option<(String, String)> {
+        // SQLite's engine projection collapses authored partitions into their
+        // parent table; it has no partition-relation DDL to spell.
+        None
+    }
+
+    fn attach_partition(
+        &self,
+        _parent: &str,
+        _name: &str,
+        _bounds: &zero_migrate_ir::ir::PartitionBounds,
+    ) -> Option<(String, String)> {
+        None
+    }
+
+    fn detach_partition(&self, _parent: &str, _name: &str, _concurrently: bool) -> Option<String> {
+        None
+    }
+
+    fn drop_partition(&self, _name: &str, _cascade: bool) -> Option<String> {
+        None
+    }
 }

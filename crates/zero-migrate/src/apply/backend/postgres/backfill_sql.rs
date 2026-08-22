@@ -43,7 +43,10 @@ fn validate_ident(what: &str, value: &str) -> Result<(), ApplyError> {
 }
 
 fn quote_ident(value: &str) -> Result<String, ApplyError> {
-    Ok(crate::render::dml::quote_ident_checked(value)?)
+    Ok(crate::render::dml::quote_ident_checked_for_dialect(
+        value,
+        &super::DIALECT,
+    )?)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1741,7 +1744,10 @@ pub(super) async fn read_progress_entries<D: SqlSession>(
     if !table_exists {
         return Ok(Vec::new());
     }
-    let meta = crate::render::dml::quote_ident_checked(&cfg.confinement.meta_schema)?;
+    let meta = crate::render::dml::quote_ident_checked_for_dialect(
+        &cfg.confinement.meta_schema,
+        &super::DIALECT,
+    )?;
     let rows = conn
         .query(
             &format!(
@@ -2351,7 +2357,7 @@ pub(super) async fn run_backfill<D: SqlSession>(
         });
     }
 
-    let guard = SqlGuard::new(cfg.guard_config());
+    let guard = SqlGuard::new(cfg.guard_config_for(&super::DIALECT));
     let end_sql = build_end_cursor_sql(spec, &cursor)?;
     guard
         .check(&end_sql)

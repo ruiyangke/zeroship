@@ -8,7 +8,7 @@ use zero_migrate::model::ir::{
     Privilege, SelectAst, TableRef, ViewQuery, CURRENT_IR_VERSION,
 };
 use zero_migrate::model::validate::{
-    validate_expr, validate_ir_scoped, SqlDialect, TargetScope, CODE_DIALECT_UNSUPPORTED,
+    validate_expr, validate_ir_scoped, TargetScope, CODE_DIALECT_UNSUPPORTED,
     CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zero_migrate::render::dml::assemble_backfill_clauses;
@@ -139,18 +139,18 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         let kind = pg_only_expr_kind(&expr).expect("sample must be PG-only");
         assert!(seen.insert(kind), "{kind} sampled twice");
 
-        validate_expr(&expr, SqlDialect::Postgres, &scope, 0)
+        validate_expr(&expr, &zero_migrate::POSTGRES, &scope, 0)
             .unwrap_or_else(|err| panic!("{kind} must validate on Postgres: {err:?}"));
         let mut set = BTreeMap::new();
         set.insert("out".to_string(), IrValue::Expr(expr.clone()));
-        let rendered = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, Some(&expr))
+        let rendered = assemble_backfill_clauses(&zero_migrate::POSTGRES, "t", &set, Some(&expr))
             .unwrap_or_else(|err| panic!("{kind} must render on Postgres: {err:?}"));
         assert!(
             !rendered.set_clause.trim().is_empty(),
             "{kind} PG render is empty"
         );
 
-        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
             let err = validate_expr(&expr, dialect, &scope, 0)
                 .expect_err("PG-only expression must refuse off Postgres");
             let expected_code = if kind == "UuidV7" {
@@ -176,8 +176,8 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
     };
 
     for (validator_dialect, sql_dialect) in [
-        (SqlDialect::Postgres, SqlDialect::Postgres),
-        (SqlDialect::Mysql, SqlDialect::Mysql),
+        (&zero_migrate::POSTGRES, &zero_migrate::POSTGRES),
+        (&zero_migrate::MYSQL, &zero_migrate::MYSQL),
     ] {
         validate_expr(&expr, validator_dialect, &scope, 0)
             .unwrap_or_else(|err| panic!("regex must validate on {validator_dialect:?}: {err:?}"));
@@ -191,10 +191,10 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
         );
     }
 
-    let err = validate_expr(&expr, SqlDialect::Sqlite, &scope, 0)
+    let err = validate_expr(&expr, &zero_migrate::SQLITE, &scope, 0)
         .expect_err("regex must fail closed on SQLite");
     assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
-    assert_eq!(err.dialect, SqlDialect::Sqlite.id());
+    assert_eq!(err.dialect, zero_migrate::SQLITE.clone());
     assert!(err.reason.contains("SQLite"), "got: {err}");
 }
 
@@ -451,16 +451,16 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
         assert!(seen.insert(kind), "{kind} sampled twice");
 
         let ir = ir_with(op.clone());
-        validate_ir_scoped(&ir, SqlDialect::Postgres, Some(&platform_scope)).unwrap_or_else(|err| {
-            panic!("{kind} must validate on PG under platform scope: {err:?}")
-        });
+        validate_ir_scoped(&ir, &zero_migrate::POSTGRES, Some(&platform_scope)).unwrap_or_else(
+            |err| panic!("{kind} must validate on PG under platform scope: {err:?}"),
+        );
 
         // The operator charter GRANTS the vendor capability each sample needs; the
         // platform scope beside it only says which schemas are in bounds.
         let migrations = IrAuthor::new(
             "app",
             "app_test",
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &support::operator_charter("app"),
         )
         .with_schema_scope(platform_scope.clone())
@@ -473,14 +473,14 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             "{kind} PG lower produced no SQL"
         );
 
-        let confined_err = validate_ir_scoped(&ir, SqlDialect::Postgres, Some(&confined_scope))
+        let confined_err = validate_ir_scoped(&ir, &zero_migrate::POSTGRES, Some(&confined_scope))
             .expect_err("confined PG scope must refuse vendor ops by capability");
         assert_eq!(
             confined_err.code, CODE_VENDOR_OP_DENIED,
             "{kind} under confined PG must fail as VENDOR_OP_DENIED, got {confined_err:?}"
         );
 
-        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
             let err = validate_ir_scoped(&ir, dialect, Some(&platform_scope))
                 .expect_err("PG vendor op must refuse off Postgres");
             assert_eq!(

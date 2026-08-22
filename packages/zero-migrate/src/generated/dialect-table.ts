@@ -6,7 +6,7 @@
 //
 // One row per (op-kind, variant) recording the token's disposition on each
 // dialect, KEYED BY DIALECT ID — the TS mirror of
-// crates/zero-migrate/src/model/dialect_table.rs.
+// crates/zero-migrate/tests/dialect_matrix/dialect_table.rs.
 //
 // There is deliberately NO `Dialect` union here. A closed union of the shipping
 // dialect names is the same "core enumerates the vendors" shape as a struct field
@@ -16,8 +16,8 @@
 //
 // The TS drift test pins this file (and the Rust one) against the sidecar, and
 // carries the census floor that a keyed-by-data scan needs. NOTHING outside this
-// file reads the TS mirror; the Rust table, by contrast, is read by the engine's
-// op_support lookup.
+// file reads the TS mirror. Production Rust support decisions likewise come from
+// the selected registered backend, not from the generated Rust artifact.
 
 export type Disposition = "portable" | "transparentDegradable" | "vendor" | "unsupported";
 

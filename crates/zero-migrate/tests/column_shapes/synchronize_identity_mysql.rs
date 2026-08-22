@@ -104,7 +104,7 @@ use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
 use zero_migrate::{
-    ApplyError, ExecutorConfig, IrAuthor, LiveSchema, PlanStep, SqlDialect, SynchronizeIdentityStep,
+    ApplyError, ExecutorConfig, IrAuthor, LiveSchema, PlanStep, SynchronizeIdentityStep,
 };
 
 const OWNER: &str = "app_synchronize_identity_mysql";
@@ -148,7 +148,7 @@ fn step(database: &str, name: &str) -> SynchronizeIdentityStep {
         }]
     }))
     .expect("synchronizeIdentity IR parses");
-    let plan = IrAuthor::new(database, OWNER, SqlDialect::Mysql, &policy)
+    let plan = IrAuthor::new(database, OWNER, &zero_migrate::MYSQL, &policy)
         .lower_plan(&ir, &LiveSchema::default())
         .expect("synchronizeIdentity IR lowers for MySQL");
     match plan.steps.into_iter().next().expect("exactly one step") {

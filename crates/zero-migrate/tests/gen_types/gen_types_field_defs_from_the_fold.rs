@@ -74,7 +74,7 @@ use crate::support::field_defs_corpus::{
     corpus_lines, measure_corpus, parse, read_stem, CARRIERS, DIALECTS, SCHEMA, STEMS,
 };
 use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::{render_artifacts, EffectivePolicy, SqlDialect};
+use zero_migrate::{render_artifacts, EffectivePolicy};
 
 const CORPUS_GOLDEN: &str = "tests/goldens/field_defs_artifacts.txt";
 
@@ -219,7 +219,7 @@ fn the_corpus_golden_actually_covers_the_map_that_moved() {
 
 fn runtime_field(
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
     policy: &EffectivePolicy,
     table: &str,
     column: &str,
@@ -290,7 +290,7 @@ fn a_dropped_unique_constraint_does_not_outlive_itself() {
 #[test]
 fn a_dropped_check_constraint_does_not_outlive_itself() {
     let policy = support::no_inject(SCHEMA);
-    let pg = SqlDialect::Postgres;
+    let pg = &zero_migrate::POSTGRES;
 
     let kept = carrier("check_bound_kept");
     let bound = runtime_field(&kept, pg, &policy, "scores", "score");
@@ -323,7 +323,7 @@ fn a_dropped_check_constraint_does_not_outlive_itself() {
     );
     assert_eq!(membership.get("enum"), None, "and its membership with it");
 
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         let error = render_artifacts(&carrier("check_bound_dropped"), dialect, SCHEMA, &policy)
             .expect_err("addConstraint(check) is PostgreSQL-only")
             .to_string();
@@ -368,7 +368,7 @@ fn a_re_added_column_does_not_inherit_the_dropped_columns_constraints() {
         );
     }
 
-    let pg = SqlDialect::Postgres;
+    let pg = &zero_migrate::POSTGRES;
     let field = runtime_field(
         &carrier("check_column_dropped_and_readded"),
         pg,
@@ -647,7 +647,7 @@ const CONTROL_ACCEPTANCES: usize = 95;
 #[test]
 fn the_refusal_probes_still_exercise_the_arms_they_name() {
     let open = support::no_inject(SCHEMA);
-    let outcome = |name: &str, dialect: SqlDialect| {
+    let outcome = |name: &str, dialect: &zero_migrate::DialectId| {
         let (_, source) = REFUSAL_PROBES
             .iter()
             .find(|(n, _)| *n == name)
@@ -656,7 +656,7 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
             .map(|_| "rendered".to_string())
             .unwrap_or_else(|e| e.to_string())
     };
-    let pg = SqlDialect::Postgres;
+    let pg = &zero_migrate::POSTGRES;
     assert!(
         outcome("table_created_twice", pg).contains("users"),
         "the duplicate-create probe must name the table: {}",
@@ -687,9 +687,9 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
          reference needs only the name"
     );
     assert!(
-        outcome("column_names_a_dropped_enum", SqlDialect::Sqlite).contains("tier"),
+        outcome("column_names_a_dropped_enum", &zero_migrate::SQLITE).contains("tier"),
         "but SQLite inlines the value list, so it fails closed and names the type: {}",
-        outcome("column_names_a_dropped_enum", SqlDialect::Sqlite)
+        outcome("column_names_a_dropped_enum", &zero_migrate::SQLITE)
     );
     assert!(
         outcome("add_a_column_to_a_missing_table", pg).contains("ghosts"),
@@ -741,7 +741,7 @@ fn the_corpus_golden_records_both_refusals_and_renders() {
                 .1,
         ),
         &support::no_inject(SCHEMA),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &mut out,
     );
     assert_eq!(

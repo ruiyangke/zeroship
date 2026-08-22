@@ -35,11 +35,15 @@ use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::schema::query::{
     build_create_table_with_fks_for_dialect_scoped_statements, FkEmission,
 };
-use zero_migrate::{render_artifacts, EffectivePolicy, SqlDialect};
+use zero_migrate::{render_artifacts, DialectId, EffectivePolicy};
 
 pub const SCHEMA: &str = "public";
 
-pub const DIALECTS: [SqlDialect; 3] = [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql];
+pub const DIALECTS: [&DialectId; 3] = [
+    &zero_migrate::POSTGRES,
+    &zero_migrate::SQLITE,
+    &zero_migrate::MYSQL,
+];
 
 /// The recorded op fixtures - the same 27 `tests/op_fixture_goldens.rs` owns and the
 /// same list consumers 1 and 2 drove. Real drained recorder envelopes, already
@@ -359,7 +363,7 @@ pub fn sqlite_rebuild_create(
         table,
         schema,
         &FkEmission::Inline,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         true,
         policy,
     )
@@ -398,10 +402,19 @@ pub fn corpus_lines(
     label: &str,
     ops: &[Op],
     policy: &EffectivePolicy,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     out: &mut Vec<String>,
 ) {
-    let d = format!("{dialect:?}");
+    // Preserve the closed enum's historical debug labels because these strings
+    // are part of the corpus golden wire, not merely assertion context.
+    let d = if dialect == &zero_migrate::POSTGRES {
+        "Postgres"
+    } else if dialect == &zero_migrate::SQLITE {
+        "Sqlite"
+    } else {
+        assert_eq!(dialect, &zero_migrate::MYSQL);
+        "Mysql"
+    };
     let rendered = match render_artifacts(ops, dialect, SCHEMA, policy) {
         Ok(rendered) => rendered,
         Err(error) => {
@@ -428,7 +441,7 @@ pub fn corpus_lines(
                 serde_json::to_string(def).expect("a FieldDef serialises")
             ));
         }
-        if dialect == SqlDialect::Sqlite {
+        if dialect == &zero_migrate::SQLITE {
             match sqlite_rebuild_create(table, schema, policy) {
                 Ok(sql) => out.push(format!("{label}|{d}|sqlite_create|{table}|{sql}")),
                 Err(error) => {

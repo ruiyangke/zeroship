@@ -53,7 +53,7 @@ use zero_migrate::render::declarative::{
 };
 use zero_migrate::render::lower::IrAuthor;
 use zero_migrate::{
-    ColType, IrFlagsOverride, LiveSchema, MigrationIr, Op, PlanStep, SqlDialect, CURRENT_IR_VERSION,
+    ColType, IrFlagsOverride, LiveSchema, MigrationIr, Op, PlanStep, CURRENT_IR_VERSION,
 };
 
 const PROJECT: &str = "app";
@@ -80,7 +80,7 @@ fn descriptor(ty: &str, required: bool) -> CollectionDescriptor {
 fn live_with(
     ty: &str,
     required: bool,
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
     effective: &zero_migrate_policy::EffectivePolicy,
 ) -> SchemaSnapshot {
     desired_snapshot_for_dialect(PROJECT, &[descriptor(ty, required)], dialect, effective)
@@ -104,14 +104,17 @@ fn one_op_ir(op: Op) -> MigrationIr {
     }
 }
 
-fn lower_steps_for(dialect: SqlDialect, op: Op) -> Result<Vec<zero_migrate::PlanStep>, String> {
+fn lower_steps_for(
+    dialect: &zero_migrate::DialectId,
+    op: Op,
+) -> Result<Vec<zero_migrate::PlanStep>, String> {
     let author = IrAuthor::new(PROJECT, APP, dialect, &support::confined_charter());
     author
         .lower_steps(&one_op_ir(op), &LiveSchema::default())
         .map_err(|e| e.to_string())
 }
 
-fn lower_for(dialect: SqlDialect, op: Op) -> Result<(), String> {
+fn lower_for(dialect: &zero_migrate::DialectId, op: Op) -> Result<(), String> {
     lower_steps_for(dialect, op).map(|_| ())
 }
 
@@ -159,7 +162,7 @@ fn set_column_not_null_op() -> Op {
 /// facet back from a live server.
 #[test]
 fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postgres() {
-    let steps = lower_steps_for(SqlDialect::Mysql, set_column_type_op())
+    let steps = lower_steps_for(&zero_migrate::MYSQL, set_column_type_op())
         .expect("MySQL lowers a retype to a restate step rather than refusing");
     assert_eq!(
         steps
@@ -178,7 +181,7 @@ fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postg
 
     // The control. A change that stopped PostgreSQL rendering its own retype would
     // satisfy the assertions above while breaking the dialect that has the statement.
-    lower_for(SqlDialect::Postgres, set_column_type_op())
+    lower_for(&zero_migrate::POSTGRES, set_column_type_op())
         .expect("PostgreSQL still lowers a column type change");
 }
 
@@ -187,7 +190,7 @@ fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postg
 /// author did not mention. The structured step therefore carries only the bare type.
 #[test]
 fn a_mysql_bounded_string_retype_strips_only_the_renderer_owned_collation() {
-    let steps = lower_steps_for(SqlDialect::Mysql, set_bounded_string_column_type_op())
+    let steps = lower_steps_for(&zero_migrate::MYSQL, set_bounded_string_column_type_op())
         .expect("MySQL lowers a bounded-string retype");
     let restate = steps
         .iter()
@@ -204,14 +207,14 @@ fn a_mysql_bounded_string_retype_strips_only_the_renderer_owned_collation() {
 
 #[test]
 fn the_ir_lane_refuses_a_mysql_nullability_change_and_still_lowers_it_for_postgres() {
-    let refused = lower_for(SqlDialect::Mysql, set_column_not_null_op())
+    let refused = lower_for(&zero_migrate::MYSQL, set_column_not_null_op())
         .expect_err("MySQL must refuse rather than emit PostgreSQL SET NOT NULL");
     assert!(
         refused.contains("setColumnNotNull"),
         "the refusal names the authored op: {refused}"
     );
 
-    lower_for(SqlDialect::Postgres, set_column_not_null_op())
+    lower_for(&zero_migrate::POSTGRES, set_column_not_null_op())
         .expect("PostgreSQL still lowers a nullability change");
 }
 
@@ -229,7 +232,7 @@ fn a_mysql_default_change_is_rendered_with_backticks_rather_than_refused() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &support::confined_charter(),
     );
     let steps = author
@@ -273,13 +276,13 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
     let desired = desired_snapshot_for_dialect(
         PROJECT,
         &[descriptor("integer", true)],
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &effective,
     )
     .expect("desired snapshot");
-    let live = live_with("string", true, SqlDialect::Mysql, &effective);
+    let live = live_with("string", true, &zero_migrate::MYSQL, &effective);
 
-    let err = DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Mysql)
+    let err = DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::MYSQL)
         .diff(&desired, &live, &HashMap::new(), &[], &effective)
         .expect_err("the differ must refuse a MySQL column change rather than plan invalid DDL");
     let text = err.to_string();
@@ -296,12 +299,12 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
     let pg_desired = desired_snapshot_for_dialect(
         PROJECT,
         &[descriptor("integer", true)],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &effective,
     )
     .expect("desired snapshot");
-    let pg_live = live_with("string", true, SqlDialect::Postgres, &effective);
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Postgres)
+    let pg_live = live_with("string", true, &zero_migrate::POSTGRES, &effective);
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::POSTGRES)
         .diff(&pg_desired, &pg_live, &HashMap::new(), &[], &effective)
         .expect("PostgreSQL still diffs a column type change");
 }

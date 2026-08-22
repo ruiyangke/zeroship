@@ -36,7 +36,7 @@ use tempfile::TempDir;
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
     apply::executor::LockMode, fold_ops, model::ir::Op, resolve_create_table_policy, Approval,
-    ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, SchemaSnapshot, SqlDialect,
+    ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, SchemaSnapshot,
     SqliteBackend,
 };
 
@@ -196,8 +196,8 @@ const RENAME_FORMAT_IR: &str = r#"{
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::no_inject(APP);
     let snapshot =
-        fold_ops(history, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
-    let sqlite_schemas = single_fold::fold(history, SqlDialect::Sqlite, PROJECT, &effective)
+        fold_ops(history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
+    let sqlite_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
@@ -215,11 +215,16 @@ async fn apply_doc(
     let resolved = resolve_create_table_policy(&raw, &support::no_inject(APP), PROJECT)
         .expect("test IR resolves");
     let ir = serde_json::to_string(&resolved).expect("resolved IR serializes");
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject(APP));
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        &zero_migrate::SQLITE,
+        &support::no_inject(APP),
+    );
     let document = zero_migrate::model::load::load_ir_document(
         &ir,
         APP,
-        zero_migrate::model::validate::SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         registry,
         None,
     )
@@ -272,8 +277,13 @@ async fn measure(tag: &str) -> Measured {
         .snapshot_schema_sqlite()
         .await
         .expect("introspect live SQLite schema");
-    let folded = fold_ops(&ops, SqlDialect::Sqlite, PROJECT, &support::no_inject(APP))
-        .expect("fold the SQLite op stream offline");
+    let folded = fold_ops(
+        &ops,
+        &zero_migrate::SQLITE,
+        PROJECT,
+        &support::no_inject(APP),
+    )
+    .expect("fold the SQLite op stream offline");
 
     Measured { folded, live }
 }
@@ -306,7 +316,7 @@ fn baseline_fold() -> SchemaSnapshot {
         .expect("the create IR resolves");
     fold_ops(
         &resolved.ops,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         PROJECT,
         &support::no_inject(APP),
     )
@@ -466,7 +476,7 @@ async fn does_the_sqlite_inline_check_keep_its_literals_while_its_reference_move
                 .expect("the never-renamed IR resolves")
                 .ops
         },
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         PROJECT,
         &support::no_inject(APP),
     )

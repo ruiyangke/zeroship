@@ -23,20 +23,25 @@
 //! that asks a renderer who it is gets an honest answer instead of a panic.
 
 use std::collections::BTreeMap;
-use zero_migrate_backend::dml::DmlError;
+use zero_migrate_backend::dml::{
+    BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflict, OnConflictRenderRequest,
+};
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
 use zero_migrate_backend::fold::{
-    AuthorTypeOverride, CatalogFoldPolicy, FoldCursorColumnContract, FoldDatabaseFeature,
-    ReferenceTextStorage,
+    AuthorTypeOverride, CatalogFoldPolicy, CatalogFoldRefusal, FoldCursorColumnContract,
+    FoldDatabaseFeature, ReferenceTextStorage, SnapshotProvenanceStrength,
 };
-use zero_migrate_backend::renderer::DmlRenderer;
-use zero_migrate_backend::schema::SchemaRenderer;
+use zero_migrate_backend::renderer::{DmlRenderer, FeatureSupportKey, MaterializedNamedTypeOp};
+use zero_migrate_backend::schema::{
+    AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest, SchemaRenderer,
+};
 use zero_migrate_backend::snapshot::{
     ColumnCollationSnapshot, ColumnSnapshot, IdDefaultSnapshot, PartitionSnapshot,
     SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use zero_migrate_backend::step::BindValue;
+use zero_migrate_backend::validation::{Disposition, ValidationPolicy, ValidationRefusal};
 use zero_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
 };
@@ -46,7 +51,7 @@ use zero_migrate_ir::backend::{
 };
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
-use zero_migrate_ir::ir::{ColType, IrScalar, Op, TableRef, ValueFormat};
+use zero_migrate_ir::ir::{ColType, IrScalar, IrValue, Op, TableRef, ValueFormat};
 use zero_migrate_ir::precondition::PreconditionCheck;
 use zero_migrate_ir::validate::{
     validate_expr, ExprDialectFeature, ExprDialectRejection, ExprDialectValidator,
@@ -90,7 +95,115 @@ struct DuckDbExistenceProbePolicy;
 #[derive(Debug)]
 struct DuckDbCatalogFoldPolicy;
 
+#[derive(Debug)]
+struct DuckDbValidationPolicy;
+
+impl ValidationPolicy for DuckDbValidationPolicy {
+    fn op_disposition(&self, _kind: &str, _variant: &str) -> Disposition {
+        // This stub deliberately supports no engine operation shape. Its own
+        // required answer is explicit and fail-closed for every current or
+        // future token; it never borrows a shipping backend's table.
+        Disposition::Unsupported
+    }
+
+    fn canonical_identifier(&self, identifier: &str) -> String {
+        identifier.to_ascii_lowercase()
+    }
+
+    fn catalog_proves_uuid_format(
+        &self,
+        native_uuid: bool,
+        catalog_uuid_format_check: bool,
+    ) -> bool {
+        native_uuid || catalog_uuid_format_check
+    }
+
+    fn lowered_reference_storage(&self, ty: &ColType) -> String {
+        format!("{ty:?}")
+    }
+
+    fn tracks_constraint_names(&self) -> bool {
+        true
+    }
+
+    fn tracks_relation_type_namespace(&self) -> bool {
+        false
+    }
+
+    fn supports_native_partitioning(&self) -> bool {
+        false
+    }
+
+    fn vendor_capability_refusal(
+        &self,
+        capability: zero_migrate_ir::capability::VendorCapability,
+    ) -> Option<ValidationRefusal> {
+        Some(ValidationRefusal {
+            reason: format!(
+                "DuckDB stub refuses vendor capability {:?}",
+                capability.as_token()
+            ),
+            suggested_fix: "use a DuckDB-supported operation".to_string(),
+        })
+    }
+
+    fn deferrable_foreign_key_refusal(&self) -> ValidationRefusal {
+        ValidationRefusal {
+            reason: "DuckDB stub does not validate deferrable foreign keys".to_string(),
+            suggested_fix: "omit the deferrable options".to_string(),
+        }
+    }
+
+    fn inline_trigger_body_refusal(&self) -> ValidationRefusal {
+        ValidationRefusal {
+            reason: "DuckDB stub does not validate inline trigger bodies".to_string(),
+            suggested_fix: "omit the trigger".to_string(),
+        }
+    }
+
+    fn trigger_event_count_refusal(&self, event_count: usize) -> Option<ValidationRefusal> {
+        (event_count > 1).then(|| ValidationRefusal {
+            reason: "DuckDB stub accepts one trigger event".to_string(),
+            suggested_fix: "split the trigger".to_string(),
+        })
+    }
+
+    fn sequence_default_refusal(&self, position: &str) -> ValidationRefusal {
+        ValidationRefusal {
+            reason: format!("DuckDB stub refuses a sequence default at {position}"),
+            suggested_fix: "remove the sequence default".to_string(),
+        }
+    }
+
+    fn virtual_generated_column_refusal(&self, column: &str) -> ValidationRefusal {
+        ValidationRefusal {
+            reason: format!("DuckDB stub refuses virtual generated column {column:?}"),
+            suggested_fix: "use a stored generated column".to_string(),
+        }
+    }
+
+    fn identity_placement_refusal(
+        &self,
+        column: &str,
+        _always: bool,
+        _primary_key_columns: Option<&[String]>,
+        _is_add_column: bool,
+    ) -> Option<ValidationRefusal> {
+        Some(ValidationRefusal {
+            reason: format!("DuckDB stub refuses identity column {column:?}"),
+            suggested_fix: "remove identity".to_string(),
+        })
+    }
+}
+
 impl CatalogFoldPolicy for DuckDbCatalogFoldPolicy {
+    fn snapshot_provenance_strength(
+        &self,
+        _table: &TableSnapshot,
+    ) -> Option<SnapshotProvenanceStrength> {
+        None
+    }
+
     fn allocate_implicit_relation_name(
         &self,
         default_name: &str,
@@ -145,6 +258,10 @@ impl CatalogFoldPolicy for DuckDbCatalogFoldPolicy {
         Ok(None)
     }
 
+    fn canonical_rename_type_spelling(&self, ty: &str) -> String {
+        ty.trim().to_ascii_lowercase()
+    }
+
     fn inline_enum_check(
         &self,
         _column: &str,
@@ -159,6 +276,35 @@ impl CatalogFoldPolicy for DuckDbCatalogFoldPolicy {
 
     fn folds_check_constraint_identity(&self) -> bool {
         false
+    }
+
+    fn refusal_message(&self, refusal: CatalogFoldRefusal) -> &'static str {
+        match refusal {
+            CatalogFoldRefusal::AlterPrimaryKeyRowidGeneration => {
+                "DuckDB refuses primary-key rowid generation in its catalog fold"
+            }
+            CatalogFoldRefusal::AddColumnIdentity => {
+                "DuckDB refuses added-column identity in its catalog fold"
+            }
+            CatalogFoldRefusal::CreateTableCheckConstraint => {
+                "DuckDB refuses a create-table CHECK in its catalog fold"
+            }
+            CatalogFoldRefusal::CreateTableUniqueConstraint => {
+                "DuckDB refuses a create-table UNIQUE in its catalog fold"
+            }
+            CatalogFoldRefusal::CreateTableExclusionConstraint => {
+                "DuckDB refuses a create-table exclusion constraint in its catalog fold"
+            }
+            CatalogFoldRefusal::CreateTableNonBtreeIndex => {
+                "DuckDB refuses a non-btree create-table index in its catalog fold"
+            }
+            CatalogFoldRefusal::AddCheckConstraint => {
+                "DuckDB refuses an added CHECK in its catalog fold"
+            }
+            CatalogFoldRefusal::AddExclusionConstraint => {
+                "DuckDB refuses an added exclusion constraint in its catalog fold"
+            }
+        }
     }
 
     fn physical_type_inputs_equal(&self, _left: &ColumnSnapshot, _right: &ColumnSnapshot) -> bool {
@@ -349,6 +495,10 @@ impl DmlRenderer for DuckDbDmlRenderer {
         &DUCKDB_DESCRIPTOR
     }
 
+    fn supports(&self, cap: zero_migrate_ir::backend::Capability) -> bool {
+        self.descriptor().capabilities.contains(cap)
+    }
+
     fn preview_session_prologue(&self) -> &'static [&'static str] {
         &[]
     }
@@ -367,6 +517,48 @@ impl DmlRenderer for DuckDbDmlRenderer {
 
     fn op_support_refusal(&self, _op: &Op, _variant: &str) -> Option<&'static str> {
         Some("DuckDB backend test refusal")
+    }
+
+    fn feature_support_refusal(&self, feature: FeatureSupportKey) -> Option<&'static str> {
+        match feature {
+            FeatureSupportKey::PartialIndex
+            | FeatureSupportKey::IndexInclude
+            | FeatureSupportKey::IndexStorageParams
+            | FeatureSupportKey::IndexOnly
+            | FeatureSupportKey::IndexNullsNotDistinct
+            | FeatureSupportKey::IndexOpclass
+            | FeatureSupportKey::IndexCollation
+            | FeatureSupportKey::ExpressionIndex
+            | FeatureSupportKey::NonBtreeIndexMethod
+            | FeatureSupportKey::TableLevelForeignKey
+            | FeatureSupportKey::TableLevelUnique
+            | FeatureSupportKey::TableLevelCheckExpression
+            | FeatureSupportKey::CompositeForeignKey
+            | FeatureSupportKey::ForeignKeyNoLocalColumn
+            | FeatureSupportKey::NonIdForeignKey
+            | FeatureSupportKey::SequenceDefault
+            | FeatureSupportKey::ConstraintNotValid
+            | FeatureSupportKey::ExclusionConstraint
+            | FeatureSupportKey::AlterColumnUsing
+            | FeatureSupportKey::RenameColumnGuard
+            | FeatureSupportKey::ExistenceGuardProbe
+            | FeatureSupportKey::InsertOnConflict
+            | FeatureSupportKey::MaterializedView
+            | FeatureSupportKey::CreateOrReplaceMaterializedView
+            | FeatureSupportKey::TriggerMultipleEvents
+            | FeatureSupportKey::TriggerExecuteFunction
+            | FeatureSupportKey::TriggerTruncateEvent
+            | FeatureSupportKey::TriggerInsteadOfTiming
+            | FeatureSupportKey::TriggerStatementForEach
+            | FeatureSupportKey::TriggerBody
+            | FeatureSupportKey::TriggerWhen
+            | FeatureSupportKey::TriggerRaiseIgnore
+            | FeatureSupportKey::Comment
+            | FeatureSupportKey::Sequence
+            | FeatureSupportKey::RawViewBody
+            | FeatureSupportKey::RawSql
+            | FeatureSupportKey::PartitionDdl => Some("DuckDB backend test feature refusal"),
+        }
     }
 
     fn quote_ident(&self, ident: &str) -> String {
@@ -415,6 +607,37 @@ impl DmlRenderer for DuckDbDmlRenderer {
 
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
         push(BindValue::Bytes(bytes.to_vec()))
+    }
+
+    fn validate_assignment_semantics(
+        &self,
+        _op: &'static str,
+        _table: &str,
+        _set: &BTreeMap<String, IrValue>,
+    ) -> Result<(), DmlError> {
+        // This stub states its own simultaneous-assignment policy instead of
+        // inheriting one from a shipping backend.
+        Ok(())
+    }
+
+    fn render_on_conflict(
+        &self,
+        _request: OnConflictRenderRequest<'_>,
+        _ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "DuckDB backend test does not implement structured onConflict".to_string(),
+        ))
+    }
+
+    fn render_limited_delete(
+        &self,
+        _request: LimitedDeleteRenderRequest<'_>,
+        _ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "DuckDB backend test does not implement row-limited DELETE".to_string(),
+        ))
     }
 
     fn render_in_list(
@@ -533,6 +756,38 @@ impl DmlRenderer for DuckDbDmlRenderer {
         )))
     }
 
+    fn render_sequence_op(
+        &self,
+        _op: &Op,
+        _eff_schema: &str,
+    ) -> Result<VendorStatement, IrLowerError> {
+        Err(IrLowerError::SequenceUnsupported {
+            kind: "sequence",
+            dialect: DUCKDB,
+        })
+    }
+
+    /// The outsider must write its own answer for materialized named-type DDL;
+    /// this no-capability stub refuses rather than inheriting a default.
+    fn render_materialized_named_type_op(
+        &self,
+        _op: MaterializedNamedTypeOp<'_>,
+    ) -> Result<VendorStatement, IrLowerError> {
+        Err(IrLowerError::UnsupportedOp(
+            "DuckDB backend test does not materialize named types",
+        ))
+    }
+
+    fn render_comment_op(
+        &self,
+        _op: &Op,
+        _eff_schema: &str,
+    ) -> Result<VendorStatement, IrLowerError> {
+        Err(IrLowerError::UnsupportedOp(
+            "validated COMMENT ON unsupported dialect reached lower",
+        ))
+    }
+
     /// The newcomer WRITES ITS OWN REFUSAL, and that is the point of the method
     /// having no default body.
     ///
@@ -572,6 +827,12 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         None
     }
 
+    fn table_rebuild_policy(
+        &self,
+    ) -> Option<&'static dyn zero_migrate_backend::table_rebuild::TableRebuildPolicy> {
+        None
+    }
+
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
         format!("\"{app_id}\".\"{target}\"")
     }
@@ -607,6 +868,25 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         _live: &zero_migrate_backend::snapshot::SchemaSnapshot,
     ) -> Result<(), String> {
         Ok(())
+    }
+
+    fn unprefixed_key_storage_refusal(
+        &self,
+        _position: &str,
+        _table: &str,
+        _column: &str,
+        _evidence: zero_migrate_backend::schema::KeyStorageEvidence<'_>,
+    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+        None
+    }
+
+    fn literal_default_storage_refusal(
+        &self,
+        _column: &str,
+        _rendered_type: &str,
+        _rendered_default: &str,
+    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+        None
     }
 
     fn existing_column_change_strategy(
@@ -737,6 +1017,38 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         _schema: &serde_json::Value,
     ) -> Vec<String> {
         Vec::new()
+    }
+
+    fn add_foreign_key_statement(
+        &self,
+        _schema: &str,
+        _table: &str,
+        _clause: &str,
+    ) -> Result<String, &'static str> {
+        Err("DuckDB test backend does not implement additive foreign keys")
+    }
+
+    fn drop_foreign_key_if_exists_statement(
+        &self,
+        _schema: &str,
+        _table: &str,
+        _name: &str,
+    ) -> Result<String, &'static str> {
+        Err("DuckDB test backend does not implement idempotent foreign-key drops")
+    }
+
+    fn add_column_if_not_exists_statements(
+        &self,
+        _request: AddColumnIfNotExistsRequest<'_>,
+    ) -> Result<Vec<String>, &'static str> {
+        Err("DuckDB test backend does not implement idempotent additive columns")
+    }
+
+    fn create_index_if_not_exists_statement(
+        &self,
+        _request: CreateIndexIfNotExistsRequest<'_>,
+    ) -> Result<String, &'static str> {
+        Err("DuckDB test backend does not implement idempotent additive indexes")
     }
 }
 
@@ -874,6 +1186,7 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     let value_format: &dyn ValueFormatRenderer = &DuckDbValueFormatRenderer;
     let existence_probe: &dyn ExistenceProbePolicy = &DuckDbExistenceProbePolicy;
     let catalog_fold: &dyn CatalogFoldPolicy = &DuckDbCatalogFoldPolicy;
+    let validation: &dyn ValidationPolicy = &DuckDbValidationPolicy;
 
     assert_eq!(dml.dialect(), DUCKDB);
     assert_eq!(schema.dialect(), DUCKDB);
@@ -885,6 +1198,17 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
         "the outsider writes its own pass-through instead of inheriting one"
     );
     assert_eq!(schema.strip_collation("VARCHAR"), "VARCHAR");
+    assert_eq!(validation.canonical_identifier("MixedCase"), "mixedcase");
+    assert_eq!(
+        validation.op_disposition("createTable", "base"),
+        Disposition::Unsupported,
+        "the outsider explicitly refuses every current engine operation shape"
+    );
+    assert_eq!(
+        validation.op_disposition("futureOperation", "futureVariant"),
+        Disposition::Unsupported,
+        "an unfamiliar operation shape fails closed in the outsider's own policy"
+    );
     assert_eq!(
         value_format.bytewise_column_metadata("VARCHAR"),
         ("VARCHAR".to_string(), None),
@@ -944,6 +1268,54 @@ fn a_fourth_backend_validates_expressions_under_its_own_id() {
         0,
     )
     .expect("the outsider's own exhaustive validator must answer for its id");
+}
+
+/// Required DML policy methods make a newcomer write its own behavior rather
+/// than falling through to one of the three shipping SQL shapes.
+#[test]
+fn a_fourth_backend_writes_its_own_dml_policy() {
+    let renderer: &dyn DmlRenderer = &DuckDbDmlRenderer;
+    renderer
+        .validate_assignment_semantics("update", "items", &BTreeMap::new())
+        .expect("the outsider states its own simultaneous-assignment policy");
+
+    let conflict = OnConflict {
+        columns: vec!["id".to_string()],
+        do_update: None,
+    };
+    let mut conflict_ctx = BindCtx::new(renderer);
+    let conflict_error = renderer
+        .render_on_conflict(
+            OnConflictRenderRequest {
+                table: "items",
+                qualified_table: "\"main\".\"items\"",
+                insert_columns: &["id".to_string()],
+                on_conflict: &conflict,
+                quoted_target_columns: &["\"id\"".to_string()],
+            },
+            &mut conflict_ctx,
+        )
+        .expect_err("the outsider explicitly refuses its unimplemented conflict grammar");
+    assert!(conflict_error
+        .to_string()
+        .contains("DuckDB backend test does not implement structured onConflict"));
+
+    let mut delete_ctx = BindCtx::new(renderer);
+    let delete_error = renderer
+        .render_limited_delete(
+            LimitedDeleteRenderRequest {
+                table: "items",
+                qualified_table: "\"main\".\"items\"",
+                rendered_where: "TRUE",
+                limit: 1,
+                catalog_identity_columns: None,
+            },
+            &mut delete_ctx,
+        )
+        .expect_err("the outsider explicitly refuses its unimplemented limited-delete grammar");
+    assert!(delete_error
+        .to_string()
+        .contains("DuckDB backend test does not implement row-limited DELETE"));
 }
 
 /// The stub is only a proof if it never touches the closed enum.

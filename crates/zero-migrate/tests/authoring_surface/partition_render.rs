@@ -6,7 +6,7 @@ use zero_migrate::model::ir::{
 };
 use zero_migrate::{
     fold_ops, Approval, ExecutorConfig, IrAuthor, IrFlagsOverride, LiveSchema, LockMode,
-    MigrationEngine, SqlDialect, SqliteBackend, CURRENT_IR_VERSION,
+    MigrationEngine, SqliteBackend, CURRENT_IR_VERSION,
 };
 
 fn col(name: &str, ty: ColType) -> IrColumn {
@@ -69,7 +69,7 @@ fn pg_sql(op: Op) -> Vec<String> {
     IrAuthor::new(
         "app",
         "app_partition",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject("app"),
     )
     .lower(&ir(op), &LiveSchema::default())
@@ -171,7 +171,7 @@ fn insert_events(rows: &[(i64, &str)]) -> Op {
 fn partition_live_from_fold(ops: &[Op]) -> LiveSchema {
     let snap = fold_ops(
         ops,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         "prj_partition",
         &support::no_inject("app"),
     )
@@ -200,7 +200,7 @@ fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zero_mig
     IrAuthor::new(
         "prj_partition",
         "app_partition",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("app"),
     )
     .lower_steps(&migration, live)
@@ -322,17 +322,17 @@ fn render_partitioned_parent_create_table_pg() {
 #[compio::test]
 async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
     use zero_migrate::apply::backend::sqlite::Mode;
-    use zero_migrate::model::validate::{validate_ir_scoped, SqlDialect};
+    use zero_migrate::model::validate::validate_ir_scoped;
 
     let ops = collapse_events_ops();
     let migration_ir = ir_ops(ops);
-    validate_ir_scoped(&migration_ir, SqlDialect::Sqlite, None)
+    validate_ir_scoped(&migration_ir, &zero_migrate::SQLITE, None)
         .expect("collapse-affirmed partition recording validates on SQLite");
 
     let steps = IrAuthor::new(
         "prj_partition",
         "app_partition",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("app"),
     )
     .lower_steps(&migration_ir, &LiveSchema::default())
@@ -736,7 +736,7 @@ fn render_index_element_collation_precedes_opclass_pg() {
 
 #[test]
 fn pg_vendor_index_features_refused_fail_closed_off_pg() {
-    use zero_migrate::model::validate::{validate_ir, SqlDialect, CODE_UNSUPPORTED};
+    use zero_migrate::model::validate::{validate_ir, CODE_UNSUPPORTED};
 
     let cases: Vec<(&str, Op)> = vec![
         (
@@ -770,7 +770,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
 
     for (label, op) in cases {
         let migration = ir(op);
-        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
             let err = validate_ir(&migration, dialect)
                 .expect_err(&format!("{label} must be refused on {dialect:?}"));
             assert_eq!(
@@ -779,7 +779,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
             );
         }
         // The same op validates cleanly on PostgreSQL.
-        validate_ir(&migration, SqlDialect::Postgres)
+        validate_ir(&migration, &zero_migrate::POSTGRES)
             .unwrap_or_else(|e| panic!("{label} must validate on Postgres: {e:?}"));
     }
 }
@@ -839,7 +839,7 @@ fn render_attach_partition_pg() {
 #[test]
 fn attach_partition_refused_fail_closed_off_pg() {
     use zero_migrate::model::validate::{
-        validate_ir_scoped, SqlDialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
+        validate_ir_scoped, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
     };
 
     let migration = ir(attach_range_partition(
@@ -847,7 +847,7 @@ fn attach_partition_refused_fail_closed_off_pg() {
         int_bound(100),
         int_bound(200),
     ));
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         let err = validate_ir_scoped(&migration, dialect, None)
             .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
         assert!(

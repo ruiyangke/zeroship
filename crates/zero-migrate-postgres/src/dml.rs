@@ -1,14 +1,23 @@
 //! PostgreSQL SQL spelling. The future `zero-migrate-postgres`.
 
-use zero_migrate_backend::dml::{self, DmlError};
+use std::collections::BTreeMap;
+
+use zero_migrate_backend::dml::{
+    self, BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest,
+};
 use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::renderer::{Capability, DmlRenderer};
+use zero_migrate_backend::renderer::{
+    Capability, DmlRenderer, FeatureSupportKey, MaterializedNamedTypeOp,
+};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::{DialectId, POSTGRES};
 use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::TableRef;
-use zero_migrate_ir::ir::{IrScalar, Op, TriggerAction};
+use zero_migrate_ir::ir::{
+    ColType, CommentTarget, ExistenceGuard, IrScalar, IrValue, Op, SafeI64, SequenceOwnedBy,
+    TriggerAction,
+};
 use zero_migrate_ir::validate::{ExprDialectFeature, ExprDialectRejection, ExprDialectValidator};
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
@@ -89,6 +98,10 @@ impl DmlRenderer for PostgresDmlRenderer {
         &crate::descriptor::POSTGRES_DESCRIPTOR
     }
 
+    fn supports(&self, cap: zero_migrate_ir::backend::Capability) -> bool {
+        self.descriptor().capabilities.contains(cap)
+    }
+
     fn preview_session_prologue(&self) -> &'static [&'static str] {
         &[]
     }
@@ -107,10 +120,65 @@ impl DmlRenderer for PostgresDmlRenderer {
 
     fn op_support_refusal(&self, op: &Op, _variant: &str) -> Option<&'static str> {
         match op {
-            Op::CreateTrigger { action, .. } if matches!(action, TriggerAction::Body { .. }) => {
+            Op::CreateTrigger {
+                action: TriggerAction::Body { .. },
+                ..
+            } => Some("Postgres triggers must execute a named trigger function"),
+            _ => None,
+        }
+    }
+
+    fn feature_support_refusal(&self, feature: FeatureSupportKey) -> Option<&'static str> {
+        match feature {
+            FeatureSupportKey::PartialIndex
+            | FeatureSupportKey::IndexInclude
+            | FeatureSupportKey::IndexStorageParams
+            | FeatureSupportKey::IndexOnly
+            | FeatureSupportKey::IndexNullsNotDistinct
+            | FeatureSupportKey::IndexOpclass
+            | FeatureSupportKey::IndexCollation
+            | FeatureSupportKey::ExpressionIndex
+            | FeatureSupportKey::NonBtreeIndexMethod
+            | FeatureSupportKey::TableLevelForeignKey
+            | FeatureSupportKey::TableLevelUnique
+            | FeatureSupportKey::TableLevelCheckExpression
+            | FeatureSupportKey::CompositeForeignKey
+            | FeatureSupportKey::NonIdForeignKey
+            | FeatureSupportKey::SequenceDefault
+            | FeatureSupportKey::ConstraintNotValid
+            | FeatureSupportKey::ExclusionConstraint
+            | FeatureSupportKey::ExistenceGuardProbe
+            | FeatureSupportKey::InsertOnConflict
+            | FeatureSupportKey::MaterializedView
+            | FeatureSupportKey::TriggerMultipleEvents
+            | FeatureSupportKey::TriggerExecuteFunction
+            | FeatureSupportKey::TriggerTruncateEvent
+            | FeatureSupportKey::TriggerInsteadOfTiming
+            | FeatureSupportKey::TriggerStatementForEach
+            | FeatureSupportKey::TriggerWhen
+            | FeatureSupportKey::Comment
+            | FeatureSupportKey::Sequence
+            | FeatureSupportKey::RawViewBody
+            | FeatureSupportKey::RawSql
+            | FeatureSupportKey::PartitionDdl => None,
+            FeatureSupportKey::ForeignKeyNoLocalColumn => {
+                Some("foreign keys need at least one local column")
+            }
+            FeatureSupportKey::AlterColumnUsing => Some(
+                "setColumnType.using expression rendering is deferred in the current engine",
+            ),
+            FeatureSupportKey::RenameColumnGuard => Some(
+                "renameColumn ifExists guards cannot be attributed to a single migration unit today",
+            ),
+            FeatureSupportKey::CreateOrReplaceMaterializedView => Some(
+                "Postgres has no CREATE OR REPLACE MATERIALIZED VIEW and the other dialects have no materialized views",
+            ),
+            FeatureSupportKey::TriggerBody => {
                 Some("Postgres triggers must execute a named trigger function")
             }
-            _ => None,
+            FeatureSupportKey::TriggerRaiseIgnore => Some(
+                "Postgres trigger bodies are unsupported; named functions must be used",
+            ),
         }
     }
 
@@ -168,6 +236,57 @@ impl DmlRenderer for PostgresDmlRenderer {
             zero_migrate_backend::spelling::base64_standard(bytes),
         ));
         format!("decode({placeholder}, 'base64')")
+    }
+
+    fn validate_assignment_semantics(
+        &self,
+        _op: &'static str,
+        _table: &str,
+        _set: &BTreeMap<String, IrValue>,
+    ) -> Result<(), DmlError> {
+        // PostgreSQL evaluates every assignment RHS from the row before the SET
+        // list, so cross-assignment reads already have the authored simultaneous
+        // semantics.
+        Ok(())
+    }
+
+    fn render_on_conflict(
+        &self,
+        request: OnConflictRenderRequest<'_>,
+        ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError> {
+        let target = format!("ON CONFLICT ({})", request.quoted_target_columns.join(", "));
+        match &request.on_conflict.do_update {
+            None => Ok(format!(" {target} DO NOTHING")),
+            Some(set) => {
+                if set.is_empty() {
+                    return Ok(format!(" {target} DO NOTHING"));
+                }
+                // BTreeMap ⇒ deterministic column order (canonical).
+                let mut assigns = Vec::with_capacity(set.len());
+                for (col, val) in set {
+                    let qc = dml::quote_ident_for_backend("column", col, self)?;
+                    let ph = dml::render_value_bound(val, ctx)?;
+                    assigns.push(format!("{qc} = {ph}"));
+                }
+                Ok(format!(" {target} DO UPDATE SET {}", assigns.join(", ")))
+            }
+        }
+    }
+
+    fn render_limited_delete(
+        &self,
+        request: LimitedDeleteRenderRequest<'_>,
+        ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError> {
+        let ph = ctx.push_bind(BindValue::Int(
+            i64::try_from(request.limit).unwrap_or(i64::MAX),
+        ));
+        Ok(format!(
+            "DELETE FROM {} WHERE (tableoid, ctid) IN \
+             (SELECT tableoid, ctid FROM {} WHERE {} LIMIT {ph})",
+            request.qualified_table, request.qualified_table, request.rendered_where
+        ))
     }
 
     fn render_in_list(
@@ -296,6 +415,29 @@ impl DmlRenderer for PostgresDmlRenderer {
         Ok(sql)
     }
 
+    fn render_sequence_op(
+        &self,
+        op: &Op,
+        eff_schema: &str,
+    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+        render_sequence_op(op, eff_schema)
+    }
+
+    fn render_materialized_named_type_op(
+        &self,
+        op: MaterializedNamedTypeOp<'_>,
+    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+        render_materialized_named_type_op(op)
+    }
+
+    fn render_comment_op(
+        &self,
+        op: &Op,
+        eff_schema: &str,
+    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+        render_comment_op(op, eff_schema)
+    }
+
     /// This vendor OWNS the vendor-op surface: all sixteen op kinds are
     /// `dialect_scope = PgOnly` and every one of them is this crate's spelling.
     ///
@@ -343,4 +485,344 @@ impl DmlRenderer for PostgresDmlRenderer {
         };
         Ok(stmts)
     }
+}
+
+fn render_materialized_named_type_op(
+    op: MaterializedNamedTypeOp<'_>,
+) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    match op {
+        MaterializedNamedTypeOp::CreateEnum {
+            name,
+            qualified_name,
+            values,
+        } => {
+            let rendered_values = values
+                .iter()
+                .map(|value| dml::sql_string_literal(value))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let up = format!("CREATE TYPE {qualified_name} AS ENUM ({rendered_values})");
+            let down = Some(format!("DROP TYPE {qualified_name}"));
+            Ok(zero_migrate_backend::vendor::VendorStatement {
+                name: format!("create_enum_{name}"),
+                up,
+                down,
+            })
+        }
+        MaterializedNamedTypeOp::DropEnum {
+            name,
+            qualified_name,
+        } => Ok(zero_migrate_backend::vendor::VendorStatement {
+            name: format!("drop_enum_{name}"),
+            up: format!("DROP TYPE {qualified_name}"),
+            down: None,
+        }),
+        MaterializedNamedTypeOp::CreateDomain {
+            name,
+            qualified_name,
+            base_type,
+            default,
+            not_null,
+            check,
+        } => {
+            let mut up = format!("CREATE DOMAIN {qualified_name} AS {base_type}");
+            if let Some(default) = default {
+                up.push_str(" DEFAULT ");
+                up.push_str(default);
+            }
+            if not_null {
+                up.push_str(" NOT NULL");
+            }
+            if let Some(check) = check {
+                up.push_str(" CHECK (");
+                up.push_str(check);
+                up.push(')');
+            }
+            let down = Some(format!("DROP DOMAIN {qualified_name}"));
+            Ok(zero_migrate_backend::vendor::VendorStatement {
+                name: format!("create_domain_{name}"),
+                up,
+                down,
+            })
+        }
+        MaterializedNamedTypeOp::DropDomain {
+            name,
+            qualified_name,
+        } => Ok(zero_migrate_backend::vendor::VendorStatement {
+            name: format!("drop_domain_{name}"),
+            up: format!("DROP DOMAIN {qualified_name}"),
+            down: None,
+        }),
+    }
+}
+
+fn render_sequence_op(
+    op: &Op,
+    eff_schema: &str,
+) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    match op {
+        Op::CreateSequence {
+            name,
+            as_type,
+            increment,
+            start,
+            min_value,
+            max_value,
+            cache,
+            cycle,
+            owned_by,
+            ..
+        } => {
+            let qname = pg_sequence_qname(eff_schema, name)?;
+            let mut up = format!("CREATE SEQUENCE {qname}");
+            if let Some(as_type) = as_type {
+                up.push_str(" AS ");
+                up.push_str(render_sequence_as_type(as_type)?);
+            }
+            if let Some(n) = increment {
+                up.push_str(" INCREMENT BY ");
+                up.push_str(&n.to_string());
+            }
+            if let Some(n) = start {
+                up.push_str(" START WITH ");
+                up.push_str(&n.to_string());
+            }
+            render_sequence_optional_bound(&mut up, "MINVALUE", "NO MINVALUE", min_value);
+            render_sequence_optional_bound(&mut up, "MAXVALUE", "NO MAXVALUE", max_value);
+            if let Some(n) = cache {
+                up.push_str(" CACHE ");
+                up.push_str(&n.to_string());
+            }
+            if let Some(cycle) = cycle {
+                up.push_str(if *cycle { " CYCLE" } else { " NO CYCLE" });
+            }
+            if let Some(owned_by) = owned_by {
+                up.push_str(" OWNED BY ");
+                up.push_str(&render_sequence_owned_by(owned_by.as_ref(), eff_schema)?);
+            }
+            Ok(zero_migrate_backend::vendor::VendorStatement {
+                name: format!("create_sequence_{name}"),
+                up,
+                down: Some(format!("DROP SEQUENCE {qname}")),
+            })
+        }
+        Op::AlterSequence {
+            name,
+            increment,
+            restart,
+            min_value,
+            max_value,
+            cache,
+            cycle,
+            owned_by,
+            ..
+        } => {
+            // An alter that asks for nothing renders `ALTER SEQUENCE <name>` with no
+            // action clause, which is not a statement. PRESENCE of the option is the
+            // test, never its inner value: `restart: null` is a bare RESTART,
+            // `min_value: null` is NO MINVALUE and `owned_by: null` is OWNED BY NONE.
+            if increment.is_none()
+                && restart.is_none()
+                && min_value.is_none()
+                && max_value.is_none()
+                && cache.is_none()
+                && cycle.is_none()
+                && owned_by.is_none()
+            {
+                return Err(IrLowerError::AlterSequenceHasNoAction { name: name.clone() });
+            }
+            let qname = pg_sequence_qname(eff_schema, name)?;
+            let mut up = format!("ALTER SEQUENCE {qname}");
+            if let Some(n) = increment {
+                up.push_str(" INCREMENT BY ");
+                up.push_str(&n.to_string());
+            }
+            if let Some(restart) = restart {
+                up.push_str(" RESTART");
+                if let Some(n) = restart {
+                    up.push_str(" WITH ");
+                    up.push_str(&n.to_string());
+                }
+            }
+            render_sequence_optional_bound(&mut up, "MINVALUE", "NO MINVALUE", min_value);
+            render_sequence_optional_bound(&mut up, "MAXVALUE", "NO MAXVALUE", max_value);
+            if let Some(n) = cache {
+                up.push_str(" CACHE ");
+                up.push_str(&n.to_string());
+            }
+            if let Some(cycle) = cycle {
+                up.push_str(if *cycle { " CYCLE" } else { " NO CYCLE" });
+            }
+            if let Some(owned_by) = owned_by {
+                up.push_str(" OWNED BY ");
+                up.push_str(&render_sequence_owned_by(owned_by.as_ref(), eff_schema)?);
+            }
+            Ok(zero_migrate_backend::vendor::VendorStatement {
+                name: format!("alter_sequence_{name}"),
+                up,
+                down: None,
+            })
+        }
+        Op::DropSequence {
+            name,
+            existence_guard,
+            ..
+        } => {
+            let qname = pg_sequence_qname(eff_schema, name)?;
+            let mut up = String::from("DROP SEQUENCE ");
+            if matches!(existence_guard, Some(ExistenceGuard::IfExists)) {
+                up.push_str("IF EXISTS ");
+            }
+            up.push_str(&qname);
+
+            // Refuse to synthesize an inverse: the definition is half the object
+            // and its runtime position is the other half. No IR history knows the
+            // position, so recreation could reissue values.
+            Ok(zero_migrate_backend::vendor::VendorStatement {
+                name: format!("drop_sequence_{name}"),
+                up,
+                down: None,
+            })
+        }
+        _ => Err(IrLowerError::UnsupportedOp(
+            "non-sequence op routed to sequence renderer",
+        )),
+    }
+}
+
+fn render_comment_op(
+    op: &Op,
+    eff_schema: &str,
+) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+    let Op::Comment { target, comment } = op else {
+        return Err(IrLowerError::UnsupportedOp(
+            "non-comment op routed to comment renderer",
+        ));
+    };
+    let object = render_comment_target(target, eff_schema)?;
+    let value = comment
+        .as_deref()
+        .map(dml::sql_string_literal)
+        .unwrap_or_else(|| "NULL".to_string());
+    Ok(zero_migrate_backend::vendor::VendorStatement {
+        name: format!("comment_{}", comment_target_name_part(target)),
+        up: format!("COMMENT ON {object} IS {value}"),
+        down: None,
+    })
+}
+
+fn comment_target_name_part(target: &CommentTarget) -> String {
+    match target {
+        CommentTarget::Table { name, .. }
+        | CommentTarget::Index { name, .. }
+        | CommentTarget::View { name, .. }
+        | CommentTarget::Type { name, .. }
+        | CommentTarget::Sequence { name, .. }
+        | CommentTarget::Function { name, .. } => name.clone(),
+        CommentTarget::Column { table, name, .. }
+        | CommentTarget::Constraint { table, name, .. } => format!("{table}_{name}"),
+    }
+}
+
+fn pg_comment_qname(kind: &'static str, schema: &str, name: &str) -> Result<String, IrLowerError> {
+    Ok(format!(
+        "{}.{}",
+        quote_engine_ident_as_dml("schema", schema)?,
+        quote_engine_ident_as_dml(kind, name)?
+    ))
+}
+
+/// `eff_schema` ALREADY accounts for the target's own qualifier: `Op::schema()` for a
+/// comment returns `target.schema()`, and `IrAuthor::effective_schema` canonicalizes a
+/// case-variant of the project schema before handing it here.
+///
+/// So do not re-read `target.schema()`. It is the author's casing, and the render seam
+/// quotes byte-verbatim while `SchemaScope::permits` matches case-insensitively - a
+/// target qualified `APP` under project `app` was blessed as `app` by the confinement
+/// gate and rendered `"APP"`, which PostgreSQL treats as a different schema entirely.
+fn render_comment_target(target: &CommentTarget, eff_schema: &str) -> Result<String, IrLowerError> {
+    let schema = eff_schema;
+    Ok(match target {
+        CommentTarget::Table { name, .. } => {
+            format!("TABLE {}", pg_comment_qname("table", schema, name)?)
+        }
+        CommentTarget::Column { table, name, .. } => format!(
+            "COLUMN {}.{}",
+            pg_comment_qname("table", schema, table)?,
+            quote_engine_ident_as_dml("column", name)?
+        ),
+        CommentTarget::Index { name, .. } => {
+            format!("INDEX {}", pg_comment_qname("index", schema, name)?)
+        }
+        CommentTarget::Constraint { table, name, .. } => format!(
+            "CONSTRAINT {} ON {}",
+            quote_engine_ident_as_dml("constraint", name)?,
+            pg_comment_qname("table", schema, table)?
+        ),
+        CommentTarget::View { name, .. } => {
+            format!("VIEW {}", pg_comment_qname("view", schema, name)?)
+        }
+        CommentTarget::Type { name, .. } => {
+            format!("TYPE {}", pg_comment_qname("type", schema, name)?)
+        }
+        CommentTarget::Sequence { name, .. } => {
+            format!("SEQUENCE {}", pg_comment_qname("sequence", schema, name)?)
+        }
+        CommentTarget::Function { name, .. } => {
+            format!("FUNCTION {}", pg_comment_qname("function", schema, name)?)
+        }
+    })
+}
+
+fn pg_sequence_qname(schema: &str, name: &str) -> Result<String, IrLowerError> {
+    Ok(format!(
+        "{}.{}",
+        quote_engine_ident_as_dml("schema", schema)?,
+        quote_engine_ident_as_dml("sequence", name)?
+    ))
+}
+
+fn render_sequence_optional_bound(
+    sql: &mut String,
+    value_kw: &'static str,
+    none_kw: &'static str,
+    value: &Option<Option<SafeI64>>,
+) {
+    if let Some(value) = value {
+        sql.push(' ');
+        match value {
+            Some(n) => {
+                sql.push_str(value_kw);
+                sql.push(' ');
+                sql.push_str(&n.to_string());
+            }
+            None => sql.push_str(none_kw),
+        }
+    }
+}
+
+fn render_sequence_as_type(as_type: &ColType) -> Result<&'static str, IrLowerError> {
+    match as_type {
+        ColType::SmallInt => Ok("smallint"),
+        ColType::Int => Ok("integer"),
+        ColType::BigInt => Ok("bigint"),
+        _ => Err(IrLowerError::UnsupportedOp(
+            "sequence AS type must be smallInt, int, or bigInt",
+        )),
+    }
+}
+
+fn render_sequence_owned_by(
+    owned_by: Option<&SequenceOwnedBy>,
+    eff_schema: &str,
+) -> Result<String, IrLowerError> {
+    let Some(owned_by) = owned_by else {
+        return Ok("NONE".to_string());
+    };
+    Ok(format!(
+        "{}.{}.{}",
+        quote_engine_ident_as_dml("schema", eff_schema)?,
+        quote_engine_ident_as_dml("table", &owned_by.table)?,
+        quote_engine_ident_as_dml("column", &owned_by.column)?
+    ))
 }

@@ -58,7 +58,7 @@ The example begins after your host has produced a reviewed `Vec<Migration>`:
 ```rust
 use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, Migration, MigrationEngine,
-    PostgresBackend, SqlDialect, SqlSession, effective_policy_from_charter_toml,
+    POSTGRES, PostgresBackend, SqlSession, effective_policy_from_charter_toml,
 };
 
 const POLICY_CHARTER: &str = r#"policy_version = 1
@@ -90,7 +90,7 @@ async fn apply_postgres<S: SqlSession>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let policy = effective_policy_from_charter_toml(POLICY_CHARTER)
         .map_err(std::io::Error::other)?;
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres);
+    let guard = GuardConfig::from_policy(policy.clone(), POSTGRES);
 
     let engine = MigrationEngine::new();
     let plan = engine.plan(migrations, &guard);
@@ -252,7 +252,7 @@ let policy =
     zero_migrate::effective_policy_from_charter_toml(policy_toml)?;
 let guard = zero_migrate::GuardConfig::from_policy(
     policy.clone(),
-    zero_migrate::SqlDialect::Postgres,
+    zero_migrate::POSTGRES,
 );
 let executor = zero_migrate::ExecutorConfig::new(
     "project_demo",

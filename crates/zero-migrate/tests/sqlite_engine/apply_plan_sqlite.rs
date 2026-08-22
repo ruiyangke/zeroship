@@ -17,7 +17,6 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig, FieldDescriptor,
     MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,
@@ -49,7 +48,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite)
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE.clone())
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -68,7 +67,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         effective,
     )
 }

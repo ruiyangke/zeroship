@@ -33,9 +33,9 @@
 use crate::support;
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir_authorized, SqlDialect, VendorAuthority};
+use zero_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
 
-fn verdict_on(dialect: SqlDialect, ops: &str) -> Result<(), String> {
+fn verdict_on(dialect: &zero_migrate::DialectId, ops: &str) -> Result<(), String> {
     let policy = support::operator_charter("public");
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
@@ -48,7 +48,7 @@ fn verdict_on(dialect: SqlDialect, ops: &str) -> Result<(), String> {
 }
 
 fn verdict(ops: &str) -> Result<(), String> {
-    verdict_on(SqlDialect::Postgres, ops)
+    verdict_on(&zero_migrate::POSTGRES, ops)
 }
 
 /// Assert WHICH refusal, not merely that the capability gate was not the one.
@@ -198,7 +198,7 @@ fn the_same_envelope_refuses_under_the_dialect_whose_leg_runs() {
     let ops = format!(
         r#"{A},{{"op":"dialectal","legs":{{"sqlite":[{{"op":"dropTable","table":"a"}}]}}}},{ADD_Z}"#
     );
-    verdict_on(SqlDialect::Sqlite, &ops)
+    verdict_on(&zero_migrate::SQLITE, &ops)
         .expect_err("under SQLite that leg runs, so the table really is gone");
 }
 

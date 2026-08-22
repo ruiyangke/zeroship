@@ -17,7 +17,10 @@ use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex};
 use crate::model::table_shape::ResolvedInject;
 use crate::render::renderer::{Capability, DialectSupports};
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_backend::schema::{
+    AddColumnDefinition, AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest,
+};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_policy::EffectivePolicy;
 
 /// Errors from query building.
@@ -100,38 +103,6 @@ pub use zero_migrate_backend::schema::{
     string_enum_values, SchemaRenderer,
 };
 
-/// Render the `COMMENT ON COLUMN` statements that attach the encryption sentinel to
-/// every `t.encrypted(...)` column (PostgreSQL only).
-#[must_use]
-pub fn build_encryption_sentinel_comments(
-    app_id: &str,
-    collection: &str,
-    schema: &serde_json::Value,
-) -> Vec<String> {
-    zero_migrate_backend::schema::build_encryption_sentinel_comments(
-        app_id,
-        collection,
-        schema,
-        renderer(&POSTGRES),
-    )
-}
-
-/// Render the `COMMENT ON COLUMN` statements that attach the mask sentinel to every
-/// masked column's sibling (PostgreSQL only).
-#[must_use]
-pub fn build_mask_sentinel_comments(
-    app_id: &str,
-    collection: &str,
-    schema: &serde_json::Value,
-) -> Vec<String> {
-    zero_migrate_backend::schema::build_mask_sentinel_comments(
-        app_id,
-        collection,
-        schema,
-        renderer(&POSTGRES),
-    )
-}
-
 /// The schema renderer for a dialect.
 ///
 /// The exhaustive dispatch itself lives in `crate::schema::backends` — one
@@ -173,7 +144,7 @@ pub(crate) fn column_snapshot_for_type_def(
 #[cfg(test)]
 mod schema_renderer_tests {
     use super::*;
-    use zero_migrate_ir::dialect::{MYSQL, SQLITE};
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     #[test]
     fn dispatch_returns_expected_schema_renderer() {
@@ -1160,23 +1131,21 @@ pub fn build_add_foreign_key(
     collection: &str,
     field: &str,
     def: &serde_json::Value,
+    dialect: &DialectId,
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&POSTGRES);
+    let backend = renderer(dialect);
 
     let target = def
         .get("refTarget")
         .and_then(|v| v.as_str())
         .ok_or_else(|| QueryError::InvalidFilter("ref field missing refTarget".to_string()))?;
 
-    let table = format!(
-        "{}.{}",
-        backend.quote_ident(app_id),
-        backend.quote_ident(collection)
-    );
-    let fk_clause = build_fk_clause(app_id, collection, field, def, target, &POSTGRES, backend)?;
-    Ok(format!("ALTER TABLE {table} ADD {fk_clause}"))
+    let fk_clause = build_fk_clause(app_id, collection, field, def, target, dialect, backend)?;
+    backend
+        .add_foreign_key_statement(app_id, collection, &fk_clause)
+        .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))
 }
 
 /// Build `ALTER TABLE … DROP CONSTRAINT` for an existing FK (B2 diff
@@ -1185,20 +1154,13 @@ pub fn build_drop_foreign_key(
     app_id: &str,
     collection: &str,
     constraint_name: &str,
+    dialect: &DialectId,
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&POSTGRES);
-    let table = format!(
-        "{}.{}",
-        backend.quote_ident(app_id),
-        backend.quote_ident(collection)
-    );
-    Ok(format!(
-        "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-        table,
-        backend.quote_ident(constraint_name)
-    ))
+    renderer(dialect)
+        .drop_foreign_key_if_exists_statement(app_id, collection, constraint_name)
+        .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))
 }
 
 /// Build a deterministic, NAMEDATALEN-safe FK constraint identifier.
@@ -1317,32 +1279,30 @@ pub fn build_add_column(
     collection: &str,
     field: &str,
     def: &serde_json::Value,
+    dialect: &DialectId,
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&POSTGRES);
+    let backend = renderer(dialect);
+    let data_type = backend.column_type(&column_snapshot_for_type_def(def), false);
+    let constraints = def_to_constraints_for_dialect(field, def, backend);
 
-    let table = format!(
-        "{}.{}",
-        backend.quote_ident(app_id),
-        backend.quote_ident(collection)
-    );
-    let pg_type = backend.column_type(&column_snapshot_for_type_def(def), false);
-    let constraints = def_to_constraints(field, def);
-
-    let mut sql = format!(
-        "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} {}",
-        table,
-        backend.quote_ident(field),
-        pg_type,
-        constraints
-    )
-    .trim()
-    .to_string();
+    let mut statements = backend
+        .add_column_if_not_exists_statements(AddColumnIfNotExistsRequest {
+            schema: app_id,
+            table: collection,
+            column: field,
+            definition: AddColumnDefinition::Rendered {
+                data_type: &data_type,
+                constraints: &constraints,
+            },
+            comment_sentinel: None,
+        })
+        .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))?;
 
     // When the field carries a `.mask({...})`
-    // declaration, also emit the sibling `<col>_masked TEXT NULL` ADD
-    // COLUMN op and the `COMMENT ON COLUMN` sentinel attachment in the
+    // declaration, also emit a nullable unbounded-text ADD COLUMN op for
+    // the sibling `<col>_masked` and its sentinel attachment in the
     // same multi-statement payload. Only the sibling is NULL here
     // (versus NOT NULL on CREATE TABLE) — existing rows would refuse
     // the ALTER if the sibling were NOT NULL; the mask backfill flips it
@@ -1358,18 +1318,20 @@ pub fn build_add_column(
     // returns `None` there because the synthetic def carries no
     // mask block. So we don't double-emit.
     if let Some(sibling) = mask_sibling_column_for_field(field, def) {
-        sql.push_str(&format!(
-            ";\nALTER TABLE {} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
-            table,
-            backend.quote_ident(&sibling),
-        ));
-        if let Some(comment) = build_mask_sentinel_comment_for_field(app_id, collection, field, def)
-        {
-            sql.push_str(&format!(";\n{comment}"));
-        }
+        let sentinel = mask_sentinel_for_field(def);
+        let sibling_statements = backend
+            .add_column_if_not_exists_statements(AddColumnIfNotExistsRequest {
+                schema: app_id,
+                table: collection,
+                column: &sibling,
+                definition: AddColumnDefinition::NullableUnboundedText,
+                comment_sentinel: sentinel.as_deref(),
+            })
+            .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))?;
+        statements.extend(sibling_statements);
     }
 
-    Ok(sql)
+    Ok(statements.join(";\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1454,6 +1416,25 @@ pub enum IndexKind {
     Spatial,
 }
 
+fn create_index_if_not_exists(
+    backend: &'static dyn SchemaRenderer,
+    app_id: &str,
+    collection: &str,
+    name: &str,
+    columns: &[&str],
+    unique: bool,
+) -> Result<String, QueryError> {
+    backend
+        .create_index_if_not_exists_statement(CreateIndexIfNotExistsRequest {
+            schema: app_id,
+            table: collection,
+            name,
+            columns,
+            unique,
+        })
+        .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))
+}
+
 /// Build the set of `CREATE INDEX CONCURRENTLY` statements for a schema.
 ///
 /// Walks the field definitions and emits:
@@ -1472,22 +1453,17 @@ pub fn build_create_indexes(
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
+    dialect: &DialectId,
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&POSTGRES);
+    let backend = renderer(dialect);
 
     let mut out = Vec::new();
 
     let Some(obj) = schema.as_object() else {
         return Ok(out);
     };
-
-    let table_qualified = format!(
-        "{}.{}",
-        backend.quote_ident(app_id),
-        backend.quote_ident(collection)
-    );
 
     for (field, def) in obj {
         // Skip top-level metadata keys (`_meta`,
@@ -1587,12 +1563,14 @@ pub fn build_create_indexes(
             == Some("deterministic");
         if det_encrypted {
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
-            let sql = format!(
-                "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                backend.quote_ident(&name),
-                table_qualified,
-                backend.quote_ident(field),
-            );
+            let sql = create_index_if_not_exists(
+                backend,
+                app_id,
+                collection,
+                &name,
+                &[field.as_str()],
+                false,
+            )?;
             out.push(IndexSpec {
                 name,
                 columns: vec![field.clone()],
@@ -1624,13 +1602,14 @@ pub fn build_create_indexes(
         // both would be redundant and waste storage).
         if wants_unique {
             let name = index_name(collection, &[field.as_str()], /* unique = */ true);
-            let col_list = backend.quote_ident(field);
-            let sql = format!(
-                "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                backend.quote_ident(&name),
-                table_qualified,
-                col_list,
-            );
+            let sql = create_index_if_not_exists(
+                backend,
+                app_id,
+                collection,
+                &name,
+                &[field.as_str()],
+                true,
+            )?;
             out.push(IndexSpec {
                 name,
                 columns: vec![field.clone()],
@@ -1640,13 +1619,14 @@ pub fn build_create_indexes(
             });
         } else if wants_index {
             let name = index_name(collection, &[field.as_str()], /* unique = */ false);
-            let col_list = backend.quote_ident(field);
-            let sql = format!(
-                "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                backend.quote_ident(&name),
-                table_qualified,
-                col_list,
-            );
+            let sql = create_index_if_not_exists(
+                backend,
+                app_id,
+                collection,
+                &name,
+                &[field.as_str()],
+                false,
+            )?;
             out.push(IndexSpec {
                 name,
                 columns: vec![field.clone()],
@@ -1669,12 +1649,14 @@ pub fn build_create_indexes(
         if wants_index || wants_unique {
             if let Some(sibling_col) = mask_sibling_column_for_field(field, def) {
                 let idx_name = format!("{collection}__{sibling_col}_idx");
-                let sql = format!(
-                    "CREATE INDEX CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-                    backend.quote_ident(&idx_name),
-                    table_qualified,
-                    backend.quote_ident(&sibling_col),
-                );
+                let sql = create_index_if_not_exists(
+                    backend,
+                    app_id,
+                    collection,
+                    &idx_name,
+                    &[sibling_col.as_str()],
+                    false,
+                )?;
                 out.push(IndexSpec {
                     name: idx_name,
                     columns: vec![sibling_col],
@@ -1707,10 +1689,11 @@ pub fn build_named_indexes(
     app_id: &str,
     collection: &str,
     indexes: &serde_json::Value,
+    dialect: &DialectId,
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(&POSTGRES);
+    let backend = renderer(dialect);
 
     let mut out = Vec::new();
     let Some(arr) = indexes.as_array() else {
@@ -1719,12 +1702,6 @@ pub fn build_named_indexes(
     if arr.is_empty() {
         return Ok(out);
     }
-
-    let table_qualified = format!(
-        "{}.{}",
-        backend.quote_ident(app_id),
-        backend.quote_ident(collection)
-    );
 
     for (i, entry) in arr.iter().enumerate() {
         let name = entry
@@ -1758,7 +1735,6 @@ pub fn build_named_indexes(
             .unwrap_or(false);
 
         let mut columns: Vec<String> = Vec::with_capacity(fields_v.len());
-        let mut quoted: Vec<String> = Vec::with_capacity(fields_v.len());
         for (j, fv) in fields_v.iter().enumerate() {
             let col = fv.as_str().ok_or_else(|| {
                 QueryError::InvalidIdent(format!("indexes[{i}].fields[{j}] must be a string"))
@@ -1769,19 +1745,20 @@ pub fn build_named_indexes(
                 )));
             }
             columns.push(col.to_string());
-            quoted.push(backend.quote_ident(col));
         }
 
-        let pg_name = named_index_name(collection, name);
-        let kind = if unique { "UNIQUE INDEX" } else { "INDEX" };
-        let sql = format!(
-            "CREATE {kind} CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
-            backend.quote_ident(&pg_name),
-            table_qualified,
-            quoted.join(", "),
-        );
+        let index_name = named_index_name(collection, name);
+        let column_refs = columns.iter().map(String::as_str).collect::<Vec<_>>();
+        let sql = create_index_if_not_exists(
+            backend,
+            app_id,
+            collection,
+            &index_name,
+            &column_refs,
+            unique,
+        )?;
         out.push(IndexSpec {
-            name: pg_name,
+            name: index_name,
             columns,
             unique,
             sql,
@@ -1877,34 +1854,6 @@ fn short_hash_base32(input: &str) -> String {
     }
     // Safety: ALPHABET is ASCII so out is valid UTF-8.
     String::from_utf8(out.to_vec()).expect("ALPHABET is ASCII")
-}
-
-/// Render the `COMMENT ON COLUMN` statement for one
-/// masked field, IFF the field has a `.mask({...})` declaration
-/// (`kind != "none"`). Used by the diff classifier's `MaskBackfill`
-/// op to attach the sentinel at the same time as the
-/// `ALTER TABLE ADD COLUMN <col>_masked` op.
-///
-/// Returns `None` for fields without a mask or with `kind: "none"` —
-/// no sibling, no sentinel.
-#[must_use]
-pub fn build_mask_sentinel_comment_for_field(
-    app_id: &str,
-    collection: &str,
-    field: &str,
-    def: &serde_json::Value,
-) -> Option<String> {
-    let backend = renderer(&POSTGRES);
-    let sibling = mask_sibling_column_for_field(field, def)?;
-    let sentinel = mask_sentinel_for_field(def)?;
-    let escaped = sentinel.replace('\'', "''");
-    Some(format!(
-        "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-        backend.quote_ident(app_id),
-        backend.quote_ident(collection),
-        backend.quote_ident(&sibling),
-        escaped,
-    ))
 }
 
 /// Render the inline `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */`
@@ -2202,13 +2151,6 @@ fn union_check_constraint_name(collection: &str, disc: &str, value_tag: &str) ->
     format!("{prefix}_{hash}")
 }
 
-/// Generate column constraints from field definition.
-fn def_to_constraints(field: &str, def: &serde_json::Value) -> String {
-    // CALLER-FIXED TARGET: the sole caller is `build_add_column`, whose whole
-    // The sole caller is PostgreSQL-only; it supplies that registered renderer.
-    def_to_constraints_for_dialect(field, def, renderer(&POSTGRES))
-}
-
 fn def_to_constraints_for_dialect(
     field: &str,
     def: &serde_json::Value,
@@ -2391,7 +2333,75 @@ fn def_to_constraints_for_dialect(
 mod tests {
     use super::*;
     use serde_json::json;
-    use zero_migrate_ir::dialect::{MYSQL, SQLITE};
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+
+    fn build_add_foreign_key(
+        app_id: &str,
+        collection: &str,
+        field: &str,
+        def: &serde_json::Value,
+    ) -> Result<String, QueryError> {
+        super::build_add_foreign_key(app_id, collection, field, def, &POSTGRES)
+    }
+
+    fn build_drop_foreign_key(
+        app_id: &str,
+        collection: &str,
+        constraint_name: &str,
+    ) -> Result<String, QueryError> {
+        super::build_drop_foreign_key(app_id, collection, constraint_name, &POSTGRES)
+    }
+
+    fn build_add_column(
+        app_id: &str,
+        collection: &str,
+        field: &str,
+        def: &serde_json::Value,
+    ) -> Result<String, QueryError> {
+        super::build_add_column(app_id, collection, field, def, &POSTGRES)
+    }
+
+    fn build_create_indexes(
+        app_id: &str,
+        collection: &str,
+        schema: &serde_json::Value,
+    ) -> Result<Vec<IndexSpec>, QueryError> {
+        super::build_create_indexes(app_id, collection, schema, &POSTGRES)
+    }
+
+    #[test]
+    fn additive_schema_builder_routes_to_the_selected_backend() {
+        let def = json!({ "type": "string" });
+        let sqlite = super::build_add_column("app1", "users", "name", &def, &SQLITE)
+            .expect_err("SQLite writes its own refusal");
+        assert_eq!(
+            sqlite.to_string(),
+            "invalid filter: SQLite has no ADD COLUMN IF NOT EXISTS grammar"
+        );
+        let mysql = super::build_add_column("app1", "users", "name", &def, &MYSQL)
+            .expect_err("MySQL writes its own refusal");
+        assert_eq!(
+            mysql.to_string(),
+            "invalid filter: MySQL register-model column changes are not live-rendered"
+        );
+    }
+
+    #[test]
+    fn named_index_keeps_the_registered_backend_bytes() {
+        let indexes = json!([{
+            "name": "lookup",
+            "fields": ["email", "tenant"],
+            "unique": true
+        }]);
+        let rendered = super::build_named_indexes("app1", "users", &indexes, &POSTGRES)
+            .expect("PostgreSQL renders the online index request");
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(
+            rendered[0].sql,
+            "CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS \"users__lookup\" ON \
+             \"app1\".\"users\" (\"email\", \"tenant\")"
+        );
+    }
 
     fn confined_policy() -> EffectivePolicy {
         crate::test_fixtures::confined_charter()

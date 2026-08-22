@@ -10,7 +10,9 @@ use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
 };
 use zero_migrate_ir::dialect::{DialectId, POSTGRES};
-use zero_migrate_ir::ir::{IndexStorageParams, PartitionSpec};
+use zero_migrate_ir::ir::{
+    IndexStorageParams, PartitionBoundValue, PartitionBounds, PartitionSpec,
+};
 
 /// This module's own vendor identity.
 const DIALECT: DialectId = POSTGRES;
@@ -104,6 +106,70 @@ fn render_partition_spec_pg(spec: &PartitionSpec) -> String {
         PartitionSpec::Hash { columns, .. } => ("HASH", columns),
     };
     format!(" PARTITION BY {kind} ({})", render_ident_list_pg(columns))
+}
+
+fn normalize_timestamptz_bound_literal(value: &str) -> String {
+    let mut out = value.to_string();
+    if out.len() >= 20
+        && out.as_bytes().get(4) == Some(&b'-')
+        && out.as_bytes().get(7) == Some(&b'-')
+        && out
+            .as_bytes()
+            .get(10)
+            .is_some_and(|b| *b == b'T' || *b == b' ')
+    {
+        out = out.replace('T', " ");
+        if let Some(stripped) = out.strip_suffix('Z') {
+            out = format!("{stripped}+00");
+        }
+        if let Some(stripped) = out.strip_suffix("+00:00") {
+            out = format!("{stripped}+00");
+        }
+        if let Some(stripped) = out.strip_suffix(".000+00") {
+            out = format!("{stripped}+00");
+        }
+    }
+    out
+}
+
+fn render_partition_bound_value_pg(value: &PartitionBoundValue) -> String {
+    match value {
+        PartitionBoundValue::String { value } => {
+            let normalized = normalize_timestamptz_bound_literal(value);
+            format!("'{}'", normalized.replace('\'', "''"))
+        }
+        PartitionBoundValue::Int { value } => value.get().to_string(),
+        PartitionBoundValue::MinValue => "MINVALUE".to_string(),
+        PartitionBoundValue::MaxValue => "MAXVALUE".to_string(),
+    }
+}
+
+fn render_partition_bound_values_pg(values: &[PartitionBoundValue]) -> String {
+    values
+        .iter()
+        .map(render_partition_bound_value_pg)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_partition_bounds_pg(bounds: &PartitionBounds) -> String {
+    match bounds {
+        PartitionBounds::Range { from, to } => format!(
+            "FOR VALUES FROM ({}) TO ({})",
+            render_partition_bound_values_pg(from),
+            render_partition_bound_values_pg(to),
+        ),
+        PartitionBounds::List { values } => {
+            format!(
+                "FOR VALUES IN ({})",
+                render_partition_bound_values_pg(values)
+            )
+        }
+        PartitionBounds::Hash { modulus, remainder } => {
+            format!("FOR VALUES WITH (MODULUS {modulus}, REMAINDER {remainder})")
+        }
+        PartitionBounds::Default => "DEFAULT".to_string(),
+    }
 }
 
 fn render_index_include_pg(include: &[String]) -> String {
@@ -446,5 +512,58 @@ impl DdlEmitter for PgEmitter {
 
     fn drop_index_up(&self, _table: Option<&str>, idx_name: &str) -> String {
         format!("DROP INDEX {}", self.qualified(idx_name))
+    }
+
+    fn create_partition(
+        &self,
+        name: &str,
+        of: &str,
+        bounds: &PartitionBounds,
+    ) -> Option<(String, String)> {
+        let up = format!(
+            "CREATE TABLE {} PARTITION OF {} {}",
+            self.qualified(name),
+            self.qualified(of),
+            render_partition_bounds_pg(bounds),
+        );
+        let down = format!("DROP TABLE {}", self.qualified(name));
+        Some((up, down))
+    }
+
+    fn attach_partition(
+        &self,
+        parent: &str,
+        name: &str,
+        bound: &PartitionBounds,
+    ) -> Option<(String, String)> {
+        let up = format!(
+            "ALTER TABLE {} ATTACH PARTITION {} {}",
+            self.qualified(parent),
+            self.qualified(name),
+            render_partition_bounds_pg(bound),
+        );
+        let down = format!(
+            "ALTER TABLE {} DETACH PARTITION {}",
+            self.qualified(parent),
+            self.qualified(name),
+        );
+        Some((up, down))
+    }
+
+    fn detach_partition(&self, parent: &str, name: &str, concurrently: bool) -> Option<String> {
+        let concurrently = if concurrently { " CONCURRENTLY" } else { "" };
+        let up = format!(
+            "ALTER TABLE {} DETACH PARTITION {}{}",
+            self.qualified(parent),
+            self.qualified(name),
+            concurrently,
+        );
+        Some(up)
+    }
+
+    fn drop_partition(&self, name: &str, cascade: bool) -> Option<String> {
+        let cascade = if cascade { " CASCADE" } else { "" };
+        let up = format!("DROP TABLE {}{}", self.qualified(name), cascade);
+        Some(up)
     }
 }

@@ -56,7 +56,7 @@
 
 use crate::model::expr::{CaseBranch, Expr, ScalarFn};
 use zero_migrate_ir::backend::Capability;
-use zero_migrate_ir::dialect::{DialectId, MYSQL, POSTGRES, SQLITE};
+use zero_migrate_ir::dialect::DialectId;
 // The PG argument-type alias fold. It moved to `zero-migrate-backend` with the
 // snapshot value types, whose `canonical_pg_signature_type` is its other caller;
 // re-imported here under its historical name so this module's two call sites and
@@ -293,7 +293,7 @@ pub fn validate_ir_authorized(
     validate_authored_identifier_lengths(ir, target_dialect)?;
     // Last, so a reference/foreign-key contract error still reports itself
     // rather than being masked by the dialect-scoped storage refusal.
-    validate_mysql_key_storage(ir, target_dialect)?;
+    validate_vendor_key_storage(ir, target_dialect)?;
     Ok(())
 }
 
@@ -430,7 +430,8 @@ fn validate_authored_identifier_lengths_op(
     Ok(())
 }
 
-/// Bound one author-supplied identifier at [`crate::plan::author::pg_max_ident_bytes`].
+/// Bound one author-supplied identifier at
+/// [`crate::plan::author::GENERATED_IDENT_MAX_BYTES`].
 ///
 /// The bound is BYTES, not characters, because PostgreSQL's NAMEDATALEN is a byte
 /// budget: a name short in characters but long in bytes is truncated exactly as an
@@ -442,7 +443,7 @@ fn authored_name_within_bound(
     op_index: usize,
     target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
-    let max = crate::plan::author::pg_max_ident_bytes();
+    let max = crate::plan::author::GENERATED_IDENT_MAX_BYTES;
     if name.len() <= max {
         return Ok(());
     }
@@ -621,39 +622,6 @@ impl<'a> CatalogColumnEvidence<'a> {
             .iter()
             .find(|candidate| candidate.name == column)
     }
-
-    /// `Some(Text | Blob)` only when the live catalog POSITIVELY proves this
-    /// column is a MySQL LOB, which is the one storage family MySQL refuses to
-    /// key without a prefix length (error 1170).
-    ///
-    /// Read from [`ColumnSnapshot::mysql_physical_type`] — the structured
-    /// `information_schema.COLUMNS.COLUMN_TYPE` parse — and DELIBERATELY NOT
-    /// from `ColumnSnapshot::data_type`. `data_type` is the dialect-neutral
-    /// canonical family, and `mysql_canonical_type` folds `varchar(n)` into
-    /// `"text"` and `varbinary(n)` into `"blob"` so the drift comparison can
-    /// treat the string families as one. Classifying THAT would refuse a key
-    /// over every bounded `t.string({ length })` column in the project — the
-    /// exact over-refusal this gate must not commit, measured on live MySQL 8
-    /// before the gate was written. `MysqlPhysicalType` keeps `Character {
-    /// length }` and `Lob { tier }` apart, which is why it is the relation read
-    /// here.
-    ///
-    /// [`ColumnSnapshot::mysql_physical_type`]: crate::model::snapshot::ColumnSnapshot::mysql_physical_type
-    fn mysql_lob_key_storage(
-        self,
-        table: &str,
-        column: &str,
-    ) -> Option<crate::render::declarative::MysqlStorage> {
-        let crate::model::snapshot::MysqlPhysicalType::Lob { tier } =
-            self.column(table, column)?.mysql_physical_type.as_ref()?
-        else {
-            return None;
-        };
-        let storage = crate::render::declarative::MysqlStorage::of(tier);
-        storage
-            .refuses_key_without_prefix_length()
-            .then_some(storage)
-    }
 }
 
 /// Whether the live catalog independently proves the value format that a
@@ -694,11 +662,13 @@ fn catalog_proves_reference_format(
     let native_uuid = crate::render::backends::VENDORS
         .get(target_dialect)
         .is_some_and(|vendor| vendor.catalog_fold.is_native_uuid_type(&target.data_type));
-    if target_dialect == &POSTGRES {
-        native_uuid
-    } else {
-        native_uuid || target.catalog_uuid_format_check
-    }
+    crate::render::backends::VENDORS
+        .get(target_dialect)
+        .is_some_and(|vendor| {
+            vendor
+                .validation
+                .catalog_proves_uuid_format(native_uuid, target.catalog_uuid_format_check)
+        })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1201,6 +1171,7 @@ fn validate_backfill_cursor_fields(
     target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
+    let validation = registered_vendor(target_dialect, op_index)?.validation;
     let error = |reason: String, suggested_fix: String| AuthoringError {
         code: CODE_OP_INVALID.to_string(),
         kind: Some(UnsupportedKind::Op),
@@ -1229,11 +1200,7 @@ fn validate_backfill_cursor_fields(
                     .to_string(),
             ));
         }
-        let comparison_name = if target_dialect == &POSTGRES {
-            column.clone()
-        } else {
-            column.to_ascii_lowercase()
-        };
+        let comparison_name = validation.canonical_identifier(column);
         if !seen.insert(comparison_name) {
             return Err(error(
                 format!(
@@ -1243,11 +1210,7 @@ fn validate_backfill_cursor_fields(
             ));
         }
         if set.keys().any(|destination| {
-            if target_dialect == &POSTGRES {
-                destination == column
-            } else {
-                destination.eq_ignore_ascii_case(column)
-            }
+            validation.canonical_identifier(destination) == validation.canonical_identifier(column)
         }) {
             return Err(error(
                 format!(
@@ -1307,12 +1270,9 @@ fn validate_per_row_destination(
         }
     }
 
+    let validation = registered_vendor(target_dialect, op_index)?.validation;
     if cursor_columns.iter().any(|cursor| {
-        if target_dialect == &POSTGRES {
-            cursor == column
-        } else {
-            cursor.eq_ignore_ascii_case(column)
-        }
+        validation.canonical_identifier(cursor) == validation.canonical_identifier(column)
     }) {
         return Err(per_row_validation_error(
             target_dialect,
@@ -2021,100 +1981,9 @@ fn lowered_reference_storage(
     ty: &crate::model::ir::ColType,
     dialect: &DialectId,
 ) -> Option<String> {
-    use crate::model::ir::ColType;
-
-    // This spelling table still needs a required backend policy seam. Until it
-    // has one, refuse an unfamiliar registered backend instead of assigning it
-    // one shipping vendor's storage by a catch-all.
-    if dialect != &POSTGRES && dialect != &SQLITE && dialect != &MYSQL {
-        return None;
-    }
-    let sqlite = dialect == &SQLITE;
-    let mysql = dialect == &MYSQL;
-    let postgres = dialect == &POSTGRES;
-
-    Some(match ty {
-        ColType::String { .. } | ColType::Text | ColType::Ref { .. } => "text".to_string(),
-        ColType::SmallInt => if sqlite { "integer" } else { "smallint" }.to_string(),
-        ColType::Int => "integer".to_string(),
-        ColType::BigInt => if sqlite { "integer" } else { "bigint" }.to_string(),
-        ColType::Double => if mysql {
-            "double"
-        } else if sqlite {
-            "real"
-        } else {
-            "double precision"
-        }
-        .to_string(),
-        ColType::Real => "real".to_string(),
-        ColType::Boolean => if sqlite { "integer" } else { "boolean" }.to_string(),
-        ColType::Json => if postgres {
-            "jsonb"
-        } else if mysql {
-            "json"
-        } else {
-            "text"
-        }
-        .to_string(),
-        ColType::Timestamp => if postgres {
-            "timestamp with time zone"
-        } else if mysql {
-            "datetime"
-        } else {
-            "text"
-        }
-        .to_string(),
-        ColType::Date => if sqlite { "text" } else { "date" }.to_string(),
-        ColType::Uuid => if postgres { "uuid" } else { "text" }.to_string(),
-        ColType::Inet => if postgres { "inet" } else { "text" }.to_string(),
-        ColType::TextArray => if postgres { "text[]" } else { "text" }.to_string(),
-        ColType::Bytes | ColType::Encrypted { .. } => {
-            if postgres { "bytea" } else { "blob" }.to_string()
-        }
-        ColType::Char { length } => {
-            if sqlite {
-                "text".to_string()
-            } else {
-                format!("char({length})")
-            }
-        }
-        ColType::Vector { vector } => format!("vector({vector})"),
-        ColType::GeoPoint => if postgres {
-            "geography(point,4326)"
-        } else {
-            "text"
-        }
-        .to_string(),
-        ColType::Decimal { precision, scale } => {
-            if postgres {
-                format!("numeric({precision},{scale})")
-            } else if mysql {
-                format!("decimal({precision},{scale})")
-            } else {
-                "text".to_string()
-            }
-        }
-        ColType::Enum { name, schema } => {
-            if postgres {
-                schema
-                    .as_deref()
-                    .map_or_else(|| name.clone(), |schema| format!("{schema}.{name}"))
-            } else if mysql {
-                format!("enum:{name}")
-            } else {
-                "text".to_string()
-            }
-        }
-        ColType::Domain { name, schema } => {
-            if postgres {
-                schema
-                    .as_deref()
-                    .map_or_else(|| name.clone(), |schema| format!("{schema}.{name}"))
-            } else {
-                format!("domain:{name}")
-            }
-        }
-    })
+    crate::render::backends::VENDORS
+        .get(dialect)
+        .map(|vendor| vendor.validation.lowered_reference_storage(ty))
 }
 
 fn reference_is_format_bearing(contract: &LogicalColumnContract) -> bool {
@@ -2436,13 +2305,8 @@ fn validate_column_references(
     Ok(())
 }
 
-/// Refuse a key (index, primary key, or unique constraint) over a column whose
-/// RENDERED MySQL storage is `TEXT` or `BLOB` with no prefix length. MySQL
-/// answers that with error 1170, "BLOB/TEXT column used in key specification
-/// without a key length", and the IR has no prefix-length element to author, so
-/// there is no spelling of this key MySQL will take. The engine already applies
-/// the rule to its own journal tables, where every keyed text column is
-/// `VARCHAR(255)`; this extends it to user tables.
+/// Ask the selected backend to validate every key-bearing column position in an
+/// authored envelope against that backend's rendered physical storage.
 ///
 /// It lives at validate for the same reason the literal-default rule does: the
 /// renderer degrades every lowering error to a `-- [runtime-resolved]` comment,
@@ -2452,24 +2316,21 @@ fn validate_column_references(
 /// referenced column must be declared in the SAME envelope — which is what the
 /// two-pass declaration walk sees. A column from an earlier ordered artifact or
 /// from an unmanaged table carries no type here and is left alone. That half is
-/// closed at lower time by [`validate_mysql_key_storage_for_lower`], against the
+/// closed at lower time by [`validate_vendor_key_storage_for_lower`], against the
 /// live catalog. This entry is NOT redundant with that one and must not be
 /// removed in its favour: it needs no connection at all, so it turns `lint` red
 /// and refuses the same-envelope mistake in CI, where no database exists.
-fn validate_mysql_key_storage(
+fn validate_vendor_key_storage(
     ir: &crate::model::ir::MigrationIr,
     target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
-    if target_dialect != &MYSQL {
-        return Ok(());
-    }
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
     for op in &ir.ops {
         collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
-        validate_mysql_key_storage_op(
+        validate_vendor_key_storage_op(
             op,
             target_dialect,
             op_index,
@@ -2481,17 +2342,16 @@ fn validate_mysql_key_storage(
     Ok(())
 }
 
-/// The lower-time half of the MySQL key-prefix rule: refuse a key over a column
-/// an EARLIER ordered migration created as `TEXT`/`BLOB`, or over such a column
-/// of a table the engine never authored.
+/// The lower-time half of backend-owned key-storage validation: include a column
+/// an earlier ordered migration created, or one from an unmanaged table.
 ///
-/// [`validate_mysql_key_storage`] cannot see either, because validation is
+/// [`validate_vendor_key_storage`] cannot see either, because validation is
 /// offline and reads only the migration in front of it. Lower time can: the
 /// apply path introspects the live catalog BEFORE it lowers, so
 /// `LiveSchema::table_snapshots` already carries every pre-existing column's
-/// resolved MySQL type. Measured on live MySQL 8.4 before this existed, the
-/// missing half cleared validate AND preview and then met MySQL's own `ERROR
-/// 1170` mid-deploy, with the envelope's earlier statements already applied.
+/// resolved physical metadata. Without this half, a backend-owned storage
+/// refusal can arrive only at the server, after earlier migration units have
+/// already applied.
 ///
 /// PRECEDENCE: an authored declaration in view always wins over the catalog.
 /// `seed` plus this envelope's own declarations describe what the column is
@@ -2499,14 +2359,13 @@ fn validate_mysql_key_storage(
 /// column this envelope re-declares would refuse a migration that repairs the
 /// very shape being complained about.
 ///
-/// FAIL-OPEN otherwise, by construction: an absent table, an absent column, a
-/// producer that left `mysql_physical_type` unset, or no catalog at all all read
-/// as "no evidence" and refuse nothing. Preview lowers against an empty
-/// snapshot and must stay quiet.
+/// NO-EVIDENCE otherwise, by construction: an absent table, an absent column,
+/// backend metadata that cannot prove a restriction, or no catalog at all all
+/// refuse nothing. Preview lowers against an empty snapshot and must stay quiet.
 ///
 /// # Errors
 /// Returns [`CODE_DIALECT_UNSUPPORTED`] naming the keyed column and its storage.
-pub(crate) fn validate_mysql_key_storage_for_lower(
+pub(crate) fn validate_vendor_key_storage_for_lower(
     ir: &crate::model::ir::MigrationIr,
     target_dialect: &DialectId,
     seed: &LogicalColumnContracts,
@@ -2514,9 +2373,6 @@ pub(crate) fn validate_mysql_key_storage_for_lower(
     default_schema: Option<&str>,
     catalog: CatalogColumnEvidence<'_>,
 ) -> Result<(), AuthoringError> {
-    if target_dialect != &MYSQL {
-        return Ok(());
-    }
     let schema_mode = LogicalSchemaMode::Effective {
         project_schema,
         default_schema,
@@ -2526,7 +2382,7 @@ pub(crate) fn validate_mysql_key_storage_for_lower(
         collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode);
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
-        validate_mysql_key_storage_op(
+        validate_vendor_key_storage_op(
             op,
             target_dialect,
             op_index,
@@ -2538,10 +2394,10 @@ pub(crate) fn validate_mysql_key_storage_for_lower(
     Ok(())
 }
 
-/// The MySQL key-prefix rule for one op. Every keyed column position an op can
-/// carry is checked against the declarations in view, falling back to `catalog`
-/// for a column none of them describes.
-fn validate_mysql_key_storage_op(
+/// Apply the selected backend's required storage policy to one op. Every keyed
+/// column position an op can carry is checked against declarations in view,
+/// falling back to `catalog` for a column none of them describes.
+fn validate_vendor_key_storage_op(
     op: &crate::model::ir::Op,
     target_dialect: &DialectId,
     op_index: usize,
@@ -2550,6 +2406,8 @@ fn validate_mysql_key_storage_op(
     catalog: CatalogColumnEvidence<'_>,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{IrConstraintKind, Op};
+
+    let backend = crate::render::backends::schema_renderer(target_dialect);
 
     let check = |position: &str,
                  schema: Option<&str>,
@@ -2561,44 +2419,45 @@ fn validate_mysql_key_storage_op(
             // is about to be, while the catalog says only what it was. Only a
             // column NOTHING in view declares - an earlier migration's, or an
             // unmanaged table's - falls through to the live catalog.
-            let (storage, witness) =
-                match logical_column_matches(declared, schema_mode, schema, table, column).pop() {
-                    Some(contract) => (
-                        crate::render::lower::storage_for_column_facets(
-                            target_dialect,
-                            &contract.ty,
-                            contract.value_format.as_ref(),
-                            contract.id_prefix.as_deref(),
-                            contract.case_sensitive,
+            let refusal = match logical_column_matches(declared, schema_mode, schema, table, column)
+                .pop()
+            {
+                Some(contract) => crate::render::lower::rendered_storage_for_column_facets(
+                    target_dialect,
+                    &contract.ty,
+                    contract.value_format.as_ref(),
+                    contract.id_prefix.as_deref(),
+                    contract.case_sensitive,
+                )
+                .and_then(|rendered| {
+                    backend.unprefixed_key_storage_refusal(
+                        position,
+                        table,
+                        column,
+                        zero_migrate_backend::schema::KeyStorageEvidence::RenderedType(&rendered),
+                    )
+                }),
+                None => catalog.column(table, column).and_then(|catalog_column| {
+                    backend.unprefixed_key_storage_refusal(
+                        position,
+                        table,
+                        column,
+                        zero_migrate_backend::schema::KeyStorageEvidence::CatalogColumn(
+                            catalog_column,
                         ),
-                        "renders as MySQL",
-                    ),
-                    None => (
-                        catalog.mysql_lob_key_storage(table, column),
-                        "the live MySQL catalog reports as",
-                    ),
-                };
-            let Some(storage) = storage else {
+                    )
+                }),
+            };
+            let Some(refusal) = refusal else {
                 continue;
             };
-            if !storage.refuses_key_without_prefix_length() {
-                continue;
-            }
             return Err(AuthoringError {
                 code: CODE_DIALECT_UNSUPPORTED.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
                 dialect: target_dialect.clone(),
-                reason: format!(
-                    "{position} keys {table}.{column}, which {witness} {} storage; \
-                     MySQL refuses a key over a TEXT or BLOB column with no prefix length",
-                    storage.label()
-                ),
-                suggested_fix: Some(
-                    "bound the column with t.string({ length }) so it renders VARCHAR, or use a \
-                     dialectal PostgreSQL/SQLite leg"
-                        .to_string(),
-                ),
+                reason: refusal.reason,
+                suggested_fix: Some(refusal.suggested_fix),
             });
         }
         Ok(())
@@ -2617,7 +2476,7 @@ fn validate_mysql_key_storage_op(
     match op {
         Op::Dialectal { legs } => {
             for inner in dialectal_leg(target_dialect, legs) {
-                validate_mysql_key_storage_op(
+                validate_vendor_key_storage_op(
                     inner,
                     target_dialect,
                     op_index,
@@ -3240,8 +3099,12 @@ fn validate_no_name_is_claimed_twice(
     // Only EXPLICIT names participate. An absent name is derived later, and
     // treating absent as a value would collapse two ordinary anonymous
     // constraints into one repeated name.
-    let track_constraint_names = target_dialect != &SQLITE;
-    let index_shares_relation_namespace = target_dialect != &MYSQL;
+    let vendor = registered_vendor(target_dialect, 0)?;
+    let track_constraint_names = vendor.validation.tracks_constraint_names();
+    let index_shares_relation_namespace = vendor
+        .descriptor
+        .capabilities
+        .contains(Capability::SchemaWideIndexNames);
 
     // POSTGRESQL'S SECOND NAMESPACE. Enums and domains are types; every table and
     // view also creates a composite row type of its own name. Measured on a live
@@ -3256,7 +3119,7 @@ fn validate_no_name_is_claimed_twice(
     // PostgreSQL accepts. That asymmetry was re-measured in isolation before being
     // built on. Other dialects emulate enums and domains rather than declaring
     // them, so there is no second namespace there.
-    let track_type_namespace = target_dialect == &POSTGRES;
+    let track_type_namespace = vendor.validation.tracks_relation_type_namespace();
     let mut types: BTreeMap<Key, &str> = BTreeMap::new();
     let mut trigger_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
@@ -4459,11 +4322,13 @@ fn effective_ops<'a>(
     out
 }
 
-/// The nested op sequence a [`Op::Dialectal`] container actually emits for one
-/// target dialect: the dialect's own leg when present, and no ops otherwise.
+/// The nested op sequence a [`Op::Dialectal`] container emits for one target.
 ///
 /// Descending into a leg that will NOT run would refuse a migration on a
 /// reference the server never sees, so the choice is made here once and shared.
+/// A missing own leg has already been refused by [`validate_dialectal_op`]; the
+/// `expect` below keeps that invariant fail-closed if validation ordering ever
+/// changes instead of silently treating absence as an empty leg.
 /// DELEGATES to [`crate::render::fold::selected_dialectal_leg`] rather than
 /// repeating the exact-id lookup, because that helper is `pub(crate)` for
 /// exactly this reason - its doc comment asks callers outside the fold to select
@@ -4479,7 +4344,8 @@ fn dialectal_leg<'a>(
     target_dialect: &DialectId,
     legs: &'a BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
 ) -> &'a [crate::model::ir::Op] {
-    crate::render::fold::selected_dialectal_leg(target_dialect, legs).unwrap_or_default()
+    crate::render::fold::selected_dialectal_leg(target_dialect, legs)
+        .expect("validate_dialectal_op must refuse a missing target leg before semantic walks")
 }
 
 /// Refuse an operation that names a column an earlier `dropColumn` removed.
@@ -5007,22 +4873,10 @@ fn validate_table_foreign_key_constraint(
     if !target_supports(target_dialect, Capability::DeferrableConstraint, op_index)?
         && (deferrable == &Some(true) || initially_deferred == &Some(true))
     {
-        let (reason, suggested_fix) = if target_dialect == &MYSQL {
-            (
-                "MySQL does not support deferrable foreign-key constraints".to_string(),
-                "omit deferrable/initiallyDeferred for MySQL, or use a dialectal PostgreSQL/SQLite leg".to_string(),
-            )
-        } else {
-            (
-                format!(
-                    "backend {:?} does not support deferrable foreign-key constraints",
-                    target_dialect.as_str()
-                ),
-                "omit deferrable/initiallyDeferred or provide a backend-specific dialectal leg"
-                    .to_string(),
-            )
-        };
-        return Err(error(reason, &suggested_fix));
+        let refusal = registered_vendor(target_dialect, op_index)?
+            .validation
+            .deferrable_foreign_key_refusal();
+        return Err(error(refusal.reason, &refusal.suggested_fix));
     }
 
     let local_table_declared =
@@ -5637,6 +5491,9 @@ fn validate_partition_recording(
 
     let mut parents: std::collections::BTreeMap<String, PartitionParentFold> =
         std::collections::BTreeMap::new();
+    let native_partitioning = registered_vendor(target_dialect, 0)?
+        .validation
+        .supports_native_partitioning();
 
     // Replay the SELECTED leg's ops inline, in place, carrying the OUTER op index for
     // diagnostics. Partition recording is stateful across the whole migration - a parent
@@ -5760,7 +5617,7 @@ fn validate_partition_recording(
                     parent
                         .children
                         .insert(name.clone(), (op_index, bounds.clone()));
-                } else if target_dialect != &POSTGRES {
+                } else if !native_partitioning {
                     return Err(partition_error(
                         CODE_DIALECT_UNSUPPORTED,
                         op_index,
@@ -5782,7 +5639,7 @@ fn validate_partition_recording(
                     parent
                         .children
                         .insert(name.clone(), (op_index, bound.clone()));
-                } else if target_dialect != &POSTGRES {
+                } else if !native_partitioning {
                     return Err(partition_error(
                         CODE_DIALECT_UNSUPPORTED,
                         op_index,
@@ -7289,13 +7146,16 @@ fn validate_op_support(
             Ok(())
         };
 
-    let support = crate::model::op_support::support(op);
+    let support = crate::model::op_support::support_for_target(op, target_dialect);
+    let native_partitioning = registered_vendor(target_dialect, op_index)?
+        .validation
+        .supports_native_partitioning();
     match op {
         Op::CreateTable {
             name,
             partition_by: Some(partition_by),
             ..
-        } if target_dialect != &POSTGRES && !partition_by.collapse() => {
+        } if !native_partitioning && !partition_by.collapse() => {
             return Err(AuthoringError {
                 code: CODE_DIALECT_UNSUPPORTED.to_string(),
                 kind: Some(UnsupportedKind::Op),
@@ -7602,48 +7462,21 @@ fn validate_vendor_op(
         return Ok(()); // portable-core op — not gated here.
     }
 
-    // (1) SQLite — every vendor op except RawViewBody is PgOnly. Refuse
-    // fail-closed at load. RawViewBody is a raw surface but not PgOnly; SQLite can
-    // create plain views from a SELECT body.
-    if target_dialect == &SQLITE
-        && caps
-            .iter()
-            .any(|cap| !matches!(cap, crate::model::capability::VendorCapability::RawViewBody))
-    {
-        let cap = caps
-            .iter()
-            .find(|cap| !matches!(cap, crate::model::capability::VendorCapability::RawViewBody))
-            .copied()
-            .expect("non-raw-view cap exists");
-        let (reason, fix) = if matches!(
-            cap,
-            crate::model::capability::VendorCapability::MaterializedView
-        ) {
-            (
-                "materializedView: SQLite has no materialized views; materialized:true is PostgreSQL-only"
-                    .to_string(),
-                "drop materialized:true for SQLite, or target Postgres for this view".to_string(),
-            )
-        } else {
-            (
-                format!(
-                    "the zero-migrate vendor op (capability {:?}) is Postgres-only — \
-                     roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/pgRaw have \
-                     no SQLite analogue (PgOnly)",
-                    cap.as_token()
-                ),
-                "vendor primitives target Postgres only — deploy this migration against a \
-                 Postgres backend, or remove the privileged Postgres op"
-                    .to_string(),
-            )
-        };
+    // (1) Ask the selected backend for its own fail-closed refusal before the
+    // operator-capability gate. Raw surfaces that backend supports return None.
+    if let Some(refusal) = caps.iter().find_map(|cap| {
+        registered_vendor(target_dialect, op_index)
+            .expect("target registration was checked above")
+            .validation
+            .vendor_capability_refusal(*cap)
+    }) {
         return Err(AuthoringError {
             code: CODE_UNSUPPORTED.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
             dialect: target_dialect.clone(),
-            reason,
-            suggested_fix: Some(fix),
+            reason: refusal.reason,
+            suggested_fix: Some(refusal.suggested_fix),
         });
     }
 
@@ -8188,26 +8021,15 @@ fn validate_trigger_dialect(
         crate::model::ir::TriggerAction::Body { .. }
             if !target_supports(target_dialect, Capability::TriggerBody, op_index)? =>
         {
-            let (reason, suggested_fix) = if target_dialect == &POSTGRES {
-                (
-                    "Postgres triggers must execute a named trigger function; the closed inline body form renders only on SQLite".to_string(),
-                    "use action: { kind: \"executeFunction\", name: \"...\" } and create the trigger function separately".to_string(),
-                )
-            } else {
-                let backend_name = registered_vendor(target_dialect, op_index)?
-                    .descriptor
-                    .display_name;
-                (
-                    format!("{backend_name} triggers do not accept the closed inline body form"),
-                    "use a trigger action supported by this backend".to_string(),
-                )
-            };
+            let refusal = registered_vendor(target_dialect, op_index)?
+                .validation
+                .inline_trigger_body_refusal();
             return Err(unsupported_trigger(
                 "triggerBody",
                 target_dialect,
                 op_index,
-                reason,
-                suggested_fix,
+                refusal.reason,
+                refusal.suggested_fix,
             ));
         }
         crate::model::ir::TriggerAction::ExecuteFunction { .. }
@@ -8242,13 +8064,16 @@ fn validate_trigger_dialect(
         ));
     }
 
-    if target_dialect == &MYSQL && events.len() > 1 {
+    if let Some(refusal) = registered_vendor(target_dialect, op_index)?
+        .validation
+        .trigger_event_count_refusal(events.len())
+    {
         return Err(unsupported_trigger(
             "triggerMultipleEvents",
             target_dialect,
             op_index,
-            "MySQL CREATE TRIGGER accepts exactly one trigger event".to_string(),
-            "split this into one trigger per event when targeting MySQL".to_string(),
+            refusal.reason,
+            refusal.suggested_fix,
         ));
     }
 
@@ -8411,11 +8236,11 @@ fn validate_column_reference_constraint_name(name: &str) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if name.len() > crate::plan::author::pg_max_ident_bytes() {
+    if name.len() > crate::plan::author::GENERATED_IDENT_MAX_BYTES {
         return Err(format!(
             "is {} bytes; the maximum is {} bytes",
             name.len(),
-            crate::plan::author::pg_max_ident_bytes()
+            crate::plan::author::GENERATED_IDENT_MAX_BYTES
         ));
     }
     Ok(())
@@ -8437,31 +8262,16 @@ fn validate_default_for_type(
 
     if let IrDefault::Nextval { .. } = default {
         if !target_supports(target_dialect, Capability::Sequence, op_index)? {
-            let (reason, suggested_fix) = if target_dialect == &SQLITE || target_dialect == &MYSQL {
-                (
-                    format!(
-                        "{position} declares a nextval sequence default, but standalone sequences and nextval defaults are PostgreSQL-only"
-                    ),
-                    "target PostgreSQL, use an identity/auto-increment shape for this dialect, or remove `.default(nextval(...))`"
-                        .to_string(),
-                )
-            } else {
-                (
-                    format!(
-                        "{position} declares a nextval sequence default, but backend {:?} does not support standalone sequences",
-                        target_dialect.as_str()
-                    ),
-                    "use a backend-supported identity/default shape or remove `.default(nextval(...))`"
-                        .to_string(),
-                )
-            };
+            let refusal = registered_vendor(target_dialect, op_index)?
+                .validation
+                .sequence_default_refusal(position);
             return Err(AuthoringError {
                 code: CODE_UNSUPPORTED.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
                 dialect: target_dialect.clone(),
-                reason,
-                suggested_fix: Some(suggested_fix),
+                reason: refusal.reason,
+                suggested_fix: Some(refusal.suggested_fix),
             });
         }
         if matches!(ty, ColType::Int | ColType::BigInt | ColType::SmallInt) {
@@ -8720,7 +8530,7 @@ fn validate_column_facets(
                 ),
                 format!(
                     "use a non-empty bare identifier of at most {} bytes, starting with an ASCII letter or '_' and containing only ASCII letters, digits, or '_'",
-                    crate::plan::author::pg_max_ident_bytes()
+                    crate::plan::author::GENERATED_IDENT_MAX_BYTES
                 ),
             ));
         }
@@ -8817,34 +8627,18 @@ fn validate_column_facets(
         )?;
     }
 
-    validate_mysql_literal_default_storage(col, target_dialect, op_index)?;
+    validate_vendor_literal_default_storage(col, target_dialect, op_index)?;
 
     if !target_supports(target_dialect, Capability::VirtualGeneratedColumn, op_index)?
         && matches!(col.generated.as_ref(), Some(generated) if !generated.stored)
     {
-        let (reason, suggested_fix) = if target_dialect == &POSTGRES {
-            (
-                format!(
-                    "column {:?} requests a VIRTUAL generated column, but Postgres supports generated columns only as STORED",
-                    col.name
-                ),
-                "use `.generated(expr)` / `{ virtual: false }` for Postgres, or target SQLite"
-                    .to_string(),
-            )
-        } else {
-            (
-                format!(
-                    "column {:?} requests a VIRTUAL generated column, but backend {:?} does not support virtual generated columns",
-                    col.name,
-                    target_dialect.as_str()
-                ),
-                "use a stored generated column or a backend-specific dialectal leg".to_string(),
-            )
-        };
+        let refusal = registered_vendor(target_dialect, op_index)?
+            .validation
+            .virtual_generated_column_refusal(&col.name);
         return Err(unsupported(
             UnsupportedKind::VirtualColumn,
-            reason,
-            suggested_fix,
+            refusal.reason,
+            refusal.suggested_fix,
         ));
     }
 
@@ -8977,40 +8771,29 @@ fn validate_column_facets(
     Ok(())
 }
 
-/// Refuse a BARE LITERAL `DEFAULT` on a column whose RENDERED MySQL storage is
-/// `TEXT`/`BLOB`/`JSON`/`GEOMETRY`. MySQL 8 rejects that at DDL time
-/// unconditionally, so `t.text().notNull().default("new")` renders SQL the server
-/// will not take.
+/// Ask the selected backend whether a bare literal `DEFAULT` is legal on the
+/// exact physical type it renders for this column.
 ///
-/// The refusal lives here rather than in the renderer because `render_ir_ops`
+/// The traversal lives here rather than in the renderer because `render_ir_ops`
 /// catches every lowering error and degrades it to a `-- [runtime-resolved]`
 /// comment: a renderer refusal never surfaces and `lint` still prints ok. This
 /// gate feeds lint's verdict directly, and apply runs it too, so one placement
-/// closes both. It mirrors the MySQL deferrable-foreign-key refusal above,
-/// including its "use a dialectal leg" remedy.
+/// closes both. The selected backend owns the refusal and its remedy.
 ///
-/// Not every default is invalid. MySQL permits an EXPRESSION default on those
-/// storages, and this engine already renders bytes defaults as `(X'..')` and JSON
-/// container/value defaults as `(JSON_OBJECT())` / `(CAST(.. AS JSON))`. The
-/// spelling is taken from the renderer itself
+/// The spelling is taken from the renderer itself
 /// ([`crate::render::lower::rendered_column_default`]) rather than inferred
 /// from the IR variant, so the two cannot disagree about which form a default
-/// takes; a leading `(` is the parenthesized-expression form MySQL accepts.
-///
-/// The storage comes from the ONE shared predicate the DDL renderer spells
-/// columns from, keyed on RENDERED storage rather than the authored type name: a
-/// `caseSensitive: false` text column renders a bare `TEXT`, while a `t.text()`
-/// carrying a value format or a legacy id prefix renders `VARCHAR(191)` and takes
-/// a literal default happily.
-fn validate_mysql_literal_default_storage(
+/// takes. The physical type likewise comes from the selected schema renderer,
+/// so the backend policy classifies emitted bytes rather than an authored token.
+fn validate_vendor_literal_default_storage(
     col: &crate::model::ir::IrColumn,
     target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
-    if target_dialect != &MYSQL || col.default.is_none() {
+    if col.default.is_none() {
         return Ok(());
     }
-    let Some(storage) = crate::render::lower::storage_for_column_facets(
+    let Some(rendered_type) = crate::render::lower::rendered_storage_for_column_facets(
         target_dialect,
         &col.ty,
         col.value_format.as_ref(),
@@ -9019,32 +8802,23 @@ fn validate_mysql_literal_default_storage(
     ) else {
         return Ok(());
     };
-    if !storage.refuses_literal_default() {
-        return Ok(());
-    }
-    let Some(rendered) = crate::render::lower::rendered_column_default(target_dialect, col) else {
+    let Some(rendered_default) = crate::render::lower::rendered_column_default(target_dialect, col)
+    else {
         return Ok(());
     };
-    if rendered.trim_start().starts_with('(') {
+    let Some(refusal) = crate::render::backends::schema_renderer(target_dialect)
+        .literal_default_storage_refusal(&col.name, &rendered_type, &rendered_default)
+    else {
         return Ok(());
-    }
+    };
 
     Err(AuthoringError {
         code: CODE_DIALECT_UNSUPPORTED.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
         dialect: target_dialect.clone(),
-        reason: format!(
-            "column {:?} declares the literal default {rendered} but renders as MySQL {} \
-             storage; MySQL refuses a literal DEFAULT on TEXT, BLOB, JSON, and GEOMETRY columns",
-            col.name,
-            storage.label()
-        ),
-        suggested_fix: Some(
-            "drop the default for MySQL, bound the column with t.string({ length }) so it renders \
-             VARCHAR, or use a dialectal PostgreSQL/SQLite leg"
-                .to_string(),
-        ),
+        reason: refusal.reason,
+        suggested_fix: Some(refusal.suggested_fix),
     })
 }
 
@@ -9083,68 +8857,20 @@ fn validate_identity_placement(
     let Some(identity) = col.identity else {
         return Ok(());
     };
-    if target_dialect == &POSTGRES {
+    let Some(refusal) = registered_vendor(target_dialect, op_index)?
+        .validation
+        .identity_placement_refusal(&col.name, identity.always, pk_cols, is_add_column)
+    else {
         return Ok(());
-    }
-    if target_dialect != &SQLITE && target_dialect != &MYSQL {
-        return Err(AuthoringError {
-            code: CODE_UNSUPPORTED.to_string(),
-            kind: Some(UnsupportedKind::Identity),
-            op_index,
-            dialect: target_dialect.clone(),
-            reason: format!(
-                "registered backend {:?} supplies no identity-placement validation policy",
-                target_dialect.as_str()
-            ),
-            suggested_fix: Some(
-                "add the backend's required identity-placement policy before authoring identity columns"
-                    .to_string(),
-            ),
-        });
-    }
-    let err = |reason: String| AuthoringError {
+    };
+    Err(AuthoringError {
         code: CODE_UNSUPPORTED.to_string(),
         kind: Some(UnsupportedKind::Identity),
         op_index,
         dialect: target_dialect.clone(),
-        reason,
-        suggested_fix: Some(
-            "use identity only on the sole integer primary key for this dialect, or remove \
-             `.identity(...)`"
-                .to_string(),
-        ),
-    };
-    if identity.always {
-        return Err(err(
-            "identity({ always: true }) is PostgreSQL-only; SQLite/MySQL support \
-             only identity({ always: false }) / autoIncrement() on the sole integer \
-             primary key"
-                .to_string(),
-        ));
-    }
-    if is_add_column {
-        return Err(err(
-            "autoIncrement identity: non-PK identity has no sound target-dialect \
-             render; SQLite AUTOINCREMENT and MySQL AUTO_INCREMENT are only sound \
-             on the sole integer primary key"
-                .to_string(),
-        ));
-    }
-    let Some(pk_cols) = pk_cols else {
-        return Err(err(format!(
-            "autoIncrement identity: column {:?} is not the declared primary key; \
-             non-PK identity has no sound target-dialect render",
-            col.name
-        )));
-    };
-    if pk_cols.len() == 1 && pk_cols[0] == col.name {
-        return Ok(());
-    }
-    Err(err(format!(
-        "autoIncrement identity: column {:?} is part of {:?}, but this dialect's \
-         identity is only sound for the sole integer primary key",
-        col.name, pk_cols
-    )))
+        reason: refusal.reason,
+        suggested_fix: Some(refusal.suggested_fix),
+    })
 }
 
 /// **Apply/render-seam ColRef resolution (rule (c)).** Re-run the
@@ -9213,6 +8939,12 @@ pub fn validate_op_resolved(
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
+    if let Op::Dialectal { legs } = op {
+        // `validate_op_resolved` is public and may be called without an earlier
+        // `validate_ir` pass. Establish the same friendly fail-closed target-leg
+        // invariant here before the resolved semantic walk selects a leg.
+        validate_dialectal_op(legs, target_dialect, op_index, None, None)?;
+    }
     validate_op_support(op, target_dialect, op_index)?;
     // The op's target table (for the DML / setColumnType ops we resolve).
     let resolved_scope = |table: &str| -> Option<Vec<String>> { live_columns.get(table).cloned() };
@@ -9415,6 +9147,7 @@ mod tests {
         UnaryOp,
     };
     use crate::model::ir::{IndexElement, IrScalar, IrValue};
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     fn cols() -> Vec<String> {
         vec![
@@ -11726,15 +11459,31 @@ mod tests {
     }
 
     /// The control that keeps this SELECTED-leg rather than every-leg. The same broken
-    /// update sits in the MySQL leg, which PostgreSQL never runs - its columns are not
-    /// this catalog's to satisfy, and refusing would reject a migration correct here.
+    /// update sits in the MySQL leg, while PostgreSQL has an explicit empty leg. The
+    /// MySQL columns are not this catalog's to satisfy, and refusing would reject a
+    /// migration correct here.
     #[test]
     fn validate_ir_resolved_ignores_an_unresolved_colref_in_an_unselected_leg() {
-        let ir = ir_with(vec![dialectal_legs(None, Some(vec![ghost_update()]))]);
+        let ir = ir_with(vec![dialectal_legs(
+            Some(Vec::new()),
+            Some(vec![ghost_update()]),
+        )]);
         assert!(
             validate_ir_resolved(&ir, &POSTGRES, &live_users()).is_ok(),
             "PostgreSQL never runs the mysql leg, so its columns are not resolved here"
         );
+    }
+
+    #[test]
+    fn validate_ir_resolved_refuses_a_missing_target_leg_without_panicking() {
+        let ir = ir_with(vec![dialectal_legs(None, Some(vec![ghost_update()]))]);
+        let err = validate_ir_resolved(&ir, &POSTGRES, &live_users())
+            .expect_err("the public resolved validator must enforce exact target coverage");
+        assert_eq!(err.code, CODE_OP_INVALID);
+        assert_eq!(err.op_index, 0);
+        assert!(err
+            .reason
+            .contains("dialectal op has no leg for the postgres target"));
     }
 
     /// A resolvable ColRef inside the selected leg still passes, so the arm above is
@@ -12989,7 +12738,7 @@ mod tests {
 
     #[test]
     fn column_reference_rejects_an_overlong_explicit_constraint_name() {
-        let name = "f".repeat(crate::plan::author::pg_max_ident_bytes() + 1);
+        let name = "f".repeat(crate::plan::author::GENERATED_IDENT_MAX_BYTES + 1);
         let ir = ir_with(vec![create_with_reference_name(&name)]);
         let error = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("an overlong foreign-key constraint name must fail closed");
@@ -12997,7 +12746,7 @@ mod tests {
         assert!(
             error
                 .reason
-                .contains(&crate::plan::author::pg_max_ident_bytes().to_string()),
+                .contains(&crate::plan::author::GENERATED_IDENT_MAX_BYTES.to_string()),
             "the error must name the length cap: {error}"
         );
     }

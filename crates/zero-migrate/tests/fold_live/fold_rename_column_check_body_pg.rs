@@ -58,7 +58,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, snapshot_schema, Approval,
     EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, PostgresBackend, SchemaSnapshot, SqlDialect,
+    MigrationIr, PostgresBackend, SchemaSnapshot,
 };
 
 const OWNER: &str = "app_fold_stale_check_body_pg";
@@ -190,8 +190,8 @@ async fn apply_through_engine(
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
@@ -273,14 +273,18 @@ async fn measure() -> Option<Measured> {
                 .map_err(|error| format!("resolve folded create-table policy: {error}"))?;
         let folded = fold_ops(
             &folded_resolved.ops,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &cfg.project_schema,
             &policy,
         )
         .map_err(|error| format!("fold the applied PostgreSQL ops: {error}"))?;
-        let live = snapshot_schema(&session, &cfg.project_schema)
-            .await
-            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let live = snapshot_schema(
+            &zero_migrate_ir::dialect::POSTGRES,
+            &session,
+            &cfg.project_schema,
+        )
+        .await
+        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         let drift = diff_snapshots(&folded, &live);
 
         let live_schema = LiveSchema::from_catalog_snapshot(live.clone(), OWNER);

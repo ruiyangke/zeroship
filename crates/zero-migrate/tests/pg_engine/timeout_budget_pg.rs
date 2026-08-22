@@ -378,7 +378,7 @@ async fn finite_timeout_overrides_still_apply() {
         "the applied migration really created its table"
     );
 
-    let journal = zero_migrate::applied(&session, &cfg)
+    let journal = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("read the journal");
     assert!(

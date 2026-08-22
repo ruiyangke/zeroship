@@ -39,6 +39,8 @@
 #[cfg(feature = "introspect")]
 use compio_postgres::Pool;
 use serde_json::Value;
+use zero_migrate_backend::schema::{AddColumnDefinition, AddColumnIfNotExistsRequest};
+use zero_migrate_ir::dialect::DialectId;
 
 use crate::model::table_shape::ResolvedInject;
 
@@ -776,10 +778,10 @@ pub fn compute_diff(
     create_table_sql: &str,
     declared_indexes: &[crate::schema::query::IndexSpec],
     inject: &ResolvedInject,
+    dialect: &DialectId,
 ) -> Vec<DiffOp> {
     let mut ops = Vec::new();
-    let schema_renderer =
-        crate::schema::query::renderer(&crate::schema::query::SqlDialect::Postgres.id());
+    let schema_renderer = crate::schema::query::renderer(dialect);
 
     let live_cols = live.tables.get(collection);
     let live_indexes = live.indexes.get(collection);
@@ -822,7 +824,9 @@ pub fn compute_diff(
             // Build the ALTER. Note: build_add_column emits IF NOT EXISTS,
             // making the operation idempotent even if the live snapshot
             // is briefly stale.
-            let sql = crate::schema::query::build_add_column(app_id, collection, field, def).ok();
+            let sql =
+                crate::schema::query::build_add_column(app_id, collection, field, def, dialect)
+                    .ok();
             ops.push(DiffOp {
                 collection: collection.to_string(),
                 change_kind: ChangeKind::AddColumn,
@@ -924,9 +928,10 @@ pub fn compute_diff(
                     // emit AddForeignKey as a separate op so the
                     // orchestrator can run ALTER TABLE ADD CONSTRAINT
                     // after the column is created.
-                    let sql =
-                        crate::schema::query::build_add_foreign_key(app_id, collection, field, def)
-                            .ok();
+                    let sql = crate::schema::query::build_add_foreign_key(
+                        app_id, collection, field, def, dialect,
+                    )
+                    .ok();
                     ops.push(DiffOp {
                         collection: collection.to_string(),
                         change_kind: ChangeKind::AddForeignKey,
@@ -951,9 +956,10 @@ pub fn compute_diff(
             // Column exists. Need to attach the FK if not present, or
             // detect a policy mismatch.
             if live_fk.is_none() {
-                let sql =
-                    crate::schema::query::build_add_foreign_key(app_id, collection, field, def)
-                        .ok();
+                let sql = crate::schema::query::build_add_foreign_key(
+                    app_id, collection, field, def, dialect,
+                )
+                .ok();
                 ops.push(DiffOp {
                     collection: collection.to_string(),
                     change_kind: ChangeKind::AddForeignKey,
@@ -971,11 +977,13 @@ pub fn compute_diff(
                 });
             } else if let Some(fk) = live_fk {
                 // Detect policy mismatch — surfaced as paired DROP+ADD.
-                let declared_on_delete = crate::schema::query::normalize_fk_action(
+                let declared_on_delete = crate::schema::query::normalize_fk_action_for_dialect(
                     def.get("onDelete").and_then(|v| v.as_str()),
+                    dialect,
                 );
-                let declared_on_update = crate::schema::query::normalize_fk_action(
+                let declared_on_update = crate::schema::query::normalize_fk_action_for_dialect(
                     def.get("onUpdate").and_then(|v| v.as_str()),
+                    dialect,
                 );
                 let declared_deferrable = def
                     .get("deferrable")
@@ -995,6 +1003,7 @@ pub fn compute_diff(
                             app_id,
                             collection,
                             &fk.constraint_name,
+                            dialect,
                         )
                         .ok(),
                         details: serde_json::json!({
@@ -1009,7 +1018,7 @@ pub fn compute_diff(
                         change_kind: ChangeKind::AddForeignKey,
                         class: ChangeClass::Compatible,
                         sql: crate::schema::query::build_add_foreign_key(
-                            app_id, collection, field, def,
+                            app_id, collection, field, def, dialect,
                         )
                         .ok(),
                         details: serde_json::json!({
@@ -1077,25 +1086,20 @@ pub fn compute_diff(
                     //     payload so an interrupted deploy never leaves
                     //     a sibling without its sentinel comment.
                     let sibling = format!("{field}_masked");
-                    let mut add_stmts = vec![format!(
-                        "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} TEXT NULL",
-                        schema_renderer.quote_ident(app_id),
-                        schema_renderer.quote_ident(collection),
-                        schema_renderer.quote_ident(&sibling),
-                    )];
                     let sentinel = crate::schema::mask_codec::build_mask_sentinel(
                         new_meta.kind,
                         new_meta.classification,
                     );
-                    let escaped = sentinel.replace('\'', "''");
-                    add_stmts.push(format!(
-                        "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-                        schema_renderer.quote_ident(app_id),
-                        schema_renderer.quote_ident(collection),
-                        schema_renderer.quote_ident(&sibling),
-                        escaped,
-                    ));
-                    let add_sql = Some(add_stmts.join(";\n"));
+                    let add_sql = schema_renderer
+                        .add_column_if_not_exists_statements(AddColumnIfNotExistsRequest {
+                            schema: app_id,
+                            table: collection,
+                            column: &sibling,
+                            definition: AddColumnDefinition::NullableUnboundedText,
+                            comment_sentinel: Some(&sentinel),
+                        })
+                        .ok()
+                        .map(|statements| statements.join(";\n"));
                     ops.push(DiffOp {
                         collection: collection.to_string(),
                         change_kind: ChangeKind::AddColumn,
@@ -1236,10 +1240,7 @@ pub fn compute_diff(
                 continue;
             }
 
-            let to_type = crate::schema::query::def_to_column_type_for_dialect(
-                def,
-                crate::schema::query::SqlDialect::Postgres,
-            );
+            let to_type = crate::schema::query::def_to_column_type_for_dialect(def, dialect);
             // The live side's spelling as introspected (e.g. "text",
             // "bytea"). We surface it verbatim so the audit row / authoring
             // pipeline sees exactly what the catalog reports.
@@ -1383,6 +1384,7 @@ fn classify_add_column(def: &Value, live: &LiveSchema, collection: &str) -> Chan
 mod tests {
     use super::*;
     use serde_json::json;
+    use zero_migrate_ir::dialect::POSTGRES;
 
     fn confined_inject(app_id: &str, collection: &str) -> ResolvedInject {
         ResolvedInject::for_table(
@@ -1418,6 +1420,7 @@ mod tests {
             create_table_sql,
             declared_indexes,
             &inject,
+            &POSTGRES,
         )
     }
 
@@ -1733,7 +1736,16 @@ mod tests {
             )],
         );
         let inject = no_inject("app1", "users");
-        let ops = super::compute_diff(&live, "app1", "users", &json!({}), "", &[], &inject);
+        let ops = super::compute_diff(
+            &live,
+            "app1",
+            "users",
+            &json!({}),
+            "",
+            &[],
+            &inject,
+            &POSTGRES,
+        );
         assert!(ops.iter().any(|op| {
             matches!(op.change_kind, ChangeKind::DropColumn)
                 && op.field.as_deref() == Some("updated_at")

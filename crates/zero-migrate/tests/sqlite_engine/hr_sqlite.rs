@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::{
-    Approval, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr, SqlDialect, SqliteBackend,
+    Approval, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr, SqliteBackend, SQLITE,
 };
 
 const PROJECT: &str = "app_hr";
@@ -106,7 +106,7 @@ async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
             &envelopes,
             &backend,
             &no_inject,
-            SqlDialect::Sqlite,
+            &SQLITE,
             PROJECT,
             APP,
             &registry,
@@ -126,7 +126,7 @@ async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
             &envelopes,
             &backend,
             &no_inject,
-            SqlDialect::Sqlite,
+            &SQLITE,
             PROJECT,
             APP,
             &registry,

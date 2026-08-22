@@ -65,6 +65,39 @@ pub enum FoldDatabaseFeature {
     UlidValidation,
 }
 
+/// Relative strength of the backend-owned catalog evidence carried by a table
+/// snapshot.
+///
+/// The ordering is intentional. A malformed or hand-built snapshot may carry
+/// more than one backend's evidence at once; selecting the strongest evidence
+/// preserves the historical `stored definition` -> `exact text storage` ->
+/// `type override` precedence without teaching core which backend owns any of
+/// those carriers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SnapshotProvenanceStrength {
+    TypeOverride,
+    ExactTextStorage,
+    StoredTableDefinition,
+}
+
+/// A catalog-fold refusal whose operator-facing bytes are owned by the selected
+/// backend.
+///
+/// These are structural operation shapes, not vendor identities. Core decides
+/// when a shape is unsupported; the backend that registered the policy states
+/// the exact refusal it wants an operator to receive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogFoldRefusal {
+    AlterPrimaryKeyRowidGeneration,
+    AddColumnIdentity,
+    CreateTableCheckConstraint,
+    CreateTableUniqueConstraint,
+    CreateTableExclusionConstraint,
+    CreateTableNonBtreeIndex,
+    AddCheckConstraint,
+    AddExclusionConstraint,
+}
+
 /// Type metadata that cannot survive the descriptor bridge's deliberately small
 /// token vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +112,16 @@ pub struct AuthorTypeOverride {
 /// Every method is required. A fourth backend must state each catalog rule in
 /// its own crate; it cannot inherit one shipping backend's behavior by omission.
 pub trait CatalogFoldPolicy: std::fmt::Debug + Sync {
+    /// Identify this backend's catalog evidence in a table snapshot.
+    ///
+    /// `None` means the snapshot carries no evidence attributable to this
+    /// backend. Every backend writes its own required answer; core only compares
+    /// the returned evidence strengths.
+    fn snapshot_provenance_strength(
+        &self,
+        table: &TableSnapshot,
+    ) -> Option<SnapshotProvenanceStrength>;
+
     /// Allocate a backend-canonical implicit relation name.
     fn allocate_implicit_relation_name(
         &self,
@@ -127,6 +170,10 @@ pub trait CatalogFoldPolicy: std::fmt::Debug + Sync {
         default_schema: &str,
     ) -> Result<Option<(String, String)>, IrLowerError>;
 
+    /// Canonicalize a type spelling for rename compatibility without
+    /// discarding backend-significant modifiers.
+    fn canonical_rename_type_spelling(&self, ty: &str) -> String;
+
     /// Render an inline membership CHECK for a non-materialized enum.
     fn inline_enum_check(
         &self,
@@ -144,6 +191,9 @@ pub trait CatalogFoldPolicy: std::fmt::Debug + Sync {
     /// expose CHECK names and clauses while the engine's chosen snapshot scope
     /// still excludes standalone authored CHECK reconciliation.
     fn folds_check_constraint_identity(&self) -> bool;
+
+    /// The exact operator-facing refusal for an unsupported catalog-fold shape.
+    fn refusal_message(&self, refusal: CatalogFoldRefusal) -> &'static str;
 
     /// Whether two column snapshots feed this backend's physical-type finalizer
     /// identical inputs, so catalog-only metadata on the base must be preserved.

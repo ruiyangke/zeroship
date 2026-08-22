@@ -23,7 +23,6 @@ use crate::support;
 
 use zero_migrate::guard::{GuardConfig, GuardError, MigrationGuard, SqlGuard};
 use zero_migrate::guard_for;
-use zero_migrate::SqlDialect;
 
 /// A realistic PG project guard: project schema `project_acme`, extension
 /// allowlist = `pgcrypto` + `uuid-ossp` (mirrors the `guard_security` matrix).
@@ -37,7 +36,7 @@ use zero_migrate::SqlDialect;
 fn pg_guard() -> Box<dyn MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         support::no_inject_with_extensions("project_acme", &["pgcrypto", "uuid-ossp"]),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     ))
 }
 
@@ -99,7 +98,7 @@ fn sqlite_descriptor_guard_passes_descriptor_create_table() {
     // so the object under test is unchanged by the re-export's removal.
     let guard = guard_for(&GuardConfig::from_policy(
         support::no_inject("project_acme"),
-        SqlDialect::Sqlite.id(),
+        zero_migrate::SQLITE.clone(),
     ));
     // Descriptor-generated DDL is trusted by construction (author-boundary line-1 +
     // backend-authorizer line-2). The engine's apply/plan path feeds exactly this.
@@ -127,7 +126,7 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
     // engine no longer relies on (it routes SQLite through SqliteGuard).
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("project_acme"),
-        SqlDialect::Sqlite.id(),
+        zero_migrate::SQLITE.clone(),
     ));
     let err = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")
@@ -150,7 +149,7 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
 fn guard_for_pg_runs_the_deny_list() {
     let guard = guard_for(&GuardConfig::from_policy(
         support::no_inject_with_extensions("project_acme", &["pgcrypto"]),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     ));
     // The PG-selected guard denies the deny-list set …
     assert!(matches!(
@@ -169,7 +168,7 @@ fn guard_for_sqlite_trusts_descriptor_ddl() {
     // so apply is NOT broken by a raw-rejection on legitimate descriptor SQL.
     let guard = guard_for(&GuardConfig::from_policy(
         support::no_inject("project_acme"),
-        SqlDialect::Sqlite.id(),
+        zero_migrate::SQLITE.clone(),
     ));
     let outcome = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")

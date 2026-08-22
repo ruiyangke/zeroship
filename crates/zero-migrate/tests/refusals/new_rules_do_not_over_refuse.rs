@@ -18,13 +18,13 @@
 //! do NOT fire on legitimate work.
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir, SqlDialect};
+use zero_migrate::model::validate::validate_ir;
 
 #[track_caller]
 fn must_pass(what: &str, ops: &str) {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    if let Err(e) = validate_ir(&ir, SqlDialect::Postgres) {
+    if let Err(e) = validate_ir(&ir, &zero_migrate::POSTGRES) {
         panic!(
             "{what} is an ordinary migration and must pass: [{}] {}",
             e.code, e.reason

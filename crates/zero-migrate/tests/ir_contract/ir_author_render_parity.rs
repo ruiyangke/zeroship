@@ -23,7 +23,6 @@ use zero_migrate::model::ir::{
     ColType, IndexElement, IrClassification, IrColumn, IrIndex, IrMask, IrMaskKind, MigrationIr, Op,
 };
 use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     resolve_create_table_policy, CollectionDescriptor, DeclarativeAuthor, DesiredSchema,
     FieldDescriptor, IndexDescriptor, LiveSchema, SchemaSnapshot, TableSnapshot,
@@ -63,13 +62,18 @@ fn test_desired_snapshot(
     project_schema: &str,
     descs: &[CollectionDescriptor],
 ) -> Result<DesiredSchema, zero_migrate::DeclarativeError> {
-    zero_migrate::render::declarative::desired_snapshot(project_schema, descs, &effective_policy())
+    zero_migrate::render::declarative::desired_snapshot_for_dialect(
+        project_schema,
+        descs,
+        &zero_migrate::POSTGRES,
+        &effective_policy(),
+    )
 }
 
 fn test_desired_snapshot_for_dialect(
     project_schema: &str,
     descs: &[CollectionDescriptor],
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
 ) -> Result<DesiredSchema, zero_migrate::DeclarativeError> {
     zero_migrate::render::declarative::desired_snapshot_for_dialect(
         project_schema,
@@ -92,11 +96,11 @@ fn sql_pairs(migs: &[zero_migrate::Migration]) -> Vec<(String, Option<String>)> 
 /// empty live schema → the emitted migrations, on the given dialect.
 fn declarative_pairs_for(
     descs: &[CollectionDescriptor],
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
 ) -> Vec<(String, Option<String>)> {
     let desired: DesiredSchema =
         test_desired_snapshot_for_dialect(SCHEMA, descs, dialect).expect("desired snapshot");
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, dialect);
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, dialect.clone());
     let plan = author
         .diff(
             &desired,
@@ -111,7 +115,7 @@ fn declarative_pairs_for(
 
 /// Run the declarative path on Postgres (the historical helper).
 fn declarative_pairs(descs: &[CollectionDescriptor]) -> Vec<(String, Option<String>)> {
-    declarative_pairs_for(descs, SqlDialect::Postgres)
+    declarative_pairs_for(descs, &zero_migrate::POSTGRES)
 }
 
 /// Run the IR path: ops → `IrAuthor::lower` against the given live tables, on the
@@ -119,7 +123,7 @@ fn declarative_pairs(descs: &[CollectionDescriptor]) -> Vec<(String, Option<Stri
 fn ir_pairs_for(
     ops: Vec<Op>,
     live: &BTreeSet<String>,
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
 ) -> Vec<(String, Option<String>)> {
     let ir = MigrationIr {
         inverse_ops: None,
@@ -145,7 +149,7 @@ fn ir_pairs_for(
 
 /// Run the IR path on Postgres (the historical helper).
 fn ir_pairs(ops: Vec<Op>, live: &BTreeSet<String>) -> Vec<(String, Option<String>)> {
-    ir_pairs_for(ops, live, SqlDialect::Postgres)
+    ir_pairs_for(ops, live, &zero_migrate::POSTGRES)
 }
 
 #[test]
@@ -292,7 +296,7 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
     let desired = test_desired_snapshot(SCHEMA, &[posts, authors]).expect("desired snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("authors".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new(SCHEMA, OWNER);
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate::POSTGRES);
     let plan = author
         .diff(
             &desired,
@@ -546,7 +550,7 @@ fn add_column_render_is_byte_identical_pg() {
     let live_full = test_desired_snapshot(SCHEMA, &[live_desc]).expect("live snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("people".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new(SCHEMA, OWNER);
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate::POSTGRES);
     let plan = author
         .diff(
             &desired,
@@ -618,7 +622,7 @@ fn create_index_render_is_byte_identical_pg() {
     let live_full = test_desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new(SCHEMA, OWNER);
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate::POSTGRES);
     let plan = author
         .diff(
             &desired,
@@ -686,7 +690,7 @@ fn create_index_render_is_byte_identical_pg() {
 fn ir_lower_one(
     op: Op,
     live: &BTreeSet<String>,
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
 ) -> Vec<zero_migrate::Migration> {
     let ir = MigrationIr {
         inverse_ops: None,
@@ -738,7 +742,7 @@ fn alter_column_type_render_is_byte_identical_pg() {
     let live = test_desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut own = HashMap::new();
     own.insert("widgets".to_string(), OWNER.to_string());
-    let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
+    let plan = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate::POSTGRES)
         .diff(&desired, &live.snapshot, &own, &[], &effective_policy())
         .expect("diff");
     let decl: Vec<_> = sql_pairs(&plan.migrations)
@@ -758,7 +762,7 @@ fn alter_column_type_render_is_byte_identical_pg() {
             existence_guard: None,
         },
         &live_set,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     ));
     assert_eq!(
         decl, ir,
@@ -802,7 +806,7 @@ fn set_column_not_null_render_is_byte_identical_pg() {
     let live = test_desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut own = HashMap::new();
     own.insert("people".to_string(), OWNER.to_string());
-    let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
+    let plan = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate::POSTGRES)
         .diff(&desired, &live.snapshot, &own, &[], &effective_policy())
         .expect("diff");
     let decl: Vec<_> = sql_pairs(&plan.migrations)
@@ -820,7 +824,7 @@ fn set_column_not_null_render_is_byte_identical_pg() {
             existence_guard: None,
         },
         &live_set,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     ));
     assert_eq!(decl, ir, "setColumnNotNull render must be byte-identical");
     assert!(decl.iter().any(|(up, _)| up.contains("SET NOT NULL")));
@@ -859,7 +863,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
         runtime_options: Default::default(),
     };
     let desired = test_desired_snapshot(SCHEMA, &[posts, authors]).expect("desired");
-    let plan = DeclarativeAuthor::new(SCHEMA, OWNER)
+    let plan = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate::POSTGRES)
         .diff(
             &desired,
             &SchemaSnapshot::default(),
@@ -908,7 +912,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
             existence_guard: None,
         },
         &live_set,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     ));
     assert_eq!(
         decl, ir,
@@ -951,7 +955,7 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
             existence_guard: None,
         },
         &live,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     ));
     let up = &ir[0].0;
     assert_eq!(
@@ -984,7 +988,7 @@ fn add_constraint_fk_renders_on_delete_cascade_pg() {
             existence_guard: None,
         },
         &live,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     ));
     assert_eq!(
         ir_none[0].0,
@@ -1021,7 +1025,7 @@ fn add_constraint_fk_renders_deferrable_tail_pg() {
                 existence_guard: None,
             },
             &live,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
         ));
         ir[0].0.clone()
     }
@@ -1075,7 +1079,7 @@ fn add_constraint_fk_explicit_on_update_restrict_renders_pg() {
             existence_guard: None,
         },
         &live,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     ));
     assert_eq!(
         ir[0].0,
@@ -1109,7 +1113,7 @@ fn standalone_add_constraint_fk_renders_non_id_reference_columns_pg() {
             existence_guard: None,
         },
         &live,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     ));
     assert_eq!(
         ir[0].0,
@@ -1142,7 +1146,7 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
             existence_guard: None,
         },
         &live,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     ));
     assert_eq!(
         uniq,
@@ -1164,7 +1168,7 @@ fn add_constraint_unique_and_pk_and_drop_constraint_render_pg() {
             existence_guard: None,
         },
         &live,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     ));
     assert_eq!(
         drop,
@@ -1192,7 +1196,7 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
     let author = IrAuthor::new(
         SCHEMA,
         OWNER,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("app"),
     );
     let one = |op: Op| {
@@ -1353,8 +1357,8 @@ fn create_table_render_is_byte_identical_sqlite() {
         existence_guard: None,
     }];
 
-    let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
-    let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
+    let decl = declarative_pairs_for(&[desc], &zero_migrate::SQLITE);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zero_migrate::SQLITE);
     assert_eq!(
         decl, ir,
         "SQLite createTable render must be byte-identical across policy-resolved paths"
@@ -1423,8 +1427,8 @@ fn create_table_with_authored_index_is_byte_identical_sqlite() {
         existence_guard: None,
     }];
 
-    let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
-    let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
+    let decl = declarative_pairs_for(&[desc], &zero_migrate::SQLITE);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zero_migrate::SQLITE);
 
     assert_eq!(decl, ir);
     assert!(ir
@@ -1468,11 +1472,12 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         .tables
         .insert("authors".into(), empty_table_snapshot());
 
-    let desired = test_desired_snapshot_for_dialect(SCHEMA, &[posts, authors], SqlDialect::Sqlite)
-        .expect("desired snapshot (sqlite)");
+    let desired =
+        test_desired_snapshot_for_dialect(SCHEMA, &[posts, authors], &zero_migrate::SQLITE)
+            .expect("desired snapshot (sqlite)");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("authors".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, SqlDialect::Sqlite);
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate::SQLITE);
     let plan = author
         .diff(
             &desired,
@@ -1516,7 +1521,7 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
     }];
     let mut live = BTreeSet::new();
     live.insert("authors".to_string());
-    let ir = ir_pairs_for(ops, &live, SqlDialect::Sqlite);
+    let ir = ir_pairs_for(ops, &live, &zero_migrate::SQLITE);
 
     // Compare only the `posts`-related render (the empty live `authors` snapshot
     // makes the differ also backfill `authors`' system fields — a test-setup
@@ -1586,8 +1591,8 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         schema: None,
         existence_guard: None,
     }];
-    let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
-    let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
+    let decl = declarative_pairs_for(&[desc], &zero_migrate::SQLITE);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zero_migrate::SQLITE);
     assert_eq!(
         decl, ir,
         "SQLite encrypted createTable must be byte-identical across policy-resolved paths"
@@ -1666,8 +1671,8 @@ fn create_table_with_explicit_masked_column_render_is_byte_identical_sqlite() {
         existence_guard: None,
     }];
 
-    let decl = declarative_pairs_for(&[desc], SqlDialect::Sqlite);
-    let ir = ir_pairs_for(ops, &BTreeSet::new(), SqlDialect::Sqlite);
+    let decl = declarative_pairs_for(&[desc], &zero_migrate::SQLITE);
+    let ir = ir_pairs_for(ops, &BTreeSet::new(), &zero_migrate::SQLITE);
 
     assert_eq!(
         decl, ir,
@@ -1697,7 +1702,7 @@ fn add_column_render_is_byte_identical_sqlite() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired = test_desired_snapshot_for_dialect(SCHEMA, &[desc], SqlDialect::Sqlite)
+    let desired = test_desired_snapshot_for_dialect(SCHEMA, &[desc], &zero_migrate::SQLITE)
         .expect("desired snapshot");
     let live_desc = CollectionDescriptor {
         name: "people".into(),
@@ -1706,11 +1711,11 @@ fn add_column_render_is_byte_identical_sqlite() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let live_full = test_desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite)
+    let live_full = test_desired_snapshot_for_dialect(SCHEMA, &[live_desc], &zero_migrate::SQLITE)
         .expect("live snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("people".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, SqlDialect::Sqlite);
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate::SQLITE);
     let plan = author
         .diff(
             &desired,
@@ -1739,7 +1744,7 @@ fn add_column_render_is_byte_identical_sqlite() {
     }];
     let mut live = BTreeSet::new();
     live.insert("people".to_string());
-    let ir = ir_pairs_for(ops, &live, SqlDialect::Sqlite);
+    let ir = ir_pairs_for(ops, &live, &zero_migrate::SQLITE);
 
     assert_eq!(
         decl, ir,
@@ -1772,16 +1777,19 @@ fn create_index_render_is_byte_identical_sqlite() {
         }],
         runtime_options: Default::default(),
     };
-    let desired =
-        test_desired_snapshot_for_dialect(SCHEMA, std::slice::from_ref(&desc), SqlDialect::Sqlite)
-            .expect("desired");
+    let desired = test_desired_snapshot_for_dialect(
+        SCHEMA,
+        std::slice::from_ref(&desc),
+        &zero_migrate::SQLITE,
+    )
+    .expect("desired");
     let mut live_desc = desc;
     live_desc.indexes = vec![];
-    let live_full =
-        test_desired_snapshot_for_dialect(SCHEMA, &[live_desc], SqlDialect::Sqlite).expect("live");
+    let live_full = test_desired_snapshot_for_dialect(SCHEMA, &[live_desc], &zero_migrate::SQLITE)
+        .expect("live");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, SqlDialect::Sqlite);
+    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate::SQLITE);
     let plan = author
         .diff(
             &desired,
@@ -1811,7 +1819,7 @@ fn create_index_render_is_byte_identical_sqlite() {
     }];
     let mut live = BTreeSet::new();
     live.insert("events".to_string());
-    let ir = ir_pairs_for(ops, &live, SqlDialect::Sqlite);
+    let ir = ir_pairs_for(ops, &live, &zero_migrate::SQLITE);
 
     assert_eq!(
         decl, ir,

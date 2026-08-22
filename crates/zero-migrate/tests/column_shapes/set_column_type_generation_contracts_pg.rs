@@ -43,7 +43,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, snapshot_schema, Approval,
     EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, PostgresBackend, SqlDialect, StructuralDrift,
+    MigrationIr, PostgresBackend, StructuralDrift,
 };
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
@@ -213,17 +213,21 @@ impl<'a> Deployment<'a> {
                 .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let catalog = snapshot_schema(self.session, &self.cfg.project_schema)
-            .await
-            .map_err(|error| format!("introspect the live PostgreSQL schema: {error}"))?;
+        let catalog = snapshot_schema(
+            &zero_migrate_ir::dialect::POSTGRES,
+            self.session,
+            &self.cfg.project_schema,
+        )
+        .await
+        .map_err(|error| format!("introspect the live PostgreSQL schema: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(catalog, OWNER);
         let author = IrAuthor::new(
             &self.cfg.project_schema,
             OWNER,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &self.policy,
         );
-        let guard = GuardConfig::from_policy(self.policy.clone(), SqlDialect::Postgres.id());
+        let guard = GuardConfig::from_policy(self.policy.clone(), zero_migrate::POSTGRES);
         let artifact = author
             .load_and_lower_guarded(&resolved_source, OWNER, registry, &live, &guard)
             .map_err(|error| format!("AUTHORING REFUSED: {error}"))?;
@@ -284,14 +288,18 @@ impl<'a> Deployment<'a> {
     async fn drift(&self, ops: &[zero_migrate::model::ir::Op]) -> Result<StructuralDrift, String> {
         let expected = fold_ops(
             ops,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &self.cfg.project_schema,
             &self.policy,
         )
         .map_err(|error| format!("fold the applied PostgreSQL ops: {error}"))?;
-        let actual = snapshot_schema(self.session, &self.cfg.project_schema)
-            .await
-            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let actual = snapshot_schema(
+            &zero_migrate_ir::dialect::POSTGRES,
+            self.session,
+            &self.cfg.project_schema,
+        )
+        .await
+        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(diff_snapshots(&expected, &actual))
     }
 

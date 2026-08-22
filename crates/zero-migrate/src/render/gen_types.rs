@@ -59,7 +59,7 @@ use crate::model::ir::{
     IndexSortOrder, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrJsonValue,
     IrScalar, MigrationIr, Op, PartitionSpec, ValueFormat,
 };
-use crate::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
 
 /// The two emitted artifact filenames (committed; the `--check` CI gate diffs
 /// against them).
@@ -263,7 +263,7 @@ fn render_runtime_descriptor_v1(
 /// [`GenTypesError::Fold`] if the schema source is structurally incoherent.
 pub fn render_artifacts(
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
@@ -301,7 +301,7 @@ pub struct SchemaExport {
 /// As [`render_artifacts`].
 pub fn render_schema_export(
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<SchemaExport, GenTypesError> {
@@ -401,7 +401,7 @@ pub fn render_schema_export(
 /// [`GenTypesError::Fold`] if the produced ops are structurally incoherent.
 pub fn render_artifacts_from_descriptors(
     descriptors: &[crate::render::declarative::CollectionDescriptor],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
@@ -421,7 +421,7 @@ pub fn render_artifacts_from_descriptors(
 /// As [`render_artifacts_from_descriptors`].
 pub fn render_schema_export_from_descriptors(
     descriptors: &[crate::render::declarative::CollectionDescriptor],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<SchemaExport, GenTypesError> {
@@ -468,7 +468,7 @@ pub(crate) fn constraint_uses_local_column(
     constraint: &IrConstraint,
     table: &str,
     column: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> bool {
     match &constraint.kind {
         IrConstraintKind::Fk { columns, .. } | IrConstraintKind::Unique { columns } => {
@@ -521,7 +521,7 @@ pub(crate) fn index_uses_column(
     index: &IrIndex,
     table: &str,
     column: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> bool {
     index.columns.iter().any(|element| match element {
         IndexElement::Column { name, .. } => name == column,
@@ -658,11 +658,11 @@ const DIALECT_NODE: &str = "dialect";
 /// actually reaches the database. A node without the target key is refused by
 /// `crate::model::validate` long before here; it renders nothing on this target, so
 /// it reads no column here either.
-fn selected_dialect_leg(
-    node: &serde_json::Map<String, Value>,
-    dialect: SqlDialect,
-) -> Option<&Value> {
-    node.get("legs")?.as_object()?.get(dialect.id().as_str())
+fn selected_dialect_leg<'a>(
+    node: &'a serde_json::Map<String, Value>,
+    dialect: &DialectId,
+) -> Option<&'a Value> {
+    node.get("legs")?.as_object()?.get(dialect.as_str())
 }
 
 /// Whether `expr` reads `table`.`column` AS IT RENDERS FOR `dialect`.
@@ -682,14 +682,14 @@ fn expr_references_column(
     table: &str,
     column: &str,
     include_unqualified: bool,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> bool {
     fn contains(
         value: &Value,
         table: &str,
         column: &str,
         include_unqualified: bool,
-        dialect: SqlDialect,
+        dialect: &DialectId,
     ) -> bool {
         match value {
             Value::Object(node) => {
@@ -1561,6 +1561,7 @@ mod tests {
     use crate::model::ir::RefAction;
     use crate::model::table_shape::ResolvedInject;
     use crate::render::declarative::{CollectionDescriptor, FieldDescriptor};
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     fn column(name: &str, ty: ColType) -> IrColumn {
         IrColumn {
@@ -1881,7 +1882,7 @@ mod tests {
             .expect("confined descriptor resolves");
         let folded = crate::render::fold::single_fold::fold(
             &ops,
-            SqlDialect::Postgres,
+            &POSTGRES,
             DEFAULT_PROJECT_SCHEMA,
             &effective,
         )
@@ -1931,7 +1932,7 @@ mod tests {
         }];
         let artifacts = render_artifacts_from_descriptors(
             &descriptors,
-            SqlDialect::Postgres,
+            &POSTGRES,
             DEFAULT_PROJECT_SCHEMA,
             &effective,
         )
@@ -1971,13 +1972,8 @@ mod tests {
             existence_guard: None,
         }];
 
-        let artifacts = render_artifacts(
-            &ops,
-            SqlDialect::Postgres,
-            DEFAULT_PROJECT_SCHEMA,
-            &effective,
-        )
-        .expect("no-inject UUID id renders");
+        let artifacts = render_artifacts(&ops, &POSTGRES, DEFAULT_PROJECT_SCHEMA, &effective)
+            .expect("no-inject UUID id renders");
         let value: Value = serde_json::from_str(&artifacts.runtime_json)
             .expect("runtime descriptor is valid JSON");
 
@@ -2021,11 +2017,7 @@ mod tests {
             !legs.contains_key("pg"),
             "the canonical wire id is postgres"
         );
-        for (dialect, name) in [
-            (SqlDialect::Postgres, "p"),
-            (SqlDialect::Sqlite, "s"),
-            (SqlDialect::Mysql, "m"),
-        ] {
+        for (dialect, name) in [(&POSTGRES, "p"), (&SQLITE, "s"), (&MYSQL, "m")] {
             assert_eq!(
                 selected_dialect_leg(node, dialect).and_then(|leg| leg.get("name")),
                 Some(&Value::String(name.to_string())),
@@ -2043,7 +2035,7 @@ mod tests {
             .as_object()
             .expect("a dialectal Expr is a JSON object");
         assert!(
-            selected_dialect_leg(node, SqlDialect::Mysql).is_none(),
+            selected_dialect_leg(node, &MYSQL).is_none(),
             "a target without its own key renders nothing"
         );
 
@@ -2060,7 +2052,7 @@ mod tests {
             .as_object()
             .expect("a dialectal Expr is a JSON object");
         assert!(
-            selected_dialect_leg(node, SqlDialect::Postgres).is_none(),
+            selected_dialect_leg(node, &POSTGRES).is_none(),
             "a misspelled id does not cover the canonical postgres target"
         );
     }

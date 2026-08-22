@@ -56,7 +56,7 @@ use zero_migrate::model::ir::Op;
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, IrAuthor, LiveSchema,
-    MigrationEngine, MigrationIr, SqlDialect, SqliteBackend,
+    MigrationEngine, MigrationIr, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_field_def_type_tokens";
@@ -152,9 +152,9 @@ async fn stored_types(backend: &SqliteBackend, table: &str, column: &str) -> Vec
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
     let snapshot =
-        fold_ops(history, SqlDialect::Sqlite, PROJECT, &policy).expect("the history folds");
+        fold_ops(history, &zero_migrate::SQLITE, PROJECT, &policy).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = single_fold::fold(history, SqlDialect::Sqlite, PROJECT, &policy)
+    live.sqlite_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &policy)
         .expect("the history folds")
         .project_field_defs();
     live
@@ -166,7 +166,7 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, policy.clone());
     let raw: MigrationIr = serde_json::from_str(source).expect("test IR parses");
     let resolved = resolve_create_table_policy(&raw, &policy, PROJECT).expect("the IR resolves");
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &policy);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &policy);
     let steps = author.lower_steps(&resolved, live).expect("the IR lowers");
     MigrationEngine::new()
         .apply_plan(

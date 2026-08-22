@@ -590,9 +590,10 @@ pub(crate) fn authorize_existence_guard_schema(
     cfg: &ExecutorConfig,
     migration: &Migration,
     probe_schema: &str,
+    dialect: &zero_migrate_ir::dialect::DialectId,
 ) -> Result<(), ApplyError> {
     if cfg
-        .guard_config()
+        .guard_config_for(dialect)
         .schema_scope()
         .is_some_and(|scope| scope.permits(probe_schema))
     {
@@ -1105,18 +1106,17 @@ async fn apply_locked<B: MigrationBackend>(
     // guard through the [`MigrationGuard`] seam, NOT an `if dialect == Sqlite`
     // branch. The guard is selected for `cfg`'s dialect (which equals
     // `backend.dialect()`) via [`guard_for`], so it carries the apply's project +
-    // trust profile from `cfg.guard_config()` (the trust profile lives on
+    // trust profile from `cfg.guard_config_for(..)` (the trust profile lives on
     // `ExecutorConfig`, not the backend):
     //   - Postgres → `PgGuard` (libpg_query deny-list) — byte-identical to the
-    //     pre-seam `SqlGuard::new(cfg.guard_config())`;
+    //     pre-seam `SqlGuard::new(cfg.guard_config_for(..))`;
     //   - SQLite → `SqliteGuard` (from `zero-migrate-sqlite`) — the trusted descriptor-diff path
     //     (`check` returns the empty clean outcome: `libpg_query` cannot vet SQLite,
     //     the first-line vet is the descriptor emitter at the author boundary and the
     //     second-line defense is the backend authorizer applied per statement at apply).
     // The non-txn idempotency check still runs through the trait (`validate_non_txn`),
     // which for SQLite rejects `transaction:false` at the dialect boundary.
-    let guard =
-        crate::render::backends::guard_for(&cfg.guard_config().for_dialect(backend.dialect().id()));
+    let guard = crate::render::backends::guard_for(&cfg.guard_config_for(&backend.dialect()));
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
     // execution. The guard runs per-migration inside the apply loop in the
@@ -1394,7 +1394,7 @@ async fn apply_repeatables<B: MigrationBackend>(
 
     // FIRST PASS — guard EVERY repeatable's `up` before any execution, mirroring
     // the versioned all-up-front static gate: a denial applies NOTHING.
-    guard_repeatable_batch(cfg, backend.dialect(), &ordered)?;
+    guard_repeatable_batch(cfg, &backend.dialect(), &ordered)?;
 
     // SECOND PASS — re-apply each changed repeatable; skip the unchanged ones.
     for &m in &ordered {
@@ -1448,10 +1448,10 @@ async fn apply_repeatables<B: MigrationBackend>(
 /// repeatable phase.
 fn guard_repeatable_batch(
     cfg: &ExecutorConfig,
-    dialect: crate::schema::query::SqlDialect,
+    dialect: &zero_migrate_ir::dialect::DialectId,
     migrations: &[&Migration],
 ) -> Result<(), ApplyError> {
-    let guard = crate::render::backends::guard_for(&cfg.guard_config().for_dialect(dialect.id()));
+    let guard = crate::render::backends::guard_for(&cfg.guard_config_for(dialect));
     for migration in migrations {
         guard
             .check(&migration.up)
@@ -2528,12 +2528,8 @@ mod order_tests {
             crate::test_fixtures::no_inject("project_acme"),
         );
 
-        guard_repeatable_batch(
-            &cfg,
-            crate::schema::query::SqlDialect::Mysql,
-            &[&repeatable],
-        )
-        .expect("descriptor-generated MySQL repeatable DDL bypasses the PostgreSQL parser");
+        guard_repeatable_batch(&cfg, &zero_migrate_ir::dialect::MYSQL, &[&repeatable])
+            .expect("descriptor-generated MySQL repeatable DDL bypasses the PostgreSQL parser");
     }
 
     #[test]

@@ -1,13 +1,14 @@
 //! Every cell `dialect-support.toml` declares `unsupported` must refuse with a
 //! reason written FOR AN OPERATOR, never with the engine's internal placeholder.
 //!
-//! WHY THIS FILE EXISTS. `Op::support()` reads the generated dialect table, so
-//! declaring a cell `unsupported` makes `validate` refuse on the table's own
-//! say-so. The refusal itself is therefore satisfied BY CONSTRUCTION - it cannot
-//! fail, and `dialect_conformance_live.rs` records the demonstration (flipping
-//! `dropTable/base` on PostgreSQL, an op PostgreSQL obviously supports, left that
-//! suite GREEN). The ONE observable a too-conservative declaration still moves is
-//! the MESSAGE, because the reason is looked up separately in
+//! WHY THIS FILE EXISTS. Production asks the selected backend policy, and the
+//! generated table's 276-cell parity test pins that policy to the reviewed cells.
+//! Declaring a disposition `unsupported` therefore makes `validate` refuse on the
+//! backend's own say-so. The refusal itself is satisfied BY CONSTRUCTION - it
+//! cannot fail, and `dialect_conformance_live.rs` records the demonstration
+//! (flipping `dropTable/base` on PostgreSQL, an op PostgreSQL obviously supports,
+//! left that suite GREEN). The ONE observable a too-conservative declaration still
+//! moves is the MESSAGE, because the reason is looked up separately in
 //! `op_support.rs::unsupported_reason`, a match over `(Op, dialect, variant)`.
 //!
 //! When those two are edited apart - a sidecar cell flipped without the matching
@@ -29,22 +30,17 @@
 //! operator would really be shown.
 
 use crate::dialect_corpus::corpus;
-use zero_migrate::model::dialect_table::{Disposition, DIALECT_TABLE};
+use crate::dialect_table::{Disposition, DIALECT_TABLE};
 use zero_migrate::model::op_support::INTERNAL_NO_REFUSAL_REASON;
-use zero_migrate::model::support::SqlDialect as TableDialect;
-use zero_migrate::model::validate::{validate_op, SqlDialect as ValidateDialect};
+use zero_migrate::model::validate::validate_op;
 
-/// The three dialects the sidecar declares. `dialect_table` and `validate` carry
-/// SEPARATE `SqlDialect` enums (engine-side support vs. the IR wire contract), so
-/// each row names both rather than converting one into the other silently.
-const DIALECTS: [(&str, TableDialect, ValidateDialect); 3] = [
-    (
-        "postgres",
-        TableDialect::Postgres,
-        ValidateDialect::Postgres,
-    ),
-    ("sqlite", TableDialect::Sqlite, ValidateDialect::Sqlite),
-    ("mysql", TableDialect::Mysql, ValidateDialect::Mysql),
+/// The three dialects the sidecar declares. Both consumers take the same open
+/// dialect identity, so each row passes the same id to the sidecar lookup and the
+/// authoring gate.
+const DIALECTS: [(&str, &zero_migrate::DialectId); 3] = [
+    ("postgres", &zero_migrate::POSTGRES),
+    ("sqlite", &zero_migrate::SQLITE),
+    ("mysql", &zero_migrate::MYSQL),
 ];
 
 #[test]
@@ -59,8 +55,8 @@ fn no_unsupported_cell_shows_the_operator_an_internal_placeholder() {
             .find(|r| r.kind == *kind && r.variant == *variant)
             .unwrap_or_else(|| panic!("no DIALECT_TABLE row for {kind}/{variant}"));
 
-        for (name, table_dialect, validate_dialect) in DIALECTS {
-            if row.disposition(table_dialect) != Disposition::Unsupported {
+        for (name, dialect) in DIALECTS {
+            if row.disposition(dialect) != Disposition::Unsupported {
                 continue;
             }
             checked += 1;
@@ -68,7 +64,7 @@ fn no_unsupported_cell_shows_the_operator_an_internal_placeholder() {
             // The cell is declared unsupported, so the authoring gate must refuse.
             // This half is the tautology; it is asserted anyway so a refusal that
             // stops happening is not silently skipped by the message check below.
-            let Err(err) = validate_op(op, validate_dialect, 0) else {
+            let Err(err) = validate_op(op, dialect, 0) else {
                 offenders.push(format!(
                     "  {kind}/{variant} [{name}] is declared `unsupported` but validate_op \
                      ACCEPTED it, so no message was produced to check"

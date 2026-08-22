@@ -23,7 +23,7 @@
 use crate::support;
 
 use zero_migrate::model::ir::ViewQuery;
-use zero_migrate::{fold_ops, FoldError, Op, SqlDialect};
+use zero_migrate::{fold_ops, FoldError, Op};
 
 const SCHEMA: &str = "app";
 
@@ -49,7 +49,7 @@ fn a_plain_replace_over_a_materialized_view_is_refused_at_the_fold() {
             create_view("totals", Some(true), None),
             create_view("totals", None, Some(true)),
         ],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &effective,
     )
@@ -74,7 +74,7 @@ fn a_plain_replace_over_a_plain_view_still_applies() {
             create_view("totals", None, None),
             create_view("totals", None, Some(true)),
         ],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &effective,
     )
@@ -97,7 +97,7 @@ fn a_materialized_replace_over_a_materialized_view_is_not_refused_by_this_check(
             create_view("totals", Some(true), None),
             create_view("totals", Some(true), Some(true)),
         ],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &effective,
     )

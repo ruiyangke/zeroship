@@ -25,13 +25,6 @@ pub enum DialectScope {
 }
 
 impl DialectScope {
-    /// The reach an artifact pinned to PostgreSQL has. The spelling `PgOnly`
-    /// used to be a variant; it is now the one value that variant could hold.
-    #[must_use]
-    pub const fn pg_only() -> Self {
-        Self::Only(zero_migrate_ir::dialect::POSTGRES)
-    }
-
     /// Whether this plan may be applied against `target`.
     #[must_use]
     pub fn admits(&self, target: &DialectId) -> bool {
@@ -50,8 +43,8 @@ impl DialectScope {
 /// one-vendor guarantee the lowering does not enforce. The differ's only gate here
 /// is `is_sqlite`, so a MySQL rename fell through to the expand-contract author and
 /// was wrapped in a variant named for PostgreSQL. That is a MISSING PLAN-TIME
-/// REFUSAL, not MySQL support — `docs/dialects.md`, `model::dialect_table` and
-/// `lower_ir_rename` all declare MySQL column rename unsupported, and the
+/// REFUSAL, not MySQL support — `docs/dialects.md`, MySQL's registered validation
+/// policy, and `lower_ir_rename` all declare MySQL column rename unsupported, and the
 /// declarative differ is the lone dissenter. The strategy names are honest about
 /// what each arm IS without re-encoding a dialect claim the type cannot keep.
 /// `dialect_matrix::plan_vocabulary_names_strategies_not_vendors` holds the line.

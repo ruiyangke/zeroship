@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde_json::json;
 use zero_migrate::model::ir::ExistenceGuard;
 use zero_migrate::model::validate::{
-    validate_ir, validate_ir_scoped, SqlDialect, UnsupportedKind, CODE_UNSUPPORTED,
+    validate_ir, validate_ir_scoped, UnsupportedKind, CODE_UNSUPPORTED,
 };
 use zero_migrate::render::lower::IrAuthor;
 use zero_migrate::{
@@ -36,7 +36,7 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
 
 fn lower(
     ops: Vec<Op>,
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
     live: &BTreeSet<String>,
 ) -> Vec<zero_migrate::Migration> {
     let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::no_inject("app"));
@@ -99,7 +99,7 @@ fn nextval_col(name: &str, schema: Option<&str>) -> IrColumn {
 fn postgres_renders_create_alter_drop_sequence() {
     let create = lower(
         vec![create_sequence_op()],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeSet::new(),
     );
     assert_eq!(
@@ -123,7 +123,7 @@ fn postgres_renders_create_alter_drop_sequence() {
             cycle: Some(false),
             owned_by: Some(None),
         }],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeSet::new(),
     );
     assert_eq!(
@@ -138,7 +138,7 @@ fn postgres_renders_create_alter_drop_sequence() {
             schema: None,
             existence_guard: Some(ExistenceGuard::IfExists),
         }],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeSet::new(),
     );
     assert_eq!(drop[0].up, r#"DROP SEQUENCE IF EXISTS "app"."invoice_seq""#);
@@ -158,7 +158,7 @@ fn postgres_renders_nextval_default_with_and_without_schema() {
             schema: None,
             existence_guard: None,
         }],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeSet::new(),
     );
     assert!(
@@ -181,7 +181,7 @@ fn postgres_renders_nextval_default_with_and_without_schema() {
             schema: None,
             existence_guard: None,
         }],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeSet::new(),
     );
     assert!(
@@ -208,7 +208,7 @@ fn postgres_renders_valid_descending_sequence() {
             cycle: Some(false),
             owned_by: None,
         }],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeSet::new(),
     );
     assert_eq!(
@@ -219,7 +219,7 @@ fn postgres_renders_valid_descending_sequence() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_sequences() {
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         let err = validate_ir(&ir(vec![create_sequence_op()]), dialect).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
@@ -246,8 +246,12 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
     // Validate under the platform profile (author-PK allowed → the createTable
     // table-shape gate returns Ok), so validation reaches the column-default-type
     // check — the realistic profile, since nextval defaults are used on the platform.
-    let err =
-        validate_ir_scoped(&ir(vec![text_nextval.clone()]), SqlDialect::Postgres, None).unwrap_err();
+    let err = validate_ir_scoped(
+        &ir(vec![text_nextval.clone()]),
+        &zero_migrate::POSTGRES,
+        None,
+    )
+    .unwrap_err();
     assert_eq!(
         err.code,
         zero_migrate::model::validate::CODE_COLUMN_DEFAULT_TYPE
@@ -256,7 +260,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
         .reason
         .contains("nextval defaults require an integer column"));
 
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         // Platform profile so the createTable table-shape gate does not pre-empt the
         // dialect-level unsupported check (nextval defaults are PostgreSQL-only).
         let err = validate_ir_scoped(&ir(vec![text_nextval.clone()]), dialect, None).unwrap_err();
@@ -270,7 +274,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
 fn fold_tracks_sequence_existence_and_drop() {
     let created = fold_ops(
         &[create_sequence_op()],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -286,7 +290,7 @@ fn fold_tracks_sequence_existence_and_drop() {
                 existence_guard: None,
             },
         ],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -357,7 +361,7 @@ fn postgres_renders_comment_on_all_structured_targets() {
                 comment: Some("Normalize email".into()),
             },
         ],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeSet::new(),
     );
     let up: Vec<&str> = migrations.iter().map(|m| m.up.as_str()).collect();
@@ -379,7 +383,7 @@ fn postgres_renders_comment_on_all_structured_targets() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_comment_on() {
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         let err = validate_ir(
             &ir(vec![Op::Comment {
                 target: CommentTarget::Table {
@@ -427,7 +431,7 @@ fn fold_tracks_and_clears_table_and_column_comments() {
 
     let folded = fold_ops(
         &set_ops,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -461,7 +465,7 @@ fn fold_tracks_and_clears_table_and_column_comments() {
     });
     let cleared = fold_ops(
         &cleared_ops,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -521,13 +525,13 @@ fn postgres_and_sqlite_render_partial_index_where() {
     };
     let live = BTreeSet::from(["users".to_string()]);
 
-    let pg = lower(vec![op.clone()], SqlDialect::Postgres, &live);
+    let pg = lower(vec![op.clone()], &zero_migrate::POSTGRES, &live);
     assert_eq!(
         pg[0].up,
         r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "app"."users" ("active") WHERE ("active" IS TRUE)"#
     );
 
-    let sqlite = lower(vec![op], SqlDialect::Sqlite, &live);
+    let sqlite = lower(vec![op], &zero_migrate::SQLITE, &live);
     assert_eq!(
         sqlite[0].up,
         r#"CREATE INDEX IF NOT EXISTS "users_active_idx" ON "users" ("active") WHERE ("active" = 1)"#
@@ -559,13 +563,13 @@ fn postgres_and_sqlite_render_expression_index_elements() {
     };
     let live = BTreeSet::from(["users".to_string()]);
 
-    let pg = lower(vec![op.clone()], SqlDialect::Postgres, &live);
+    let pg = lower(vec![op.clone()], &zero_migrate::POSTGRES, &live);
     assert_eq!(
         pg[0].up,
         r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "app"."users" ("email", (lower("email"))) WHERE ("active" IS TRUE)"#
     );
 
-    let sqlite = lower(vec![op], SqlDialect::Sqlite, &live);
+    let sqlite = lower(vec![op], &zero_migrate::SQLITE, &live);
     assert_eq!(
         sqlite[0].up,
         r#"CREATE INDEX IF NOT EXISTS "users_email_lower_idx" ON "users" ("email", (lower("email"))) WHERE ("active" = 1)"#
@@ -593,7 +597,7 @@ fn mysql_fail_closes_on_expression_index_elements() {
             existence_guard: None,
             nulls_not_distinct: None,
         }]),
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -620,7 +624,7 @@ fn mysql_fail_closes_on_partial_index_predicate() {
             existence_guard: None,
             nulls_not_distinct: None,
         }]),
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -669,7 +673,7 @@ fn postgres_renders_exclusion_constraint() {
             schema: None,
             existence_guard: None,
         }],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &live,
     );
     assert_eq!(
@@ -718,7 +722,7 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
             schema: None,
             existence_guard: None,
         }],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &live,
     );
 
@@ -731,7 +735,7 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_exclusion_constraints() {
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         let err = validate_ir(
             &ir(vec![Op::AddConstraint {
                 table: "bookings".into(),
@@ -803,7 +807,7 @@ fn an_over_long_index_name_is_refused() {
         nulls_not_distinct: None,
         existence_guard: None,
     };
-    let err = validate_ir(&ir(vec![op]), SqlDialect::Postgres)
+    let err = validate_ir(&ir(vec![op]), &zero_migrate::POSTGRES)
         .expect_err("an index name past the identifier cap must be refused");
     assert!(
         err.reason.contains("truncates identifiers"),
@@ -834,6 +838,6 @@ fn an_over_long_index_name_is_refused() {
         nulls_not_distinct: None,
         existence_guard: None,
     };
-    validate_ir(&ir(vec![op_ok]), SqlDialect::Postgres)
+    validate_ir(&ir(vec![op_ok]), &zero_migrate::POSTGRES)
         .expect("an index name within the cap stays valid");
 }

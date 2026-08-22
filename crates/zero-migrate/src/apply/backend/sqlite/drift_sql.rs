@@ -38,6 +38,9 @@
 
 use std::collections::BTreeMap;
 
+use super::actor::{MigrationActor, SqliteActorError};
+use super::authorizer::Mode;
+use super::SQLITE_DIALECT;
 use crate::apply::drift::DriftError;
 use crate::model::ir::{IdentityCol, IndexSortOrder};
 use crate::model::snapshot::{
@@ -47,10 +50,6 @@ use crate::model::snapshot::{
 use crate::render::value_format::{
     catalog_id_default, catalog_uuid_id_default, recover_format_check, RecoveredFormatCheck,
 };
-use crate::schema::query::SqlDialect;
-
-use super::actor::{MigrationActor, SqliteActorError};
-use super::authorizer::Mode;
 
 /// One member column of a composite foreign key, as `PRAGMA foreign_key_list`
 /// reports it: `(seq, from_column, to_column)` — `seq` orders the columns within
@@ -129,9 +128,8 @@ pub(crate) async fn snapshot_schema_for(
         .set_mode(Mode::EngineJournal)
         .await
         .map_err(drift_err)?;
-    let schema_ident =
-        crate::render::dml::quote_ident_checked_for_dialect(schema, SqlDialect::Sqlite)
-            .map_err(|error| DriftError::Snapshot(error.to_string()))?;
+    let schema_ident = crate::render::dml::quote_ident_checked_for_dialect(schema, &SQLITE_DIALECT)
+        .map_err(|error| DriftError::Snapshot(error.to_string()))?;
 
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
@@ -333,9 +331,9 @@ async fn introspect_columns(
         let value_format = recovered_checks.value_format;
         let has_uuid_format_check = recovered_checks.uuid;
         let catalog_default = if has_uuid_format_check {
-            catalog_uuid_id_default(raw_default.as_deref(), SqlDialect::Sqlite, None)
+            catalog_uuid_id_default(raw_default.as_deref(), &SQLITE_DIALECT, None)
         } else {
-            catalog_id_default(raw_default.as_deref(), SqlDialect::Sqlite, None)
+            catalog_id_default(raw_default.as_deref(), &SQLITE_DIALECT, None)
         };
         let is_uuid_v4_default = matches!(
             catalog_default,
@@ -914,10 +912,10 @@ fn identifier_lists_equal(left: &[String], right: &[String]) -> bool {
 }
 
 fn fk_actions_equal(parsed: Option<&str>, pragma: &str) -> bool {
-    use crate::schema::query::{normalize_fk_action_for_dialect, SqlDialect};
+    use crate::schema::query::normalize_fk_action_for_dialect;
 
-    normalize_fk_action_for_dialect(parsed, SqlDialect::Sqlite)
-        == normalize_fk_action_for_dialect(Some(pragma), SqlDialect::Sqlite)
+    normalize_fk_action_for_dialect(parsed, &SQLITE_DIALECT)
+        == normalize_fk_action_for_dialect(Some(pragma), &SQLITE_DIALECT)
 }
 
 fn canonical_foreign_key_definition(
@@ -929,7 +927,7 @@ fn canonical_foreign_key_definition(
     use std::fmt::Write as _;
 
     use crate::render::declarative::{constraintdef_cols, quote_ident_if_needed};
-    use crate::schema::query::{normalize_fk_action_for_dialect, SqlDialect};
+    use crate::schema::query::normalize_fk_action_for_dialect;
 
     let mut definition = format!(
         "FOREIGN KEY ({}) REFERENCES {}({})",
@@ -957,8 +955,8 @@ fn canonical_foreign_key_definition(
         );
     }
 
-    let on_update = normalize_fk_action_for_dialect(Some(&pragma_fk.on_update), SqlDialect::Sqlite);
-    let on_delete = normalize_fk_action_for_dialect(Some(&pragma_fk.on_delete), SqlDialect::Sqlite);
+    let on_update = normalize_fk_action_for_dialect(Some(&pragma_fk.on_update), &SQLITE_DIALECT);
+    let on_delete = normalize_fk_action_for_dialect(Some(&pragma_fk.on_delete), &SQLITE_DIALECT);
     if on_update != "NO ACTION" {
         let _ = write!(definition, " ON UPDATE {on_update}");
     }
@@ -1362,7 +1360,7 @@ fn recover_column_format_checks(create_sql: &str, column: &str) -> RecoveredColu
         let Some(close) = find_matching_paren(create_sql, open) else {
             continue;
         };
-        match recover_format_check(column, &create_sql[start..=close], SqlDialect::Sqlite) {
+        match recover_format_check(column, &create_sql[start..=close], &SQLITE_DIALECT) {
             Some(RecoveredFormatCheck::Uuid) => uuid_count += 1,
             Some(RecoveredFormatCheck::Value(format)) => value_formats.push(format),
             None => {}
@@ -1678,8 +1676,6 @@ mod tests {
     #[test]
     fn sqlite_fk_definition_is_ordered_and_match_simple_is_implicit() {
         use crate::render::declarative::ir_fk_constraint_snapshot_for_columns;
-        use crate::schema::query::SqlDialect;
-
         let pragma = PragmaForeignKey {
             referenced_table: "Parent".to_string(),
             columns: Vec::new(),
@@ -1717,7 +1713,7 @@ mod tests {
             true,
             true,
             false,
-            SqlDialect::Sqlite,
+            &SQLITE_DIALECT,
         );
         assert_eq!(
             actual, desired.definition,
@@ -1737,7 +1733,7 @@ mod tests {
             &crate::model::ir::ValueFormat::TypeId {
                 prefix: "account".to_string(),
             },
-            SqlDialect::Sqlite,
+            &SQLITE_DIALECT,
         )
         .expect("TypeID metadata")
         .inline_check;

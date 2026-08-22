@@ -11,7 +11,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
     fold_ops, snapshot_schema, validate_ir, ColumnSnapshot, ConstraintSnapshot, IrAuthor,
-    LiveSchema, MysqlTextStorageSnapshot, SchemaSnapshot, SqlDialect, TableSnapshot,
+    LiveSchema, MysqlTextStorageSnapshot, SchemaSnapshot, TableSnapshot,
 };
 
 const PROJECT_SCHEMA: &str = "app";
@@ -176,29 +176,31 @@ fn typed_reference_matrix_ir() -> MigrationIr {
     )
 }
 
-fn create_marker(dialect: SqlDialect, table: &str) -> String {
-    match dialect {
-        SqlDialect::Postgres => format!("CREATE TABLE \"{PROJECT_SCHEMA}\".\"{table}\""),
-        SqlDialect::Mysql => format!("CREATE TABLE `{PROJECT_SCHEMA}`.`{table}`"),
-        SqlDialect::Sqlite => format!("CREATE TABLE \"{table}\""),
+fn create_marker(dialect: &zero_migrate::DialectId, table: &str) -> String {
+    if dialect == &zero_migrate::POSTGRES {
+        format!("CREATE TABLE \"{PROJECT_SCHEMA}\".\"{table}\"")
+    } else if dialect == &zero_migrate::MYSQL {
+        format!("CREATE TABLE `{PROJECT_SCHEMA}`.`{table}`")
+    } else if dialect == &zero_migrate::SQLITE {
+        format!("CREATE TABLE \"{table}\"")
+    } else {
+        panic!("unregistered test dialect {dialect}")
     }
 }
 
-fn assert_reference_target(sql: &str, dialect: SqlDialect, table: &str) {
-    let matches = match dialect {
-        SqlDialect::Postgres => {
-            sql.contains(&format!("REFERENCES \"{PROJECT_SCHEMA}\".\"{table}\" (id)"))
-        }
-        SqlDialect::Mysql => {
-            sql.contains(&format!("REFERENCES `{PROJECT_SCHEMA}`.`{table}` (`id`)"))
-        }
+fn assert_reference_target(sql: &str, dialect: &zero_migrate::DialectId, table: &str) {
+    let matches = if dialect == &zero_migrate::POSTGRES {
+        sql.contains(&format!("REFERENCES \"{PROJECT_SCHEMA}\".\"{table}\" (id)"))
+    } else if dialect == &zero_migrate::MYSQL {
+        sql.contains(&format!("REFERENCES `{PROJECT_SCHEMA}`.`{table}` (`id`)"))
+    } else if dialect == &zero_migrate::SQLITE {
         // SQLite foreign keys may not name a schema. Accept either canonical
         // identifier quoting style while refusing a project-schema qualifier.
-        SqlDialect::Sqlite => {
-            (sql.contains(&format!("REFERENCES \"{table}\" (id)"))
-                || sql.contains(&format!("REFERENCES {table}(id)")))
-                && !sql.contains(&format!("REFERENCES {PROJECT_SCHEMA}.{table}"))
-        }
+        (sql.contains(&format!("REFERENCES \"{table}\" (id)"))
+            || sql.contains(&format!("REFERENCES {table}(id)")))
+            && !sql.contains(&format!("REFERENCES {PROJECT_SCHEMA}.{table}"))
+    } else {
+        panic!("unregistered test dialect {dialect}")
     };
     assert!(
         matches,
@@ -208,7 +210,7 @@ fn assert_reference_target(sql: &str, dialect: SqlDialect, table: &str) {
 
 fn create_sql<'a>(
     migrations: &'a [zero_migrate::Migration],
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
     table: &str,
 ) -> &'a str {
     let marker = create_marker(dialect, table);
@@ -224,7 +226,11 @@ fn create_sql<'a>(
 fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
     let ir = typed_reference_matrix_ir();
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
+    ] {
         let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &LiveSchema::default())
             .unwrap_or_else(|error| panic!("{dialect:?} typed references must lower: {error}"));
@@ -244,25 +250,29 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
             assert_reference_target(child, dialect, target);
         }
 
-        let expected_storage = match dialect {
-            SqlDialect::Postgres => [
+        let expected_storage = if dialect == &zero_migrate::POSTGRES {
+            [
                 "\"int_parent_id\" integer",
                 "\"uuid_parent_id\" uuid",
                 "\"type_id_parent_id\" text COLLATE \"C\"",
                 "\"ulid_parent_id\" text COLLATE \"C\"",
-            ],
-            SqlDialect::Mysql => [
+            ]
+        } else if dialect == &zero_migrate::MYSQL {
+            [
                 "`int_parent_id` INT",
                 "`uuid_parent_id` VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin",
                 "`type_id_parent_id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin",
                 "`ulid_parent_id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin",
-            ],
-            SqlDialect::Sqlite => [
+            ]
+        } else if dialect == &zero_migrate::SQLITE {
+            [
                 "\"int_parent_id\" INTEGER",
                 "\"uuid_parent_id\" TEXT",
                 "\"type_id_parent_id\" TEXT COLLATE BINARY",
                 "\"ulid_parent_id\" TEXT COLLATE BINARY",
-            ],
+            ]
+        } else {
+            panic!("unregistered test dialect {dialect}")
         };
         for storage in expected_storage {
             assert!(
@@ -276,15 +286,16 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
             "a typed reference must not duplicate a child format CHECK on {dialect:?}: {child}"
         );
         let uuid_parent = create_sql(&migrations, dialect, "uuid_parents");
-        match dialect {
-            SqlDialect::Postgres => assert!(
+        if dialect == &zero_migrate::POSTGRES {
+            assert!(
                 !uuid_parent.contains("CHECK ("),
                 "native PostgreSQL UUID storage needs no textual format CHECK: {uuid_parent}"
-            ),
-            SqlDialect::Mysql | SqlDialect::Sqlite => assert!(
+            );
+        } else {
+            assert!(
                 uuid_parent.contains("CHECK (") && uuid_parent.contains("0-9a-f"),
                 "the authoritative UUID key must enforce canonical lowercase syntax on {dialect:?}: {uuid_parent}"
-            ),
+            );
         }
         let type_id_parent = create_sql(&migrations, dialect, "type_id_parents");
         assert!(
@@ -303,7 +314,7 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
 fn offline_fold_keeps_uuid_checks_on_keys_and_off_references() {
     let ir = typed_reference_matrix_ir();
 
-    for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [&zero_migrate::MYSQL, &zero_migrate::SQLITE] {
         let snapshot = fold_ops(&ir.ops, dialect, PROJECT_SCHEMA, &support::no_inject("app"))
             .unwrap_or_else(|error| panic!("{dialect:?} typed references must fold: {error}"));
         let parent = snapshot.tables["uuid_parents"]
@@ -334,12 +345,12 @@ fn mysql_format_typed_references_accept_delete_and_update_actions_without_checks
     let migrations = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &no_inject_policy(),
     )
     .lower(&ir, &LiveSchema::default())
     .expect("MySQL format-typed references with actions must lower");
-    let child = create_sql(&migrations, SqlDialect::Mysql, "children");
+    let child = create_sql(&migrations, &zero_migrate::MYSQL, "children");
 
     assert!(
         child.contains("ON UPDATE SET NULL ON DELETE CASCADE"),
@@ -416,7 +427,7 @@ fn sqlite_inlines_a_typed_reference_to_a_later_declared_parent() {
     let migrations = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &no_inject_policy(),
     )
     .lower(&ir, &LiveSchema::default())
@@ -434,15 +445,15 @@ fn sqlite_inlines_a_typed_reference_to_a_later_declared_parent() {
         "the regression fixture must retain child-first operation order"
     );
 
-    let child = create_sql(&migrations, SqlDialect::Sqlite, "children");
-    assert_reference_target(child, SqlDialect::Sqlite, "parents");
+    let child = create_sql(&migrations, &zero_migrate::SQLITE, "children");
+    assert_reference_target(child, &zero_migrate::SQLITE, "parents");
 }
 
 fn assert_declared_mismatch(ir: &MigrationIr, expected: &[&str]) {
     for dialect in [
-        SqlDialect::Postgres,
-        SqlDialect::Mysql,
-        SqlDialect::Sqlite,
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
     ] {
         let error = validate_ir(ir, dialect)
             .expect_err("each dialect must reject the declared reference mismatch");
@@ -533,9 +544,9 @@ fn declared_reference_targets_must_be_single_column_keys() {
     ] {
         let ir = reference_target_ir(name, parent);
         for dialect in [
-            SqlDialect::Postgres,
-            SqlDialect::Mysql,
-            SqlDialect::Sqlite,
+            &zero_migrate::POSTGRES,
+            &zero_migrate::MYSQL,
+            &zero_migrate::SQLITE,
         ] {
             validate_ir(&ir, dialect).unwrap_or_else(|error| {
                 panic!("{name} must be a valid reference key on {dialect:?}: {error}")
@@ -543,7 +554,7 @@ fn declared_reference_targets_must_be_single_column_keys() {
         }
     }
     let ir = reference_target_ir("table_unique_key", table_unique_parent);
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::POSTGRES, &zero_migrate::MYSQL] {
         validate_ir(&ir, dialect).unwrap_or_else(|error| {
             panic!("table UNIQUE must be a valid reference key on {dialect:?}: {error}")
         });
@@ -554,7 +565,7 @@ fn declared_reference_targets_must_be_single_column_keys() {
 fn explicit_non_id_reference_column_is_preserved() {
     // BOUNDED, not `text`: this column is UNIQUE and the IR below is lowered under
     // MySQL, where a key over an unbounded `text` column is error 1170 - refused
-    // offline by `validate_mysql_key_storage` and at lower time by its live-catalog
+    // offline by the backend storage gate and at lower time by its live-catalog
     // peer. The subject here is that an explicit non-`id` reference TARGET is
     // preserved, which the column's width does not touch. The referencing column is
     // bounded to match, because a reference has to agree with its target's storage.
@@ -597,7 +608,11 @@ fn explicit_non_id_reference_column_is_preserved() {
         ],
     );
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
+    ] {
         let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &LiveSchema::default())
             .unwrap_or_else(|error| panic!("{dialect:?} non-id reference must lower: {error}"));
@@ -790,13 +805,13 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
             },
         );
         let mut live = LiveSchema::from_catalog_snapshot(snapshot, "external_owner");
-        live.advance_logical_columns(&target, SqlDialect::Postgres, PROJECT_SCHEMA, None)
+        live.advance_logical_columns(&target, &zero_migrate::POSTGRES, PROJECT_SCHEMA, None)
             .expect("record the authored formatted key contract");
 
         let migrations = IrAuthor::new(
             PROJECT_SCHEMA,
             OWNER,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &no_inject_policy(),
         )
             .lower(&child_ir, &live)
@@ -805,7 +820,7 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
                     "PostgreSQL live text storage must match a {label} reference whose DDL adds COLLATE C: {error}"
                 )
             });
-        let child = create_sql(&migrations, SqlDialect::Postgres, "children");
+        let child = create_sql(&migrations, &zero_migrate::POSTGRES, "children");
         assert!(
             child.contains(r#""parent_id" text COLLATE "C""#),
             "the explicit formatted reference storage was not preserved: {child}"
@@ -814,7 +829,7 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
             !child.contains("CHECK"),
             "a formatted child reference must not carry its own CHECK: {child}"
         );
-        assert_reference_target(child, SqlDialect::Postgres, &parent);
+        assert_reference_target(child, &zero_migrate::POSTGRES, &parent);
     }
 }
 
@@ -863,7 +878,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
         let parent_migrations = IrAuthor::new(
             &schema,
             OWNER,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &support::no_inject(&schema),
         )
             .lower(&targets, &LiveSchema::default())
@@ -875,7 +890,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                 .map_err(|error| format!("apply formatted parent key: {error}"))?;
         }
 
-        let parent_snapshot = snapshot_schema(&session, &schema)
+        let parent_snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("introspect formatted parent keys: {error}"))?;
         for table in ["type_id_parents", "ulid_parents"] {
@@ -893,7 +908,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
         }
 
         let mut live = LiveSchema::from_catalog_snapshot(parent_snapshot, OWNER);
-        live.advance_logical_columns(&targets, SqlDialect::Postgres, &schema, None)
+        live.advance_logical_columns(&targets, &zero_migrate::POSTGRES, &schema, None)
             .map_err(|error| format!("record formatted parent contracts: {error}"))?;
         let children = ir(
             "live_pg_formatted_children",
@@ -923,7 +938,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
         let child_migrations = IrAuthor::new(
             &schema,
             OWNER,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &support::no_inject(&schema),
         )
             .lower(&children, &live)
@@ -939,7 +954,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
             .await
             .map_err(|error| format!("apply typed child references: {error}"))?;
 
-        let applied = snapshot_schema(&session, &schema)
+        let applied = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("introspect applied typed references: {error}"))?;
         let foreign_key_count = applied
@@ -993,7 +1008,11 @@ fn format_bearing_reference_to_unmanaged_target_without_authored_metadata_is_rej
         ("unmanaged_uuid_reference", "uuid", None, "canonical UUID"),
     ] {
         let ir = unmanaged_child_ir(name, local_type, local_format);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+        for dialect in [
+            &zero_migrate::POSTGRES,
+            &zero_migrate::MYSQL,
+            &zero_migrate::SQLITE,
+        ] {
             let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
                 .lower(&ir, &unmanaged_live("text"))
                 .expect_err("a catalog type cannot supply missing authored format metadata");
@@ -1048,12 +1067,12 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
     let migrations = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &no_inject_policy(),
     )
     .lower(&ir, &live)
     .expect("live VARCHAR(36) must validate the recorded UUID reference contract");
-    let child = create_sql(&migrations, SqlDialect::Mysql, "children");
+    let child = create_sql(&migrations, &zero_migrate::MYSQL, "children");
     assert!(
         child.contains("`uuid_parent_id` VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin"),
         "the catalog must not replace explicit UUID storage: {child}"
@@ -1077,7 +1096,7 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
     let error = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &no_inject_policy(),
     )
     .lower(&ir, &mismatched_live)
@@ -1096,9 +1115,9 @@ fn primitive_unmanaged_reference_is_catalog_validated_without_type_inference() {
     assert_eq!(recorded["ops"][0]["columns"][0]["type"], "int");
 
     for (dialect, live_type, local_storage) in [
-        (SqlDialect::Postgres, "integer", "\"parent_id\" integer"),
-        (SqlDialect::Mysql, "int", "`parent_id` INT"),
-        (SqlDialect::Sqlite, "integer", "\"parent_id\" INTEGER"),
+        (&zero_migrate::POSTGRES, "integer", "\"parent_id\" integer"),
+        (&zero_migrate::MYSQL, "int", "`parent_id` INT"),
+        (&zero_migrate::SQLITE, "integer", "\"parent_id\" INTEGER"),
     ] {
         let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
             .lower(&ir, &unmanaged_live(live_type))
@@ -1135,9 +1154,9 @@ fn primitive_unmanaged_reference_requires_a_live_single_column_candidate_key() {
     let ir = unmanaged_child_ir("unmanaged_non_key_reference", "int", None);
 
     for (dialect, live_type) in [
-        (SqlDialect::Postgres, "integer"),
-        (SqlDialect::Mysql, "int"),
-        (SqlDialect::Sqlite, "integer"),
+        (&zero_migrate::POSTGRES, "integer"),
+        (&zero_migrate::MYSQL, "int"),
+        (&zero_migrate::SQLITE, "integer"),
     ] {
         let mut live = unmanaged_live(live_type);
         let target = live
@@ -1165,7 +1184,7 @@ fn sqlite_unmanaged_integer_reference_keeps_declared_width() {
         let error = IrAuthor::new(
             PROJECT_SCHEMA,
             OWNER,
-            SqlDialect::Sqlite,
+            &zero_migrate::SQLITE,
             &no_inject_policy(),
         )
         .lower(&ir, &unmanaged_live(live_type))
@@ -1181,7 +1200,7 @@ fn sqlite_unmanaged_integer_reference_keeps_declared_width() {
     IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &no_inject_policy(),
     )
     .lower(&bigint, &unmanaged_live("bigint"))
@@ -1242,20 +1261,20 @@ fn sqlite_declared_bigint_reference_matches_managed_integer_storage() {
         },
     );
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
-    live.advance_logical_columns(&target, SqlDialect::Sqlite, PROJECT_SCHEMA, None)
+    live.advance_logical_columns(&target, &zero_migrate::SQLITE, PROJECT_SCHEMA, None)
         .expect("record the managed BIGINT key contract");
 
     let migrations = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &no_inject_policy(),
     )
     .lower(&child, &live)
     .expect("managed logical width must validate its engine-rendered INTEGER storage");
-    let sql = create_sql(&migrations, SqlDialect::Sqlite, "children");
+    let sql = create_sql(&migrations, &zero_migrate::SQLITE, "children");
     assert!(sql.contains(r#""parent_id" INTEGER"#), "{sql}");
-    assert_reference_target(sql, SqlDialect::Sqlite, "managed_parents");
+    assert_reference_target(sql, &zero_migrate::SQLITE, "managed_parents");
 }
 
 #[test]
@@ -1279,7 +1298,7 @@ fn mysql_unbounded_text_reference_is_refused_before_collation_comparison() {
     let error = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &no_inject_policy(),
     )
     .lower(
@@ -1389,7 +1408,7 @@ fn absorb_logical_columns_carries_an_applied_file_contract_into_a_later_foreign_
     let author = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &no_inject_policy(),
     );
 
@@ -1407,14 +1426,14 @@ fn absorb_logical_columns_carries_an_applied_file_contract_into_a_later_foreign_
     );
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
-    live.absorb_logical_columns(&applied, SqlDialect::Postgres, PROJECT_SCHEMA, None)
+    live.absorb_logical_columns(&applied, &zero_migrate::POSTGRES, PROJECT_SCHEMA, None)
         .expect("an applied artifact contributes contracts without strict lower-time validation");
     let migrations = author
         .lower(&appended, &live)
         .expect("the absorbed contract makes the appended foreign key lower");
     assert_reference_target(
-        create_sql(&migrations, SqlDialect::Postgres, "sessions"),
-        SqlDialect::Postgres,
+        create_sql(&migrations, &zero_migrate::POSTGRES, "sessions"),
+        &zero_migrate::POSTGRES,
         "accounts",
     );
 }
@@ -1481,7 +1500,7 @@ fn absorb_logical_columns_replays_the_candidate_key_lifecycle_of_an_applied_file
     );
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
-    live.absorb_logical_columns(&applied, SqlDialect::Postgres, PROJECT_SCHEMA, None)
+    live.absorb_logical_columns(&applied, &zero_migrate::POSTGRES, PROJECT_SCHEMA, None)
         .expect("the applied artifact's UNIQUE index is part of its accumulated contracts");
     assert!(
         contract_for(&live, "orgs", "public_id").single_column_reference_key,
@@ -1491,13 +1510,13 @@ fn absorb_logical_columns_replays_the_candidate_key_lifecycle_of_an_applied_file
     let migrations = IrAuthor::new(
         PROJECT_SCHEMA,
         OWNER,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &no_inject_policy(),
     )
     .lower(&appended, &live)
     .expect("a UNIQUE key declared by the applied file is a valid reference target");
     assert!(
-        create_sql(&migrations, SqlDialect::Postgres, "org_links").contains(&format!(
+        create_sql(&migrations, &zero_migrate::POSTGRES, "org_links").contains(&format!(
             "REFERENCES \"{PROJECT_SCHEMA}\".\"orgs\" (\"public_id\")"
         )),
         "the appended foreign key did not target the absorbed UNIQUE key: {migrations:#?}"
@@ -1530,7 +1549,7 @@ fn absorb_logical_columns_accumulates_what_strict_advance_rejects() {
     );
 
     let error = LiveSchema::default()
-        .advance_logical_columns(&applied, SqlDialect::Postgres, PROJECT_SCHEMA, None)
+        .advance_logical_columns(&applied, &zero_migrate::POSTGRES, PROJECT_SCHEMA, None)
         .expect_err("strict accumulation still rejects an unseeded formatted target");
     assert!(
         error
@@ -1541,7 +1560,7 @@ fn absorb_logical_columns_accumulates_what_strict_advance_rejects() {
 
     let mut lenient = LiveSchema::default();
     lenient
-        .absorb_logical_columns(&applied, SqlDialect::Postgres, PROJECT_SCHEMA, None)
+        .absorb_logical_columns(&applied, &zero_migrate::POSTGRES, PROJECT_SCHEMA, None)
         .expect("the lenient path performs no lower-time reference validation");
     assert!(
         contract_for(&lenient, "invoices", "id").single_column_reference_key,

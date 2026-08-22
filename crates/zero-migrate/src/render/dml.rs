@@ -3,7 +3,7 @@
 //!
 //! The seam itself is `zero_migrate_backend::dml`, glob-re-exported below so every
 //! existing `render::dml::…` path in this crate resolves unchanged. What lives HERE
-//! is the handful of doors that used to take a `dialect: SqlDialect` and resolve a
+//! is the handful of doors that used to take a closed dialect identity and resolve a
 //! renderer from it.
 //!
 //! # Why they could not stay down there
@@ -18,7 +18,7 @@
 //!
 //! The contract crate's copies take a `&dyn DmlRenderer` instead. A vendor passes
 //! `self` and the round trip disappears; the engine, which genuinely holds a
-//! `SqlDialect` and not a renderer, resolves once — here.
+//! dialect identity and not a renderer, resolves once — here.
 //!
 //! # What this buys, beyond compiling
 //!
@@ -26,16 +26,16 @@
 //! the open vendor registry and immediately pass a renderer to the neutral contract.
 //! Vendor implementations never call back through these doors. The final enum-removal
 //! cluster deletes the doors with their callers instead of adding a reverse
-//! `DialectId -> SqlDialect` bridge.
+//! open-id-to-closed-enum bridge.
 
 pub use zero_migrate_backend::dml::*;
 
 use zero_migrate_backend::dml as seam;
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::Expr;
 use zero_migrate_ir::ir::{IrScalar, IrValue};
 
 use crate::render::backends::renderer;
-use crate::schema::query::SqlDialect;
 
 /// EMIT an identifier in `dialect`'s own spelling, decided by that dialect's backend
 /// rather than by a `format!` in the engine.
@@ -43,75 +43,64 @@ use crate::schema::query::SqlDialect;
 /// This is the door for anything that will be sent to a database. The other door,
 /// the snapshot codec is for the normal form that is COMPARED rather than
 /// executed; picking between them is the point of there being two.
-pub(crate) fn escape_quote_ident_for_dialect(ident: &str, dialect: SqlDialect) -> String {
-    seam::escape_quote_ident_for_backend(ident, renderer(&dialect.id()))
+pub(crate) fn escape_quote_ident_for_dialect(ident: &str, dialect: &DialectId) -> String {
+    seam::escape_quote_ident_for_backend(ident, renderer(dialect))
 }
 
 /// Validate a trigger-body identifier and emit it in the selected spelling.
 pub(crate) fn quote_bare_ident_for_dialect(
     what: &'static str,
     ident: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<String, DmlError> {
-    seam::quote_bare_ident_for_backend(what, ident, renderer(&dialect.id()))
+    seam::quote_bare_ident_for_backend(what, ident, renderer(dialect))
 }
 
 /// The fail-closed gate for an ENGINE-supplied identifier, emitted in `dialect`'s
 /// spelling.
 pub(crate) fn quote_ident_checked_for_dialect(
     ident: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<String, IdentQuoteError> {
-    seam::quote_ident_checked_for_backend(ident, renderer(&dialect.id()))
-}
-
-/// The ONE canonical render seam for an ENGINE-supplied identifier — the project
-/// schema, the migrator role, the meta schema, a derived trigger name.
-///
-/// PostgreSQL-PINNED, and the pin is this line. It used to be written inside
-/// `render::dml` itself; it could not stay there, because that module is now below
-/// the vendors and has no PostgreSQL renderer to resolve. Its thirty call sites are
-/// unchanged.
-pub(crate) fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError> {
-    seam::quote_ident_checked_for_backend(ident, renderer(&SqlDialect::Postgres.id()))
+    seam::quote_ident_checked_for_backend(ident, renderer(dialect))
 }
 
 /// Render an inline string literal in `dialect`'s spelling.
-pub(crate) fn inline_string_literal(s: &str, dialect: SqlDialect) -> String {
-    seam::inline_string_literal_for_backend(s, renderer(&dialect.id()))
+pub(crate) fn inline_string_literal(s: &str, dialect: &DialectId) -> String {
+    seam::inline_string_literal_for_backend(s, renderer(dialect))
 }
 
 /// Render an inline scalar literal in `dialect`'s spelling.
-pub(crate) fn inline_literal(s: &IrScalar, dialect: SqlDialect) -> Result<String, DmlError> {
-    seam::inline_literal_for_backend(s, renderer(&dialect.id()))
+pub(crate) fn inline_literal(s: &IrScalar, dialect: &DialectId) -> Result<String, DmlError> {
+    seam::inline_literal_for_backend(s, renderer(dialect))
 }
 
 /// Render a closed-AST expression to inline SQL for `dialect`.
-pub(crate) fn render_expr_inline(expr: &Expr, dialect: SqlDialect) -> Result<String, DmlError> {
-    seam::render_expr_inline_for_backend(expr, renderer(&dialect.id()))
+pub(crate) fn render_expr_inline(expr: &Expr, dialect: &DialectId) -> Result<String, DmlError> {
+    seam::render_expr_inline_for_backend(expr, renderer(dialect))
 }
 
 /// [`render_expr_inline`] with a caller-supplied column-reference spelling.
 pub(crate) fn render_expr_inline_with_col<F>(
     expr: &Expr,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     col_ref: &F,
 ) -> Result<String, DmlError>
 where
     F: Fn(&str) -> Result<String, DmlError>,
 {
-    seam::render_expr_inline_with_col_for_backend(expr, renderer(&dialect.id()), col_ref)
+    seam::render_expr_inline_with_col_for_backend(expr, renderer(dialect), col_ref)
 }
 
 /// The columns a closed-AST expression reads, spelled for `dialect`.
-pub(crate) fn expr_column_refs(expr: &Expr, dialect: SqlDialect) -> Result<Vec<String>, DmlError> {
-    seam::expr_column_refs_for_backend(expr, renderer(&dialect.id()))
+pub(crate) fn expr_column_refs(expr: &Expr, dialect: &DialectId) -> Result<Vec<String>, DmlError> {
+    seam::expr_column_refs_for_backend(expr, renderer(dialect))
 }
 
 /// Assemble an `insert` into a template + binds for `dialect`.
 pub fn assemble_insert(
     project_schema: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     table: &str,
     columns: &[String],
     rows: &[Vec<IrValue>],
@@ -119,7 +108,7 @@ pub fn assemble_insert(
 ) -> Result<AssembledDml, DmlError> {
     seam::assemble_insert_for_backend(
         project_schema,
-        renderer(&dialect.id()),
+        renderer(dialect),
         table,
         columns,
         rows,
@@ -130,74 +119,62 @@ pub fn assemble_insert(
 /// Assemble an `update` into a template + binds for `dialect`.
 pub fn assemble_update(
     project_schema: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     table: &str,
     set: &std::collections::BTreeMap<String, IrValue>,
     r#where: Option<&Expr>,
 ) -> Result<AssembledDml, DmlError> {
-    seam::assemble_update_for_backend(project_schema, renderer(&dialect.id()), table, set, r#where)
+    seam::assemble_update_for_backend(project_schema, renderer(dialect), table, set, r#where)
 }
 
 /// Assemble a `delete` into a template + binds for `dialect`.
 pub fn assemble_delete(
     project_schema: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     table: &str,
     r#where: &Expr,
     limit: Option<u64>,
 ) -> Result<AssembledDml, DmlError> {
-    seam::assemble_delete_for_backend(
-        project_schema,
-        renderer(&dialect.id()),
-        table,
-        r#where,
-        limit,
-    )
+    seam::assemble_delete_for_backend(project_schema, renderer(dialect), table, r#where, limit)
 }
 
-/// [`assemble_delete`], with the catalog-proven SQLite identity a limited delete
-/// needs.
-pub(crate) fn assemble_delete_with_sqlite_identity(
+/// [`assemble_delete`], with a catalog-proven row identity for a limited delete.
+pub(crate) fn assemble_delete_with_catalog_identity(
     project_schema: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     table: &str,
     r#where: &Expr,
     limit: Option<u64>,
-    sqlite_identity_columns: Option<&[String]>,
+    catalog_identity_columns: Option<&[String]>,
 ) -> Result<AssembledDml, DmlError> {
-    seam::assemble_delete_with_sqlite_identity_for_backend(
+    seam::assemble_delete_with_catalog_identity_for_backend(
         project_schema,
-        renderer(&dialect.id()),
+        renderer(dialect),
         table,
         r#where,
         limit,
-        sqlite_identity_columns,
+        catalog_identity_columns,
     )
 }
 
 /// Assemble a `backfill`'s SET/WHERE clauses for `dialect`.
 pub fn assemble_backfill_clauses(
-    dialect: SqlDialect,
+    dialect: &DialectId,
     table: &str,
     set: &std::collections::BTreeMap<String, IrValue>,
     filter: Option<&Expr>,
 ) -> Result<BackfillClauses, DmlError> {
-    seam::assemble_backfill_clauses_for_backend(renderer(&dialect.id()), table, set, filter)
+    seam::assemble_backfill_clauses_for_backend(renderer(dialect), table, set, filter)
 }
 
 /// [`assemble_backfill_clauses`], admitting an empty `set`.
 pub(crate) fn assemble_backfill_clauses_allow_empty(
-    dialect: SqlDialect,
+    dialect: &DialectId,
     table: &str,
     set: &std::collections::BTreeMap<String, IrValue>,
     filter: Option<&Expr>,
 ) -> Result<BackfillClauses, DmlError> {
-    seam::assemble_backfill_clauses_allow_empty_for_backend(
-        renderer(&dialect.id()),
-        table,
-        set,
-        filter,
-    )
+    seam::assemble_backfill_clauses_allow_empty_for_backend(renderer(dialect), table, set, filter)
 }
 #[cfg(test)]
 mod tests {
@@ -205,11 +182,16 @@ mod tests {
     use std::collections::BTreeMap;
     use zero_migrate_backend::dml::{render_expr_bound, BindCtx};
     use zero_migrate_backend::step::BindValue;
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
     use zero_migrate_ir::expr::{
         BinaryOp, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
     };
 
     const SCHEMA: &str = "app_proj";
+
+    fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError> {
+        quote_ident_checked_for_dialect(ident, &POSTGRES)
+    }
 
     /// A `BindCtx` RESOLVES its backend once, at construction, and carries the
     /// registry's own object for its dialect.
@@ -223,11 +205,11 @@ mod tests {
     /// though every emitted byte would still match.
     #[test]
     fn bind_ctx_resolves_its_backend_once_from_its_dialect() {
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
-            let ctx = BindCtx::new(renderer(&dialect.id()));
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
+            let ctx = BindCtx::new(renderer(dialect));
             let carried = std::ptr::from_ref(ctx.backend).cast::<u8>();
             let registry =
-                std::ptr::from_ref(crate::render::backends::renderer(&dialect.id())).cast::<u8>();
+                std::ptr::from_ref(crate::render::backends::renderer(dialect)).cast::<u8>();
             assert_eq!(
                 carried, registry,
                 "BindCtx::new({dialect:?}) must carry the registry's backend for that dialect"
@@ -316,7 +298,7 @@ mod tests {
     /// get its own spelling — the exact mirror image of the ANSI arrangement. No
     /// emitted byte was wrong, because every call site named MySQL in the callee's
     /// name, and the one-dialect-literal test passed because the reach was by
-    /// function name rather than a `SqlDialect::` literal. The defect was
+    /// function name rather than a `DialectId` constant. The defect was
     /// STRUCTURAL and it was a step-4 blocker: the future `zero-migrate-mysql`
     /// would have needed core at runtime to spell its own identifier, which is the
     /// core-to-backend cycle the whole backend split exists to break.
@@ -433,7 +415,7 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "bare backtick spelling found outside zero-migrate-mysql — route \
-             these through dml::escape_quote_ident_for_dialect(.., SqlDialect::Mysql) \
+             these through dml::escape_quote_ident_for_dialect(.., &MYSQL) \
              so the MySQL backend decides its own spelling: {offenders:?}"
         );
     }
@@ -443,7 +425,8 @@ mod tests {
     /// (`replace('"', "\"\"")`) must live in EXACTLY one physical home — and
     /// nowhere else in the crate source. Every other quoting seam routes through
     /// it (via one of the two `dml` doors for author-validated helpers, or via
-    /// [`quote_ident_checked`] for the fail-closed engine-identifier surfaces).
+    /// [`quote_ident_checked_for_dialect`] for the fail-closed engine-identifier
+    /// surfaces).
     ///
     /// THE HOME MOVED, AND THE INVARIANT DID NOT WEAKEN. It used to be `dml.rs`.
     /// It is now `render/backends/mod.rs::ansi_double_quote_ident`, which is
@@ -537,7 +520,7 @@ mod tests {
             "bare `\"`-escape seam found outside render/backends/mod.rs — route \
              these through dml::escape_quote_ident_for_dialect (to emit) / \
              snapshot::quote_constraint_definition_ident (the comparison normal form) / \
-             dml::quote_ident_checked (engine identifiers): {offenders:?}"
+             dml::quote_ident_checked_for_dialect (engine identifiers): {offenders:?}"
         );
     }
 
@@ -546,7 +529,7 @@ mod tests {
     /// five seams (`dml`/`role`/`author`/`backfill`/`journal`) that first adopted
     /// the wrapper. The infallible doors must NEVER be handed an
     /// **engine-supplied** identifier (project schema / migrator role / meta
-    /// schema) — those must route through [`quote_ident_checked`] so they fail
+    /// schema) — those must route through [`quote_ident_checked_for_dialect`] so they fail
     /// closed on empty / NUL. We scan the crate source for the give-away
     /// byte-patterns (`…(&cfg.confinement.meta_schema)`, `…(&cfg.project_schema)`,
     /// `…(role)`, `…(&exec_cfg.confinement.meta_schema)`) — every such site is an
@@ -581,7 +564,7 @@ mod tests {
     #[test]
     fn no_engine_identifier_uses_the_infallible_escaper() {
         use std::path::Path;
-        // The engine-supplied identifier argument patterns. `quote_ident_checked`
+        // The engine-supplied identifier argument patterns. `quote_ident_checked_for_dialect`
         // takes the SAME args; the infallible doors must not.
         let esc = [
             'e', 's', 'c', 'a', 'p', 'e', '_', 'q', 'u', 'o', 't', 'e', '_', 'i', 'd', 'e', 'n',
@@ -638,7 +621,7 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "engine-supplied identifier handed to the INFALLIBLE escaper — route \
-             through dml::quote_ident_checked so it fails closed on empty/NUL: {offenders:?}"
+             through dml::quote_ident_checked_for_dialect so it fails closed on empty/NUL: {offenders:?}"
         );
     }
 
@@ -659,17 +642,11 @@ mod tests {
     fn bytes_inline_literals_are_native_binary_values_on_every_dialect() {
         let value = IrScalar::Bytes(vec![0x00, 0x01, 0x7f, 0x80, 0xff]);
         assert_eq!(
-            inline_literal(&value, SqlDialect::Postgres).unwrap(),
+            inline_literal(&value, &POSTGRES).unwrap(),
             "decode('AAF/gP8=', 'base64')"
         );
-        assert_eq!(
-            inline_literal(&value, SqlDialect::Mysql).unwrap(),
-            "(X'00017f80ff')"
-        );
-        assert_eq!(
-            inline_literal(&value, SqlDialect::Sqlite).unwrap(),
-            "X'00017f80ff'"
-        );
+        assert_eq!(inline_literal(&value, &MYSQL).unwrap(), "(X'00017f80ff')");
+        assert_eq!(inline_literal(&value, &SQLITE).unwrap(), "X'00017f80ff'");
     }
 
     // ── Concat is dialect-specific (regression: MySQL `||` is logical OR) ─────
@@ -685,19 +662,19 @@ mod tests {
             rhs: Box::new(Expr::col("last")),
         };
 
-        let pg = render_expr_inline(&expr, SqlDialect::Postgres).unwrap();
+        let pg = render_expr_inline(&expr, &POSTGRES).unwrap();
         assert_eq!(
             pg, "(\"first\" || \"last\")",
             "PG uses the || concat operator"
         );
 
-        let sqlite = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap();
+        let sqlite = render_expr_inline(&expr, &SQLITE).unwrap();
         assert_eq!(
             sqlite, "(\"first\" || \"last\")",
             "SQLite uses the || concat operator"
         );
 
-        let mysql = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
+        let mysql = render_expr_inline(&expr, &MYSQL).unwrap();
         assert!(
             mysql.starts_with("CONCAT(") && !mysql.contains("||"),
             "MySQL MUST render Concat as CONCAT(...), never `||` (logical OR): got {mysql}"
@@ -734,12 +711,9 @@ mod tests {
                 operand: Box::new(Expr::col("x")),
                 target,
             };
-            assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), pg);
-            assert_eq!(
-                render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
-                sqlite
-            );
-            assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), mysql);
+            assert_eq!(render_expr_inline(&expr, &POSTGRES).unwrap(), pg);
+            assert_eq!(render_expr_inline(&expr, &SQLITE).unwrap(), sqlite);
+            assert_eq!(render_expr_inline(&expr, &MYSQL).unwrap(), mysql);
         }
     }
 
@@ -752,59 +726,38 @@ mod tests {
     fn qualified_colref_renders_dotted_per_dialect() {
         let qualified = Expr::col_qualified("users", "id");
         assert_eq!(
-            render_expr_inline(&qualified, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&qualified, &POSTGRES).unwrap(),
             "\"users\".\"id\"",
             "PG qualifies with double-quoted table.col"
         );
         assert_eq!(
-            render_expr_inline(&qualified, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&qualified, &SQLITE).unwrap(),
             "\"users\".\"id\"",
             "SQLite qualifies with double-quoted table.col"
         );
         assert_eq!(
-            render_expr_inline(&qualified, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&qualified, &MYSQL).unwrap(),
             "`users`.`id`",
             "MySQL qualifies with backtick-quoted table.col"
         );
 
         // Unqualified stays exactly as today — no table segment, no dot.
         let plain = Expr::col("id");
-        assert_eq!(
-            render_expr_inline(&plain, SqlDialect::Postgres).unwrap(),
-            "\"id\""
-        );
-        assert_eq!(
-            render_expr_inline(&plain, SqlDialect::Sqlite).unwrap(),
-            "\"id\""
-        );
-        assert_eq!(
-            render_expr_inline(&plain, SqlDialect::Mysql).unwrap(),
-            "`id`"
-        );
+        assert_eq!(render_expr_inline(&plain, &POSTGRES).unwrap(), "\"id\"");
+        assert_eq!(render_expr_inline(&plain, &SQLITE).unwrap(), "\"id\"");
+        assert_eq!(render_expr_inline(&plain, &MYSQL).unwrap(), "`id`");
 
         // The parameterized (bind) path mirrors the inline path for the ColRef arm.
         assert_eq!(
-            render_expr_bound(
-                &qualified,
-                &mut BindCtx::new(renderer(&SqlDialect::Postgres.id()))
-            )
-            .unwrap(),
+            render_expr_bound(&qualified, &mut BindCtx::new(renderer(&POSTGRES))).unwrap(),
             "\"users\".\"id\""
         );
         assert_eq!(
-            render_expr_bound(
-                &qualified,
-                &mut BindCtx::new(renderer(&SqlDialect::Mysql.id())),
-            )
-            .unwrap(),
+            render_expr_bound(&qualified, &mut BindCtx::new(renderer(&MYSQL)),).unwrap(),
             "`users`.`id`"
         );
         assert_eq!(
-            render_expr_bound(
-                &plain,
-                &mut BindCtx::new(renderer(&SqlDialect::Postgres.id())),
-            )
-            .unwrap(),
+            render_expr_bound(&plain, &mut BindCtx::new(renderer(&POSTGRES)),).unwrap(),
             "\"id\""
         );
     }
@@ -818,14 +771,14 @@ mod tests {
             args: vec![Expr::col("name")],
         };
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&expr, &POSTGRES).unwrap(),
             "length(\"name\")"
         );
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&expr, &SQLITE).unwrap(),
             "length(\"name\")"
         );
-        let mysql = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
+        let mysql = render_expr_inline(&expr, &MYSQL).unwrap();
         assert!(
             mysql.starts_with("char_length("),
             "MySQL length() must render as CHAR_LENGTH (LENGTH is byte length): got {mysql}"
@@ -897,12 +850,12 @@ mod tests {
         ];
         for (expr, pg_expect, sqlite_expect) in cases {
             assert_eq!(
-                &render_expr_inline(expr, SqlDialect::Postgres).unwrap(),
+                &render_expr_inline(expr, &POSTGRES).unwrap(),
                 pg_expect,
                 "PG render mismatch"
             );
             assert_eq!(
-                &render_expr_inline(expr, SqlDialect::Sqlite).unwrap(),
+                &render_expr_inline(expr, &SQLITE).unwrap(),
                 sqlite_expect.unwrap_or(pg_expect),
                 "SQLite render mismatch"
             );
@@ -913,7 +866,7 @@ mod tests {
                 .replace("'a'", "_utf8mb4 X'61'")
                 .replace("'b'", "_utf8mb4 X'62'");
             assert_eq!(
-                render_expr_inline(expr, SqlDialect::Mysql).unwrap(),
+                render_expr_inline(expr, &MYSQL).unwrap(),
                 mysql_expect,
                 "MySQL render mismatch"
             );
@@ -966,12 +919,9 @@ mod tests {
                 field,
                 from: Box::new(Expr::col("ts")),
             };
-            assert_eq!(render_expr_inline(&expr, SqlDialect::Postgres).unwrap(), pg);
-            assert_eq!(
-                render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
-                sqlite
-            );
-            assert_eq!(render_expr_inline(&expr, SqlDialect::Mysql).unwrap(), mysql);
+            assert_eq!(render_expr_inline(&expr, &POSTGRES).unwrap(), pg);
+            assert_eq!(render_expr_inline(&expr, &SQLITE).unwrap(), sqlite);
+            assert_eq!(render_expr_inline(&expr, &MYSQL).unwrap(), mysql);
         }
     }
 
@@ -982,10 +932,10 @@ mod tests {
             from: Box::new(Expr::col("ts")),
         };
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&expr, &POSTGRES).unwrap(),
             "EXTRACT(epoch FROM \"ts\")"
         );
-        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&SQLITE, &MYSQL] {
             let err = render_expr_inline(&expr, dialect).unwrap_err();
             assert!(
                 err.to_string().contains("PostgreSQL-only"),
@@ -998,7 +948,7 @@ mod tests {
             from: Box::new(Expr::col("ts")),
         };
         assert_eq!(
-            render_expr_inline(&second, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&second, &POSTGRES).unwrap(),
             "EXTRACT(second FROM \"ts\")",
             "second stays PG-only because PG preserves fractional seconds"
         );
@@ -1011,15 +961,15 @@ mod tests {
             pattern: "^a$".to_string(),
         };
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&expr, &POSTGRES).unwrap(),
             "(\"name\" ~ '^a$'::text)"
         );
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&expr, &MYSQL).unwrap(),
             "(`name` REGEXP _utf8mb4 X'5e6124')"
         );
 
-        let err = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap_err();
+        let err = render_expr_inline(&expr, &SQLITE).unwrap_err();
         assert!(
             err.to_string().contains("SQLite") && err.to_string().contains("REGEXP"),
             "SQLite regex must fail closed with a precise message: {err}"
@@ -1035,25 +985,12 @@ mod tests {
             r#fn: ScalarFn::Mod,
             args: vec![Expr::col("n"), Expr::lit(IrScalar::Int(3))],
         };
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
-            "(\"n\" % 3)"
-        );
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
-            "(\"n\" % 3)"
-        );
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
-            "(`n` % 3)"
-        );
+        assert_eq!(render_expr_inline(&expr, &POSTGRES).unwrap(), "(\"n\" % 3)");
+        assert_eq!(render_expr_inline(&expr, &SQLITE).unwrap(), "(\"n\" % 3)");
+        assert_eq!(render_expr_inline(&expr, &MYSQL).unwrap(), "(`n` % 3)");
         // The bound (parameterized) path lowers identically (operator form).
         assert_eq!(
-            render_expr_bound(
-                &expr,
-                &mut BindCtx::new(renderer(&SqlDialect::Postgres.id())),
-            )
-            .unwrap(),
+            render_expr_bound(&expr, &mut BindCtx::new(renderer(&POSTGRES)),).unwrap(),
             "(\"n\" % $1)"
         );
     }
@@ -1063,17 +1000,11 @@ mod tests {
         let decimal = "12345678901234567890.1234567890";
         let literal = Expr::lit(IrScalar::Decimal(decimal.into()));
         assert_eq!(
-            render_expr_inline(&literal, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&literal, &SQLITE).unwrap(),
             format!("'{decimal}'")
         );
-        assert_eq!(
-            render_expr_inline(&literal, SqlDialect::Postgres).unwrap(),
-            decimal
-        );
-        assert_eq!(
-            render_expr_inline(&literal, SqlDialect::Mysql).unwrap(),
-            decimal
-        );
+        assert_eq!(render_expr_inline(&literal, &POSTGRES).unwrap(), decimal);
+        assert_eq!(render_expr_inline(&literal, &MYSQL).unwrap(), decimal);
 
         let list = Expr::InList {
             expr: Box::new(Expr::col("amount")),
@@ -1081,7 +1012,7 @@ mod tests {
             negated: false,
         };
         assert_eq!(
-            render_expr_inline(&list, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&list, &SQLITE).unwrap(),
             format!("(\"amount\" IN ('{decimal}'))")
         );
     }
@@ -1098,14 +1029,14 @@ mod tests {
                 op,
                 operand: Box::new(Expr::col("active")),
             };
-            let pg = render_expr_inline(&e, SqlDialect::Postgres).unwrap();
+            let pg = render_expr_inline(&e, &POSTGRES).unwrap();
             assert!(pg.contains(std_frag), "PG keeps `{std_frag}`: {pg}");
-            let mysql = render_expr_inline(&e, SqlDialect::Mysql).unwrap();
+            let mysql = render_expr_inline(&e, &MYSQL).unwrap();
             assert!(
                 mysql.contains(std_frag),
                 "MySQL keeps `{std_frag}`: {mysql}"
             );
-            let sqlite = render_expr_inline(&e, SqlDialect::Sqlite).unwrap();
+            let sqlite = render_expr_inline(&e, &SQLITE).unwrap();
             assert!(
                 sqlite.contains(sqlite_expect)
                     && !sqlite.contains("IS TRUE")
@@ -1129,25 +1060,22 @@ mod tests {
         let expect_pg_sqlite = "(\"age\" BETWEEN 18 AND 65)";
         let expect_mysql = "(`age` BETWEEN 18 AND 65)";
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&expr, &POSTGRES).unwrap(),
             expect_pg_sqlite
         );
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&expr, &SQLITE).unwrap(),
             expect_pg_sqlite
         );
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
-            expect_mysql
-        );
+        assert_eq!(render_expr_inline(&expr, &MYSQL).unwrap(), expect_mysql);
 
         // Bound path: operand is an identifier; low/high become placeholders.
         for (dialect, ident) in [
-            (SqlDialect::Postgres, "\"age\""),
-            (SqlDialect::Sqlite, "\"age\""),
-            (SqlDialect::Mysql, "`age`"),
+            (&POSTGRES, "\"age\""),
+            (&SQLITE, "\"age\""),
+            (&MYSQL, "`age`"),
         ] {
-            let mut ctx = BindCtx::new(renderer(&dialect.id()));
+            let mut ctx = BindCtx::new(renderer(dialect));
             let sql = render_expr_bound(&expr, &mut ctx).unwrap();
             assert!(
                 sql.starts_with(&format!("({ident} BETWEEN ")) && sql.contains(" AND "),
@@ -1167,15 +1095,15 @@ mod tests {
             pattern: Box::new(Expr::lit(IrScalar::Str("A%".to_string()))),
         };
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&expr, &POSTGRES).unwrap(),
             "(\"name\" LIKE 'A%')"
         );
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&expr, &SQLITE).unwrap(),
             "(\"name\" LIKE 'A%')"
         );
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&expr, &MYSQL).unwrap(),
             "(`name` LIKE _utf8mb4 X'4125')"
         );
     }
@@ -1188,15 +1116,15 @@ mod tests {
             negated: false,
         };
         assert_eq!(
-            render_expr_inline(&includes, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&includes, &POSTGRES).unwrap(),
             "(\"status\" = ANY (ARRAY['a'::text, 'b'::text]))"
         );
         assert_eq!(
-            render_expr_inline(&includes, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&includes, &SQLITE).unwrap(),
             "(\"status\" IN ('a', 'b'))"
         );
         assert_eq!(
-            render_expr_inline(&includes, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&includes, &MYSQL).unwrap(),
             "(`status` IN (_utf8mb4 X'61', _utf8mb4 X'62'))"
         );
 
@@ -1206,15 +1134,15 @@ mod tests {
             negated: true,
         };
         assert_eq!(
-            render_expr_inline(&excludes, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&excludes, &POSTGRES).unwrap(),
             "(\"status\" <> ALL (ARRAY['x'::text, 'y'::text]))"
         );
         assert_eq!(
-            render_expr_inline(&excludes, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&excludes, &SQLITE).unwrap(),
             "(\"status\" NOT IN ('x', 'y'))"
         );
         assert_eq!(
-            render_expr_inline(&excludes, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&excludes, &MYSQL).unwrap(),
             "(`status` NOT IN (_utf8mb4 X'78', _utf8mb4 X'79'))"
         );
 
@@ -1224,15 +1152,15 @@ mod tests {
             negated: false,
         };
         assert_eq!(
-            render_expr_inline(&status_codes, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&status_codes, &POSTGRES).unwrap(),
             "(\"http_status\" = ANY (ARRAY[200,404,500]))"
         );
         assert_eq!(
-            render_expr_inline(&status_codes, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&status_codes, &SQLITE).unwrap(),
             "(\"http_status\" IN (200,404,500))"
         );
         assert_eq!(
-            render_expr_inline(&status_codes, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&status_codes, &MYSQL).unwrap(),
             "(`http_status` IN (200,404,500))"
         );
 
@@ -1242,15 +1170,15 @@ mod tests {
             negated: false,
         };
         assert_eq!(
-            render_expr_inline(&enabled, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&enabled, &POSTGRES).unwrap(),
             "(\"enabled\" = ANY (ARRAY[TRUE,FALSE]))"
         );
         assert_eq!(
-            render_expr_inline(&enabled, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&enabled, &SQLITE).unwrap(),
             "(\"enabled\" IN (TRUE,FALSE))"
         );
         assert_eq!(
-            render_expr_inline(&enabled, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&enabled, &MYSQL).unwrap(),
             "(`enabled` IN (TRUE,FALSE))"
         );
     }
@@ -1267,7 +1195,7 @@ mod tests {
             elems: vec![],
             negated: true,
         };
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             assert_eq!(
                 render_expr_inline(&includes_empty, dialect).unwrap(),
                 "FALSE"
@@ -1277,13 +1205,11 @@ mod tests {
                 "TRUE"
             );
             assert_eq!(
-                render_expr_bound(&includes_empty, &mut BindCtx::new(renderer(&dialect.id())))
-                    .unwrap(),
+                render_expr_bound(&includes_empty, &mut BindCtx::new(renderer(dialect))).unwrap(),
                 "FALSE"
             );
             assert_eq!(
-                render_expr_bound(&excludes_empty, &mut BindCtx::new(renderer(&dialect.id())))
-                    .unwrap(),
+                render_expr_bound(&excludes_empty, &mut BindCtx::new(renderer(dialect))).unwrap(),
                 "TRUE"
             );
         }
@@ -1297,15 +1223,15 @@ mod tests {
             negated: false,
         };
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&expr, &POSTGRES).unwrap(),
             "(\"status\" = ANY (ARRAY['a''b'::text]))"
         );
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&expr, &SQLITE).unwrap(),
             "(\"status\" IN ('a''b'))"
         );
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&expr, &MYSQL).unwrap(),
             "(`status` IN (_utf8mb4 X'612762'))"
         );
     }
@@ -1327,8 +1253,8 @@ mod tests {
         ];
 
         for expr in expressions {
-            let inline = render_expr_inline(&expr, SqlDialect::Mysql).unwrap();
-            let mut ctx = BindCtx::new(renderer(&SqlDialect::Mysql.id()));
+            let inline = render_expr_inline(&expr, &MYSQL).unwrap();
+            let mut ctx = BindCtx::new(renderer(&MYSQL));
             let bound = render_expr_bound(&expr, &mut ctx).unwrap();
             for sql in [&inline, &bound] {
                 assert!(
@@ -1351,7 +1277,7 @@ mod tests {
             elems: vec![IrScalar::Str("ok".into()), IrScalar::Int(200)],
             negated: false,
         };
-        let err = render_expr_inline(&mixed, SqlDialect::Postgres).unwrap_err();
+        let err = render_expr_inline(&mixed, &POSTGRES).unwrap_err();
         assert!(
             err.to_string().contains("homogeneous"),
             "mixed inList should fail homogeneous check: {err}"
@@ -1362,7 +1288,7 @@ mod tests {
             elems: vec![IrScalar::Bytes(vec![1, 2, 3])],
             negated: false,
         };
-        let err = render_expr_inline(&bytes, SqlDialect::Sqlite).unwrap_err();
+        let err = render_expr_inline(&bytes, &SQLITE).unwrap_err();
         assert!(
             err.to_string().contains("bytes are not allowed"),
             "bytes inList should fail closed: {err}"
@@ -1379,33 +1305,28 @@ mod tests {
             right: Box::new(Expr::col("b")),
         };
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&expr, &POSTGRES).unwrap(),
             "(\"a\" IS DISTINCT FROM \"b\")",
             "PG uses IS DISTINCT FROM"
         );
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&expr, &SQLITE).unwrap(),
             "(\"a\" IS DISTINCT FROM \"b\")",
             "SQLite uses IS DISTINCT FROM"
         );
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&expr, &MYSQL).unwrap(),
             "(NOT (`a` <=> `b`))",
             "MySQL lowers to NOT (a <=> b) — no IS DISTINCT FROM operator"
         );
 
         // Bound path renders the same divergent spellings.
         assert_eq!(
-            render_expr_bound(
-                &expr,
-                &mut BindCtx::new(renderer(&SqlDialect::Postgres.id())),
-            )
-            .unwrap(),
+            render_expr_bound(&expr, &mut BindCtx::new(renderer(&POSTGRES)),).unwrap(),
             "(\"a\" IS DISTINCT FROM \"b\")"
         );
         assert_eq!(
-            render_expr_bound(&expr, &mut BindCtx::new(renderer(&SqlDialect::Mysql.id())),)
-                .unwrap(),
+            render_expr_bound(&expr, &mut BindCtx::new(renderer(&MYSQL)),).unwrap(),
             "(NOT (`a` <=> `b`))"
         );
     }
@@ -1426,27 +1347,14 @@ mod tests {
             .collect(),
         };
         // Inline path: each leg is an inline string literal.
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
-            "'A'"
-        );
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
-            "'B'"
-        );
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Mysql).unwrap(),
-            "_utf8mb4 X'43'"
-        );
+        assert_eq!(render_expr_inline(&expr, &POSTGRES).unwrap(), "'A'");
+        assert_eq!(render_expr_inline(&expr, &SQLITE).unwrap(), "'B'");
+        assert_eq!(render_expr_inline(&expr, &MYSQL).unwrap(), "_utf8mb4 X'43'");
 
         // Bound path: each leg's literal becomes exactly ONE placeholder — the
         // shape is fixed by the chosen leg, not by the other legs.
-        for (dialect, ph) in [
-            (SqlDialect::Postgres, "$1"),
-            (SqlDialect::Sqlite, "?1"),
-            (SqlDialect::Mysql, "?"),
-        ] {
-            let mut ctx = BindCtx::new(renderer(&dialect.id()));
+        for (dialect, ph) in [(&POSTGRES, "$1"), (&SQLITE, "?1"), (&MYSQL, "?")] {
+            let mut ctx = BindCtx::new(renderer(dialect));
             let sql = render_expr_bound(&expr, &mut ctx).unwrap();
             assert_eq!(sql, ph, "dialect() binds its chosen leg on {dialect:?}");
             assert_eq!(
@@ -1477,13 +1385,10 @@ mod tests {
             .collect(),
         };
         assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&expr, &POSTGRES).unwrap(),
             "(\"age\" BETWEEN 1 AND 9)",
         );
-        assert_eq!(
-            render_expr_inline(&expr, SqlDialect::Sqlite).unwrap(),
-            "\"age\""
-        );
+        assert_eq!(render_expr_inline(&expr, &SQLITE).unwrap(), "\"age\"");
     }
 
     #[test]
@@ -1496,8 +1401,8 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        assert!(render_expr_inline(&expr, SqlDialect::Postgres).is_ok());
-        let err = render_expr_inline(&expr, SqlDialect::Sqlite).unwrap_err();
+        assert!(render_expr_inline(&expr, &POSTGRES).is_ok());
+        let err = render_expr_inline(&expr, &SQLITE).unwrap_err();
         assert!(
             matches!(err, DmlError::UnrenderableExpr(_)),
             "no SQLite leg → fail-closed: {err:?}"
@@ -1517,7 +1422,7 @@ mod tests {
             delimiter: None,
             distinct: false,
         };
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &SQLITE, &MYSQL] {
             assert_eq!(
                 render_expr_inline(&count_star, d).unwrap(),
                 "count(*)",
@@ -1533,15 +1438,15 @@ mod tests {
             distinct: true,
         };
         assert_eq!(
-            render_expr_inline(&count_distinct, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&count_distinct, &POSTGRES).unwrap(),
             "count(DISTINCT \"x\")"
         );
         assert_eq!(
-            render_expr_inline(&count_distinct, SqlDialect::Sqlite).unwrap(),
+            render_expr_inline(&count_distinct, &SQLITE).unwrap(),
             "count(DISTINCT \"x\")"
         );
         assert_eq!(
-            render_expr_inline(&count_distinct, SqlDialect::Mysql).unwrap(),
+            render_expr_inline(&count_distinct, &MYSQL).unwrap(),
             "count(DISTINCT `x`)"
         );
 
@@ -1559,33 +1464,29 @@ mod tests {
                 distinct: false,
             };
             assert_eq!(
-                render_expr_inline(&e, SqlDialect::Postgres).unwrap(),
+                render_expr_inline(&e, &POSTGRES).unwrap(),
                 format!("{name}(\"x\")")
             );
             assert_eq!(
-                render_expr_inline(&e, SqlDialect::Sqlite).unwrap(),
+                render_expr_inline(&e, &SQLITE).unwrap(),
                 format!("{name}(\"x\")")
             );
             assert_eq!(
-                render_expr_inline(&e, SqlDialect::Mysql).unwrap(),
+                render_expr_inline(&e, &MYSQL).unwrap(),
                 format!("{name}(`x`)")
             );
         }
 
         // The bound path renders the aggregate identically and binds no placeholders
         // (a ColRef arg is an identifier, not a bind).
-        let mut ctx = BindCtx::new(renderer(&SqlDialect::Postgres.id()));
+        let mut ctx = BindCtx::new(renderer(&POSTGRES));
         assert_eq!(
             render_expr_bound(&count_distinct, &mut ctx).unwrap(),
             "count(DISTINCT \"x\")"
         );
         assert_eq!(ctx.binds.len(), 0, "a ColRef aggregate arg is not a bind");
         assert_eq!(
-            render_expr_bound(
-                &count_star,
-                &mut BindCtx::new(renderer(&SqlDialect::Mysql.id())),
-            )
-            .unwrap(),
+            render_expr_bound(&count_star, &mut BindCtx::new(renderer(&MYSQL)),).unwrap(),
             "count(*)"
         );
     }
@@ -1601,7 +1502,7 @@ mod tests {
             distinct: false,
         };
         assert_eq!(
-            render_expr_inline(&string_agg, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&string_agg, &POSTGRES).unwrap(),
             "string_agg(\"name\", ', ')"
         );
 
@@ -1612,7 +1513,7 @@ mod tests {
             distinct: true,
         };
         assert_eq!(
-            render_expr_inline(&string_agg_distinct, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&string_agg_distinct, &POSTGRES).unwrap(),
             "string_agg(DISTINCT \"name\", '|')"
         );
 
@@ -1627,7 +1528,7 @@ mod tests {
                 delimiter: None,
                 distinct: false,
             };
-            assert_eq!(render_expr_inline(&e, SqlDialect::Postgres).unwrap(), sql);
+            assert_eq!(render_expr_inline(&e, &POSTGRES).unwrap(), sql);
         }
     }
 
@@ -1637,7 +1538,7 @@ mod tests {
     fn rejects_schema_qualified_table() {
         let err = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "other_schema.victims",
             &["a".into()],
             &[vec![val(IrScalar::Int(1))]],
@@ -1660,7 +1561,7 @@ mod tests {
     fn rejects_nul_in_project_schema_pg() {
         let err = assemble_insert(
             "app\0proj",
-            SqlDialect::Postgres,
+            &POSTGRES,
             "t",
             &["a".into()],
             &[vec![val(IrScalar::Int(1))]],
@@ -1679,7 +1580,7 @@ mod tests {
     fn rejects_empty_project_schema_pg() {
         let err = assemble_insert(
             "",
-            SqlDialect::Postgres,
+            &POSTGRES,
             "t",
             &["a".into()],
             &[vec![val(IrScalar::Int(1))]],
@@ -1700,7 +1601,7 @@ mod tests {
     fn uuid_project_schema_renders_pg() {
         let a = assemble_insert(
             "019efd94-a4e0-7a82-8a08-95e1f906ca3f",
-            SqlDialect::Postgres,
+            &POSTGRES,
             "members",
             &["id".into()],
             &[vec![val(IrScalar::Int(1))]],
@@ -1722,7 +1623,7 @@ mod tests {
     fn quote_bearing_project_schema_is_escaped_not_broken_out_pg() {
         let a = assemble_insert(
             "a\"; DROP--",
-            SqlDialect::Postgres,
+            &POSTGRES,
             "t",
             &["a".into()],
             &[vec![val(IrScalar::Int(1))]],
@@ -1739,7 +1640,7 @@ mod tests {
     fn rejects_injection_in_column() {
         let err = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "t",
             &["a\"); DROP TABLE users; --".into()],
             &[vec![val(IrScalar::Int(1))]],
@@ -1758,7 +1659,7 @@ mod tests {
     fn insert_binds_all_values_pg() {
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "status_codes",
             &["code".into(), "label".into()],
             &[vec![
@@ -1783,7 +1684,7 @@ mod tests {
         let exact = 9_007_199_254_740_993_i64;
         let scalar = IrScalar::Int64(exact);
 
-        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+        for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
             assert_eq!(
                 inline_literal(&scalar, dialect).unwrap(),
                 "9007199254740993"
@@ -1805,7 +1706,7 @@ mod tests {
     fn insert_renders_exact_uuid_v4_without_bind_pg() {
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "events",
             &["created_at".into(), "id".into()],
             &[vec![
@@ -1832,7 +1733,7 @@ mod tests {
     fn insert_renders_exact_uuid_v4_without_uuid_v1_mysql() {
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Mysql,
+            &MYSQL,
             "events",
             &["created_at".into(), "id".into()],
             &[vec![
@@ -1876,7 +1777,7 @@ mod tests {
     fn insert_renders_exact_uuid_v4_without_bind_sqlite() {
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Sqlite,
+            &SQLITE,
             "events",
             &["created_at".into(), "id".into()],
             &[vec![
@@ -1908,7 +1809,7 @@ mod tests {
     #[test]
     fn sqlite_uuid_v4_samples_have_canonical_rfc_bits() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        let expr = render_expr_inline(&Expr::UuidV4, SqlDialect::Sqlite).unwrap();
+        let expr = render_expr_inline(&Expr::UuidV4, &SQLITE).unwrap();
         let sql = format!("SELECT {expr}");
         let mut values = Vec::with_capacity(128);
 
@@ -1956,10 +1857,10 @@ mod tests {
     #[test]
     fn uuid_v7_is_native_postgres_and_fails_closed_elsewhere() {
         assert_eq!(
-            render_expr_inline(&Expr::UuidV7, SqlDialect::Postgres).unwrap(),
+            render_expr_inline(&Expr::UuidV7, &POSTGRES).unwrap(),
             "uuidv7()"
         );
-        for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
+        for dialect in [&MYSQL, &SQLITE] {
             let error = render_expr_inline(&Expr::UuidV7, dialect).unwrap_err();
             assert!(
                 matches!(error, DmlError::UnrenderableExpr(ref message) if message.contains("uuidV7") && message.contains("unsupported")),
@@ -1972,7 +1873,7 @@ mod tests {
     fn insert_uses_question_placeholders_on_sqlite() {
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Sqlite,
+            &SQLITE,
             "t",
             &["a".into(), "b".into()],
             &[vec![val(IrScalar::Int(1)), val(IrScalar::Null)]],
@@ -1989,7 +1890,7 @@ mod tests {
     #[test]
     fn binary_insert_values_round_trip_without_text_coercion() {
         let bytes = vec![0, 1, 0x7f, 0x80, 0xff];
-        let assemble = |dialect| {
+        let assemble = |dialect: &DialectId| {
             assemble_insert(
                 SCHEMA,
                 dialect,
@@ -2001,15 +1902,15 @@ mod tests {
             .unwrap()
         };
 
-        let pg = assemble(SqlDialect::Postgres);
+        let pg = assemble(&POSTGRES);
         assert!(pg.template.contains("VALUES (decode($1, 'base64'))"));
         assert_eq!(pg.binds, vec![BindValue::Text("AAF/gP8=".into())]);
 
-        let mysql = assemble(SqlDialect::Mysql);
+        let mysql = assemble(&MYSQL);
         assert!(mysql.template.contains("VALUES (FROM_BASE64(?))"));
         assert_eq!(mysql.binds, vec![BindValue::Text("AAF/gP8=".into())]);
 
-        let sqlite = assemble(SqlDialect::Sqlite);
+        let sqlite = assemble(&SQLITE);
         assert!(sqlite.template.contains("VALUES (?1)"));
         assert_eq!(sqlite.binds, vec![BindValue::Bytes(bytes)]);
     }
@@ -2018,7 +1919,7 @@ mod tests {
     fn insert_multi_row_continues_placeholder_counter() {
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "t",
             &["a".into()],
             &[vec![val(IrScalar::Int(1))], vec![val(IrScalar::Int(2))]],
@@ -2039,7 +1940,7 @@ mod tests {
         let hostile = "x'); DROP TABLE users; --";
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "t",
             &["a".into()],
             &[vec![val(IrScalar::Str(hostile.into()))]],
@@ -2065,15 +1966,7 @@ mod tests {
         let rows: Vec<Vec<IrValue>> = (0..=MAX_BIND_PARAMS as i64)
             .map(|i| vec![val(IrScalar::Int(i))])
             .collect();
-        let err = assemble_insert(
-            SCHEMA,
-            SqlDialect::Postgres,
-            "t",
-            &["a".into()],
-            &rows,
-            None,
-        )
-        .unwrap_err();
+        let err = assemble_insert(SCHEMA, &POSTGRES, "t", &["a".into()], &rows, None).unwrap_err();
         assert!(
             matches!(err, DmlError::TooManyBinds { count, max, .. } if count == MAX_BIND_PARAMS + 1 && max == MAX_BIND_PARAMS),
             "{err:?}"
@@ -2082,22 +1975,14 @@ mod tests {
         let rows_ok: Vec<Vec<IrValue>> = (0..MAX_BIND_PARAMS as i64)
             .map(|i| vec![val(IrScalar::Int(i))])
             .collect();
-        assert!(assemble_insert(
-            SCHEMA,
-            SqlDialect::Postgres,
-            "t",
-            &["a".into()],
-            &rows_ok,
-            None
-        )
-        .is_ok());
+        assert!(assemble_insert(SCHEMA, &POSTGRES, "t", &["a".into()], &rows_ok, None).is_ok());
     }
 
     #[test]
     fn insert_ragged_row_rejected() {
         let err = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "t",
             &["a".into(), "b".into()],
             &[vec![val(IrScalar::Int(1))]],
@@ -2120,7 +2005,7 @@ mod tests {
         };
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "status_codes",
             &["code".into(), "label".into()],
             &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
@@ -2156,7 +2041,7 @@ mod tests {
         };
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "status_codes",
             &["code".into(), "label".into()],
             &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
@@ -2183,7 +2068,7 @@ mod tests {
         };
         let a = assemble_insert(
             SCHEMA,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "t",
             &["code".into()],
             &[vec![val(IrScalar::Int(1))]],
@@ -2208,7 +2093,7 @@ mod tests {
         };
         let assembled = assemble_insert(
             SCHEMA,
-            SqlDialect::Sqlite,
+            &SQLITE,
             "status_codes",
             &["code".into(), "label".into()],
             &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
@@ -2238,7 +2123,7 @@ mod tests {
         };
         let err = assemble_insert(
             SCHEMA,
-            SqlDialect::Mysql,
+            &MYSQL,
             "status_codes",
             &["code".into(), "label".into()],
             &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
@@ -2259,7 +2144,7 @@ mod tests {
         };
         let assembled = assemble_insert(
             SCHEMA,
-            SqlDialect::Mysql,
+            &MYSQL,
             "status_codes",
             &["code".into(), "label".into()],
             &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
@@ -2295,7 +2180,7 @@ mod tests {
         };
         let assembled = assemble_insert(
             SCHEMA,
-            SqlDialect::Mysql,
+            &MYSQL,
             "status_codes",
             &["code".into(), "label".into()],
             &[vec![val(IrScalar::Int(1)), val(IrScalar::Str("ok".into()))]],
@@ -2328,7 +2213,7 @@ mod tests {
         };
         let err = assemble_insert(
             SCHEMA,
-            SqlDialect::Mysql,
+            &MYSQL,
             "status_codes",
             &["label".into()],
             &[vec![val(IrScalar::Str("ok".into()))]],
@@ -2349,7 +2234,7 @@ mod tests {
         };
         let err = assemble_insert(
             SCHEMA,
-            SqlDialect::Mysql,
+            &MYSQL,
             "status_codes",
             &["code".into()],
             &[vec![val(IrScalar::Int(1))]],
@@ -2374,7 +2259,7 @@ mod tests {
 
         let error = assemble_insert(
             SCHEMA,
-            SqlDialect::Mysql,
+            &MYSQL,
             "status_codes",
             &["code".into(), "first".into(), "second".into()],
             &[vec![
@@ -2417,14 +2302,7 @@ mod tests {
             lhs: Box::new(Expr::col("code")),
             rhs: Box::new(lit_int(0)),
         };
-        let a = assemble_update(
-            SCHEMA,
-            SqlDialect::Postgres,
-            "status_codes",
-            &set,
-            Some(&pred),
-        )
-        .unwrap();
+        let a = assemble_update(SCHEMA, &POSTGRES, "status_codes", &set, Some(&pred)).unwrap();
         assert_eq!(
             a.template,
             "UPDATE \"app_proj\".\"status_codes\" SET \"label\" = coalesce(\"label\", $1) \
@@ -2439,15 +2317,14 @@ mod tests {
     #[test]
     fn update_portable_on_sqlite() {
         let set = BTreeMap::from([("a".to_string(), dml_expr(lit_int(5)))]);
-        let a = assemble_update(SCHEMA, SqlDialect::Sqlite, "t", &set, None).unwrap();
+        let a = assemble_update(SCHEMA, &SQLITE, "t", &set, None).unwrap();
         assert_eq!(a.template, "UPDATE \"t\" SET \"a\" = ?1");
         assert_eq!(a.binds, vec![BindValue::Int(5)]);
     }
 
     #[test]
     fn update_empty_set_rejected() {
-        let err =
-            assemble_update(SCHEMA, SqlDialect::Postgres, "t", &BTreeMap::new(), None).unwrap_err();
+        let err = assemble_update(SCHEMA, &POSTGRES, "t", &BTreeMap::new(), None).unwrap_err();
         assert!(
             matches!(err, DmlError::EmptySet { op: "update", .. }),
             "{err:?}"
@@ -2460,7 +2337,7 @@ mod tests {
             ("first".to_string(), dml_expr(Expr::col("second"))),
             ("second".to_string(), dml_expr(Expr::col("first"))),
         ]);
-        let error = assemble_update(SCHEMA, SqlDialect::Mysql, "t", &swap, None).unwrap_err();
+        let error = assemble_update(SCHEMA, &MYSQL, "t", &swap, None).unwrap_err();
         assert!(
             matches!(
                 &error,
@@ -2483,7 +2360,7 @@ mod tests {
             }),
         )]);
         assert!(
-            assemble_update(SCHEMA, SqlDialect::Mysql, "t", &increment, None).is_ok(),
+            assemble_update(SCHEMA, &MYSQL, "t", &increment, None).is_ok(),
             "a column's own RHS is evaluated before that assignment and remains portable"
         );
     }
@@ -2496,7 +2373,7 @@ mod tests {
             op: UnaryOp::IsNull,
             operand: Box::new(Expr::col("code")),
         };
-        let a = assemble_delete(SCHEMA, SqlDialect::Postgres, "t", &pred, None).unwrap();
+        let a = assemble_delete(SCHEMA, &POSTGRES, "t", &pred, None).unwrap();
         assert_eq!(
             a.template,
             "DELETE FROM \"app_proj\".\"t\" WHERE (\"code\" IS NULL)"
@@ -2512,9 +2389,9 @@ mod tests {
             rhs: Box::new(lit_int(0)),
         };
         let identity = vec!["id".to_string()];
-        let a = assemble_delete_with_sqlite_identity(
+        let a = assemble_delete_with_catalog_identity(
             SCHEMA,
-            SqlDialect::Sqlite,
+            &SQLITE,
             "t",
             &pred,
             Some(100),
@@ -2537,9 +2414,9 @@ mod tests {
             rhs: Box::new(lit_int(0)),
         };
         let identity = vec!["id".to_string()];
-        let assembled = assemble_delete_with_sqlite_identity(
+        let assembled = assemble_delete_with_catalog_identity(
             SCHEMA,
-            SqlDialect::Sqlite,
+            &SQLITE,
             "t",
             &pred,
             Some(1),
@@ -2568,9 +2445,9 @@ mod tests {
             rhs: Box::new(lit_int(0)),
         };
         let identity = vec!["tenant".to_string(), "id".to_string()];
-        let assembled = assemble_delete_with_sqlite_identity(
+        let assembled = assemble_delete_with_catalog_identity(
             SCHEMA,
-            SqlDialect::Sqlite,
+            &SQLITE,
             "t",
             &pred,
             Some(1),
@@ -2607,7 +2484,7 @@ mod tests {
             op: UnaryOp::IsNull,
             operand: Box::new(Expr::col("code")),
         };
-        let err = assemble_delete(SCHEMA, SqlDialect::Sqlite, "t", &pred, Some(1)).unwrap_err();
+        let err = assemble_delete(SCHEMA, &SQLITE, "t", &pred, Some(1)).unwrap_err();
         assert_eq!(
             err,
             DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
@@ -2625,7 +2502,7 @@ mod tests {
             lhs: Box::new(Expr::col("code")),
             rhs: Box::new(lit_int(0)),
         };
-        let a = assemble_delete(SCHEMA, SqlDialect::Postgres, "t", &pred, Some(100)).unwrap();
+        let a = assemble_delete(SCHEMA, &POSTGRES, "t", &pred, Some(100)).unwrap();
         assert_eq!(
             a.template,
             "DELETE FROM \"app_proj\".\"t\" WHERE (tableoid, ctid) IN \
@@ -2651,7 +2528,7 @@ mod tests {
             lhs: Box::new(Expr::col("code")),
             rhs: Box::new(lit_int(0)),
         };
-        let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, Some(&filter)).unwrap();
+        let c = assemble_backfill_clauses(&POSTGRES, "t", &set, Some(&filter)).unwrap();
         assert_eq!(c.set_clause, "\"label\" = (\"code\" || '!')");
         assert_eq!(c.filter.as_deref(), Some("(\"code\" > 0)"));
     }
@@ -2661,7 +2538,7 @@ mod tests {
     #[test]
     fn backfill_inline_string_is_quote_escaped() {
         let set = BTreeMap::from([("a".to_string(), dml_expr(lit_str("O'Brien")))]);
-        let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
+        let c = assemble_backfill_clauses(&POSTGRES, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = 'O''Brien'");
     }
 
@@ -2671,7 +2548,7 @@ mod tests {
             "a".to_string(),
             dml_expr(lit_str("a\\b'; DROP TABLE users; --")),
         )]);
-        let c = assemble_backfill_clauses(SqlDialect::Mysql, "t", &set, None).unwrap();
+        let c = assemble_backfill_clauses(&MYSQL, "t", &set, None).unwrap();
         assert_eq!(
             c.set_clause,
             "`a` = _utf8mb4 X'615c62273b2044524f50205441424c452075736572733b202d2d'"
@@ -2685,7 +2562,7 @@ mod tests {
             ("first".to_string(), dml_expr(Expr::col("second"))),
             ("second".to_string(), dml_expr(Expr::col("first"))),
         ]);
-        let error = assemble_backfill_clauses(SqlDialect::Mysql, "t", &swap, None).unwrap_err();
+        let error = assemble_backfill_clauses(&MYSQL, "t", &swap, None).unwrap_err();
         assert!(
             matches!(
                 &error,
@@ -2702,8 +2579,7 @@ mod tests {
 
     #[test]
     fn backfill_empty_set_rejected() {
-        let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &BTreeMap::new(), None)
-            .unwrap_err();
+        let err = assemble_backfill_clauses(&POSTGRES, "t", &BTreeMap::new(), None).unwrap_err();
         assert!(
             matches!(err, DmlError::EmptySet { op: "backfill", .. }),
             "{err:?}"
@@ -2727,7 +2603,7 @@ mod tests {
     #[test]
     fn split_part_pg_native() {
         let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", " ", 1)))]);
-        let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
+        let c = assemble_backfill_clauses(&POSTGRES, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"first\" = split_part(\"name\", ' ', 1)");
     }
 
@@ -2736,7 +2612,7 @@ mod tests {
     #[test]
     fn split_part_sqlite_n1_unroll() {
         let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", " ", 1)))]);
-        let c = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap();
+        let c = assemble_backfill_clauses(&SQLITE, "t", &set, None).unwrap();
         assert_eq!(
             c.set_clause,
             "\"first\" = substr((\"name\" || ' '), 1, instr((\"name\" || ' '), ' ') - 1)"
@@ -2747,7 +2623,7 @@ mod tests {
     #[test]
     fn split_part_sqlite_n2_unroll() {
         let set = BTreeMap::from([("last".to_string(), dml_expr(split("name", " ", 2)))]);
-        let c = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap();
+        let c = assemble_backfill_clauses(&SQLITE, "t", &set, None).unwrap();
         // cur1 = substr((name||' '), instr((name||' '), ' ') + 1)
         // result = substr(cur1, 1, instr(cur1, ' ') - 1)
         assert_eq!(
@@ -2762,7 +2638,7 @@ mod tests {
     #[test]
     fn split_part_one_shot_bound_pg() {
         let set = BTreeMap::from([("first".to_string(), dml_expr(split("name", ",", 1)))]);
-        let a = assemble_update(SCHEMA, SqlDialect::Postgres, "t", &set, None).unwrap();
+        let a = assemble_update(SCHEMA, &POSTGRES, "t", &set, None).unwrap();
         assert_eq!(
             a.template,
             "UPDATE \"app_proj\".\"t\" SET \"first\" = split_part(\"name\", ',', 1)"
@@ -2781,10 +2657,10 @@ mod tests {
             let expected_expr =
                 format!("substring_index(substring_index(`name`, {literal}, 1), {literal}, -1)");
 
-            let backfill = assemble_backfill_clauses(SqlDialect::Mysql, "t", &set, None).unwrap();
+            let backfill = assemble_backfill_clauses(&MYSQL, "t", &set, None).unwrap();
             assert_eq!(backfill.set_clause, format!("`part` = {expected_expr}"));
 
-            let one_shot = assemble_update(SCHEMA, SqlDialect::Mysql, "t", &set, None).unwrap();
+            let one_shot = assemble_update(SCHEMA, &MYSQL, "t", &set, None).unwrap();
             assert_eq!(
                 one_shot.template,
                 format!("UPDATE `app_proj`.`t` SET `part` = {expected_expr}")
@@ -2798,7 +2674,7 @@ mod tests {
     #[test]
     fn split_part_quote_delim_escaped_sqlite() {
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", "'", 1)))]);
-        let c = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap();
+        let c = assemble_backfill_clauses(&SQLITE, "t", &set, None).unwrap();
         assert_eq!(
             c.set_clause,
             "\"a\" = substr((\"name\" || ''''), 1, instr((\"name\" || ''''), '''') - 1)"
@@ -2811,10 +2687,10 @@ mod tests {
     #[test]
     fn split_part_renderer_rejects_out_of_envelope() {
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
-        let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap_err();
+        let err = assemble_backfill_clauses(&SQLITE, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 9)))]);
-        let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap_err();
+        let err = assemble_backfill_clauses(&SQLITE, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
 
@@ -2828,17 +2704,17 @@ mod tests {
     fn split_part_out_of_envelope_renders_native_on_pg() {
         // multi-char delimiter — PG's split_part is multi-char-capable.
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
-        let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
+        let c = assemble_backfill_clauses(&POSTGRES, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ', ', 1)");
 
         // n beyond the SQLite unroll bound (9) — PG takes any positive n.
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 9)))]);
-        let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
+        let c = assemble_backfill_clauses(&POSTGRES, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", ',', 9)");
 
         // and the one-shot (bound) PG path too — delim/n stay pinned constants.
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ", ", 1)))]);
-        let a = assemble_update(SCHEMA, SqlDialect::Postgres, "t", &set, None).unwrap();
+        let a = assemble_update(SCHEMA, &POSTGRES, "t", &set, None).unwrap();
         assert_eq!(
             a.template,
             "UPDATE \"app_proj\".\"t\" SET \"a\" = split_part(\"name\", ', ', 1)"
@@ -2854,10 +2730,10 @@ mod tests {
     #[test]
     fn split_part_non_ascii_delim_renders_on_pg() {
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", "→", 2)))]);
-        let c = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap();
+        let c = assemble_backfill_clauses(&POSTGRES, "t", &set, None).unwrap();
         assert_eq!(c.set_clause, "\"a\" = split_part(\"name\", '→', 2)");
         // …but rejected on the SQLite leg (out of the byte-wise envelope).
-        let err = assemble_backfill_clauses(SqlDialect::Sqlite, "t", &set, None).unwrap_err();
+        let err = assemble_backfill_clauses(&SQLITE, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
 
@@ -2868,7 +2744,7 @@ mod tests {
     fn split_part_pg_still_rejects_malformed() {
         // n = 0 (not a positive part index) — invalid on PG too.
         let set = BTreeMap::from([("a".to_string(), dml_expr(split("name", ",", 0)))]);
-        let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap_err();
+        let err = assemble_backfill_clauses(&POSTGRES, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
         // non-literal delim (a ColRef) — never renderable.
         let bad = Expr::FnSynth {
@@ -2886,8 +2762,7 @@ mod tests {
             ],
         };
         let set = BTreeMap::from([("a".to_string(), dml_expr(bad))]);
-        let err = assemble_backfill_clauses(SqlDialect::Postgres, "t", &set, None).unwrap_err();
+        let err = assemble_backfill_clauses(&POSTGRES, "t", &set, None).unwrap_err();
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
-
 }

@@ -32,7 +32,7 @@ use zero_migrate::apply::executor::LockMode;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
-    PostgresBackend, SqlDialect,
+    PostgresBackend,
 };
 
 const OWNER: &str = "app_scalar_precision";
@@ -83,12 +83,12 @@ async fn round_trip(
     let author = IrAuthor::new(
         &cfg.project_schema,
         OWNER,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::confined_charter(),
     );
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES,
     );
     let registry: BTreeMap<String, String> =
         [("t".to_string(), OWNER.to_string())].into_iter().collect();
@@ -115,8 +115,13 @@ async fn round_trip(
     let mut live = LiveSchema::default();
     live.tables.insert("t".into());
     let declared: MigrationIr = serde_json::from_str(&ddl).expect("the schema envelope parses");
-    live.advance_logical_columns(&declared, SqlDialect::Postgres, &cfg.project_schema, None)
-        .expect("seed the declared logical column contracts");
+    live.advance_logical_columns(
+        &declared,
+        &zero_migrate::POSTGRES,
+        &cfg.project_schema,
+        None,
+    )
+    .expect("seed the declared logical column contracts");
 
     let dml = format!(
         r#"{{"ir_version":1,"name":"data","irreversible":"inserts one probe row","ops":[{{"op":"insert","table":"t","columns":["c0","v"],"rows":[[1,{literal}]]}}]}}"#

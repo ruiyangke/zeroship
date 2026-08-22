@@ -65,7 +65,7 @@ async fn live_postgres_reports_a_hand_dropped_function_policy_and_trigger() {
             .await
             .map_err(|error| format!("create the fixture schema: {error}"))?;
 
-        let before = snapshot_schema(&session, &schema)
+        let before = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("snapshot the live schema: {error}"))?;
         let vendor = before
@@ -122,7 +122,7 @@ async fn live_postgres_reports_a_hand_dropped_function_policy_and_trigger() {
         // (3) A second read of an UNCHANGED schema is clean. Two catalog reads agree
         //     trivially on text, but not on anything the decoding does per row, so
         //     this catches a non-deterministic role aggregate or event ordering.
-        let unchanged = snapshot_schema(&session, &schema)
+        let unchanged = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("re-snapshot the live schema: {error}"))?;
         let clean = diff_snapshots(&before, &unchanged);
@@ -142,7 +142,7 @@ async fn live_postgres_reports_a_hand_dropped_function_policy_and_trigger() {
             .await
             .map_err(|error| format!("drop the objects out of band: {error}"))?;
 
-        let after = snapshot_schema(&session, &schema)
+        let after = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("snapshot after the out-of-band drops: {error}"))?;
         let drift = diff_snapshots(&before, &after);
@@ -209,7 +209,7 @@ async fn live_postgres_reports_a_policy_narrowed_out_of_band() {
             ))
             .await
             .map_err(|error| format!("create the fixture schema: {error}"))?;
-        let before = snapshot_schema(&session, &schema)
+        let before = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("snapshot the live schema: {error}"))?;
 
@@ -221,7 +221,7 @@ async fn live_postgres_reports_a_policy_narrowed_out_of_band() {
             ))
             .await
             .map_err(|error| format!("replace the policy out of band: {error}"))?;
-        let after = snapshot_schema(&session, &schema)
+        let after = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("re-snapshot the live schema: {error}"))?;
 

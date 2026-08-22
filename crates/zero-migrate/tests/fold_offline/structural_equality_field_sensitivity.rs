@@ -132,6 +132,7 @@ fn model_column_probes() -> ProbeSet<schema_model::Column> {
         id_default,
         case_sensitive,
         unbounded_text,
+        type_def,
         authored_type,
         collation,
         encryption_sentinel,
@@ -177,6 +178,9 @@ fn model_column_probes() -> ProbeSet<schema_model::Column> {
     });
     set.probe("Column::unbounded_text", unbounded_text, |c| {
         c.unbounded_text = true;
+    });
+    set.probe("Column::type_def", type_def, |c| {
+        c.type_def = Some(serde_json::json!({ "type": "string", "maxLength": 24 }));
     });
     set.probe("Column::authored_type", authored_type, |c| {
         c.authored_type = true;
@@ -384,7 +388,7 @@ fn every_field_of_the_neutral_column_is_compared_by_default() {
     let set = model_column_probes();
     assert_eq!(
         set.probes.len(),
-        18,
+        19,
         "the `Column` probe list drifted from the type's field count"
     );
 

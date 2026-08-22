@@ -13,7 +13,7 @@ use zero_migrate::guard::GuardConfig;
 use zero_migrate::model::capability::{VendorCapabilities, VendorCapability};
 use zero_migrate::model::load::{load_ir_document, IrLoadError};
 use zero_migrate::model::table_shape::resolve_create_table_policy;
-use zero_migrate::model::validate::{SqlDialect, CODE_VENDOR_OP_DENIED};
+use zero_migrate::model::validate::CODE_VENDOR_OP_DENIED;
 use zero_migrate::render::lower::{
     IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema, LoadAndLowerGuardedError,
     LoweredArtifact,
@@ -128,8 +128,8 @@ fn lower_rls_envelope(
     let resolved =
         resolve_create_table_policy(&authored, policy, SCHEMA).expect("table shape resolves");
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
-    let author = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Postgres, policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES.clone());
+    let author = IrAuthor::new(SCHEMA, OWNER, &zero_migrate::POSTGRES, policy);
     author.load_and_lower_guarded(
         &resolved_json,
         OWNER,
@@ -220,7 +220,7 @@ fn charter_granting_cross_schema_but_not_access_rls_still_refuses_set_rls() {
 #[test]
 fn cross_schema_alone_composes_to_a_scope_that_would_grant_every_capability() {
     let policy = cross_schema_only_charter();
-    let scope = GuardConfig::from_policy(policy, SqlDialect::Postgres.id())
+    let scope = GuardConfig::from_policy(policy, zero_migrate::POSTGRES.clone())
         .schema_scope()
         .expect("the guard derives a schema scope");
     assert_eq!(
@@ -257,7 +257,7 @@ fn the_load_gate_without_a_charter_still_refuses_set_rls() {
     let error = load_ir_document(
         &resolved_json,
         OWNER,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeMap::new(),
         Some(&scope),
     )

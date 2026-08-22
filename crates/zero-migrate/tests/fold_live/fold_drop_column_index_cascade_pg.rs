@@ -17,7 +17,7 @@
 //! `render/fold.rs` matched the drop against `IndexSnapshot::columns` alone - the
 //! KEY column list - so an index that covered the dropped column only through
 //! `IndexSnapshot::include` survived the fold and left a PHANTOM INDEX that live
-//! introspection does not have, making `fold_ops != snapshot_schema(live)`.
+//! introspection does not have, making `fold_ops != snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, live)`.
 //!
 //! The other two column-bearing fields, `IndexSnapshot::predicate` and the
 //! `IndexElementSnapshot::Expr` key, cascade in PostgreSQL for the same reason but
@@ -44,7 +44,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, snapshot_schema, Approval,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
-    PostgresBackend, SqlDialect, StructuralDrift,
+    PostgresBackend, StructuralDrift,
 };
 
 const OWNER: &str = "app_fold_drop_index_pg";
@@ -109,8 +109,8 @@ async fn drift_after_applying(source: &str) -> Option<StructuralDrift> {
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,
@@ -135,14 +135,18 @@ async fn drift_after_applying(source: &str) -> Option<StructuralDrift> {
 
         let expected = fold_ops(
             &resolved.ops,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &cfg.project_schema,
             &policy,
         )
         .map_err(|error| format!("fold the applied PostgreSQL ops: {error}"))?;
-        let actual = snapshot_schema(&session, &cfg.project_schema)
-            .await
-            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let actual = snapshot_schema(
+            &zero_migrate_ir::dialect::POSTGRES,
+            &session,
+            &cfg.project_schema,
+        )
+        .await
+        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(diff_snapshots(&expected, &actual))
     }
     .await;

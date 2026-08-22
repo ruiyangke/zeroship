@@ -33,10 +33,23 @@ use crate::support::PgDevSession;
 
 use zero_migrate::render::declarative::DeclarativeError;
 use zero_migrate::{
-    desired_snapshot, effective_policy_from_charter_toml, snapshot_schema, Approval,
-    CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor,
-    GuardConfig, MigrationEngine, PostgresBackend, SqlDialect,
+    effective_policy_from_charter_toml, snapshot_schema, Approval, CollectionDescriptor,
+    DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig,
+    MigrationEngine, PostgresBackend,
 };
+
+fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    effective: &EffectivePolicy,
+) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
+    zero_migrate::desired_snapshot_for_dialect(
+        project_schema,
+        descriptors,
+        &zero_migrate::POSTGRES,
+        effective,
+    )
+}
 
 /// The grants every arm needs to plan and apply into its own per-run schema, with
 /// `require` supplying whatever obligation the arm is measuring.
@@ -149,11 +162,15 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 }
 
 fn guard_cfg(policy: &EffectivePolicy) -> GuardConfig {
-    GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id())
+    GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES.clone())
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
-    DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test")
+    DeclarativeAuthor::new_for_dialect(
+        cfg.project_schema.clone(),
+        "app_test",
+        zero_migrate::POSTGRES,
+    )
 }
 
 /// A one-field collection descriptor.
@@ -217,9 +234,13 @@ async fn require_rls_over_the_created_schema_refuses_the_declarative_create() {
     let desc = descriptor("widgets", "title", "string", true);
     let desired = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&desc), &policy)
         .expect("desired_snapshot");
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
     assert!(
         !live_empty.tables.contains_key("widgets"),
         "the arm measures a CREATE, so the table must be absent from live"
@@ -304,9 +325,13 @@ scope = {{ include = [{:?}] }}
         descriptor("gadgets", "title", "string", true),
     ];
     let desired = desired_snapshot(&cfg.project_schema, &descs, &policy).expect("desired_snapshot");
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
 
     let refusal = engine
         .plan_declarative(
@@ -354,9 +379,13 @@ async fn require_rls_over_another_schema_still_plans_the_create() {
     let desc = descriptor("widgets", "title", "string", true);
     let desired = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&desc), &policy)
         .expect("desired_snapshot");
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
 
     let planned = engine.plan_declarative(
         &desired,
@@ -402,9 +431,13 @@ async fn require_rls_admits_an_alter_only_and_a_no_op_diff() {
     let v1 = descriptor("widgets", "title", "string", true);
     let desired_v1 = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&v1), &unobligated)
         .expect("desired_snapshot v1");
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
     let plan_v1 = engine
         .plan_declarative(
             &desired_v1,
@@ -434,9 +467,13 @@ async fn require_rls_admits_an_alter_only_and_a_no_op_diff() {
     let v2 = descriptor_two_fields("widgets");
     let desired_v2 = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&v2), &policy)
         .expect("desired_snapshot v2");
-    let live_v1 = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (v1)");
+    let live_v1 = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (v1)");
     let mut ownership: HashMap<String, String> = HashMap::new();
     ownership.insert("widgets".to_string(), "app_test".to_string());
 
@@ -498,9 +535,13 @@ async fn a_charter_without_require_rls_plans_the_create() {
     let desc = descriptor("widgets", "title", "string", true);
     let desired = desired_snapshot(&cfg.project_schema, std::slice::from_ref(&desc), &policy)
         .expect("desired_snapshot");
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
 
     let planned = engine.plan_declarative(
         &desired,

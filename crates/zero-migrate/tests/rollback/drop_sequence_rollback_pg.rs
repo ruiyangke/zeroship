@@ -26,7 +26,7 @@ use zero_migrate::model::snapshot::SequenceSnapshot;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, snapshot_schema, Approval, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, MigrationEngine, PostgresBackend, SqlDialect,
+    LiveSchema, MigrationEngine, PostgresBackend,
 };
 
 const OWNER: &str = "app_drop_sequence_rollback_pg";
@@ -97,17 +97,17 @@ async fn apply_doc(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let policy = support::no_inject(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-    let document = zero_migrate::model::load::load_ir_document(
-        ir,
-        OWNER,
-        zero_migrate::model::validate::SqlDialect::Postgres,
-        reg,
-        None,
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+    let document =
+        zero_migrate::model::load::load_ir_document(ir, OWNER, &zero_migrate::POSTGRES, reg, None)
+            .map_err(|error| format!("load gate (postgres): {error}"))?;
+    let folded = fold_ops(
+        history,
+        &zero_migrate::POSTGRES,
+        &cfg.project_schema,
+        &policy,
     )
-    .map_err(|error| format!("load gate (postgres): {error}"))?;
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &policy)
-        .map_err(|error| format!("fold the applied history: {error}"))?;
+    .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     history.extend(document.ops.iter().cloned());
     let plan = author
@@ -139,7 +139,7 @@ async fn live_sequence(
     session: &PgDevSession,
     schema: &str,
 ) -> Result<Option<SequenceSnapshot>, String> {
-    let snapshot = snapshot_schema(session, schema)
+    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, schema)
         .await
         .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
     Ok(snapshot.sequences.get(SEQ).cloned())
@@ -148,7 +148,7 @@ async fn live_sequence(
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     ))
 }
 

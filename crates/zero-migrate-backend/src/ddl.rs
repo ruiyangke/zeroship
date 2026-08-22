@@ -49,6 +49,15 @@ use crate::snapshot::{
 };
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::IndexSortOrder;
+use zero_migrate_ir::ir::PartitionBounds;
+
+/// True if `index_name` is the implicit index a PRIMARY KEY materialises
+/// (`<table>_pkey`). It is created/dropped by the PK clause, never by a
+/// standalone CREATE/DROP INDEX, so the differ never emits DDL for it.
+#[must_use]
+pub fn is_pk_index(table: &str, index_name: &str) -> bool {
+    index_name == format!("{table}_pkey")
+}
 
 // once, handed to whichever emitter the dialect selects.
 
@@ -212,6 +221,33 @@ pub trait DdlEmitter {
     /// must emit it unqualified (a qualified `DROP INDEX "schema"."ix"` silently
     /// no-ops on `SQLite` — the dangerous silent-drift mode).
     fn drop_index_up(&self, table: Option<&str>, idx_name: &str) -> String;
+
+    /// Render native CREATE PARTITION relation DDL as `(up, down)`, or explicitly
+    /// refuse when this backend collapses authored partitions into their parent.
+    fn create_partition(
+        &self,
+        name: &str,
+        of: &str,
+        bounds: &PartitionBounds,
+    ) -> Option<(String, String)>;
+
+    /// Render native ATTACH PARTITION DDL as `(up, down)`, or explicitly refuse.
+    fn attach_partition(
+        &self,
+        parent: &str,
+        name: &str,
+        bounds: &PartitionBounds,
+    ) -> Option<(String, String)>;
+
+    /// Render native DETACH PARTITION DDL, or explicitly refuse.
+    fn detach_partition(&self, parent: &str, name: &str, concurrently: bool) -> Option<String>;
+
+    /// Render native DROP PARTITION relation DDL, or explicitly refuse.
+    ///
+    /// All four methods are required with no default so a future backend must
+    /// state the complete boundary instead of silently borrowing another
+    /// vendor's partition grammar.
+    fn drop_partition(&self, name: &str, cascade: bool) -> Option<String>;
 }
 
 /// Render an index element's canonical order suffix.

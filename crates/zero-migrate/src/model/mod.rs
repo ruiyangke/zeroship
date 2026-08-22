@@ -1,5 +1,4 @@
 pub mod backfill;
-pub mod dialect_table;
 // The fail-closed IR envelope load gate — POLICY-bound half (`load_ir_document`);
 // the policy-free half is re-exported from `zero_migrate_ir::load`.
 pub mod load;
@@ -14,7 +13,7 @@ pub(crate) mod support_matrix;
 pub mod table_shape;
 // The POLICY validator (`validate_ir`/`validate_op`, the vendor-capability gate,
 // the raw-view-body `pg_query` scan). It re-exports the STRUCTURAL validator from
-// `zero_migrate_ir::validate`, so `crate::model::validate::{SqlDialect, AuthoringError,
+// `zero_migrate_ir::validate`, so `crate::model::validate::{AuthoringError,
 // validate_expr, CODE_*, …}` still resolve.
 pub mod validate;
 

@@ -898,21 +898,20 @@ impl Ctx<'_> {
         }
     }
 
-    fn validate_feature(
-        &self,
-        feature: ExprDialectFeature<'_>,
-    ) -> Result<(), AuthoringError> {
+    fn validate_feature(&self, feature: ExprDialectFeature<'_>) -> Result<(), AuthoringError> {
         let Some(validator) = self.validator else {
             return Ok(());
         };
-        validator.validate_expr_feature(feature).map_err(|rejection| {
-            self.err(
-                rejection.code,
-                rejection.kind,
-                rejection.reason,
-                rejection.suggested_fix,
-            )
-        })
+        validator
+            .validate_expr_feature(feature)
+            .map_err(|rejection| {
+                self.err(
+                    rejection.code,
+                    rejection.kind,
+                    rejection.reason,
+                    rejection.suggested_fix,
+                )
+            })
     }
 
     fn walk(&self, expr: &Expr) -> Result<(), AuthoringError> {

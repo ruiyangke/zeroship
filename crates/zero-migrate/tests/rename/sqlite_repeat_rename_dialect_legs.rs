@@ -23,7 +23,7 @@
 use crate::support;
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::{IrAuthor, LiveSchema, SqlDialect};
+use zero_migrate::{IrAuthor, LiveSchema};
 
 const PROJECT: &str = "app";
 const APP: &str = "app";
@@ -32,10 +32,15 @@ const APP: &str = "app";
 fn lower_error(ops_json: &str) -> Option<String> {
     let raw = format!(r#"{{"ir_version":1,"name":"renames","ops":{ops_json}}}"#);
     let ir: MigrationIr = serde_json::from_str(&raw).expect("the rename test IR parses");
-    IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject("app"))
-        .lower_steps(&ir, &LiveSchema::default())
-        .err()
-        .map(|error| error.to_string())
+    IrAuthor::new(
+        PROJECT,
+        APP,
+        &zero_migrate::SQLITE,
+        &support::no_inject("app"),
+    )
+    .lower_steps(&ir, &LiveSchema::default())
+    .err()
+    .map(|error| error.to_string())
 }
 
 /// The control: two top-level renames of one table are already refused, so the arms

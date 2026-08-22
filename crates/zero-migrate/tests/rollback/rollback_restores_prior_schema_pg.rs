@@ -30,7 +30,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     guard_for, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
-    PostgresBackend, SqlDialect,
+    PostgresBackend,
 };
 
 const OWNER: &str = "app_rollback_pg";
@@ -123,12 +123,12 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
         let author = IrAuthor::new(
             &cfg.project_schema,
             OWNER,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &support::confined_charter(),
         );
         let guard_cfg = GuardConfig::from_policy(
             support::no_inject(&cfg.project_schema),
-            SqlDialect::Postgres.id(),
+            zero_migrate::POSTGRES.clone(),
         );
         let registry: BTreeMap<String, String> = [("t1".to_string(), OWNER.to_string())]
             .into_iter()

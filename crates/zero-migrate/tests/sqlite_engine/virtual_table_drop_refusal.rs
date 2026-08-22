@@ -25,7 +25,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
     FieldDescriptor, SqliteBackend,
@@ -98,7 +97,7 @@ async fn diff_with_total_ownership(
     let desired = desired_snapshot_for_dialect(
         PROJECT,
         &[posts_descriptor()],
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &effective_policy(),
     )
     .expect("desired");
@@ -107,7 +106,7 @@ async fn diff_with_total_ownership(
         .keys()
         .map(|t| (t.clone(), APP.to_string()))
         .collect();
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite).diff(
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE.clone()).diff(
         &desired,
         &live,
         &ownership,

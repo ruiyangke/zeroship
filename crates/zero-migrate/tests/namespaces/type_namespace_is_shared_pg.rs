@@ -35,12 +35,12 @@
 //! other two dialects, so there is no second namespace there to collide with.
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir, SqlDialect};
+use zero_migrate::model::validate::validate_ir;
 
 fn verdict(ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, SqlDialect::Postgres).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, &zero_migrate::POSTGRES).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 fn tbl(n: &str) -> String {

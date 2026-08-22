@@ -26,7 +26,6 @@ use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::render::sql_preview::{
     render_ir_envelope_sql, render_plan_sql, render_set_sql, PreviewOpts, RUNTIME_RESOLVED,
 };
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::PlanStep;
 use zero_migrate::{resolve_create_table_policy, MigrationIr};
 
@@ -120,8 +119,8 @@ fn opts() -> PreviewOpts {
 }
 
 /// Render the representative IR for a dialect through the offline IR preview.
-fn render_representative(dialect: SqlDialect) -> String {
-    let ir = if dialect == SqlDialect::Mysql {
+fn render_representative(dialect: &zero_migrate::DialectId) -> String {
+    let ir = if dialect == &zero_migrate::MYSQL {
         REPRESENTATIVE_IR_MYSQL
     } else {
         REPRESENTATIVE_IR
@@ -154,7 +153,7 @@ fn assert_golden(name: &str, actual: &str) {
 fn golden_pg() {
     assert_golden(
         "sql_preview_pg.txt",
-        &render_representative(SqlDialect::Postgres),
+        &render_representative(&zero_migrate::POSTGRES),
     );
 }
 
@@ -162,7 +161,7 @@ fn golden_pg() {
 fn golden_sqlite() {
     assert_golden(
         "sql_preview_sqlite.txt",
-        &render_representative(SqlDialect::Sqlite),
+        &render_representative(&zero_migrate::SQLITE),
     );
 }
 
@@ -170,7 +169,7 @@ fn golden_sqlite() {
 fn golden_mysql() {
     assert_golden(
         "sql_preview_mysql.txt",
-        &render_representative(SqlDialect::Mysql),
+        &render_representative(&zero_migrate::MYSQL),
     );
 }
 
@@ -181,20 +180,20 @@ fn golden_mysql() {
 /// preview surfaces the lowered SQL rather than re-implementing a renderer.
 #[test]
 fn faithful_to_lowered_sql_pg() {
-    faithful_to_lowered_sql(SqlDialect::Postgres);
+    faithful_to_lowered_sql(&zero_migrate::POSTGRES);
 }
 
 #[test]
 fn faithful_to_lowered_sql_sqlite() {
-    faithful_to_lowered_sql(SqlDialect::Sqlite);
+    faithful_to_lowered_sql(&zero_migrate::SQLITE);
 }
 
 #[test]
 fn faithful_to_lowered_sql_mysql() {
-    faithful_to_lowered_sql(SqlDialect::Mysql);
+    faithful_to_lowered_sql(&zero_migrate::MYSQL);
 }
 
-fn faithful_to_lowered_sql(dialect: SqlDialect) {
+fn faithful_to_lowered_sql(dialect: &zero_migrate::DialectId) {
     // An IR with ONLY the DB-independent ops (so `lower_steps` succeeds end-to-end).
     let envelope_json = r#"{
       "ir_version": 1,
@@ -251,7 +250,7 @@ fn faithful_to_lowered_sql(dialect: SqlDialect) {
 #[test]
 fn mysql_feature_preview_renders_mysql8_sql() {
     let ir = resolve_envelope_json(MYSQL_FEATURE_IR);
-    let out = render_ir_envelope_sql(&ir, SqlDialect::Mysql, &opts())
+    let out = render_ir_envelope_sql(&ir, &zero_migrate::MYSQL, &opts())
         .expect("MySQL feature fixture renders offline");
     assert!(
         !out.contains(RUNTIME_RESOLVED),
@@ -289,7 +288,7 @@ fn mysql_feature_preview_renders_mysql8_sql() {
 /// (no `CREATE TABLE`-rebuild, no dual-write trigger, no `ALTER … RENAME`).
 #[test]
 fn online_rename_is_labeled_never_fabricated() {
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+    for dialect in [&zero_migrate::POSTGRES, &zero_migrate::SQLITE] {
         let ir = r#"{"ir_version":1,"name":"r","ops":[
           {"op":"renameColumn","table":"codes","from":"label","to":"display_name","type":"text"}
         ]}"#;
@@ -338,7 +337,8 @@ fn backfill_is_labeled_never_fabricated() {
           "rhs":{"node":"literal","value":1000}}}
     ]}"#;
     let ir = resolve_envelope_json(ir);
-    let out = render_ir_envelope_sql(&ir, SqlDialect::Postgres, &opts()).expect("renders offline");
+    let out =
+        render_ir_envelope_sql(&ir, &zero_migrate::POSTGRES, &opts()).expect("renders offline");
     assert!(
         out.contains(RUNTIME_RESOLVED) && out.contains("backfill"),
         "backfill must be labeled runtime-resolved:\n{out}"
@@ -363,7 +363,7 @@ fn external_cursor_invariant_is_prominent_in_preview() {
        "batchSize":100,"set":{"migrated":{"node":"literal","value":0}}}
     ]}"#;
     let ir = resolve_envelope_json(ir);
-    let out = render_ir_envelope_sql(&ir, SqlDialect::Postgres, &opts()).expect("preview");
+    let out = render_ir_envelope_sql(&ir, &zero_migrate::POSTGRES, &opts()).expect("preview");
     assert!(
         out.contains("CURSOR STABILITY EXTERNAL INVARIANT")
             && out.contains("writers_freeze_code_keys")
@@ -379,7 +379,11 @@ fn synchronize_identity_quiescence_assertion_is_prominent_in_preview() {
        "writesQuiesced":"orders_import_window"}
     ]}"#;
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::SQLITE,
+        &zero_migrate::MYSQL,
+    ] {
         let out = render_ir_envelope_sql(ir, dialect, &opts()).expect("preview");
         assert!(
             out.contains(RUNTIME_RESOLVED)
@@ -401,7 +405,8 @@ fn guarded_op_labeled_and_bare_ddl_has_no_fabricated_clause() {
     let ir = r#"{"ir_version":1,"name":"g","ops":[
       {"op":"addColumn","table":"codes","column":"flag","type":"boolean","nullable":true,"existenceGuard":"ifNotExists"}
     ]}"#;
-    let out = render_ir_envelope_sql(ir, SqlDialect::Postgres, &opts()).expect("renders offline");
+    let out =
+        render_ir_envelope_sql(ir, &zero_migrate::POSTGRES, &opts()).expect("renders offline");
     assert!(
         out.contains(RUNTIME_RESOLVED) && out.contains("catalog-probed"),
         "guarded addColumn must carry the catalog-probe label:\n{out}"
@@ -439,7 +444,11 @@ fn guard_label_is_truthful_per_dialect() {
     ]}"#;
     const PROBE_CLAIM: &str = "catalog-probed at apply (run / satisfied-noop / fail-drift)";
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::SQLITE,
+        &zero_migrate::MYSQL,
+    ] {
         for ir in [ADD_COLUMN_IR, DROP_VIEW_IR] {
             let out = render_ir_envelope_sql(ir, dialect, &opts()).expect("renders offline");
             assert!(
@@ -449,8 +458,8 @@ fn guard_label_is_truthful_per_dialect() {
         }
     }
 
-    let out =
-        render_ir_envelope_sql(ADD_COLUMN_IR, SqlDialect::Mysql, &opts()).expect("renders offline");
+    let out = render_ir_envelope_sql(ADD_COLUMN_IR, &zero_migrate::MYSQL, &opts())
+        .expect("renders offline");
     assert!(
         out.contains(RUNTIME_RESOLVED)
             && out.contains(PROBE_CLAIM)
@@ -461,8 +470,8 @@ fn guard_label_is_truthful_per_dialect() {
         "the MySQL guard label must describe the probe and its fail-closed boundary:\n{out}"
     );
 
-    let out =
-        render_ir_envelope_sql(DROP_VIEW_IR, SqlDialect::Mysql, &opts()).expect("renders offline");
+    let out = render_ir_envelope_sql(DROP_VIEW_IR, &zero_migrate::MYSQL, &opts())
+        .expect("renders offline");
     assert!(
         out.contains(PROBE_CLAIM),
         "MySQL dropView must describe the catalog probe:\n{out}"
@@ -486,9 +495,9 @@ fn render_succeeds_without_a_dsn() {
     std::env::remove_var("DATABASE_URL");
     let representative = resolve_envelope_json(REPRESENTATIVE_IR);
     let representative_mysql = resolve_envelope_json(REPRESENTATIVE_IR_MYSQL);
-    let pg = render_ir_envelope_sql(&representative, SqlDialect::Postgres, &opts());
-    let sqlite = render_ir_envelope_sql(&representative, SqlDialect::Sqlite, &opts());
-    let mysql = render_ir_envelope_sql(&representative_mysql, SqlDialect::Mysql, &opts());
+    let pg = render_ir_envelope_sql(&representative, &zero_migrate::POSTGRES, &opts());
+    let sqlite = render_ir_envelope_sql(&representative, &zero_migrate::SQLITE, &opts());
+    let mysql = render_ir_envelope_sql(&representative_mysql, &zero_migrate::MYSQL, &opts());
     assert!(
         pg.is_ok() && sqlite.is_ok() && mysql.is_ok(),
         "offline render must not need a DSN"
@@ -514,14 +523,14 @@ fn render_plan_sql_surfaces_lowered_ddl_offline() {
     let author = IrAuthor::new(
         "public",
         "app_preview",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject("public"),
     );
     let plan = author
         .lower_plan(&ir, &LiveSchema::default())
         .expect("DB-independent IR lowers offline");
 
-    let out = render_plan_sql(&plan, SqlDialect::Postgres, &opts());
+    let out = render_plan_sql(&plan, &zero_migrate::POSTGRES, &opts());
     assert!(
         out.contains("-- plan"),
         "carries the per-plan header:\n{out}"
@@ -557,7 +566,7 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
 
     // Author a REAL PG expand-contract plan via the same author the engine uses, so
     // the test feeds the genuine E1..C2 + backfill shape (never a synthetic stub).
-    let ec = ExpandContractAuthor::new("public", "app_preview")
+    let ec = ExpandContractAuthor::new("public", "app_preview", zero_migrate::POSTGRES)
         .author(&OnlineIntent::RenameColumn {
             table: "codes".to_string(),
             from: "label".to_string(),
@@ -583,7 +592,7 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
     let author = IrAuthor::new(
         "public",
         "app_preview",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject("public"),
     );
     let mut plan = author
@@ -591,7 +600,7 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
         .expect("DB-independent IR lowers offline");
     plan.steps = vec![PlanStep::OnlineRename(rename)];
 
-    let out = render_plan_sql(&plan, SqlDialect::Postgres, &opts());
+    let out = render_plan_sql(&plan, &zero_migrate::POSTGRES, &opts());
 
     // The rename is labeled runtime-resolved (the backfill + cutover depend on live state).
     assert!(
@@ -636,7 +645,7 @@ fn render_plan_sql_online_rename_is_labeled_never_fabricated() {
 /// A malformed IR envelope is a hard error (the CLI maps this to a non-zero exit).
 #[test]
 fn malformed_ir_is_error() {
-    let err = render_ir_envelope_sql("{ not json", SqlDialect::Postgres, &opts());
+    let err = render_ir_envelope_sql("{ not json", &zero_migrate::POSTGRES, &opts());
     assert!(err.is_err(), "malformed IR must be an error");
 }
 
@@ -666,14 +675,14 @@ fn render_set_sql_surfaces_lowered_ddl_offline() {
     let author = IrAuthor::new(
         "public",
         "app_preview",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject("public"),
     );
     let plan = author
         .lower_plan(&ir, &LiveSchema::default())
         .expect("DB-independent IR lowers offline");
 
-    let out = render_set_sql(&[plan], SqlDialect::Postgres, &opts());
+    let out = render_set_sql(&[plan], &zero_migrate::POSTGRES, &opts());
     assert!(
         out.contains("CREATE TABLE"),
         "the lowered DDL should surface:\n{out}"
@@ -697,21 +706,21 @@ fn string_length_renders_bounded_varchar_across_dialects() {
     ]}"#;
     let resolved = resolve_envelope_json(ir);
 
-    let pg = render_ir_envelope_sql(&resolved, SqlDialect::Postgres, &opts())
+    let pg = render_ir_envelope_sql(&resolved, &zero_migrate::POSTGRES, &opts())
         .expect("bounded string renders on PG");
     assert!(
         pg.contains("character varying(200)") || pg.contains("varchar(200)"),
         "PG must render a bounded varchar(200):\n{pg}"
     );
 
-    let mysql = render_ir_envelope_sql(&resolved, SqlDialect::Mysql, &opts())
+    let mysql = render_ir_envelope_sql(&resolved, &zero_migrate::MYSQL, &opts())
         .expect("bounded string renders on MySQL");
     assert!(
         mysql.contains("VARCHAR(200)"),
         "MySQL must render VARCHAR(200), not the legacy VARCHAR(191) cap:\n{mysql}"
     );
 
-    let sqlite = render_ir_envelope_sql(&resolved, SqlDialect::Sqlite, &opts())
+    let sqlite = render_ir_envelope_sql(&resolved, &zero_migrate::SQLITE, &opts())
         .expect("bounded string renders on SQLite");
     assert!(
         sqlite.to_uppercase().contains("\"CODE\" TEXT")
@@ -743,7 +752,7 @@ fn mysql_constraint_requoting_escapes_hostile_identifiers() {
         let resolved = resolve_create_table_policy(&raw, &support::confined_charter(), "public")
             .expect("hostile IR resolves");
         let json = serde_json::to_string(&resolved).expect("resolved IR serializes");
-        render_ir_envelope_sql(&json, SqlDialect::Mysql, &opts())
+        render_ir_envelope_sql(&json, &zero_migrate::MYSQL, &opts())
             .expect("hostile IR renders offline")
             .lines()
             .find(|l| l.starts_with("CREATE TABLE"))
@@ -795,7 +804,7 @@ fn preview_of_a_raw_envelope_shows_the_charter_injected_shape() {
       ]}
     ]}"#;
 
-    let out = render_ir_envelope_sql(raw, SqlDialect::Postgres, &opts())
+    let out = render_ir_envelope_sql(raw, &zero_migrate::POSTGRES, &opts())
         .expect("a raw envelope renders under the injecting charter");
 
     for injected in [
@@ -848,7 +857,11 @@ fn preview_is_identical_for_raw_and_pre_resolved_envelopes() {
     ]}"#;
     let pre_resolved = resolve_envelope_json(raw);
 
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::SQLITE,
+        &zero_migrate::MYSQL,
+    ] {
         let from_raw =
             render_ir_envelope_sql(raw, dialect, &opts()).expect("raw envelope previews");
         let from_resolved = render_ir_envelope_sql(&pre_resolved, dialect, &opts())
@@ -879,7 +892,7 @@ fn preview_fails_closed_on_a_charter_violating_envelope() {
       ]}
     ]}"#;
 
-    let err = render_ir_envelope_sql(violating, SqlDialect::Postgres, &opts())
+    let err = render_ir_envelope_sql(violating, &zero_migrate::POSTGRES, &opts())
         .expect_err("a create-table colliding with an injected system column is refused");
     assert!(
         err.contains("table-shape resolve"),
@@ -907,7 +920,7 @@ fn preview_resolves_before_it_validates() {
       ]}
     ]}"#;
 
-    let out = render_ir_envelope_sql(raw, SqlDialect::Postgres, &opts()).expect(
+    let out = render_ir_envelope_sql(raw, &zero_migrate::POSTGRES, &opts()).expect(
         "a partial index over an injected column previews once the shape is resolved first",
     );
     assert!(
@@ -964,14 +977,14 @@ columns = [ { name = "tenant_stamp", type = "text", nullable = false } ]
       ]}
     ]}"#;
 
-    let covered = render_ir_envelope_sql(raw, SqlDialect::Postgres, &scoped_opts("tenant_a"))
+    let covered = render_ir_envelope_sql(raw, &zero_migrate::POSTGRES, &scoped_opts("tenant_a"))
         .expect("the covered schema previews");
     assert!(
         covered.contains("\"tenant_stamp\""),
         "a table previewed into the injected schema must carry the injection:\n{covered}"
     );
 
-    let uncovered = render_ir_envelope_sql(raw, SqlDialect::Postgres, &scoped_opts("tenant_b"))
+    let uncovered = render_ir_envelope_sql(raw, &zero_migrate::POSTGRES, &scoped_opts("tenant_b"))
         .expect("an uncovered schema previews");
     assert!(
         !uncovered.contains("tenant_stamp"),
@@ -1031,7 +1044,7 @@ fn guarded_drop_partition_announces_that_a_run_verdict_destroys_rows() {
 
     let guarded_drop = render_ir_envelope_sql(
         &resolve(&ir(r#","existenceGuard":"ifExists""#, drop_op)),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &preview_opts,
     )
     .expect("a guarded dropPartition previews offline");
@@ -1042,7 +1055,7 @@ fn guarded_drop_partition_announces_that_a_run_verdict_destroys_rows() {
 
     let unguarded_drop = render_ir_envelope_sql(
         &resolve(&ir("", drop_op)),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &preview_opts,
     )
     .expect("an unguarded dropPartition previews offline");
@@ -1053,7 +1066,7 @@ fn guarded_drop_partition_announces_that_a_run_verdict_destroys_rows() {
 
     let guarded_create = render_ir_envelope_sql(
         &resolve(&ir(r#","existenceGuard":"ifNotExists""#, create_op)),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &preview_opts,
     )
     .expect("a guarded createPartition previews offline");
@@ -1099,13 +1112,13 @@ fn a_retype_previews_the_statement_apply_runs_and_nothing_more() {
     let author = IrAuthor::new(
         "public",
         "app_preview",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::confined_charter(),
     );
     let steps = author
         .lower_steps(&ir, &LiveSchema::default())
         .expect("lowers offline");
-    let preview = render_ir_envelope_sql(&envelope_json, SqlDialect::Postgres, &opts())
+    let preview = render_ir_envelope_sql(&envelope_json, &zero_migrate::POSTGRES, &opts())
         .expect("renders offline");
 
     // The statement itself, pinned. Written out rather than derived from the lowered

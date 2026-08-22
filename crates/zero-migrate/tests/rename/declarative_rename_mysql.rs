@@ -28,8 +28,8 @@
 //!
 //! Everything else in the repo already said MySQL cannot rename a column.
 //! `docs/dialects.md`'s "Rename column" row reads `MySQL 8 | No`.
-//! `model/dialect_table.rs` records `renameColumn | base | mysql: Unsupported`. The
-//! IR lane onto the SAME `ExpandContractAuthor` answers `SqlDialect::Mysql =>
+//! MySQL's validation policy records `renameColumn | base` as `Unsupported`. The
+//! IR lane onto the SAME `ExpandContractAuthor` answers `&zero_migrate::MYSQL =>
 //! Err(UnsupportedInV1)` at plan time. The declarative differ was the lone dissenter
 //! and the only path that reached a live server, so the guard makes the code honor a
 //! promise it was breaking rather than changing what the product offers.
@@ -102,7 +102,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     desired_snapshot_for_dialect, snapshot_schema, Approval, CollectionDescriptor,
     DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig,
-    IndexDescriptor, MigrationEngine, PostgresBackend, RenameHint, SqlDialect,
+    IndexDescriptor, MigrationEngine, PostgresBackend, RenameHint,
 };
 
 const OWNER: &str = "app_declarative_rename";
@@ -256,8 +256,9 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
         .expect("create the isolated declarative-rename database");
 
     let engine = MigrationEngine::new();
-    let author = DeclarativeAuthor::new_for_dialect(database.clone(), OWNER, SqlDialect::Mysql);
-    let guard = GuardConfig::from_policy(policy_for(&database), SqlDialect::Mysql.id());
+    let author =
+        DeclarativeAuthor::new_for_dialect(database.clone(), OWNER, zero_migrate::MYSQL.clone());
+    let guard = GuardConfig::from_policy(policy_for(&database), zero_migrate::MYSQL.clone());
     let backend = MysqlBackend::new_generic(&session);
 
     // v1: create the table, then WRITE A ROW. Without data a rename cannot lose
@@ -266,7 +267,7 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
     let desired1 = desired_snapshot_for_dialect(
         &database,
         std::slice::from_ref(&v1),
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &policy_for(&database),
     )
     .expect("desired v1");
@@ -315,7 +316,7 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
     let desired2 = desired_snapshot_for_dialect(
         &database,
         std::slice::from_ref(&v2),
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &policy_for(&database),
     )
     .expect("desired v2");
@@ -526,19 +527,20 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
         .expect("create the isolated declarative-rename schema");
 
     let engine = MigrationEngine::new();
-    let author = DeclarativeAuthor::new_for_dialect(schema.clone(), OWNER, SqlDialect::Postgres);
-    let guard = GuardConfig::from_policy(policy_for(&schema), SqlDialect::Postgres.id());
+    let author =
+        DeclarativeAuthor::new_for_dialect(schema.clone(), OWNER, zero_migrate::POSTGRES.clone());
+    let guard = GuardConfig::from_policy(policy_for(&schema), zero_migrate::POSTGRES.clone());
     let backend = PostgresBackend::new_generic(&session);
 
     let v1 = people(OLD_COLUMN, false);
     let desired1 = desired_snapshot_for_dialect(
         &schema,
         std::slice::from_ref(&v1),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &policy_for(&schema),
     )
     .expect("desired v1");
-    let live_empty = snapshot_schema(&session, &schema)
+    let live_empty = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
         .await
         .expect("snapshot live PG (empty)");
     let plan1 = engine
@@ -580,11 +582,11 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
     let desired2 = desired_snapshot_for_dialect(
         &schema,
         std::slice::from_ref(&v2),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &policy_for(&schema),
     )
     .expect("desired v2");
-    let live_v1 = snapshot_schema(&session, &schema)
+    let live_v1 = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
         .await
         .expect("snapshot live PG (v1)");
     let plan2 = engine

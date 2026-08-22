@@ -58,7 +58,7 @@ use crate::render::value_format::{
     catalog_expression_fingerprint_in_dialect, catalog_id_default, catalog_id_default_for_expected,
     catalog_text_id_default, catalog_uuid_id_default, recover_format_check, RecoveredFormatCheck,
 };
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
 
 // ---------------------------------------------------------------------------
 // B1 — checksum / tamper / orphan drift
@@ -158,11 +158,12 @@ impl ChecksumDriftReport {
 /// [`DriftError::Journal`] if the journal read fails.
 #[cfg(pg_seam)]
 pub async fn check_checksum_drift<D: SqlSession>(
+    dialect: &DialectId,
     conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> Result<ChecksumDriftReport, DriftError> {
-    let applied = journal::applied(conn, cfg).await?;
+    let applied = journal::applied(conn, cfg, dialect).await?;
     Ok(compare_applied_to_set(&applied, migrations))
 }
 
@@ -623,10 +624,11 @@ fn parse_index_storage_params_pg(
 
 #[cfg(pg_seam)]
 pub async fn snapshot_schema<D: SqlSession>(
+    dialect: &DialectId,
     conn: &D,
     schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
-    snapshot_schema_for(conn, schema).await
+    snapshot_schema_for(conn, schema, dialect).await
 }
 
 /// The savepoint the view-body probe rolls back to. One name, reused per view,
@@ -698,6 +700,7 @@ const VIEW_BODY_PROBE_VIEW: &str = "zm_view_body_probe";
 /// against and it stays uncompared.
 #[cfg(pg_seam)]
 pub async fn resolve_view_bodies<D: SqlSession>(
+    dialect: &DialectId,
     conn: &D,
     schema: &str,
     expected: &mut SchemaSnapshot,
@@ -725,7 +728,7 @@ pub async fn resolve_view_bodies<D: SqlSession>(
         conn.batch("BEGIN").await?;
     }
 
-    let outcome = resolve_view_bodies_in_transaction(conn, schema, expected, actual).await;
+    let outcome = resolve_view_bodies_in_transaction(conn, schema, expected, actual, dialect).await;
 
     let unwind = if nested {
         conn.batch(&format!(
@@ -752,6 +755,7 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
     schema: &str,
     expected: &mut SchemaSnapshot,
     actual: &mut SchemaSnapshot,
+    dialect: &DialectId,
 ) -> Result<(), DriftError> {
     let names: Vec<String> = expected
         .views
@@ -771,8 +775,7 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
         // The authored body rendered the same way `createView` rendered it when the
         // migration ran. Anything else would be comparing the differ's idea of the
         // body against the engine's.
-        let Ok(body) =
-            crate::render::lower::render_view_query(query, view_schema, SqlDialect::Postgres, None)
+        let Ok(body) = crate::render::lower::render_view_query(query, view_schema, dialect, None)
         else {
             continue;
         };
@@ -783,7 +786,7 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
         // because temp object creation is transactional.
         conn.batch(&format!("SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}_one"))
             .await?;
-        let probed = probe_one_view_body(conn, view_schema, &name, &body).await;
+        let probed = probe_one_view_body(conn, view_schema, &name, &body, dialect).await;
         conn.batch(&format!(
             "ROLLBACK TO SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}_one; \
              RELEASE SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}_one"
@@ -825,11 +828,8 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
 /// function and this whole probe is `#[cfg(pg_seam)]`. It used to call the crate's
 /// raw escape primitive, which produced correct bytes for no stated dialect.
 #[cfg(pg_seam)]
-fn pg_view_ident(ident: &str) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(
-        ident,
-        crate::schema::query::SqlDialect::Postgres,
-    )
+fn pg_view_ident(ident: &str, dialect: &DialectId) -> String {
+    crate::render::dml::escape_quote_ident_for_dialect(ident, dialect)
 }
 
 #[cfg(pg_seam)]
@@ -838,6 +838,7 @@ async fn probe_one_view_body<D: SqlSession>(
     view_schema: &str,
     name: &str,
     body: &str,
+    dialect: &DialectId,
 ) -> Result<Option<(String, String)>, DriftError> {
     if conn
         .batch(&format!(
@@ -862,7 +863,12 @@ async fn probe_one_view_body<D: SqlSession>(
                         AS expected_body, \
                         pg_get_viewdef($1::text::regclass, true) AS actual_body"
             ),
-            &[format!("{}.{}", pg_view_ident(view_schema), pg_view_ident(name)).into()],
+            &[format!(
+                "{}.{}",
+                pg_view_ident(view_schema, dialect),
+                pg_view_ident(name, dialect)
+            )
+            .into()],
         )
         .await?;
 
@@ -1098,6 +1104,7 @@ fn trigger_events_from_tgtype(tgtype: i32) -> Vec<TriggerEvent> {
 pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     conn: &D,
     schema: &str,
+    dialect: &DialectId,
 ) -> Result<SchemaSnapshot, DriftError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut partitions: BTreeMap<String, PartitionSnapshot> = BTreeMap::new();
@@ -1493,6 +1500,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 default.as_deref(),
                 false,
                 has_user_semantic_dependency,
+                dialect,
             );
             t.columns.push(ColumnSnapshot {
                 name: column_name,
@@ -1792,7 +1800,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             {
                 let column_name = &local_columns[0];
                 if let Some(RecoveredFormatCheck::Value(value_format)) =
-                    recover_format_check(column_name, &catalog_definition, SqlDialect::Postgres)
+                    recover_format_check(column_name, &catalog_definition, dialect)
                 {
                     if let Some(column) = t
                         .columns
@@ -1814,6 +1822,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                                     .get(&(table.clone(), column.name.clone()))
                                     .copied()
                                     .unwrap_or(false),
+                                dialect,
                             );
                             continue;
                         }
@@ -1843,6 +1852,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                                     .get(&(table.clone(), column.name.clone()))
                                     .copied()
                                     .unwrap_or(false),
+                                dialect,
                             );
                         }
                     }
@@ -2527,6 +2537,7 @@ fn recover_pg_id_default(
     expression: Option<&str>,
     force_id_surface: bool,
     has_user_semantic_dependency: bool,
+    dialect: &DialectId,
 ) -> Option<IdDefaultSnapshot> {
     let nextval = expression.and_then(|expr| recover_nextval_default(Some(expr.to_string())));
     if !force_id_surface
@@ -2551,7 +2562,7 @@ fn recover_pg_id_default(
         }
         return Some(IdDefaultSnapshot::Expression(format!(
             "user-defined:{}",
-            catalog_expression_fingerprint_in_dialect(expression, SqlDialect::Postgres)
+            catalog_expression_fingerprint_in_dialect(expression, dialect)
         )));
     }
 
@@ -2564,13 +2575,13 @@ fn recover_pg_id_default(
     if has_user_semantic_dependency {
         return Some(IdDefaultSnapshot::Expression(format!(
             "user-defined:{}",
-            catalog_expression_fingerprint_in_dialect(expression, SqlDialect::Postgres)
+            catalog_expression_fingerprint_in_dialect(expression, dialect)
         )));
     }
     Some(if data_type.eq_ignore_ascii_case("uuid") {
-        catalog_uuid_id_default(Some(expression), SqlDialect::Postgres, None)
+        catalog_uuid_id_default(Some(expression), dialect, None)
     } else {
-        catalog_id_default(Some(expression), SqlDialect::Postgres, None)
+        catalog_id_default(Some(expression), dialect, None)
     })
 }
 
@@ -2669,7 +2680,7 @@ fn pg_foreign_key_definition(
 }
 
 /// Canonical rendered form of a `nextval` default, or `None` when the expression
-/// is not one. SqlDialect-free on purpose: the sequence identity is the whole key.
+/// is not one. Backend-identity-free on purpose: the sequence identity is the whole key.
 fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
     let sequence = parse_nextval_sequence_ref(expr?)?;
     Some(crate::render::declarative::nextval_default_expr(&sequence))
@@ -2710,7 +2721,7 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
 ///
 /// WHEN THE COMPARISON IS SKIPPED, and why each skip is not an oversight:
 ///
-/// * `None` dialect. [`introspected_table_dialect`] recognises a live catalog read
+/// * `None` vendor. [`introspected_table_vendor`] recognises a live catalog read
 ///   by the evidence only introspection leaves; a snapshot without it is not one,
 ///   and the literal fingerprint is dialect-sensitive (a MySQL `COLUMN_DEFAULT`
 ///   arrives with its SQL quotes already stripped). A `nextval` still compares,
@@ -2798,7 +2809,7 @@ fn format_generated_kind(kind: GeneratedKindSnapshot) -> &'static str {
 
 fn comparable_column_default(
     raw: Option<&str>,
-    dialect: Option<SqlDialect>,
+    vendor: Option<&zero_migrate_backend::registry::BackendVendor>,
     mysql_expression_default: Option<bool>,
 ) -> Option<IdDefaultSnapshot> {
     let Some(raw) = raw else {
@@ -2807,13 +2818,17 @@ fn comparable_column_default(
     if let Some(sequence) = comparable_nextval_default(Some(raw)) {
         return Some(IdDefaultSnapshot::Nextval(sequence));
     }
-    let dialect = dialect?;
+    let vendor = vendor?;
+    let dialect = &vendor.descriptor.id;
     // MySQL reports `COLUMN_DEFAULT` in its COERCED character form, without SQL
     // quotes, so the two sides only meet once the authored key is projected into
     // that same storage spelling. `mysql_expression_default` is the authoritative
     // literal-vs-expression bit; the authored side has none and does not need one,
     // because its text still carries its quotes.
-    let key = if dialect == SqlDialect::Mysql {
+    let key = if vendor
+        .value_format
+        .catalog_default_marker_is_authoritative()
+    {
         catalog_text_id_default(Some(raw), dialect, mysql_expression_default)
     } else {
         catalog_id_default(Some(raw), dialect, None)
@@ -3059,25 +3074,21 @@ fn format_id_default(default: Option<&crate::model::snapshot::IdDefaultSnapshot>
     }
 }
 
-fn introspected_table_dialect(table: &TableSnapshot) -> Option<SqlDialect> {
-    if table.stored_create_sql.is_some() {
-        return Some(SqlDialect::Sqlite);
-    }
-    if table
-        .columns
+fn introspected_table_vendor(
+    table: &TableSnapshot,
+) -> Option<&'static zero_migrate_backend::registry::BackendVendor> {
+    crate::render::backends::VENDORS
+        .as_slice()
         .iter()
-        .any(|column| column.mysql_text_storage.is_some())
-    {
-        return Some(SqlDialect::Mysql);
-    }
-    if table
-        .columns
-        .iter()
-        .any(|column| column.ddl_type_override.is_some())
-    {
-        return Some(SqlDialect::Postgres);
-    }
-    None
+        .copied()
+        .filter_map(|vendor| {
+            vendor
+                .catalog_fold
+                .snapshot_provenance_strength(table)
+                .map(|strength| (strength, vendor))
+        })
+        .max_by_key(|(strength, _)| *strength)
+        .map(|(_, vendor)| vendor)
 }
 
 fn column_data_types_eq(expected: &ColumnSnapshot, actual: &ColumnSnapshot) -> bool {
@@ -3278,7 +3289,8 @@ fn diff_attrs(
     // value format, recoverable text collation, and catalog comment.
     let act_cols: BTreeMap<&str, &ColumnSnapshot> =
         act_t.columns.iter().map(|c| (c.name.as_str(), c)).collect();
-    let actual_dialect = introspected_table_dialect(act_t);
+    let actual_vendor = introspected_table_vendor(act_t);
+    let actual_dialect = actual_vendor.map(|vendor| &vendor.descriptor.id);
     for ec in &exp_t.columns {
         if let Some(ac) = act_cols.get(ec.name.as_str()) {
             let obj = format!("column {}", ec.name);
@@ -3335,11 +3347,15 @@ fn diff_attrs(
             );
             if let Some(expected_default) = ec.id_default.as_ref() {
                 let recover_against_expected = || {
-                    if actual_dialect == Some(SqlDialect::Mysql) && ac.mysql_text_storage.is_some()
+                    if actual_vendor.is_some_and(|vendor| {
+                        vendor
+                            .value_format
+                            .catalog_default_marker_is_authoritative()
+                    }) && ac.mysql_text_storage.is_some()
                     {
                         return catalog_text_id_default(
                             ac.default.as_deref(),
-                            SqlDialect::Mysql,
+                            actual_dialect.expect("an actual vendor supplies its own dialect id"),
                             ac.mysql_default_generated,
                         );
                     }
@@ -3373,10 +3389,10 @@ fn diff_attrs(
                 // is all either side holds. `comparable_column_default` documents
                 // which spellings that text can be compared through and which it
                 // cannot; a `None` on either side is that refusal, not an absence.
-                comparable_column_default(ec.default.as_deref(), actual_dialect, None),
+                comparable_column_default(ec.default.as_deref(), actual_vendor, None),
                 comparable_column_default(
                     ac.default.as_deref(),
-                    actual_dialect,
+                    actual_vendor,
                     ac.mysql_default_generated,
                 ),
             ) {

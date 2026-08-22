@@ -69,7 +69,7 @@
 //! # The introspection surface, named
 //!
 //! `expected` is `render::fold::effects::state_at(&live_at_0, &ops, k, ..)`.
-//! `actual` is `snapshot_schema(&session, project_schema)` - the engine's own
+//! `actual` is `snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, project_schema)` - the engine's own
 //! introspection, the SAME function that produced `live_at_0`, returning the SAME
 //! `SchemaSnapshot` type `state_at` returns. Nothing is hand-rolled from the catalog,
 //! so the comparison is between two values of one representation.
@@ -112,7 +112,7 @@ use zero_migrate::render::fold::effects::state_at;
 use zero_migrate::{
     diff_snapshots, resolve_create_table_policy, snapshot_schema, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
-    PostgresBackend, SchemaSnapshot, SqlDialect, StructuralDrift,
+    PostgresBackend, SchemaSnapshot, StructuralDrift,
 };
 
 const OWNER: &str = "app_state_at_matches_the_server_pg";
@@ -236,9 +236,13 @@ async fn prefixes(
             .await
             .map_err(|error| format!("seed the pre-existing schema: {error}"))?;
 
-        let live_at_0 = snapshot_schema(&session, &cfg.project_schema)
-            .await
-            .map_err(|error| format!("introspect live_at_0: {error}"))?;
+        let live_at_0 = snapshot_schema(
+            &zero_migrate_ir::dialect::POSTGRES,
+            &session,
+            &cfg.project_schema,
+        )
+        .await
+        .map_err(|error| format!("introspect live_at_0: {error}"))?;
 
         for object in seeded {
             if !object.present_in(&live_at_0) {
@@ -266,8 +270,8 @@ async fn prefixes(
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
         let artifact = author
             .load_and_lower_guarded(&resolved_source, OWNER, &registry, &live, &guard)
             .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
@@ -314,14 +318,18 @@ async fn prefixes(
                 &live_at_0,
                 &resolved.ops,
                 k,
-                SqlDialect::Postgres,
+                &zero_migrate::POSTGRES,
                 &cfg.project_schema,
                 &policy,
             )
             .map_err(|error| format!("prefix {k}: state_at must fold: {error:?}"))?;
-            let actual = snapshot_schema(&session, &cfg.project_schema)
-                .await
-                .map_err(|error| format!("prefix {k}: introspect the live schema: {error}"))?;
+            let actual = snapshot_schema(
+                &zero_migrate_ir::dialect::POSTGRES,
+                &session,
+                &cfg.project_schema,
+            )
+            .await
+            .map_err(|error| format!("prefix {k}: introspect the live schema: {error}"))?;
 
             if k == 0 {
                 // The floor. See the module doc: without this, a comparator blind to

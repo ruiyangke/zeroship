@@ -26,11 +26,23 @@ use std::collections::HashMap;
 use crate::support::PgDevSession;
 
 use zero_migrate::{
-    desired_snapshot, diff_snapshots, diff_snapshots_with_index_aliases, snapshot_schema,
-    AcceptedIndexAlias, Approval, CollectionDescriptor, DeclarativeAuthor, EffectivePolicy,
-    ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor, MigrationEngine,
-    PostgresBackend, SqlDialect,
+    diff_snapshots, diff_snapshots_with_index_aliases, snapshot_schema, AcceptedIndexAlias,
+    Approval, CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig,
+    FieldDescriptor, GuardConfig, IndexDescriptor, MigrationEngine, PostgresBackend,
 };
+
+fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    effective: &EffectivePolicy,
+) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
+    zero_migrate::desired_snapshot_for_dialect(
+        project_schema,
+        descriptors,
+        &zero_migrate::POSTGRES,
+        effective,
+    )
+}
 
 /// PostgreSQL's NAMEDATALEN-derived identifier bound, in bytes. Both derivations
 /// stay under it, so neither name in this test is server-truncated - the divergence
@@ -102,12 +114,16 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     )
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
-    DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test")
+    DeclarativeAuthor::new_for_dialect(
+        cfg.project_schema.clone(),
+        "app_test",
+        zero_migrate::POSTGRES,
+    )
 }
 
 /// The table name every arm uses. 12 bytes, so a 44-byte field name puts the
@@ -191,9 +207,13 @@ async fn deploy(
     let author = author_for(cfg);
     let desired = desired_snapshot(&cfg.project_schema, descs, &effective_policy(cfg))
         .expect("desired_snapshot");
-    let live = snapshot_schema(session, &cfg.project_schema)
-        .await
-        .expect("snapshot live");
+    let live = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -217,9 +237,13 @@ async fn deploy(
         )
         .await
         .expect("apply_declarative");
-    snapshot_schema(session, &cfg.project_schema)
-        .await
-        .expect("snapshot live after deploy")
+    snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live after deploy")
 }
 
 /// ARM A - the defect. An index the DATA PLANE created re-diffs CLEAN against the
@@ -301,9 +325,13 @@ async fn a_data_plane_named_index_re_diffs_clean() {
         &effective_policy(&cfg),
     )
     .expect("desired_snapshot");
-    let live_after = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after)");
+    let live_after = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after)");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -395,9 +423,13 @@ async fn b_engine_named_index_still_round_trips_clean() {
         &effective_policy(&cfg),
     )
     .expect("desired_snapshot");
-    let live_after = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after)");
+    let live_after = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after)");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -476,9 +508,13 @@ async fn c_author_supplied_rename_still_creates_and_drops() {
         &effective_policy(&cfg),
     )
     .expect("desired_snapshot");
-    let live_after = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after)");
+    let live_after = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after)");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -570,10 +606,18 @@ async fn d_alias_accepted_no_op_does_not_trip_ownership() {
         "the owner must be the other app for this to be a non-owner deploy"
     );
 
-    let live_after = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after)");
-    let non_owner = DeclarativeAuthor::new(cfg.project_schema.clone(), "app_zzz");
+    let live_after = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after)");
+    let non_owner = DeclarativeAuthor::new_for_dialect(
+        cfg.project_schema.clone(),
+        "app_zzz",
+        zero_migrate::POSTGRES,
+    );
     let planned = engine.plan_declarative(
         &desired,
         &live_after,

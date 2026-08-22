@@ -5,7 +5,7 @@ use zero_migrate::model::expr::{
     SynthFn, UnaryOp,
 };
 use zero_migrate::model::ir::{IrScalar, IrValue};
-use zero_migrate::model::validate::{validate_expr, SqlDialect, TargetScope};
+use zero_migrate::model::validate::{validate_expr, TargetScope};
 use zero_migrate::render::dml::assemble_backfill_clauses;
 use zero_migrate::POSTGRES;
 
@@ -295,11 +295,11 @@ fn portable_expr_samples() -> Vec<Expr> {
     ]
 }
 
-const fn dialect_pairs() -> [(SqlDialect, SqlDialect); 3] {
+fn dialect_pairs() -> [(zero_migrate::DialectId, zero_migrate::DialectId); 3] {
     [
-        (SqlDialect::Postgres, SqlDialect::Postgres),
-        (SqlDialect::Sqlite, SqlDialect::Sqlite),
-        (SqlDialect::Mysql, SqlDialect::Mysql),
+        (zero_migrate::POSTGRES, zero_migrate::POSTGRES),
+        (zero_migrate::SQLITE, zero_migrate::SQLITE),
+        (zero_migrate::MYSQL, zero_migrate::MYSQL),
     ]
 }
 
@@ -316,13 +316,13 @@ fn assert_validates_and_renders_on_all_three(expr: &Expr, variant: &str) {
     let columns = scope_columns();
     let scope = TargetScope::new("t", &columns);
     for (validator_dialect, sql_dialect) in dialect_pairs() {
-        validate_expr(expr, validator_dialect, &scope, 0).unwrap_or_else(|err| {
+        validate_expr(expr, &validator_dialect, &scope, 0).unwrap_or_else(|err| {
             panic!("{variant} must validate on {validator_dialect:?}: {err:?}")
         });
 
         let mut set = BTreeMap::new();
         set.insert("out".to_string(), IrValue::Expr(expr.clone()));
-        let rendered = assemble_backfill_clauses(sql_dialect, "t", &set, Some(expr))
+        let rendered = assemble_backfill_clauses(&sql_dialect, "t", &set, Some(expr))
             .unwrap_or_else(|err| panic!("{variant} must render on {sql_dialect:?}: {err:?}"));
         assert!(
             !rendered.set_clause.trim().is_empty(),

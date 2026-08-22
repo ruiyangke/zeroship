@@ -31,8 +31,7 @@ use std::collections::BTreeMap;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
-    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, SqlDialect,
-    SqliteBackend,
+    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, SqliteBackend,
 };
 const PROJECT: &str = "prj_ir";
 const APP: &str = "app_ir";
@@ -91,10 +90,11 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
         let author = IrAuthor::new(
             PROJECT,
             APP,
-            SqlDialect::Sqlite,
+            &zero_migrate::SQLITE,
             &support::confined_charter(),
         );
-        let gc = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
+        let gc =
+            GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
         if needs_seed {
             let s = format!(r#"{{"ir_version":1,"name":"seed","ops":[{seed}]}}"#);
             let a = author

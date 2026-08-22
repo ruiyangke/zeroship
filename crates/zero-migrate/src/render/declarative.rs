@@ -4,7 +4,7 @@
 //! per-collection descriptor JSON the db SDK emits via `registerModel`
 //! (`{ _meta, _indexes, <field>: { type, required, unique, default, ref } }`). This
 //! module turns that declared schema into a deterministic [`SchemaSnapshot`]
-//! ([`desired_snapshot`]) and then **diffs** it against the live snapshot to
+//! ([`desired_snapshot_for_dialect`]) and then **diffs** it against the live snapshot to
 //! generate migrations ([`DeclarativeAuthor::diff`], additive +
 //! destructive-gated).
 //!
@@ -34,8 +34,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde::Deserialize;
 
 use crate::model::ir::{
-    ColType, EmptyContainerKind, IndexElement, IrColumn, IrIndex, IrJsonValue, PartitionBoundValue,
-    PartitionBounds, TableRuntimeOptions,
+    ColType, EmptyContainerKind, IndexElement, IrColumn, IrIndex, IrJsonValue, PartitionBounds,
+    TableRuntimeOptions,
 };
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::snapshot::{
@@ -46,20 +46,27 @@ use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{ExpandContractAuthor, ExpandContractPlan, OnlineIntent};
 use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_ir::dialect::DialectId;
 #[cfg(test)]
-use zero_migrate_ir::dialect::{MYSQL, SQLITE};
+use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 // The per-dialect DDL emission seam. Declared below the engine so the three impls
 // can leave it for the three vendor crates without Cargo seeing a cycle.
 // The column-clause spellings moved with it, for the same reason: all three impls
 // call every one of them, so a shared helper cannot stay above the vendors.
 use zero_migrate_backend::ddl::{
-    constraint_supports_fk_columns, fk_local_columns, fk_target_table, index_supports_fk_columns,
+    constraint_supports_fk_columns, fk_target_table, index_supports_fk_columns, is_pk_index,
     CreateTableRequest, DdlEmitter,
 };
 use zero_migrate_backend::schema::{
     ColumnRenameStrategy, ExistingColumnChangeStrategy, SchemaRenderer,
 };
+use zero_migrate_backend::table_rebuild::{InjectedPrimaryKey, ResolvedRename, TableRebuildPolicy};
+
+impl InjectedPrimaryKey for ResolvedInject {
+    fn primary_key(&self) -> Option<&[String]> {
+        ResolvedInject::primary_key(self)
+    }
+}
 
 /// The PG keywords whose category is NOT `UNRESERVED` (i.e. reserved,
 /// type/function-name, or column-name keywords). `quote_identifier` — and thus
@@ -288,131 +295,7 @@ pub(crate) fn constraintdef_cols(cols: &[String]) -> String {
 
 // `inline_checks_clause` MOVED to `zero_migrate_backend::ddl`.
 
-/// The MySQL storage families whose DDL rules differ from every other column.
-///
-/// MySQL 8 refuses a bare literal `DEFAULT` on all four, and refuses a key over
-/// [`Self::Text`] / [`Self::Blob`] with no prefix length (error 1170). Callers
-/// classify the MySQL renderer's output, so this follows physical storage rather
-/// than guessing from an authored type name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MysqlStorage {
-    /// The `TEXT` family.
-    Text,
-    /// The `BLOB` family.
-    Blob,
-    /// `JSON`.
-    Json,
-    /// The spatial family.
-    Geometry,
-    /// Everything else: numeric, temporal, `ENUM`, `CHAR(n)`, `VARCHAR(n)`.
-    Other,
-}
-
-impl MysqlStorage {
-    /// Classify a MySQL base type spelling.
-    pub(crate) fn of(base: &str) -> Self {
-        let upper = base.trim().to_ascii_uppercase();
-        let head = upper
-            .split(|c: char| c == '(' || c.is_ascii_whitespace())
-            .next()
-            .unwrap_or("");
-        match head {
-            "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => Self::Text,
-            "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => Self::Blob,
-            "JSON" => Self::Json,
-            "GEOMETRY" | "POINT" | "LINESTRING" | "POLYGON" | "MULTIPOINT" | "MULTILINESTRING"
-            | "MULTIPOLYGON" | "GEOMETRYCOLLECTION" => Self::Geometry,
-            _ => Self::Other,
-        }
-    }
-
-    /// Whether MySQL refuses a bare literal `DEFAULT` on this storage.
-    pub(crate) const fn refuses_literal_default(self) -> bool {
-        matches!(self, Self::Text | Self::Blob | Self::Json | Self::Geometry)
-    }
-
-    /// Whether MySQL refuses a key over this storage with no prefix length.
-    pub(crate) const fn refuses_key_without_prefix_length(self) -> bool {
-        matches!(self, Self::Text | Self::Blob)
-    }
-
-    /// The human-facing name used in a refusal.
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Text => "TEXT",
-            Self::Blob => "BLOB",
-            Self::Json => "JSON",
-            Self::Geometry => "GEOMETRY",
-            Self::Other => "other",
-        }
-    }
-}
-
 // `primary_key_clause` and `null_clause` MOVED to each vendor's DDL module.
-
-fn normalize_timestamptz_bound_literal(value: &str) -> String {
-    let mut out = value.to_string();
-    if out.len() >= 20
-        && out.as_bytes().get(4) == Some(&b'-')
-        && out.as_bytes().get(7) == Some(&b'-')
-        && out
-            .as_bytes()
-            .get(10)
-            .is_some_and(|b| *b == b'T' || *b == b' ')
-    {
-        out = out.replace('T', " ");
-        if let Some(stripped) = out.strip_suffix('Z') {
-            out = format!("{stripped}+00");
-        }
-        if let Some(stripped) = out.strip_suffix("+00:00") {
-            out = format!("{stripped}+00");
-        }
-        if let Some(stripped) = out.strip_suffix(".000+00") {
-            out = format!("{stripped}+00");
-        }
-    }
-    out
-}
-
-fn render_partition_bound_value_pg(value: &PartitionBoundValue) -> String {
-    match value {
-        PartitionBoundValue::String { value } => {
-            let normalized = normalize_timestamptz_bound_literal(value);
-            format!("'{}'", normalized.replace('\'', "''"))
-        }
-        PartitionBoundValue::Int { value } => value.get().to_string(),
-        PartitionBoundValue::MinValue => "MINVALUE".to_string(),
-        PartitionBoundValue::MaxValue => "MAXVALUE".to_string(),
-    }
-}
-
-fn render_partition_bound_values_pg(values: &[PartitionBoundValue]) -> String {
-    values
-        .iter()
-        .map(render_partition_bound_value_pg)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn render_partition_bounds_pg(bounds: &PartitionBounds) -> String {
-    match bounds {
-        PartitionBounds::Range { from, to } => format!(
-            "FOR VALUES FROM ({}) TO ({})",
-            render_partition_bound_values_pg(from),
-            render_partition_bound_values_pg(to),
-        ),
-        PartitionBounds::List { values } => {
-            format!(
-                "FOR VALUES IN ({})",
-                render_partition_bound_values_pg(values)
-            )
-        }
-        PartitionBounds::Hash { modulus, remainder } => {
-            format!("FOR VALUES WITH (MODULUS {modulus}, REMAINDER {remainder})")
-        }
-        PartitionBounds::Default => "DEFAULT".to_string(),
-    }
-}
 
 /// A lowered migration paired with its STRUCTURAL per-statement list — the exact
 /// statements whose `join(";\n")` is the migration's `up`. The IR guard-per-
@@ -736,18 +619,6 @@ pub struct RenameHint {
     pub from: String,
     /// The new (desired) column name being renamed to.
     pub to: String,
-}
-
-/// A [`RenameHint`] that has been **verified** against the desired/live snapshots
-/// (matched an actual drop+add pair with identical types). The diff routes each
-/// one through the expand-contract rename sequence. `ty` is the shared
-/// `information_schema` data-type spelling of the two matched columns.
-#[derive(Debug, Clone)]
-struct ResolvedRename {
-    table: String,
-    from: String,
-    to: String,
-    ty: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1670,7 +1541,7 @@ pub(crate) fn rename_column_in_index_bodies(
 /// rewrites the other three kinds in the same loop, and the fold is building the
 /// authoritative post-rename state rather than deciding whether a rebuild can be skipped.
 /// The SQLite rename REBUILD is the case that cannot do this here, which is why its own
-/// rewrite lives one layer down in `render_create_table_sqlite_rebuild`; it is not
+/// rewrite lives one layer down in `render_create_table_rebuild`; it is not
 /// extended to `CHECK` because the fold REFUSES to put a table-level CHECK in a SQLite
 /// snapshot at all (`createTable table-level CHECK is PostgreSQL-only`), so there is no
 /// SQLite CHECK definition for a rebuild to splice.
@@ -1743,11 +1614,11 @@ pub(crate) fn rename_column_in_inline_checks(
 /// `definition` (unlike `ColumnSnapshot`'s, which excludes both `inline_checks` and
 /// `generated` - which is exactly why those two are rewritten into the DESIRED
 /// snapshot). Rewriting `definition` there would make the desired table differ from the
-/// renamed live one, flip [`pure_sqlite_column_rename`] to `None`, turn
+/// renamed live one, flip [`TableRebuildPolicy::pure_column_rename`] to `None`, turn
 /// `preserve_stored_shape` OFF, and stop the CATALOG path replaying SQLite's own stored
 /// body - a regression on the leg that actually deploys. So the only sound seam is
 /// AFTER that decision, inside
-/// [`DeclarativeAuthor::render_create_table_sqlite_rebuild`] and after its stored-shape
+/// [`DeclarativeAuthor::render_create_table_rebuild`] and after its stored-shape
 /// arm has already returned. The sole caller is there.
 ///
 /// The rewrite REUSES the fold's [`crate::render::fold::rename_constraint_definition_column`],
@@ -2105,21 +1976,7 @@ impl DesiredSchema {
 ///   table with different shapes.
 /// - [`DeclarativeError::Invalid`] — a `ref` field's target table is not a safe
 ///   bare identifier.
-pub fn desired_snapshot(
-    project_schema: &str,
-    descriptors: &[CollectionDescriptor],
-    effective: &zero_migrate_policy::EffectivePolicy,
-) -> Result<DesiredSchema, DeclarativeError> {
-    // The historical entry point defaults to the **Postgres** desired shape —
-    // byte-identical to before snapshots became dialect-aware. SQLite callers must
-    // use [`desired_snapshot_for_dialect`]: besides its FTS5 physical shape, the
-    // SQLite snapshot carries an unqualified canonical FK target (SQLite rejects a
-    // schema-qualified REFERENCES target). Feeding this PG-default snapshot to a
-    // SQLite author would therefore leak PG FK spelling into SQLite CREATE DDL.
-    desired_snapshot_for_dialect(project_schema, descriptors, &POSTGRES, effective)
-}
-
-/// Backend-aware [`desired_snapshot`]. One piece of desired shape differs by
+/// Build the desired snapshot for an explicit registered backend. One piece of desired shape differs by
 /// engine:
 ///
 /// - **Foreign keys** — PostgreSQL/MySQL snapshot definitions qualify the target
@@ -2714,13 +2571,6 @@ fn desired_snapshot_second_pass(
     })
 }
 
-/// True if `index_name` is the implicit index a PRIMARY KEY materialises
-/// (`<table>_pkey`). It is created/dropped by the PK clause, never by a
-/// standalone CREATE/DROP INDEX, so the differ never emits DDL for it.
-fn is_pk_index(table: &str, index_name: &str) -> bool {
-    index_name == format!("{table}_pkey")
-}
-
 // `primary_key_columns`, `inline_pk_for_column` and `should_render_table_pk` MOVED
 // to `zero_migrate_backend::ddl`. They READ the snapshot's implicit `<table>_pkey`
 // index to decide whether a PK is inline or table-level, which every emitter needs
@@ -2790,184 +2640,6 @@ fn has_case_insensitive_text(table: &TableSnapshot) -> bool {
         .columns
         .iter()
         .any(|column| matches!(column.case_sensitive, Some(false)))
-}
-
-fn pure_sqlite_column_rename<'a>(
-    live: &TableSnapshot,
-    desired: &TableSnapshot,
-    renames: &[&'a ResolvedRename],
-) -> Option<&'a ResolvedRename> {
-    let [rename] = renames else {
-        return None;
-    };
-    let mut renamed_live = live.clone();
-    if renamed_live
-        .columns
-        .iter()
-        .any(|column| column.name == rename.to)
-    {
-        return None;
-    }
-    let column = renamed_live
-        .columns
-        .iter_mut()
-        .find(|column| column.name == rename.from)?;
-    column.name.clone_from(&rename.to);
-    (renamed_live == *desired).then_some(*rename)
-}
-
-fn retarget_sqlite_fk_definition(
-    definition: &str,
-    target: &str,
-    backend: &dyn SchemaRenderer,
-) -> Option<String> {
-    let marker = "REFERENCES";
-    let marker_start = definition.find(marker)?;
-    let after_marker = marker_start + marker.len();
-    let target_start =
-        after_marker + definition[after_marker..].find(|ch: char| !ch.is_whitespace())?;
-    let target_end = target_start
-        + definition[target_start..]
-            .find(|ch: char| ch == '(' || ch.is_whitespace())
-            .unwrap_or(definition.len() - target_start);
-    let mut rewritten = definition.to_string();
-    rewritten.replace_range(target_start..target_end, &backend.quote_ident(target));
-    Some(rewritten)
-}
-
-fn retarget_sqlite_self_references_in_schema(
-    schema: &mut serde_json::Value,
-    table: &str,
-    target: &str,
-) {
-    let Some(fields) = schema.as_object_mut() else {
-        return;
-    };
-    for definition in fields.values_mut() {
-        if definition
-            .get("refTarget")
-            .and_then(serde_json::Value::as_str)
-            == Some(table)
-        {
-            if let Some(definition) = definition.as_object_mut() {
-                definition.insert(
-                    "refTarget".to_string(),
-                    serde_json::Value::String(target.to_string()),
-                );
-            }
-        }
-    }
-}
-
-fn sqlite_stored_create_for_pure_rename(
-    table: &str,
-    tmp_table: &str,
-    snapshot: &TableSnapshot,
-    backend: &dyn SchemaRenderer,
-) -> Result<String, DeclarativeError> {
-    let stored = snapshot.stored_create_sql.as_deref().ok_or_else(|| {
-        DeclarativeError::Invalid(format!(
-            "SQLite pure-rename rebuild of '{table}' has no stored CREATE TABLE SQL"
-        ))
-    })?;
-
-    // Preserve the catalog-stored table body byte-for-byte, except for named
-    // self-referential FKs: during the copy/drop phase they must point at the
-    // replacement table, not the old table that is about to be dropped.
-    let mut temporary_snapshot = snapshot.clone();
-    for constraint in &mut temporary_snapshot.constraints {
-        if constraint.kind == "FOREIGN KEY"
-            && fk_target_table(&constraint.definition).as_deref() == Some(table)
-        {
-            constraint.definition = retarget_sqlite_fk_definition(
-                &constraint.definition,
-                tmp_table,
-                backend,
-            )
-            .ok_or_else(|| {
-                DeclarativeError::Invalid(format!(
-                    "SQLite pure-rename rebuild of '{table}' could not retarget self-referential foreign key {:?}",
-                    constraint.name
-                ))
-            })?;
-        }
-    }
-    let stored_ddl = backend
-        .stored_ddl()
-        .expect("the SQLite renderer must provide stored-DDL analysis");
-    let stored = stored_ddl.rewrite_stored_foreign_keys(
-        table,
-        stored,
-        snapshot,
-        &temporary_snapshot,
-        backend,
-    )?;
-    let (open, _) = stored_ddl.create_body_bounds(&stored).ok_or_else(|| {
-        DeclarativeError::Invalid(format!(
-            "SQLite pure-rename rebuild of '{table}' could not parse its stored CREATE TABLE body"
-        ))
-    })?;
-    Ok(format!(
-        "CREATE TABLE {}{}",
-        backend.quote_ident(table),
-        &stored[open..]
-    ))
-}
-
-fn sqlite_authored_primary_key_clause(
-    table: &str,
-    snapshot: &TableSnapshot,
-    inject: &ResolvedInject,
-    backend: &dyn SchemaRenderer,
-) -> Result<Option<String>, DeclarativeError> {
-    let mut primary_keys = snapshot
-        .constraints
-        .iter()
-        .filter(|constraint| constraint.kind == "PRIMARY KEY");
-    let Some(primary_key) = primary_keys.next() else {
-        return Ok(None);
-    };
-    if primary_keys.next().is_some() {
-        return Err(DeclarativeError::Invalid(format!(
-            "SQLite rebuild snapshot for '{table}' carries more than one PRIMARY KEY"
-        )));
-    }
-    let columns = fk_local_columns(&primary_key.definition);
-    if columns.is_empty() {
-        return Err(DeclarativeError::Invalid(format!(
-            "SQLite rebuild snapshot for '{table}' has an unreadable PRIMARY KEY definition"
-        )));
-    }
-    if inject.primary_key() == Some(columns.as_slice()) {
-        return Ok(None);
-    }
-    Ok(Some(format!(
-        "CONSTRAINT {} {}",
-        backend.quote_ident(&primary_key.name),
-        primary_key.definition
-    )))
-}
-
-fn append_sqlite_table_constraint(
-    table: &str,
-    create_sql: &str,
-    constraint: &str,
-    backend: &dyn SchemaRenderer,
-) -> Result<String, DeclarativeError> {
-    let stored_ddl = backend
-        .stored_ddl()
-        .expect("the SQLite renderer must provide stored-DDL analysis");
-    let (open, close) = stored_ddl.create_body_bounds(create_sql).ok_or_else(|| {
-        DeclarativeError::Invalid(format!(
-            "SQLite rebuild of '{table}' could not parse its emitted CREATE TABLE body"
-        ))
-    })?;
-    let body = &create_sql[open + 1..close];
-    let insert_at = open + 1 + body.trim_end().len();
-    let separator = if body.trim().is_empty() { "" } else { "," };
-    let mut rendered = create_sql.to_string();
-    rendered.insert_str(insert_at, &format!("{separator}\n  {constraint}"));
-    Ok(rendered)
 }
 
 /// True if `index_name` is an index the active policy's CREATE-TABLE lowering
@@ -3781,28 +3453,16 @@ pub struct DeclarativeAuthor {
     owner_app: String,
     /// The target SQL dialect the emitted `up`/`down` are spelled in.
     ///
-    /// - `Postgres` (the default via [`Self::new`]) — the historical PG-only
+    /// - `Postgres` — the historical PG-only
     ///   emitter: `self.render_create_table` etc. produce schema-qualified PG DDL.
     ///   BYTE-IDENTICAL to before this field existed.
-    /// - `Sqlite` (via [`Self::new_for_dialect`]) — the snapshot renderer emits
+    /// - `Sqlite` — the snapshot renderer emits
     ///   unqualified DDL into `main` (= the app file) under the `SqliteBackend`'s
     ///   hardened authorizer.
     dialect: DialectId,
 }
 
 impl DeclarativeAuthor {
-    /// Construct a declarative author bound to a project schema + the **deploying**
-    /// app. In the multi-app model the deploying app is the ownership-enforcement
-    /// subject: [`Self::diff`] refuses a structural change to a table owned by a
-    /// different app.
-    ///
-    /// Defaults to the **Postgres** dialect — byte-identical to before the dialect parameter.
-    /// Use [`Self::new_for_dialect`] for the Confined SQLite path.
-    #[must_use]
-    pub fn new(project_schema: impl Into<String>, owner_app: impl Into<String>) -> Self {
-        Self::new_for_dialect(project_schema, owner_app, POSTGRES)
-    }
-
     /// Construct a declarative author for an explicit target `dialect`.
     ///
     /// The SQLite identity selects unqualified snapshot-rendered DDL that lands in
@@ -3869,6 +3529,12 @@ impl DeclarativeAuthor {
 
     fn schema_renderer(&self) -> &'static dyn SchemaRenderer {
         crate::render::backends::schema_renderer(&self.dialect)
+    }
+
+    fn table_rebuild_policy(&self) -> &'static dyn TableRebuildPolicy {
+        self.schema_renderer()
+            .table_rebuild_policy()
+            .expect("a table-rebuild strategy must register its own rebuild policy")
     }
 
     fn quote_ident(&self, ident: &str) -> String {
@@ -4260,10 +3926,13 @@ impl DeclarativeAuthor {
             // INDEX, ADD INDEX) still flow through the per-op path when NO rebuild is
             // needed.
             if uses_table_rebuild {
-                if let Some(reason) =
-                    self.sqlite_existing_table_needs_rebuild(table, lt, dt, &table_renames)
-                {
-                    let rb = self.build_sqlite_rebuild(
+                if let Some(reason) = self.table_rebuild_policy().existing_table_needs_rebuild(
+                    table,
+                    lt,
+                    dt,
+                    &table_renames,
+                ) {
+                    let rb = self.build_table_rebuild(
                         table,
                         desired_full,
                         lt,
@@ -4280,7 +3949,7 @@ impl DeclarativeAuthor {
                 // (native ≥ 3.25) — but the engine's rename path is the PG-shaped
                 // expand-contract sequence (schema-qualified, dual-write). Routing a
                 // pure SQLite rename through a rebuild keeps it single-sourced and
-                // confinement-clean; `sqlite_existing_table_needs_rebuild` already
+                // confinement-clean; the registered rebuild policy already
                 // returns `Some` whenever there is a rename, so a rename can never
                 // reach the PG expand-contract author below on the SQLite leg.
             }
@@ -4316,7 +3985,11 @@ impl DeclarativeAuthor {
                 }
             }
 
-            let ec = ExpandContractAuthor::new(&self.project_schema, &self.owner_app);
+            let ec = ExpandContractAuthor::new(
+                &self.project_schema,
+                &self.owner_app,
+                self.dialect.clone(),
+            );
             for r in &table_renames {
                 let rename_column = ColumnSnapshot {
                     data_type: r.ty.clone(),
@@ -4350,7 +4023,7 @@ impl DeclarativeAuthor {
                         // TABLE only does RENAME / ADD COLUMN / DROP COLUMN / RENAME
                         // COLUMN). A type change or ANY nullability change is now
                         // reconciled by the 12-step table REBUILD detected up front —
-                        // `sqlite_existing_table_needs_rebuild` returns `Some` for
+                        // the registered rebuild policy returns `Some` for
                         // exactly these, and the loop `continue`s past this whole
                         // existing-table body BEFORE reaching here. So on the SQLite
                         // leg a same-name column with a real type/nullability change is
@@ -4952,7 +4625,7 @@ impl DeclarativeAuthor {
     /// COMPARES `definition`, so rewriting it any earlier flips
     /// `preserve_stored_shape` off. `column_renames` is the resolved rename set for
     /// this table, empty for every rebuild that is not a rename.
-    fn render_create_table_sqlite_rebuild(
+    fn render_create_table_rebuild(
         &self,
         table: &str,
         tmp_table: &str,
@@ -4979,12 +4652,9 @@ impl DeclarativeAuthor {
         // Rewriting a constraint for it would desynchronise that body from the rename
         // SQLite is about to perform.
         if preserve_stored_shape {
-            return sqlite_stored_create_for_pure_rename(
-                table,
-                tmp_table,
-                snapshot,
-                self.schema_renderer(),
-            );
+            return self
+                .table_rebuild_policy()
+                .stored_create_for_pure_rename(table, tmp_table, snapshot);
         }
 
         // The rename-follow the desired snapshot could NOT carry. Renaming
@@ -4992,7 +4662,7 @@ impl DeclarativeAuthor {
         // naming the PRE-rename column, and both arms below spell a constraint from
         // that text: the snapshot renderer splices a FOREIGN KEY / UNIQUE / composite
         // PRIMARY KEY body in whole, and the SDK-value arm reads the PRIMARY KEY's
-        // local column list back out through `sqlite_authored_primary_key_clause`. The
+        // local column list back out through the registered rebuild policy. The
         // rewrite cannot live in the desired snapshot because `ConstraintSnapshot`'s
         // equality compares `definition` and would flip `preserve_stored_shape` off -
         // see `rename_column_in_constraint_definitions`, which also says why the FK's
@@ -5011,11 +4681,9 @@ impl DeclarativeAuthor {
                 if constraint.kind == "FOREIGN KEY"
                     && fk_target_table(&constraint.definition).as_deref() == Some(table)
                 {
-                    constraint.definition = retarget_sqlite_fk_definition(
-                        &constraint.definition,
-                        tmp_table,
-                        self.schema_renderer(),
-                    )
+                    constraint.definition = self
+                        .table_rebuild_policy()
+                        .retarget_foreign_key_definition(&constraint.definition, tmp_table)
                     .ok_or_else(|| {
                         DeclarativeError::Invalid(format!(
                             "SQLite rebuild of '{table}' could not retarget self-referential foreign key {:?}",
@@ -5049,7 +4717,8 @@ impl DeclarativeAuthor {
             ))
         })?;
         let mut schema = schema.clone();
-        retarget_sqlite_self_references_in_schema(&mut schema, table, tmp_table);
+        self.table_rebuild_policy()
+            .retarget_self_references_in_schema(&mut schema, table, tmp_table);
         let mut create =
             crate::schema::query::build_create_table_with_fks_for_dialect_scoped_statements(
                 &self.project_schema,
@@ -5070,171 +4739,17 @@ impl DeclarativeAuthor {
                     "internal: SQLite rebuild of '{table}' emitted no CREATE TABLE"
                 ))
             })?;
-        if let Some(primary_key) =
-            sqlite_authored_primary_key_clause(table, snapshot, inject, self.schema_renderer())?
+        if let Some(primary_key) = self
+            .table_rebuild_policy()
+            .authored_primary_key_clause(table, snapshot, inject)?
         {
-            create = append_sqlite_table_constraint(
+            create = self.table_rebuild_policy().append_table_constraint(
                 table,
                 &create,
                 &primary_key,
-                self.schema_renderer(),
             )?;
         }
         Ok(create)
-    }
-
-    /// does this existing SQLite table need the 12-step table REBUILD to
-    /// reconcile `live` → `desired`? Returns `Some(reason)` for a change SQLite has
-    /// NO native `ALTER` for, `None` if every difference is natively expressible
-    /// (ADD COLUMN / DROP COLUMN / ADD INDEX / DROP INDEX).
-    ///
-    /// The rebuild triggers: a same-name column TYPE change, a
-    /// nullability change (either direction), a hinted column RENAME, a same-name
-    /// index in-place redefinition (uniqueness or column-set change), a same-name FK
-    /// redefinition, and an ADD/DROP of an FK constraint (SQLite has no
-    /// `ALTER TABLE ADD/DROP CONSTRAINT`, so any FK-set change is a rebuild).
-    ///
-    /// **Fail-closed:** the FIRST trigger found returns immediately with a precise
-    /// reason; the per-op emission below never runs for a rebuild-needing table.
-    fn sqlite_existing_table_needs_rebuild(
-        &self,
-        table: &str,
-        lt: &TableSnapshot,
-        dt: &TableSnapshot,
-        table_renames: &[&ResolvedRename],
-    ) -> Option<String> {
-        // (1) A hinted column RENAME — SQLite has `RENAME COLUMN`, but the engine's
-        //     rename path is the PG-shaped expand-contract sequence; on SQLite we
-        //     reconcile a rename via the rebuild (`to ← from` copy mapping), keeping
-        //     it single-sourced + confinement-clean.
-        if let Some(r) = table_renames.first() {
-            return Some(format!("rename column {} → {}", r.from, r.to));
-        }
-
-        let live_cols: BTreeMap<&str, &ColumnSnapshot> =
-            lt.columns.iter().map(|c| (c.name.as_str(), c)).collect();
-
-        // (2)/(3) A same-name column with a TYPE or NULLABILITY change. The
-        //     the registered SQLite canonicalizer avoids false positives on
-        //     PG-vs-SQLite spelling differences (bytea↔blob, double precision↔real,
-        //     timestamptz↔text); a GENUINE change maps to two distinct tokens.
-        for c in &dt.columns {
-            if let Some(lc) = live_cols.get(c.name.as_str()) {
-                if self.schema_renderer().canonical_type(&lc.data_type)
-                    != self.schema_renderer().canonical_type(&c.data_type)
-                {
-                    return Some(format!(
-                        "alter column {} type {} → {}",
-                        c.name, lc.data_type, c.data_type
-                    ));
-                }
-                if lc.nullable != c.nullable {
-                    return Some(format!(
-                        "alter column {} nullability {} → {}",
-                        c.name, lc.nullable, c.nullable
-                    ));
-                }
-                if lc.case_sensitive != c.case_sensitive {
-                    return Some(format!(
-                        "alter column {} caseSensitive {} → {}",
-                        c.name,
-                        lc.case_sensitive.unwrap_or(true),
-                        c.case_sensitive.unwrap_or(true)
-                    ));
-                }
-            }
-        }
-
-        // (4) A same-name INDEX whose uniqueness or column set changed — an in-place
-        //     index redefinition (SQLite has no `ALTER INDEX`; a DROP+CREATE inside a
-        //     rebuild is how the new shape's index set lands).
-        let live_idx: BTreeMap<&str, &IndexSnapshot> =
-            lt.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
-        for idx in &dt.indexes {
-            if is_pk_index(table, &idx.name) {
-                continue;
-            }
-            if let Some(li) = live_idx.get(idx.name.as_str()) {
-                if li.unique != idx.unique {
-                    return Some(format!(
-                        "index {}.{} uniqueness change {} → {}",
-                        table, idx.name, li.unique, idx.unique
-                    ));
-                }
-                if li.columns != idx.columns {
-                    return Some(format!(
-                        "index {}.{} column change {:?} → {:?}",
-                        table, idx.name, li.columns, idx.columns
-                    ));
-                }
-            }
-        }
-
-        // (5) A FOREIGN KEY set change — a redefinition (same name, changed body),
-        //     an ADD (desired-only FK), or a DROP (live-only FK). SQLite inlines FKs
-        //     at CREATE TABLE and has no `ALTER TABLE ADD/DROP CONSTRAINT`, so ANY FK
-        //     set difference is a rebuild.
-        let live_fk: BTreeMap<&str, &ConstraintSnapshot> = lt
-            .constraints
-            .iter()
-            .filter(|c| c.kind == "FOREIGN KEY")
-            .map(|c| (c.name.as_str(), c))
-            .collect();
-        let desired_fk: BTreeMap<&str, &ConstraintSnapshot> = dt
-            .constraints
-            .iter()
-            .filter(|c| c.kind == "FOREIGN KEY")
-            .map(|c| (c.name.as_str(), c))
-            .collect();
-        for (name, dc) in &desired_fk {
-            match live_fk.get(name) {
-                None => return Some(format!("add foreign key {table}.{name}")),
-                Some(lc) if lc.definition != dc.definition => {
-                    return Some(format!(
-                        "foreign key {table}.{name} definition change {:?} → {:?}",
-                        lc.definition, dc.definition
-                    ));
-                }
-                Some(_) => {}
-            }
-        }
-        for name in live_fk.keys() {
-            if !desired_fk.contains_key(name) {
-                return Some(format!("drop foreign key {table}.{name}"));
-            }
-        }
-
-        // (6) A DROP COLUMN of a CONSTRAINED column. SQLite's native
-        //     `ALTER TABLE … DROP COLUMN` ERRORS at apply when the dropped column
-        //     participates in ANY index, CHECK, foreign key, generated-column
-        //     expression, or partial-index predicate — so the per-op
-        //     `render_drop_column` would abort the migration. We route such a drop
-        //     to the 12-step rebuild (which omits the column from `copy_columns` and
-        //     recreates only the surviving dependents). A column that is
-        //     UNconstrained drops natively via the per-op path (no rebuild).
-        //
-        //     "Dropped" = a column present in LIVE, absent from DESIRED, and NOT a
-        //     rename `from` (a rename is its own rebuild trigger, handled in step 1).
-        let desired_names: BTreeSet<&str> = dt.columns.iter().map(|c| c.name.as_str()).collect();
-        let renamed_from: BTreeSet<&str> = table_renames.iter().map(|r| r.from.as_str()).collect();
-        for lc in &lt.columns {
-            let col = lc.name.as_str();
-            if desired_names.contains(col) || renamed_from.contains(col) {
-                continue; // surviving column, or handled by the rename path
-            }
-            // This `col` is being dropped. Does any index / constraint / raw-DDL
-            // dependent of the LIVE table reference it? If so → rebuild.
-            if let Some(dep) = self
-                .schema_renderer()
-                .stored_ddl()
-                .expect("the SQLite renderer must provide stored-DDL analysis")
-                .dropped_column_dependent(table, lc, lt)
-            {
-                return Some(dep);
-            }
-        }
-
-        None
     }
 
     /// build the [`TableRebuild`] (spec + journal migration) that
@@ -5249,7 +4764,7 @@ impl DeclarativeAuthor {
     /// dropped column is excluded, an added one takes its DEFAULT/NULL. The recreate
     /// set contains indexes newly planned to support the desired FK; the backend
     /// separately captures and replays every existing index and trigger verbatim.
-    pub(crate) fn build_sqlite_constraint_rebuild(
+    pub(crate) fn build_table_constraint_rebuild(
         &self,
         table: &str,
         live: &TableSnapshot,
@@ -5365,7 +4880,7 @@ impl DeclarativeAuthor {
             recreate_objects,
             column_renames: Vec::new(),
             dropped_columns,
-            sequence_policy: zero_migrate_sqlite::SqliteSequencePolicy::Preserve,
+            sequence_policy: crate::render::backends::SqliteSequencePolicy::Preserve,
             reason,
         };
         let preview_up = std::iter::once(spec.new_table_create.as_str())
@@ -5382,7 +4897,7 @@ impl DeclarativeAuthor {
         Ok(TableRebuild { migration, spec })
     }
 
-    fn build_sqlite_rebuild(
+    fn build_table_rebuild(
         &self,
         table: &str,
         desired_full: &DesiredSchema,
@@ -5399,9 +4914,11 @@ impl DeclarativeAuthor {
         // final name; targeting the old table here would fire ON DELETE actions when
         // the old table is dropped.
         let tmp = TableRebuildSpec::tmp_name(table);
-        let pure_rename = pure_sqlite_column_rename(lt, dt, table_renames);
+        let pure_rename = self
+            .table_rebuild_policy()
+            .pure_column_rename(lt, dt, table_renames);
         let preserve_stored_shape = pure_rename.is_some() && dt.stored_create_sql.is_some();
-        let create_real = self.render_create_table_sqlite_rebuild(
+        let create_real = self.render_create_table_rebuild(
             table,
             &tmp,
             desired_full,
@@ -5526,7 +5043,7 @@ impl DeclarativeAuthor {
                 .map(|rename| vec![(rename.from.clone(), rename.to.clone())])
                 .unwrap_or_default(),
             dropped_columns,
-            sequence_policy: zero_migrate_sqlite::SqliteSequencePolicy::Preserve,
+            sequence_policy: crate::render::backends::SqliteSequencePolicy::Preserve,
             reason,
         };
 
@@ -5618,7 +5135,11 @@ impl DeclarativeAuthor {
                 // declarative path calls the SAME `ExpandContractAuthor::author` with
                 // the SAME `OnlineIntent` fields, so the authored E1..C2 ids +
                 // intra-chain `depends_on` match by construction.
-                let ec = ExpandContractAuthor::new(&self.project_schema, &self.owner_app);
+                let ec = ExpandContractAuthor::new(
+                    &self.project_schema,
+                    &self.owner_app,
+                    self.dialect.clone(),
+                );
                 let plan = ec
                     .author(&OnlineIntent::RenameColumn {
                         table: table.to_string(),
@@ -5634,7 +5155,7 @@ impl DeclarativeAuthor {
                 Ok(crate::render::step::RenameStep::ExpandContract(plan))
             }
             ColumnRenameStrategy::TableRebuild => {
-                let rebuild = self.sqlite_rename_rebuild(
+                let rebuild = self.build_column_rename_rebuild(
                     table,
                     from,
                     to,
@@ -5676,7 +5197,7 @@ impl DeclarativeAuthor {
     // the rename triple, the full live snapshot + SDK Value to author the rebuild,
     // and the real owner for the cross-app guard. See `lower_ir_rename`.
     #[allow(clippy::too_many_arguments)]
-    fn sqlite_rename_rebuild(
+    fn build_column_rename_rebuild(
         &self,
         table: &str,
         from: &str,
@@ -5705,7 +5226,7 @@ impl DeclarativeAuthor {
         }
         // Renaming `ColumnSnapshot::name` alone leaves any generated expression in
         // this table naming the PRE-rename column, and this desired snapshot is what
-        // `render_create_table_sqlite_rebuild` renders the new-table CREATE from
+        // `render_create_table_rebuild` renders the new-table CREATE from
         // whenever the table has a generated column. Follow the rename into the
         // expressions through the SAME helper the fold uses, or the rebuild emits
         // `GENERATED ALWAYS AS (("qty_on_hand" + 1))` for a table whose only such
@@ -5725,10 +5246,10 @@ impl DeclarativeAuthor {
         // excludes both `inline_checks` and `generated`, which is precisely why the two
         // rewrites above are safe in place). Rewriting a definition into THIS desired
         // snapshot would make it differ from the renamed live one, flip
-        // `pure_sqlite_column_rename` to `None`, turn `preserve_stored_shape` off and
+        // the pure-column-rename policy to `None`, turn `preserve_stored_shape` off and
         // stop the CATALOG path replaying its stored body - a regression on the leg
         // that actually deploys. So the rename-follow runs one layer down, in
-        // `render_create_table_sqlite_rebuild`, AFTER that decision is taken and after
+        // `render_create_table_rebuild`, AFTER that decision is taken and after
         // the stored-shape arm has returned. See
         // `rename_column_in_constraint_definitions`.
         //
@@ -5898,6 +5419,7 @@ impl DeclarativeAuthor {
     }
 
     /// Render `CREATE TABLE <schema>.<table> (<cols…>, <pk>, <inline fks…>)`.
+    #[cfg(test)]
     fn render_create_table(
         &self,
         table: &str,
@@ -6233,17 +5755,14 @@ impl DeclarativeAuthor {
     }
 
     fn render_create_partition(&self, name: &str, of: &str, bounds: &PartitionBounds) -> Migration {
-        let up = format!(
-            "CREATE TABLE {} PARTITION OF {} {}",
-            self.qualified(name),
-            self.qualified(of),
-            render_partition_bounds_pg(bounds),
-        );
-        let down = Some(format!("DROP TABLE {}", self.qualified(name)));
+        let (up, down) = self
+            .emitter()
+            .create_partition(name, of, bounds)
+            .expect("selected backend supports partition-relation DDL");
         self.make(
             &format!("create_partition_{name}"),
             up,
-            down,
+            Some(down),
             MigrationFlags::default(),
             Vec::new(),
         )
@@ -6255,34 +5774,24 @@ impl DeclarativeAuthor {
         name: &str,
         bound: &PartitionBounds,
     ) -> Migration {
-        let up = format!(
-            "ALTER TABLE {} ATTACH PARTITION {} {}",
-            self.qualified(parent),
-            self.qualified(name),
-            render_partition_bounds_pg(bound),
-        );
-        let down = Some(format!(
-            "ALTER TABLE {} DETACH PARTITION {}",
-            self.qualified(parent),
-            self.qualified(name),
-        ));
+        let (up, down) = self
+            .emitter()
+            .attach_partition(parent, name, bound)
+            .expect("selected backend supports partition-relation DDL");
         self.make(
             &format!("attach_partition_{parent}_{name}"),
             up,
-            down,
+            Some(down),
             MigrationFlags::default(),
             Vec::new(),
         )
     }
 
     fn render_detach_partition(&self, parent: &str, name: &str, concurrently: bool) -> Migration {
-        let concurrently = if concurrently { " CONCURRENTLY" } else { "" };
-        let up = format!(
-            "ALTER TABLE {} DETACH PARTITION {}{}",
-            self.qualified(parent),
-            self.qualified(name),
-            concurrently,
-        );
+        let up = self
+            .emitter()
+            .detach_partition(parent, name, concurrently)
+            .expect("selected backend supports partition-relation DDL");
         self.make(
             &format!("detach_partition_{parent}_{name}"),
             up,
@@ -6293,8 +5802,10 @@ impl DeclarativeAuthor {
     }
 
     fn render_drop_partition(&self, name: &str, cascade: bool) -> Migration {
-        let cascade = if cascade { " CASCADE" } else { "" };
-        let up = format!("DROP TABLE {}{}", self.qualified(name), cascade);
+        let up = self
+            .emitter()
+            .drop_partition(name, cascade)
+            .expect("selected backend supports partition-relation DDL");
         self.make(
             &format!("drop_partition_{name}"),
             up,
@@ -7452,8 +6963,8 @@ mod snapshot_builder_refactor_safety_tests {
         let pg_inject = no_inject("app", &d.name);
         let pg_snap = build_resolved_table_snapshot("app", &d, &POSTGRES, &pg_inject)
             .expect("PG snapshot builds");
-        let pg_sql =
-            DeclarativeAuthor::new("app", "app_test").render_create_table(&d.name, &pg_snap, &[]);
+        let pg_sql = DeclarativeAuthor::new_for_dialect("app", "app_test", POSTGRES)
+            .render_create_table(&d.name, &pg_snap, &[]);
         assert!(
             pg_sql.contains("\"email\" public.citext"),
             "Postgres case-insensitive text must render public.citext:\n{pg_sql}"
@@ -7515,11 +7026,8 @@ mod snapshot_builder_refactor_safety_tests {
             None
         );
 
-        let sql = DeclarativeAuthor::new("zero_migrate", "platform").render_create_table(
-            &d.name,
-            &snap,
-            &[],
-        );
+        let sql = DeclarativeAuthor::new_for_dialect("zero_migrate", "platform", POSTGRES)
+            .render_create_table(&d.name, &snap, &[]);
         assert!(
             !sql.contains("\"payload\" jsonb NOT NULL DEFAULT"),
             "platform-exact json column without explicit default must not render DEFAULT:\n{sql}"
@@ -7549,8 +7057,8 @@ mod snapshot_builder_refactor_safety_tests {
             "confined-resolved json columns keep plugin-db default synthesis"
         );
 
-        let sql =
-            DeclarativeAuthor::new("app", "app_test").render_create_table(&d.name, &snap, &[]);
+        let sql = DeclarativeAuthor::new_for_dialect("app", "app_test", POSTGRES)
+            .render_create_table(&d.name, &snap, &[]);
         assert!(
             sql.contains("\"payload\" jsonb DEFAULT '{}'::jsonb"),
             "confined-resolved json column must still render DEFAULT '{{}}'::jsonb:\n{sql}"
@@ -7581,11 +7089,8 @@ mod snapshot_builder_refactor_safety_tests {
             "explicit-default arm must remain unchanged"
         );
 
-        let sql = DeclarativeAuthor::new("zero_migrate", "platform").render_create_table(
-            &d.name,
-            &snap,
-            &[],
-        );
+        let sql = DeclarativeAuthor::new_for_dialect("zero_migrate", "platform", POSTGRES)
+            .render_create_table(&d.name, &snap, &[]);
         assert!(
             sql.contains("\"settings\" jsonb NOT NULL DEFAULT '{}'::jsonb"),
             "platform-exact explicit json default must still render:\n{sql}"
@@ -7882,7 +7387,8 @@ mod mysql_storage_agreement_tests {
     //! COUNTERFACTUAL - a shape the engine refuses rather than one it ships - and
     //! the refusal it depends on is pinned by
     //! [`a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it`].
-    use super::{column_snapshot_for_field, FieldDescriptor, MysqlStorage};
+    use super::{column_snapshot_for_field, FieldDescriptor};
+    use zero_migrate_backend::schema::KeyStorageEvidence;
     use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     fn field(name: &str, ty: &str) -> FieldDescriptor {
@@ -7936,47 +7442,71 @@ mod mysql_storage_agreement_tests {
 
     #[test]
     fn the_shared_predicate_and_the_renderer_agree_on_mysql_storage() {
-        let cases: Vec<(FieldDescriptor, MysqlStorage)> = vec![
-            (unbounded("body"), MysqlStorage::Text),
-            (case_insensitive(unbounded("body_ci")), MysqlStorage::Text),
+        let cases: Vec<(FieldDescriptor, Option<&str>, Option<&str>)> = vec![
+            (unbounded("body"), Some("TEXT"), Some("TEXT")),
+            (
+                case_insensitive(unbounded("body_ci")),
+                Some("TEXT"),
+                Some("TEXT"),
+            ),
             // COUNTERFACTUAL. Authored name says "bounded", rendered storage is a
             // bare TEXT - the width is dropped, not narrowed. No authored schema
             // reaches this: the facet gate refuses it (see the test below). Kept as
             // a case so that relaxing the gate cannot quietly make it reachable.
             (
                 case_insensitive(bounded("label_ci", 50)),
-                MysqlStorage::Text,
+                Some("TEXT"),
+                Some("TEXT"),
             ),
-            (bounded("label", 50), MysqlStorage::Other),
+            (bounded("label", 50), None, None),
             // A descriptor `string` with no maxLength is the direct `t.text()`
             // carrier and deliberately converges with the IR marker on TEXT.
-            (field("brand", "string"), MysqlStorage::Text),
-            (native_enum("status"), MysqlStorage::Other),
-            (prefixed_id("ticket_id"), MysqlStorage::Other),
-            (fixed_char("code", 10), MysqlStorage::Other),
-            (field("doc", "json"), MysqlStorage::Json),
-            (field("tags", "textArray"), MysqlStorage::Json),
-            (field("payload", "bytes"), MysqlStorage::Blob),
-            (vector("embedding", 3), MysqlStorage::Blob),
-            (field("where_at", "geoPoint"), MysqlStorage::Geometry),
-            (field("n", "int"), MysqlStorage::Other),
-            (field("big", "bigInt"), MysqlStorage::Other),
-            (field("flag", "boolean"), MysqlStorage::Other),
-            (field("at", "date"), MysqlStorage::Other),
-            (field("host", "inet"), MysqlStorage::Other),
+            (field("brand", "string"), Some("TEXT"), Some("TEXT")),
+            (native_enum("status"), None, None),
+            (prefixed_id("ticket_id"), None, None),
+            (fixed_char("code", 10), None, None),
+            (field("doc", "json"), None, Some("JSON")),
+            (field("tags", "textArray"), None, Some("JSON")),
+            (field("payload", "bytes"), Some("BLOB"), Some("BLOB")),
+            (vector("embedding", 3), Some("BLOB"), Some("BLOB")),
+            (field("where_at", "geoPoint"), None, Some("GEOMETRY")),
+            (field("n", "int"), None, None),
+            (field("big", "bigInt"), None, None),
+            (field("flag", "boolean"), None, None),
+            (field("at", "date"), None, None),
+            (field("host", "inet"), None, None),
         ];
 
-        for (f, expected) in cases {
+        for (f, key_label, default_label) in cases {
             let snapshot = column_snapshot_for_field(&f, &MYSQL, false)
                 .unwrap_or_else(|error| panic!("{:?} snapshots: {error}", f.name));
-            let rendered =
-                crate::render::backends::schema_renderer(&MYSQL).column_type(&snapshot, false);
-            assert_eq!(
-                MysqlStorage::of(&rendered),
-                expected,
-                "{:?} renders {rendered:?}",
-                f.name,
+            let backend = crate::render::backends::schema_renderer(&MYSQL);
+            let rendered = backend.column_type(&snapshot, false);
+            let key = backend.unprefixed_key_storage_refusal(
+                "test key",
+                "things",
+                &f.name,
+                KeyStorageEvidence::RenderedType(&rendered),
             );
+            let literal = backend.literal_default_storage_refusal(&f.name, &rendered, "'value'");
+            assert_eq!(
+                key.is_some(),
+                key_label.is_some(),
+                "{:?} renders {rendered:?}",
+                f.name
+            );
+            assert_eq!(
+                literal.is_some(),
+                default_label.is_some(),
+                "{:?} renders {rendered:?}",
+                f.name
+            );
+            if let (Some(refusal), Some(label)) = (key, key_label) {
+                assert!(refusal.reason.contains(label), "{}", refusal.reason);
+            }
+            if let (Some(refusal), Some(label)) = (literal, default_label) {
+                assert!(refusal.reason.contains(label), "{}", refusal.reason);
+            }
         }
     }
 

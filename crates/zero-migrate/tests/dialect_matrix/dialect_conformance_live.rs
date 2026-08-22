@@ -1,9 +1,10 @@
 //! LAYER 1 of the backend conformance kit: the dialect table's declarations,
 //! answered by a live server.
 //!
-//! `dialect_table_faithfulness.rs` proves the sidecar, the generated
-//! `DIALECT_TABLE` and `Op::support()` agree with each other. All three are the
-//! ENGINE'S OWN OPINION, and no connection is opened anywhere in that file. So a
+//! `dialect_table_faithfulness.rs` proves the sidecar and generated
+//! `DIALECT_TABLE` agree; the generated file's lib test pins all 276 cells to the
+//! registered backend policies that production support queries. Those are still
+//! the ENGINE'S OWN OPINION, and no connection is opened by either proof. So a
 //! row may declare `portable`, fail against a real PostgreSQL, and pass it. This
 //! file is the layer that closes exactly that gap, and nothing else: for every
 //! `(op-kind, variant)` row of `dialect-support.toml` it drives the SAME
@@ -142,12 +143,12 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+use crate::dialect_table::{Disposition, DIALECT_TABLE};
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
 use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
 use zero_migrate::apply::executor::{ApplyError, LockMode};
 use zero_migrate::driver::{DbError, SqlSession};
-use zero_migrate::model::dialect_table::{Disposition, DIALECT_TABLE};
 use zero_migrate::model::ir::Op;
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{
@@ -156,7 +157,7 @@ use zero_migrate::render::lower::{
 use zero_migrate::{
     resolve_create_table_policy, Approval, DeclarativeApplyError, EffectivePolicy, EngineError,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
-    PostgresBackend, SqlDialect, SqliteBackend,
+    PostgresBackend, SqliteBackend,
 };
 
 /// What the MySQL leg needed, and where each piece of it now lives. Recorded as a
@@ -185,7 +186,7 @@ use zero_migrate::{
 ///    [`mysql_probe_databases`], sorted by the SAME [`probe_owner`] the PostgreSQL
 ///    leg uses, because one MySQL instance is shared by every agent and gate run in
 ///    this tree and a sibling's live probe read as a leak fails a working suite.
-/// 3. DONE HERE: the per-row prelude review, [`prelude`]'s `SqlDialect::Mysql`
+/// 3. DONE HERE: the per-row prelude review, [`prelude`]'s `MYSQL` dialect
 ///    arms. The findings are recorded beside them.
 /// 4. NEEDED NOTHING, as predicted: `disposition_for` reads `row.mysql` from the
 ///    generated table like the other two columns.
@@ -437,7 +438,7 @@ fn lower(
     envelope: &str,
     schema: &str,
     policy: &EffectivePolicy,
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
     live: &LiveSchema,
 ) -> Result<LoweredArtifact, Verdict> {
     let authored: MigrationIr = match serde_json::from_str(envelope) {
@@ -468,7 +469,7 @@ fn lower(
         }
     };
     let author = IrAuthor::new(schema, OWNER, dialect, policy);
-    let guard = GuardConfig::from_policy(policy.clone(), dialect.id());
+    let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
     author
         .load_and_lower_guarded(&source, OWNER, &registry(), live, &guard)
         .map_err(|error| classify_lower(&error))
@@ -649,7 +650,12 @@ fn create_function() -> Value {
 /// The ops that must already have applied for this row's representative to have
 /// its referents. Authored as IR and applied through the SAME production path -
 /// never hand-written DDL.
-fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec<Value> {
+fn prelude(
+    kind: &str,
+    variant: &str,
+    dialect: &zero_migrate::DialectId,
+    probe: &Names,
+) -> Vec<Value> {
     // THE MySQL AXIS, and it is the exact counterpart of the SQLite one below.
     //
     // `text` renders as MySQL TEXT storage, and MySQL refuses a key over a TEXT or
@@ -674,7 +680,7 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
     // FIXTURE half of the answer; the ungated standalone lane is an engine finding,
     // recorded in `docs/review-log.md`, not something this fixture can repair.
     let keyable = || {
-        if dialect == SqlDialect::Mysql {
+        if dialect == &zero_migrate::MYSQL {
             json!({ "string": { "length": 24 } })
         } else {
             json!("text")
@@ -786,34 +792,40 @@ fn prelude(kind: &str, variant: &str, dialect: SqlDialect, probe: &Names) -> Vec
         // table the trigger is attached to, so the prelude supplies `t2` and deletes
         // from it. What this row asks is whether `dropTrigger` drops a trigger, not
         // what the trigger's body says.
-        ("dropTrigger", _) => match dialect {
-            SqlDialect::Mysql => vec![
-                text(),
-                json!({ "op": "createTable", "name": "t2",
+        ("dropTrigger", _) => {
+            if dialect == &zero_migrate::MYSQL {
+                vec![
+                    text(),
+                    json!({ "op": "createTable", "name": "t2",
                         "columns": [col("id", json!("bigInt"), false),
                                     col("x", json!("boolean"), true)],
                         "primaryKey": ["id"], "constraints": [], "indexes": [] }),
-                json!({ "op": "createTrigger", "name": "tg", "table": "t",
+                    json!({ "op": "createTrigger", "name": "tg", "table": "t",
                         "timing": "before", "events": ["insert"], "forEach": "row",
                         "action": { "kind": "body", "statements": [
                             { "stmt": "delete", "table": "t2",
                               "where": { "node": "colRef", "name": "x" } }] } }),
-            ],
-            SqlDialect::Postgres => vec![
-                text(),
-                create_function(),
-                json!({ "op": "createTrigger", "name": "tg", "table": "t",
-                        "timing": "before", "events": ["insert"], "forEach": "row",
-                        "action": { "kind": "executeFunction", "name": "f" } }),
-            ],
-            SqlDialect::Sqlite => vec![
-                text(),
-                json!({ "op": "createTrigger", "name": "tg", "table": "t",
-                        "timing": "before", "events": ["insert"], "forEach": "row",
-                        "action": { "kind": "body", "statements": [
-                            { "stmt": "select", "expr": { "node": "colRef", "name": "x" } }] } }),
-            ],
-        },
+                ]
+            } else if dialect == &zero_migrate::POSTGRES {
+                vec![
+                    text(),
+                    create_function(),
+                    json!({ "op": "createTrigger", "name": "tg", "table": "t",
+                            "timing": "before", "events": ["insert"], "forEach": "row",
+                            "action": { "kind": "executeFunction", "name": "f" } }),
+                ]
+            } else if dialect == &zero_migrate::SQLITE {
+                vec![
+                    text(),
+                    json!({ "op": "createTrigger", "name": "tg", "table": "t",
+                            "timing": "before", "events": ["insert"], "forEach": "row",
+                            "action": { "kind": "body", "statements": [
+                                { "stmt": "select", "expr": { "node": "colRef", "name": "x" } }] } }),
+                ]
+            } else {
+                panic!("unregistered test dialect {dialect}")
+            }
+        }
 
         ("createPartition", _) => vec![table_t_partitioned()],
         ("attachPartition", _) => vec![
@@ -1089,7 +1101,7 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
         kind,
         variant,
         op,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &probe,
         &policy,
         &cfg,
@@ -1165,7 +1177,7 @@ async fn mysql_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict
         kind,
         variant,
         op,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &probe,
         &policy,
         &cfg,
@@ -1249,7 +1261,7 @@ async fn sqlite_verdict(kind: &str, variant: &str, op: &Op) -> Verdict {
         kind,
         variant,
         op,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &probe,
         &policy,
         &cfg,
@@ -1266,7 +1278,7 @@ async fn run_row<B: MigrationBackend>(
     kind: &str,
     variant: &str,
     op: &Op,
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
     probe: &Names,
     policy: &EffectivePolicy,
     cfg: &ExecutorConfig,
@@ -1316,7 +1328,7 @@ async fn run_row<B: MigrationBackend>(
         Ok(snapshot) => LiveSchema::from_catalog_snapshot(snapshot, OWNER),
         Err(_) => LiveSchema::from_tables(BTreeSet::new()),
     };
-    if dialect == SqlDialect::Sqlite && !prelude_ops.is_empty() {
+    if dialect == &zero_migrate::SQLITE && !prelude_ops.is_empty() {
         let history: Vec<Op> = prelude_ops
             .iter()
             .filter_map(|op| serde_json::from_value(op.clone()).ok())
@@ -1405,11 +1417,12 @@ const NO_REASON_SENTINEL: &str = "internal: supported cell has no refusal reason
 /// Rows that currently show [`NO_REASON_SENTINEL`] to the operator, pinned.
 ///
 /// This check exists because of a MEASURED limit on layer 1 as the proposal
-/// specifies it. `Op::support()` READS the dialect table, so a cell declared
-/// `unsupported` makes validate refuse on the table's own say-so: the required
-/// outcome `RefusedByCapability` is satisfied BY CONSTRUCTION, and the check
-/// cannot fail. Demonstrated by flipping `dropTable/base` on PostgreSQL - an op
-/// PostgreSQL obviously supports - to `unsupported`: the suite stayed GREEN.
+/// specifies it. Production support reads the selected backend policy, whose
+/// answers are pinned to the generated table by the 276-cell parity test. An
+/// `unsupported` answer makes validate refuse on that backend's own say-so: the
+/// required outcome `RefusedByCapability` is satisfied BY CONSTRUCTION, and the
+/// check cannot fail. Demonstrated by flipping `dropTable/base` on PostgreSQL - an
+/// op PostgreSQL obviously supports - to `unsupported`: the suite stayed GREEN.
 ///
 /// What that flip DID change is the operator's message, which became the sentinel
 /// above. So the message is the one observable that a too-conservative declaration

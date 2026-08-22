@@ -36,7 +36,8 @@
 //!    differ and the drift pass through `pair_indexes`, which is the one place two
 //!    consumers already agree by construction rather than by convention.
 //! 3. **pure-rename equivalence** - "is the ONLY difference between live and desired
-//!    this one column rename?", which `render::declarative::pure_sqlite_column_rename`
+//!    this one column rename?", which the registered rebuild policy's
+//!    `pure_column_rename`
 //!    asks through `TableSnapshot::eq` ([`rename_equivalence_identity`]).
 //! 4. **structural drift** - "would a user call this a change to their schema?"
 //!    ([`drift_identity`]). This one does NOT go through `PartialEq` at all;
@@ -54,7 +55,7 @@
 //!
 //! Question 3 is the one that has already BLOCKED A FIX. `docs/review-log.md:28291-28297`
 //! records that `ConstraintSnapshot`'s `PartialEq` compares `definition`, so following a
-//! column rename into a constraint definition inside `sqlite_rename_rebuild` would have
+//! column rename into a constraint definition inside the column-rename rebuild would have
 //! flipped `preserve_stored_shape` off and stopped the catalog path replaying SQLite's
 //! own stored body. Whether you may fix a bug currently depends on an exclusion list
 //! written for an unrelated reason. Naming the comparators separately is what makes that
@@ -385,7 +386,7 @@ pub struct Column {
     pub nullable: bool,
     /// The `DEFAULT` clause expression to emit at CREATE / ADD COLUMN.
     pub default: Option<String>,
-    /// SqlDialect-rendered type spelling to use in DDL instead of deriving from
+    /// Backend-rendered type spelling to use in DDL instead of deriving from
     /// `data_type`.
     ///
     /// The VALUE is dialect-rendered; the FIELD is neutral, because every backend has a
@@ -409,6 +410,8 @@ pub struct Column {
     pub case_sensitive: Option<bool>,
     /// Whether this authored logical text column is unbounded.
     pub unbounded_text: bool,
+    /// Descriptor type token retained for backend-owned spelling.
+    pub type_def: Option<serde_json::Value>,
     /// Whether this type came from authored tokens rather than a catalog read.
     pub authored_type: bool,
     /// Exact non-default catalog collation identity.
@@ -547,6 +550,7 @@ impl Column {
             id_default: snapshot.id_default.clone(),
             case_sensitive: snapshot.case_sensitive,
             unbounded_text: snapshot.unbounded_text,
+            type_def: snapshot.type_def.clone(),
             authored_type: snapshot.authored_type,
             collation: snapshot.collation.clone(),
             encryption_sentinel: snapshot.encryption_sentinel.clone(),
@@ -582,7 +586,7 @@ impl Column {
             mysql_default_generated: vendor.mysql_default_generated.get(&key).copied(),
             case_sensitive: self.case_sensitive,
             unbounded_text: self.unbounded_text,
-            type_def: None,
+            type_def: self.type_def.clone(),
             authored_type: self.authored_type,
             collation: self.collation.clone(),
             mysql_text_storage: vendor.mysql_text_storage.get(&key).cloned(),
@@ -935,6 +939,8 @@ impl SchemaModel {
 ///   IS compared.
 /// * `ddl_type_override` - emission-only spelling for a named type reference. The
 ///   introspectable `data_type` is compared instead.
+/// * `type_def` - emission-only descriptor token retained so a backend can recover
+///   its physical spelling. The introspectable `data_type` is compared instead.
 /// * `inline_checks` - emission-only. Live introspection tracks table constraints
 ///   separately; only recognised ID-format CHECKs project into `value_format`, which IS
 ///   compared.
@@ -951,7 +957,7 @@ impl SchemaModel {
 /// defensible, and that is the fact section D of the proposal is about.
 /// `docs/review-log.md:28481-28486`: `rename_column_in_generated_columns` and
 /// `rename_column_in_inline_checks` write into the DESIRED snapshot from
-/// `sqlite_rename_rebuild`, and "that is safe only because `ColumnSnapshot`'s
+/// the column-rename rebuild, and "that is safe only because `ColumnSnapshot`'s
 /// `PartialEq` excludes both fields". The mirror case is the bug that stayed unfixed for
 /// a commit: `ConstraintSnapshot`'s equality does NOT exclude `definition`, so the same
 /// rewrite one field over would have flipped `preserve_stored_shape` off. See
@@ -977,6 +983,7 @@ pub fn column_shape_identity(left: &Column, right: &Column) -> bool {
         id_default,
         case_sensitive,
         unbounded_text: _ignored_unbounded_text_emission_only,
+        type_def: _ignored_type_def_emission_only,
         authored_type: _ignored_authored_type_emission_only,
         collation,
         encryption_sentinel: _ignored_encryption_sentinel,
@@ -1038,6 +1045,7 @@ pub fn drift_identity(left: &Column, right: &Column) -> bool {
         id_default: _routed_by_shape_identity_6,
         case_sensitive: _routed_by_shape_identity_7,
         unbounded_text: _ignored_unbounded_text_emission_only,
+        type_def: _ignored_type_def_emission_only,
         authored_type: _ignored_authored_type_emission_only,
         collation: _routed_by_shape_identity_8,
         encryption_sentinel: _ignored_encryption_sentinel,
@@ -1175,7 +1183,8 @@ pub fn constraint_shape_identity(left: &Constraint, right: &Constraint) -> bool 
 /// The neutral half of `TableSnapshot::eq`, whose four production consumers are all in
 /// `render/declarative.rs`: `DesiredSchema`'s own equality (`:3450`),
 /// `desired_snapshot_second_pass`'s `ConflictingDeclaration` check (`:4128`),
-/// `pure_sqlite_column_rename` (`:4261`), and `enforce_ownership`'s "did anything
+/// the registered rebuild policy's `pure_column_rename`, and `enforce_ownership`'s
+/// "did anything
 /// actually change" gate (`:6645`, `:6647`).
 ///
 /// `runtime_options` is ignored because live catalog introspection cannot recover it, so
@@ -1217,7 +1226,7 @@ pub fn table_shape_identity(left: &Table, right: &Table) -> bool {
 /// it now indistinguishable from the desired one - so the SQLite rebuild may replay
 /// `sqlite_master`'s stored `CREATE TABLE` verbatim instead of re-rendering it?
 ///
-/// The question `render::declarative::pure_sqlite_column_rename` (`declarative.rs:4261`)
+/// The question the registered rebuild policy's `pure_column_rename` asks
 /// asks. Today it asks it through `TableSnapshot::eq`, so its answer is
 /// [`table_shape_identity`] and this function is defined as that - deliberately, because
 /// this step preserves behaviour exactly and
@@ -1226,11 +1235,11 @@ pub fn table_shape_identity(left: &Table, right: &Table) -> bool {
 /// **Naming it is the deliverable, not changing it.** Section D of the proposal shows
 /// this is the comparator that has already BLOCKED A FIX: because
 /// `ConstraintSnapshot::eq` compares `definition`, following a column rename into a
-/// constraint definition inside `sqlite_rename_rebuild` would have made the desired table
+/// constraint definition inside the column-rename rebuild would have made the desired table
 /// unequal to the renamed live one, flipped `preserve_stored_shape` off, and stopped the
 /// catalog path replaying SQLite's own stored body
 /// (`docs/review-log.md:28291-28297`, `28481-28487`). The rewrite had to be moved a layer
-/// down into `render_create_table_sqlite_rebuild` instead.
+/// down into `render_create_table_rebuild` instead.
 ///
 /// So the coupling is real and it stays. What changes is that it is now a DECLARED INPUT
 /// of one named function with the consequence written next to it, instead of a fact you

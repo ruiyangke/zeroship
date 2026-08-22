@@ -77,23 +77,14 @@
 //! match. (Plain text, not doc links: every name in this section is a private
 //! item, and a link from this module's public docs to one is a rustdoc warning.)
 //!
-//! Three kinds of dialect branch STAYED, on purpose:
+//! The remaining neutral helpers do not select a vendor:
 //!
-//! - **Semantics.** `validate_mysql_assignment_semantics` and
-//!   `mysql_expr_references_column` decide whether an authored program MEANS
-//!   the same thing under MySQL's left-to-right SET evaluation. They emit an
-//!   ERROR, never SQL bytes. Core deciding something about a vendor stays in
-//!   core, dialect-parameterized.
 //! - **IR leg selection.** `select_dialect_leg` reads the wire-pinned
 //!   `Expr::Dialectal { legs }` map by the backend's own `DialectId`. It cannot
 //!   move; the shape is a checksum input.
-//! - **Everything entangled with `BindCtx`.** `push_scalar`'s bytes transport,
-//!   `render_on_conflict_mysql`, and the limited-`DELETE` arms all interleave
-//!   spelling with the bind accumulator, which is not part of the backend
-//!   contract. `push_scalar` additionally asks "does this driver bind bytes
-//!   natively", which is a CAPABILITY the vocabulary does not have yet. Moving
-//!   these means promoting the bind accumulator first — a design decision, not a
-//!   directory move.
+//! - **Bind accumulation.** [`BindCtx`] is contract vocabulary now. It lets each
+//!   required backend method append values while owning its conflict and limited
+//!   delete grammar; core neither picks a shipping id nor supplies a fallback.
 //!
 //! # The shared SQLite-DML module seam
 //!
@@ -118,11 +109,7 @@
 use std::collections::BTreeMap;
 
 use crate::renderer::{Capability, DmlRenderer};
-// The canonical ids, imported under a module alias so every comparison below reads
-// `dialect_id::MYSQL` — a NAMED constant from the id vocabulary — rather than a
-// bare `MYSQL` that would look like a local vendor literal in a crate whose whole
-// job is to name no vendor.
-use zero_migrate_ir::dialect::{self as dialect_id, DialectId};
+use zero_migrate_ir::dialect::DialectId;
 
 use crate::step::BindValue;
 use zero_migrate_ir::expr::{
@@ -274,7 +261,8 @@ pub const MAX_BIND_PARAMS: usize = 65535;
 ///
 /// This function used to have two dialect-free wrappers, `quote_ident` and its
 /// public-in-crate sibling `quote_bare_ident`, both of which passed
-/// `SqlDialect::Postgres`. They were safe only for callers that were THEMSELVES
+/// the PostgreSQL variant of the former closed dialect enum. They were safe only
+/// for callers that were THEMSELVES
 /// PostgreSQL-specific, and twice they were not: `render::backends::sqlite` quoted
 /// all four of its identifier emissions with them, and after that was fixed
 /// `render_sqlite_trigger_op` — then still in `render::lower`, since moved into
@@ -292,14 +280,9 @@ pub const MAX_BIND_PARAMS: usize = 65535;
 /// into, and its absence is what makes "core hard-codes a dialect behind a
 /// backend's back" unrepresentable here instead of merely absent today.
 ///
-/// The other PG-pinned wrapper, `quote_ident_checked`, is untouched and stays
-/// pinned. Its callers — `apply::backend::postgres`, `apply::role`,
-/// `apply::journal`, `render::vendor`, `conn`, `plan::author`, and the vendor-op
-/// arms of `render::lower` — really are PostgreSQL-specific and travel to the PG
-/// crate with the pin intact. (An earlier version of this note said those callers
-/// used the wrapper deleted above. They never did; they have always used
-/// `quote_ident_checked`, which is a different function with a different
-/// fail-closed contract.)
+/// The fail-closed engine-identifier gate is separately exposed as
+/// [`quote_ident_checked_for_backend`]. It also requires a backend explicitly;
+/// there is no dialect-free spelling or default backend.
 ///
 /// Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`.
 pub fn quote_ident_for_backend(
@@ -333,7 +316,7 @@ pub fn quote_bare_ident_for_backend(
 
 /// A render-seam rejection of an **engine-supplied identifier** (project schema,
 /// migrator role, meta schema, …) — the single fail-closed gate every engine
-/// quoting seam routes through (`quote_ident_checked`). Distinct from
+/// quoting seam routes through. Distinct from
 /// [`DmlError::InvalidIdentifier`], which gates *author-supplied* bare
 /// identifiers with the strict `[A-Za-z_][A-Za-z0-9_]*` rule; this gate is for
 /// names the engine itself produces (a UUIDv7 schema carries `-`, so the strict
@@ -366,13 +349,10 @@ pub struct IdentQuoteError {
 /// inside an identifier outright). Everything else (including `"`) is rendered
 /// safely by escaping, **byte-identically** to a bare
 /// `format!("\"{}\"", x.replace('"', "\"\""))`.
-/// THE PIN MOVED, IT DID NOT GO. `quote_ident_checked(ident)` used to be this
-/// function with `SqlDialect::Postgres` written into its body — a PostgreSQL-pinned
-/// seam with thirty engine callers. The pin cannot live here any more: this crate is
-/// BELOW the vendors and has no PostgreSQL renderer to resolve. It is now
-/// `zero_migrate::render::dml::quote_ident_checked`, one line in the engine, which
-/// resolves PostgreSQL from the engine's registry and calls this. The engine's
-/// thirty call sites are unchanged and the pin is still exactly one line.
+/// There is deliberately no dialect-free wrapper. Vendor code passes its own
+/// renderer, while engine code carrying a [`DialectId`]
+/// resolves that registered backend through
+/// `zero_migrate::render::dml::quote_ident_checked_for_dialect`.
 pub fn quote_ident_checked_for_backend(
     ident: &str,
     backend: &dyn DmlRenderer,
@@ -551,9 +531,9 @@ pub fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> 
 /// Validate an in-list / regex text operand, then let the CALLER'S OWN backend
 /// spell it.
 ///
-/// It takes the backend rather than a
-/// [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect) because every caller is a
-/// backend rendering for itself: `backends/mysql.rs::render_regex_match` and
+/// It takes the backend rather than the former closed dialect enum because every
+/// caller is a backend rendering for itself:
+/// `backends/mysql.rs::render_regex_match` and
 /// [`render_in_list_elem_portable`] below. Taking a dialect here meant core
 /// resolving the registry to reach the vendor that had just called in — see
 /// [`render_in_list_elem_portable`] for the whole shape. Core owns whether the
@@ -643,7 +623,7 @@ pub fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
 ///
 /// # It takes a BACKEND, and that is the whole point
 ///
-/// This used to take `dialect: SqlDialect`, and its only two callers —
+/// This used to take `dialect` as the former closed dialect enum, and its only two callers —
 /// `backends/sqlite.rs::render_in_list` and `backends/mysql.rs::render_in_list` —
 /// handed it their own `DIALECT` const. Core then resolved that dialect back
 /// through `crate::render::backends::renderer` to reach the very backend that had
@@ -1025,8 +1005,8 @@ fn render_split_part(
 /// and inline render paths.
 ///
 /// A `Dialectal` with no own leg for the target is
-/// UNREACHABLE here because [`crate::model::validate`] refuses it per-target
-/// (`EXPR_NOT_PORTABLE`) before assembly — but the seam is fail-closed
+/// UNREACHABLE here because the engine's structural validator refuses it
+/// per-target (`EXPR_NOT_PORTABLE`) before assembly — but the seam is fail-closed
 /// defensively: it returns [`DmlError::UnrenderableExpr`] rather than silently
 /// dropping the value.
 ///
@@ -1035,7 +1015,7 @@ fn render_split_part(
 /// `dialect` is an OPEN [`DialectId`], and the leg map is keyed by that same
 /// identity. A fourth backend therefore selects its own key without core naming
 /// it or silently borrowing another backend's value.
-fn select_dialect_leg(
+pub fn select_dialect_leg(
     dialect: DialectId,
     legs: &BTreeMap<DialectId, Box<Expr>>,
 ) -> Result<&Expr, DmlError> {
@@ -1143,109 +1123,6 @@ pub fn expr_column_refs_for_backend(
     Ok(out.into_iter().collect())
 }
 
-/// Return whether the MySQL-selected leg of an expression reads `column`.
-/// This mirrors the renderer's recursive closed-AST walk so an unsafe dependency
-/// cannot hide inside CASE, a helper, or a dialect branch.
-fn mysql_expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlError> {
-    Ok(match expr {
-        Expr::ColRef { name, .. } => name == column,
-        Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::PgInterval { .. } => false,
-        Expr::BinOp { lhs, rhs, .. } => {
-            mysql_expr_references_column(lhs, column)? || mysql_expr_references_column(rhs, column)?
-        }
-        Expr::UnaryOp { operand, .. }
-        | Expr::Cast { operand, .. }
-        | Expr::PgColumnSize { expr: operand }
-        | Expr::Extract { from: operand, .. }
-        | Expr::PgExtract { from: operand, .. }
-        | Expr::PgRegexMatch { expr: operand, .. }
-        | Expr::InList { expr: operand, .. } => mysql_expr_references_column(operand, column)?,
-        Expr::Case { branches, r#else } => {
-            let mut found = false;
-            for branch in branches {
-                if mysql_expr_references_column(&branch.when, column)?
-                    || mysql_expr_references_column(&branch.then, column)?
-                {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                if let Some(r#else) = r#else {
-                    found = mysql_expr_references_column(r#else, column)?;
-                }
-            }
-            found
-        }
-        Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
-            let mut found = false;
-            for arg in args {
-                if mysql_expr_references_column(arg, column)? {
-                    found = true;
-                    break;
-                }
-            }
-            found
-        }
-        Expr::Between { operand, low, high } => {
-            mysql_expr_references_column(operand, column)?
-                || mysql_expr_references_column(low, column)?
-                || mysql_expr_references_column(high, column)?
-        }
-        Expr::Like { operand, pattern } => {
-            mysql_expr_references_column(operand, column)?
-                || mysql_expr_references_column(pattern, column)?
-        }
-        Expr::DistinctFrom { left, right } => {
-            mysql_expr_references_column(left, column)?
-                || mysql_expr_references_column(right, column)?
-        }
-        Expr::Agg { arg, delimiter, .. } => {
-            if let Some(arg) = arg {
-                if mysql_expr_references_column(arg, column)? {
-                    return Ok(true);
-                }
-            }
-            if let Some(delimiter) = delimiter {
-                mysql_expr_references_column(delimiter, column)?
-            } else {
-                false
-            }
-        }
-        Expr::Dialectal { legs } => {
-            mysql_expr_references_column(select_dialect_leg(dialect_id::MYSQL, legs)?, column)?
-        }
-    })
-}
-
-/// MySQL evaluates a SET list from left to right. Refuse cross-assignment reads
-/// rather than silently changing the simultaneous RHS semantics authors get on
-/// PostgreSQL and SQLite. A self-reference remains safe because its RHS is read
-/// before that column's sole assignment.
-fn validate_mysql_assignment_semantics(
-    op: &'static str,
-    table: &str,
-    set: &BTreeMap<String, IrValue>,
-) -> Result<(), DmlError> {
-    for (column, value) in set {
-        let IrValue::Expr(expr) = value else {
-            continue;
-        };
-        for referenced_column in set.keys() {
-            if referenced_column != column && mysql_expr_references_column(expr, referenced_column)?
-            {
-                return Err(DmlError::MySqlCrossAssignmentDependency {
-                    op,
-                    table: table.to_string(),
-                    column: column.clone(),
-                    referenced_column: referenced_column.clone(),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
 /// A bind accumulator carried through the parameterized render walk: it owns the
 /// running placeholder counter (1-based, dialect-specific) and the ordered
 /// [`BindValue`] list.
@@ -1253,8 +1130,8 @@ fn validate_mysql_assignment_semantics(
 pub struct BindCtx<'a> {
     /// The vendor this walk is rendering for.
     ///
-    /// It used to carry a `dialect: SqlDialect` ALONGSIDE the backend, with a note
-    /// saying `dialect` survived only because the sibling doors
+    /// It used to carry `dialect` as the former closed dialect enum ALONGSIDE the
+    /// backend, with a note saying `dialect` survived only because the sibling doors
     /// (`quote_ident_for_backend`, `inline_literal_for_backend`, …) still took one and had
     /// callers outside `render::`. The crate split is the "later step" that note
     /// anticipated: those doors take a `&dyn DmlRenderer` now, so the second field
@@ -1275,7 +1152,7 @@ impl<'a> BindCtx<'a> {
     }
 
     /// Append a bound scalar and return its dialect placeholder.
-    fn push_bind(&mut self, b: BindValue) -> String {
+    pub fn push_bind(&mut self, b: BindValue) -> String {
         self.binds.push(b);
         self.backend.placeholder(self.binds.len())
     }
@@ -1451,7 +1328,11 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
     }
 }
 
-fn render_value_bound(value: &IrValue, ctx: &mut BindCtx) -> Result<String, DmlError> {
+/// Render one assignment/row value through the bound-expression walk.
+///
+/// Required vendor conflict renderers use this neutral door so their values join
+/// the caller's bind sequence without reproducing expression rendering.
+pub fn render_value_bound(value: &IrValue, ctx: &mut BindCtx) -> Result<String, DmlError> {
     match value {
         IrValue::Scalar(s) => Ok(ctx.push_scalar(s)),
         IrValue::Expr(e) => render_expr_bound(e, ctx),
@@ -1499,7 +1380,7 @@ pub fn render_value_inline_for_backend(
 /// the recursive worker.
 ///
 /// Its callers — in `render::lower`, `render::declarative`, `model::` and
-/// `apply::` — hold a [`SqlDialect`](zero_migrate_ir::dialect::SqlDialect) and
+/// `apply::` — hold an open [`DialectId`] and
 /// resolve their backend from it. What the split buys is that the RECURSION
 /// carries a resolved backend instead of re-deriving it from the dialect at each
 /// node, which is the same arrangement [`BindCtx`] gives the bound walk.
@@ -1706,6 +1587,36 @@ pub struct OnConflict {
     pub do_update: Option<BTreeMap<String, IrValue>>,
 }
 
+/// Neutral, prevalidated inputs to one backend's conflict-clause renderer.
+#[derive(Debug, Clone, Copy)]
+pub struct OnConflictRenderRequest<'a> {
+    /// The authored bare table name, used in diagnostics.
+    pub table: &'a str,
+    /// The backend-qualified target table already emitted by this renderer.
+    pub qualified_table: &'a str,
+    /// The authored insert-column order.
+    pub insert_columns: &'a [String],
+    /// The authored structured conflict request.
+    pub on_conflict: &'a OnConflict,
+    /// Conflict-target columns quoted by this same backend, in authored order.
+    pub quoted_target_columns: &'a [String],
+}
+
+/// Neutral inputs to one backend's row-limited DELETE renderer.
+#[derive(Debug, Clone, Copy)]
+pub struct LimitedDeleteRenderRequest<'a> {
+    /// The authored bare table name, used in diagnostics.
+    pub table: &'a str,
+    /// The backend-qualified target table.
+    pub qualified_table: &'a str,
+    /// The already-rendered predicate body.
+    pub rendered_where: &'a str,
+    /// The authored row limit.
+    pub limit: u64,
+    /// A catalog-proven identity, when the backend needs one.
+    pub catalog_identity_columns: Option<&'a [String]>,
+}
+
 /// The assembled one-shot DML statement: the placeholder template + ordered binds.
 /// Fed straight into `PlanStep::Dml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1785,7 +1696,27 @@ pub fn assemble_insert_for_backend(
                 dialect.as_str()
             )));
         }
-        template.push_str(&render_on_conflict(table, &qtable, columns, oc, &mut ctx)?);
+        if oc.columns.is_empty() {
+            return Err(DmlError::MalformedInsert {
+                table: "<onConflict>".to_string(),
+                reason: "onConflict carries no target columns".to_string(),
+            });
+        }
+        let quoted_target_columns = oc
+            .columns
+            .iter()
+            .map(|column| quote_ident_for_backend("column", column, backend))
+            .collect::<Result<Vec<_>, _>>()?;
+        template.push_str(&backend.render_on_conflict(
+            OnConflictRenderRequest {
+                table,
+                qualified_table: &qtable,
+                insert_columns: columns,
+                on_conflict: oc,
+                quoted_target_columns: &quoted_target_columns,
+            },
+            &mut ctx,
+        )?);
     }
 
     if ctx.binds.len() > MAX_BIND_PARAMS {
@@ -1802,143 +1733,6 @@ pub fn assemble_insert_for_backend(
     })
 }
 
-/// Render a dialect-native conflict tail. PostgreSQL and SQLite share the exact
-/// `ON CONFLICT (cols)` grammar. MySQL uses its duplicate-key grammar and guards
-/// every requested update with an incoming-target comparison.
-fn render_on_conflict(
-    table: &str,
-    qtable: &str,
-    insert_columns: &[String],
-    oc: &OnConflict,
-    ctx: &mut BindCtx,
-) -> Result<String, DmlError> {
-    if oc.columns.is_empty() {
-        return Err(DmlError::MalformedInsert {
-            table: "<onConflict>".to_string(),
-            reason: "onConflict carries no target columns".to_string(),
-        });
-    }
-    let qcols: Result<Vec<_>, _> = oc
-        .columns
-        .iter()
-        .map(|c| quote_ident_for_backend("column", c, ctx.backend))
-        .collect();
-    let qcols = qcols?;
-    // A SPELLING gate, not a capability one: both shapes mean "upsert", and
-    // `InsertOnConflictClause` — already asked by the caller — is what decides
-    // whether the backend can do it at all. MySQL writes
-    // `ON DUPLICATE KEY UPDATE`, the ANSI-ish vendors write `ON CONFLICT (...)`.
-    //
-    // OPEN QUESTION, deliberately left visible rather than papered over: a fourth
-    // backend that claims `InsertOnConflictClause` gets the `ON CONFLICT` spelling
-    // by falling through here, which is a GUESS about its syntax. The fix is a
-    // vendor trait method that renders the whole clause, the way
-    // `render_trigger_op` already does for triggers; that is a spelling move, not
-    // an identity one, so it is not part of this change.
-    if ctx.backend.dialect() == dialect_id::MYSQL {
-        return render_on_conflict_mysql(table, qtable, insert_columns, oc, &qcols, ctx);
-    }
-
-    let target = format!("ON CONFLICT ({})", qcols.join(", "));
-    match &oc.do_update {
-        None => Ok(format!(" {target} DO NOTHING")),
-        Some(set) => {
-            if set.is_empty() {
-                return Ok(format!(" {target} DO NOTHING"));
-            }
-            // BTreeMap ⇒ deterministic column order (canonical).
-            let mut assigns = Vec::with_capacity(set.len());
-            for (col, val) in set {
-                let qc = quote_ident_for_backend("column", col, ctx.backend)?;
-                let ph = render_value_bound(val, ctx)?;
-                assigns.push(format!("{qc} = {ph}"));
-            }
-            Ok(format!(" {target} DO UPDATE SET {}", assigns.join(", ")))
-        }
-    }
-}
-
-/// Render MySQL 8's closest safe native equivalent to a named conflict target.
-/// MySQL has no syntax for choosing one unique key. `DO NOTHING` is refused
-/// because neither a no-op update nor `INSERT IGNORE` has the same behavior. For
-/// `doUpdate`, generated row aliases expose the incoming target values and each
-/// assignment is conditional on all authored target columns matching the existing
-/// row. A non-target collision evaluates a guarded invalid-JSON expression, which
-/// is a hard MySQL error even when the caller uses a permissive `sql_mode`. The
-/// generated alias names contain hyphens, which cannot collide with the DSL's bare
-/// authored identifiers.
-fn render_on_conflict_mysql(
-    table: &str,
-    qtable: &str,
-    insert_columns: &[String],
-    oc: &OnConflict,
-    qtarget_columns: &[String],
-    ctx: &mut BindCtx,
-) -> Result<String, DmlError> {
-    let Some(set) = oc.do_update.as_ref().filter(|set| !set.is_empty()) else {
-        return Err(DmlError::MySqlConflictDoNothingNotExact);
-    };
-
-    for target in &oc.columns {
-        if set.contains_key(target) {
-            return Err(DmlError::MySqlConflictTargetUpdated {
-                table: table.to_string(),
-                column: target.clone(),
-            });
-        }
-    }
-    validate_mysql_assignment_semantics("onConflict.doUpdate", table, set)?;
-
-    let row_alias = escape_quote_ident_for_backend("zero-migrate-incoming", ctx.backend);
-    let value_aliases = insert_columns
-        .iter()
-        .enumerate()
-        .map(|(index, _)| {
-            escape_quote_ident_for_backend(&format!("zero-migrate-value-{index}"), ctx.backend)
-        })
-        .collect::<Vec<_>>();
-
-    let mut target_match = Vec::with_capacity(oc.columns.len());
-    for (target, qtarget) in oc.columns.iter().zip(qtarget_columns) {
-        let Some(index) = insert_columns.iter().position(|column| column == target) else {
-            return Err(DmlError::MySqlConflictTargetNotInserted {
-                table: table.to_string(),
-                column: target.clone(),
-            });
-        };
-        target_match.push(format!(
-            "({qtable}.{qtarget} = {row_alias}.{})",
-            value_aliases[index]
-        ));
-    }
-    let target_match = target_match.join(" AND ");
-    // Ordinary equality is intentional: MySQL UNIQUE indexes do not conflict on
-    // NULL, so NULL/NULL must never establish an authored-target match. The false
-    // branch is selected for both FALSE and NULL. Invalid JSON text is specified
-    // by MySQL as a statement error independently of `sql_mode`; division by zero
-    // is not, and under a permissive mode silently yields NULL. CONCAT keeps IF's
-    // false branch string-compatible with legitimate text, decimal, or binary
-    // assignment values. IF evaluates only the selected branch, so a genuine
-    // authored-target collision never touches the invalid document.
-    let non_target_conflict_error =
-        "CONCAT('', JSON_EXTRACT('zero-migrate conflict target mismatch', '$'))";
-
-    let mut assigns = Vec::with_capacity(set.len());
-    for (column, value) in set {
-        let qcolumn = quote_ident_for_backend("column", column, ctx.backend)?;
-        let desired = render_value_bound(value, ctx)?;
-        assigns.push(format!(
-            "{qcolumn} = IF({target_match}, {desired}, {non_target_conflict_error})"
-        ));
-    }
-
-    Ok(format!(
-        " AS {row_alias}({}) ON DUPLICATE KEY UPDATE {}",
-        value_aliases.join(", "),
-        assigns.join(", ")
-    ))
-}
-
 /// Assemble a one-shot `update` op (no `batch`) into a parameterized statement.
 /// `set` RHS values render through `render_value_bound` and the optional `where`
 /// renders through `render_expr_bound`, so scalar set values and expression
@@ -1953,7 +1747,6 @@ pub fn assemble_update_for_backend(
     set: &BTreeMap<String, IrValue>,
     r#where: Option<&Expr>,
 ) -> Result<AssembledDml, DmlError> {
-    let dialect = backend.dialect();
     if set.is_empty() {
         return Err(DmlError::EmptySet {
             op: "update",
@@ -1962,17 +1755,7 @@ pub fn assemble_update_for_backend(
     }
     let mut ctx = BindCtx::new(backend);
     let qtable = qualify_table(project_schema, ctx.backend, table)?;
-    // A CAPABILITY question with no capability to ask yet, and this comment is the
-    // honest form of that: "does this backend evaluate a SET list simultaneously,
-    // or left to right?" is a semantic fact about the vendor, not a spelling and
-    // not a provenance. All three shipping backends can answer it (PostgreSQL and
-    // SQLite simultaneously, MySQL left-to-right), so it wants to become
-    // `Capability::SimultaneousSetAssignment` — a claim every backend must state.
-    // Adding a capability changes the pinned matrix, so it is its own change; the
-    // gate stays an id comparison until then rather than being silently widened.
-    if dialect == dialect_id::MYSQL {
-        validate_mysql_assignment_semantics("update", table, set)?;
-    }
+    backend.validate_assignment_semantics("update", table, set)?;
     // BTreeMap ⇒ deterministic, canonical assignment order.
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {
@@ -2008,7 +1791,7 @@ pub fn assemble_delete_for_backend(
     r#where: &Expr,
     limit: Option<u64>,
 ) -> Result<AssembledDml, DmlError> {
-    assemble_delete_with_sqlite_identity_for_backend(
+    assemble_delete_with_catalog_identity_for_backend(
         project_schema,
         backend,
         table,
@@ -2021,84 +1804,29 @@ pub fn assemble_delete_for_backend(
 /// Catalog-aware delete assembly used by the guarded IR lower. The SQLite
 /// identity columns must be a non-null PRIMARY KEY or complete non-partial UNIQUE
 /// key recovered from the live table snapshot.
-pub fn assemble_delete_with_sqlite_identity_for_backend(
+pub fn assemble_delete_with_catalog_identity_for_backend(
     project_schema: &str,
     backend: &dyn DmlRenderer,
     table: &str,
     r#where: &Expr,
     limit: Option<u64>,
-    sqlite_identity_columns: Option<&[String]>,
+    catalog_identity_columns: Option<&[String]>,
 ) -> Result<AssembledDml, DmlError> {
-    let dialect = backend.dialect();
     let mut ctx = BindCtx::new(backend);
     let qtable = qualify_table(project_schema, ctx.backend, table)?;
     let w = render_expr_bound(r#where, &mut ctx)?;
-    // The tuple `match (dialect, limit)` this replaces was exhaustive over a closed
-    // enum; `dialect` is open now, so the vendor selection is a GUARD on each arm
-    // and the arms themselves are untouched — same order, same bodies, same SQL.
-    //
-    // The one arm that is new is the last, and it REFUSES. A limited DELETE is
-    // three unrelated shapes here, one of them built on a PostgreSQL pseudo-column
-    // pair (`tableoid, ctid`) that exists nowhere else, so there is no shape a
-    // fourth backend could be handed by default. Falling through to any of them
-    // would emit syntactically plausible SQL that deletes the wrong rows on a
-    // backend nobody tested. The real home for all three is a vendor trait method,
-    // the way `render_trigger_op` already is; that is a relocation, not this
-    // change.
     let template = match limit {
         None => format!("DELETE FROM {qtable} WHERE {w}"),
-        // PostgreSQL and SQLite cannot take a bare limited DELETE portably. The
-        // limit binds natively while a subquery selects exact row identities.
-        Some(n) if dialect == dialect_id::SQLITE => {
-            let identity_columns = sqlite_identity_columns
-                .filter(|columns| !columns.is_empty())
-                .ok_or_else(|| DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
-                    table: table.to_string(),
-                })?;
-            let quoted_identity: Result<Vec<_>, _> = identity_columns
-                .iter()
-                .map(|column| {
-                    quote_ident_checked_for_backend(column, backend).map_err(|_| {
-                        DmlError::InvalidIdentifier {
-                            what: "catalog identity column",
-                            value: column.clone(),
-                        }
-                    })
-                })
-                .collect();
-            let quoted_identity = quoted_identity?;
-            let selected_identity = quoted_identity.join(", ");
-            let compared_identity = if quoted_identity.len() == 1 {
-                selected_identity.clone()
-            } else {
-                format!("({selected_identity})")
-            };
-            let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
-            format!(
-                "DELETE FROM {qtable} WHERE {compared_identity} IN \
-                 (SELECT {selected_identity} FROM {qtable} WHERE {w} LIMIT {ph})"
-            )
-        }
-        Some(n) if dialect == dialect_id::POSTGRES => {
-            let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
-            format!(
-                "DELETE FROM {qtable} WHERE (tableoid, ctid) IN \
-                 (SELECT tableoid, ctid FROM {qtable} WHERE {w} LIMIT {ph})"
-            )
-        }
-        Some(n) if dialect == dialect_id::MYSQL => {
-            let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
-            format!("DELETE FROM {qtable} WHERE {w} LIMIT {ph}")
-        }
-        Some(_) => {
-            return Err(DmlError::UnrenderableExpr(format!(
-                "a row-limited DELETE has no portable spelling and the {} backend has \
-                 not declared one — the three shipping shapes are a vendor \
-                 pseudo-column pair, a unique-identity subquery, and a native LIMIT \
-                 clause, and none of them may be guessed for another vendor",
-                dialect.as_str()
-            )))
-        }
+        Some(limit) => backend.render_limited_delete(
+            LimitedDeleteRenderRequest {
+                table,
+                qualified_table: &qtable,
+                rendered_where: &w,
+                limit,
+                catalog_identity_columns,
+            },
+            &mut ctx,
+        )?,
     };
     Ok(AssembledDml {
         template,
@@ -2152,18 +1880,13 @@ fn assemble_backfill_clauses_inner_for_backend(
     filter: Option<&Expr>,
     allow_empty: bool,
 ) -> Result<BackfillClauses, DmlError> {
-    let dialect = backend.dialect();
     if set.is_empty() && !allow_empty {
         return Err(DmlError::EmptySet {
             op: "backfill",
             table: table.to_string(),
         });
     }
-    // The same SET-list evaluation-order question as `assemble_update_for_backend`
-    // above, and the same open capability. See the comment there.
-    if dialect == dialect_id::MYSQL {
-        validate_mysql_assignment_semantics("backfill", table, set)?;
-    }
+    backend.validate_assignment_semantics("backfill", table, set)?;
     // BTreeMap ⇒ canonical order.
     let mut assigns = Vec::with_capacity(set.len());
     for (col, rhs) in set {

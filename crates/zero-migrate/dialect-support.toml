@@ -4,8 +4,8 @@
 # DISPOSITION on each dialect. The generator
 # (`packages/zero-migrate/scripts/gen-dialect-table.mjs`) reads this file and
 # emits BOTH:
-#   - crates/zero-migrate/src/model/dialect_table.rs (const lookup table)
-#   - packages/zero-migrate/src/generated/dialect-table.ts        (the TS mirror)
+#   - crates/zero-migrate/tests/dialect_matrix/dialect_table.rs (Rust test artifact)
+#   - packages/zero-migrate/src/generated/dialect-table.ts      (the TS mirror)
 # Regenerate with: `pnpm --filter zero-migrate gen:dialect-table`, then
 # commit both generated artifacts.
 #
@@ -17,8 +17,8 @@
 #                         BOTH halves were false. TWO rows use it, on both
 #                         non-PostgreSQL dialects: createPartition/base and
 #                         createTable/partitionedCollapse. And it is live, not
-#                         reserved - the generated table carries it
-#                         (model/dialect_table.rs), op_support.rs groups it with
+#                         reserved - the generated test artifact carries it, each
+#                         backend policy answers it, op_support.rs groups it with
 #                         portable and vendor as SUPPORTED, and lowering acts on
 #                         it: createPartition on MySQL/SQLite collapses the child
 #                         into its parent behind a mirror guard instead of
@@ -26,9 +26,9 @@
 #   vendor               vendor-tier construct, admitted only on this dialect
 #   unsupported          refused on this dialect
 #
-# FAITHFULNESS, which is the whole point: this file is HAND-AUTHORED to MIRROR the
-# live `crates/zero-migrate/src/model/support.rs` `Support::decision()` +
-# `Support::tier` behaviour, mapped decision→disposition as:
+# FAITHFULNESS, which is the whole point: this file is HAND-AUTHORED to MIRROR each
+# registered backend's required `ValidationPolicy::op_disposition` answer and the
+# live `Support::decision()` + `Support::tier` behaviour, mapped as:
 #   Supported + Core   -> portable
 #   Supported + Vendor -> vendor
 #   Unsupported        -> unsupported

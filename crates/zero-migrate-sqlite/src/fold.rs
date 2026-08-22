@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::fold::{
-    AuthorTypeOverride, CatalogFoldPolicy, FoldCursorColumnContract, FoldCursorComparison,
-    FoldCursorScalarType, FoldDatabaseFeature, ReferenceTextStorage,
+    AuthorTypeOverride, CatalogFoldPolicy, CatalogFoldRefusal, FoldCursorColumnContract,
+    FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature, ReferenceTextStorage,
+    SnapshotProvenanceStrength,
 };
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
@@ -20,6 +21,16 @@ pub(crate) struct SqliteCatalogFoldPolicy;
 pub(crate) static POLICY: SqliteCatalogFoldPolicy = SqliteCatalogFoldPolicy;
 
 impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
+    fn snapshot_provenance_strength(
+        &self,
+        table: &TableSnapshot,
+    ) -> Option<SnapshotProvenanceStrength> {
+        table
+            .stored_create_sql
+            .is_some()
+            .then_some(SnapshotProvenanceStrength::StoredTableDefinition)
+    }
+
     fn allocate_implicit_relation_name(
         &self,
         default_name: &str,
@@ -87,6 +98,12 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
         Ok(None)
     }
 
+    fn canonical_rename_type_spelling(&self, ty: &str) -> String {
+        // SQLite rebuilds renames and compares its own affinity spelling; it
+        // does not inherit PostgreSQL's built-in alias table.
+        crate::schema::RENDERER.canonical_type(ty)
+    }
+
     fn inline_enum_check(
         &self,
         column: &str,
@@ -114,12 +131,54 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
         false
     }
 
+    fn refusal_message(&self, refusal: CatalogFoldRefusal) -> &'static str {
+        match refusal {
+            CatalogFoldRefusal::AlterPrimaryKeyRowidGeneration => {
+                "alterPrimaryKey cannot introduce SQLite INTEGER PRIMARY KEY rowid generation"
+            }
+            CatalogFoldRefusal::AddColumnIdentity => {
+                "addColumn identity on SQLite (non-PK identity has no sound SQLite emulation)"
+            }
+            CatalogFoldRefusal::CreateTableCheckConstraint => {
+                "createTable table-level CHECK is PostgreSQL-only"
+            }
+            CatalogFoldRefusal::CreateTableUniqueConstraint => {
+                "createTable table-level UNIQUE on SQLite (the SQLite CREATE \
+                 renders from the descriptor; a table-level UNIQUE is not \
+                 threaded into the emitter)"
+            }
+            CatalogFoldRefusal::CreateTableExclusionConstraint => {
+                "createTable exclusion constraint is PostgreSQL-only"
+            }
+            CatalogFoldRefusal::CreateTableNonBtreeIndex => {
+                "createTable non-btree index `using` on SQLite (not yet supported)"
+            }
+            CatalogFoldRefusal::AddCheckConstraint => "addConstraint(check) is PostgreSQL-only",
+            CatalogFoldRefusal::AddExclusionConstraint => {
+                "addConstraint exclusion constraint is PostgreSQL-only"
+            }
+        }
+    }
+
     fn physical_type_inputs_equal(&self, _left: &ColumnSnapshot, _right: &ColumnSnapshot) -> bool {
         // SQLite's finalizer is an explicit no-op, so every answer is safe.
         false
     }
 
     fn reference_catalog_type<'a>(&self, column: &'a ColumnSnapshot) -> &'a str {
+        // SQLite emits every managed integer width as INTEGER, but authored
+        // reference validation must still distinguish int/smallInt/bigInt when
+        // the other side is an unmanaged declaration retained by PRAGMA. The
+        // neutral token is the only non-vendor carrier that preserves that fact.
+        if let Some(integer_token) = column
+            .type_def
+            .as_ref()
+            .and_then(|def| def.get("type"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|ty| matches!(*ty, "smallInt" | "int" | "integer" | "bigInt"))
+        {
+            return integer_token;
+        }
         column
             .ddl_type_override
             .as_deref()

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use super::DIALECT;
 use crate::apply::drift::DriftError;
 use crate::driver::SqlSession;
 use crate::model::ir::{IdentityCol, IndexSortOrder};
@@ -13,7 +14,6 @@ use crate::render::value_format::{
     catalog_id_default, catalog_text_id_default, catalog_uuid_id_default, recover_format_check,
     RecoveredFormatCheck,
 };
-use crate::schema::query::SqlDialect;
 
 #[derive(Debug)]
 struct IndexParts {
@@ -64,9 +64,9 @@ fn recover_mysql_id_default(
     uuid_surface: bool,
 ) -> IdDefaultSnapshot {
     if uuid_surface {
-        catalog_uuid_id_default(default, SqlDialect::Mysql, Some(expression_default))
+        catalog_uuid_id_default(default, &DIALECT, Some(expression_default))
     } else {
-        catalog_id_default(default, SqlDialect::Mysql, Some(expression_default))
+        catalog_id_default(default, &DIALECT, Some(expression_default))
     }
 }
 
@@ -221,7 +221,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             // while no live-MySQL fixture has measured the pairing; the cost is that a
             // MySQL `DROP EXPRESSION` equivalent stays invisible.
             generated_kind: None,
-            data_type: zero_migrate_mysql::VENDOR.schema.canonical_type(&raw_type),
+            data_type: crate::render::backends::schema_renderer(&DIALECT).canonical_type(&raw_type),
             mysql_physical_type: Some(MysqlPhysicalType::parse(&raw_type)),
             nullable: nullable.eq_ignore_ascii_case("YES"),
             default: default.clone(),
@@ -287,7 +287,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 .iter()
                 .enumerate()
                 .filter_map(|(index, column)| {
-                    recover_format_check(&column.name, &check_clause, SqlDialect::Mysql)
+                    recover_format_check(&column.name, &check_clause, &DIALECT)
                         .map(|format| (index, format))
                 })
                 .collect::<Vec<_>>();
@@ -316,7 +316,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 }
                 RecoveredFormatCheck::Value(_) => catalog_text_id_default(
                     column.default.as_deref(),
-                    SqlDialect::Mysql,
+                    &DIALECT,
                     Some(expression_default),
                 ),
             });
@@ -588,7 +588,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             false,
             false,
             false,
-            crate::schema::query::SqlDialect::Mysql,
+            &DIALECT,
         );
         let table = tables
             .get_mut(&table_name)
@@ -613,7 +613,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 column.id_default = Some(if column.mysql_text_storage.is_some() {
                     catalog_text_id_default(
                         column.default.as_deref(),
-                        SqlDialect::Mysql,
+                        &DIALECT,
                         Some(expression_default),
                     )
                 } else {
@@ -639,8 +639,8 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     // `..Default::default()` spelling makes them look identical, so the difference is
     // written out rather than left to be rediscovered.
     //
-    // REFUSED - `model::dialect_table` records these as `Unsupported` on MySQL, so
-    // `op_support::unsupported_reason` fires and no MySQL catalog can hold one:
+    // REFUSED - MySQL's registered validation policy records these as unsupported,
+    // so `op_support::unsupported_reason` fires and no MySQL catalog can hold one:
     // `sequences` ("standalone sequence objects are PostgreSQL-only in the current
     // engine"), `schemas` ("schema vendor primitives are PostgreSQL-only"),
     // `extensions` ("extension vendor primitives are PostgreSQL-only"), and `roles`.

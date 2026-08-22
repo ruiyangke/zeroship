@@ -6,7 +6,7 @@
 //! from inside core, so the shape of each surviving call matters more than the count:
 //!
 //! * A **boundary** resolution — a `pub` surface whose callers hand in a
-//!   `SqlDialect`, turning it into a backend exactly where it crosses in — survives
+//!   `&zero_migrate::DialectId`, turning it into a backend exactly where it crosses in — survives
 //!   the extraction. It becomes the facade's `register(..)` table.
 //! * A **caller-fixed target** — `build_add_foreign_key` and `def_to_constraints`,
 //!   `pg_quote_ident`-spelled throughout, and the tests that name the vendor under
@@ -20,7 +20,7 @@
 //! point `build_create_table_with_fks_for_dialect_scoped_statements`: one CREATE
 //! TABLE emit went through the registry five separate times for the same dialect.
 //! They are gone. The emitters take `backend: &'static dyn SchemaRenderer` where they
-//! took `dialect: SqlDialect`, and the resolution happens once.
+//! took `dialect: &zero_migrate::DialectId`, and the resolution happens once.
 //!
 //! # Why this needs a test rather than a comment
 //!
@@ -53,7 +53,7 @@
 //! It reads `schema/query.rs` only, and it sees only the two states a function can be
 //! in THERE. It is blind to:
 //!
-//! * A core emitter that still takes `dialect: SqlDialect` and looks a backend up.
+//! * A core emitter that still takes `dialect: &zero_migrate::DialectId` and looks a backend up.
 //!   Such a function is not a carrier, so it is not scanned. The census clause below
 //!   is the partial guard — converting a carrier back drops the count and fails —
 //!   but a brand-new dialect-taking emitter with a fresh lookup is invisible here.
@@ -97,7 +97,7 @@
 /// over nothing, and report green, which is the failure direction that matters. So
 /// the count of carriers found is asserted too. Six is what the conversion produced;
 /// the assertion is a FLOOR, so a seventh emitter adopting the carrier passes
-/// silently while a broken scanner and a carrier reverted to `dialect: SqlDialect`
+/// silently while a broken scanner and a carrier reverted to `dialect: &zero_migrate::DialectId`
 /// both go red.
 ///
 /// # Two ways this goes red that are not defects
@@ -191,7 +191,7 @@ fn a_schema_emitter_holding_a_backend_never_resolves_another() {
          different situations. Either the scan itself broke — the region cutter, or \
          the `{CARRIER}` needle — in which case the loop above iterated over nothing \
          and its green meant nothing; or an emitter stopped carrying a backend and \
-         went back to taking a `dialect: SqlDialect`, which is the regression this \
+         went back to taking a `dialect: &zero_migrate::DialectId`, which is the regression this \
          file exists to catch. Check which before editing the floor. The six the \
          conversion produced were {KNOWN:?}; a legitimate drop (an emitter deleted or \
          two folded together) lowers the floor in the same commit, with the reason.",

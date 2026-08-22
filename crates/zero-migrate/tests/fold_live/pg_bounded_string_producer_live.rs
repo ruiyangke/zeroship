@@ -74,8 +74,7 @@ use zero_migrate::render::declarative::{CollectionDescriptor, DeclarativeAuthor,
 use zero_migrate::{
     descriptors_to_create_ops, desired_snapshot_for_dialect, render_schema_export_from_descriptors,
     resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend, SqlDialect,
-    TableRuntimeOptions,
+    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend, TableRuntimeOptions,
 };
 
 const OWNER: &str = "app_bounded_string";
@@ -223,7 +222,7 @@ async fn apply_ops(
         .ensure_journal(cfg)
         .await
         .map_err(|error| format!("ensure the migration journal: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, policy);
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, policy);
     let ir = ir_from_ops(ops);
     let steps = author
         .lower_steps(&ir, &LiveSchema::default())
@@ -249,7 +248,7 @@ fn descriptors_from_ops(
     schema: &str,
     policy: &EffectivePolicy,
 ) -> Result<Vec<CollectionDescriptor>, String> {
-    let export = zero_migrate::render_schema_export(ops, SqlDialect::Postgres, schema, policy)
+    let export = zero_migrate::render_schema_export(ops, &zero_migrate::POSTGRES, schema, policy)
         .map_err(|error| format!("render the schema export: {error}"))?;
     Ok(export.collections.into_values().collect())
 }
@@ -424,7 +423,7 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
             descriptors_from_ops(&ops, &cfg.project_schema, &policy)?;
         let reexport = render_schema_export_from_descriptors(
             &exported,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &cfg.project_schema,
             &policy,
         )
@@ -443,7 +442,7 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
         let desired = desired_snapshot_for_dialect(
             &cfg.project_schema,
             &desired_descriptors,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &policy,
         )
         .map_err(|error| format!("resolve the re-imported descriptors: {error}"))?;
@@ -467,10 +466,10 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
                 &DeclarativeAuthor::new_for_dialect(
                     &cfg.project_schema,
                     OWNER,
-                    SqlDialect::Postgres,
+                    zero_migrate::POSTGRES,
                 ),
                 &[],
-                &GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id()),
+                &GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES),
                 &policy,
             )
             .map_err(|error| format!("plan the re-imported schema declaratively: {error}"))?;

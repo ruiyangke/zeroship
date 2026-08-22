@@ -15,7 +15,7 @@ use crate::support;
 
 use std::collections::BTreeSet;
 use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::{CommentTarget, LiveSchema, MigrationIr, Op, SqlDialect};
+use zero_migrate::{CommentTarget, LiveSchema, MigrationIr, Op};
 
 const SCHEMA: &str = "app";
 const OWNER: &str = "app_test";
@@ -40,7 +40,7 @@ fn comment_sql(schema: Option<&str>) -> String {
     let author = IrAuthor::new(
         SCHEMA,
         OWNER,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject("app"),
     );
     let ops = vec![Op::Comment {

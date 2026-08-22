@@ -1193,10 +1193,11 @@ pub struct ConstraintSnapshot {
     /// [`ColumnSnapshot::inline_checks`] and [`ColumnSnapshot::generated`]. Those two
     /// are EXCLUDED from column equality, so the rebuild rewrites them straight into
     /// its desired snapshot. Rewriting a `definition` there would make the desired
-    /// table unequal to the renamed live one, flip `pure_sqlite_column_rename` to
+    /// table unequal to the renamed live one, flip the registered rebuild policy's
+    /// `pure_column_rename` answer to
     /// `None`, turn `preserve_stored_shape` off and stop the CATALOG path replaying
     /// SQLite's own stored body. The rewrite therefore runs one layer down, in
-    /// `render_create_table_sqlite_rebuild`, AFTER that decision and after the
+    /// `render_create_table_rebuild`, AFTER that decision and after the
     /// stored-shape arm has returned - see
     /// `render::declarative::rename_column_in_constraint_definitions`. Read this as the
     /// standing rule: a rename-follow on a field this `PartialEq` compares has to run

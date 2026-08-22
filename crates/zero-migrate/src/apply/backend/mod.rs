@@ -77,7 +77,16 @@ use crate::render::plan::{DatabaseRequirements, TableRebuildSpec};
 use crate::render::step::{
     AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep,
 };
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
+
+fn legacy_debug_dialect_label(dialect: &DialectId) -> String {
+    let mut chars = dialect.as_str().chars();
+    let first = chars
+        .next()
+        .expect("a registered dialect id is never empty")
+        .to_ascii_uppercase();
+    format!("{first}{}", chars.as_str())
+}
 
 /// The Postgres session GUCs the backend restores on exit so its per-apply
 /// settings never leak onto the pooled/long-lived connection.
@@ -317,9 +326,31 @@ pub trait MigrationBackend {
     /// to [`restore_session`](Self::restore_session).
     type SessionSnapshot;
 
-    /// The SQL dialect this backend targets. Drives the dialect-boundary rejects
-    /// in the generic body (e.g. `transaction:false` on SQLite).
-    fn dialect(&self) -> SqlDialect;
+    /// The SQL dialect identity this backend targets. Drives the dialect-boundary
+    /// rejects in the generic body (e.g. `transaction:false` on SQLite).
+    fn dialect(&self) -> DialectId;
+
+    /// The engine setting names that enforce statement and lock budgets on this
+    /// backend. `None` means the backend has no corresponding session settings,
+    /// so plan-time timeout preflight has nothing to validate.
+    ///
+    /// Required with no default: a new backend must state its own timeout surface
+    /// rather than inheriting another vendor's setting names or silence.
+    fn timeout_setting_names(&self) -> Option<(&'static str, &'static str)>;
+
+    /// Whether catalog refreshes must preserve and advance the authored logical
+    /// column view because the backend's catalog cannot reconstruct it losslessly.
+    ///
+    /// Required with no default: each backend must state whether the engine keeps
+    /// this extra authored-history projection on its behalf.
+    fn preserves_authored_logical_columns(&self) -> bool;
+
+    /// Whether lowering needs the SDK-shaped field-definition projection alongside
+    /// catalog snapshots (for example, to render a lossless table rebuild).
+    ///
+    /// Required with no default: this is a backend policy answer, not a property
+    /// inferred from dialect identity in the generic engine.
+    fn projects_sdk_field_defs(&self) -> bool;
 
     /// The positional bind placeholder style this backend's SQL uses (`$N` on
     /// Postgres, `?` on MySQL). Placeholder style is a **backend concern** so no
@@ -357,8 +388,8 @@ pub trait MigrationBackend {
             .collect::<Vec<_>>()
             .join(", ");
         Err(ApplyError::Backend(format!(
-            "{:?} backend cannot verify required database feature(s): {features}",
-            self.dialect()
+            "{} backend cannot verify required database feature(s): {features}",
+            legacy_debug_dialect_label(&self.dialect())
         )))
     }
 

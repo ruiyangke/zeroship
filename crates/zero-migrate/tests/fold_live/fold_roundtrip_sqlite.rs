@@ -9,7 +9,7 @@
 //!
 //! Same shape as the PG oracle: APPLY the corpus to a real temp-file `SQLite` backend,
 //! INTROSPECT via `snapshot_schema_sqlite`, FOLD the SAME ops offline with the
-//! `SqlDialect::Sqlite` dialect, assert structural equality. No DB env gate is
+//! `SQLITE` dialect, assert structural equality. No DB env gate is
 //! needed - `SQLite` is an embedded temp file, always available.
 //!
 //! The comparison runs after EVERY stage, not once at the end of the corpus. A
@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::{
     apply::executor::LockMode, fold_ops, model::ir::Op, resolve_create_table_policy, Approval,
-    ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, SchemaSnapshot, SqlDialect,
+    ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, SchemaSnapshot,
     SqliteBackend,
 };
 
@@ -82,17 +82,12 @@ async fn apply_doc(
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
-    let document = zero_migrate::model::load::load_ir_document(
-        &ir,
-        APP,
-        zero_migrate::model::validate::SqlDialect::Sqlite,
-        reg,
-        None,
-    )
-    .expect("load gate (sqlite)");
+    let document =
+        zero_migrate::model::load::load_ir_document(&ir, APP, &zero_migrate::SQLITE, reg, None)
+            .expect("load gate (sqlite)");
     let ops = document.ops.clone();
     let live = LiveSchema::from_tables(live_tables.clone());
     let plan = author
@@ -133,7 +128,7 @@ async fn apply_doc(
 ///      constraint + its same-named index on both sides is introspection-only noise.
 ///   3. **CHECK `definition` blanked - DEAD on both sides today.** Neither half of
 ///      this oracle can produce a `CHECK` constraint, so the loop below never fires.
-///      `fold_ops` under `SqlDialect::Sqlite` REFUSES one outright: both
+///      `fold_ops` under the `SQLITE` dialect REFUSES one outright: both
 ///      `fold_create_table_specs` and the `Op::AddConstraint` arm return
 ///      `FoldError::Unsupported` ("createTable table-level CHECK is PostgreSQL-only"
 ///      / "addConstraint(check) is PostgreSQL-only"), so a corpus that authored a
@@ -169,7 +164,7 @@ async fn apply_doc(
 fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
     for t in snap.tables.values_mut() {
         for c in &mut t.columns {
-            c.data_type = zero_migrate::schema::query::renderer(&SqlDialect::Sqlite.id())
+            c.data_type = zero_migrate::schema::query::renderer(&zero_migrate::SQLITE)
                 .canonical_type(&c.data_type);
         }
         // Drop every PRIMARY KEY constraint + its implicit same-named index.
@@ -204,7 +199,7 @@ async fn assert_matches_live(be: &SqliteBackend, ops: &[Op], stage: &str) {
         .unwrap_or_else(|error| panic!("{stage}: introspect live SQLite schema: {error}"));
     let folded = fold_ops(
         ops,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         PROJECT,
         &support::confined_charter(),
     )

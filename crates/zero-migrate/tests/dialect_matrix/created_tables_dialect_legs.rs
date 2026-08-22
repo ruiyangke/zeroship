@@ -30,9 +30,7 @@ use crate::support;
 
 use std::collections::BTreeMap;
 
-use zero_migrate::{
-    resolve_create_table_policy, GuardConfig, IrAuthor, LiveSchema, MigrationIr, SqlDialect,
-};
+use zero_migrate::{resolve_create_table_policy, GuardConfig, IrAuthor, LiveSchema, MigrationIr};
 
 const PROJECT: &str = "app";
 const APP: &str = "app";
@@ -44,16 +42,21 @@ fn artifact_created_tables(ops_json: &str) -> Vec<String> {
         .expect("the test IR resolves without platform columns");
     let resolved_json = serde_json::to_string(&resolved).expect("resolved test IR serializes");
 
-    IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject("app"))
-        .load_and_lower_guarded(
-            &resolved_json,
-            APP,
-            &BTreeMap::new(),
-            &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
-        )
-        .expect("the dialectal create lowers under SQLite")
-        .created_tables
+    IrAuthor::new(
+        PROJECT,
+        APP,
+        &zero_migrate::SQLITE,
+        &support::no_inject("app"),
+    )
+    .load_and_lower_guarded(
+        &resolved_json,
+        APP,
+        &BTreeMap::new(),
+        &LiveSchema::default(),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE),
+    )
+    .expect("the dialectal create lowers under SQLite")
+    .created_tables
 }
 
 /// The control: a top-level create is claimed. Without this the arms below could pass

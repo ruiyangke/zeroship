@@ -70,7 +70,7 @@ use crate::conn::ExecutorConfig;
 use crate::model::migration::Migration;
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::TableRebuildSpec;
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, SQLITE};
 
 pub use actor::{MigrationActor, SqliteActorError};
 pub use authorizer::Mode;
@@ -83,17 +83,17 @@ pub use rebuild_sql::RebuildError;
 /// `identity_sql`, `primary_key_sql`, `rebuild_sql`) each spell identifiers into
 /// SQL they send to a real SQLite database. They used to do it through the raw
 /// crate-wide escape primitive, which reached no renderer at all — and because
-/// they contained NO `SqlDialect::` literal, the one-dialect-literal grep read
+/// they contained no vendor-identity literal, the one-dialect-literal grep read
 /// them as clean: it looks for a FOREIGN literal, and "no literal" passes.
 ///
 /// One const, read by all four, is the shape that makes their vendor greppable
 /// without putting four literals in the tree. It mirrors
 /// `render::backends::sqlite`'s own `DIALECT`.
-const SQLITE_DIALECT: SqlDialect = SqlDialect::Sqlite;
+const SQLITE_DIALECT: DialectId = SQLITE;
 
 /// The parser registered by this backend for its catalog-stored table DDL.
 fn stored_ddl() -> &'static dyn zero_migrate_backend::stored_ddl::StoredDdl {
-    crate::render::backends::stored_ddl(&SQLITE_DIALECT.id())
+    crate::render::backends::stored_ddl(&SQLITE_DIALECT)
         .expect("the registered SQLite backend must provide stored-DDL analysis")
 }
 
@@ -480,8 +480,25 @@ fn journal_err(e: SqliteActorError) -> JournalError {
 impl MigrationBackend for SqliteBackend {
     type SessionSnapshot = ();
 
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Sqlite
+    fn dialect(&self) -> DialectId {
+        SQLITE_DIALECT
+    }
+
+    fn timeout_setting_names(&self) -> Option<(&'static str, &'static str)> {
+        // SQLite exposes neither a statement-timeout nor a lock-timeout session
+        // setting. Its actor enforces confinement through its own execution seam.
+        None
+    }
+
+    fn preserves_authored_logical_columns(&self) -> bool {
+        // SQLite affinity/catalog metadata cannot reconstruct authored logical
+        // formats losslessly, so refreshes must retain the authored view.
+        true
+    }
+
+    fn projects_sdk_field_defs(&self) -> bool {
+        // SQLite table rebuilds render CREATE TABLE from this lossless projection.
+        true
     }
 
     fn ddl_is_transactional(&self) -> bool {
@@ -624,7 +641,7 @@ impl MigrationBackend for SqliteBackend {
         // - FailDrift → typed `ExistenceGuardDrift` (parity with the PG arm) —
         // never a silent skip over a divergence.
         if let Some(probe) = &m.existence_guard {
-            authorize_existence_guard_schema(cfg, m, probe.schema())?;
+            authorize_existence_guard_schema(cfg, m, probe.schema(), &SQLITE_DIALECT)?;
             // The probe's schema is authorized above but is NOT what SQLite snapshots.
             // SQLite's schema argument names an ATTACHED DATABASE - it reaches the
             // catalog as `PRAGMA <db>.table_info(...)` and `<db>.sqlite_master` - while
@@ -1243,6 +1260,9 @@ mod lock_tests {
         let journal = dir.path().join("journal.sqlite");
         let first = SqliteBackend::open(&app, &journal).expect("first backend");
         let second = SqliteBackend::open(&app, &journal).expect("second backend");
+        assert_eq!(first.timeout_setting_names(), None);
+        assert!(first.preserves_authored_logical_columns());
+        assert!(first.projects_sdk_field_defs());
         let cfg = ExecutorConfig::new("project", "main", crate::test_fixtures::no_inject("main"));
 
         first

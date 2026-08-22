@@ -9,7 +9,7 @@ use crate::support;
 
 use zero_migrate::analyze::{analyze, rule, Severity};
 use zero_migrate::guard::{GuardConfig, SqlGuard};
-use zero_migrate::{analyze_migration, Advisory, SqlDialect};
+use zero_migrate::{analyze_migration, Advisory};
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -518,7 +518,7 @@ fn non_concurrent_index_suggestion_notes_own_nontransactional_migration() {
 // ---------------------------------------------------------------------------
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject("proj_acme"), SqlDialect::Postgres.id())
+    GuardConfig::from_policy(support::no_inject("proj_acme"), zero_migrate::POSTGRES)
 }
 
 #[test]
@@ -586,9 +586,13 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
     use zero_migrate::{Column, MigrationAuthor, RawSqlAuthor};
     // Author a destructive drop the way the differ / RawSqlAuthor would, then
     // run the analyzer seam over it.
-    let drop = RawSqlAuthor::new("app_acme", support::no_inject("proj_acme"))
-        .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
-        .unwrap();
+    let drop = RawSqlAuthor::new(
+        "app_acme",
+        zero_migrate::POSTGRES,
+        support::no_inject("proj_acme"),
+    )
+    .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
+    .unwrap();
     let advisories = analyze_migration(&drop);
     assert!(
         advisories.iter().any(|a| a.rule == rule::DESTRUCTIVE_DROP),
@@ -606,16 +610,17 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
         .to_lowercase()
         .contains("expand-contract"));
     // sanity: a benign additive migration gets no advisories.
-    let add = zero_migrate::DeterministicAuthor::new("proj_acme", "app_acme")
-        .author(&zero_migrate::AuthorRequest::CreateTable {
-            name: "orders".into(),
-            columns: vec![Column {
-                name: "id".into(),
-                ty: "bigint".into(),
-                nullable: false,
-            }],
-        })
-        .unwrap();
+    let add =
+        zero_migrate::DeterministicAuthor::new("proj_acme", "app_acme", zero_migrate::POSTGRES)
+            .author(&zero_migrate::AuthorRequest::CreateTable {
+                name: "orders".into(),
+                columns: vec![Column {
+                    name: "id".into(),
+                    ty: "bigint".into(),
+                    nullable: false,
+                }],
+            })
+            .unwrap();
     for m in &add {
         assert!(
             analyze_migration(m).is_empty(),

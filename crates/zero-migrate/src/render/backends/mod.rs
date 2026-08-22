@@ -1,7 +1,7 @@
 //! The REGISTRY of shipping backends — the engine's one list of which vendors exist.
 //!
 //! This module used to hold the vendors themselves, as three sibling modules with a
-//! hard-coded `match` over `SqlDialect` beneath them. `docs/proposals/pluggable-backends.md`
+//! hard-coded match over a closed dialect enum beneath them. `docs/proposals/pluggable-backends.md`
 //! step 4 has now happened: they are `zero-migrate-postgres`, `zero-migrate-sqlite`
 //! and `zero-migrate-mysql`, the contract they implement is `zero-migrate-backend`,
 //! and what is left here is the composition.
@@ -47,8 +47,8 @@
 //! A backend can still reach another vendor's spelling THROUGH a contract helper that
 //! hard-codes a dialect, and the grep above cannot see it because the literal lives
 //! in `zero-migrate-backend`. That was not hypothetical here: `dml::quote_ident`,
-//! `dml::quote_bare_ident` and `dml::quote_ident_checked` all pinned
-//! `SqlDialect::Postgres`, so all four identifier emissions in the SQLite backend
+//! `dml::quote_bare_ident` and `dml::quote_ident_checked_for_dialect` all pinned
+//! the PostgreSQL enum leg, so all four identifier emissions in the SQLite backend
 //! used to be quoted by the POSTGRESQL renderer. It was correct only because both
 //! vendors spell an identifier `"x"`.
 //!
@@ -90,8 +90,12 @@ use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_ir::dialect::DialectId;
 
+// This vendor-owned policy remains part of the engine's neutral plan carrier. Re-export
+// it from the one composition module so core never reaches into a vendor crate directly.
+pub(crate) use zero_migrate_sqlite::{SqliteSequencePolicy, VENDOR};
+
 #[cfg(test)]
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
 /// The shipping backends, named ONCE for the whole engine.
 ///
@@ -104,40 +108,32 @@ use crate::schema::query::SqlDialect;
 /// The set is still a compile-time constant rather than a global the host fills at
 /// startup, and that is deliberate — see `zero_migrate_backend::registry` for why a
 /// growable registry would trade a compile error for a runtime one.
-static SHIPPING: [&BackendVendor; 3] = [
-    &zero_migrate_postgres::VENDOR,
-    &zero_migrate_sqlite::VENDOR,
-    &zero_migrate_mysql::VENDOR,
-];
+const POSTGRES_VENDOR: &BackendVendor = &zero_migrate_postgres::VENDOR;
+const SQLITE_VENDOR: &BackendVendor = &VENDOR;
+const MYSQL_VENDOR: &BackendVendor = &zero_migrate_mysql::VENDOR;
+
+static SHIPPING: [&BackendVendor; 3] = [POSTGRES_VENDOR, SQLITE_VENDOR, MYSQL_VENDOR];
 
 pub(crate) const VENDORS: VendorSet = VendorSet::new(&SHIPPING);
 
-/// PostgreSQL's registered byte limit, for the deterministic identifier-name
-/// precomputation that is still PostgreSQL-shaped.
+/// The engine's stable generated-identifier byte budget, read from the registered
+/// backend that imposes the limiting byte-counted cap. Generated names are
+/// precomputed once and then handed to every emitter, so this is one composition
+/// fact rather than a per-call vendor dispatch.
 ///
-/// Resolved through the registry by [`DialectId`], NOT by naming the backend crate.
-/// Both spellings read the same declared descriptor, but an id is not a crate name:
-/// the shipping list above stays the ONE place core names a backend crate, and
-/// `core_names_no_vendor_crate` keeps its exact count of three.
-///
-/// A fn rather than a `const` because the registry lookup is not const-evaluable.
-/// Nothing needed const-ness - every call site is a runtime expression - so this
-/// costs no generality. Indexing `SHIPPING[0]` would have kept the `const` and also
-/// dropped the crate name, but it identifies PostgreSQL POSITIONALLY: reorder the
-/// list and it silently reads a different vendor's cap. An id cannot do that.
-pub(crate) fn postgres_identifier_limit_bytes() -> usize {
-    match vendor(&zero_migrate_ir::dialect::POSTGRES)
-        .descriptor
-        .limits
-        .identifier
-    {
+/// This is the ONE definition. It used to be three - `plan::author`, `apply::role`
+/// and `render::expand_contract` each restated `63`, and `plan::author`'s doc
+/// promised the author's number and the backend's DECLARED number "cannot drift
+/// apart", which was true of one site and false of the other two. Reading the
+/// declared limit here makes that promise true of all of them.
+pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
+    match POSTGRES_VENDOR.descriptor.limits.identifier {
         zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
         zero_migrate_ir::backend::IdentifierLimit::Unbounded
         | zero_migrate_ir::backend::IdentifierLimit::Characters(_) => {
             panic!("PostgreSQL declares a BYTE identifier cap")
         }
-    }
-}
+    };
 
 /// The vendor for a dialect.
 ///
@@ -193,7 +189,7 @@ pub(crate) fn ddl_emitter(dialect: &DialectId, project_schema: &str) -> Box<dyn 
 /// The LINE-1 guard for a config's dialect — this vendor's, built by this vendor.
 ///
 /// This replaced `zero_migrate_guard::guard::guard_for`, which was a second
-/// `match` over `SqlDialect` living in the guard crate and mapping BOTH
+/// closed identity match living in the guard crate and mapping BOTH
 /// descriptor-only dialects onto one shared `SqliteDescriptorGuard`. Two consequences
 /// of folding it into the vendor registry are worth stating:
 ///
@@ -217,15 +213,9 @@ mod tests {
 
     #[test]
     fn dispatch_returns_expected_dml_renderer() {
-        assert_eq!(renderer(&SqlDialect::Postgres.id()).synth_now(), "now()");
-        assert_eq!(
-            renderer(&SqlDialect::Sqlite.id()).synth_now(),
-            "CURRENT_TIMESTAMP"
-        );
-        assert_eq!(
-            renderer(&SqlDialect::Mysql.id()).synth_now(),
-            "CURRENT_TIMESTAMP(6)"
-        );
+        assert_eq!(renderer(&POSTGRES).synth_now(), "now()");
+        assert_eq!(renderer(&SQLITE).synth_now(), "CURRENT_TIMESTAMP");
+        assert_eq!(renderer(&MYSQL).synth_now(), "CURRENT_TIMESTAMP(6)");
     }
 
     /// The registry composes, and it composes through the LEAF crate's builder
@@ -242,10 +232,10 @@ mod tests {
             .expect("the shipping vendors must satisfy the dialect-id rule");
         assert_eq!(registry.len(), VENDORS.len());
         assert_eq!(registry.len(), 3);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [POSTGRES, SQLITE, MYSQL] {
             assert!(
-                registry.get(&dialect.id()).is_some(),
-                "{dialect:?} must be registered"
+                registry.get(&dialect).is_some(),
+                "{dialect} must be registered"
             );
         }
     }
@@ -308,8 +298,8 @@ mod tests {
         };
         let expected = "CONSTRAINT \"fk\"\"child\" FOREIGN KEY (\"child\"\"col\") REFERENCES \"project\"\"schema\".\"parents\" (id, \"parent\"\"col\") ON DELETE CASCADE";
 
-        let sqlite = ddl_emitter(&SqlDialect::Sqlite.id(), "project\"schema").fk_clause(&fk);
-        let postgres = ddl_emitter(&SqlDialect::Postgres.id(), "project\"schema").fk_clause(&fk);
+        let sqlite = ddl_emitter(&SQLITE, "project\"schema").fk_clause(&fk);
+        let postgres = ddl_emitter(&POSTGRES, "project\"schema").fk_clause(&fk);
         assert_eq!(sqlite, expected);
         assert_eq!(sqlite, postgres);
     }

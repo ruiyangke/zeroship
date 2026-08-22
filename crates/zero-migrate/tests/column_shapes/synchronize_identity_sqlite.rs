@@ -8,9 +8,7 @@ use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
-use zero_migrate::{
-    IrAuthor, LiveSchema, PlanStep, SqlDialect, SqliteBackend, SynchronizeIdentityStep,
-};
+use zero_migrate::{IrAuthor, LiveSchema, PlanStep, SqliteBackend, SynchronizeIdentityStep};
 
 struct Paths {
     _dir: TempDir,
@@ -51,7 +49,7 @@ fn step(name: &str, table: &str, column: &str) -> SynchronizeIdentityStep {
     let plan = IrAuthor::new(
         "app",
         "app_test",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("app"),
     )
     .lower_plan(&ir, &LiveSchema::default())

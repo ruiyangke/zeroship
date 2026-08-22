@@ -32,7 +32,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     diff_snapshots, effective_policy_from_charter_toml, fold_ops, resolve_create_table_policy,
     snapshot_schema, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    LockMode, MigrationEngine, MigrationIr, PostgresBackend, SqlDialect, StructuralDrift,
+    LockMode, MigrationEngine, MigrationIr, PostgresBackend, StructuralDrift,
 };
 
 const OWNER: &str = "app_fold_roundtrip_pg";
@@ -169,8 +169,8 @@ async fn apply_ir(
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -227,14 +227,18 @@ async fn assert_roundtrip(
 
         let expected = fold_ops(
             &ir.ops,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
         .map_err(|error| format!("fold the applied PostgreSQL ops: {error}"))?;
-        let actual = snapshot_schema(&session, &cfg.project_schema)
-            .await
-            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let actual = snapshot_schema(
+            &zero_migrate_ir::dialect::POSTGRES,
+            &session,
+            &cfg.project_schema,
+        )
+        .await
+        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(diff_snapshots(&expected, &actual))
     }
     .await;
@@ -413,8 +417,8 @@ async fn assert_lifecycle_roundtrip(
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,
@@ -470,18 +474,22 @@ async fn assert_lifecycle_roundtrip(
                 let (checkpoint, _) = checkpoints[next_checkpoint];
                 let expected = fold_ops(
                     &applied_ops,
-                    SqlDialect::Postgres,
+                    &zero_migrate::POSTGRES,
                     &cfg.project_schema,
                     &policy,
                 )
                 .map_err(|error| {
                     format!("{checkpoint}: fold the applied PostgreSQL ops: {error}")
                 })?;
-                let actual = snapshot_schema(&session, &cfg.project_schema)
-                    .await
-                    .map_err(|error| {
-                        format!("{checkpoint}: snapshot the live PostgreSQL schema: {error}")
-                    })?;
+                let actual = snapshot_schema(
+                    &zero_migrate_ir::dialect::POSTGRES,
+                    &session,
+                    &cfg.project_schema,
+                )
+                .await
+                .map_err(|error| {
+                    format!("{checkpoint}: snapshot the live PostgreSQL schema: {error}")
+                })?;
                 let drift = diff_snapshots(&expected, &actual);
                 if !drift.is_clean() {
                     return Err(format!(

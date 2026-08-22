@@ -48,8 +48,9 @@ use zero_migrate::model::probe::{GuardDir, GuardProbe};
 use zero_migrate::model::snapshot::{
     ConstraintSnapshot, IndexSnapshot, SchemaSnapshot, TableSnapshot,
 };
-use zero_migrate::model::validate::{validate_ir_scoped, AuthoringError, SqlDialect};
+use zero_migrate::model::validate::{validate_ir_scoped, AuthoringError};
 use zero_migrate::render::existence_probe::{decide, GuardVerdict};
+use zero_migrate::DialectId;
 use zero_migrate::{
     ColType, IndexElement, IrAuthor, IrColumn, IrConstraint, IrConstraintKind, IrIndex, LiveSchema,
     MigrationIr, Op, SchemaScope, POSTGRES, SQLITE,
@@ -57,7 +58,11 @@ use zero_migrate::{
 
 use crate::support;
 
-const DIALECTS: [SqlDialect; 3] = [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite];
+const DIALECTS: [&DialectId; 3] = [
+    &zero_migrate::POSTGRES,
+    &zero_migrate::MYSQL,
+    &zero_migrate::SQLITE,
+];
 
 /// PostgreSQL's NAMEDATALEN-derived identifier bound, in bytes.
 const MAX: usize = 63;
@@ -78,7 +83,7 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
     }
 }
 
-fn validate(op: Op, dialect: SqlDialect) -> Result<(), AuthoringError> {
+fn validate(op: Op, dialect: &DialectId) -> Result<(), AuthoringError> {
     validate_ir_scoped(&ir(vec![op]), dialect, Some(&SchemaScope::Unconfined))
 }
 
@@ -240,11 +245,11 @@ type NamedOpFactory = (&'static str, fn(&str) -> Op);
 /// Constraint-NAME length stays covered on SQLite by the `createTable inline
 /// constraint` factory below, which is portable on all three dialects, so nothing
 /// this file exists to prove is lost.
-const ADD_CONSTRAINT_DIALECTS: [SqlDialect; 2] = [SqlDialect::Postgres, SqlDialect::Mysql];
+const ADD_CONSTRAINT_DIALECTS: [&DialectId; 2] = [&zero_migrate::POSTGRES, &zero_migrate::MYSQL];
 
 /// Every CREATE-side op factory that carries an author-supplied identifier and is
 /// authorable on `dialect`.
-fn create_side_factories(dialect: SqlDialect) -> Vec<NamedOpFactory> {
+fn create_side_factories(dialect: &DialectId) -> Vec<NamedOpFactory> {
     let mut factories: Vec<NamedOpFactory> = vec![
         (
             "createTable inline constraint",
@@ -268,7 +273,7 @@ fn drop_side_factories() -> Vec<NamedOpFactory> {
     ]
 }
 
-fn assert_refused_for_length(label: &str, dialect: SqlDialect, op: Op) {
+fn assert_refused_for_length(label: &str, dialect: &DialectId, op: Op) {
     let error = validate(op, dialect).expect_err(&format!(
         "{label} on {dialect:?} must refuse a truncatable name"
     ));
@@ -282,7 +287,7 @@ fn assert_refused_for_length(label: &str, dialect: SqlDialect, op: Op) {
     );
 }
 
-fn assert_not_refused_for_length(label: &str, dialect: SqlDialect, op: Op) {
+fn assert_not_refused_for_length(label: &str, dialect: &DialectId, op: Op) {
     if let Err(error) = validate(op, dialect) {
         assert!(
             !error.reason.contains("truncates identifiers"),
@@ -331,7 +336,7 @@ fn create_table_refuses_a_64_byte_inline_index_name_on_every_dialect() {
 fn drop_side_refuses_a_64_byte_name_on_postgres() {
     let name = ascii_name(MAX + 1);
     for (label, factory) in drop_side_factories() {
-        assert_refused_for_length(label, SqlDialect::Postgres, factory(&name));
+        assert_refused_for_length(label, &zero_migrate::POSTGRES, factory(&name));
     }
 }
 
@@ -341,7 +346,7 @@ fn drop_side_refuses_a_64_byte_name_on_postgres() {
 #[test]
 fn drop_side_accepts_a_64_byte_name_on_mysql_and_sqlite() {
     let name = ascii_name(MAX + 1);
-    for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [&zero_migrate::MYSQL, &zero_migrate::SQLITE] {
         for (label, factory) in drop_side_factories() {
             assert_not_refused_for_length(label, dialect, factory(&name));
         }
@@ -386,7 +391,7 @@ fn a_multi_byte_name_over_63_bytes_is_refused_where_the_bound_applies() {
         }
     }
     for (label, factory) in drop_side_factories() {
-        assert_refused_for_length(label, SqlDialect::Postgres, factory(&name));
+        assert_refused_for_length(label, &zero_migrate::POSTGRES, factory(&name));
     }
 }
 
@@ -397,7 +402,7 @@ fn a_multi_byte_name_over_63_bytes_is_refused_where_the_bound_applies() {
 // there too.
 
 /// Lower one op through the real `IrAuthor`, returning the rendered error text.
-fn lower_error(op: Op, dialect: SqlDialect) -> Option<String> {
+fn lower_error(op: Op, dialect: &DialectId) -> Option<String> {
     let author = IrAuthor::new("app", "app_idents", dialect, &support::no_inject("app"));
     author
         .lower(&ir(vec![op]), &LiveSchema::default())
@@ -406,7 +411,7 @@ fn lower_error(op: Op, dialect: SqlDialect) -> Option<String> {
 }
 
 #[track_caller]
-fn assert_lower_refused_for_length(label: &str, dialect: SqlDialect, op: Op) {
+fn assert_lower_refused_for_length(label: &str, dialect: &DialectId, op: Op) {
     let error = lower_error(op, dialect).unwrap_or_else(|| {
         panic!("{label} on {dialect:?} must refuse a truncatable name at lower")
     });
@@ -417,7 +422,7 @@ fn assert_lower_refused_for_length(label: &str, dialect: SqlDialect, op: Op) {
 }
 
 #[track_caller]
-fn assert_lower_not_refused_for_length(label: &str, dialect: SqlDialect, op: Op) {
+fn assert_lower_not_refused_for_length(label: &str, dialect: &DialectId, op: Op) {
     if let Some(error) = lower_error(op, dialect) {
         assert!(
             !error.contains("truncates identifiers"),
@@ -431,10 +436,14 @@ fn assert_lower_not_refused_for_length(label: &str, dialect: SqlDialect, op: Op)
 #[test]
 fn lower_refuses_a_64_byte_authored_constraint_name() {
     let name = ascii_name(MAX + 1);
-    assert_lower_refused_for_length("addConstraint", SqlDialect::Postgres, add_constraint(&name));
+    assert_lower_refused_for_length(
+        "addConstraint",
+        &zero_migrate::POSTGRES,
+        add_constraint(&name),
+    );
     assert_lower_refused_for_length(
         "dropConstraint",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         drop_constraint(&name),
     );
 }
@@ -444,12 +453,12 @@ fn lower_accepts_a_63_byte_authored_constraint_name() {
     let name = ascii_name(MAX);
     assert_lower_not_refused_for_length(
         "addConstraint",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         add_constraint(&name),
     );
     assert_lower_not_refused_for_length(
         "dropConstraint",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         drop_constraint(&name),
     );
 }
@@ -470,7 +479,7 @@ fn the_load_gate_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
     let name = ascii_name(MAX + 1);
     assert_refused_for_length(
         "dialectal postgres dropConstraint",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         dialectal_pg_drop_constraint(&name),
     );
 }
@@ -480,7 +489,7 @@ fn the_lower_seam_refuses_a_64_byte_name_nested_in_a_dialectal_leg() {
     let name = ascii_name(MAX + 1);
     assert_lower_refused_for_length(
         "dialectal postgres dropConstraint",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         dialectal_pg_drop_constraint(&name),
     );
 }
@@ -496,7 +505,11 @@ fn an_unselected_dialectal_leg_is_not_bounded() {
             (SQLITE, vec![drop_constraint(&name)]),
         ]),
     };
-    assert_not_refused_for_length("dialectal sqlite leg on postgres", SqlDialect::Postgres, op);
+    assert_not_refused_for_length(
+        "dialectal sqlite leg on postgres",
+        &zero_migrate::POSTGRES,
+        op,
+    );
 }
 
 // - The executor's existence probe -
@@ -618,12 +631,12 @@ fn assert_ifexists_miss(
     label: &str,
     probe: &GuardProbe,
     live: &SchemaSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     noop_reason: &str,
 ) {
     let mysql_constraint =
-        matches!(dialect, SqlDialect::Mysql) && matches!(probe, GuardProbe::Constraint { .. });
-    let verdict = decide(probe, live, &dialect.id());
+        dialect == &zero_migrate::MYSQL && matches!(probe, GuardProbe::Constraint { .. });
+    let verdict = decide(probe, live, dialect);
     if mysql_constraint {
         match verdict {
             GuardVerdict::FailDrift(divergence) => {
@@ -743,14 +756,14 @@ fn an_over_long_if_not_exists_name_fails_closed_on_postgres() {
 #[test]
 fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
     let name = ascii_name(MAX);
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::MYSQL,
+        &zero_migrate::SQLITE,
+    ] {
         for (label, probe, live) in probe_cases() {
             assert_eq!(
-                decide(
-                    &probe(&name, GuardDir::IfExists),
-                    &live(&name),
-                    &dialect.id(),
-                ),
+                decide(&probe(&name, GuardDir::IfExists), &live(&name), dialect,),
                 GuardVerdict::RunBare,
                 "{label} ifExists on {dialect:?}: a live object still runs the drop"
             );
@@ -762,11 +775,7 @@ fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
                 "an absent object still no-ops",
             );
             assert_eq!(
-                decide(
-                    &probe(&name, GuardDir::IfNotExists),
-                    &empty_live(),
-                    &dialect.id(),
-                ),
+                decide(&probe(&name, GuardDir::IfNotExists), &empty_live(), dialect,),
                 GuardVerdict::RunBare,
                 "{label} ifNotExists on {dialect:?}: an absent object still creates"
             );
@@ -781,13 +790,13 @@ fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
 fn an_over_long_name_is_not_truncated_on_mysql_or_sqlite() {
     let authored = ascii_name(MAX + 1);
     let truncated = pg_truncation(&authored);
-    for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [&zero_migrate::MYSQL, &zero_migrate::SQLITE] {
         for (label, probe, live) in probe_cases() {
             assert_eq!(
                 decide(
                     &probe(&authored, GuardDir::IfExists),
                     &live(&authored),
-                    &dialect.id(),
+                    dialect,
                 ),
                 GuardVerdict::RunBare,
                 "{label} ifExists on {dialect:?}: the catalog can hold the full name"
@@ -803,7 +812,7 @@ fn an_over_long_name_is_not_truncated_on_mysql_or_sqlite() {
                 decide(
                     &probe(&authored, GuardDir::IfNotExists),
                     &empty_live(),
-                    &dialect.id(),
+                    dialect,
                 ),
                 GuardVerdict::RunBare,
                 "{label} ifNotExists on {dialect:?}: an absent object still creates"

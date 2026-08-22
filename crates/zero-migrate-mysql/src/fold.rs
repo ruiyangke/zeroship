@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::fold::{
-    AuthorTypeOverride, CatalogFoldPolicy, FoldCursorColumnContract, FoldCursorComparison,
-    FoldCursorScalarType, FoldDatabaseFeature, ReferenceTextStorage,
+    AuthorTypeOverride, CatalogFoldPolicy, CatalogFoldRefusal, FoldCursorColumnContract,
+    FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature, ReferenceTextStorage,
+    SnapshotProvenanceStrength,
 };
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
@@ -19,6 +20,17 @@ pub(crate) struct MysqlCatalogFoldPolicy;
 pub(crate) static POLICY: MysqlCatalogFoldPolicy = MysqlCatalogFoldPolicy;
 
 impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
+    fn snapshot_provenance_strength(
+        &self,
+        table: &TableSnapshot,
+    ) -> Option<SnapshotProvenanceStrength> {
+        table
+            .columns
+            .iter()
+            .any(|column| column.mysql_text_storage.is_some())
+            .then_some(SnapshotProvenanceStrength::ExactTextStorage)
+    }
+
     fn allocate_implicit_relation_name(
         &self,
         default_name: &str,
@@ -95,6 +107,12 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
         Ok(None)
     }
 
+    fn canonical_rename_type_spelling(&self, ty: &str) -> String {
+        // MySQL's rename strategy never uses PostgreSQL alias equivalence. Its
+        // own schema canonicalizer owns the physical spellings it does compare.
+        crate::schema::RENDERER.canonical_type(ty)
+    }
+
     fn inline_enum_check(
         &self,
         _column: &str,
@@ -111,6 +129,35 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
         // MySQL exposes CHECK names, clauses, and ENFORCED state. The current fold
         // scope nevertheless does not reconcile arbitrary authored CHECK identity.
         false
+    }
+
+    fn refusal_message(&self, refusal: CatalogFoldRefusal) -> &'static str {
+        match refusal {
+            CatalogFoldRefusal::AlterPrimaryKeyRowidGeneration => {
+                "alterPrimaryKey cannot introduce SQLite INTEGER PRIMARY KEY rowid generation"
+            }
+            CatalogFoldRefusal::AddColumnIdentity => {
+                "addColumn identity on SQLite (non-PK identity has no sound SQLite emulation)"
+            }
+            CatalogFoldRefusal::CreateTableCheckConstraint => {
+                "createTable table-level CHECK is PostgreSQL-only"
+            }
+            CatalogFoldRefusal::CreateTableUniqueConstraint => {
+                "createTable table-level UNIQUE on SQLite (the SQLite CREATE \
+                 renders from the descriptor; a table-level UNIQUE is not \
+                 threaded into the emitter)"
+            }
+            CatalogFoldRefusal::CreateTableExclusionConstraint => {
+                "createTable exclusion constraint is PostgreSQL-only"
+            }
+            CatalogFoldRefusal::CreateTableNonBtreeIndex => {
+                "createTable non-btree index `using` on SQLite (not yet supported)"
+            }
+            CatalogFoldRefusal::AddCheckConstraint => "addConstraint(check) is PostgreSQL-only",
+            CatalogFoldRefusal::AddExclusionConstraint => {
+                "addConstraint exclusion constraint is PostgreSQL-only"
+            }
+        }
     }
 
     fn physical_type_inputs_equal(&self, left: &ColumnSnapshot, right: &ColumnSnapshot) -> bool {

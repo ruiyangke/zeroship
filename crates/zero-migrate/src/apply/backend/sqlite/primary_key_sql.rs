@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::AlterPrimaryKeyAction;
+use crate::render::backends::SqliteSequencePolicy;
 use crate::render::plan::TableRebuildSpec;
-use zero_migrate_sqlite::SqliteSequencePolicy;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
@@ -29,7 +29,7 @@ fn lit(value: &str) -> String {
 }
 
 fn ident(value: &str) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(value, super::SQLITE_DIALECT)
+    crate::render::dml::escape_quote_ident_for_dialect(value, &super::SQLITE_DIALECT)
 }
 
 fn cell(row: &[Option<String>], index: usize, field: &str) -> Result<String, SqliteActorError> {
@@ -367,7 +367,7 @@ pub(crate) async fn resolve(
             &stored_create,
             target_columns(action),
             generated_rowid.map(|column| column.name.as_str()),
-            crate::render::backends::schema_renderer(&super::SQLITE_DIALECT.id()),
+            crate::render::backends::schema_renderer(&super::SQLITE_DIALECT),
         )
         .map_err(|error| fail(error.to_string()))?;
     let (open, _) = stored_ddl

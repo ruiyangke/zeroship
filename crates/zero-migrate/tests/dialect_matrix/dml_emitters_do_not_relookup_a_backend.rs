@@ -8,7 +8,7 @@
 //! is core resolving a vendor BY DIALECT from inside core. The taxonomy is the same
 //! one the schema file spells out:
 //!
-//! * A **boundary** — a door whose callers hand in a `SqlDialect`, which turns it
+//! * A **boundary** — a door whose callers hand in a `&zero_migrate::DialectId`, which turns it
 //!   into a backend ONCE and hands that backend down. These survive extraction as
 //!   the facade's `register(..)` table.
 //! * A **caller-fixed target** — naming a vendor you already are, or already meant.
@@ -126,13 +126,13 @@
 //!   census floor below is measuring, and a reader who finds the floor dropping
 //!   needs to know these carriers are the reason it is as high as it is. It is NOT
 //!   an outstanding decision any more; do not re-add a `_for_dialect` door here.
-//! * A core emitter that still takes `dialect: SqlDialect` and looks a backend up.
+//! * A core emitter that still takes `dialect: &zero_migrate::DialectId` and looks a backend up.
 //!   Such a function is not a carrier, so it is not scanned. The census floor is the
 //!   partial guard — converting a carrier back drops the count and fails — but a
 //!   brand-new dialect-taking emitter with a fresh lookup is invisible here.
 //! * A lookup ONE HOP away. `render_view_op` carries a backend and calls
 //!   `render_view_query`, which resolves one. That is legitimate — `render_view_query`
-//!   is `pub(crate)` and `apply::drift` calls it holding only a `SqlDialect`, so it
+//!   is `pub(crate)` and `apply::drift` calls it holding only a `&zero_migrate::DialectId`, so it
 //!   is a genuine door — but the scan cannot tell that from a laundered point-of-use
 //!   lookup, because it never leaves the region it is reading.
 //! * `value_format.rs:472` resolves a backend from a dialect and is meant to. Its
@@ -171,7 +171,7 @@
 /// over nothing, and report green, which is the failure direction that matters. So
 /// the count of carriers found is asserted too. The assertion is a FLOOR, so a new
 /// emitter adopting the carrier passes silently while a broken scanner and a carrier
-/// reverted to `dialect: SqlDialect` both go red.
+/// reverted to `dialect: &zero_migrate::DialectId` both go red.
 ///
 /// # Two ways this goes red that are not defects
 ///
@@ -304,7 +304,7 @@ fn a_dml_emitter_holding_a_backend_never_resolves_another() {
              \n\
              Use the `backend` this function was given. `DmlRenderer` NOW has a \
              `dialect()` accessor — the crate split added it, because the spelling \
-             helpers had to stop taking a `SqlDialect` and the capability and \
+             helpers had to stop taking a `&zero_migrate::DialectId` and the capability and \
              leg-selection questions they ask still need one. So a genuine DIALECT \
              need (drift comparison, capability folding, normalization keyed by \
              dialect: core decisions, not vendor spelling) is `backend.dialect()`, \
@@ -330,7 +330,7 @@ fn a_dml_emitter_holding_a_backend_never_resolves_another() {
          different situations. Either the scan itself broke — the region cutter, or \
          the `{CARRIER_NAME}` / `{CARRIER_TYPE}` needle — in which case the loop \
          above iterated over nothing and its green meant nothing; or an emitter \
-         stopped carrying a backend and went back to taking a `dialect: SqlDialect`, \
+         stopped carrying a backend and went back to taking a `dialect: &zero_migrate::DialectId`, \
          which is the regression this file exists to catch. Check WHICH before \
          editing the floor. The set at the time of writing was {KNOWN:#?}; a \
          legitimate drop (an emitter deleted or two folded together) lowers the \

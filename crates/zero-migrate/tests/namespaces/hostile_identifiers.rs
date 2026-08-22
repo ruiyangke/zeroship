@@ -38,7 +38,7 @@ use std::collections::BTreeMap;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
-    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, SqlDialect,
+    Approval, DialectId, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
     SqliteBackend,
 };
 
@@ -46,7 +46,7 @@ const PROJECT: &str = "prj_ir";
 const APP: &str = "app_ir";
 
 /// Lower a single `createTable` whose table name is `raw`.
-fn lower_create_table(raw: &str, dialect: SqlDialect) -> Result<Vec<String>, String> {
+fn lower_create_table(raw: &str, dialect: &DialectId) -> Result<Vec<String>, String> {
     let bytes = format!(
         r#"{{"ir_version":1,"name":"hostile","ops":[{{"op":"createTable","name":"{raw}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}]}}"#
     );
@@ -56,7 +56,7 @@ fn lower_create_table(raw: &str, dialect: SqlDialect) -> Result<Vec<String>, Str
             APP,
             &BTreeMap::new(),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), dialect.id()),
+            &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone()),
         )
         .map_err(|e| format!("{e:?}"))?;
     Ok(artifact
@@ -98,11 +98,18 @@ fn a_double_quote_is_refused_or_escaped_but_never_left_bare() {
     // guard rejects, which the permissive form scored as the refusal branch and
     // passed. A test that reads a BROKEN ESCAPER as a safe refusal is worse than
     // no test, so the dialect that is known to escape must still escape.
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
-        let (quote, must_escape) = match dialect {
-            SqlDialect::Mysql => ('`', true),
-            SqlDialect::Sqlite => ('"', true),
-            SqlDialect::Postgres => ('"', false),
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::SQLITE,
+        &zero_migrate::MYSQL,
+    ] {
+        let (quote, must_escape) = if dialect == &zero_migrate::MYSQL {
+            ('`', true)
+        } else if dialect == &zero_migrate::SQLITE {
+            ('"', true)
+        } else {
+            assert_eq!(dialect, &zero_migrate::POSTGRES);
+            ('"', false)
         };
         for (label, raw) in QUOTE_BEARING {
             // Reuse the payloads with the dialect's own quote substituted in, so
@@ -177,7 +184,7 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
             .await
             .expect("seed the table the payload tries to drop");
 
-        let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::confined_charter())
+        let artifact = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &support::confined_charter())
             .load_and_lower_guarded(
                 &format!(
                     r#"{{"ir_version":1,"name":"hostile","ops":[{{"op":"createTable","name":"{raw}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}]}}"#
@@ -185,7 +192,7 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
                 APP,
                 &BTreeMap::new(),
                 &LiveSchema::default(),
-                &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
+                &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone()),
             )
         .unwrap_or_else(|e| {
             // NOT a `continue`. SQLite is the dialect that ESCAPES these, so a
@@ -260,7 +267,7 @@ const AWKWARD: &[(&str, &str)] = &[
 #[test]
 fn an_awkward_identifier_is_quoted_rather_than_refused() {
     for (label, raw) in AWKWARD {
-        let statements = lower_create_table(raw, SqlDialect::Postgres)
+        let statements = lower_create_table(raw, &zero_migrate::POSTGRES)
             .unwrap_or_else(|e| panic!("{label}: a legal identifier must lower: {e}"));
         let sql = statements.join(" ");
         assert!(
@@ -281,11 +288,11 @@ async fn an_awkward_identifier_survives_a_real_database_unchanged() {
         )
         .expect("open the hardened sqlite backend");
 
-        let statements = lower_create_table(raw, SqlDialect::Sqlite)
+        let statements = lower_create_table(raw, &zero_migrate::SQLITE)
             .unwrap_or_else(|e| panic!("{label}: a legal identifier must lower: {e}"));
         assert!(!statements.is_empty(), "{label}: nothing was rendered");
 
-        let artifact = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::confined_charter())
+        let artifact = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &support::confined_charter())
             .load_and_lower_guarded(
                 &format!(
                     r#"{{"ir_version":1,"name":"hostile","ops":[{{"op":"createTable","name":"{raw}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}]}}"#
@@ -293,7 +300,7 @@ async fn an_awkward_identifier_survives_a_real_database_unchanged() {
                 APP,
                 &BTreeMap::new(),
                 &LiveSchema::default(),
-                &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
+                &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone()),
             )
             .expect("lower for apply");
 

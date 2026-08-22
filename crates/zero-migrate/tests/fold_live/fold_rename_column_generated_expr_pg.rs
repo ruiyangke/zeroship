@@ -44,7 +44,7 @@ use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, BinaryOp, ColType, EffectivePolicy,
     ExecutorConfig, Expr, GeneratedCol, GuardConfig, IrAuthor, IrColumn, IrScalar, LiveSchema,
-    LockMode, MigrationEngine, MigrationIr, Op, PostgresBackend, SqlDialect,
+    LockMode, MigrationEngine, MigrationIr, Op, PostgresBackend,
 };
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
@@ -178,8 +178,8 @@ async fn apply_create(
 ) -> Result<(), String> {
     let resolved_source = serde_json::to_string(resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -272,7 +272,7 @@ async fn measure() -> Option<Measured> {
         // What the two offline replays say, over the SAME op stream.
         let mut ops = resolved.ops.clone();
         ops.push(rename_op());
-        let folded = fold_ops(&ops, SqlDialect::Postgres, &cfg.project_schema, &policy)
+        let folded = fold_ops(&ops, &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the PostgreSQL ops: {error}"))?;
         let folded = folded
             .tables
@@ -282,7 +282,7 @@ async fn measure() -> Option<Measured> {
             .map(|generated| generated.expr.clone())
             .ok_or_else(|| "the folded snapshot carries no generated body".to_string())?;
 
-        let fields = single_fold::fold(&ops, SqlDialect::Postgres, &cfg.project_schema, &policy)
+        let fields = single_fold::fold(&ops, &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
             .map(|folded| folded.project_field_defs())
             .map_err(|error| format!("fold the ops to field defs: {error}"))?;
         let descriptor = fields

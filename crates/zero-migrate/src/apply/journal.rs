@@ -35,6 +35,7 @@ use crate::driver::SqlSession;
 
 use crate::apply::executor::BackendError;
 use crate::conn::ExecutorConfig;
+use zero_migrate_ir::dialect::DialectId;
 
 /// A journal phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,17 +413,20 @@ impl From<crate::driver::DbError> for JournalError {
 
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in
 /// double-quotes, so a schema name is never interpolated as raw SQL. Routes
-/// through the ONE crate-shared engine seam ([`crate::render::dml::quote_ident_checked`])
+/// through the explicit backend seam
+/// ([`crate::render::dml::quote_ident_checked_for_dialect`])
 /// — byte-identical to (and uniformly self-defending with)
 /// `author`/`backfill`/`role`/`dml`: fail-closed on an empty / NUL identifier.
-fn quote_ident(ident: &str) -> Result<String, JournalError> {
-    Ok(crate::render::dml::quote_ident_checked(ident)?)
+fn quote_ident(dialect: &DialectId, ident: &str) -> Result<String, JournalError> {
+    Ok(crate::render::dml::quote_ident_checked_for_dialect(
+        ident, dialect,
+    )?)
 }
 
 /// Test seam (see `dml::tests::all_engine_seams_render_uniformly`).
 #[cfg(test)]
 pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> {
-    quote_ident(ident)
+    quote_ident(&zero_migrate_ir::dialect::POSTGRES, ident)
 }
 
 /// Bootstrap (idempotently) the meta schema + journal table + inflight
@@ -449,12 +453,16 @@ pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> 
 pub async fn ensure_journal<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
-    let trg_fn = quote_ident(&format!(
-        "{}_schema_migrations_immutable",
-        cfg.confinement.meta_schema
-    ))?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let trg_fn = quote_ident(
+        dialect,
+        &format!(
+            "{}_schema_migrations_immutable",
+            cfg.confinement.meta_schema
+        ),
+    )?;
     let meta_lit = cfg.confinement.meta_schema.replace('\'', "''");
 
     // 1. Meta schema.
@@ -829,7 +837,7 @@ pub async fn ensure_journal<D: SqlSession>(
             ),
         ] {
             let trg_lit = trg.replace('\'', "''");
-            let trg_q = quote_ident(trg)?;
+            let trg_q = quote_ident(dialect, trg)?;
             conn.batch(&format!(
                 "DO $do$ BEGIN
                     IF NOT EXISTS (
@@ -879,8 +887,9 @@ pub async fn ensure_journal<D: SqlSession>(
 pub async fn applied<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     // Single-table net state: take the LATEST event per version (DISTINCT ON over
     // the consolidated events table, by `event_seq DESC`) and keep only the
     // versions whose latest event is `applied` (net-applied). Then UNION the lone
@@ -1021,8 +1030,9 @@ pub struct HistoryEvent {
 pub async fn net_rolled_back<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<Vec<RolledBackEntry>, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1070,8 +1080,9 @@ pub async fn net_rolled_back<D: SqlSession>(
 pub async fn history<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<Vec<HistoryEvent>, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1125,13 +1136,14 @@ pub async fn history<D: SqlSession>(
 pub async fn record_rolled_back<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     version: &str,
     name: &str,
     checksum: &str,
     rolled_back_by: &str,
     exec_ms: i64,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let n = conn
         .exec(
             &format!(
@@ -1163,12 +1175,13 @@ pub async fn record_rolled_back<D: SqlSession>(
 pub async fn record_started<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     version: &str,
     name: &str,
     checksum: &str,
     applied_by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     conn.exec(
         &format!(
             "INSERT INTO {meta}.schema_migrations_inflight
@@ -1222,9 +1235,10 @@ pub struct CompletedRecord<'a> {
 pub async fn record_completed<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     rec: CompletedRecord<'_>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     // Plain INSERT (consistent with the transactional path). `event_seq` is a
     // surrogate identity PK, so this appends a fresh `completed` event — including
     // a re-apply after a rollback, where a prior `completed` + a later
@@ -1273,8 +1287,9 @@ pub async fn record_completed<D: SqlSession>(
 pub async fn outstanding_pending_contracts<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<Vec<PendingContract>, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1338,8 +1353,9 @@ pub async fn outstanding_pending_contracts<D: SqlSession>(
 pub async fn resolved_pending_contracts<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<Vec<ResolvedPendingContract>, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1394,7 +1410,9 @@ pub async fn resolved_pending_contracts<D: SqlSession>(
 pub async fn pending_contract_shape<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     contract: &PendingContract,
+    catalog_fold: &dyn zero_migrate_backend::fold::CatalogFoldPolicy,
 ) -> Result<PendingContractShape, JournalError> {
     let catalog = conn
         .query(
@@ -1428,9 +1446,10 @@ pub async fn pending_contract_shape<D: SqlSession>(
         let first_type: String = catalog[0].try_get("formatted_type")?;
         let second_type: String = catalog[1].try_get("formatted_type")?;
         let expected_type_oid: Option<i64> = catalog[0].try_get("expected_type_oid")?;
-        let expected_type = canonical_pending_contract_type(&contract.ty);
-        let formatted_type_matches = canonical_pending_contract_type(&first_type) == expected_type
-            && canonical_pending_contract_type(&second_type) == expected_type;
+        let expected_type = canonical_pending_contract_type(catalog_fold, &contract.ty);
+        let formatted_type_matches = canonical_pending_contract_type(catalog_fold, &first_type)
+            == expected_type
+            && canonical_pending_contract_type(catalog_fold, &second_type) == expected_type;
         let authored_type_matches = match expected_type_oid {
             // PostgreSQL named enum/domain types have no modifier. Resolve the
             // authored, safely quoted type name to its catalog OID so equivalent
@@ -1451,10 +1470,10 @@ pub async fn pending_contract_shape<D: SqlSession>(
     };
 
     let values_synchronized = if columns_compatible {
-        let schema = quote_ident(&cfg.project_schema)?;
-        let table = quote_ident(&contract.table)?;
-        let from = quote_ident(&contract.from_col)?;
-        let to = quote_ident(&contract.to_col)?;
+        let schema = quote_ident(dialect, &cfg.project_schema)?;
+        let table = quote_ident(dialect, &contract.table)?;
+        let from = quote_ident(dialect, &contract.from_col)?;
+        let to = quote_ident(dialect, &contract.to_col)?;
         conn.query_one(
             &format!(
                 "SELECT NOT EXISTS (
@@ -1518,8 +1537,11 @@ pub async fn pending_contract_shape<D: SqlSession>(
 /// Normalize PostgreSQL's built-in type aliases without discarding modifiers.
 /// This keeps `numeric(20,4)` distinct from `numeric(20,2)` while accepting the
 /// equivalent spellings authors and `format_type` commonly use.
-fn canonical_pending_contract_type(ty: &str) -> String {
-    crate::render::lower::canonical_postgres_type_spelling(ty)
+fn canonical_pending_contract_type(
+    catalog_fold: &dyn zero_migrate_backend::fold::CatalogFoldPolicy,
+    ty: &str,
+) -> String {
+    catalog_fold.canonical_rename_type_spelling(ty)
 }
 
 /// Open a cross-deploy pending-contract obligation: INSERT a `state='pending'`
@@ -1555,10 +1577,11 @@ fn canonical_pending_contract_type(ty: &str) -> String {
 pub async fn record_pending_contract_with_recovery<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     rec: PendingContractRecord<'_>,
     scope: Option<DeployRecoveryScope<'_>>,
 ) -> Result<bool, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let cv_json = serde_json::to_string(rec.contract_versions).map_err(|e| {
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
@@ -1661,11 +1684,12 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
 pub async fn resolve_pending_contract<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     pc: &PendingContract,
     resolution: Resolution,
     by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let cv_json = serde_json::to_string(&pc.contract_versions).map_err(|e| {
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
@@ -1736,11 +1760,12 @@ pub struct DeployRecovery {
 pub async fn mark_deploy_recovery_committed<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     deploy_id: &str,
     pending_version: &str,
     by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let n = conn
         .exec(
             &format!(
@@ -1783,6 +1808,7 @@ pub async fn mark_deploy_recovery_committed<D: SqlSession>(
 pub async fn mark_deploy_recovery_committed_batch<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     deploy_id: &str,
     pending_versions: &[String],
     by: &str,
@@ -1793,7 +1819,7 @@ pub async fn mark_deploy_recovery_committed_batch<D: SqlSession>(
     conn.batch("BEGIN").await?;
     let result = async {
         for pv in pending_versions {
-            mark_deploy_recovery_committed(conn, cfg, deploy_id, pv, by).await?;
+            mark_deploy_recovery_committed(conn, cfg, dialect, deploy_id, pv, by).await?;
         }
         Ok::<(), JournalError>(())
     }
@@ -1823,11 +1849,12 @@ pub async fn mark_deploy_recovery_committed_batch<D: SqlSession>(
 pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     deploy_id: &str,
     pending_version: &str,
     by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let n = conn
         .exec(
             &format!(
@@ -1876,8 +1903,9 @@ pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
 pub async fn outstanding_deploy_recoveries<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<Vec<DeployRecovery>, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1936,8 +1964,9 @@ pub async fn outstanding_deploy_recoveries<D: SqlSession>(
 pub async fn applied_count<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<i64, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let row = conn
         .query_one(
             &format!(
@@ -1979,8 +2008,9 @@ pub async fn applied_count<D: SqlSession>(
 pub async fn superseded_versions<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<Vec<String>, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -2051,8 +2081,9 @@ pub async fn superseded_versions<D: SqlSession>(
 pub async fn latest_completed_checksums<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
 ) -> Result<std::collections::HashMap<String, String>, JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -2118,10 +2149,11 @@ pub struct BaselineRecord<'a> {
 pub async fn record_baseline<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
     conn.batch("BEGIN").await?;
-    let result = record_baseline_inner(conn, cfg, rec).await;
+    let result = record_baseline_inner(conn, cfg, dialect, rec).await;
     if let Err(e) = result {
         // Roll back the partial row/edges; surface the original error.
         if let Err(rb) = conn.batch("ROLLBACK").await {
@@ -2140,9 +2172,10 @@ pub async fn record_baseline<D: SqlSession>(
 async fn record_baseline_inner<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     let n = conn
         .exec(
             &format!(
@@ -2189,9 +2222,10 @@ async fn record_baseline_inner<D: SqlSession>(
 pub async fn clear_inflight<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &DialectId,
     version: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
     conn.exec(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
         &[version.into()],
@@ -2208,21 +2242,23 @@ mod tests {
 
     #[test]
     fn pending_contract_type_aliases_preserve_modifiers() {
+        let catalog_fold =
+            crate::render::backends::vendor(&zero_migrate_ir::dialect::POSTGRES).catalog_fold;
         assert_eq!(
-            canonical_pending_contract_type("timestamp with time zone"),
-            canonical_pending_contract_type("timestamptz")
+            canonical_pending_contract_type(catalog_fold, "timestamp with time zone"),
+            canonical_pending_contract_type(catalog_fold, "timestamptz")
         );
         assert_eq!(
-            canonical_pending_contract_type("decimal(20, 4)"),
-            canonical_pending_contract_type("NUMERIC(20,4)")
+            canonical_pending_contract_type(catalog_fold, "decimal(20, 4)"),
+            canonical_pending_contract_type(catalog_fold, "NUMERIC(20,4)")
         );
         assert_ne!(
-            canonical_pending_contract_type("numeric(20,4)"),
-            canonical_pending_contract_type("numeric(20,2)")
+            canonical_pending_contract_type(catalog_fold, "numeric(20,4)"),
+            canonical_pending_contract_type(catalog_fold, "numeric(20,2)")
         );
         assert_eq!(
-            canonical_pending_contract_type("character varying(128)[]"),
-            canonical_pending_contract_type("varchar(128)[]")
+            canonical_pending_contract_type(catalog_fold, "character varying(128)[]"),
+            canonical_pending_contract_type(catalog_fold, "varchar(128)[]")
         );
     }
 

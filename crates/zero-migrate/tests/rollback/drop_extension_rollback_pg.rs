@@ -31,7 +31,7 @@ use zero_migrate::model::snapshot::ExtensionSnapshot;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, snapshot_schema, Approval, EffectivePolicy, ExecutorConfig, GuardConfig,
-    IrAuthor, LiveSchema, MigrationEngine, PostgresBackend, SqlDialect,
+    IrAuthor, LiveSchema, MigrationEngine, PostgresBackend,
 };
 
 const OWNER: &str = "app_drop_extension_rollback_pg";
@@ -123,9 +123,9 @@ async fn apply_doc(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &pol);
-    let guard = GuardConfig::from_policy(pol.clone(), SqlDialect::Postgres.id());
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &pol)
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &pol);
+    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate::POSTGRES.clone());
+    let folded = fold_ops(history, &zero_migrate::POSTGRES, &cfg.project_schema, &pol)
         .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     // Go through the guarded deploy entry rather than hand-rolling load + lower.
@@ -166,7 +166,7 @@ async fn live_extension(
     schema: &str,
     ext: &str,
 ) -> Result<Option<ExtensionSnapshot>, String> {
-    let snapshot = snapshot_schema(session, schema)
+    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, schema)
         .await
         .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
     Ok(snapshot.extensions.get(ext).cloned())
@@ -175,7 +175,7 @@ async fn live_extension(
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         policy(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     ))
 }
 
@@ -188,7 +188,7 @@ fn create_extension_op(schema: Option<&str>) -> Op {
 }
 
 fn lower_drop_from_history(history: &[Op], if_exists: Option<bool>) -> Migration {
-    let dialect = SqlDialect::Postgres;
+    let dialect = &zero_migrate::POSTGRES;
     let pol = policy(PROJECT_SCHEMA);
     let folded =
         fold_ops(history, dialect, PROJECT_SCHEMA, &pol).expect("the extension history must fold");
@@ -204,7 +204,7 @@ fn lower_drop_from_history(history: &[Op], if_exists: Option<bool>) -> Migration
         "ops": [drop]
     })
     .to_string();
-    let guard = GuardConfig::from_policy(pol.clone(), dialect.id());
+    let guard = GuardConfig::from_policy(pol.clone(), (*dialect).clone());
     let artifact = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &pol)
         .load_and_lower_guarded(&document, OWNER, &BTreeMap::new(), &live, &guard)
         .expect("the extension drop must lower");
@@ -224,7 +224,7 @@ async fn unguarded_drop_extension_from_folded_history_has_create_inverse() {
     );
     guard_for(&GuardConfig::from_policy(
         policy(PROJECT_SCHEMA),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     ))
     .as_ref()
     .check(migration.down.as_deref().expect("the inverse exists"))
@@ -262,11 +262,15 @@ async fn drop_extension_inverse_uses_only_the_recorded_schema() {
     let with_schema = [create_extension_op(Some("public"))];
     let without_schema = [create_extension_op(None)];
     let pol = policy(PROJECT_SCHEMA);
-    let recorded = fold_ops(&with_schema, SqlDialect::Postgres, PROJECT_SCHEMA, &pol)
+    let recorded = fold_ops(&with_schema, &zero_migrate::POSTGRES, PROJECT_SCHEMA, &pol)
         .expect("the extension history must fold");
-    let recorded_without_schema =
-        fold_ops(&without_schema, SqlDialect::Postgres, PROJECT_SCHEMA, &pol)
-            .expect("the extension history without a schema must fold");
+    let recorded_without_schema = fold_ops(
+        &without_schema,
+        &zero_migrate::POSTGRES,
+        PROJECT_SCHEMA,
+        &pol,
+    )
+    .expect("the extension history without a schema must fold");
 
     assert_eq!(
         recorded.extensions.get(EXT),

@@ -36,7 +36,7 @@ use crate::support;
 
 use zero_migrate::{
     fold_ops, ColType, ColumnOrExpr, ExclusionElement, ExclusionMethod, ExclusionOperator, Expr,
-    IrColumn, IrConstraint, IrConstraintKind, Op, ScalarFn, SqlDialect,
+    IrColumn, IrConstraint, IrConstraintKind, Op, ScalarFn,
 };
 
 const SCHEMA: &str = "app";
@@ -119,7 +119,7 @@ fn the_fold_projects_a_drop_postgres_refuses_when_an_exclusion_expression_reads_
             create_stays(vec![exclusion_over_an_expression()]),
             drop_column("note"),
         ],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &effective,
     )
@@ -170,7 +170,7 @@ fn a_plain_column_exclusion_still_cascades_with_the_column_it_names() {
 
     let folded = fold_ops(
         &[create_stays(vec![plain]), drop_column("lo")],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &effective,
     )

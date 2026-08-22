@@ -1,11 +1,10 @@
 use crate::support;
 
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, validate_ir, BinaryOp, ColType, Expr, GeneratedCol,
     IdentityCol, IrAuthor, IrColumn, IrDefault, IrFlagsOverride, IrLowerError, IrScalar,
-    LiveSchema, MigrationIr, Op, SchemaScope, UnsupportedKind,
-    CODE_COLUMN_FACET_CONFLICT, CODE_UNSUPPORTED, CURRENT_IR_VERSION,
+    LiveSchema, MigrationIr, Op, SchemaScope, UnsupportedKind, CODE_COLUMN_FACET_CONFLICT,
+    CODE_UNSUPPORTED, CURRENT_IR_VERSION,
 };
 
 const SCHEMA: &str = "app";
@@ -49,7 +48,7 @@ fn ir_platform(op: Op) -> MigrationIr {
 
 fn validate_platform(
     ir: &MigrationIr,
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
 ) -> Result<(), zero_migrate::AuthoringError> {
     zero_migrate::model::validate::validate_ir_scoped(ir, dialect, Some(&SchemaScope::Unconfined))
 }
@@ -106,7 +105,7 @@ fn pk(columns: &[&str]) -> Option<Vec<String>> {
     Some(columns.iter().map(|c| (*c).to_string()).collect())
 }
 
-fn lower_create(dialect: SqlDialect, op: Op) -> LowerResult {
+fn lower_create(dialect: &zero_migrate::DialectId, op: Op) -> LowerResult {
     let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::confined_charter());
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
@@ -118,7 +117,7 @@ fn lower_create(dialect: SqlDialect, op: Op) -> LowerResult {
         .up)
 }
 
-fn lower_first(dialect: SqlDialect, op: Op) -> LowerResult {
+fn lower_first(dialect: &zero_migrate::DialectId, op: Op) -> LowerResult {
     let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::confined_charter());
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
@@ -142,7 +141,7 @@ fn generated_create(stored: bool) -> Op {
 
 #[test]
 fn pg_generated_stored_column_renders_exact_create_table_ddl() {
-    let up = lower_create(SqlDialect::Postgres, generated_create(true)).unwrap();
+    let up = lower_create(&zero_migrate::POSTGRES, generated_create(true)).unwrap();
     assert_eq!(
         up,
         r#"CREATE TABLE "app"."line_items" ("created_at" timestamptz NOT NULL, "created_by" character varying(255), "deleted_at" timestamptz, "id" character varying(255) PRIMARY KEY NOT NULL, "qty" integer, "total_cents" integer GENERATED ALWAYS AS (("qty" * "unit_cents")) STORED NOT NULL, "unit_cents" integer, "updated_at" timestamptz NOT NULL, "updated_by" character varying(255), "version" integer NOT NULL)"#,
@@ -151,7 +150,7 @@ fn pg_generated_stored_column_renders_exact_create_table_ddl() {
 
 #[test]
 fn sqlite_generated_stored_and_virtual_columns_render_exact_create_table_ddl() {
-    let stored = lower_create(SqlDialect::Sqlite, generated_create(true)).unwrap();
+    let stored = lower_create(&zero_migrate::SQLITE, generated_create(true)).unwrap();
     assert_eq!(
         stored,
         format!(
@@ -159,7 +158,7 @@ fn sqlite_generated_stored_and_virtual_columns_render_exact_create_table_ddl() {
         ),
     );
 
-    let virtual_col = lower_create(SqlDialect::Sqlite, generated_create(false)).unwrap();
+    let virtual_col = lower_create(&zero_migrate::SQLITE, generated_create(false)).unwrap();
     assert_eq!(
         virtual_col,
         format!(
@@ -170,7 +169,7 @@ fn sqlite_generated_stored_and_virtual_columns_render_exact_create_table_ddl() {
 
 #[test]
 fn pg_virtual_generated_column_is_unsupported() {
-    let err = validate_ir(&ir(generated_create(false)), SqlDialect::Postgres)
+    let err = validate_ir(&ir(generated_create(false)), &zero_migrate::POSTGRES)
         .expect_err("Postgres supports generated columns only as STORED");
     assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
     assert_eq!(err.kind, Some(UnsupportedKind::VirtualColumn));
@@ -193,7 +192,7 @@ fn generated_column_cannot_also_have_default() {
             ],
             None,
         )),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     )
     .expect_err("generated + default is a column-facet conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -204,7 +203,7 @@ fn pg_identity_always_and_by_default_render_exact_create_table_ddl() {
     let mut id = col("id", ColType::BigInt);
     id.nullable = Some(false);
     id.identity = Some(IdentityCol { always: true });
-    let always = lower_create(SqlDialect::Postgres, create_table(vec![id], pk_id())).unwrap();
+    let always = lower_create(&zero_migrate::POSTGRES, create_table(vec![id], pk_id())).unwrap();
     assert_eq!(
         always,
         r#"CREATE TABLE "app"."line_items" ("created_at" timestamptz NOT NULL, "created_by" character varying(255), "deleted_at" timestamptz, "id" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY NOT NULL, "updated_at" timestamptz NOT NULL, "updated_by" character varying(255), "version" integer NOT NULL)"#,
@@ -213,7 +212,8 @@ fn pg_identity_always_and_by_default_render_exact_create_table_ddl() {
     let mut id = col("id", ColType::BigInt);
     id.nullable = Some(false);
     id.identity = Some(IdentityCol { always: false });
-    let by_default = lower_create(SqlDialect::Postgres, create_table(vec![id], pk_id())).unwrap();
+    let by_default =
+        lower_create(&zero_migrate::POSTGRES, create_table(vec![id], pk_id())).unwrap();
     assert_eq!(
         by_default,
         r#"CREATE TABLE "app"."line_items" ("created_at" timestamptz NOT NULL, "created_by" character varying(255), "deleted_at" timestamptz, "id" bigint GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY NOT NULL, "updated_at" timestamptz NOT NULL, "updated_by" character varying(255), "version" integer NOT NULL)"#,
@@ -227,7 +227,7 @@ fn auto_increment_identity_by_default_renders_per_dialect() {
     id.identity = Some(IdentityCol { always: false });
 
     let pg = lower_create(
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         create_table(vec![id.clone()], pk_id()),
     )
     .unwrap();
@@ -236,7 +236,11 @@ fn auto_increment_identity_by_default_renders_per_dialect() {
         "Postgres must render BY DEFAULT identity on the declared bigInt PK: {pg}"
     );
 
-    let up = lower_create(SqlDialect::Sqlite, create_table(vec![id.clone()], pk_id())).unwrap();
+    let up = lower_create(
+        &zero_migrate::SQLITE,
+        create_table(vec![id.clone()], pk_id()),
+    )
+    .unwrap();
     assert_eq!(
         up,
         format!(
@@ -248,7 +252,7 @@ fn auto_increment_identity_by_default_renders_per_dialect() {
         "SQLite autoIncrement must use an inline INTEGER PRIMARY KEY and suppress the table PK: {up}"
     );
 
-    let mysql = lower_create(SqlDialect::Mysql, create_table(vec![id], pk_id())).unwrap();
+    let mysql = lower_create(&zero_migrate::MYSQL, create_table(vec![id], pk_id())).unwrap();
     assert!(
         mysql.contains("`id` BIGINT AUTO_INCREMENT PRIMARY KEY"),
         "MySQL must render AUTO_INCREMENT on the declared bigInt PK: {mysql}"
@@ -262,9 +266,9 @@ fn identity_always_is_postgres_only() {
     id.identity = Some(IdentityCol { always: true });
     let op = create_table(vec![id], pk_id());
 
-    validate_ir(&ir(op.clone()), SqlDialect::Postgres)
+    validate_ir(&ir(op.clone()), &zero_migrate::POSTGRES)
         .expect("Postgres supports identity({ always:true })");
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         let err = validate_ir(&ir(op.clone()), dialect)
             .expect_err("identity({ always:true }) must be PostgreSQL-only");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -278,10 +282,10 @@ fn auto_increment_requires_single_column_primary_key_on_sqlite_and_mysql() {
     seq.identity = Some(IdentityCol { always: false });
     validate_platform(
         &ir_platform(create_table(vec![seq.clone()], None)),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     )
     .expect("Postgres permits BY DEFAULT identity outside a primary key");
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         let err = validate_platform(&ir_platform(create_table(vec![seq.clone()], None)), dialect)
             .expect_err("autoIncrement on a non-PK column has no sound emulation");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -293,9 +297,9 @@ fn auto_increment_requires_single_column_primary_key_on_sqlite_and_mysql() {
     id.identity = Some(IdentityCol { always: false });
     let tenant = col("tenant_id", ColType::Text);
     let composite = ir_platform(create_table(vec![id, tenant], pk(&["id", "tenant_id"])));
-    validate_platform(&composite, SqlDialect::Postgres)
+    validate_platform(&composite, &zero_migrate::POSTGRES)
         .expect("a PostgreSQL-targeted BY DEFAULT identity may be one composite-PK component");
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         let err = validate_platform(&composite, dialect)
             .expect_err("autoIncrement on a composite-PK column has no sound emulation");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -312,7 +316,7 @@ fn identity_cannot_also_have_default_or_generated() {
     });
     let err = validate_platform(
         &raw_ir(create_table(vec![id_with_default], pk_id())),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     )
     .expect_err("identity + default is a conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -325,7 +329,7 @@ fn identity_cannot_also_have_default_or_generated() {
     });
     let err = validate_platform(
         &raw_ir(create_table(vec![id_with_generated], pk_id())),
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
     )
     .expect_err("identity + generated is a conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -348,7 +352,7 @@ fn generated_and_identity_facets_render_on_add_column() {
         schema: None,
         existence_guard: None,
     };
-    let up = lower_first(SqlDialect::Postgres, add_generated).unwrap();
+    let up = lower_first(&zero_migrate::POSTGRES, add_generated).unwrap();
     assert_eq!(
         up,
         r#"ALTER TABLE "app"."line_items" ADD COLUMN "total_cents" integer GENERATED ALWAYS AS (("qty" * "unit_cents")) STORED NOT NULL"#,
@@ -369,7 +373,7 @@ fn generated_and_identity_facets_render_on_add_column() {
         schema: None,
         existence_guard: None,
     };
-    let up = lower_first(SqlDialect::Postgres, add_identity).unwrap();
+    let up = lower_first(&zero_migrate::POSTGRES, add_identity).unwrap();
     assert_eq!(
         up,
         r#"ALTER TABLE "app"."line_items" ADD COLUMN "seq" bigint GENERATED BY DEFAULT AS IDENTITY NOT NULL"#,
@@ -380,7 +384,7 @@ fn generated_and_identity_facets_render_on_add_column() {
 fn fold_carries_generated_and_identity_column_facets() {
     let snap = fold_ops(
         &[generated_create(true)],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -403,7 +407,7 @@ fn fold_carries_generated_and_identity_column_facets() {
     id.identity = Some(IdentityCol { always: false });
     let snap = fold_ops(
         &[create_table(vec![id], pk_id())],
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -425,7 +429,7 @@ fn fold_carries_generated_and_identity_column_facets() {
 #[test]
 fn mysql_renders_the_injected_system_columns_as_bounded_varchar() {
     let up = lower_create(
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         create_table(vec![col("qty", ColType::Int)], None),
     )
     .unwrap();

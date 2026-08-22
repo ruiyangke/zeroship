@@ -956,25 +956,21 @@ pub enum IrLowerError {
     /// the boxed error's `Display`.
     #[error("IrAuthor::lower of a DML op: {0}")]
     DmlValidate(Box<zero_migrate_ir::validate::AuthoringError>),
-    /// a key (index, primary key, or unique constraint) named a column the LIVE
-    /// MySQL catalog reports as `TEXT`/`BLOB`. MySQL answers that with error
-    /// 1170, and [`zero_migrate_ir::ir::IndexElement::Column`] carries no
-    /// prefix-length field, so there is no spelling of this key MySQL will take.
+    /// a selected backend's key-storage policy refused a live catalog column.
+    /// [`zero_migrate_ir::ir::IndexElement::Column`] carries no backend-specific
+    /// prefix or storage modifier, so the authoring error supplies that backend's
+    /// exact reason and remedy.
     ///
-    /// The OFFLINE gate (`validate_mysql_key_storage`) already refuses this when
+    /// The OFFLINE backend storage gate already refuses this when
     /// the column is declared in the SAME migration as the key. This is the half
     /// it cannot see: a column an EARLIER ordered migration created, or one of an
     /// unmanaged table. Validation reads only the migration in front of it, so
     /// the live catalog the apply path has already introspected is the only
     /// witness — which is why the refusal lives here and not there.
     ///
-    /// MEASURED on live MySQL 8.4.11 through the host `apply` path: before this
-    /// existed, `createTable(body TEXT)` then `createIndex(body)` in a later
-    /// migration cleared validate AND preview and failed mid-deploy with the
-    /// server's own `BLOB/TEXT column 'body' used in key specification without a
-    /// key length`. Boxed (the `AuthoringError` payload is large).
+    /// Boxed because the `AuthoringError` payload is large.
     #[error("{0}")]
-    MysqlKeyStorage(Box<zero_migrate_ir::validate::AuthoringError>),
+    KeyStorage(Box<zero_migrate_ir::validate::AuthoringError>),
     /// the creator-DML assembler (`crate::render::dml`) rejected a DML op: a
     /// malformed identifier, an empty/ragged insert, or a MySQL `onConflict`
     /// shape whose authored target cannot be retained safely.

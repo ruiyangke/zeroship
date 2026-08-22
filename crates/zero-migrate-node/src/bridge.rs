@@ -67,7 +67,7 @@ use zero_migrate::apply::journal::{HistoryEvent, HistoryKind};
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::{Migration, MigrationId};
-use zero_migrate::{MigrationEngine, MigrationIr, SqlDialect, SqliteBackend};
+use zero_migrate::{MigrationEngine, MigrationIr, SqliteBackend, POSTGRES, SQLITE};
 
 use crate::api;
 use crate::descriptors::descriptor_dto_to_engine;
@@ -229,7 +229,7 @@ pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
     for (index, envelope) in envelopes.iter().enumerate() {
         let live = zero_migrate::render::fold::fold_ops(
             &history,
-            dialect,
+            &dialect,
             &opts.default_schema,
             &opts.effective_policy,
         )
@@ -238,7 +238,7 @@ pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
             |snapshot| zero_migrate::LiveSchema::from_catalog_snapshot(snapshot, &opts.owner_app),
         );
         out.push(
-            zero_migrate::render_ir_envelope_sql_onto(envelope, dialect, &opts, &live).map_err(
+            zero_migrate::render_ir_envelope_sql_onto(envelope, &dialect, &opts, &live).map_err(
                 |e| {
                     Error::from_reason(format!(
                         "previewSql: envelope[{index}] failed to render: {e}"
@@ -565,7 +565,7 @@ pub fn apply_ir(
         .collect::<Result<Vec<_>>>()?;
     let registry_json = serde_json::to_string(&req.registry)
         .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
-    // SqlDialect selects the backend: Postgres and MySQL ride the
+    // Dialect identity selects the backend: Postgres and MySQL ride the
     // SAME `SqlSession` seam, but each dialect's lock / journal / placeholder SQL
     // lives in its own `MigrationBackend`. `apply` builds `PostgresBackend`;
     // `apply_with_lock_mysql` builds `MysqlBackend` (`GET_LOCK`, MySQL journal DDL,
@@ -702,7 +702,7 @@ pub fn apply_ir_sqlite(
                 &envelopes,
                 &backend,
                 &effective,
-                SqlDialect::Sqlite,
+                &SQLITE,
                 &project_schema,
                 &owner_app,
                 &registry,
@@ -1219,7 +1219,7 @@ pub fn history(
 
     run_verb(env, host_driver, move |session| async move {
         let cfg = ExecutorConfig::new(project_id, project_schema, effective);
-        zero_migrate::ops::status::history(&session, &cfg)
+        zero_migrate::ops::status::history(&zero_migrate_ir::dialect::POSTGRES, &session, &cfg)
             .await
             .map(|h| history_reply(&h))
             .map_err(|e| e.to_string())
@@ -1267,7 +1267,7 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
     // "could not read any of this", indistinguishable from "looked and found
     // nothing". Say which one it is; an operator reading a silent report is
     // entitled to know the analyzer never spoke.
-    if !matches!(dialect, zero_migrate::SqlDialect::Postgres) {
+    if dialect != POSTGRES {
         out.push(AdvisoryDto {
             migration: String::new(),
             rule: "analyzer_dialect_unsupported".to_string(),
@@ -1276,7 +1276,7 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
                 "operational advisories are not available for {}: the analyzer reads \
                  PostgreSQL syntax, so no rule was evaluated against these statements. \
                  An empty advisory list here means UNCHECKED, not clean",
-                dialect_wire_name(dialect)
+                dialect.as_str()
             ),
             suggestion: None,
             statement: String::new(),
@@ -1289,7 +1289,7 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
         // it. `analyze` over a whole multi-statement `up` would return a flat
         // list with no way back to the ALTER TABLE it describes.
         let Ok((migration, statements)) =
-            zero_migrate::render_ir_envelope_sql_statements(envelope, dialect, &opts)
+            zero_migrate::render_ir_envelope_sql_statements(envelope, &dialect, &opts)
         else {
             // An envelope that will not render offline yields no advisories
             // rather than failing the verb: this is enrichment, never a gate.
@@ -1309,13 +1309,4 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
         }
     }
     Ok(out)
-}
-
-/// The wire spelling of a dialect, for operator-facing text.
-const fn dialect_wire_name(dialect: zero_migrate::SqlDialect) -> &'static str {
-    match dialect {
-        zero_migrate::SqlDialect::Postgres => "postgres",
-        zero_migrate::SqlDialect::Mysql => "mysql",
-        zero_migrate::SqlDialect::Sqlite => "sqlite",
-    }
 }

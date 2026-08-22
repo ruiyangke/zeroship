@@ -29,7 +29,6 @@ use zero_migrate::apply::journal::{JournaledKind, Phase};
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     Approval, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor, DryRunError,
     EffectivePolicy, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
@@ -61,7 +60,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite)
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE.clone())
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -71,7 +70,7 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id())
+    GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone())
 }
 
 fn effective_policy() -> EffectivePolicy {
@@ -86,7 +85,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         effective,
     )
 }

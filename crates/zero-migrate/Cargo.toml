@@ -83,7 +83,8 @@ zero-migrate-ir = { workspace = true }
 zero-migrate-backend = { workspace = true }
 # The three SHIPPING BACKENDS. The engine names them exactly once each, in
 # `render::backends::VENDORS`, which is the registry composition that replaced the
-# hard-coded `match` over `SqlDialect`. The arrow only points this way: no vendor
+# hard-coded match over the former closed SQL-dialect enum. The arrow only points
+# this way: no vendor
 # crate depends on the engine, which is what let them be extracted at all.
 zero-migrate-postgres = { workspace = true }
 zero-migrate-sqlite = { workspace = true }

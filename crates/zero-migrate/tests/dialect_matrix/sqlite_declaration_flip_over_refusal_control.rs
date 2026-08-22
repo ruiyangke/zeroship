@@ -38,7 +38,6 @@ use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
 
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, GuardConfig, IrAuthor, LiveSchema,
     MigrationIr, PlanStep, RenameStep, SchemaSnapshot, SqliteBackend,
@@ -80,11 +79,11 @@ async fn apply_first_deploy(be: &SqliteBackend, descs: &[CollectionDescriptor]) 
     let desired = zero_migrate::desired_snapshot_for_dialect(
         PROJECT,
         descs,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &effective_policy(),
     )
     .expect("desired snapshot");
-    let plan = DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite)
+    let plan = DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE)
         .diff(
             &desired,
             &SchemaSnapshot::default(),
@@ -164,8 +163,8 @@ fn drop_constraint_ir(name: &str) -> MigrationIr {
 fn load_and_lower(ir: &MigrationIr, live: &LiveSchema) -> Vec<PlanStep> {
     let policy = effective_policy();
     let source = serde_json::to_string(ir).expect("serialize IR envelope");
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &policy);
-    let guard = GuardConfig::from_policy(effective_policy(), SqlDialect::Sqlite.id());
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &policy);
+    let guard = GuardConfig::from_policy(effective_policy(), zero_migrate::SQLITE);
     author
         .load_and_lower_guarded(&source, APP, &registry(), live, &guard)
         .expect(

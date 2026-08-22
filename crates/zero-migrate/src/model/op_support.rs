@@ -4,8 +4,8 @@
 //! These were inherent methods on `Op` in `model/ir.rs`. When the wire contract
 //! was extracted into the `zero-migrate-ir` leaf crate, the
 //! dialect-support / vendor-capability logic could NOT ride along: it reads the
-//! engine-owned portability tables ([`crate::model::support`],
-//! [`crate::model::dialect_table`], [`crate::model::capability`]) and the engine's
+//! engine-owned portability vocabulary ([`crate::model::support`],
+//! [`crate::model::capability`]) and the engine's
 //! authoring error codes ([`crate::model::validate`]). Those are dialect/policy
 //! facts of THIS engine, not wire data, so they stay engine-side and reach the
 //! foreign `Op` type through free functions taking `&Op`.
@@ -26,7 +26,8 @@ pub fn is_vendor(op: &Op) -> bool {
     !vendor_capabilities(op).is_empty()
 }
 
-/// Static dialect support declaration for this concrete op shape.
+/// Dynamic support declaration for this concrete op shape across every
+/// registered backend.
 ///
 /// This is the support matrix the authoring validator consumes for dialect
 /// and feature refusals before lowering.
@@ -35,54 +36,41 @@ pub fn support(op: &Op) -> crate::model::support::Support {
     use crate::model::support::Support;
 
     let (kind, variant) = op_kind_and_variant(op);
-    let row = crate::model::dialect_table::lookup(kind, variant)
-        .unwrap_or_else(|| panic!("dialect table has no row for op {kind}/{variant}"));
-    // Both sides are now keyed by `DialectId`, so this is a LOOP over the row's
-    // own cells rather than three calls in vendor order. Nothing here names a
-    // dialect: the row states which ids it covers, and the op-level declaration
-    // states a decision for exactly those. That is what makes a fourth backend a
-    // sidecar edit and nothing else — it used to need a fourth argument here and
-    // a fourth field on `DialectSupport`.
-    //
-    // `support_cell` still needs the closed `SqlDialect` for its per-dialect refusal
-    // prose, so the ids are walked through the enum; `dialect_for_id` is the one
-    // place that conversion happens, and it panics rather than guess.
-    let dialects = crate::model::support::DialectSupport::from_cells(row.dispositions.iter().map(
-        |(id, disposition)| {
-            let dialect = dialect_for_id(id, kind, variant);
-            (id.clone(), support_cell(op, *disposition, dialect, variant))
-        },
-    ));
+    let dialects = crate::model::support::DialectSupport::from_cells(
+        crate::render::backends::VENDORS
+            .as_slice()
+            .iter()
+            .map(|vendor| {
+                let id = &vendor.descriptor.id;
+                let disposition = vendor.validation.op_disposition(kind, variant);
+                (id.clone(), support_cell(op, disposition, id, variant))
+            }),
+    );
     Support::new(support_tier(op), dialects, support_features(op))
 }
 
-/// The closed [`SqlDialect`] variant an id denotes, for the ONE step that still
-/// needs it.
+/// Support declaration for only the selected registered backend.
 ///
-/// [`zero_migrate_ir::dialect`] refuses this direction on purpose — an id has no
-/// variant to map to once a backend ships from a crate core does not own — and
-/// this is not a general escape from that. [`unsupported_reason`] is a match over
-/// `SqlDialect` carrying per-dialect refusal PROSE, so a cell can only be filled in
-/// for a dialect this engine has written prose for. Panicking names the row and
-/// the id; the alternatives are worse in the way the rest of this area already
-/// decided: dropping the cell would silently narrow the declaration (the exact
-/// fail-open the census floor in `model::support` exists to catch), and
-/// synthesizing a refusal would invent a verdict with no reason to show anyone.
-fn dialect_for_id(
-    id: &zero_migrate_ir::dialect::DialectId,
-    kind: &str,
-    variant: &str,
-) -> crate::model::support::SqlDialect {
-    use crate::model::support::SqlDialect;
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
-        if &dialect.id() == id {
-            return dialect;
-        }
-    }
-    panic!(
-        "dialect table row {kind}/{variant} states a disposition for {id}, which this \
-         engine has no refusal prose for"
-    )
+/// This is the production validation route. Core resolves the open id once and
+/// asks that backend's required policy; it never reads the generated three-vendor
+/// parity artifact.
+#[must_use]
+pub fn support_for_target(
+    op: &Op,
+    target: &zero_migrate_ir::dialect::DialectId,
+) -> crate::model::support::Support {
+    use crate::model::support::Support;
+
+    let (kind, variant) = op_kind_and_variant(op);
+    let vendor = crate::render::backends::VENDORS
+        .get(target)
+        .unwrap_or_else(|| panic!("no registered backend vendor for {target}"));
+    let disposition = vendor.validation.op_disposition(kind, variant);
+    let dialects = crate::model::support::DialectSupport::from_cells([(
+        target.clone(),
+        support_cell(op, disposition, target, variant),
+    )]);
+    Support::new(support_tier(op), dialects, support_features(op))
 }
 
 /// The placeholder returned when a cell is declared `unsupported` and NOBODY
@@ -107,82 +95,25 @@ pub const INTERNAL_NO_REFUSAL_REASON: &str = "internal: supported cell has no re
 /// Short alias for the arms below, which are dense enough already.
 const NEVER_REFUSED: &str = INTERNAL_NO_REFUSAL_REASON;
 
-/// SQLite has no `ALTER COLUMN`. Every alter-shaped column/constraint change is
-/// reconciled by the DIFFER's 12-step table rebuild, which reads the full live
-/// table structure; a stand-alone op carries only the one field it names, so the
-/// imperative lane refuses rather than emit a partial rebuild
-/// (`IrLowerError::SqliteRebuildOnly`, gated in `render/lower.rs`). Declaring
-/// these cells `unsupported` moves that refusal from lower up to authoring, where
-/// the operator can act on it.
-const SQLITE_ALTER_COLUMN_REBUILD_ONLY: &str =
-    "SQLite has no ALTER COLUMN: this change is applied only by the declarative \
-     differ's 12-step table rebuild, which needs the whole table definition — \
-     express it as a schema change rather than a stand-alone op";
-
-/// The constraint-shaped half of [`SQLITE_ALTER_COLUMN_REBUILD_ONLY`]. Same
-/// rebuild, different sentence: SQLite's `ALTER TABLE` cannot add or drop a
-/// table constraint at all, so naming `ALTER COLUMN` here would misdescribe the
-/// limit. Note this is a PER-VARIANT gap, not a per-op one — `addConstraint`'s
-/// foreign-key variants DO apply on SQLite (measured), because a rebuild-free
-/// path exists for them.
-const SQLITE_CONSTRAINT_REBUILD_ONLY: &str =
-    "SQLite cannot add or drop a table constraint in place: it is applied only by \
-     the declarative differ's 12-step table rebuild, which needs the whole table \
-     definition — express it as a schema change rather than a stand-alone op";
-
-/// `NOT VALID` → `VALIDATE CONSTRAINT` is PostgreSQL's two-phase online
-/// constraint adoption. Neither other dialect has the second half, which is the
-/// reason `dialect-support.toml`'s own comment on this row already gives.
-const VALIDATE_CONSTRAINT_PG_ONLY: &str =
-    "VALIDATE CONSTRAINT is PostgreSQL-only online constraint adoption (the second \
-     half of NOT VALID → VALIDATE CONSTRAINT); SQLite and MySQL have no such \
-     statement, so there is nothing to validate";
-
-/// MySQL's limit here is OURS, not the database's: `MODIFY COLUMN` restates the
-/// ENTIRE column definition, and these ops carry a single field. See
-/// `render/lower.rs::refuse_mysql_alter_column`, which keeps this apart from the
-/// `NativeAlterColumn` capability claim (MySQL answers `true` there, correctly).
-///
-/// This now covers only `setColumnNotNull` / `dropColumnNotNull`. `setColumnType`
-/// left this reason behind: the definition the op does not carry is READ from
-/// `SHOW CREATE TABLE` at apply (`render::step::AlterColumnTypeStep`), and the same
-/// route is open to these two. The wording below therefore says what the engine has
-/// not done yet rather than what MySQL cannot do — the previous wording said the
-/// second thing, and it was wrong.
-const MYSQL_ALTER_COLUMN_RESTATE: &str =
-    "MySQL restates the whole column definition in MODIFY COLUMN, which this op \
-     does not carry, and this engine does not yet read the live definition back for \
-     a nullability change the way it does for a retype — express it as a schema \
-     change rather than a stand-alone op";
-const NEXTVAL_PG_ONLY: &str =
-    "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences";
-const IDENTITY_ALWAYS_PG_ONLY: &str =
-    "identity({ always: true }) is PostgreSQL-only; SQLite/MySQL support only \
-         identity({ always: false }) / autoIncrement() on the sole integer primary key";
-const BY_DEFAULT_IDENTITY_SINGLE_PK: &str =
-    "identity({ always: false }) / autoIncrement() must be the sole primary-key \
-         column on SQLite/MySQL";
-
-/// Assemble one per-dialect [`crate::model::support::SupportDecision`] from the generated dialect
-/// table's disposition for this (op-kind, variant): an `Unsupported`
+/// Assemble one per-dialect [`crate::model::support::SupportDecision`] from the
+/// selected backend's disposition for this (op-kind, variant): an `Unsupported`
 /// disposition becomes the engine-internal refusal reason; any supported
 /// disposition (portable / vendor / transparent-degradable) becomes the op's
 /// render mode on that dialect. The supported/unsupported/vendor GATE is thus
-/// single-sourced from the generated table (`dialect_table.rs`, emitted from
-/// the human-reviewed `dialect-support.toml`); only the render strategy and
-/// diagnostic wording — which are NOT dialect truth — remain in Rust.
+/// owned by the backend that registered the selected id; only the render
+/// strategy and diagnostic wording remain in core.
 fn support_cell(
     op: &Op,
-    disposition: crate::model::dialect_table::Disposition,
-    dialect: crate::model::support::SqlDialect,
+    disposition: zero_migrate_backend::validation::Disposition,
+    dialect: &zero_migrate_ir::dialect::DialectId,
     variant: &'static str,
 ) -> crate::model::support::SupportDecision {
-    use crate::model::dialect_table::Disposition;
     use crate::model::support::{supported, unsupported};
+    use zero_migrate_backend::validation::Disposition;
     match disposition {
         Disposition::Unsupported => {
             let reason = unsupported_reason(op, dialect, variant);
-            // The sidecar and `unsupported_reason` are edited in different files
+            // The backend table and `unsupported_reason` are edited in different files
             // and have already drifted apart once, shipping the placeholder to
             // operators. Debug builds - which is every test run - refuse to
             // return it, so a cell flipped to `unsupported` without its reason
@@ -192,7 +123,7 @@ fn support_cell(
             debug_assert_ne!(
                 reason,
                 INTERNAL_NO_REFUSAL_REASON,
-                "dialect-support.toml declares {}/{variant} unsupported on {dialect:?}, but \
+                "the backend policy declares {}/{variant} unsupported on {dialect:?}, but \
                  op_support::unsupported_reason has no arm for it: the operator would be \
                  shown an internal placeholder instead of a reason",
                 op_kind_and_variant(op).0,
@@ -211,11 +142,11 @@ fn support_cell(
 /// decision — so it is derived here, not from the generated dialect table.
 fn render_mode(
     op: &Op,
-    dialect: crate::model::support::SqlDialect,
+    dialect: &zero_migrate_ir::dialect::DialectId,
     variant: &'static str,
 ) -> crate::model::support::RenderMode {
-    use crate::model::support::{SqlDialect, RenderMode};
-    let sqlite_live = matches!(dialect, SqlDialect::Sqlite);
+    use crate::model::support::RenderMode;
+    let alter_live = crate::render::backends::renderer(dialect).alter_ops_require_live_schema();
     match op {
         // Backfill, column-rename, primary-key lifecycle, and identity
         // synchronization are live-rendered
@@ -239,7 +170,7 @@ fn render_mode(
         | Op::ValidateConstraint { .. }
         | Op::AddConstraint { .. }
         | Op::SetColumnDefault { .. } => {
-            if sqlite_live {
+            if alter_live {
                 RenderMode::LiveResolved
             } else {
                 RenderMode::Offline
@@ -250,256 +181,115 @@ fn render_mode(
 }
 
 /// The refusal reason an UNSUPPORTED cell of this op reports on `dialect`. Only
-/// consulted by `support_cell` where the generated table records an
+/// consulted by `support_cell` where the selected backend records an
 /// `Unsupported` disposition, so the fully-portable ops never reach it. The
 /// reason wording (and, for `createIndex` / `createTrigger`, its per-dialect
 /// divergence on combined payloads) mirrors the previous hand-written arms
 /// exactly, preserving the author-facing diagnostics.
 fn unsupported_reason(
     op: &Op,
-    dialect: crate::model::support::SqlDialect,
+    dialect: &zero_migrate_ir::dialect::DialectId,
     variant: &'static str,
 ) -> &'static str {
-    use crate::model::support::SqlDialect;
+    let backend_refusal = || {
+        crate::render::backends::renderer(dialect)
+            .op_support_refusal(op, variant)
+            .unwrap_or(NEVER_REFUSED)
+    };
     match op {
-            Op::CreateTable { .. } => match variant {
-                "partitioned" => "partitioned tables are PostgreSQL-only",
-                "pgOnlyIndexFeature" => {
-                    "createTable BRIN/INCLUDE/WITH/ONLY index features are PostgreSQL-only"
-                }
-                "nextvalDefault" => NEXTVAL_PG_ONLY,
-                "identityAlways" => IDENTITY_ALWAYS_PG_ONLY,
-                "nonportableByDefaultIdentity" => BY_DEFAULT_IDENTITY_SINGLE_PK,
-                _ => NEVER_REFUSED,
-            },
-            Op::CreatePartition { .. }
-            | Op::AttachPartition { .. }
-            | Op::DetachPartition { .. }
-            | Op::DropPartition { .. } => "partition lifecycle operations are PostgreSQL-only",
-            Op::AddColumn { .. } => match variant {
-                "identity" => {
-                    "addColumn identity is PostgreSQL-only; SQLite/MySQL auto-increment \
-                     identity requires a createTable sole primary key"
-                }
-                "nextvalDefault" => NEXTVAL_PG_ONLY,
-                _ => NEVER_REFUSED,
-            },
-            Op::CreateIndex {
-                columns, r#where, ..
-            } => match dialect {
-                SqlDialect::Sqlite => {
-                    "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on SQLite"
-                }
-                SqlDialect::Mysql => {
-                    if columns
-                        .iter()
-                        .any(|element| matches!(element, IndexElement::Expr { .. }))
-                    {
-                        "createIndex expression elements are not supported on MySQL"
-                    } else if r#where.is_some() {
-                        "createIndex partial predicates require partial-index support; MySQL does not support partial indexes"
-                    } else {
-                        "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on MySQL"
-                    }
-                }
-                SqlDialect::Postgres => NEVER_REFUSED,
-            },
-            Op::Comment { .. } => "COMMENT ON is PostgreSQL-only in the current engine",
-            // The ALTER-shaped column ops. All of them refuse on the same two
-            // grounds, so they share one helper rather than repeating it five
-            // times and letting the copies drift.
-            //
-            // `using` is a THIRD thing and must be matched first: an expression
-            // the engine cannot render is refused on EVERY dialect (PostgreSQL
-            // included), which is not a dialect limit at all.
-            Op::SetColumnType { .. } => match variant {
-                "using" => "setColumnType.using expression rendering is deferred in the current engine",
-                _ => alter_column_reason(dialect),
-            },
-            Op::SetColumnDefault { .. } => match variant {
-                "nextval" => NEXTVAL_PG_ONLY,
-                _ => alter_column_reason(dialect),
-            },
-            Op::SetColumnNotNull { .. }
-            | Op::DropColumnNotNull { .. }
-            | Op::DropColumnDefault { .. } => alter_column_reason(dialect),
-            Op::DropConstraint { .. } => SQLITE_CONSTRAINT_REBUILD_ONLY,
-            Op::ValidateConstraint { .. } => VALIDATE_CONSTRAINT_PG_ONLY,
-            Op::RenameColumn { .. } => match variant {
-                "existenceGuard" => {
-                    "renameColumn ifExists guards cannot be attributed to a single migration unit today"
-                }
-                _ => "renameColumn is render-only for MySQL, not live-rendered",
-            },
-            Op::AlterPrimaryKey { .. } => NEVER_REFUSED,
-            Op::SynchronizeIdentity { .. } => NEVER_REFUSED,
-            Op::AddConstraint { .. } => match variant {
-                "check" => {
-                    "addConstraint(check) expression rendering is PostgreSQL-only in the current engine"
-                }
-                "pk" => "addConstraint user PRIMARY KEY is inconsistent today and fold refuses it",
-                "fkNoLocalColumn" => "addConstraint(fk) with no local column is unsupported",
-                "exclusion" => "exclusion constraints are PostgreSQL-only in the current engine",
-                "fkComposite" => "multi-column foreign keys are unsupported on this target",
-                "fkNonId" => {
-                    "foreign keys referencing non-id columns are unsupported on this target"
-                }
-                // Only the non-FK variants need the rebuild. `fkSimple`,
-                // `fkComposite` and `fkNonId` all APPLY on SQLite (measured
-                // against a live database), so this is a per-variant gap.
-                "unique" => SQLITE_CONSTRAINT_REBUILD_ONLY,
-                "fkNotValid" => {
-                    "NOT VALID online constraint adoption (addForeignKey { notValid }) is PostgreSQL-only in the current engine"
-                }
-                _ => NEVER_REFUSED,
-            },
-            Op::Insert { .. } => match variant {
-                "onConflictDoNothing" => {
-                    "MySQL cannot express targeted onConflict DO NOTHING without firing update triggers or suppressing unrelated errors"
-                }
-                _ => NEVER_REFUSED,
-            },
-            Op::CreateView { .. } => match variant {
-                "materializedReplace" => {
-                    "createView replace+materialized is unsupported in the current engine"
-                }
-                _ => "materialized views are PostgreSQL-only in the current engine",
-            },
-            Op::DropView { .. } => "materialized views are PostgreSQL-only in the current engine",
-            Op::CreateDomain { .. } => NEXTVAL_PG_ONLY,
-            Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
-                "standalone sequence objects are PostgreSQL-only in the current engine"
-            }
-            Op::CreateSchema { .. } | Op::DropSchema { .. } => {
-                "schema vendor primitives are PostgreSQL-only"
-            }
-            Op::CreateExtension { .. } | Op::DropExtension { .. } => {
-                "extension vendor primitives are PostgreSQL-only"
-            }
-            Op::CreateRole { .. } => match variant {
-                "superuserIfNotExists" => {
-                    "createRole cannot combine superuser:true with ifNotExists:true"
-                }
-                _ => "role vendor primitives are PostgreSQL-only",
-            },
-            Op::AlterRole { .. } | Op::DropRole { .. } | Op::DropOwnedBy { .. } => {
-                "role vendor primitives are PostgreSQL-only"
-            }
-            Op::Grant { .. } | Op::Revoke { .. } => "grant vendor primitives are PostgreSQL-only",
-            Op::SetRls { .. } => "RLS vendor primitives are PostgreSQL-only",
-            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => {
-                "policy vendor primitives are PostgreSQL-only"
-            }
-            Op::CreateFunction { .. } | Op::DropFunction { .. } => {
-                "function vendor primitives are PostgreSQL-only"
-            }
-            Op::PgRaw { .. } => "pgRaw statements are PostgreSQL-only",
-            Op::CreateTrigger {
-                timing,
-                events,
-                for_each,
-                action,
-                when,
-                ..
-            } => trigger_reason(dialect, timing, events, for_each, action, when),
-            // Every remaining op is portable on all three dialects, so no cell is
-            // ever `Unsupported` and this reason is never surfaced.
+        Op::CreateTable { .. } => match variant {
+            "partitioned"
+            | "pgOnlyIndexFeature"
+            | "nextvalDefault"
+            | "identityAlways"
+            | "nonportableByDefaultIdentity" => backend_refusal(),
             _ => NEVER_REFUSED,
-        }
-}
-
-/// The per-dialect trigger refusal reason, computed from the payload with the
-/// same priority the previous op-level trigger arms used (so a combined
-/// trigger reports each dialect's own first-hit facet).
-/// The refusal shared by every ALTER-shaped column op (`setColumnType`,
-/// `setColumnDefault`, `setColumnNotNull`, `dropColumnNotNull`,
-/// `dropColumnDefault`).
-///
-/// Two DIFFERENT limits meet here and `render/lower.rs` is careful to keep them
-/// apart, so this does too: SQLite's is the DATABASE's (no `ALTER COLUMN`, so
-/// the differ's table rebuild is the only route), MySQL's is OURS (the engine
-/// renders PostgreSQL syntax and `MODIFY COLUMN` needs the whole column
-/// definition restated). PostgreSQL never refuses these on dialect grounds -
-/// every such cell is `portable` in the sidecar - so it can only be reached by a
-/// future flip, which the `debug_assert!` in `support_cell` will catch.
-fn alter_column_reason(dialect: crate::model::support::SqlDialect) -> &'static str {
-    use crate::model::support::SqlDialect;
-    match dialect {
-        SqlDialect::Sqlite => SQLITE_ALTER_COLUMN_REBUILD_ONLY,
-        SqlDialect::Mysql => MYSQL_ALTER_COLUMN_RESTATE,
-        SqlDialect::Postgres => NEVER_REFUSED,
-    }
-}
-
-fn trigger_reason(
-    dialect: crate::model::support::SqlDialect,
-    timing: &TriggerTiming,
-    events: &[TriggerEvent],
-    for_each: &ForEach,
-    action: &TriggerAction,
-    when: &Option<Expr>,
-) -> &'static str {
-    use crate::model::support::SqlDialect;
-    match dialect {
-        SqlDialect::Postgres => {
-            if matches!(action, TriggerAction::Body { .. }) {
-                "Postgres triggers must execute a named trigger function"
-            } else {
-                NEVER_REFUSED
+        },
+        Op::CreatePartition { .. }
+        | Op::AttachPartition { .. }
+        | Op::DetachPartition { .. }
+        | Op::DropPartition { .. } => backend_refusal(),
+        Op::AddColumn { .. } => match variant {
+            "identity" | "nextvalDefault" => backend_refusal(),
+            _ => NEVER_REFUSED,
+        },
+        Op::CreateIndex { .. } | Op::Comment { .. } => backend_refusal(),
+        // The ALTER-shaped column ops. All of them refuse on the same two
+        // grounds, so they share one helper rather than repeating it five
+        // times and letting the copies drift.
+        //
+        // `using` is a THIRD thing and must be matched first: an expression
+        // the engine cannot render is refused on EVERY dialect (PostgreSQL
+        // included), which is not a dialect limit at all.
+        Op::SetColumnType { .. } => match variant {
+            "using" => "setColumnType.using expression rendering is deferred in the current engine",
+            _ => backend_refusal(),
+        },
+        Op::SetColumnDefault { .. } => backend_refusal(),
+        Op::SetColumnNotNull { .. }
+        | Op::DropColumnNotNull { .. }
+        | Op::DropColumnDefault { .. }
+        | Op::DropConstraint { .. }
+        | Op::ValidateConstraint { .. } => backend_refusal(),
+        Op::RenameColumn { .. } => match variant {
+            "existenceGuard" => {
+                "renameColumn ifExists guards cannot be attributed to a single migration unit today"
             }
-        }
-        SqlDialect::Sqlite => {
-            if matches!(action, TriggerAction::ExecuteFunction { .. }) {
-                "SQLite has no CREATE TRIGGER EXECUTE FUNCTION form"
-            } else if events.len() != 1 {
-                // Verbatim the string `Feature::TriggerMultipleEvents` already
-                // shows for this shape. The FEATURE table has declared SQLite
-                // unsupported here for some time; the OP sidecar said `portable`
-                // and the two disagreed. Now that the sidecar agrees, the op-level
-                // decision is reached FIRST (validate checks the dialect cell
-                // before any feature gate), so this arm has to reproduce the
-                // message the operator was already getting - otherwise correcting
-                // the declaration would DEGRADE the diagnosis.
-                "SQLite CREATE TRIGGER accepts exactly one trigger event"
-            } else if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
-                "SQLite has no TRUNCATE trigger event"
-            } else if matches!(for_each, ForEach::Statement) {
-                "SQLite triggers are row-level only"
-            } else {
-                NEVER_REFUSED
+            _ => backend_refusal(),
+        },
+        Op::AlterPrimaryKey { .. } => NEVER_REFUSED,
+        Op::SynchronizeIdentity { .. } => NEVER_REFUSED,
+        Op::AddConstraint { .. } => match variant {
+            "pk" => "addConstraint user PRIMARY KEY is inconsistent today and fold refuses it",
+            "fkNoLocalColumn" => "addConstraint(fk) with no local column is unsupported",
+            "fkComposite" => "multi-column foreign keys are unsupported on this target",
+            "fkNonId" => "foreign keys referencing non-id columns are unsupported on this target",
+            // Only the non-FK variants need the rebuild. `fkSimple`,
+            // `fkComposite` and `fkNonId` all APPLY on SQLite (measured
+            // against a live database), so this is a per-variant gap.
+            "check" | "exclusion" | "unique" | "fkNotValid" => backend_refusal(),
+            _ => NEVER_REFUSED,
+        },
+        Op::Insert { .. } => match variant {
+            "onConflictDoNothing" => backend_refusal(),
+            _ => NEVER_REFUSED,
+        },
+        Op::CreateView { .. } => match variant {
+            "materializedReplace" => {
+                "createView replace+materialized is unsupported in the current engine"
             }
-        }
-        SqlDialect::Mysql => {
-            if matches!(action, TriggerAction::ExecuteFunction { .. }) {
-                "MySQL has no CREATE TRIGGER EXECUTE FUNCTION form"
-            } else if events.len() != 1 {
-                "MySQL CREATE TRIGGER accepts exactly one trigger event"
-            } else if events.iter().any(|e| matches!(e, TriggerEvent::Truncate)) {
-                "MySQL has no TRUNCATE trigger event"
-            } else if matches!(timing, TriggerTiming::InsteadOf) {
-                "MySQL does not support INSTEAD OF triggers"
-            } else if matches!(for_each, ForEach::Statement) {
-                "MySQL triggers are row-level only"
-            } else if when.is_some() {
-                "MySQL triggers do not support WHEN predicates"
-            } else if let TriggerAction::Body { statements } = action {
-                if statements.iter().any(|stmt| {
-                    matches!(
-                        stmt,
-                        TriggerStmt::Raise {
-                            level: RaiseLevel::Ignore,
-                            ..
-                        }
-                    )
-                }) {
-                    "MySQL cannot render RAISE IGNORE"
-                } else {
-                    NEVER_REFUSED
-                }
-            } else {
-                NEVER_REFUSED
+            _ => backend_refusal(),
+        },
+        Op::DropView { .. }
+        | Op::CreateDomain { .. }
+        | Op::CreateSequence { .. }
+        | Op::AlterSequence { .. }
+        | Op::DropSequence { .. }
+        | Op::CreateSchema { .. }
+        | Op::DropSchema { .. }
+        | Op::CreateExtension { .. }
+        | Op::DropExtension { .. } => backend_refusal(),
+        Op::CreateRole { .. } => match variant {
+            "superuserIfNotExists" => {
+                "createRole cannot combine superuser:true with ifNotExists:true"
             }
-        }
+            _ => backend_refusal(),
+        },
+        Op::AlterRole { .. }
+        | Op::DropRole { .. }
+        | Op::DropOwnedBy { .. }
+        | Op::Grant { .. }
+        | Op::Revoke { .. }
+        | Op::SetRls { .. }
+        | Op::CreatePolicy { .. }
+        | Op::DropPolicy { .. }
+        | Op::CreateFunction { .. }
+        | Op::DropFunction { .. }
+        | Op::PgRaw { .. }
+        | Op::CreateTrigger { .. } => backend_refusal(),
+        // Every remaining op is portable on all three dialects, so no cell is
+        // ever `Unsupported` and this reason is never surfaced.
+        _ => NEVER_REFUSED,
     }
 }
 
@@ -679,7 +469,7 @@ feature_support_registry! {
     }
     PgRaw {
         label: "PostgreSQL raw SQL",
-        features: crate::model::support::PG_RAW_FEATURES,
+        features: crate::model::support::RAW_SQL_FEATURES,
         ops: [Op::PgRaw { .. }],
     }
 }
@@ -891,7 +681,7 @@ fn create_table_variant(
     partition_by: &Option<PartitionSpec>,
     indexes: &[IrIndex],
 ) -> &'static str {
-    let has_pg_only_index_feature = indexes.iter().any(|index| {
+    let has_nonportable_index_feature = indexes.iter().any(|index| {
         matches!(index.using, Some(IndexMethod::Brin))
             || !index.include.is_empty()
             || index.with.as_ref().is_some_and(|params| !params.is_empty())
@@ -916,7 +706,7 @@ fn create_table_variant(
         } else {
             "partitioned"
         }
-    } else if has_pg_only_index_feature {
+    } else if has_nonportable_index_feature {
         "pgOnlyIndexFeature"
     } else if has_nextval_default {
         "nextvalDefault"
@@ -1129,7 +919,8 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
 mod alter_primary_key_tests {
     use super::*;
     use crate::model::ir::AlterPrimaryKeyAction;
-    use crate::model::support::{SqlDialect, RenderMode};
+    use crate::model::support::RenderMode;
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     #[test]
     fn lifecycle_operation_is_portable_live_resolved_core() {
@@ -1147,7 +938,7 @@ mod alter_primary_key_tests {
         assert!(!is_vendor(&op));
         assert!(vendor_capabilities(&op).is_empty());
         let support = support(&op);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             let decision = support.decision(dialect);
             assert!(decision.is_supported(), "{dialect:?}: {decision:?}");
             assert_eq!(decision.render_mode(), Some(RenderMode::LiveResolved));

@@ -59,12 +59,19 @@ use zero_migrate::{
     snapshot_schema, status, ApplyError, Approval, ApprovalScope, BackfillSpec, BindValue,
     DeclarativeApplyError, EngineError, ExecutorConfig, ExpandContractAuthor, GuardConfig,
     IrAuthor, LiveSchema, LockMode, Migration, MigrationEngine, MigrationFlags, MigrationId,
-    MigrationIr, OnlineIntent, PlanStep, PostgresBackend, RenameStep, Resolution, SqlDialect,
+    MigrationIr, OnlineIntent, PlanStep, PostgresBackend, RenameStep, Resolution, POSTGRES,
 };
 
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
+
+fn pg_expand_contract_author(
+    project_schema: impl Into<String>,
+    owner_app: impl Into<String>,
+) -> ExpandContractAuthor {
+    ExpandContractAuthor::new(project_schema, owner_app, POSTGRES)
+}
 
 /// A unique token so each test gets isolated meta + project schemas in the shared DB.
 fn token() -> String {
@@ -588,13 +595,10 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let author = IrAuthor::new(
         &cfg.project_schema,
         "app_test",
-        SqlDialect::Postgres,
+        &POSTGRES,
         &support::no_inject("app"),
     );
-    let guard_cfg = GuardConfig::from_policy(
-        support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
-    );
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(&cfg.project_schema), POSTGRES);
     let artifact = author
         .load_and_lower_guarded(
             &ir,
@@ -624,7 +628,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let mut declared_live = LiveSchema::default();
     declared_live.tables.insert("samples".into());
     declared_live
-        .advance_logical_columns(&resolved, SqlDialect::Postgres, &cfg.project_schema, None)
+        .advance_logical_columns(&resolved, &POSTGRES, &cfg.project_schema, None)
         .expect("the applied schema envelope seeds its logical column contracts");
 
     let data_ir = r#"{"ir_version":1,"name":"pg_per_row_generators_data","irreversible":"overwrites generated identifiers in place without recording their pre-images","ops":[
@@ -701,7 +705,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let mut logical_live = LiveSchema::default();
     logical_live.tables.insert("samples".into());
     logical_live
-        .advance_logical_columns(&resolved, SqlDialect::Postgres, &cfg.project_schema, None)
+        .advance_logical_columns(&resolved, &POSTGRES, &cfg.project_schema, None)
         .expect("the applied artifact seeds its declared logical column contracts");
     let invalid_backfill: MigrationIr = serde_json::from_str(
         r#"{"ir_version":1,"name":"reject_generic_text_per_row","ops":[
@@ -2093,7 +2097,7 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
 
     let backend = PostgresBackend::new_generic(&session);
     let engine = MigrationEngine::new();
-    let rename = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let rename = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "rename_guard_items".into(),
             from: "email".into(),
@@ -2296,20 +2300,15 @@ async fn interrupt_online_rename_deploy(
         .expect("resolve rename policy");
     let resolved_rename_json =
         serde_json::to_string(&resolved_rename).expect("serialize resolved rename");
-    let authored = IrAuthor::new(
-        &cfg.project_schema,
-        "app_test",
-        SqlDialect::Postgres,
-        &policy,
-    )
-    .load_and_lower_guarded(
-        &resolved_rename_json,
-        "app_test",
-        &registry,
-        &initial_live,
-        &GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id()),
-    )
-    .expect("lower rename before interruption");
+    let authored = IrAuthor::new(&cfg.project_schema, "app_test", &POSTGRES, &policy)
+        .load_and_lower_guarded(
+            &resolved_rename_json,
+            "app_test",
+            &registry,
+            &initial_live,
+            &GuardConfig::from_policy(policy.clone(), POSTGRES),
+        )
+        .expect("lower rename before interruption");
     let rename_plan = authored
         .plan
         .steps
@@ -2335,7 +2334,7 @@ async fn interrupt_online_rename_deploy(
             &envelopes,
             &backend,
             &policy,
-            SqlDialect::Postgres,
+            &POSTGRES,
             &cfg.project_schema,
             "app_test",
             &registry,
@@ -2353,9 +2352,10 @@ async fn interrupt_online_rename_deploy(
         "the existing apply fault must be the interruption: {interrupted_text}"
     );
 
-    let completed_after_interrupt = zero_migrate::applied(session, cfg)
-        .await
-        .expect("read journal after interruption");
+    let completed_after_interrupt =
+        zero_migrate::applied(session, cfg, &zero_migrate_ir::dialect::POSTGRES)
+            .await
+            .expect("read journal after interruption");
     assert!(
         expand_versions.iter().all(|version| {
             completed_after_interrupt.iter().any(|entry| {
@@ -2462,9 +2462,10 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
         .await,
         "the pending-contract refusal must run before the touching DDL"
     );
-    let journal_after_refusal = zero_migrate::applied(&session, &cfg)
-        .await
-        .expect("read journal after refused same-table DDL");
+    let journal_after_refusal =
+        zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
+            .await
+            .expect("read journal after refused same-table DDL");
     assert!(
         !journal_after_refusal
             .iter()
@@ -2487,7 +2488,8 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
     )
     .await
     .expect("apply a contract version for the rollback interlock proof");
-    let rollback_guard = zero_migrate::guard_for(&cfg.guard_config());
+    let rollback_guard =
+        zero_migrate::guard_for(&cfg.guard_config_for(&zero_migrate_ir::dialect::POSTGRES));
     let rollback_error = zero_migrate::rollback(
         &backend,
         &cfg,
@@ -2570,7 +2572,7 @@ async fn interrupted_online_rename_is_automatically_recovered_on_same_deploy_ret
             &interrupted.envelopes,
             &backend,
             &interrupted.policy,
-            SqlDialect::Postgres,
+            &POSTGRES,
             &cfg.project_schema,
             "app_test",
             &interrupted.registry,
@@ -2631,7 +2633,7 @@ async fn transactional_apply_creates_table_and_journals_completed() {
     );
 
     // The journal recorded a completed event, readable back over the seam.
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal read");
     assert_eq!(applied.len(), 1, "one journal row");
@@ -2649,7 +2651,7 @@ async fn transactional_apply_creates_table_and_journals_completed() {
     .await
     .expect("re-apply no-op");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = zero_migrate::applied(&session, &cfg)
+    let applied2 = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal re-read");
     assert_eq!(applied2.len(), 1, "no duplicate journal row on re-apply");
@@ -2712,7 +2714,7 @@ async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused(
     // The journal must have recorded it as a once-only kind. That recording is
     // what the guard trusts over the supplied flag, so an arm that never checked
     // it could be measuring a journal that said "repeatable" all along.
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal read");
     assert_eq!(applied.len(), 1);
@@ -2769,7 +2771,7 @@ async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused(
 
     // The journal is still the original single completed event - the refused
     // apply appended nothing and rewrote nothing.
-    let after = zero_migrate::applied(&session, &cfg)
+    let after = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal re-read");
     assert_eq!(after.len(), 1, "the refused apply appended no journal row");
@@ -2917,6 +2919,7 @@ async fn non_transactional_two_phase_apply_and_recovery() {
     zero_migrate::record_started(
         &session,
         &cfg,
+        &zero_migrate_ir::dialect::POSTGRES,
         v2.as_str(),
         "idx_items_id",
         idx2.checksum.as_str(),
@@ -2940,7 +2943,7 @@ async fn non_transactional_two_phase_apply_and_recovery() {
             || out2.recovered.contains(&v2.as_str().to_string()),
         "the crashed non-txn migration was recovered + completed: {out2:?}"
     );
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal read");
     assert!(
@@ -3019,6 +3022,7 @@ async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
     zero_migrate::record_started(
         &session,
         &cfg,
+        &zero_migrate_ir::dialect::POSTGRES,
         v1.as_str(),
         "idx_items",
         half_ran.checksum.as_str(),
@@ -3050,7 +3054,7 @@ async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
     }
 
     // The marker survives the refusal, so the operator can still inspect it.
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal read");
     assert!(
@@ -3280,7 +3284,7 @@ async fn a_committed_non_txn_concurrent_index_still_recovers_on_replay() {
         out.recovered.contains(&v1.as_str().to_string()),
         "the replay is reported as a recovery: {out:?}"
     );
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal read");
     assert!(
@@ -3460,11 +3464,11 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
 
-    ensure_journal(&session, &cfg)
+    ensure_journal(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("ensure_journal 1");
     // Re-bootstrap: must not error (CREATE … IF NOT EXISTS discipline).
-    ensure_journal(&session, &cfg)
+    ensure_journal(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("ensure_journal 2 (idempotent)");
 
@@ -3472,6 +3476,7 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
     zero_migrate::record_completed(
         &session,
         &cfg,
+        &zero_migrate_ir::dialect::POSTGRES,
         zero_migrate::apply::journal::CompletedRecord {
             down: None,
             version: v.as_str(),
@@ -3485,7 +3490,7 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
     .await
     .expect("record_completed");
 
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal read");
     assert_eq!(applied.len(), 1);
@@ -3527,9 +3532,14 @@ async fn checksum_drift_detects_a_tampered_applied_migration() {
     .expect("apply");
 
     // No drift when the set matches the journal.
-    let report = check_checksum_drift(&session, &cfg, std::slice::from_ref(&m))
-        .await
-        .expect("drift check clean");
+    let report = check_checksum_drift(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg,
+        std::slice::from_ref(&m),
+    )
+    .await
+    .expect("drift check clean");
     assert!(
         report.is_clean(),
         "no drift when the set matches: {report:?}"
@@ -3550,9 +3560,14 @@ async fn checksum_drift_detects_a_tampered_applied_migration() {
         m.checksum.as_str(),
         "tamper changed the checksum"
     );
-    let report2 = check_checksum_drift(&session, &cfg, std::slice::from_ref(&tampered))
-        .await
-        .expect("drift check tampered");
+    let report2 = check_checksum_drift(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg,
+        std::slice::from_ref(&tampered),
+    )
+    .await
+    .expect("drift check tampered");
     assert!(
         !report2.is_clean(),
         "a tampered applied checksum is detected as drift"
@@ -3588,9 +3603,13 @@ async fn snapshot_schema_reflects_the_live_catalog() {
     .await
     .expect("apply");
 
-    let snap = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot_schema over the seam");
+    let snap = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot_schema over the seam");
     let table = snap
         .tables
         .get("profiles")
@@ -3633,9 +3652,13 @@ async fn snapshot_schema_preserves_quoted_named_type_identity() {
         .await
         .expect("create quoted enum/domain fixture");
 
-    let snap = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot quoted named types");
+    let snap = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot quoted named types");
     let table = &snap.tables["named_values"];
     for (column_name, type_name) in [("mood", "MoodState"), ("code", "StateCode")] {
         let column = table
@@ -3832,7 +3855,7 @@ async fn baseline_records_completed_without_running_up() {
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
-    ensure_journal(&session, &cfg)
+    ensure_journal(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("ensure_journal");
 
@@ -3863,7 +3886,7 @@ async fn baseline_records_completed_without_running_up() {
 
     // The version is journaled net-applied (via the baseline), and the table
     // survived (the up did NOT run).
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal read");
     assert!(
@@ -3906,9 +3929,14 @@ async fn status_and_history_report_over_the_seam() {
     .await
     .expect("apply");
 
-    let st = status(&session, &cfg, std::slice::from_ref(&m))
-        .await
-        .expect("status over the seam");
+    let st = status(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg,
+        std::slice::from_ref(&m),
+    )
+    .await
+    .expect("status over the seam");
     assert!(
         st.applied.iter().any(|e| e.version == v.as_str()),
         "status reports the applied version"
@@ -3919,7 +3947,7 @@ async fn status_and_history_report_over_the_seam() {
         st.pending
     );
 
-    let hist = history(&session, &cfg)
+    let hist = history(&zero_migrate_ir::dialect::POSTGRES, &session, &cfg)
         .await
         .expect("history over the seam");
     assert!(
@@ -3964,7 +3992,7 @@ async fn non_idempotent_non_txn_dml_aborts_before_any_apply() {
         "expected NonIdempotentNonTxn, got {err:?}"
     );
     // All-up-front: nothing applied (not even the valid base migration).
-    let applied = zero_migrate::applied(&session, &cfg)
+    let applied = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .unwrap_or_default();
     assert!(
@@ -4010,7 +4038,7 @@ async fn limited_delete_honors_its_cap_across_partitions() {
     .expect("parse delete predicate");
     let assembled = zero_migrate::render::dml::assemble_delete(
         &cfg.project_schema,
-        zero_migrate::SqlDialect::Postgres,
+        &POSTGRES,
         "events",
         &predicate,
         Some(1),
@@ -4102,7 +4130,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
 
     let backend = PostgresBackend::new_generic(&session);
     let engine = MigrationEngine::new();
-    let apply_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let apply_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "apply_users".into(),
             from: "email".into(),
@@ -4194,7 +4222,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         .await
     );
 
-    let direct_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let direct_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "direct_users".into(),
             from: "email".into(),
@@ -4311,7 +4339,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         .await
         .expect("direct contract retry appends the missing tombstone");
 
-    let abort_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let abort_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "abort_users".into(),
             from: "email".into(),
@@ -4447,7 +4475,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         .expect("decode dependent table check");
     assert!(!dependent_table_exists);
 
-    let partial_abort_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let partial_abort_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "abort_partial_users".into(),
             from: "email".into(),
@@ -4538,7 +4566,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         .await
     );
 
-    let drift_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let drift_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "drift_users".into(),
             from: "email".into(),
@@ -4599,7 +4627,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         .expect("decode preserved source value");
     assert_eq!(preserved, "preserve@example.test");
 
-    let numeric_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let numeric_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "numeric_users".into(),
             from: "amount".into(),
@@ -4651,7 +4679,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
     assert!(column_exists(&session, &cfg.project_schema, "numeric_users", "amount").await);
     assert!(column_exists(&session, &cfg.project_schema, "numeric_users", "amount_new").await);
 
-    let timestamp_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let timestamp_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "timestamp_users".into(),
             from: "created_at".into(),
@@ -4730,7 +4758,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
             format!("\"{}\".\"state_code\"", cfg.project_schema),
         ),
     ] {
-        let named_plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        let named_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
             .author(&OnlineIntent::RenameColumn {
                 table: table.to_string(),
                 from: "state".into(),
@@ -4809,7 +4837,7 @@ async fn a_partially_journaled_resolution_cannot_switch_actions() {
 
     let backend = PostgresBackend::new_generic(&session);
     let engine = MigrationEngine::new();
-    let author = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test");
+    let author = pg_expand_contract_author(cfg.project_schema.clone(), "app_test");
 
     let apply_intent = OnlineIntent::RenameColumn {
         table: "legacy_apply_users".into(),
@@ -5019,7 +5047,7 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
 
     let backend = PostgresBackend::new_generic(&session);
     let engine = MigrationEngine::new();
-    let plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "tombstone_retry_users".into(),
             from: "email".into(),
@@ -5082,7 +5110,7 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
     );
     let atomic_version =
         MigrationId::derive("resolve_pending_apply_atomic", pending_version.as_bytes());
-    let journal = zero_migrate::applied(&session, &cfg)
+    let journal = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("read journal after append fault");
     assert!(
@@ -5233,7 +5261,7 @@ fn lower_masked_add_column(cfg: &ExecutorConfig, ir_name: &str, guarded: bool) -
     IrAuthor::new(
         &cfg.project_schema,
         "app_test",
-        SqlDialect::Postgres,
+        &POSTGRES,
         &support::no_inject("app"),
     )
     .lower(&resolved, &LiveSchema::default())
@@ -5246,7 +5274,7 @@ async fn journal_applied(
     cfg: &ExecutorConfig,
     version: &MigrationId,
 ) -> bool {
-    zero_migrate::applied(session, cfg)
+    zero_migrate::applied(session, cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal read")
         .iter()
@@ -5513,7 +5541,7 @@ fn lower_partition_plan(
     IrAuthor::new(
         &cfg.project_schema,
         "app_test",
-        SqlDialect::Postgres,
+        &POSTGRES,
         &support::no_inject("app"),
     )
     .lower_steps(&resolved, live)
@@ -5526,7 +5554,7 @@ fn lower_partition_plan(
 fn partition_live_after_setup(cfg: &ExecutorConfig) -> LiveSchema {
     let snap = zero_migrate::fold_ops(
         &partition_setup_ops(),
-        SqlDialect::Postgres,
+        &POSTGRES,
         &cfg.project_schema,
         &support::no_inject("app"),
     )
@@ -5949,7 +5977,7 @@ async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_star
 
     let backend = PostgresBackend::new_generic(&session);
     let engine = MigrationEngine::new();
-    let rename = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let rename = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "dep_rename_items".into(),
             from: "qty".into(),
@@ -6185,8 +6213,7 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
     assert!(table_exists(&session, &schema, "child").await);
 
     let set = vec![parent.clone(), child.clone()];
-    let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(&schema), SqlDialect::Postgres.id());
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(&schema), POSTGRES);
     let guard = zero_migrate::guard_for(&guard_cfg);
     let outcome = zero_migrate::rollback(
         &backend,
@@ -6261,7 +6288,7 @@ async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
 
     let backend = PostgresBackend::new_generic(&session);
     let engine = MigrationEngine::new();
-    let rename = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let rename = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "chk_rename_items".into(),
             from: "qty".into(),
@@ -6515,13 +6542,10 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
     let author = IrAuthor::new(
         &cfg.project_schema,
         "app_test",
-        SqlDialect::Postgres,
+        &POSTGRES,
         &support::no_inject("app"),
     );
-    let guard_cfg = GuardConfig::from_policy(
-        support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
-    );
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(&cfg.project_schema), POSTGRES);
     let schema_artifact = author
         .load_and_lower_guarded(
             &ir,
@@ -6551,7 +6575,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
     let mut declared_live = LiveSchema::default();
     declared_live.tables.insert("samples".into());
     declared_live
-        .advance_logical_columns(&resolved, SqlDialect::Postgres, &cfg.project_schema, None)
+        .advance_logical_columns(&resolved, &POSTGRES, &cfg.project_schema, None)
         .expect("the applied schema envelope seeds its logical column contracts");
     let registry: BTreeMap<String, String> = [("samples".to_string(), "app_test".to_string())]
         .into_iter()
@@ -6896,7 +6920,7 @@ async fn a_migration_edited_after_it_applied_aborts_the_next_deploy() {
         "the batch must be refused BEFORE the pending migration executes"
     );
     // And the tampered version must not have been re-journalled.
-    let journal = zero_migrate::applied(&session, &cfg)
+    let journal = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("journal read");
     assert_eq!(
@@ -6985,7 +7009,7 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
         .expect("seed the row the window protects");
 
     // Open the window.
-    let plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "forge_users".into(),
             from: "email".into(),
@@ -7168,7 +7192,7 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
     )
     .await
     .expect("control base table");
-    let control_plan = ExpandContractAuthor::new(control_cfg.project_schema.clone(), "app_test")
+    let control_plan = pg_expand_contract_author(control_cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "forge_users".into(),
             from: "email".into(),
@@ -7287,7 +7311,7 @@ async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
         .expect("create the dependent views");
 
     let rename_plan = |table: &str, from: &str, to: &str| {
-        ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+        pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
             .author(&OnlineIntent::RenameColumn {
                 table: table.to_string(),
                 from: from.to_string(),
@@ -7475,7 +7499,7 @@ async fn a_contract_whose_expand_never_landed_is_refused() {
         .await
         .expect("seed the value the contract would destroy");
 
-    let plan = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test")
+    let plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "gate_users".into(),
             from: "email".into(),
@@ -8273,7 +8297,7 @@ async fn re_supplying_settled_work_is_a_no_op_rather_than_a_refusal() {
             .collect()
     }
 
-    let author = ExpandContractAuthor::new(cfg.project_schema.clone(), "app_test");
+    let author = pg_expand_contract_author(cfg.project_schema.clone(), "app_test");
     let intent = OnlineIntent::RenameColumn {
         table: "live_users".into(),
         from: "email".into(),

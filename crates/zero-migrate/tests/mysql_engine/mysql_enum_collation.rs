@@ -59,7 +59,7 @@ use zero_migrate::render::declarative::{
 };
 use zero_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
-    IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine, MigrationIr, SqlDialect,
+    IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine, MigrationIr,
 };
 
 const OWNER: &str = "app_enum_collation";
@@ -90,7 +90,11 @@ fn cfg_for(database: &str) -> ExecutorConfig {
 
 /// Lower one IR doc for `dialect` and return the statements, so a test can show the
 /// server the SAME DDL the engine would deploy.
-fn lower(dialect: SqlDialect, schema: &str, values: &str) -> Result<Vec<String>, String> {
+fn lower(
+    dialect: &zero_migrate::DialectId,
+    schema: &str,
+    values: &str,
+) -> Result<Vec<String>, String> {
     let policy = support::no_inject(schema);
     let authored: MigrationIr =
         serde_json::from_str(&source(values)).map_err(|e| format!("parse the test IR: {e}"))?;
@@ -117,8 +121,8 @@ async fn deploy_mysql(
         .map_err(|e| format!("resolve create-table policy: {e}"))?;
     let resolved_source =
         serde_json::to_string(&resolved).map_err(|e| format!("serialize resolved IR: {e}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Mysql, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Mysql.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL);
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let artifact = author
         .load_and_lower_guarded(
@@ -351,7 +355,7 @@ async fn a_wrong_case_enum_member_is_refused_on_postgres() {
             .batch(&format!("CREATE SCHEMA \"{schema}\""))
             .await
             .map_err(|e| format!("create the probe schema: {e}"))?;
-        for statement in lower(SqlDialect::Postgres, &schema, r#"["active","archived"]"#)? {
+        for statement in lower(&zero_migrate::POSTGRES, &schema, r#"["active","archived"]"#)? {
             session
                 .batch(&statement)
                 .await
@@ -399,7 +403,7 @@ async fn an_enum_whose_members_differ_only_in_case_deploys_on_mysql() {
         // SQLite renders the same members as an inline CHECK and PostgreSQL as a
         // native type; both accept the pair. Lowering them here keeps the claim about
         // the AUTHORED schema rather than about one dialect's SQL.
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for dialect in [&zero_migrate::POSTGRES, &zero_migrate::SQLITE] {
             lower(dialect, "app", r#"["active","Active"]"#).map_err(|e| {
                 format!("{dialect:?} could not even render the case-pair enum: {e}")
             })?;
@@ -492,7 +496,7 @@ async fn a_deployed_enum_column_does_not_drift_against_its_own_fold() {
         let ops = deploy_mysql(&session, &cfg, r#"["active","archived"]"#).await?;
         let expected = fold_ops(
             &ops,
-            SqlDialect::Mysql,
+            &zero_migrate::MYSQL,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -548,8 +552,8 @@ fn an_ir_enum_column_cannot_declare_case_insensitivity() {
         ],"primaryKey":["id"]}}
     ]}}"#
     );
-    let author = IrAuthor::new("app", OWNER, SqlDialect::Mysql, &policy);
-    let guard = GuardConfig::from_policy(policy, SqlDialect::Mysql.id());
+    let author = IrAuthor::new("app", OWNER, &zero_migrate::MYSQL, &policy);
+    let guard = GuardConfig::from_policy(policy, zero_migrate::MYSQL);
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let refusal = author
         .load_and_lower_guarded(&src, OWNER, &registry, &LiveSchema::default(), &guard)
@@ -622,11 +626,11 @@ fn descriptor_create_ddl(
     let desired = desired_snapshot_for_dialect(
         project,
         std::slice::from_ref(descriptor),
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &effective,
     )
     .map_err(|e| format!("build the desired snapshot: {e}"))?;
-    let plan = DeclarativeAuthor::new_for_dialect(project, OWNER, SqlDialect::Mysql)
+    let plan = DeclarativeAuthor::new_for_dialect(project, OWNER, zero_migrate::MYSQL)
         .diff(
             &desired,
             &SchemaSnapshot::default(),

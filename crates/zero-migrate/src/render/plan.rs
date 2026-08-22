@@ -30,8 +30,8 @@
 
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::precondition::PreconditionCheck;
+use crate::render::backends::SqliteSequencePolicy;
 use crate::render::step::{DialectScope, PlanStep, StepReversibility};
-use zero_migrate_sqlite::SqliteSequencePolicy;
 
 /// A database feature whose exact IR lowering has live target requirements.
 /// These are derived from the typed expression AST and carried on the complete

@@ -45,13 +45,27 @@ mod support;
 use zero_migrate::model::expr::{BinaryOp, Expr};
 use zero_migrate::model::ir::{ColType, GeneratedCol, IdentityCol, IrColumn, Op};
 use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
-use zero_migrate::{SqlDialect, TableRuntimeOptions};
+use zero_migrate::{DialectId, TableRuntimeOptions, MYSQL, POSTGRES, SQLITE};
 
 use zero_migrate_node::descriptors::{
     descriptor_dto_to_engine, descriptor_to_dto, field_dto_to_engine, field_to_dto,
 };
 
 const SCHEMA: &str = "public";
+
+/// Preserve the former enum's `Debug` labels in assertion diagnostics while the
+/// test itself uses the open dialect identity.
+fn dialect_debug_label(dialect: &DialectId) -> &'static str {
+    if dialect == &POSTGRES {
+        "Postgres"
+    } else if dialect == &MYSQL {
+        "Mysql"
+    } else if dialect == &SQLITE {
+        "Sqlite"
+    } else {
+        panic!("unregistered test dialect {dialect}")
+    }
+}
 
 // ---------------------------------------------------------------------------
 // The corpus.
@@ -269,7 +283,7 @@ fn width_and_generated_ops() -> Vec<Op> {
 /// below carries the portable arm across all three instead of pretending this one does.
 fn folded_fields() -> Vec<(String, FieldDescriptor)> {
     let policy = support::no_inject(SCHEMA);
-    let dialect = SqlDialect::Postgres;
+    let dialect = &POSTGRES;
 
     let from_descriptors = zero_migrate::render_schema_export_from_descriptors(
         &seed_descriptors(),
@@ -292,7 +306,7 @@ fn folded_fields() -> Vec<(String, FieldDescriptor)> {
 
 /// The PORTABLE arm: the typed width/generated ops, which carry no CHECK and therefore
 /// fold under every dialect.
-fn folded_portable_fields(dialect: SqlDialect) -> Vec<(String, FieldDescriptor)> {
+fn folded_portable_fields(dialect: &DialectId) -> Vec<(String, FieldDescriptor)> {
     let policy = support::no_inject(SCHEMA);
     let export =
         zero_migrate::render_schema_export(&width_and_generated_ops(), dialect, SCHEMA, &policy)
@@ -478,13 +492,9 @@ fn a_whole_collection_survives_the_export_round_trip() {
         for seed in &mut seeds {
             seed.runtime_options.strictness = strictness;
         }
-        let export = zero_migrate::render_schema_export_from_descriptors(
-            &seeds,
-            SqlDialect::Postgres,
-            SCHEMA,
-            &policy,
-        )
-        .expect("the seed descriptor set folds");
+        let export =
+            zero_migrate::render_schema_export_from_descriptors(&seeds, &POSTGRES, SCHEMA, &policy)
+                .expect("the seed descriptor set folds");
 
         for (name, collection) in &export.collections {
             let back =
@@ -518,15 +528,16 @@ fn a_whole_collection_survives_the_export_round_trip() {
 /// exactly that.
 #[test]
 fn the_wire_is_dialect_independent() {
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
+        let dialect_label = dialect_debug_label(dialect);
         let fields = folded_portable_fields(dialect);
         assert_eq!(
             fields.len(),
             5,
-            "{dialect:?}: the portable arm no longer folds five columns"
+            "{dialect_label}: the portable arm no longer folds five columns"
         );
         for (label, field) in fields {
-            assert_round_trips(&format!("{dialect:?} {label}"), &field);
+            assert_round_trips(&format!("{dialect_label} {label}"), &field);
         }
     }
 }
@@ -539,7 +550,8 @@ fn the_wire_is_dialect_independent() {
 #[test]
 fn the_check_bearing_corpus_is_postgres_only() {
     let policy = support::no_inject(SCHEMA);
-    for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
+    for dialect in [&MYSQL, &SQLITE] {
+        let dialect_label = dialect_debug_label(dialect);
         let refused = zero_migrate::render_schema_export_from_descriptors(
             &seed_descriptors(),
             dialect,
@@ -548,7 +560,7 @@ fn the_check_bearing_corpus_is_postgres_only() {
         );
         assert!(
             refused.is_err(),
-            "{dialect:?} now folds a table-level CHECK; widen the round trip's corpus"
+            "{dialect_label} now folds a table-level CHECK; widen the round trip's corpus"
         );
     }
 }
@@ -565,7 +577,7 @@ fn unbounded_text_is_re_derived_rather_than_carried() {
     let policy = support::no_inject(SCHEMA);
     let export = zero_migrate::render_schema_export_from_descriptors(
         &seed_descriptors(),
-        SqlDialect::Postgres,
+        &POSTGRES,
         SCHEMA,
         &policy,
     )
@@ -597,7 +609,7 @@ fn unbounded_text_is_re_derived_rather_than_carried() {
             indexes: Vec::new(),
             runtime_options: TableRuntimeOptions::default(),
         }],
-        SqlDialect::Postgres,
+        &POSTGRES,
         SCHEMA,
         &policy,
     )
@@ -635,7 +647,7 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
             indexes: Vec::new(),
             runtime_options: TableRuntimeOptions::default(),
         }],
-        SqlDialect::Postgres,
+        &POSTGRES,
         SCHEMA,
         &policy,
     );
@@ -673,13 +685,9 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
 #[test]
 fn a_varchar_width_survives_the_wire_and_the_producer() {
     let policy = support::no_inject(SCHEMA);
-    let export = zero_migrate::render_schema_export(
-        &width_and_generated_ops(),
-        SqlDialect::Postgres,
-        SCHEMA,
-        &policy,
-    )
-    .expect("the typed width ops fold");
+    let export =
+        zero_migrate::render_schema_export(&width_and_generated_ops(), &POSTGRES, SCHEMA, &policy)
+            .expect("the typed width ops fold");
 
     let first = export.collections["widths"]
         .fields
@@ -707,7 +715,7 @@ fn a_varchar_width_survives_the_wire_and_the_producer() {
             indexes: Vec::new(),
             runtime_options: TableRuntimeOptions::default(),
         }],
-        SqlDialect::Postgres,
+        &POSTGRES,
         SCHEMA,
         &policy,
     )

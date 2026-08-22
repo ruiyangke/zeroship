@@ -42,7 +42,7 @@ use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, BinaryOp, ColType, ExecutorConfig, Expr,
-    GeneratedCol, IrColumn, IrScalar, MigrationEngine, MigrationIr, Op, SqlDialect, SqliteBackend,
+    GeneratedCol, IrColumn, IrScalar, MigrationEngine, MigrationIr, Op, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_gen_rename";
@@ -160,8 +160,8 @@ fn exec_cfg() -> ExecutorConfig {
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::confined_charter();
     let snapshot =
-        fold_ops(history, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
-    let sqlite_schemas = single_fold::fold(history, SqlDialect::Sqlite, PROJECT, &effective)
+        fold_ops(history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
+    let sqlite_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
@@ -181,7 +181,7 @@ async fn a_sqlite_rename_rebuild_emits_a_generated_body_over_the_new_column_name
     let p = paths("gen_rename");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
 
     // Deploy the table for real, and keep the RESOLVED ops as the fold's history —
     // the same cumulative-op list the engine folds.

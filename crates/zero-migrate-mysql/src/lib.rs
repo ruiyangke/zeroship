@@ -30,6 +30,7 @@ mod existence_probe;
 mod fold;
 pub mod guard;
 mod schema;
+mod validation;
 mod value_format;
 
 pub use guard::MysqlGuard;
@@ -44,7 +45,7 @@ use zero_migrate_backend::registry::BackendVendor;
 /// in-crate `match` used to give for free and which `pub` statics would have thrown
 /// away at exactly the moment the vendor became separately linkable.
 ///
-/// `value_format`, `ddl`, and `guard` are REQUIRED. Delete any line and this literal stops
+/// `value_format`, `validation`, `ddl`, and `guard` are REQUIRED. Delete any line and this literal stops
 /// compiling, here, with this crate named — which is the point: a backend cannot
 /// inherit another backend's DDL or acquire a trusting guard by omission. See
 /// `zero_migrate_backend::registry::BackendVendor`.
@@ -55,6 +56,7 @@ pub static VENDOR: BackendVendor = BackendVendor {
     value_format: &value_format::RENDERER,
     existence_probe: &existence_probe::POLICY,
     catalog_fold: &fold::POLICY,
+    validation: &validation::POLICY,
     ddl: ddl::emitter,
     guard: guard::guard,
 };

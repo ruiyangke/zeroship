@@ -1,11 +1,12 @@
 //! The dialect-table CORPUS + SIDECAR-DRIFT anchor.
 //!
 //! The generated single-source dialect table
-//! (`src/model/dialect_table.rs`, emitted from `dialect-support.toml` by
-//! `packages/zero-migrate/scripts/gen-dialect-table.mjs`) is the single source of the
-//! per-op dialect-support decisions, and `Op::support` READS the
-//! table (via [`Op::op_variant`]). This file pins the invariants that stay
-//! meaningful once the table is authoritative —
+//! (`tests/dialect_matrix/dialect_table.rs`, emitted from `dialect-support.toml` by
+//! `packages/zero-migrate/scripts/gen-dialect-table.mjs`) is the byte-pinned review
+//! artifact for the per-op dialect-support decisions. Production asks the selected
+//! registered backend's required policy instead; the generated file's lib test
+//! compares all 276 reviewed cells with those policies. This file pins the
+//! generator-side invariants —
 //! see the comment above the test for the full "what guards what".
 //!
 //! DESIGN — how it enumerates Op × dialect exhaustively:
@@ -13,9 +14,9 @@
 //!     Payload-INDEPENDENT ops carry a single `"base"` variant; payload-DEPENDENT
 //!     ops (whose support decision turns on a node/option) carry one triple per
 //!     distinct support branch, each built to exhibit that branch.
-//!   * SHARED VARIANT DERIVATION: each corpus op's `Op::op_variant()` (the ONE
-//!     branch-selection `Op::support` keys the table lookup on) must equal its
-//!     labelled variant — pinning the corpus and the engine against drift.
+//!   * SHARED VARIANT DERIVATION: each corpus op's `Op::op_variant()` (the same
+//!     branch selection production support passes to the backend policy) must
+//!     equal its labelled variant — pinning the corpus and the engine against drift.
 //!   * EXHAUSTIVENESS over op-KINDS: the corpus's kinds equal the schema's `Op`
 //!     `oneOf` discriminants (the 56-op wire contract `op_support_matrix` pins).
 //!   * EXHAUSTIVENESS over TABLE ROWS: the corpus's `(kind, variant)` set is a
@@ -55,7 +56,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::dialect_corpus::corpus;
-use zero_migrate::model::dialect_table::{Disposition, DispositionRow, DIALECT_TABLE};
+use crate::dialect_table::{Disposition, DispositionRow, DIALECT_TABLE};
 use zero_migrate::model::ir::Op;
 
 /// The `op` wire tag (op-kind discriminant) of a concrete op, via its serde image.
@@ -180,23 +181,22 @@ fn schema_op_tags() -> BTreeSet<String> {
 
 // What now guards what.
 //
-// `Op::support` READS the dialect table (looking the disposition up by
-// `Op::op_variant`), so a direct `generated DIALECT_TABLE == decision_to_disposition(
-// Op::support())` check would be TAUTOLOGICAL. The load-bearing behavioural gate
-// lives in `op_support_matrix` (`decision()` == the live validate/lower behaviour).
-// This file pins the TWO invariants that remain meaningful once the table
-// is the consumer's source of truth:
+// Production support reads the selected registered backend's required policy,
+// not this generated table. The generated file's lib test compares all 276 cells
+// with those policies, while `op_support_matrix` remains the load-bearing
+// behavioural gate (`decision()` == the live validate/lower behaviour). This file
+// pins the two generator-side invariants:
 //
 //   * SHARED VARIANT DERIVATION — every representative corpus op's
-//     `Op::op_variant()` equals its labelled variant. `op_variant` is the single
-//     branch-selection shared by `Op::support` and this corpus, so this pins the
-//     two against drift.
+//     `Op::op_variant()` equals its labelled variant. Production passes that same
+//     branch token to the selected backend policy, so this pins the two against drift.
 //   * SIDECAR ⟷ GENERATED TABLE — the committed `dialect_table.rs`'s
 //     `DIALECT_TABLE` matches the hand-authored, human-reviewed
 //     `dialect-support.toml` (the same sidecar → table drift the TS
 //     `dialect-table-drift` test guards with a byte-level regenerate, checked
-//     here Rust-side and node-free). Together with `op_support_matrix` this closes
-//     the loop: sidecar ⟷ table ⟷ (op_variant∘table) `Op::support` ⟷ validate.
+//     here Rust-side and node-free). Together with the generated 276-cell policy
+//     parity test and `op_support_matrix`, this closes the loop: sidecar ⟷ table
+//     ⟷ backend policies ⟷ production support ⟷ validate.
 #[test]
 fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     let corpus = corpus();
@@ -217,7 +217,7 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
 
     // 2. SHARED VARIANT DERIVATION: each representative op reports the labelled
     //    variant AND kind through the crate's `Op::op_variant` / serde tag — the
-    //    same derivation `Op::support` uses to key the table lookup. This is what
+    //    same derivation production passes to the selected backend policy. This
     //    keeps the corpus and the engine's variant selection from drifting.
     for (kind, variant, op) in &corpus {
         assert_eq!(

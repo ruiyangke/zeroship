@@ -47,7 +47,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, snapshot_schema, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
-    PostgresBackend, SchemaSnapshot, SqlDialect,
+    PostgresBackend, SchemaSnapshot,
 };
 
 const OWNER: &str = "app_schema_model_equivalence_pg";
@@ -138,8 +138,13 @@ fn fold(
         serde_json::from_str(ir).map_err(|error| format!("parse test IR: {error}"))?;
     let resolved = resolve_create_table_policy(&authored, policy, project_schema)
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
-    fold_ops(&resolved.ops, SqlDialect::Postgres, project_schema, policy)
-        .map_err(|error| format!("fold the PostgreSQL ops: {error}"))
+    fold_ops(
+        &resolved.ops,
+        &zero_migrate::POSTGRES,
+        project_schema,
+        policy,
+    )
+    .map_err(|error| format!("fold the PostgreSQL ops: {error}"))
 }
 
 async fn apply_through_engine(
@@ -154,8 +159,8 @@ async fn apply_through_engine(
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -218,9 +223,13 @@ async fn measure() -> Option<Measured> {
         apply_through_engine(&backend, &cfg, &policy, CORPUS_IR).await?;
 
         let folded = fold(CORPUS_IR, &policy, &cfg.project_schema)?;
-        let live = snapshot_schema(&session, &cfg.project_schema)
-            .await
-            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let live = snapshot_schema(
+            &zero_migrate_ir::dialect::POSTGRES,
+            &session,
+            &cfg.project_schema,
+        )
+        .await
+        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
 
         Ok(Measured { folded, live })
     }

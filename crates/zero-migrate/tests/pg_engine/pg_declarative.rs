@@ -15,10 +15,23 @@ use std::collections::HashMap;
 use crate::support::PgDevSession;
 
 use zero_migrate::{
-    desired_snapshot, diff_snapshots, snapshot_schema, Approval, CollectionDescriptor,
-    DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig,
-    MigrationEngine, PostgresBackend, RenameHint, SqlDialect,
+    diff_snapshots, snapshot_schema, Approval, CollectionDescriptor, DeclarativeAuthor,
+    EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig, MigrationEngine,
+    PostgresBackend, RenameHint,
 };
+
+fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    effective: &EffectivePolicy,
+) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
+    zero_migrate::desired_snapshot_for_dialect(
+        project_schema,
+        descriptors,
+        &zero_migrate::POSTGRES,
+        effective,
+    )
+}
 
 /// The charter every stage of the deploy runs under, scoped to this run's project
 /// schema and carrying no inject rule.
@@ -95,12 +108,16 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     )
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
-    DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test")
+    DeclarativeAuthor::new_for_dialect(
+        cfg.project_schema.clone(),
+        "app_test",
+        zero_migrate::POSTGRES,
+    )
 }
 
 /// A one-field collection descriptor.
@@ -157,9 +174,13 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
     .expect("desired_snapshot");
 
     // Live: empty (the table does not exist yet).
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
     assert!(
         !table_exists(&session, &cfg.project_schema, "widgets").await,
         "the table does not exist before the declarative deploy"
@@ -199,9 +220,13 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
 
     // Re-introspect live and diff against desired: the freshly-created table must
     // round-trip to the desired snapshot with ZERO structural drift.
-    let live_after = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after)");
+    let live_after = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after)");
     let drift = diff_snapshots(&desired.snapshot, &live_after);
     assert!(
         drift.is_clean(),
@@ -213,9 +238,13 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
     );
 
     // Idempotent re-deploy: desired == live now, so the diff is empty (no-op).
-    let live_now = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (now)");
+    let live_now = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (now)");
     let plan2 = engine
         .plan_declarative(
             &desired,
@@ -258,9 +287,13 @@ async fn declarative_add_column_diff_applies() {
         &effective_policy(&cfg),
     )
     .expect("desired v1");
-    let live0 = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("live0");
+    let live0 = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("live0");
     let plan1 = engine
         .plan_declarative(
             &desired_v1,
@@ -312,9 +345,13 @@ async fn declarative_add_column_diff_applies() {
         &effective_policy(&cfg),
     )
     .expect("desired v2");
-    let live1 = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("live1");
+    let live1 = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("live1");
     let plan2 = engine
         .plan_declarative(
             &desired_v2,
@@ -344,9 +381,13 @@ async fn declarative_add_column_diff_applies() {
         .expect("apply v2 add-column");
 
     // The new column now exists, and live round-trips to desired_v2 with zero drift.
-    let live2 = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("live2");
+    let live2 = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("live2");
     let table = live2.tables.get("widgets").expect("widgets table present");
     assert!(
         table.columns.iter().any(|c| c.name == "subtitle"),
@@ -410,9 +451,13 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
     )
     .expect("desired_snapshot");
 
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -439,9 +484,13 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
 
     // BASELINE. Without this the test cannot tell "the ALTER was detected" from
     // "this snapshot never matched in the first place".
-    let live_after = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after deploy)");
+    let live_after = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after deploy)");
     let clean = diff_snapshots(&desired.snapshot, &live_after);
     assert!(
         clean.is_clean(),
@@ -463,9 +512,13 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
         .await
         .expect("out-of-band ALTER");
 
-    let tampered = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (tampered)");
+    let tampered = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (tampered)");
     let drift = diff_snapshots(&desired.snapshot, &tampered);
     assert!(
         !drift.altered_objects.is_empty(),
@@ -496,9 +549,13 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
         .await
         .expect("recreate it NON-unique under the same name");
 
-    let tampered2 = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (tampered 2)");
+    let tampered2 = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (tampered 2)");
     let drift2 = diff_snapshots(&desired.snapshot, &tampered2);
     assert!(
         !drift2.altered_objects.is_empty(),
@@ -536,9 +593,13 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
     )
     .expect("desired_snapshot");
 
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -564,9 +625,13 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
         .expect("apply_declarative create sprockets");
 
     // BASELINE, as in the sibling test: prove the snapshot matches before tampering.
-    let live_after = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after deploy)");
+    let live_after = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after deploy)");
     assert!(
         diff_snapshots(&desired.snapshot, &live_after).is_clean(),
         "baseline must be clean before tampering"
@@ -584,9 +649,13 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
         .await
         .expect("out-of-band CREATE");
 
-    let after_create = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after create)");
+    let after_create = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after create)");
     let drift = diff_snapshots(&desired.snapshot, &after_create);
     assert!(
         !drift.unexpected_objects.is_empty(),
@@ -606,9 +675,13 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
         .await
         .expect("out-of-band DROP");
 
-    let after_drop = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after drop)");
+    let after_drop = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after drop)");
     let drift2 = diff_snapshots(&desired.snapshot, &after_drop);
     assert!(
         !drift2.missing_objects.is_empty(),
@@ -652,9 +725,13 @@ async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
         &effective_policy(&cfg),
     )
     .expect("desired v1");
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
     let plan1 = engine
         .plan_declarative(
             &desired1,
@@ -687,9 +764,13 @@ async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
         &effective_policy(&cfg),
     )
     .expect("desired v2");
-    let live_v1 = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (v1)");
+    let live_v1 = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (v1)");
 
     // CONTROL FIRST, and it is the whole point: WITHOUT the hint the diff cannot
     // know a rename happened, so it must plan a drop plus a create. If this ever
@@ -786,9 +867,13 @@ async fn rows_survive_a_postgres_online_rename() {
         &effective_policy(&cfg),
     )
     .expect("desired v1");
-    let live_empty = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (empty)");
+    let live_empty = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (empty)");
     let plan1 = engine
         .plan_declarative(
             &desired1,
@@ -845,9 +930,13 @@ async fn rows_survive_a_postgres_online_rename() {
         &effective_policy(&cfg),
     )
     .expect("desired v2");
-    let live_v1 = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (v1)");
+    let live_v1 = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (v1)");
     let hints = vec![RenameHint {
         table: "people".into(),
         from: "email".into(),

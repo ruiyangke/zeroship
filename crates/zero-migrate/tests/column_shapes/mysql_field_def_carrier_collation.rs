@@ -3,7 +3,7 @@
 //!
 //! The engine has two MySQL renderers. `render::declarative` answers from a
 //! [`FieldDescriptor`] and a PostgreSQL-spelled `data_type` (the SNAPSHOT carrier);
-//! `schema::query::renderer(SqlDialect::Mysql)` answers from a raw SDK field def (the
+//! `schema::query::renderer(&MYSQL)` answers from a raw SDK field def (the
 //! FIELD-DEF carrier). Both decide what a MySQL column is, and only the first pinned a
 //! collation - so on the second one every character column inherited the table
 //! default, which on a stock MySQL 8 server is `utf8mb4_0900_ai_ci`.
@@ -29,8 +29,8 @@
 //! SQLite (37 sections, 3333 tests): exactly eight tests tripped it, all eight
 //! `#[cfg(test)]` unit tests inside `schema/query.rs` itself. The dialect-generic
 //! emitter's only production caller is the SQLite 12-step rebuild, which passes a
-//! hardcoded `SqlDialect::Sqlite`; the `def_to_column_type_for_dialect` call sites in
-//! `render::declarative` and `schema::diff` all pass a hardcoded `SqlDialect::Postgres`.
+//! hardcoded `SQLITE`; the `def_to_column_type_for_dialect` call sites in
+//! `render::declarative` and `schema::diff` all pass a hardcoded `POSTGRES`.
 //!
 //! So this pin is the whole of this arm's coverage together with the live file, and no
 //! deployment moves if it regresses. It is here because `schema::query` is a `pub mod`
@@ -46,13 +46,12 @@ use zero_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
 };
 use zero_migrate::schema::query::def_to_column_type_for_dialect;
-use zero_migrate::SqlDialect;
 
 const CASE_SENSITIVE: &str = "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs";
 const CASE_INSENSITIVE: &str = "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci";
 
 fn mysql_type(def: serde_json::Value) -> String {
-    def_to_column_type_for_dialect(&def, SqlDialect::Mysql)
+    def_to_column_type_for_dialect(&def, &zero_migrate::MYSQL)
 }
 
 /// EVERY character spelling the field-def carrier can produce, named rather than
@@ -280,11 +279,11 @@ fn descriptor_create_ddl() -> Result<String, String> {
     let desired = desired_snapshot_for_dialect(
         PROJECT,
         std::slice::from_ref(&descriptor),
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &effective,
     )
     .map_err(|e| format!("build the desired snapshot: {e}"))?;
-    DeclarativeAuthor::new_for_dialect(PROJECT, PROJECT, SqlDialect::Mysql)
+    DeclarativeAuthor::new_for_dialect(PROJECT, PROJECT, zero_migrate::MYSQL)
         .diff(
             &desired,
             &SchemaSnapshot::default(),

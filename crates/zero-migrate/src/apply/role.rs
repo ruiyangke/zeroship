@@ -107,12 +107,16 @@ pub enum RoleError {
 
 /// Quote a SQL identifier (double embedded quotes, wrap in `"`), so a schema /
 /// role name is never interpolated as raw SQL. Routes through the ONE crate-shared
-/// engine seam ([`crate::render::dml::quote_ident_checked`]) — byte-identical to (and
+/// explicit backend seam
+/// ([`crate::render::dml::quote_ident_checked_for_dialect`]) — byte-identical to (and
 /// uniformly self-defending with) `author`/`backfill`/`journal`/`dml`: fail-closed
 /// on an empty / NUL identifier.
 #[cfg(test)]
 fn quote_ident(ident: &str) -> Result<String, RoleError> {
-    Ok(crate::render::dml::quote_ident_checked(ident)?)
+    Ok(crate::render::dml::quote_ident_checked_for_dialect(
+        ident,
+        &crate::apply::backend::postgres::DIALECT,
+    )?)
 }
 
 /// Test seam (see `dml::tests::all_engine_seams_render_uniformly`).

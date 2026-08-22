@@ -44,8 +44,8 @@ use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, MigrationIr, SqlDialect, SqliteBackend,
+    resolve_create_table_policy, Approval, DialectId, ExecutorConfig, GuardConfig, IrAuthor,
+    LiveSchema, MigrationEngine, MigrationIr, SqliteBackend,
 };
 
 const OWNER: &str = "app_mysql_trigger_result_set";
@@ -104,7 +104,7 @@ fn delete_statement() -> Value {
 async fn apply<B: MigrationBackend>(
     backend: &B,
     cfg: &ExecutorConfig,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     ir: &str,
 ) -> Result<(), String> {
     let policy = support::operator_charter(&cfg.project_schema);
@@ -119,7 +119,7 @@ async fn apply<B: MigrationBackend>(
         Err(error) => return Err(format!("snapshot the live schema: {error}")),
     };
     let author = IrAuthor::new(&cfg.project_schema, OWNER, dialect, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), dialect.id());
+    let guard = GuardConfig::from_policy(policy.clone(), (*dialect).clone());
     let artifact = author
         .load_and_lower_guarded(&source, OWNER, &registry(), &live, &guard)
         .map_err(|error| format!("lower: {error}"))?;
@@ -163,7 +163,7 @@ async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
         apply(
             &backend,
             &cfg,
-            SqlDialect::Mysql,
+            &zero_migrate::MYSQL,
             &envelope("setup", base_ops()),
         )
         .await?;
@@ -174,7 +174,7 @@ async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
         let refusal = match apply(
             &backend,
             &cfg,
-            SqlDialect::Mysql,
+            &zero_migrate::MYSQL,
             &envelope("select_body", vec![trigger("tg_bad", select_statement())]),
         )
         .await
@@ -203,7 +203,7 @@ async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
         apply(
             &backend,
             &cfg,
-            SqlDialect::Mysql,
+            &zero_migrate::MYSQL,
             &envelope("delete_body", vec![trigger("tg_good", delete_statement())]),
         )
         .await?;
@@ -254,7 +254,7 @@ async fn sqlite_still_accepts_a_select_trigger_body() {
     apply(
         &backend,
         &cfg,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &envelope("setup", base_ops()),
     )
     .await
@@ -265,7 +265,7 @@ async fn sqlite_still_accepts_a_select_trigger_body() {
     apply(
         &backend,
         &cfg,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &envelope("select_body", vec![trigger("tg_ok", select_statement())]),
     )
     .await

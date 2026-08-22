@@ -129,9 +129,8 @@ pub enum GuardMode {
 pub struct GuardConfig {
     /// PRIVATE. The target SQL dialect this guard config is for.
     ///
-    /// - `postgres` (the default) — the `libpg_query` line-1 guard runs
-    ///   (`SqlGuard::check` parses + deny-walks the SQL). A config keeps this
-    ///   dialect unless [`GuardConfig::for_dialect`] selects another.
+    /// - `postgres` — the `libpg_query` line-1 guard runs
+    ///   (`SqlGuard::check` parses + deny-walks the SQL).
     /// - every other id — a vendor-owned guard path. An untrusted raw SQL string
     ///   presented to PostgreSQL's `SqlGuard::check` is refused. Any explicit
     ///   non-enforced mode is reset to [`GuardMode::Enforced`] by
@@ -184,18 +183,6 @@ impl GuardConfig {
     pub fn with_effective_policy(mut self, effective: EffectivePolicy) -> Self {
         self.effective = effective;
         self
-    }
-
-    /// Construct an enforced Postgres guard from a caller-composed policy.
-    ///
-    /// The project schema argument is retained for API compatibility. Schema
-    /// authority comes only from the explicit effective policy.
-    #[must_use]
-    pub fn confined_with_effective(
-        _project_schema: impl Into<String>,
-        effective: EffectivePolicy,
-    ) -> Self {
-        Self::from_policy(effective, POSTGRES)
     }
 
     /// Borrow the composed [`EffectivePolicy`] this config decides against.

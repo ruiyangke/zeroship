@@ -35,7 +35,6 @@ use zero_migrate::model::ir::{
 };
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{resolve_create_table_policy, SqliteBackend};
 
 struct Paths {
@@ -90,7 +89,7 @@ fn lower(op: Op) -> Vec<Migration> {
     let author = IrAuthor::new(
         "main",
         "app_test",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
     author

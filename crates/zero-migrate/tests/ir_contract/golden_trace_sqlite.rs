@@ -23,7 +23,6 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::journal::Phase;
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
     DeclarativeDeployOutcome, DeclarativeDeployPlan, EffectivePolicy, EngineError, ExecutorConfig,
@@ -46,7 +45,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         effective,
     )
 }
@@ -73,7 +72,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite)
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE)
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -81,7 +80,7 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id())
+    GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE)
 }
 
 fn live_from(descs: &[CollectionDescriptor]) -> (SchemaSnapshot, HashMap<String, String>) {
@@ -360,7 +359,7 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
     // backend (online() == None). The differ never produces this on SQLite; we
     // construct it directly to prove the apply_plan dispatch fails closed rather
     // than silently dropping the rename (the fail-closed invariant).
-    let rename = ExpandContractAuthor::new(PROJECT, APP)
+    let rename = ExpandContractAuthor::new(PROJECT, APP, zero_migrate::POSTGRES)
         .author(&OnlineIntent::RenameColumn {
             table: "people".into(),
             from: "nickname".into(),

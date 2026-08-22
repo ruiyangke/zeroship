@@ -24,7 +24,8 @@
 
 use crate::guard::{GuardConfig, GuardError, SqlGuard};
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
-use crate::{EffectivePolicy, SqlDialect};
+use crate::EffectivePolicy;
+use zero_migrate_ir::dialect::DialectId;
 
 /// A pluggable source of versioned migrations.
 ///
@@ -108,13 +109,14 @@ pub enum AuthorRequest {
     },
 }
 
-/// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Routes
-/// through the ONE crate-shared engine seam ([`crate::render::dml::quote_ident_checked`])
+/// Quote an identifier in the selected backend's spelling. Routes through the
+/// crate-shared engine seam
+/// ([`crate::render::dml::quote_ident_checked_for_dialect`])
 /// so author output is byte-identical to (and uniformly self-defending with) the
 /// executor/role/journal quoting — fail-closed on an empty / NUL identifier
 /// (which `"`-doubling cannot neutralise) rather than silently emitting it.
-fn quote_ident(ident: &str) -> Result<String, AuthorError> {
-    crate::render::dml::quote_ident_checked(ident).map_err(|e| {
+fn quote_ident(ident: &str, dialect: &DialectId) -> Result<String, AuthorError> {
+    crate::render::dml::quote_ident_checked_for_dialect(ident, dialect).map_err(|e| {
         AuthorError::Invalid(format!(
             "unquotable identifier ({}): {:?}",
             e.reason, e.value
@@ -126,19 +128,28 @@ fn quote_ident(ident: &str) -> Result<String, AuthorError> {
 /// helper's uniform render can be asserted across all engine seams.
 #[cfg(test)]
 pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, AuthorError> {
-    quote_ident(ident)
+    quote_ident(ident, &zero_migrate_ir::dialect::POSTGRES)
 }
 
 /// Render `<schema>.<object>`, both parts quoted.
-fn qualified(schema: &str, object: &str) -> Result<String, AuthorError> {
-    Ok(format!("{}.{}", quote_ident(schema)?, quote_ident(object)?))
+fn qualified(schema: &str, object: &str, dialect: &DialectId) -> Result<String, AuthorError> {
+    Ok(format!(
+        "{}.{}",
+        quote_ident(schema, dialect)?,
+        quote_ident(object, dialect)?
+    ))
 }
 
 /// Render one column definition for a `CREATE TABLE` / `ADD COLUMN` clause.
-fn column_def(c: &Column) -> Result<String, AuthorError> {
+fn column_def(c: &Column, dialect: &DialectId) -> Result<String, AuthorError> {
     let null = if c.nullable { "" } else { " NOT NULL" };
     // `ty` is emitted verbatim — a Postgres type, not an identifier.
-    Ok(format!("{} {}{}", quote_ident(&c.name)?, c.ty, null))
+    Ok(format!(
+        "{} {}{}",
+        quote_ident(&c.name, dialect)?,
+        c.ty,
+        null
+    ))
 }
 
 /// The Postgres identifier length limit (`NAMEDATALEN - 1`), in bytes. An index
@@ -152,15 +163,10 @@ fn column_def(c: &Column) -> Result<String, AuthorError> {
 /// number the backend DECLARES cannot drift apart. The `Bytes` arm is not
 /// incidental: MySQL's cap is 64 CHARACTERS and SQLite has none, which is why
 /// this bound is PostgreSQL's and not everyone's.
-///
-/// This is the ONE definition. It used to be three - `apply::role` and
-/// `render::expand_contract` each restated `63` - so the sentence above was true of
-/// one site and false of the other two.
-pub(crate) fn pg_max_ident_bytes() -> usize {
-    crate::render::backends::postgres_identifier_limit_bytes()
-}
+pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
+    crate::render::backends::GENERATED_IDENT_MAX_BYTES;
 
-/// Cap an arbitrary generated identifier to ≤ `pg_max_ident_bytes()` (63 bytes),
+/// Cap an arbitrary generated identifier to ≤ `GENERATED_IDENT_MAX_BYTES` (63 bytes),
 /// deterministically: when `natural` fits, return it verbatim; when it would
 /// overflow, keep a readable prefix and append a short hash of the *full* name so
 /// distinct long inputs still map to distinct, stable names.
@@ -188,7 +194,7 @@ pub(crate) fn pg_max_ident_bytes() -> usize {
 /// equal.
 pub fn cap_ident_name(natural: &str) -> String {
     use sha2::{Digest, Sha256};
-    if natural.len() <= pg_max_ident_bytes() {
+    if natural.len() <= GENERATED_IDENT_MAX_BYTES {
         return natural.to_string();
     }
     // Overflow: deterministic 10-hex-char hash of the full natural name, plus a
@@ -198,7 +204,7 @@ pub fn cap_ident_name(natural: &str) -> String {
                                             // Reserve room for the `_<suffix>` (1 + 10 = 11 bytes). Truncate the readable
                                             // part on a char boundary so we never split a multi-byte UTF-8 sequence
                                             // (identifiers are ASCII in practice, but be safe).
-    let budget = pg_max_ident_bytes() - (1 + suffix.len());
+    let budget = GENERATED_IDENT_MAX_BYTES - (1 + suffix.len());
     let mut prefix = String::with_capacity(budget);
     for ch in natural.chars() {
         if prefix.len() + ch.len_utf8() > budget {
@@ -229,15 +235,23 @@ pub struct DeterministicAuthor {
     /// The declaring app (`app_…`) recorded on the migration (per-table
     /// ownership).
     owner_app: String,
+    /// The registered backend whose identifier spelling this author emits.
+    dialect: DialectId,
 }
 
 impl DeterministicAuthor {
-    /// Construct a deterministic author bound to a project schema + owner app.
+    /// Construct a deterministic author bound to a project schema, owner app,
+    /// and backend identity.
     #[must_use]
-    pub fn new(project_schema: impl Into<String>, owner_app: impl Into<String>) -> Self {
+    pub fn new(
+        project_schema: impl Into<String>,
+        owner_app: impl Into<String>,
+        dialect: DialectId,
+    ) -> Self {
         Self {
             project_schema: project_schema.into(),
             owner_app: owner_app.into(),
+            dialect,
         }
     }
 
@@ -290,12 +304,18 @@ impl MigrationAuthor for DeterministicAuthor {
                 }
                 let cols = columns
                     .iter()
-                    .map(column_def)
+                    .map(|column| column_def(column, &self.dialect))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
-                let up = format!("CREATE TABLE {} ({cols})", qualified(schema, name)?);
+                let up = format!(
+                    "CREATE TABLE {} ({cols})",
+                    qualified(schema, name, &self.dialect)?
+                );
                 // A clean additive create has a precise reverse.
-                let down = Some(format!("DROP TABLE {}", qualified(schema, name)?));
+                let down = Some(format!(
+                    "DROP TABLE {}",
+                    qualified(schema, name, &self.dialect)?
+                ));
                 self.make(
                     &format!("create_table_{name}"),
                     up,
@@ -313,13 +333,13 @@ impl MigrationAuthor for DeterministicAuthor {
                 }
                 let up = format!(
                     "ALTER TABLE {} ADD COLUMN {}",
-                    qualified(schema, table)?,
-                    column_def(column)?,
+                    qualified(schema, table, &self.dialect)?,
+                    column_def(column, &self.dialect)?,
                 );
                 let down = Some(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
-                    qualified(schema, table)?,
-                    quote_ident(&column.name)?,
+                    qualified(schema, table, &self.dialect)?,
+                    quote_ident(&column.name, &self.dialect)?,
                 ));
                 self.make(
                     &format!("add_column_{table}_{}", column.name),
@@ -344,7 +364,7 @@ impl MigrationAuthor for DeterministicAuthor {
                 let idx = index_name(table, columns);
                 let cols = columns
                     .iter()
-                    .map(|c| quote_ident(c))
+                    .map(|c| quote_ident(c, &self.dialect))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
                 // The non-txn idempotency rule (executor) REQUIRES `CREATE INDEX
@@ -353,15 +373,15 @@ impl MigrationAuthor for DeterministicAuthor {
                 let concurrent_kw = if *concurrently { "CONCURRENTLY " } else { "" };
                 let up = format!(
                     "CREATE INDEX {concurrent_kw}IF NOT EXISTS {} ON {} ({cols})",
-                    quote_ident(&idx)?,
-                    qualified(schema, table)?,
+                    quote_ident(&idx, &self.dialect)?,
+                    qualified(schema, table, &self.dialect)?,
                 );
                 // A concurrent DROP mirrors a concurrent CREATE; `IF EXISTS`
                 // keeps the down idempotent too.
                 let drop_concurrent = if *concurrently { "CONCURRENTLY " } else { "" };
                 let down = Some(format!(
                     "DROP INDEX {drop_concurrent}IF EXISTS {}",
-                    qualified(schema, &idx)?,
+                    qualified(schema, &idx, &self.dialect)?,
                 ));
                 let flags = MigrationFlags {
                     // CONCURRENTLY cannot run inside a transaction.
@@ -395,16 +415,23 @@ impl MigrationAuthor for DeterministicAuthor {
 pub struct RawSqlAuthor {
     /// The declaring app (`app_…`) recorded on the migration.
     owner_app: String,
+    /// The backend whose guard grammar and fail-safe rules inspect the SQL.
+    dialect: DialectId,
     /// The explicitly authored policy used to inspect the supplied SQL.
     effective: EffectivePolicy,
 }
 
 impl RawSqlAuthor {
-    /// Construct a raw-SQL author bound to an owner app and explicit policy.
+    /// Construct a raw-SQL author bound to an owner app, backend, and explicit policy.
     #[must_use]
-    pub fn new(owner_app: impl Into<String>, effective: EffectivePolicy) -> Self {
+    pub fn new(
+        owner_app: impl Into<String>,
+        dialect: DialectId,
+        effective: EffectivePolicy,
+    ) -> Self {
         Self {
             owner_app: owner_app.into(),
+            dialect,
             effective,
         }
     }
@@ -422,7 +449,7 @@ impl RawSqlAuthor {
     pub fn wrap(&self, name: &str, up: &str, down: Option<&str>) -> Result<Migration, AuthorError> {
         let guard = SqlGuard::new(GuardConfig::from_policy(
             self.effective.clone(),
-            SqlDialect::Postgres.id(),
+            self.dialect.clone(),
         ));
         // Derive flags from a guard pass when it succeeds; on a *denial* keep
         // conservative defaults but err only if UNPARSEABLE (a denial is the
@@ -468,9 +495,10 @@ impl RawSqlAuthor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zero_migrate_ir::dialect::POSTGRES;
 
     fn det() -> DeterministicAuthor {
-        DeterministicAuthor::new("proj_acme", "app_acme")
+        DeterministicAuthor::new("proj_acme", "app_acme", zero_migrate_ir::dialect::POSTGRES)
     }
 
     fn col(name: &str, ty: &str, nullable: bool) -> Column {
@@ -609,10 +637,9 @@ mod tests {
         // Must fit Postgres's NAMEDATALEN-1 limit so the name we emit in `up`
         // matches the on-disk name and the `down`'s DROP INDEX.
         assert!(
-            n1.len() <= pg_max_ident_bytes(),
-            "index name {} bytes exceeds {}",
-            n1.len(),
-            pg_max_ident_bytes()
+            n1.len() <= GENERATED_IDENT_MAX_BYTES,
+            "index name {} bytes exceeds {GENERATED_IDENT_MAX_BYTES}",
+            n1.len()
         );
         // Deterministic: same inputs → same name (so re-authoring the same shape
         // is idempotent and the `down` can target it).
@@ -626,7 +653,7 @@ mod tests {
             n1, n2,
             "distinct column sets must yield distinct index names"
         );
-        assert!(n2.len() <= pg_max_ident_bytes());
+        assert!(n2.len() <= GENERATED_IDENT_MAX_BYTES);
         // A valid Postgres identifier (starts with a letter, then [a-z0-9_]).
         assert!(
             n1.starts_with("idx_"),
@@ -659,7 +686,7 @@ mod tests {
         };
         let m = &det().author(&req).expect("author")[0];
         let expected = index_name(&long_table, &["x".repeat(30), "y".repeat(30)]);
-        assert!(expected.len() <= pg_max_ident_bytes());
+        assert!(expected.len() <= GENERATED_IDENT_MAX_BYTES);
         assert!(m.up.contains(&format!("\"{expected}\"")), "up = {}", m.up);
         assert!(
             m.down
@@ -682,7 +709,11 @@ mod tests {
 
     #[test]
     fn raw_sql_author_wraps_safe_additive_sql_with_clean_flags() {
-        let author = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
+        let author = RawSqlAuthor::new(
+            "app_acme",
+            POSTGRES,
+            crate::test_fixtures::no_inject("proj_acme"),
+        );
         let m = author
             .wrap(
                 "seed_settings",
@@ -702,7 +733,11 @@ mod tests {
 
     #[test]
     fn raw_sql_author_flags_destructive_drop_requiring_approval() {
-        let author = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
+        let author = RawSqlAuthor::new(
+            "app_acme",
+            POSTGRES,
+            crate::test_fixtures::no_inject("proj_acme"),
+        );
         let m = author
             .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
             .expect("wrap");
@@ -716,7 +751,11 @@ mod tests {
 
     #[test]
     fn raw_sql_author_rejects_unparseable_up() {
-        let author = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
+        let author = RawSqlAuthor::new(
+            "app_acme",
+            POSTGRES,
+            crate::test_fixtures::no_inject("proj_acme"),
+        );
         let err = author
             .wrap("broken", "THIS IS NOT SQL ;;", None)
             .unwrap_err();
@@ -731,7 +770,11 @@ mod tests {
         // A cross-tenant read is parseable but will be DENIED by plan(); the
         // author still mints it (conservative requires_approval) so plan can
         // report the denial precisely rather than failing at authoring.
-        let author = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
+        let author = RawSqlAuthor::new(
+            "app_acme",
+            POSTGRES,
+            crate::test_fixtures::no_inject("proj_acme"),
+        );
         let m = author
             .wrap("evil", "SELECT * FROM control.users", None)
             .expect("parseable, so wrap succeeds");

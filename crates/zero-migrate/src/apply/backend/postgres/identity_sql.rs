@@ -16,10 +16,14 @@ use crate::apply::executor::ApplyError;
 use crate::apply::journal::{self, JournalError, Phase};
 use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
-use crate::render::dml::quote_ident_checked;
+use crate::render::dml::{quote_ident_checked_for_dialect, IdentQuoteError};
 use crate::render::step::SynchronizeIdentityStep;
 
 use super::session;
+
+fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError> {
+    quote_ident_checked_for_dialect(ident, &super::DIALECT)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct OwnedSequence {
@@ -56,7 +60,7 @@ pub(super) async fn apply<D: SqlSession>(
     }
 
     let marker = &step.migration;
-    let completed = journal::applied(conn, cfg)
+    let completed = journal::applied(conn, cfg, &super::DIALECT)
         .await?
         .into_iter()
         .filter(|entry| matches!(entry.phase, Phase::Completed))

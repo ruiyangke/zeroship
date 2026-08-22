@@ -32,7 +32,7 @@ use zero_migrate::model::probe::{GuardDir, GuardProbe};
 use zero_migrate::render::existence_probe::{decide, GuardVerdict};
 use zero_migrate::{
     apply, snapshot_schema, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase,
-    SqlDialect, POSTGRES,
+    POSTGRES,
 };
 
 /// PostgreSQL's NAMEDATALEN-derived identifier bound, in bytes.
@@ -189,7 +189,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
     let author = IrAuthor::new(
         &cfg.project_schema,
         "app_test",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject(&cfg.project_schema),
     );
 
@@ -207,9 +207,13 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
     // The probe backstop, which does not depend on lowering having run: a consumer can
     // build a Migration carrying its own existence guard. An ifExists miss on the
     // authored name is a lie whenever the truncated spelling is live.
-    let live = snapshot_schema(&session, &cfg.project_schema)
-        .await
-        .expect("snapshot the live schema");
+    let live = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        &session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot the live schema");
     let probe = GuardProbe::Constraint {
         schema: cfg.project_schema.clone(),
         table: "t".into(),
@@ -254,7 +258,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
         "apply reports the migration applied: {out:?}"
     );
 
-    let journal = zero_migrate::applied(&session, &cfg)
+    let journal = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
         .await
         .expect("read the journal");
     assert!(

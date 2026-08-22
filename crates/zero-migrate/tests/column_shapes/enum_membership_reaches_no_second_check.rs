@@ -30,7 +30,7 @@ use crate::support;
 use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::{fold_ops, PlanStep, RenameStep, SqlDialect};
+use zero_migrate::{fold_ops, PlanStep, RenameStep};
 
 const PROJECT: &str = "public";
 const APP: &str = "app_enum";
@@ -65,7 +65,7 @@ fn issues_ir() -> MigrationIr {
     .expect("issues IR deserializes")
 }
 
-fn lowered_sql(dialect: SqlDialect, ir: &MigrationIr, live: &LiveSchema) -> String {
+fn lowered_sql(dialect: &zero_migrate::DialectId, ir: &MigrationIr, live: &LiveSchema) -> String {
     IrAuthor::new(PROJECT, APP, dialect, &support::no_inject(PROJECT))
         .lower_steps(ir, live)
         .unwrap_or_else(|error| panic!("{dialect:?} lowers the enum table: {error}"))
@@ -81,7 +81,11 @@ fn lowered_sql(dialect: SqlDialect, ir: &MigrationIr, live: &LiveSchema) -> Stri
 /// PostgreSQL: the column IS the native type. Not one CHECK anywhere.
 #[test]
 fn a_native_enum_column_gets_no_membership_check() {
-    let sql = lowered_sql(SqlDialect::Postgres, &issues_ir(), &LiveSchema::default());
+    let sql = lowered_sql(
+        &zero_migrate::POSTGRES,
+        &issues_ir(),
+        &LiveSchema::default(),
+    );
     assert!(
         sql.contains(r#"CREATE TYPE "public"."issue_status""#)
             && sql.contains(r#""status" "public"."issue_status""#),
@@ -99,7 +103,7 @@ fn a_native_enum_column_gets_no_membership_check() {
 /// descriptor's `enum_values` must not add a second.
 #[test]
 fn an_inlined_enum_column_gets_exactly_one_membership_check() {
-    let sql = lowered_sql(SqlDialect::Sqlite, &issues_ir(), &LiveSchema::default());
+    let sql = lowered_sql(&zero_migrate::SQLITE, &issues_ir(), &LiveSchema::default());
     assert_eq!(
         sql.matches(r#"CHECK ("status" IN ("#).count(),
         1,
@@ -142,10 +146,10 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
     let ops = issues_ir().ops;
     let effective = support::no_inject(PROJECT);
     let snapshot =
-        fold_ops(&ops, SqlDialect::Sqlite, PROJECT, &effective).expect("the history folds");
+        fold_ops(&ops, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
-    live.sqlite_schemas = single_fold::fold(&ops, SqlDialect::Sqlite, PROJECT, &effective)
+    live.sqlite_schemas = single_fold::fold(&ops, &zero_migrate::SQLITE, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the field-def replay folds");
 
@@ -170,7 +174,7 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
         checksum: None,
     };
 
-    let steps = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &effective)
+    let steps = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective)
         .lower_steps(&rename, &live)
         .expect("the rename lowers to a rebuild");
     let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {

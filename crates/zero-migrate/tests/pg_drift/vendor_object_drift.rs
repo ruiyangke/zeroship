@@ -60,7 +60,6 @@ use zero_migrate::model::snapshot::{
     FunctionIdentity, FunctionKey, PolicyIdentity, PolicyKey, SchemaSnapshot, TriggerIdentity,
     TriggerKey, VendorObjectIdentities,
 };
-use zero_migrate::schema::query::SqlDialect;
 
 fn function(name: &str, arg_types: &[&str]) -> FunctionKey {
     FunctionKey {
@@ -452,7 +451,11 @@ fn folding_onto_a_base_that_looked_does_not_erase_the_claim() {
         vendor_objects: Some(VendorObjectIdentities::default()),
         ..SchemaSnapshot::default()
     };
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [
+        &zero_migrate::POSTGRES,
+        &zero_migrate::SQLITE,
+        &zero_migrate::MYSQL,
+    ] {
         let folded = zero_migrate::render::fold::fold_ops_onto(
             &base,
             &[],
@@ -471,9 +474,9 @@ fn folding_onto_a_base_that_looked_does_not_erase_the_claim() {
     // what keeps the SQLite and MySQL round-trip oracles comparing like with like.
     let silent = SchemaSnapshot::default();
     for (dialect, expected) in [
-        (SqlDialect::Postgres, true),
-        (SqlDialect::Sqlite, false),
-        (SqlDialect::Mysql, false),
+        (&zero_migrate::POSTGRES, true),
+        (&zero_migrate::SQLITE, false),
+        (&zero_migrate::MYSQL, false),
     ] {
         let folded = zero_migrate::render::fold::fold_ops_onto(
             &silent,

@@ -41,12 +41,12 @@
 //! dialects scope trigger names differently and are not covered by this check.
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir, SqlDialect};
+use zero_migrate::model::validate::validate_ir;
 
 fn verdict(ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, SqlDialect::Postgres).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, &zero_migrate::POSTGRES).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 const A: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"]}"#;

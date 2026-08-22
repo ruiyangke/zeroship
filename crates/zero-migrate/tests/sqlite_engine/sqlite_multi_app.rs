@@ -29,7 +29,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor, SchemaSnapshot,
     SqliteBackend,
@@ -60,7 +59,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 /// A `SQLite` author deploying AS `owner_app`.
 fn author_as(owner_app: &str) -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, owner_app, SqlDialect::Sqlite)
+    DeclarativeAuthor::new_for_dialect(PROJECT, owner_app, zero_migrate::SQLITE.clone())
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
@@ -75,7 +74,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         effective,
     )
 }

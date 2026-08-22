@@ -11,9 +11,7 @@ use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::{
-    diff_snapshots, snapshot_schema, IrAuthor, LiveSchema, SqlDialect, SqliteBackend,
-};
+use zero_migrate::{diff_snapshots, snapshot_schema, IrAuthor, LiveSchema, SqliteBackend};
 
 const OWNER: &str = "app_collation_introspection";
 
@@ -154,7 +152,7 @@ async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composi
     let error = IrAuthor::new(
         "main",
         OWNER,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("main"),
     )
     .lower(&composite_fk_ir("sqlite_collation_fk"), &live)
@@ -205,7 +203,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
             .await
             .map_err(|error| format!("create PostgreSQL collation fixture: {error}"))?;
 
-        let expected = snapshot_schema(&session, &schema)
+        let expected = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("initial PostgreSQL snapshot: {error}"))?;
         let c_collation = expected.tables["children"]
@@ -227,7 +225,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
             ))
             .await
             .map_err(|error| format!("change PostgreSQL child collation: {error}"))?;
-        let actual = snapshot_schema(&session, &schema)
+        let actual = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("changed PostgreSQL snapshot: {error}"))?;
         let posix = actual.tables["children"]
@@ -256,7 +254,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
         let error = IrAuthor::new(
             &schema,
             OWNER,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &support::no_inject(&schema),
         )
         .lower(&composite_fk_ir("postgres_collation_fk"), &live)

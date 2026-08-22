@@ -36,7 +36,6 @@ use serde_json::json;
 use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{fold_ops, resolve_create_table_policy, LiveSchema};
 
 const SCHEMA: &str = "app";
@@ -46,15 +45,15 @@ const OWNER: &str = "app_test";
 /// measured separately: it emits NO `zero-migrate:enc:` sentinel at all (see
 /// [`mysql_emits_no_encryption_sentinel_to_disagree_with`]), so there is nothing for the
 /// runtime descriptor to disagree with there.
-const SENTINEL_DIALECTS: [(&str, SqlDialect); 2] = [
-    ("postgres", SqlDialect::Postgres),
-    ("sqlite", SqlDialect::Sqlite),
+const SENTINEL_DIALECTS: [(&str, &zero_migrate::DialectId); 2] = [
+    ("postgres", &zero_migrate::POSTGRES),
+    ("sqlite", &zero_migrate::SQLITE),
 ];
 
-const ALL_DIALECTS: [(&str, SqlDialect); 3] = [
-    ("postgres", SqlDialect::Postgres),
-    ("sqlite", SqlDialect::Sqlite),
-    ("mysql", SqlDialect::Mysql),
+const ALL_DIALECTS: [(&str, &zero_migrate::DialectId); 3] = [
+    ("postgres", &zero_migrate::POSTGRES),
+    ("sqlite", &zero_migrate::SQLITE),
+    ("mysql", &zero_migrate::MYSQL),
 ];
 
 /// `createTable` with one encrypted column whose inner type is `inner`, preceded by a
@@ -97,7 +96,7 @@ fn add_column_ops(base: serde_json::Value, inner: serde_json::Value) -> Vec<Op> 
 }
 
 /// Render ops through the REAL lower and return every emitted `up` statement joined.
-fn rendered_sql(ops: Vec<Op>, dialect: SqlDialect) -> String {
+fn rendered_sql(ops: Vec<Op>, dialect: &zero_migrate::DialectId) -> String {
     let ir = MigrationIr {
         inverse_ops: None,
         irreversible: None,
@@ -275,7 +274,10 @@ fn mysql_emits_no_encryption_sentinel_to_disagree_with() {
         json!({ "domain": { "name": "positive_number" } }),
         json!("int"),
     ] {
-        let sql = rendered_sql(create_ops(json!("int"), inner.clone()), SqlDialect::Mysql);
+        let sql = rendered_sql(
+            create_ops(json!("int"), inner.clone()),
+            &zero_migrate::MYSQL,
+        );
         assert!(
             enc_sentinels(&sql).is_empty(),
             "mysql emits no enc sentinel today ({inner}):\n{sql}"

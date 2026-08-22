@@ -65,6 +65,7 @@
 
 use crate::model::backfill::BackfillSpec;
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId, OnlinePhase};
+use zero_migrate_ir::dialect::DialectId;
 
 /// A high-level online-migration intent the [`ExpandContractAuthor`] expands
 /// into an ordered, phased [`Migration`] sequence.
@@ -136,19 +137,9 @@ impl ExpandContractPlan {
     }
 }
 
-/// Quote a Postgres identifier (double embedded quotes, wrap in `"`). Mirrors
-/// [`crate::plan::author`]'s quoting so output is injection-safe.
-///
-/// PostgreSQL, named rather than assumed. Expand/contract is a PG-only shape (its
-/// callers in `engine` emit `ADD CONSTRAINT … NOT VALID` / `VALIDATE CONSTRAINT`,
-/// which neither other backend has), so the dialect is not in doubt — but it now
-/// has to be written down, because the raw primitive this used to call spelled the
-/// bytes for nobody.
-pub(crate) fn quote_ident(ident: &str) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(
-        ident,
-        crate::schema::query::SqlDialect::Postgres,
-    )
+/// Quote an identifier through the explicitly selected registered backend.
+pub(crate) fn quote_ident(ident: &str, dialect: &DialectId) -> String {
+    crate::render::dml::escape_quote_ident_for_dialect(ident, dialect)
 }
 
 /// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,
@@ -212,8 +203,12 @@ fn validate_type(ty: &str) -> Result<(), ExpandContractError> {
 }
 
 /// Render `<schema>.<object>`, both parts quoted.
-pub(crate) fn qualified(schema: &str, object: &str) -> String {
-    format!("{}.{}", quote_ident(schema), quote_ident(object))
+pub(crate) fn qualified(schema: &str, object: &str, dialect: &DialectId) -> String {
+    format!(
+        "{}.{}",
+        quote_ident(schema, dialect),
+        quote_ident(object, dialect)
+    )
 }
 
 /// Sub-step indices for the online-rename sequence — folded into the
@@ -271,12 +266,6 @@ fn rename_id_seed(
     seed
 }
 
-// The Postgres identifier length limit (`NAMEDATALEN - 1`), in bytes, used to live
-// here as a second literal `63` that MIRRORED `plan::author`'s constant. A mirror is
-// exactly the drift that constant's doc promises cannot happen, so the four call sites
-// below now call `crate::plan::author::pg_max_ident_bytes()` — the one definition,
-// which reads PostgreSQL's DECLARED cap off its descriptor.
-
 /// Deterministically derive the dual-write function name for a rename, capped to
 /// Postgres's 63-byte identifier limit. Stable across re-authoring (so the
 /// `down` and the orchestrator target the same object), with a hash suffix to
@@ -298,12 +287,12 @@ pub(crate) fn dual_write_trg_name(table: &str, from: &str, to: &str) -> String {
 /// [`crate::plan::author`]'s `index_name`, factored for the function/trigger names.
 fn capped_name(natural: &str) -> String {
     use sha2::{Digest, Sha256};
-    if natural.len() <= crate::plan::author::pg_max_ident_bytes() {
+    if natural.len() <= crate::render::backends::GENERATED_IDENT_MAX_BYTES {
         return natural.to_string();
     }
     let digest = Sha256::digest(natural.as_bytes());
     let suffix = hex::encode(&digest[..5]); // 10 hex chars
-    let budget = crate::plan::author::pg_max_ident_bytes() - (1 + suffix.len());
+    let budget = crate::render::backends::GENERATED_IDENT_MAX_BYTES - (1 + suffix.len());
     let mut prefix = String::with_capacity(budget);
     for ch in natural.chars() {
         if prefix.len() + ch.len_utf8() > budget {
@@ -338,15 +327,22 @@ pub struct ExpandContractAuthor {
     project_schema: String,
     /// The declaring app (`app_…`) recorded on each migration.
     owner_app: String,
+    /// The registered backend whose identifier spelling this author uses.
+    dialect: DialectId,
 }
 
 impl ExpandContractAuthor {
-    /// Construct an author bound to a project schema + owner app.
+    /// Construct an author bound to a project schema, owner app, and backend identity.
     #[must_use]
-    pub fn new(project_schema: impl Into<String>, owner_app: impl Into<String>) -> Self {
+    pub fn new(
+        project_schema: impl Into<String>,
+        owner_app: impl Into<String>,
+        dialect: DialectId,
+    ) -> Self {
         Self {
             project_schema: project_schema.into(),
             owner_app: owner_app.into(),
+            dialect,
         }
     }
 
@@ -409,8 +405,8 @@ impl ExpandContractAuthor {
             &format!("abort_drop_column_{table}_{to}"),
             format!(
                 "ALTER TABLE {} DROP COLUMN {}",
-                qualified(&self.project_schema, table),
-                quote_ident(to)
+                qualified(&self.project_schema, table, &self.dialect),
+                quote_ident(to, &self.dialect)
             ),
             None,
             MigrationFlags {
@@ -462,13 +458,13 @@ impl ExpandContractAuthor {
         validate_type(ty)?;
 
         let schema = &self.project_schema;
-        let tbl_q = qualified(schema, table);
-        let from_q = quote_ident(from);
-        let to_q = quote_ident(to);
+        let tbl_q = qualified(schema, table, &self.dialect);
+        let from_q = quote_ident(from, &self.dialect);
+        let to_q = quote_ident(to, &self.dialect);
         let fn_name = dual_write_fn_name(table, from, to);
         let trg_name = dual_write_trg_name(table, from, to);
-        let fn_q = qualified(schema, &fn_name);
-        let trg_q = quote_ident(&trg_name);
+        let fn_q = qualified(schema, &fn_name, &self.dialect);
+        let trg_q = quote_ident(&trg_name, &self.dialect);
 
         // ---- E1: ADD COLUMN <to> <ty> (nullable, transactional, additive) ----
         let e1_up = format!("ALTER TABLE {tbl_q} ADD COLUMN {to_q} {ty}");
@@ -677,7 +673,7 @@ impl ExpandContractAuthor {
     // The id-derivation pair (`id_seed`, `step_index`) pushes this to 8 args; they
     // are one logical unit (the deterministic sub-version derivation) and
     // bundling them into a struct would only relocate the same fields. Matches the
-    // crate's `lower_ir_rename` / `sqlite_rename_rebuild` allow pattern.
+    // crate's `lower_ir_rename` / column-rename rebuild allow pattern.
     #[allow(clippy::too_many_arguments)]
     fn make(
         &self,
@@ -811,7 +807,7 @@ mod tests {
     use super::*;
 
     fn author() -> ExpandContractAuthor {
-        ExpandContractAuthor::new("proj_acme", "app_acme")
+        ExpandContractAuthor::new("proj_acme", "app_acme", zero_migrate_ir::dialect::POSTGRES)
     }
 
     fn rename() -> OnlineIntent {
@@ -1250,12 +1246,12 @@ mod tests {
         let fn_name = dual_write_fn_name(&"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
         let trg_name = dual_write_trg_name(&"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
         assert!(
-            fn_name.len() <= crate::plan::author::pg_max_ident_bytes(),
+            fn_name.len() <= crate::render::backends::GENERATED_IDENT_MAX_BYTES,
             "fn {} bytes",
             fn_name.len()
         );
         assert!(
-            trg_name.len() <= crate::plan::author::pg_max_ident_bytes(),
+            trg_name.len() <= crate::render::backends::GENERATED_IDENT_MAX_BYTES,
             "trg {} bytes",
             trg_name.len()
         );

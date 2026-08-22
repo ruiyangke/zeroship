@@ -18,7 +18,7 @@ use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::{
     apply::executor::LockMode, resolve_create_table_policy, Approval, DeclarativeApplyError,
     EngineError, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LoadAndLowerError,
-    MigrationEngine, MigrationIr, SqlDialect, SqliteBackend,
+    MigrationEngine, MigrationIr, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_ir";
@@ -170,7 +170,7 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
     let migrations = author
@@ -180,7 +180,8 @@ async fn ir_envelope_lowers_and_applies_on_sqlite() {
 
     // Apply through the engine on the real SQLite backend (Confined SQLite guard).
     let engine = MigrationEngine::new();
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
+    let guard_cfg =
+        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -235,8 +236,9 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
         ]}"#,
     );
     let charter = support::no_inject("app");
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &charter);
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &charter);
+    let guard_cfg =
+        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
     let schema_artifact = author
         .load_and_lower_guarded(
             &schema_ir,
@@ -262,7 +264,7 @@ async fn per_row_backfill_generates_a_fresh_exact_value_for_every_sqlite_row() {
     let schema_envelope: MigrationIr =
         serde_json::from_str(&schema_ir).expect("resolved schema IR parses");
     let mut live = LiveSchema::from_tables(BTreeSet::from(["samples".to_string()]));
-    live.advance_logical_columns(&schema_envelope, SqlDialect::Sqlite, PROJECT, None)
+    live.advance_logical_columns(&schema_envelope, &zero_migrate::SQLITE, PROJECT, None)
         .expect("the schema records the perRow destination formats");
     let data_artifact = author
         .load_and_lower_guarded(
@@ -402,15 +404,20 @@ async fn per_row_destination_mismatches_fail_before_any_sqlite_row_changes() {
             ]
         });
         let ir = no_inject_envelope_json(&raw.to_string());
-        let error = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject("app"))
-            .load_and_lower_guarded(
-                &ir,
-                APP,
-                &registry(&[]),
-                &LiveSchema::default(),
-                &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
-            )
-            .expect_err(label);
+        let error = IrAuthor::new(
+            PROJECT,
+            APP,
+            &zero_migrate::SQLITE,
+            &support::no_inject("app"),
+        )
+        .load_and_lower_guarded(
+            &ir,
+            APP,
+            &registry(&[]),
+            &LiveSchema::default(),
+            &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone()),
+        )
+        .expect_err(label);
         let message = error.to_string();
         assert!(
             message.contains(expected_a) && message.contains(expected_b),
@@ -460,10 +467,11 @@ async fn insert_on_conflict_updates_and_does_nothing_on_real_sqlite() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
+    let guard_cfg =
+        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
     let artifact = author
         .load_and_lower_guarded(
             &ir,
@@ -538,7 +546,7 @@ async fn portable_scalar_and_date_functions_apply_on_hardened_sqlite() {
     let artifact = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     )
     .load_and_lower_guarded(
@@ -546,7 +554,7 @@ async fn portable_scalar_and_date_functions_apply_on_hardened_sqlite() {
         APP,
         &registry(&[("metrics", APP)]),
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone()),
     )
     .expect("portable function update lowers");
 
@@ -631,10 +639,11 @@ async fn byte_value_insert_persists_exact_blob_and_completed_journal_on_real_sql
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
+    let guard_cfg =
+        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
     let artifact = author
         .load_and_lower_guarded(
             &ir,
@@ -717,7 +726,7 @@ async fn byte_value_backfill_persists_exact_blob_on_real_sqlite() {
     let artifact = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     )
     .load_and_lower_guarded(
@@ -725,7 +734,7 @@ async fn byte_value_backfill_persists_exact_blob_on_real_sqlite() {
         APP,
         &registry(&[("files", APP)]),
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone()),
     )
     .expect("a byteValue backfill lowers for SQLite");
 
@@ -773,9 +782,10 @@ async fn fixed_decimal_create_and_insert_preserve_exact_text_on_real_sqlite() {
            "rows":[[{"decimal":"12345678901234567890.1234567890"}]]}
         ]}"#,
     );
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
+    let guard_cfg =
+        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
     let charter = support::no_inject("app");
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &charter);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &charter);
     let schema_artifact = author
         .load_and_lower_guarded(
             &schema_ir,
@@ -882,7 +892,7 @@ async fn mixed_data_plan_is_refused_before_insert_when_delete_and_backfill_are_u
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
     let artifact = author
@@ -891,7 +901,7 @@ async fn mixed_data_plan_is_refused_before_insert_when_delete_and_backfill_are_u
             APP,
             &registry(&[("users", APP)]),
             &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
+            &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone()),
         )
         .expect("the mixed data plan lowers");
 
@@ -951,7 +961,7 @@ async fn ir_envelope_date_column_lowers_and_applies_on_sqlite() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
     let migrations = author
@@ -965,7 +975,8 @@ async fn ir_envelope_date_column_lowers_and_applies_on_sqlite() {
     );
 
     let engine = MigrationEngine::new();
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
+    let guard_cfg =
+        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -1015,10 +1026,11 @@ async fn ir_envelope_string_default_with_embedded_semicolon_newline_applies_on_s
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
+    let guard_cfg =
+        GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone());
     let artifact = author
         .load_and_lower_guarded(&ir, APP, &registry(&[]), &LiveSchema::default(), &guard_cfg)
         .expect("a portable ;\\n string default must lower through the guarded path on SQLite");
@@ -1110,7 +1122,12 @@ async fn out_of_envelope_splitpart_refused_on_sqlite() {
 
     let mut live = BTreeSet::new();
     live.insert("users".to_string());
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &support::no_inject("app"));
+    let author = IrAuthor::new(
+        PROJECT,
+        APP,
+        &zero_migrate::SQLITE,
+        &support::no_inject("app"),
+    );
     let err = author
         .load_and_lower(ir, APP, &registry(&[("users", APP)]), &(&live).into())
         .expect_err("an out-of-envelope splitPart must be refused on SQLite");

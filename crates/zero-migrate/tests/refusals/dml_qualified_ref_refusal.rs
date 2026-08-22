@@ -24,7 +24,6 @@
 
 use zero_migrate::model::expr::{BinaryOp, Expr};
 use zero_migrate::model::ir::{IrScalar, IrValue, MigrationIr, Op, CURRENT_IR_VERSION};
-use zero_migrate::model::support::SqlDialect;
 use zero_migrate::model::validate::validate_ir_scoped;
 use zero_migrate::SchemaScope;
 
@@ -42,7 +41,7 @@ fn refusal_for(op: Op) -> Option<String> {
         preconditions: Vec::new(),
         checksum: None,
     };
-    validate_ir_scoped(&ir, SqlDialect::Postgres, Some(&SchemaScope::Unconfined))
+    validate_ir_scoped(&ir, &zero_migrate::POSTGRES, Some(&SchemaScope::Unconfined))
         .err()
         .map(|error| format!("{} {}", error.code, error.reason))
 }
@@ -129,7 +128,7 @@ fn a_view_that_joins_keeps_its_lenient_pass() {
 
     let outcome = validate_ir_scoped(
         &create_view,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         Some(&SchemaScope::Unconfined),
     );
     assert!(

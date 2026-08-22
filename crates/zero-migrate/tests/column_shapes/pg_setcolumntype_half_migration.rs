@@ -29,7 +29,7 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, PostgresBackend, SqlDialect,
+    MigrationIr, PostgresBackend,
 };
 
 const OWNER: &str = "app_setcolumntype_half_migration";
@@ -191,8 +191,8 @@ async fn apply_envelope(
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
     // The AUTHORING gate. Every arm below reaches a plan through it, which is what
     // makes "cleared validate, the guard and the lower" a measurement rather than a
     // claim: a defect caught here would never have been the half-migration.

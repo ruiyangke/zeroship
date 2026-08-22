@@ -30,19 +30,13 @@ use zero_migrate::ops::status::{
 };
 use zero_migrate::{
     effective_policy_from_charter_layers, fold_ops_onto, resolve_create_table_policy, DialectId,
-    EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, SqlDialect,
+    EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, MYSQL,
+    POSTGRES,
 };
 
-/// Map the wire dialect spelling to the render [`SqlDialect`]. Unknown → `Err`.
-fn parse_sql_dialect(s: &str) -> Result<SqlDialect, String> {
-    match s {
-        "postgres" => Ok(SqlDialect::Postgres),
-        "sqlite" => Ok(SqlDialect::Sqlite),
-        "mysql" => Ok(SqlDialect::Mysql),
-        other => Err(format!(
-            "unknown dialect {other:?} (expected postgres|sqlite|mysql)"
-        )),
-    }
+/// Map the wire dialect spelling to its open [`DialectId`]. Unknown → `Err`.
+fn parse_sql_dialect(s: &str) -> Result<DialectId, String> {
+    crate::verbs::preview_dialect(s)
 }
 
 /// The one spelling of the refusal, so both arms below name the same condition.
@@ -268,7 +262,7 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     let resolved_bytes = serde_json::to_string(&resolved)
         .map_err(|e| format!("resolved IR failed to serialize: {e}"))?;
 
-    let author = IrAuthor::new(project_schema, owner_app, dialect, &effective);
+    let author = IrAuthor::new(project_schema, owner_app, &dialect, &effective);
 
     // Use the GUARDED lower — the SAME entry the IR envelope deploy path uses
     // (`load_and_lower_guarded` in `render/lower.rs`). This matters for JOURNAL
@@ -279,7 +273,7 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     // instead of the shared anchor — which diverges from the reference journal
     // (the DB-backed oracle caught exactly this). Guarded here ⇒ the host journal's
     // checksum column is byte-identical to the reference path's.
-    let guard_cfg = GuardConfig::from_policy(effective, dialect.id());
+    let guard_cfg = GuardConfig::from_policy(effective, dialect);
     let artifact = author
         .load_and_lower_guarded(&resolved_bytes, owner_app, &registry, live, &guard_cfg)
         .map_err(|e| e.to_string())?;
@@ -396,7 +390,7 @@ pub fn lower_ordered_envelopes_to_plans_for_rollback(
             &raw.ops,
             owner_app,
             project_schema,
-            dialect,
+            &dialect,
             &registry,
             charter_layers,
             &live,
@@ -407,13 +401,19 @@ pub fn lower_ordered_envelopes_to_plans_for_rollback(
         )?;
 
         let contributed = executed_history_ops(&artifact, journal_entries)?;
-        advance_ownership_registry(&mut registry, &contributed, dialect, owner_app);
+        advance_ownership_registry(&mut registry, &contributed, &dialect, owner_app);
         history_ops.extend(contributed);
 
         let logical_columns = live.logical_columns.clone();
         live = live_schema_with_ownership(base_snapshot.clone(), owner_app, &registry);
         live.logical_columns = logical_columns;
-        merge_recovered_definitions(&mut live, &history_ops, dialect, project_schema, &effective);
+        merge_recovered_definitions(
+            &mut live,
+            &history_ops,
+            &dialect,
+            project_schema,
+            &effective,
+        );
 
         artifacts.push(artifact);
     }
@@ -436,7 +436,7 @@ pub fn lower_ordered_envelopes_to_plans_for_rollback(
 fn merge_recovered_definitions(
     live: &mut LiveSchema,
     history_ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &zero_migrate::EffectivePolicy,
 ) {
@@ -606,7 +606,7 @@ fn lower_ordered_envelopes_to_plans_inner(
             &raw.ops,
             owner_app,
             project_schema,
-            dialect,
+            &dialect,
             &registry,
             charter_layers,
             &live,
@@ -624,7 +624,7 @@ fn lower_ordered_envelopes_to_plans_inner(
                 match fold_ops_onto(
                     &base_snapshot,
                     &candidate,
-                    dialect,
+                    &dialect,
                     project_schema,
                     &effective,
                 ) {
@@ -653,13 +653,13 @@ fn lower_ordered_envelopes_to_plans_inner(
                         // NOT MySQL. MySQL evaluates no existence probe at apply time,
                         // so a satisfied verdict here would send bare DDL to a backend
                         // that cannot check anything; its leg keeps refusing.
-                        let verdict = if dialect == SqlDialect::Mysql {
+                        let verdict = if dialect == MYSQL {
                             ProjectionGuardVerdict::NotSatisfied
                         } else {
                             let span = artifact.op_spans.get(span).ok_or_else(|| {
                                 format!("lowered operation has no plan-step span at index {span}")
                             })?;
-                            projection_guard_verdict(&artifact, span, &base_snapshot, dialect)?
+                            projection_guard_verdict(&artifact, span, &base_snapshot, &dialect)?
                         };
                         match verdict {
                             ProjectionGuardVerdict::AllUnitsSatisfied => {
@@ -740,14 +740,14 @@ fn lower_ordered_envelopes_to_plans_inner(
                 advance_ownership_registry(
                     &mut registry,
                     std::slice::from_ref(&op),
-                    dialect,
+                    &dialect,
                     owner_app,
                 );
             }
             let projected = fold_ops_onto(
                 &base_snapshot,
                 &pending_ops,
-                dialect,
+                &dialect,
                 project_schema,
                 &effective,
             )
@@ -761,7 +761,7 @@ fn lower_ordered_envelopes_to_plans_inner(
             live = live_schema_with_ownership(projected, owner_app, &registry);
             live.logical_columns = logical_columns;
         }
-        live.advance_logical_columns(&resolved, dialect, project_schema, None)
+        live.advance_logical_columns(&resolved, &dialect, project_schema, None)
             .map_err(|error| {
                 format!(
                     "failed to advance logical project schema after envelope {:?}: {error}",
@@ -889,7 +889,7 @@ fn lower_envelope_recovering_historical_renames(
     raw_ops: &[Op],
     owner_app: &str,
     project_schema: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     registry: &BTreeMap<String, String>,
     charter_layers: &[&str],
     live: &LiveSchema,
@@ -912,7 +912,7 @@ fn lower_envelope_recovering_historical_renames(
         envelope,
         owner_app,
         project_schema,
-        dialect_name(dialect),
+        dialect.as_str(),
         &registry_json,
         charter_layers,
         live,
@@ -921,7 +921,7 @@ fn lower_envelope_recovering_historical_renames(
     match initial {
         Ok(lowered) => Ok(lowered),
         Err(original_error)
-            if dialect == SqlDialect::Postgres
+            if dialect == &POSTGRES
                 && (is_historical_rename_lower_error(&original_error)
                     || !historical_contracts.is_empty()) =>
         {
@@ -955,7 +955,7 @@ fn lower_envelope_recovering_historical_renames(
                 envelope,
                 owner_app,
                 project_schema,
-                dialect_name(dialect),
+                dialect.as_str(),
                 &historical_registry_json,
                 charter_layers,
                 &historical_live,
@@ -987,7 +987,7 @@ fn is_historical_rename_lower_error(error: &str) -> bool {
 
 fn ops_contain_contract_rename(
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     contract: &zero_migrate::apply::journal::PendingContract,
 ) -> bool {
     ops.iter().any(|op| match op {
@@ -1006,7 +1006,7 @@ fn ops_contain_contract_rename(
 fn normalize_historical_renames(
     live: &mut LiveSchema,
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     owner_app: &str,
     resolved_contracts: &[zero_migrate::apply::journal::ResolvedPendingContract],
@@ -1113,23 +1113,21 @@ fn synthetic_rename_source_column(
     from: &str,
     ty: &zero_migrate::model::ir::ColType,
     durable_ddl_type: &str,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<zero_migrate::model::snapshot::ColumnSnapshot, String> {
-    if dialect == SqlDialect::Postgres {
-        if let Some((data_type, _authored_ddl_type)) =
-            zero_migrate::render::lower::postgres_named_type_metadata(ty, project_schema)
-                .map_err(|error| format!("failed to reconstruct historical named type: {error}"))?
-        {
-            return Ok(zero_migrate::model::snapshot::ColumnSnapshot {
-                name: from.to_string(),
-                data_type,
-                ddl_type_override: Some(durable_ddl_type.to_string()),
-                nullable: true,
-                ..Default::default()
-            });
-        }
+    if let Some((data_type, _authored_ddl_type)) =
+        zero_migrate::render::lower::named_type_metadata(ty, dialect, project_schema)
+            .map_err(|error| format!("failed to reconstruct historical named type: {error}"))?
+    {
+        return Ok(zero_migrate::model::snapshot::ColumnSnapshot {
+            name: from.to_string(),
+            data_type,
+            ddl_type_override: Some(durable_ddl_type.to_string()),
+            nullable: true,
+            ..Default::default()
+        });
     }
 
     let mut base = zero_migrate::model::snapshot::SchemaSnapshot::default();
@@ -1176,20 +1174,11 @@ fn empty_table_snapshot() -> zero_migrate::model::snapshot::TableSnapshot {
     }
 }
 
-fn dialect_name(dialect: SqlDialect) -> &'static str {
-    match dialect {
-        SqlDialect::Postgres => "postgres",
-        SqlDialect::Sqlite => "sqlite",
-        SqlDialect::Mysql => "mysql",
-    }
-}
-
-fn selected_dialectal_leg(
-    legs: &BTreeMap<DialectId, Vec<Op>>,
-    dialect: SqlDialect,
-) -> Option<&[Op]> {
-    legs.get(&DialectId::new(dialect_name(dialect)))
-        .map(Vec::as_slice)
+fn selected_dialectal_leg<'a>(
+    legs: &'a BTreeMap<DialectId, Vec<Op>>,
+    dialect: &DialectId,
+) -> Option<&'a [Op]> {
+    legs.get(dialect).map(Vec::as_slice)
 }
 
 fn live_schema_with_ownership(
@@ -1343,7 +1332,7 @@ fn projection_guard_verdict(
     artifact: &LoweredArtifact,
     span: &zero_migrate::render::lower::LoweredOpSpan,
     snapshot: &zero_migrate::model::snapshot::SchemaSnapshot,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<ProjectionGuardVerdict, String> {
     use zero_migrate::render::existence_probe::{decide, GuardVerdict};
 
@@ -1365,7 +1354,7 @@ fn projection_guard_verdict(
                 zero_migrate::PlanStep::Ddl(migration) => migration.existence_guard.as_ref(),
                 _ => None,
             };
-            match probe.map(|probe| decide(probe, snapshot, &dialect.id())) {
+            match probe.map(|probe| decide(probe, snapshot, dialect)) {
                 Some(GuardVerdict::SatisfiedNoop) => {}
                 Some(GuardVerdict::FailDrift(found)) => {
                     all_satisfied = false;
@@ -1580,7 +1569,7 @@ fn inflight_projection_already_reflected(
 fn advance_ownership_registry(
     registry: &mut BTreeMap<String, String>,
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     owner_app: &str,
 ) {
     for op in ops {
@@ -1836,9 +1825,8 @@ scope = "all"
         let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
         let effective =
             effective_policy_from_charter_layers(charter).expect("the function charter composes");
-        let history =
-            zero_migrate::fold_ops(&create_ir.ops, SqlDialect::Postgres, owner, &effective)
-                .expect("the function create folds");
+        let history = zero_migrate::fold_ops(&create_ir.ops, &POSTGRES, owner, &effective)
+            .expect("the function create folds");
         let drop_artifact = lower_envelope_to_plan_with_live(
             &drop,
             owner,
@@ -1924,9 +1912,8 @@ scope = "all"
         let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
         let effective =
             effective_policy_from_charter_layers(charter).expect("the policy charter composes");
-        let history =
-            zero_migrate::fold_ops(&create_ir.ops, SqlDialect::Postgres, owner, &effective)
-                .expect("the policy create folds");
+        let history = zero_migrate::fold_ops(&create_ir.ops, &POSTGRES, owner, &effective)
+            .expect("the policy create folds");
         let drop_artifact = lower_envelope_to_plan_with_live(
             &drop,
             owner,
@@ -2012,9 +1999,8 @@ scope = "all"
         let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
         let effective =
             effective_policy_from_charter_layers(charter).expect("the trigger charter composes");
-        let history =
-            zero_migrate::fold_ops(&create_ir.ops, SqlDialect::Postgres, owner, &effective)
-                .expect("the trigger create folds");
+        let history = zero_migrate::fold_ops(&create_ir.ops, &POSTGRES, owner, &effective)
+            .expect("the trigger create folds");
         let drop_artifact = lower_envelope_to_plan_with_live(
             &drop,
             owner,
@@ -2315,7 +2301,7 @@ scope = "all"
         assert!(normalize_historical_renames(
             &mut live,
             &ir.ops,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "app_test",
             "app_test",
             &[],
@@ -3328,7 +3314,7 @@ scope = "all"
             serde_json::from_str(&declaration).expect("the declaration IR parses");
         let live_snapshot = zero_migrate::fold_ops(
             &declaration_ir.ops,
-            SqlDialect::Postgres,
+            &POSTGRES,
             owner,
             &no_inject_policy(owner),
         )
@@ -3417,13 +3403,9 @@ scope = "all"
         let envelopes = ordered_status_envelopes(zero_migrate::model::ir::CURRENT_IR_VERSION);
         let create_ir: MigrationIr =
             serde_json::from_str(&envelopes[0]).expect("create envelope parses");
-        let live_snapshot = zero_migrate::fold_ops(
-            &create_ir.ops,
-            SqlDialect::Mysql,
-            owner,
-            &no_inject_policy(owner),
-        )
-        .expect("the inflight create is reflected in the catalog");
+        let live_snapshot =
+            zero_migrate::fold_ops(&create_ir.ops, &MYSQL, owner, &no_inject_policy(owner))
+                .expect("the inflight create is reflected in the catalog");
         let create = lower_envelope_to_plan(
             &envelopes[0],
             owner,
@@ -3494,7 +3476,7 @@ scope = "all"
             serde_json::from_str(&envelopes[0]).expect("create envelope parses");
         let live_snapshot = zero_migrate::fold_ops(
             &create_ir.ops,
-            SqlDialect::Postgres,
+            &POSTGRES,
             "app_status_ordered",
             &no_inject_policy("app_status_ordered"),
         )
@@ -3591,7 +3573,7 @@ scope = "all"
         let mixed_ir: MigrationIr = serde_json::from_str(&mixed).expect("mixed envelope parses");
         let live_snapshot = zero_migrate::fold_ops(
             &mixed_ir.ops[..2],
-            SqlDialect::Postgres,
+            &POSTGRES,
             owner,
             &no_inject_policy(owner),
         )

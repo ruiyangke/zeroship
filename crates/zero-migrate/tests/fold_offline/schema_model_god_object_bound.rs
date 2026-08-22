@@ -207,7 +207,7 @@ fn route_the_runtime_descriptor() -> Routing {
     routing.would_join_the_model(
         "vector_dims",
         vector_dims,
-        "pgvector dimensionality. SqlDialect-neutral as a FACT even though only one backend \
+        "pgvector dimensionality. Dialect-neutral as a FACT even though only one backend \
          can render it - a backend that cannot is a capability answer, not a reason to \
          hide the authored number.",
     );

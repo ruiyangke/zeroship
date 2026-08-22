@@ -45,6 +45,74 @@ pub enum ColumnRenameStrategy {
     Refuse(&'static str),
 }
 
+/// The physical evidence available while validating whether a column may be
+/// used as a key without a prefix length.
+///
+/// The engine owns the neutral declaration/catalog traversal. The selected
+/// backend owns the meaning of the physical spelling that traversal reaches.
+#[derive(Debug, Clone, Copy)]
+pub enum KeyStorageEvidence<'a> {
+    /// The exact type spelling this backend renders for an authored column.
+    RenderedType(&'a str),
+    /// The live catalog column, including any backend-owned physical metadata.
+    CatalogColumn(&'a ColumnSnapshot),
+}
+
+/// A backend-owned schema-validation refusal.
+///
+/// Core supplies only the op index and dialect provenance when projecting this
+/// into its public authoring error. The reason and remedy remain in the backend
+/// that owns the physical storage rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageValidationRefusal {
+    /// Operator-facing explanation of the backend's physical storage rule.
+    pub reason: String,
+    /// Operator-facing remedy written by the backend that owns the rule.
+    pub suggested_fix: String,
+}
+
+/// The already-validated neutral pieces of one additive column change.
+///
+/// The selected backend owns the surrounding `ALTER TABLE` grammar and the
+/// placement (or refusal) of a catalog comment sentinel. Core deliberately
+/// supplies primitives rather than a vendor-shaped column-definition type.
+#[derive(Debug, Clone, Copy)]
+pub struct AddColumnIfNotExistsRequest<'a> {
+    pub schema: &'a str,
+    pub table: &'a str,
+    pub column: &'a str,
+    pub definition: AddColumnDefinition<'a>,
+    pub comment_sentinel: Option<&'a str>,
+}
+
+/// The neutral definition input for an additive column request.
+///
+/// `Rendered` carries fragments produced for this same selected backend. The
+/// synthetic mask sibling instead uses `NullableUnboundedText`, leaving both
+/// its physical type and nullability spellings entirely to that backend.
+#[derive(Debug, Clone, Copy)]
+pub enum AddColumnDefinition<'a> {
+    Rendered {
+        data_type: &'a str,
+        constraints: &'a str,
+    },
+    NullableUnboundedText,
+}
+
+/// The already-validated neutral pieces of one additive index change.
+///
+/// `if_not_exists` is part of the requested recovery semantics. A backend that
+/// cannot express those semantics must return its own refusal rather than inherit
+/// another vendor's syntax.
+#[derive(Debug, Clone, Copy)]
+pub struct CreateIndexIfNotExistsRequest<'a> {
+    pub schema: &'a str,
+    pub table: &'a str,
+    pub name: &'a str,
+    pub columns: &'a [&'a str],
+    pub unique: bool,
+}
+
 /// Dialect-specific schema/DDL spelling.
 ///
 /// This trait deliberately has no default methods: every registered backend must
@@ -103,6 +171,14 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// Required with no default so a new backend states that boundary itself.
     fn stored_ddl(&self) -> Option<&'static dyn crate::stored_ddl::StoredDdl>;
 
+    /// This backend's table-rebuild policy, or an explicit `None` when its
+    /// structural strategy never rebuilds a table.
+    ///
+    /// Required with no default: a new backend must either register its own
+    /// rebuild decisions and stored-DDL rewrites or state that it has none.
+    fn table_rebuild_policy(&self)
+        -> Option<&'static dyn crate::table_rebuild::TableRebuildPolicy>;
+
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
 
     /// Compose a snapshot-normalized foreign-key target from already canonical
@@ -141,6 +217,31 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
         desired: &SchemaSnapshot,
         live: &SchemaSnapshot,
     ) -> Result<(), String>;
+
+    /// Refuse one authored/catalog column as an unprefixed key target when this
+    /// backend's physical storage requires a prefix length.
+    ///
+    /// Required with no default: a backend that has no such restriction must
+    /// state that itself by returning `None`.
+    fn unprefixed_key_storage_refusal(
+        &self,
+        position: &str,
+        table: &str,
+        column: &str,
+        evidence: KeyStorageEvidence<'_>,
+    ) -> Option<StorageValidationRefusal>;
+
+    /// Refuse one bare literal default when this backend's physical storage
+    /// requires an expression form instead.
+    ///
+    /// Required with no default for the same fail-closed registration reason as
+    /// [`Self::unprefixed_key_storage_refusal`].
+    fn literal_default_storage_refusal(
+        &self,
+        column: &str,
+        rendered_type: &str,
+        rendered_default: &str,
+    ) -> Option<StorageValidationRefusal>;
 
     /// Required structural strategies used by the neutral declarative planner.
     fn existing_column_change_strategy(&self) -> ExistingColumnChangeStrategy;
@@ -229,6 +330,36 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
         collection: &str,
         schema: &serde_json::Value,
     ) -> Vec<String>;
+
+    /// Render an additive foreign-key change from a clause this same backend
+    /// already rendered, or return this backend's explicit refusal.
+    fn add_foreign_key_statement(
+        &self,
+        schema: &str,
+        table: &str,
+        clause: &str,
+    ) -> Result<String, &'static str>;
+
+    /// Render an idempotent named foreign-key removal, or return this backend's
+    /// explicit refusal when its grammar requires a structural rebuild.
+    fn drop_foreign_key_if_exists_statement(
+        &self,
+        schema: &str,
+        table: &str,
+        name: &str,
+    ) -> Result<String, &'static str>;
+
+    /// Render one idempotent additive-column payload as structural statements.
+    fn add_column_if_not_exists_statements(
+        &self,
+        request: AddColumnIfNotExistsRequest<'_>,
+    ) -> Result<Vec<String>, &'static str>;
+
+    /// Render one idempotent additive-index statement.
+    fn create_index_if_not_exists_statement(
+        &self,
+        request: CreateIndexIfNotExistsRequest<'_>,
+    ) -> Result<String, &'static str>;
 }
 
 /// True for top-level schema keys that carry

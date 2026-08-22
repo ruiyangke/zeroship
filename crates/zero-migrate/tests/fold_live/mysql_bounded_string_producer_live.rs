@@ -48,7 +48,7 @@ use zero_migrate::model::ir::Op;
 use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 use zero_migrate::{
     descriptors_to_create_ops, resolve_create_table_policy, Approval, EffectivePolicy,
-    ExecutorConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, SqlDialect,
+    ExecutorConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
     TableRuntimeOptions,
 };
 
@@ -155,7 +155,7 @@ async fn measure(
             .ensure_journal(&cfg)
             .await
             .map_err(|error| format!("ensure the migration journal: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Mysql, &policy);
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
         let ir: MigrationIr = serde_json::from_value(serde_json::json!({
             "ir_version": 1,
             "name": "bounded_string",

@@ -84,7 +84,7 @@ use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
     desired_snapshot_for_dialect, fold_ops, resolve_create_table_policy, Approval,
     CollectionDescriptor, DeclarativeAuthor, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, MigrationIr, SqlDialect, SqliteBackend,
+    MigrationEngine, MigrationIr, SqliteBackend, SQLITE,
 };
 
 const PROJECT: &str = "prj_decimal_rebuild";
@@ -193,10 +193,9 @@ async fn stored(backend: &SqliteBackend, table: &str, column: &str) -> Vec<(Stri
 /// `fold_ops`, field maps from the projection, no `stored_create_sql`.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
-    let snapshot =
-        fold_ops(history, SqlDialect::Sqlite, PROJECT, &policy).expect("the history folds");
+    let snapshot = fold_ops(history, &SQLITE, PROJECT, &policy).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = single_fold::fold(history, SqlDialect::Sqlite, PROJECT, &policy)
+    live.sqlite_schemas = single_fold::fold(history, &SQLITE, PROJECT, &policy)
         .expect("the history folds")
         .project_field_defs();
     live
@@ -208,7 +207,7 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, policy.clone());
     let raw: MigrationIr = serde_json::from_str(source).expect("test IR parses");
     let resolved = resolve_create_table_policy(&raw, &policy, PROJECT).expect("the IR resolves");
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Sqlite, &policy);
+    let author = IrAuthor::new(PROJECT, APP, &SQLITE, &policy);
     let steps = author.lower_steps(&resolved, live).expect("the IR lowers");
     MigrationEngine::new()
         .apply_plan(
@@ -239,7 +238,7 @@ async fn deploy(backend: &SqliteBackend, tables: &[&str], sources: &[&str]) -> R
             &envelopes,
             backend,
             &policy,
-            SqlDialect::Sqlite,
+            &SQLITE,
             PROJECT,
             APP,
             &registry(tables),
@@ -476,7 +475,7 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
     // the unchanged schema presents. Nothing about the schema differs between the two
     // sides - only the carrier each is spelled through.
     let descriptors: Vec<CollectionDescriptor> =
-        single_fold::fold(&history, SqlDialect::Sqlite, PROJECT, &policy)
+        single_fold::fold(&history, &SQLITE, PROJECT, &policy)
             .expect("the history folds")
             .project_collection_descriptors()
             .into_values()
@@ -488,7 +487,7 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
                 ..descriptor
             })
             .collect();
-    let desired = desired_snapshot_for_dialect(PROJECT, &descriptors, SqlDialect::Sqlite, &policy)
+    let desired = desired_snapshot_for_dialect(PROJECT, &descriptors, &SQLITE, &policy)
         .expect("the descriptor set resolves to a desired snapshot");
 
     let plan = MigrationEngine::new()
@@ -496,9 +495,9 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
             &desired,
             &live,
             &ownership,
-            &DeclarativeAuthor::new_for_dialect(PROJECT, APP, SqlDialect::Sqlite),
+            &DeclarativeAuthor::new_for_dialect(PROJECT, APP, SQLITE),
             &[],
-            &GuardConfig::from_policy(policy.clone(), SqlDialect::Sqlite.id()),
+            &GuardConfig::from_policy(policy.clone(), SQLITE),
             &policy,
         )
         .expect("the declarative plan is authored");

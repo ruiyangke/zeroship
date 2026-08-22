@@ -6,8 +6,8 @@
 //!
 //! It holds the per-vendor TRAITS, the vocabulary their signatures name, and
 //! the registry shape a vendor crate hands back. It deliberately holds no vendor:
-//! nothing here spells a keyword, quotes an identifier or names a dialect except
-//! `SqlDialect`, which is a wire-level target descriptor from `zero-migrate-ir`.
+//! nothing here spells a keyword, quotes an identifier or names a dialect. Its
+//! wire-level target identity is the open `DialectId` from `zero-migrate-ir`.
 //!
 //! | trait | question it answers |
 //! |---|---|
@@ -59,8 +59,8 @@
 //! Moving three things collapses it to **7 modules / 7,733 lines**:
 //! [`error::IrLowerError`], [`error::DeclarativeError`] and [`step::BindValue`].
 //! Every other apparent edge dissolved on inspection: `crate::model::ir`,
-//! `crate::model::expr` and `crate::schema::query::SqlDialect` are `-ir` re-exports,
-//! and `BackfillSpec` / `PlanStep` appeared in doc links only.
+//! `crate::model::expr` and the former `crate::schema::query` dialect identity were
+//! `-ir` re-exports, and `BackfillSpec` / `PlanStep` appeared in doc links only.
 //!
 //! # What is NOT here
 //!
@@ -87,5 +87,7 @@ pub mod snapshot;
 pub mod spelling;
 pub mod step;
 pub mod stored_ddl;
+pub mod table_rebuild;
+pub mod validation;
 pub mod value_format;
 pub mod vendor;

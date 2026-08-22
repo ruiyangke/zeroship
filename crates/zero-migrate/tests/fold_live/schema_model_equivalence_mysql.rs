@@ -35,7 +35,7 @@ use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, SchemaSnapshot, SqlDialect,
+    LiveSchema, LockMode, MigrationEngine, MigrationIr, SchemaSnapshot,
 };
 
 const OWNER: &str = "app_schema_model_equivalence_mysql";
@@ -89,8 +89,8 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Mysql, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Mysql.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -120,7 +120,7 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
 
     let folded = fold_ops(
         &resolved.ops,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &cfg.project_schema,
         &policy,
     )

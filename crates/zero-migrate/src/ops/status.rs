@@ -1166,11 +1166,12 @@ fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, 
 ///   unsatisfiable or cyclic (the same fault apply would surface).
 #[cfg(pg_seam)]
 pub async fn status<D: SqlSession>(
+    dialect: &zero_migrate_ir::dialect::DialectId,
     conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> Result<MigrationStatus, StatusError> {
-    journal::ensure_journal(conn, cfg).await?;
+    journal::ensure_journal(conn, cfg, dialect).await?;
 
     // One consistent snapshot over both journal reads (applied + rolled_back). A
     // REPEATABLE READ READ ONLY txn pins a single MVCC view, so a concurrent
@@ -1178,7 +1179,7 @@ pub async fn status<D: SqlSession>(
     conn.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await
         .map_err(|e| StatusError::Journal(JournalError::Db(e.into())))?;
-    let snapshot = read_status_snapshot(conn, cfg, migrations).await;
+    let snapshot = read_status_snapshot(conn, cfg, dialect, migrations).await;
     finish_status_snapshot(conn, snapshot).await
 }
 
@@ -1468,9 +1469,10 @@ async fn status_via_backend_locked_inner<B: crate::apply::backend::MigrationBack
 async fn read_status_snapshot<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &zero_migrate_ir::dialect::DialectId,
     migrations: &[Migration],
 ) -> Result<MigrationStatus, StatusError> {
-    let entries = journal::applied(conn, cfg).await?;
+    let entries = journal::applied(conn, cfg, dialect).await?;
     // NET-applied entries only (drop lone `started` inflight markers — those are
     // crash-recovery keys, not settled applied state).
     let applied: Vec<AppliedEntry> = entries
@@ -1494,7 +1496,7 @@ async fn read_status_snapshot<D: SqlSession>(
     // Supersession (squash): a version superseded by a net-applied squash OR
     // by an in-set squash is NOT pending — status must agree with apply. Reuses the
     // executor's `compute_superseded` so the two views never diverge.
-    let journal_superseded = journal::superseded_versions(conn, cfg).await?;
+    let journal_superseded = journal::superseded_versions(conn, cfg, dialect).await?;
     let superseded_owned =
         crate::apply::executor::compute_superseded(migrations, &journal_superseded);
     let superseded: std::collections::HashSet<&str> =
@@ -1503,13 +1505,13 @@ async fn read_status_snapshot<D: SqlSession>(
         order_pending(migrations, &completed, &superseded).map_err(StatusError::Ordering)?;
     let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
 
-    let rolled_back = journal::net_rolled_back(conn, cfg).await?;
+    let rolled_back = journal::net_rolled_back(conn, cfg, dialect).await?;
 
     // Surface the outstanding cross-deploy pending contracts
     // (with orphan detection) + the plans blocked on a pending-contract
     // dependency. Read inside this same REPEATABLE READ READ ONLY snapshot so the
     // obligation view is consistent with the applied/rolled-back buckets.
-    let outstanding = journal::outstanding_pending_contracts(conn, cfg).await?;
+    let outstanding = journal::outstanding_pending_contracts(conn, cfg, dialect).await?;
     let (pending_contracts, blocked) = derive_pending_contract_status(&outstanding, migrations);
 
     Ok(MigrationStatus {
@@ -1650,11 +1652,12 @@ fn derive_pending_contract_status_for_plans(
 /// [`StatusError::Journal`] on a journal read/bootstrap failure.
 #[cfg(pg_seam)]
 pub async fn history<D: SqlSession>(
+    dialect: &zero_migrate_ir::dialect::DialectId,
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<HistoryEvent>, StatusError> {
-    journal::ensure_journal(conn, cfg).await?;
-    Ok(journal::history(conn, cfg).await?)
+    journal::ensure_journal(conn, cfg, dialect).await?;
+    Ok(journal::history(conn, cfg, dialect).await?)
 }
 
 #[cfg(test)]
@@ -1664,7 +1667,7 @@ mod plan_status_tests {
     use crate::model::migration::{ChecksumInput, MigrationFlags};
     use crate::render::lower::{IrAuthor, LiveSchema};
     use crate::render::step::DialectScope;
-    use crate::schema::query::SqlDialect;
+    use zero_migrate_ir::dialect::POSTGRES;
 
     fn id(seed: &str) -> MigrationId {
         MigrationId::derive("status_test", seed.as_bytes())
@@ -2535,7 +2538,7 @@ mod plan_status_tests {
         let plan = IrAuthor::new(
             "app",
             "app_status",
-            SqlDialect::Postgres,
+            &POSTGRES,
             &crate::test_fixtures::no_inject("app"),
         )
         .lower_plan(&ir, &LiveSchema::default())

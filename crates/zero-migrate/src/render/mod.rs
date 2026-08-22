@@ -24,20 +24,16 @@ pub mod vendor;
 pub(crate) mod renderer {
     pub(crate) use zero_migrate_backend::renderer::*;
 
-    use crate::schema::query::SqlDialect;
+    use zero_migrate_ir::dialect::DialectId;
 
-    /// Temporary compatibility for core carriers that still hold the closed enum.
-    ///
-    /// The capability row is resolved through the build's open vendor registry. No
-    /// descriptor table or vendor match lives in the contract crate; this trait goes
-    /// away with the remaining `SqlDialect` carriers.
+    /// Resolve one capability through the build's open vendor registry.
     pub(crate) trait DialectSupports {
         fn supports(self, cap: Capability) -> bool;
     }
 
-    impl DialectSupports for SqlDialect {
+    impl DialectSupports for &DialectId {
         fn supports(self, cap: Capability) -> bool {
-            crate::render::backends::vendor(&self.id())
+            crate::render::backends::vendor(self)
                 .descriptor
                 .capabilities
                 .contains(cap)

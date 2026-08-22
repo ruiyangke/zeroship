@@ -1,7 +1,10 @@
 //! SQLite schema/DDL spelling. The future `zero-migrate-sqlite`.
 
 use zero_migrate_backend::renderer::DmlRenderer;
-use zero_migrate_backend::schema::{decimal_precision_scale, SchemaRenderer};
+use zero_migrate_backend::schema::{
+    decimal_precision_scale, AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest,
+    SchemaRenderer,
+};
 use zero_migrate_backend::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::{DialectId, SQLITE};
 
@@ -41,6 +44,12 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
     fn stored_ddl(&self) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
         Some(&crate::stored_ddl::PARSER)
+    }
+
+    fn table_rebuild_policy(
+        &self,
+    ) -> Option<&'static dyn zero_migrate_backend::table_rebuild::TableRebuildPolicy> {
+        Some(&crate::table_rebuild::POLICY)
     }
 
     fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
@@ -101,6 +110,28 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         _live: &zero_migrate_backend::snapshot::SchemaSnapshot,
     ) -> Result<(), String> {
         Ok(())
+    }
+
+    fn unprefixed_key_storage_refusal(
+        &self,
+        _position: &str,
+        _table: &str,
+        _column: &str,
+        _evidence: zero_migrate_backend::schema::KeyStorageEvidence<'_>,
+    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+        // SQLite has no prefix-length syntax or corresponding storage-family
+        // restriction for the key shapes this engine authors.
+        None
+    }
+
+    fn literal_default_storage_refusal(
+        &self,
+        _column: &str,
+        _rendered_type: &str,
+        _rendered_default: &str,
+    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+        // SQLite accepts literal defaults independently of declared type affinity.
+        None
     }
 
     fn existing_column_change_strategy(
@@ -248,6 +279,38 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         _schema: &serde_json::Value,
     ) -> Vec<String> {
         Vec::new()
+    }
+
+    fn add_foreign_key_statement(
+        &self,
+        _schema: &str,
+        _table: &str,
+        _clause: &str,
+    ) -> Result<String, &'static str> {
+        Err("SQLite cannot add a foreign key without rebuilding the table")
+    }
+
+    fn drop_foreign_key_if_exists_statement(
+        &self,
+        _schema: &str,
+        _table: &str,
+        _name: &str,
+    ) -> Result<String, &'static str> {
+        Err("SQLite cannot drop a foreign key without rebuilding the table")
+    }
+
+    fn add_column_if_not_exists_statements(
+        &self,
+        _request: AddColumnIfNotExistsRequest<'_>,
+    ) -> Result<Vec<String>, &'static str> {
+        Err("SQLite has no ADD COLUMN IF NOT EXISTS grammar")
+    }
+
+    fn create_index_if_not_exists_statement(
+        &self,
+        _request: CreateIndexIfNotExistsRequest<'_>,
+    ) -> Result<String, &'static str> {
+        Err("SQLite has no concurrent index-build grammar")
     }
 }
 

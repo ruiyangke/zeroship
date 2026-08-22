@@ -444,6 +444,34 @@ impl DdlEmitter for MysqlEmitter {
             None => format!("DROP INDEX {}", mysql_quote_ident(idx_name)),
         }
     }
+
+    fn create_partition(
+        &self,
+        _name: &str,
+        _of: &str,
+        _bounds: &zero_migrate_ir::ir::PartitionBounds,
+    ) -> Option<(String, String)> {
+        // This backend's current engine projection collapses authored
+        // partitions instead of emitting native partition-relation DDL.
+        None
+    }
+
+    fn attach_partition(
+        &self,
+        _parent: &str,
+        _name: &str,
+        _bounds: &zero_migrate_ir::ir::PartitionBounds,
+    ) -> Option<(String, String)> {
+        None
+    }
+
+    fn detach_partition(&self, _parent: &str, _name: &str, _concurrently: bool) -> Option<String> {
+        None
+    }
+
+    fn drop_partition(&self, _name: &str, _cascade: bool) -> Option<String> {
+        None
+    }
 }
 
 #[cfg(test)]

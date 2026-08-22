@@ -18,7 +18,7 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, PostgresBackend, SqlDialect,
+    MigrationEngine, PostgresBackend,
 };
 
 const OWNER: &str = "app_drop_sequence_position_pg";
@@ -75,17 +75,22 @@ async fn apply_doc(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let policy = support::no_inject(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
     let document = zero_migrate::model::load::load_ir_document(
         ir,
         OWNER,
-        zero_migrate::model::validate::SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeMap::new(),
         None,
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &policy)
-        .map_err(|error| format!("fold the applied history: {error}"))?;
+    let folded = fold_ops(
+        history,
+        &zero_migrate::POSTGRES,
+        &cfg.project_schema,
+        &policy,
+    )
+    .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     history.extend(document.ops.iter().cloned());
     let plan = author
@@ -139,7 +144,7 @@ async fn sequence_exists(session: &PgDevSession, schema: &str) -> Result<bool, S
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     ))
 }
 

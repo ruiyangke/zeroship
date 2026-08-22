@@ -38,12 +38,60 @@
 //! held before. The unit that blocks the crate split is the LOOKUP, not the call
 //! site, and the two counts are not the same number.
 
-use crate::dml::DmlError;
+use crate::dml::{BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest};
 use crate::error::IrLowerError;
 use crate::step::BindValue;
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
-use zero_migrate_ir::ir::{IrScalar, Op, TableRef};
+use zero_migrate_ir::ir::{IrScalar, IrValue, Op, TableRef};
+
+/// Neutral inputs to one backend's materialized enum/domain DDL renderer.
+///
+/// Core resolves the named-type registry and renders the expression-bearing
+/// fragments before crossing this boundary. The backend owns the statement
+/// grammar and receives the already-qualified type name supplied by its own
+/// [`crate::fold::CatalogFoldPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializedNamedTypeOp<'a> {
+    /// Create a materialized enum from its authored string members.
+    CreateEnum {
+        /// Stable journal-name component.
+        name: &'a str,
+        /// Backend-rendered qualified type name.
+        qualified_name: &'a str,
+        /// Authored enum members, in order.
+        values: &'a [String],
+    },
+    /// Drop a materialized enum.
+    DropEnum {
+        /// Stable journal-name component.
+        name: &'a str,
+        /// Backend-rendered qualified type name.
+        qualified_name: &'a str,
+    },
+    /// Create a materialized domain from already-rendered type/expression fragments.
+    CreateDomain {
+        /// Stable journal-name component.
+        name: &'a str,
+        /// Backend-rendered qualified type name.
+        qualified_name: &'a str,
+        /// Backend-rendered base type.
+        base_type: &'a str,
+        /// Backend-rendered default expression, without the `DEFAULT` keyword.
+        default: Option<&'a str>,
+        /// Whether to append `NOT NULL`.
+        not_null: bool,
+        /// Backend-rendered CHECK expression, without `CHECK (` / `)`.
+        check: Option<&'a str>,
+    },
+    /// Drop a materialized domain.
+    DropDomain {
+        /// Stable journal-name component.
+        name: &'a str,
+        /// Backend-rendered qualified type name.
+        qualified_name: &'a str,
+    },
+}
 
 /// The dialect feature predicates the migration lowerer asks.
 ///
@@ -53,6 +101,55 @@ use zero_migrate_ir::ir::{IrScalar, Op, TableRef};
 /// keep naming it through `render::renderer`.
 pub use zero_migrate_ir::backend::Capability;
 
+/// A backend-owned feature-support decision used by the authoring matrix.
+///
+/// These are structural engine features rather than vendor identities. Core
+/// names the feature it found in the closed IR, then asks the already-resolved
+/// backend whether its renderer supports that shape. Keeping the list in the
+/// contract makes the backend answer exhaustive: adding a feature forces every
+/// registered backend to state its own support or refusal instead of inheriting
+/// a core-owned vendor set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeatureSupportKey {
+    PartialIndex,
+    IndexInclude,
+    IndexStorageParams,
+    IndexOnly,
+    IndexNullsNotDistinct,
+    IndexOpclass,
+    IndexCollation,
+    ExpressionIndex,
+    NonBtreeIndexMethod,
+    TableLevelForeignKey,
+    TableLevelUnique,
+    TableLevelCheckExpression,
+    CompositeForeignKey,
+    ForeignKeyNoLocalColumn,
+    NonIdForeignKey,
+    ConstraintNotValid,
+    ExclusionConstraint,
+    AlterColumnUsing,
+    SequenceDefault,
+    RenameColumnGuard,
+    ExistenceGuardProbe,
+    InsertOnConflict,
+    MaterializedView,
+    CreateOrReplaceMaterializedView,
+    TriggerMultipleEvents,
+    TriggerExecuteFunction,
+    TriggerTruncateEvent,
+    TriggerInsteadOfTiming,
+    TriggerStatementForEach,
+    TriggerBody,
+    TriggerWhen,
+    TriggerRaiseIgnore,
+    Comment,
+    Sequence,
+    RawViewBody,
+    RawSql,
+    PartitionDdl,
+}
+
 /// Dialect-specific DML/view/trigger rendering.
 ///
 /// No SPELLING method has a default body: adding a dialect requires an explicit
@@ -60,13 +157,12 @@ pub use zero_migrate_ir::backend::Capability;
 /// so adding a backend requires its own complete implementation and one registry
 /// entry rather than another arm in this contract.
 ///
-/// The two exceptions are [`dialect`](Self::dialect) and
-/// [`supports`](Self::supports), and they are exceptions because neither is a
-/// render decision: both are DERIVED from the one thing a backend does declare
-/// about itself, its [`descriptor`](Self::descriptor). Giving them bodies here is
-/// what stops a vendor from answering the identity question and the capability
-/// question inconsistently — there is one source of truth per backend and the
-/// trait reads it.
+/// There are no default method bodies. [`dialect`](Self::dialect) and
+/// [`supports`](Self::supports) are required even though neither is a render
+/// decision: each backend derives both answers from the one thing it declares
+/// about itself, its [`descriptor`](Self::descriptor). Requiring those explicit
+/// bodies keeps one source of truth per backend without letting a future vendor
+/// inherit another backend's identity or capability answer by omission.
 ///
 /// `Debug` is a SUPERTRAIT because the carriers that now hold a resolved
 /// `&'static dyn DmlRenderer` ([`crate::dml::BindCtx`],
@@ -83,8 +179,8 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// Which vendor this is.
     ///
     /// ADDED BY THE CRATE SPLIT, and it is the hinge the whole extraction turns on.
-    /// The spelling helpers in [`crate::dml`] used to take a `dialect: SqlDialect`
-    /// and resolve a renderer from it through a registry in the engine — which is
+    /// The spelling helpers in [`crate::dml`] used to take `dialect` as the former
+    /// closed dialect enum and resolve a renderer from it through a registry in the engine — which is
     /// exactly the edge that could not survive the split, because the registry has
     /// to be ABOVE the vendors and `dml` has to be BELOW them. They take a
     /// `&dyn DmlRenderer` now, and this method gives back the one thing the
@@ -97,7 +193,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     ///
     /// # Why the OPEN id and not the closed enum
     ///
-    /// It returned `SqlDialect` until now, and that single return type was what
+    /// It returned the former closed dialect enum until now, and that single return type was what
     /// stopped a fourth backend from lowering a migration. A vendor crate cannot
     /// produce a value of a closed enum it does not own, so the only body that
     /// type-checked outside this workspace's three vendors was `todo!()`: the crate
@@ -119,8 +215,8 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// its limits, all in one value the backend declares in its own crate.
     ///
     /// The renderer used to hand back an identity ([`dialect`](Self::dialect)) and
-    /// core turned that identity into capabilities through
-    /// `SqlDialect::descriptor` — an exhaustive match in `zero-migrate-ir`, i.e. a
+    /// core turned that identity into capabilities through the former closed
+    /// enum's `descriptor` method — an exhaustive match in `zero-migrate-ir`, i.e. a
     /// table core owns about vendors core does not. That is the same closed-set
     /// problem the identity had, one level up: an outsider's id has no arm in that
     /// match, so the honest answer for it was "no capabilities at all", and a
@@ -151,13 +247,19 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// missing answer for a backend-specific branch as an internal defect.
     fn op_support_refusal(&self, op: &Op, variant: &str) -> Option<&'static str>;
 
+    /// This backend's required, exhaustive authoring-feature decision.
+    ///
+    /// `None` means the backend supports the feature. `Some(reason)` is the
+    /// backend-authored operator-facing refusal. There is deliberately no
+    /// default body: a new backend cannot silently inherit the shipping
+    /// backends' feature envelope.
+    fn feature_support_refusal(&self, feature: FeatureSupportKey) -> Option<&'static str>;
+
     /// Ask THIS backend a capability question.
     ///
     /// `supports` never branches on the vendor: it reads this vendor's descriptor,
     /// so the answer remains owned by the vendor that declared it.
-    fn supports(&self, cap: Capability) -> bool {
-        self.descriptor().capabilities.contains(cap)
-    }
+    fn supports(&self, cap: Capability) -> bool;
 
     fn quote_ident(&self, ident: &str) -> String;
     fn qualify_table(&self, project_schema: &str, table: &str) -> Result<String, DmlError>;
@@ -189,10 +291,43 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// schema-blind DML seam and mysql2 both take canonical base64 as TEXT and
     /// decode it inside the statement, in each vendor's own spelling.
     ///
-    /// This was a three-way `match` on `SqlDialect` inside `BindCtx::push_scalar`
-    /// — a spelling decision made in core, which is the shape this module exists
+    /// This was a three-way `match` on the former closed dialect enum inside
+    /// `BindCtx::push_scalar` — a spelling decision made in core, which is the shape this module exists
     /// to hold instead.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String;
+
+    /// Validate this backend's SET-list evaluation semantics.
+    ///
+    /// This is required even for vendors whose assignments are simultaneous:
+    /// there is no core-owned vendor table and no default that a newly registered
+    /// backend can inherit silently.
+    fn validate_assignment_semantics(
+        &self,
+        op: &'static str,
+        table: &str,
+        set: &std::collections::BTreeMap<String, IrValue>,
+    ) -> Result<(), DmlError>;
+
+    /// Render this backend's structured insert-conflict tail.
+    ///
+    /// Core validates and quotes the neutral target-column inputs before calling
+    /// this method. The backend owns the grammar and any vendor-specific semantic
+    /// checks. There is deliberately no default conflict syntax.
+    fn render_on_conflict(
+        &self,
+        request: OnConflictRenderRequest<'_>,
+        ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError>;
+
+    /// Render a row-limited DELETE after core has rendered its table and filter.
+    ///
+    /// The three shipping engines use three unrelated row-selection mechanisms,
+    /// so every backend must state its own answer and no portable fallback exists.
+    fn render_limited_delete(
+        &self,
+        request: LimitedDeleteRenderRequest<'_>,
+        ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError>;
 
     /// The vendor's membership-test shape for an already-rendered `expr` against
     /// a homogeneous literal list. `joiner` is the caller's canonical separator.
@@ -242,6 +377,38 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
         op: &Op,
         eff_schema: &str,
     ) -> Result<Vec<crate::vendor::VendorStatement>, IrLowerError>;
+
+    /// This vendor's sequence DDL spelling.
+    ///
+    /// Core checks [`Capability::Sequence`] before calling this method. The
+    /// method is still required, with no default refusal, so a newly registered
+    /// backend has to state its own posture explicitly.
+    fn render_sequence_op(
+        &self,
+        op: &Op,
+        eff_schema: &str,
+    ) -> Result<crate::vendor::VendorStatement, IrLowerError>;
+
+    /// This vendor's materialized enum/domain DDL spelling.
+    ///
+    /// Core checks the corresponding materialized-type capability before calling
+    /// this method. It remains required with no default refusal: every backend,
+    /// including one that materializes neither kind, must state its own answer.
+    fn render_materialized_named_type_op(
+        &self,
+        op: MaterializedNamedTypeOp<'_>,
+    ) -> Result<crate::vendor::VendorStatement, IrLowerError>;
+
+    /// This vendor's `COMMENT ON` spelling.
+    ///
+    /// Core checks [`Capability::CommentOn`] before calling this method. The
+    /// method is required for the same fail-closed reason as
+    /// [`render_sequence_op`](Self::render_sequence_op).
+    fn render_comment_op(
+        &self,
+        op: &Op,
+        eff_schema: &str,
+    ) -> Result<crate::vendor::VendorStatement, IrLowerError>;
 
     /// This vendor's rendering of the PRIVILEGED vendor ops — schemas, extensions,
     /// roles, grants, RLS, policies, functions and the raw escape.

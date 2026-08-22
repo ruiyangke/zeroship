@@ -34,7 +34,7 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, PostgresBackend, SqlDialect,
+    MigrationEngine, PostgresBackend,
 };
 
 const OWNER: &str = "app_replace_function_rollback_pg";
@@ -103,7 +103,7 @@ async fn apply_doc(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let policy = support::operator_charter(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
     // The charter is threaded as vendor authority rather than left to the scope-derived
     // fallback, which answers schema confinement and grants nothing outside an operator
     // posture. `createFunction` is a privileged primitive, so the gate has to read the
@@ -111,7 +111,7 @@ async fn apply_doc(
     let document = zero_migrate::model::load::load_ir_document_authorized(
         ir,
         OWNER,
-        zero_migrate::model::validate::SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         reg,
         None,
         Some(zero_migrate::model::validate::VendorAuthority {
@@ -120,8 +120,13 @@ async fn apply_doc(
         }),
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &policy)
-        .map_err(|error| format!("fold the applied history: {error}"))?;
+    let folded = fold_ops(
+        history,
+        &zero_migrate::POSTGRES,
+        &cfg.project_schema,
+        &policy,
+    )
+    .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     history.extend(document.ops.iter().cloned());
     let plan = author
@@ -264,7 +269,7 @@ async fn rolling_back_a_function_replace_on_postgres() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::operator_charter(&cfg.project_schema),
-                SqlDialect::Postgres.id(),
+                zero_migrate::POSTGRES.clone(),
             ))
             .as_ref(),
         )

@@ -45,7 +45,6 @@ use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
 use zero_migrate::driver::{Bind, SqlSession};
 use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    SqlDialect,
 };
 
 const OWNER: &str = "app_mysql_setcolumntype_restate";
@@ -406,8 +405,8 @@ async fn an_authored_set_column_type_applies_on_mysql_and_keeps_every_facet() {
              "toType":{"string":{"length":128}}}
         ]}"#;
         let policy = support::no_inject(&cfg.project_schema);
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Mysql, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Mysql.id());
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
+        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL);
         let registry: BTreeMap<String, String> = [("facets".to_string(), OWNER.to_string())]
             .into_iter()
             .collect();

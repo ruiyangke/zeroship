@@ -64,7 +64,9 @@ use crate::render::plan::{DatabaseFeature, DatabaseRequirements, TableRebuildSpe
 use crate::render::step::{
     AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep,
 };
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, MYSQL};
+
+const DIALECT: DialectId = MYSQL;
 
 /// The generic MySQL [`MigrationBackend`] implementation.
 ///
@@ -538,8 +540,23 @@ fn parse_mysql_version(raw: &str) -> Result<[u32; 3], String> {
 impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     type SessionSnapshot = MysqlSessionSnapshot;
 
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Mysql
+    fn dialect(&self) -> DialectId {
+        DIALECT
+    }
+
+    fn timeout_setting_names(&self) -> Option<(&'static str, &'static str)> {
+        Some(("max_execution_time", "innodb_lock_wait_timeout"))
+    }
+
+    fn preserves_authored_logical_columns(&self) -> bool {
+        // MySQL's engine path consumes the refreshed catalog snapshot directly;
+        // it does not maintain the logical-column side projection.
+        false
+    }
+
+    fn projects_sdk_field_defs(&self) -> bool {
+        // MySQL has no SDK-shaped table-rebuild projection in the engine.
+        false
     }
 
     async fn verify_database_requirements(
@@ -2025,7 +2042,13 @@ mod render_tests {
     fn backend_reports_mysql_dialect_and_question_placeholders() {
         let rec = RecordingSession::new();
         let backend = MysqlBackend::new_generic(&rec);
-        assert_eq!(backend.dialect(), SqlDialect::Mysql);
+        assert_eq!(backend.dialect(), DIALECT);
+        assert_eq!(
+            backend.timeout_setting_names(),
+            Some(("max_execution_time", "innodb_lock_wait_timeout"))
+        );
+        assert!(!backend.preserves_authored_logical_columns());
+        assert!(!backend.projects_sdk_field_defs());
         assert_eq!(backend.placeholder_style(), PlaceholderStyle::Question);
         assert!(
             !backend.ddl_is_transactional(),
@@ -2768,12 +2791,12 @@ mod render_tests {
     #[compio::test]
     async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks() {
         let uuid_generated_check =
-            crate::render::value_format::uuid_column_metadata("generated_uuid", SqlDialect::Mysql)
+            crate::render::value_format::uuid_column_metadata("generated_uuid", &DIALECT)
                 .expect("UUID metadata")
                 .expect("MySQL UUID CHECK")
                 .inline_check;
         let uuid_supplied_check =
-            crate::render::value_format::uuid_column_metadata("supplied_uuid", SqlDialect::Mysql)
+            crate::render::value_format::uuid_column_metadata("supplied_uuid", &DIALECT)
                 .expect("UUID metadata")
                 .expect("MySQL UUID CHECK")
                 .inline_check;
@@ -2782,17 +2805,14 @@ mod render_tests {
             &ValueFormat::TypeId {
                 prefix: "user".to_string(),
             },
-            SqlDialect::Mysql,
+            &DIALECT,
         )
         .expect("TypeID metadata")
         .inline_check;
-        let ulid_check = crate::render::value_format::column_metadata(
-            "ulid",
-            &ValueFormat::Ulid,
-            SqlDialect::Mysql,
-        )
-        .expect("ULID metadata")
-        .inline_check;
+        let ulid_check =
+            crate::render::value_format::column_metadata("ulid", &ValueFormat::Ulid, &DIALECT)
+                .expect("ULID metadata")
+                .inline_check;
         let table_rows = || {
             vec![Row::new(
                 vec!["table_name".into()],
@@ -2866,7 +2886,7 @@ mod render_tests {
                 schema: None,
                 existence_guard: None,
             }],
-            SqlDialect::Mysql,
+            &DIALECT,
             "proj_x",
             &crate::test_fixtures::no_inject("app"),
         )
@@ -2943,7 +2963,7 @@ mod render_tests {
             &ValueFormat::TypeId {
                 prefix: "account".to_string(),
             },
-            SqlDialect::Mysql,
+            &DIALECT,
         )
         .expect("altered TypeID metadata")
         .inline_check;
@@ -3180,7 +3200,7 @@ mod render_tests {
                     schema: None,
                     existence_guard: None,
                 }],
-                SqlDialect::Mysql,
+                &DIALECT,
                 "proj_x",
                 &crate::test_fixtures::no_inject("app"),
             )
@@ -3298,7 +3318,7 @@ mod render_tests {
         .expect("typed-reference literal fixture must deserialize");
         let expected = crate::render::fold::fold_ops(
             &ir.ops,
-            SqlDialect::Mysql,
+            &DIALECT,
             "proj_x",
             &crate::test_fixtures::no_inject("app"),
         )
@@ -3315,7 +3335,7 @@ mod render_tests {
             &ValueFormat::TypeId {
                 prefix: "account".to_string(),
             },
-            SqlDialect::Mysql,
+            &DIALECT,
         )
         .expect("TypeID metadata")
         .inline_check;
@@ -3580,7 +3600,7 @@ mod render_tests {
         .expect("MySQL key-format fixture must deserialize");
         let expected = crate::render::fold::fold_ops(
             &ir.ops,
-            SqlDialect::Mysql,
+            &DIALECT,
             "proj_x",
             &crate::test_fixtures::no_inject("app"),
         )
@@ -3590,7 +3610,7 @@ mod render_tests {
             &ValueFormat::TypeId {
                 prefix: "account".to_string(),
             },
-            SqlDialect::Mysql,
+            &DIALECT,
         )
         .expect("TypeID key metadata")
         .inline_check;
@@ -3599,17 +3619,14 @@ mod render_tests {
             &ValueFormat::TypeId {
                 prefix: "team".to_string(),
             },
-            SqlDialect::Mysql,
+            &DIALECT,
         )
         .expect("altered TypeID key metadata")
         .inline_check;
-        let ulid_check = crate::render::value_format::column_metadata(
-            "id",
-            &ValueFormat::Ulid,
-            SqlDialect::Mysql,
-        )
-        .expect("ULID key metadata")
-        .inline_check;
+        let ulid_check =
+            crate::render::value_format::column_metadata("id", &ValueFormat::Ulid, &DIALECT)
+                .expect("ULID key metadata")
+                .inline_check;
         let altered_ulid_check =
             ulid_check.replacen("CHAR_LENGTH(`id`) = 26", "CHAR_LENGTH(`id`) = 25", 1);
         assert_ne!(
@@ -3755,15 +3772,14 @@ mod render_tests {
         .expect("regrouped TypeID fixture must deserialize");
         let expected = crate::render::fold::fold_ops(
             &ir.ops,
-            SqlDialect::Mysql,
+            &DIALECT,
             "proj_x",
             &crate::test_fixtures::no_inject("app"),
         )
         .expect("regrouped TypeID fixture must fold");
-        let canonical =
-            crate::render::value_format::column_metadata("id", &value_format, SqlDialect::Mysql)
-                .expect("TypeID metadata")
-                .inline_check;
+        let canonical = crate::render::value_format::column_metadata("id", &value_format, &DIALECT)
+            .expect("TypeID metadata")
+            .inline_check;
         let regrouped = canonical.replacen("CHECK (", "CHECK (((", 1).replacen(
             "OR (CHAR_LENGTH(`id`) = 34 AND ",
             "OR CHAR_LENGTH(`id`) = 34) AND ",
@@ -3938,7 +3954,7 @@ mod render_tests {
         ];
         let expected = crate::render::fold::fold_ops(
             &ops,
-            SqlDialect::Mysql,
+            &DIALECT,
             "proj_x",
             &crate::test_fixtures::no_inject("app"),
         )

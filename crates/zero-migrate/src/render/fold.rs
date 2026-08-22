@@ -111,6 +111,7 @@ use crate::render::value_format::{
     authored_id_default, authored_text_id_default, authored_uuid_id_default, catalog_id_default,
     catalog_uuid_id_default, column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
+use zero_migrate_backend::fold::CatalogFoldRefusal;
 use zero_migrate_ir::dialect::DialectId;
 #[cfg(test)]
 use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
@@ -712,9 +713,11 @@ fn rewrite_incoming_fk_column_targets(
     }
 }
 
-/// The leg an `Op::Dialectal` contributes on `dialect`: its own, else nothing.
-/// `pub(crate)` so callers outside the fold select legs the SAME way rather than
-/// re-deriving the exact-id lookup and drifting from it.
+/// Look up the leg an `Op::Dialectal` contributes on `dialect`.
+///
+/// Absence is returned as `None`; the fold/lower callers turn it into the
+/// fail-closed portability refusal. `pub(crate)` keeps every caller on the same
+/// exact-id lookup rather than letting selection drift between passes.
 pub(crate) fn selected_dialectal_leg<'a>(
     dialect: &DialectId,
     legs: &'a std::collections::BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<Op>>,
@@ -1015,7 +1018,8 @@ fn apply_fold_alter_primary_key(
             && fold_policy(dialect).stored_table_allows_rowid(snap.stored_create_sql.as_deref())
         {
             return Err(FoldError::Unsupported(
-                "alterPrimaryKey cannot introduce INTEGER PRIMARY KEY rowid generation",
+                fold_policy(dialect)
+                    .refusal_message(CatalogFoldRefusal::AlterPrimaryKeyRowidGeneration),
             ));
         }
         for column in target {
@@ -2465,6 +2469,15 @@ impl<'a> CatalogFold<'a> {
                     fold_policy(dialect).is_native_uuid_type(&col.data_type);
                 col.data_type = new_col.data_type;
                 col.ddl_type_override = new_col.ddl_type_override;
+                // These are the rest of the target type carrier. The descriptor
+                // replay that this arm must match rebuilds `unbounded_text` and all
+                // parameter siblings from `to_type`; `type_def` is that same neutral
+                // target definition on the snapshot side. Leaving any of the three
+                // behind makes MySQL restamp the OLD authored spelling after a
+                // `SetColumnType` even though `data_type` already names the new one.
+                col.unbounded_text = new_col.unbounded_text;
+                col.type_def = new_col.type_def;
+                col.authored_type = new_col.authored_type;
                 // The remaining TYPE-BOUND facets, taken from `new_col` rather than
                 // left behind. Each one is `None`/empty on `new_col` unless `to_type`
                 // itself produces it, so this is "re-derive from the target type", not
@@ -3511,7 +3524,7 @@ fn add_column_snapshot(
 ) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), FoldError> {
     if !supports(dialect, Capability::NonPkIdentity) && identity.is_some() {
         return Err(FoldError::Unsupported(
-            "addColumn identity is unsupported when the target backend lacks non-PK identity",
+            fold_policy(dialect).refusal_message(CatalogFoldRefusal::AddColumnIdentity),
         ));
     }
     let field = ir_column_to_field(&IrColumn {
@@ -3902,7 +3915,7 @@ fn apply_fold_named_type_column_metadata(
                 return Ok(());
             }
             return Err(FoldError::Unsupported(
-                "named enum representation was not resolved by the target backend",
+                "named enum metadata was not resolved",
             ));
         }
         ColType::Domain { name, .. } => {
@@ -4032,7 +4045,8 @@ fn fold_create_table_specs(
             IrConstraintKind::Check { expr, .. } => {
                 if !fold_policy(dialect).folds_check_constraint_identity() {
                     return Err(FoldError::Unsupported(
-                        "createTable table-level CHECK is outside this backend's folded catalog scope",
+                        fold_policy(dialect)
+                            .refusal_message(CatalogFoldRefusal::CreateTableCheckConstraint),
                     ));
                 }
                 let name = c.name.as_deref().map_or_else(
@@ -4113,7 +4127,8 @@ fn fold_create_table_specs(
             IrConstraintKind::Unique { columns } => {
                 if !supports(dialect, Capability::TableLevelUnique) {
                     return Err(FoldError::Unsupported(
-                        "createTable table-level UNIQUE is outside this backend's emitted descriptor path",
+                        fold_policy(dialect)
+                            .refusal_message(CatalogFoldRefusal::CreateTableUniqueConstraint),
                     ));
                 }
                 let name = c.name.as_deref().map_or_else(
@@ -4125,7 +4140,8 @@ fn fold_create_table_specs(
             IrConstraintKind::Exclusion { elements, .. } => {
                 if !supports(dialect, Capability::ExclusionConstraint) {
                     return Err(FoldError::Unsupported(
-                        "createTable exclusion constraint is unsupported by the target backend",
+                        fold_policy(dialect)
+                            .refusal_message(CatalogFoldRefusal::CreateTableExclusionConstraint),
                     ));
                 }
                 let name = c.name.as_deref().map_or_else(
@@ -4161,7 +4177,7 @@ fn fold_create_table_specs(
         let access = ix.using.map_or("btree", index_method_access);
         if !supports(dialect, Capability::NonBtreeIndexMethod) && access != "btree" {
             return Err(FoldError::Unsupported(
-                "createTable non-btree index `using` is unsupported by the target backend",
+                fold_policy(dialect).refusal_message(CatalogFoldRefusal::CreateTableNonBtreeIndex),
             ));
         }
         let mut snap_idx = create_index_snapshot(
@@ -4519,7 +4535,7 @@ fn add_constraint_snapshot(
         IrConstraintKind::Check { expr, .. } => {
             if !fold_policy(dialect).folds_check_constraint_identity() {
                 return Err(FoldError::Unsupported(
-                    "addConstraint(check) is outside this backend's folded catalog scope",
+                    fold_policy(dialect).refusal_message(CatalogFoldRefusal::AddCheckConstraint),
                 ));
             }
             let cname = name.map_or_else(
@@ -4545,7 +4561,8 @@ fn add_constraint_snapshot(
         IrConstraintKind::Exclusion { elements, .. } => {
             if !supports(dialect, Capability::ExclusionConstraint) {
                 return Err(FoldError::Unsupported(
-                    "addConstraint exclusion constraint is unsupported by the target backend",
+                    fold_policy(dialect)
+                        .refusal_message(CatalogFoldRefusal::AddExclusionConstraint),
                 ));
             }
             let cname = name.map_or_else(

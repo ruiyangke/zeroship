@@ -9,39 +9,17 @@
 //! the sidecar and nothing here, in the generator, or in core changes shape.
 //!
 //! Which test proves what: `tests/dialect_table_faithfulness.rs` proves the
-//! corpus ⟷ table bijection and the sidecar ⟷ table transcription (it CANNOT
-//! prove agreement with `Op::support()` — `Op::support()` reads this table, so
-//! that check would be tautological). `op_support_matrix.rs` is the behavioural
-//! gate; `dialect_conformance_live.rs` is the live one.
+//! corpus ⟷ table bijection and the sidecar ⟷ table transcription. The integration
+//! test below compares all generated cells with the registered backends' required
+//! policies. `op_support_matrix.rs` is the behavioural gate;
+//! `dialect_conformance_live.rs` is the live one.
 //!
-//! Engine code DOES read this table: `crate::model::op_support` calls
-//! `dialect_table::lookup(kind, variant)`. The TypeScript mirror has no reader
-//! outside its own file; state the two sides separately, because they have
-//! already drifted apart once.
+//! Production engine code DOES NOT read this table: it resolves the selected
+//! registered vendor and calls that vendor's required `ValidationPolicy`.
+//! This Rust table and its TypeScript mirror are generator/test artifacts only.
 
-use crate::model::support::SqlDialect;
+pub use zero_migrate_backend::validation::Disposition;
 use zero_migrate_ir::dialect::DialectId;
-
-/// The disposition of one (op-kind, variant) token on one dialect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Disposition {
-    /// Core construct that renders/validates on this dialect.
-    Portable,
-    /// Native where supported, absence-tolerable elsewhere.
-    ///
-    /// LIVE, not reserved. This doc used to end "Reserved; no current row uses
-    /// it" and both halves were false: `createPartition/base` and
-    /// `createTable/partitionedCollapse` carry it on both non-PostgreSQL
-    /// dialects, `op_support` groups it with portable and vendor as SUPPORTED,
-    /// and lowering acts on it by collapsing a partition child into its parent
-    /// behind a mirror guard. The sidecar's own legend carried the same error
-    /// until it was measured; this is the last copy of it.
-    TransparentDegradable,
-    /// Vendor-tier construct admitted on this dialect.
-    Vendor,
-    /// Refused on this dialect.
-    Unsupported,
-}
 
 /// One row of the generated dialect table: an (op-kind, variant) token and its
 /// per-dialect disposition.
@@ -83,17 +61,15 @@ impl DispositionRow {
 
     /// The disposition of this row on the given dialect.
     ///
-    /// Panics if the row declares no cell for it. That is deliberate and matches
-    /// the existing contract of [`lookup`]'s caller, which already panics on a
-    /// missing ROW: a missing cell is a generation defect, and both of the other
-    /// answers hide it — treating it as supported fails open, and treating it as
-    /// `Unsupported` invents a refusal the sidecar never authored.
+    /// Panics if the row declares no cell for it. A missing cell is a generation
+    /// defect, and both of the other answers hide it — treating it as supported
+    /// fails open, and treating it as `Unsupported` invents a refusal the
+    /// sidecar never authored.
     #[must_use]
-    pub fn disposition(&self, dialect: SqlDialect) -> Disposition {
-        let id = dialect.id();
-        self.disposition_for(&id).unwrap_or_else(|| {
+    pub fn disposition(&self, dialect: &DialectId) -> Disposition {
+        self.disposition_for(dialect).unwrap_or_else(|| {
             panic!(
-                "dialect table row {}/{} declares no disposition for {id}",
+                "dialect table row {}/{} declares no disposition for {dialect}",
                 self.kind, self.variant
             )
         })
@@ -207,10 +183,55 @@ pub const DIALECT_TABLE: &[DispositionRow] = &[
     DispositionRow { kind: "validateConstraint", variant: "base", dispositions: &[(DialectId::new("mysql"), Disposition::Unsupported), (DialectId::new("postgres"), Disposition::Portable), (DialectId::new("sqlite"), Disposition::Unsupported)] },
 ];
 
-/// Look up the row for an (op-kind, variant) token, if present.
-#[must_use]
-pub fn lookup(kind: &str, variant: &str) -> Option<&'static DispositionRow> {
-    DIALECT_TABLE
-        .iter()
-        .find(|row| row.kind == kind && row.variant == variant)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The generated three-vendor artifact remains a byte-pinned review surface,
+    /// but production asks each registered backend directly. Pin every one of the
+    /// 92 × 3 historical decisions while ownership moves across that boundary.
+    #[test]
+    fn generated_cells_match_registered_backend_policies() {
+        assert_eq!(
+            DIALECT_TABLE.len(),
+            92,
+            "the reviewed operation-shape census moved"
+        );
+        assert_eq!(
+            crate::SHIPPING_VENDORS.len(),
+            3,
+            "the reviewed shipping-backend census moved"
+        );
+
+        let mut checked = 0;
+        for row in DIALECT_TABLE {
+            assert_eq!(
+                row.dispositions.len(),
+                crate::SHIPPING_VENDORS.len(),
+                "generated row {}/{} does not cover every registered backend",
+                row.kind,
+                row.variant,
+            );
+            for vendor in crate::SHIPPING_VENDORS {
+                let dialect = &vendor.descriptor.id;
+                let expected = row.disposition_for(dialect).unwrap_or_else(|| {
+                    panic!(
+                        "generated row {}/{} omits backend {dialect}",
+                        row.kind, row.variant
+                    )
+                });
+                assert_eq!(
+                    vendor.validation.op_disposition(row.kind, row.variant),
+                    expected,
+                    "backend policy drifted from generated cell {}/{}/{}",
+                    row.kind,
+                    row.variant,
+                    dialect,
+                );
+                checked += 1;
+            }
+        }
+
+        assert_eq!(checked, 276, "the reviewed generated-cell census moved");
+    }
 }

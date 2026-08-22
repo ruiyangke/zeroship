@@ -19,11 +19,11 @@ use std::collections::HashMap;
 
 use zero_migrate::model::ir::{MigrationIr, Op, CURRENT_IR_VERSION};
 use zero_migrate::model::load::load_ir_document;
-use zero_migrate::model::validate::SqlDialect;
 use zero_migrate::render::declarative::CollectionDescriptor;
 use zero_migrate::{
     effective_policy_from_charter_layers, render_schema_export,
-    render_schema_export_from_descriptors, EffectivePolicy, SchemaScope, DEFAULT_PROJECT_SCHEMA,
+    render_schema_export_from_descriptors, DialectId, EffectivePolicy, SchemaScope,
+    DEFAULT_PROJECT_SCHEMA,
 };
 
 use crate::wire::{BuildInfo, GenArtifactsReply, LoadVerifyReply};
@@ -52,16 +52,9 @@ pub fn build_info() -> BuildInfo {
     }
 }
 
-/// Map the wire dialect spelling to [`SqlDialect`]. Unknown → `Err`.
-fn parse_dialect(s: &str) -> Result<SqlDialect, String> {
-    match s {
-        "postgres" => Ok(SqlDialect::Postgres),
-        "sqlite" => Ok(SqlDialect::Sqlite),
-        "mysql" => Ok(SqlDialect::Mysql),
-        other => Err(format!(
-            "unknown dialect {other:?} (expected postgres|sqlite|mysql)"
-        )),
-    }
+/// Map the wire dialect spelling to its open [`DialectId`]. Unknown → `Err`.
+fn parse_dialect(s: &str) -> Result<DialectId, String> {
+    crate::verbs::preview_dialect(s)
 }
 
 /// Load + verify an IR document (the sync, DB-free deploy gate).
@@ -101,7 +94,7 @@ pub fn load_verify(
     match load_ir_document(
         envelope_json,
         deploying_app,
-        dialect,
+        &dialect,
         &registry,
         Some(&schema_scope),
     ) {
@@ -183,8 +176,8 @@ pub fn gen_artifacts_from_envelopes(
     // consumes it: the fold's output no longer distinguishes an op that came from a
     // leg from one authored at the top level.
     let has_dialectal_ops = zero_migrate::history_carries_dialectal_ops(&ops);
-    match render_schema_export(&ops, dialect, schema, &effective) {
-        Ok(export) => gen_ok(export, dialect, has_dialectal_ops),
+    match render_schema_export(&ops, &dialect, schema, &effective) {
+        Ok(export) => gen_ok(export, &dialect, has_dialectal_ops),
         Err(e) => gen_err(e.to_string()),
     }
 }
@@ -222,18 +215,18 @@ pub fn gen_artifacts_from_descriptors(
         Ok(p) => p,
         Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
     };
-    match render_schema_export_from_descriptors(descriptors, dialect, schema, &effective) {
+    match render_schema_export_from_descriptors(descriptors, &dialect, schema, &effective) {
         // A declared descriptor set has no op stream, so it cannot carry a
         // `dialect()` wrapper. `false` here is a property of the source shape, not a
         // default standing in for an unasked question.
-        Ok(export) => gen_ok(export, dialect, false),
+        Ok(export) => gen_ok(export, &dialect, false),
         Err(e) => gen_err(e.to_string()),
     }
 }
 
 fn gen_ok(
     export: zero_migrate::SchemaExport,
-    dialect: zero_migrate::SqlDialect,
+    dialect: &DialectId,
     has_dialectal_ops: bool,
 ) -> GenArtifactsReply {
     GenArtifactsReply {
@@ -253,13 +246,13 @@ fn gen_ok(
                 .collect(),
         ),
         // The RESOLVED target, read back off the value the fold ran under rather than
-        // echoed from the caller's string: `preview_dialect` accepts more than one
-        // spelling per target, and the export is only interpretable against the one
-        // that was actually used. Named via `SqlDialect::id()` — the engine's OWN
-        // canonical name, and what a fourth backend would be registered under — rather
-        // than a local three-arm match, which would be a second naming authority that
-        // nothing keeps in step with the first.
-        dialect: Some(dialect.id().as_str().to_string()),
+        // echoed from the caller's string. The export is only interpretable against
+        // the registered identity that was actually used. Named directly by the open
+        // dialect identity — the
+        // engine's canonical name, and what a fourth backend would be registered under —
+        // rather than a local three-arm match, which would be a second naming authority
+        // that nothing keeps in step with the first.
+        dialect: Some(dialect.as_str().to_string()),
     }
 }
 

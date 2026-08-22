@@ -189,7 +189,7 @@ pub async fn squash<B: MigrationBackend>(
     // dialect-correct guard is selected from the backend's dialect: PG runs
     // the libpg_query deny-list (`SqlGuard::new(confined(project_schema))`); a
     // non-PG engine runs its own dialect's guard.
-    let guard = guard_for(&cfg.guard_config().for_dialect(backend.dialect().id()));
+    let guard = guard_for(&cfg.guard_config_for(&backend.dialect()));
     guard
         .check(&squash_migration.up)
         .map_err(|source| SquashError::Guard {

@@ -90,7 +90,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::ir::{MigrationIr, Op};
 use crate::render::fold::fold_ops;
-use crate::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, MYSQL, POSTGRES, SQLITE};
 
 /// The schema unqualified objects resolve under.
 pub(super) const SCHEMA: &str = "public";
@@ -98,8 +98,16 @@ pub(super) const SCHEMA: &str = "public";
 /// Every walker that takes a dialect is run under all three. Several of the
 /// divergences the log recorded were dialect-specific, and two of the rows this
 /// file records are visible on exactly one dialect.
-pub(super) const DIALECTS: [SqlDialect; 3] =
-    [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql];
+pub(super) const DIALECTS: [DialectId; 3] = [POSTGRES, SQLITE, MYSQL];
+
+pub(super) fn dialect_label(dialect: &DialectId) -> &'static str {
+    match dialect.as_str() {
+        "postgres" => "Postgres",
+        "sqlite" => "Sqlite",
+        "mysql" => "Mysql",
+        _ => "Other",
+    }
+}
 
 /// A named op stream, written as the wire JSON an author's recorder emits.
 pub(super) struct Stream {
@@ -515,7 +523,7 @@ pub(super) fn policy(confined: bool) -> crate::EffectivePolicy {
 }
 
 impl Replay {
-    fn run(ops: &[Op], d: SqlDialect, confined: bool) -> Self {
+    fn run(ops: &[Op], d: &DialectId, confined: bool) -> Self {
         let p = policy(confined);
         // ONE fold, THREE projections read off it - the same value `render_artifacts`
         // reads all three from. Folding three times would be three traversals, which is
@@ -605,8 +613,8 @@ impl Reach {
 /// moves the other way. Counting `match` arms by eye would prove nothing about
 /// behaviour, and section A's own numbers were arm counts.
 fn sweep_reach(acc: &mut BTreeMap<(String, String), [Reach; 4]>, ops: &[Op], confined: bool) {
-    for d in DIALECTS {
-        let dname = format!("{d:?}");
+    for d in &DIALECTS {
+        let dname = dialect_label(d).to_string();
         let mut prev: Option<[Result<String, String>; 4]> = None;
         for i in 0..=ops.len() {
             let replay = Replay::run(&ops[..i], d, confined);
@@ -1035,12 +1043,13 @@ fn case_lines() -> Vec<String> {
     let mut lines = Vec::new();
     for c in CASES {
         let ops = parse(c.ops);
-        for d in DIALECTS {
+        for d in &DIALECTS {
             let replay = Replay::run(&ops, d, false);
             for q in probes_for(c.name) {
                 lines.push(format!(
-                    "{}|{d:?}|{}|{}",
+                    "{}|{}|{}|{}",
                     c.name,
+                    dialect_label(d),
                     q.label(),
                     classify(&replay, q).render()
                 ));
@@ -1166,7 +1175,7 @@ enum Status {
 
 /// One recorded row: a measured verdict plus how to read it.
 struct Row {
-    /// `case|SqlDialect|question`.
+    /// `case|dialect|question`.
     key: &'static str,
     /// The measured verdict, verbatim.
     verdict: &'static str,
@@ -1473,7 +1482,7 @@ const ROWS: &[Row] = &[
 ];
 
 /// Which op variants each walker reaches, measured by prefix sweep, one line
-/// per `variant|SqlDialect`. Cells are `FO FFD ATO RMO`, `R`eaches / `S`ilent /
+/// per `variant|dialect`. Cells are `FO FFD ATO RMO`, `R`eaches / `S`ilent /
 /// `-` unobserved.
 ///
 /// Step 4 consumer 2 moved EIGHTEEN cells - six variants across three dialects -

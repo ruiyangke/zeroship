@@ -9,7 +9,7 @@
 //! Same shape as its two siblings. APPLY the corpus through the REAL pipeline
 //! (`load_and_lower_guarded` + `MigrationEngine::apply_plan` over
 //! `MysqlBackend`), INTROSPECT with the shipped `snapshot_schema`, FOLD the SAME
-//! resolved ops offline under `SqlDialect::Mysql`, and require `diff_snapshots(...)`
+//! resolved ops offline under the `MYSQL` dialect, and require `diff_snapshots(...)`
 //! to be clean. The comparison runs after EVERY stage rather than once at the end,
 //! for the reason `fold_roundtrip_sqlite.rs` states: a create and a drop of the same
 //! object cancel in the folded snapshot, so a single trailing comparison would
@@ -39,7 +39,7 @@ use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     diff_snapshots, fold_ops, model::ir::Op, resolve_create_table_policy, Approval, ExecutorConfig,
-    GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, SqlDialect,
+    GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
 };
 
 const OWNER: &str = "app_fold_roundtrip_mysql";
@@ -73,8 +73,8 @@ async fn apply_doc(
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Mysql, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Mysql.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL);
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
@@ -104,7 +104,7 @@ async fn assert_matches_live(
 ) -> Result<(), String> {
     let expected = fold_ops(
         ops,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &cfg.project_schema,
         &support::no_inject(&cfg.project_schema),
     )

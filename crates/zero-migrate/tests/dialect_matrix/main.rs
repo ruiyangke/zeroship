@@ -20,6 +20,7 @@ mod core_does_not_spell_a_vendors_bytes;
 mod core_names_no_vendor_crate;
 mod created_tables_dialect_legs;
 mod dialect_conformance_live;
+mod dialect_table;
 mod dialect_table_faithfulness;
 mod dialectal_containers_are_expanded;
 mod dialectal_ops;
@@ -39,3 +40,12 @@ mod touched_tables_dialect_legs;
 mod unsupported_reason_is_operator_facing;
 mod vendor_ops_dispatch_per_vendor;
 mod vendor_registry_owns_shipping_descriptors;
+
+/// Test-only composition used to compare the generated review artifact with the
+/// policies production resolves through its private registry. Keeping this here
+/// prevents the vendor matrix and a registry test hook from entering core.
+static SHIPPING_VENDORS: &[&zero_migrate_backend::registry::BackendVendor] = &[
+    &zero_migrate_mysql::VENDOR,
+    &zero_migrate_postgres::VENDOR,
+    &zero_migrate_sqlite::VENDOR,
+];

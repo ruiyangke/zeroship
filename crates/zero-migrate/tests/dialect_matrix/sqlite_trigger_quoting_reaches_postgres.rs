@@ -11,7 +11,7 @@
 //! # The coupling, measured rather than reasoned — and now FIXED
 //!
 //! `render::dml::quote_bare_ident` is the PostgreSQL-PINNED identifier wrapper: it
-//! delegates to `quote_ident`, which is `quote_ident_for_dialect(.., SqlDialect::
+//! delegates to `quote_ident`, which is `quote_ident_for_dialect(..::
 //! Postgres)`, which resolves to `PostgresDmlRenderer::quote_ident`.
 //! `render_sqlite_trigger_op` and its helpers called it SIX times, and
 //! `backends/sqlite.rs` delegates its trigger rendering there. So every identifier in

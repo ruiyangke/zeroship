@@ -29,7 +29,7 @@ use crate::guard::{
 use crate::model::capability::OperatorCapability;
 use crate::model::ir::{MigrationIr, Op};
 use crate::model::policy::{DestructiveOps, SchemaScope};
-use crate::{DialectId, GuardMode, SqlDialect};
+use crate::{DialectId, GuardMode, MYSQL, POSTGRES, SQLITE};
 
 /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
 /// the two ported extensions. Minted via the `for_test` seam, which
@@ -55,15 +55,12 @@ fn platform_guard_config_with_data(
             require_rls,
             destructive_ops,
         ),
-        SqlDialect::Postgres.id(),
+        POSTGRES,
     )
 }
 
 fn confined_guard_config() -> GuardConfig {
-    GuardConfig::from_policy(
-        crate::test_fixtures::no_inject("zero_migrate"),
-        SqlDialect::Postgres.id(),
-    )
+    GuardConfig::from_policy(crate::test_fixtures::no_inject("zero_migrate"), POSTGRES)
 }
 
 fn confined_guard() -> SqlGuard {
@@ -122,7 +119,7 @@ fn create_table(name: &str) -> Op {
 fn destructive_ops_forbid_denies_structured_destructive_sql_classes() {
     let confined = SqlGuard::new(GuardConfig::from_policy(
         crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
-        SqlDialect::Postgres.id(),
+        POSTGRES,
     ));
     for sql in [
         "DROP TABLE users",
@@ -171,7 +168,7 @@ fn destructive_ops_forbid_denies_structured_destructive_sql_classes() {
 fn destructive_ops_forbid_denies_dml_holes_and_unknowns_fail_closed() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
-        SqlDialect::Postgres.id(),
+        POSTGRES,
     ));
 
     for sql in [
@@ -215,7 +212,7 @@ fn destructive_ops_forbid_denies_dml_holes_and_unknowns_fail_closed() {
 fn destructive_ops_warn_allows_and_records_structured_warning() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Warn),
-        SqlDialect::Postgres.id(),
+        POSTGRES,
     ));
 
     for sql in [
@@ -251,7 +248,7 @@ fn destructive_ops_warn_allows_and_records_structured_warning() {
 fn destructive_ops_warn_allows_and_records_unknown_warning() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Warn),
-        SqlDialect::Postgres.id(),
+        POSTGRES,
     ));
 
     let report = guard
@@ -271,7 +268,7 @@ fn destructive_ops_warn_allows_and_records_unknown_warning() {
 fn destructive_ops_allow_is_silent_for_policy_warning() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::test_fixtures::no_inject("public"),
-        SqlDialect::Postgres.id(),
+        POSTGRES,
     ));
 
     let report = guard
@@ -288,7 +285,7 @@ fn destructive_ops_allow_is_silent_for_policy_warning() {
 fn destructive_ops_forbid_allows_clearly_non_destructive_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Forbid),
-        SqlDialect::Postgres.id(),
+        POSTGRES,
     ));
 
     guard
@@ -459,7 +456,7 @@ fn platform_author() -> crate::render::lower::IrAuthor {
     crate::render::lower::IrAuthor::new(
         "zero_migrate",
         "app_corpus",
-        SqlDialect::Postgres,
+        &POSTGRES,
         &crate::test_fixtures::operator_with_data_security(
             &["zero_migrate", "public"],
             &["citext", "uuid-ossp"],
@@ -794,7 +791,7 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
     // (it does NOT skip the static guard — only Trusted does).
     let gcfg = GuardConfig::from_policy(
         crate::test_fixtures::operator_no_inject("zero_migrate"),
-        SqlDialect::Postgres.id(),
+        POSTGRES,
     );
     assert_eq!(
         gcfg.schema_scope(),
@@ -811,10 +808,10 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
         crate::test_fixtures::operator_no_inject("zero_migrate"),
     );
     assert_eq!(
-        ecfg.guard_config().schema_scope(),
+        ecfg.guard_config_for(&POSTGRES).schema_scope(),
         Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
     );
-    assert!(!ecfg.guard_config().skips_denylist_belt());
+    assert!(!ecfg.guard_config_for(&POSTGRES).skips_denylist_belt());
     // NOTE: `OperatorCapability::new` is PUBLIC, as are `Default` and (under an
     // additive feature) `for_test`, so any dependent crate can mint one. Nothing
     // reads it. The boundary that is actually pinned is the unforgeable
@@ -1199,7 +1196,7 @@ fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
     let author = crate::render::lower::IrAuthor::new(
         "zero_migrate",
         "app_corpus",
-        SqlDialect::Postgres,
+        &POSTGRES,
         &crate::test_fixtures::no_inject("app"),
     );
     let op = zero_migrate_ir::ir::Op::CreateRole {
@@ -1241,7 +1238,7 @@ fn benign_vendor_policy_is_refused_at_lower_without_capability() {
     let author = crate::render::lower::IrAuthor::new(
         "zero_migrate",
         "app_corpus",
-        SqlDialect::Postgres,
+        &POSTGRES,
         &crate::test_fixtures::no_inject("app"),
     );
     let op = zero_migrate_ir::ir::Op::CreatePolicy {
@@ -1336,7 +1333,7 @@ fn trusted_guard() -> SqlGuard {
 fn trusted_guard_config() -> GuardConfig {
     GuardConfig::from_policy_with_mode(
         crate::test_fixtures::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
-        SqlDialect::Postgres.id(),
+        POSTGRES,
         GuardMode::Off,
     )
 }
@@ -1348,7 +1345,7 @@ fn trusted_author() -> crate::render::lower::IrAuthor {
     crate::render::lower::IrAuthor::new(
         "public",
         "app_corpus",
-        SqlDialect::Postgres,
+        &POSTGRES,
         &crate::test_fixtures::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
     )
 }
@@ -1553,7 +1550,7 @@ fn trusted_early_return_is_gated_on_trust_trusted_only() {
 /// and are constructed without the policy, so nothing else can read the knob for them.
 ///
 /// Every one of the sibling `destructive_ops` tests above runs at
-/// `SqlDialect::Postgres`, where the denial comes from the SQL-TEXT deny-list instead.
+/// the PostgreSQL identity, where the denial comes from the SQL-TEXT deny-list instead.
 /// So before this test, deleting the `cfg.dialect() != &POSTGRES`
 /// gate left the whole suite green while silently making `forbid` inert on two of the
 /// three shipping dialects — the precise regression the posture was added to fix.
@@ -1574,11 +1571,7 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
         crate::test_fixtures::no_inject_with_data_security("public", false, DestructiveOps::Forbid)
     };
 
-    for dialect in [
-        SqlDialect::Sqlite.id(),
-        SqlDialect::Mysql.id(),
-        DialectId::new("duckdb"),
-    ] {
+    for dialect in [SQLITE, MYSQL, DialectId::new("duckdb")] {
         let cfg = GuardConfig::from_policy(policy(), dialect.clone());
         let err = check_ir_data_security_policy(&cfg, &ir).expect_err(
             "a trusting MigrationGuard means this IR walk is the dialect's ONLY \
@@ -1598,7 +1591,7 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
         );
     }
 
-    let pg = GuardConfig::from_policy(policy(), SqlDialect::Postgres.id());
+    let pg = GuardConfig::from_policy(policy(), POSTGRES);
     assert!(
         check_ir_data_security_policy(&pg, &ir).is_ok(),
         "the IR arm is for the dialects whose guard cannot read the knob; PostgreSQL's \

@@ -5,7 +5,7 @@
 //! and the oracle most of this crate's live tests are built on. It holds only
 //! while every op stays inside the project schema.
 //!
-//! `snapshot_schema(conn, name)` asks `pg_namespace WHERE nspname = $1` — one
+//! `snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, conn, name)` asks `pg_namespace WHERE nspname = $1` — one
 //! schema, by construction. `fold_ops` records every schema an op creates, and
 //! nothing it does adds the PROJECT schema, because no op creates that. So for a
 //! migration carrying `createSchema`, the two sides are not merely different,
@@ -53,7 +53,7 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     diff_snapshots, fold_ops, snapshot_schema, Approval, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend, SqlDialect,
+    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend,
 };
 
 const OWNER: &str = "app_fold_cross_schema";
@@ -131,9 +131,9 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
         })
         .to_string();
 
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
-        let base = fold_ops(&[], SqlDialect::Postgres, &cfg.project_schema, &policy)
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES.clone());
+        let base = fold_ops(&[], &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
         let artifact = author
@@ -166,14 +166,18 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
             serde_json::from_str(&doc).map_err(|error| format!("parse the IR: {error}"))?;
         let expected = fold_ops(
             &authored.ops,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &cfg.project_schema,
             &policy,
         )
         .map_err(|error| format!("fold the authored ops: {error}"))?;
-        let actual = snapshot_schema(&session, &cfg.project_schema)
-            .await
-            .map_err(|error| format!("snapshot the live schema: {error}"))?;
+        let actual = snapshot_schema(
+            &zero_migrate_ir::dialect::POSTGRES,
+            &session,
+            &cfg.project_schema,
+        )
+        .await
+        .map_err(|error| format!("snapshot the live schema: {error}"))?;
 
         // Disjoint, which is the root of it: neither side is a subset of the
         // other, so no amount of tolerance in the comparison rescues this pairing.

@@ -21,8 +21,8 @@
 //! # The cycle this breaks
 //!
 //! Before the split, `render::backends::renderer` was an exhaustive `match` over
-//! `SqlDialect` naming `postgres::RENDERER`, `sqlite::RENDERER` and
-//! `mysql::RENDERER` — three statics in the same crate as the trait. Extract the
+//! the former closed dialect enum, naming `postgres::RENDERER`, `sqlite::RENDERER`
+//! and `mysql::RENDERER` — three statics in the same crate as the trait. Extract the
 //! vendors and the engine names them for its registry while they name the engine for
 //! `DmlRenderer`, `IrLowerError` and `DmlError`. Cargo refuses.
 //!
@@ -37,8 +37,7 @@
 //! [`VendorSet`] remains a compile-time shipping slice, not a lazily populated
 //! global. Dispatch now looks up the open [`DialectId`](zero_migrate_ir::dialect::DialectId)
 //! filed by each descriptor, so the contract contains no enum match and a fourth
-//! backend requires no contract edit. The engine's temporary `SqlDialect` callers
-//! still convert their target to that id until the enum is deleted.
+//! backend requires no contract edit. Engine callers pass that open id directly.
 
 use crate::ddl::DdlEmitter;
 use crate::existence_probe::ExistenceProbePolicy;
@@ -46,6 +45,7 @@ use crate::fold::CatalogFoldPolicy;
 use crate::guard::{GuardConfig, MigrationGuard};
 use crate::renderer::DmlRenderer;
 use crate::schema::SchemaRenderer;
+use crate::validation::ValidationPolicy;
 use crate::value_format::ValueFormatRenderer;
 use zero_migrate_ir::backend::{BackendDescriptor, BackendRegistry, RegistryError};
 
@@ -78,13 +78,14 @@ pub type DdlFactory = fn(&str) -> Box<dyn DdlEmitter>;
 /// # Every field is REQUIRED, and `guard` is why that matters
 ///
 /// This struct derives no `Default`, has no `Default` impl, and is not
-/// `#[non_exhaustive]`. All eight fields must be written out in a struct literal at the
+/// `#[non_exhaustive]`. All nine fields must be written out in a struct literal at the
 /// vendor's own definition site. A new backend that ships no DDL emitter or no guard
 /// therefore fails to compile **in its own crate, named** — E0063 for the missing
 /// field — rather than picking one up by omission.
 ///
 /// That is the whole point of the field. It replaced a `guard_for(cfg)` function whose
-/// `SqlDialect` match handed both descriptor-only dialects one shared trusting guard.
+/// match on the former closed dialect enum handed both descriptor-only dialects one shared
+/// trusting guard.
 /// The match was exhaustive, so a fourth dialect broke the build — but the obvious way
 /// to fix that break was a `_ =>` arm, which would have granted every future backend
 /// the trusting path in one line and in silence. There is no such arm to add now.
@@ -118,6 +119,11 @@ pub struct BackendVendor {
     /// rowid, primary-key, named-type, CHECK-scope, and physical-type behavior in
     /// its own crate.
     pub catalog_fold: &'static dyn CatalogFoldPolicy,
+    /// Backend-owned authoring-validation facts and exact refusals.
+    ///
+    /// Required, never defaulted: a future backend must state its identifier,
+    /// namespace, partition, and unsupported-shape policy in its own crate.
+    pub validation: &'static dyn ValidationPolicy,
     /// How this vendor spells schema-changing statements.
     ///
     /// Required, never defaulted. A vendor cannot silently inherit another backend's
@@ -168,6 +174,7 @@ pub struct BackendVendor {
 /// use zero_migrate_backend::fold::CatalogFoldPolicy;
 /// use zero_migrate_backend::schema::SchemaRenderer;
 /// use zero_migrate_backend::value_format::ValueFormatRenderer;
+/// use zero_migrate_backend::validation::ValidationPolicy;
 /// use zero_migrate_ir::backend::BackendDescriptor;
 /// fn vendor(
 ///     descriptor: &'static BackendDescriptor,
@@ -176,6 +183,7 @@ pub struct BackendVendor {
 ///     value_format: &'static dyn ValueFormatRenderer,
 ///     existence_probe: &'static dyn ExistenceProbePolicy,
 ///     catalog_fold: &'static dyn CatalogFoldPolicy,
+///     validation: &'static dyn ValidationPolicy,
 ///     ddl: DdlFactory,
 /// ) -> BackendVendor {
 ///     BackendVendor {
@@ -185,6 +193,7 @@ pub struct BackendVendor {
 ///         value_format,
 ///         existence_probe,
 ///         catalog_fold,
+///         validation,
 ///         ddl,
 ///     }
 /// }
@@ -223,6 +232,16 @@ impl VendorSet {
     #[must_use]
     pub const fn as_slice(self) -> &'static [&'static BackendVendor] {
         self.vendors
+    }
+
+    /// The registered backend identities, in composition order.
+    ///
+    /// Consumers that need the shipping census derive it from this iterator;
+    /// they never restate a second vendor list in core.
+    pub fn dialects(self) -> impl Iterator<Item = zero_migrate_ir::dialect::DialectId> {
+        self.vendors
+            .iter()
+            .map(|vendor| vendor.descriptor.id.clone())
     }
 
     /// How many backends this build ships.

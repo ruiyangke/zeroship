@@ -25,7 +25,7 @@
 
 use zero_migrate::effective_policy_from_charter_toml;
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir_authorized, SqlDialect, VendorAuthority};
+use zero_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
 
 /// A charter granting ordinary table creation plus exactly ONE vendor capability.
 fn granting(key: &str) -> zero_migrate::EffectivePolicy {
@@ -53,7 +53,7 @@ fn allowed(policy: &zero_migrate::EffectivePolicy, op: &str) -> bool {
         effective: policy,
         default_schema: "app1",
     };
-    validate_ir_authorized(&ir, SqlDialect::Postgres, None, Some(authority)).is_ok()
+    validate_ir_authorized(&ir, &zero_migrate::POSTGRES, None, Some(authority)).is_ok()
 }
 
 const CREATE_SCHEMA: &str = r#"{"op":"createSchema","name":"s"}"#;

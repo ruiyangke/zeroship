@@ -30,7 +30,9 @@ use crate::model::snapshot::SchemaSnapshot;
 use crate::render::plan::{DatabaseRequirements, TableRebuildSpec};
 use crate::render::step::BindValue;
 use crate::render::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+
+pub(crate) const DIALECT: DialectId = POSTGRES;
 
 /// The generic Postgres [`MigrationBackend`] implementation on the host-pg build.
 ///
@@ -58,8 +60,23 @@ impl<'a, D: SqlSession> PostgresBackend<'a, D> {
 impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     type SessionSnapshot = PgSessionSnapshot;
 
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Postgres
+    fn dialect(&self) -> DialectId {
+        DIALECT
+    }
+
+    fn timeout_setting_names(&self) -> Option<(&'static str, &'static str)> {
+        Some(("statement_timeout", "lock_timeout"))
+    }
+
+    fn preserves_authored_logical_columns(&self) -> bool {
+        // PostgreSQL lowering consumes the refreshed catalog snapshot directly;
+        // it does not maintain the logical-column side projection.
+        false
+    }
+
+    fn projects_sdk_field_defs(&self) -> bool {
+        // PostgreSQL does not rebuild tables from the SDK-shaped projection.
+        false
     }
 
     async fn verify_database_requirements(
@@ -227,18 +244,18 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
-        journal::ensure_journal(self.conn, cfg).await
+        journal::ensure_journal(self.conn, cfg, &DIALECT).await
     }
 
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError> {
-        journal::applied(self.conn, cfg).await
+        journal::applied(self.conn, cfg, &DIALECT).await
     }
 
     async fn net_rolled_back_versions(
         &self,
         cfg: &ExecutorConfig,
     ) -> Result<Vec<String>, JournalError> {
-        journal::net_rolled_back(self.conn, cfg)
+        journal::net_rolled_back(self.conn, cfg, &DIALECT)
             .await
             .map(|entries| entries.into_iter().map(|entry| entry.version).collect())
     }
@@ -251,14 +268,14 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     async fn superseded_versions(&self, cfg: &ExecutorConfig) -> Result<Vec<String>, JournalError> {
-        journal::superseded_versions(self.conn, cfg).await
+        journal::superseded_versions(self.conn, cfg, &DIALECT).await
     }
 
     async fn latest_completed_checksums(
         &self,
         cfg: &ExecutorConfig,
     ) -> Result<std::collections::HashMap<String, String>, JournalError> {
-        journal::latest_completed_checksums(self.conn, cfg).await
+        journal::latest_completed_checksums(self.conn, cfg, &DIALECT).await
     }
 
     async fn check_checksum_drift(
@@ -266,11 +283,11 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         cfg: &ExecutorConfig,
         migrations: &[Migration],
     ) -> Result<crate::apply::drift::ChecksumDriftReport, DriftError> {
-        crate::apply::drift::check_checksum_drift(self.conn, cfg, migrations).await
+        crate::apply::drift::check_checksum_drift(&DIALECT, self.conn, cfg, migrations).await
     }
 
     async fn snapshot_schema(&self, cfg: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError> {
-        crate::apply::drift::snapshot_schema_for(self.conn, &cfg.project_schema).await
+        crate::apply::drift::snapshot_schema_for(self.conn, &cfg.project_schema, &DIALECT).await
     }
 
     async fn evaluate_preconditions(
@@ -278,7 +295,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         cfg: &ExecutorConfig,
         m: &Migration,
     ) -> Result<crate::apply::executor::PreconditionVerdict, ApplyError> {
-        crate::apply::precondition::evaluate_all(self.conn, cfg, m).await
+        crate::apply::precondition::evaluate_all(self.conn, cfg, &DIALECT, m).await
     }
 
     /// The blocking-dependency predicate, MEASURED against a live server by
@@ -324,7 +341,8 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         check: &crate::model::precondition::Precondition,
     ) -> Result<crate::apply::backend::PlanPreconditionVerdict, ApplyError> {
         let (met, blockers) =
-            crate::apply::precondition::evaluate_one(self.conn, cfg, version, check).await?;
+            crate::apply::precondition::evaluate_one(self.conn, cfg, &DIALECT, version, check)
+                .await?;
         if met {
             return Ok(crate::apply::backend::PlanPreconditionVerdict::Met);
         }
@@ -509,6 +527,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         crate::apply::journal::record_baseline(
             self.conn,
             cfg,
+            &DIALECT,
             crate::apply::journal::BaselineRecord {
                 version: squash_migration.version.as_str(),
                 name: &squash_migration.name,
@@ -670,7 +689,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         m: &Migration,
         applied_by: &str,
     ) -> Result<BaselineOutcome, BaselineError> {
-        crate::apply::baseline::baseline(self.conn, cfg, m, applied_by).await
+        crate::apply::baseline::baseline(self.conn, cfg, &DIALECT, m, applied_by).await
     }
 }
 
@@ -818,14 +837,16 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         &'a self,
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::PendingContract>> {
-        Box::pin(async move { journal::outstanding_pending_contracts(self.conn, cfg).await })
+        Box::pin(
+            async move { journal::outstanding_pending_contracts(self.conn, cfg, &DIALECT).await },
+        )
     }
 
     fn resolved_pending_contracts<'a>(
         &'a self,
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::ResolvedPendingContract>> {
-        Box::pin(async move { journal::resolved_pending_contracts(self.conn, cfg).await })
+        Box::pin(async move { journal::resolved_pending_contracts(self.conn, cfg, &DIALECT).await })
     }
 
     fn pending_contract_shape<'a>(
@@ -833,7 +854,16 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         cfg: &'a ExecutorConfig,
         contract: &'a journal::PendingContract,
     ) -> JournalFuture<'a, journal::PendingContractShape> {
-        Box::pin(async move { journal::pending_contract_shape(self.conn, cfg, contract).await })
+        Box::pin(async move {
+            journal::pending_contract_shape(
+                self.conn,
+                cfg,
+                &DIALECT,
+                contract,
+                crate::render::backends::vendor(&DIALECT).catalog_fold,
+            )
+            .await
+        })
     }
 
     fn record_pending_contract_with_recovery<'a>(
@@ -843,7 +873,8 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         scope: Option<journal::DeployRecoveryScope<'a>>,
     ) -> JournalFuture<'a, bool> {
         Box::pin(async move {
-            journal::record_pending_contract_with_recovery(self.conn, cfg, rec, scope).await
+            journal::record_pending_contract_with_recovery(self.conn, cfg, &DIALECT, rec, scope)
+                .await
         })
     }
 
@@ -855,7 +886,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         by: &'a str,
     ) -> JournalFuture<'a, ()> {
         Box::pin(async move {
-            journal::resolve_pending_contract(self.conn, cfg, pc, resolution, by).await
+            journal::resolve_pending_contract(self.conn, cfg, &DIALECT, pc, resolution, by).await
         })
     }
 
@@ -870,6 +901,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
             journal::mark_deploy_recovery_committed_batch(
                 self.conn,
                 cfg,
+                &DIALECT,
                 deploy_id,
                 pending_versions,
                 by,
@@ -886,8 +918,15 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         by: &'a str,
     ) -> JournalFuture<'a, ()> {
         Box::pin(async move {
-            journal::mark_deploy_recovery_reconciled(self.conn, cfg, deploy_id, pending_version, by)
-                .await
+            journal::mark_deploy_recovery_reconciled(
+                self.conn,
+                cfg,
+                &DIALECT,
+                deploy_id,
+                pending_version,
+                by,
+            )
+            .await
         })
     }
 
@@ -895,7 +934,9 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         &'a self,
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::DeployRecovery>> {
-        Box::pin(async move { journal::outstanding_deploy_recoveries(self.conn, cfg).await })
+        Box::pin(
+            async move { journal::outstanding_deploy_recoveries(self.conn, cfg, &DIALECT).await },
+        )
     }
 }
 
@@ -1453,6 +1494,12 @@ mod recording_session_genericity {
     async fn uuid_generation_requirements_gate_postgres_server_versions() {
         let empty = RecordingSession::with_server_version(120_000);
         let empty_backend = PostgresBackend::new_generic(&empty);
+        assert_eq!(
+            empty_backend.timeout_setting_names(),
+            Some(("statement_timeout", "lock_timeout"))
+        );
+        assert!(!empty_backend.preserves_authored_logical_columns());
+        assert!(!empty_backend.projects_sdk_field_defs());
         empty_backend
             .verify_database_requirements(&DatabaseRequirements::default())
             .await
@@ -1748,6 +1795,7 @@ mod recording_session_genericity {
         crate::apply::journal::record_started(
             &rec,
             &cfg,
+            &DIALECT,
             "mig_0001",
             "create_users",
             "cafef00d",
@@ -1777,7 +1825,7 @@ mod recording_session_genericity {
 
         // 5. READ — the status()/history() free fns over the SAME driver
         //    (generalized to `<D: SqlSession>`).
-        let st = crate::ops::status::status(&rec, &cfg, &[])
+        let st = crate::ops::status::status(&DIALECT, &rec, &cfg, &[])
             .await
             .expect("status over host driver");
         // The canned journal row is net-applied, so status sees it as applied.
@@ -1786,7 +1834,7 @@ mod recording_session_genericity {
             "status decoded the net-applied version over Row: {:?}",
             st.applied
         );
-        let hist = crate::ops::status::history(&rec, &cfg)
+        let hist = crate::ops::status::history(&DIALECT, &rec, &cfg)
             .await
             .expect("history over host driver");
         // history() over the empty canned history read returns an empty log without

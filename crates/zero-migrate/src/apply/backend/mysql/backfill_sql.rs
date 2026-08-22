@@ -10,6 +10,7 @@ use std::time::Instant;
 
 use sha2::{Digest, Sha256};
 
+use super::{journal_sql, session};
 use crate::apply::backend::{BackfillError, BackfillOutcome, BackfillProgressEntry, BackfillSpec};
 use crate::apply::executor::ApplyError;
 use crate::apply::journal::{CompletedRecord, EventKind, JournalError};
@@ -21,7 +22,6 @@ use crate::model::backfill::{
 };
 use crate::model::ir::{CursorStability, IrScalar, PerRowGenerator};
 use crate::model::migration::{Checksum, MigrationId};
-use super::{journal_sql, session};
 
 const GUARD_PLANNED: &str = "planned";
 const GUARD_INSTALLED: &str = "installed";
@@ -561,7 +561,7 @@ fn quote_bare(what: &'static str, ident: &str) -> Result<String, ApplyError> {
     }
     Ok(crate::render::dml::escape_quote_ident_for_dialect(
         ident,
-        crate::schema::query::SqlDialect::Mysql,
+        &super::DIALECT,
     ))
 }
 
@@ -1637,8 +1637,7 @@ fn mysql_live_cursor_column(
         CursorColumnContract {
             name: name.to_string(),
             scalar_type,
-            database_type: zero_migrate_mysql::VENDOR
-                .schema
+            database_type: crate::render::backends::schema_renderer(&super::DIALECT)
                 .canonical_type(&column_type),
             comparison,
         },

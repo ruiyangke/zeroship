@@ -5,7 +5,8 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::model::op_support::FEATURE_SUPPORT_REGISTRY;
-use crate::model::support::{SqlDialect, Feature, SupportDecision};
+use crate::model::support::{Feature, SupportDecision};
+use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
 const REGENERATE_COMMAND: &str = "ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX=1 cargo test -p zero-migrate --lib model::support_matrix::committed_support_matrix_is_current -- --exact";
 
@@ -105,20 +106,12 @@ pub(crate) fn render_support_matrix() -> String {
                 "support-matrix feature label must not be empty"
             );
             let postgres = render_cell(
-                feature.decision(SqlDialect::Postgres),
+                feature.decision(&POSTGRES),
                 &mut footnote_ids,
                 &mut footnotes,
             );
-            let mysql = render_cell(
-                feature.decision(SqlDialect::Mysql),
-                &mut footnote_ids,
-                &mut footnotes,
-            );
-            let sqlite = render_cell(
-                feature.decision(SqlDialect::Sqlite),
-                &mut footnote_ids,
-                &mut footnotes,
-            );
+            let mysql = render_cell(feature.decision(&MYSQL), &mut footnote_ids, &mut footnotes);
+            let sqlite = render_cell(feature.decision(&SQLITE), &mut footnote_ids, &mut footnotes);
             writeln!(markdown, "| {label} | {postgres} | {mysql} | {sqlite} |")
                 .expect("writing to a String cannot fail");
         }

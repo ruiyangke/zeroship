@@ -7,7 +7,7 @@ use crate::support;
 
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::{IrAuthor, LiveSchema, SqlDialect};
+use zero_migrate::{IrAuthor, LiveSchema};
 
 const VALID_ULIDS_IN_BYTEWISE_ORDER: &[&str] = &[
     "00000000000000000000000000",
@@ -86,7 +86,11 @@ fn bare_type_id_ir(table: &str) -> MigrationIr {
     .expect("bare TypeID create-table IR must deserialize")
 }
 
-fn lower_create_for_schema(dialect: SqlDialect, schema: &str, ir: &MigrationIr) -> String {
+fn lower_create_for_schema(
+    dialect: &zero_migrate::DialectId,
+    schema: &str,
+    ir: &MigrationIr,
+) -> String {
     let migrations = IrAuthor::new(
         schema,
         "app_ulid_samples",
@@ -99,11 +103,11 @@ fn lower_create_for_schema(dialect: SqlDialect, schema: &str, ir: &MigrationIr) 
     migrations.into_iter().next().unwrap().up
 }
 
-fn lower_create(dialect: SqlDialect, table: &str) -> String {
+fn lower_create(dialect: &zero_migrate::DialectId, table: &str) -> String {
     lower_create_for_schema(dialect, "app", &ulid_ir(table))
 }
 
-fn lower_add(dialect: SqlDialect, table: &str) -> String {
+fn lower_add(dialect: &zero_migrate::DialectId, table: &str) -> String {
     let ir: MigrationIr = serde_json::from_value(serde_json::json!({
         "ir_version": CURRENT_IR_VERSION,
         "name": format!("add_{table}_id"),
@@ -132,15 +136,15 @@ fn lower_add(dialect: SqlDialect, table: &str) -> String {
 #[test]
 fn ulid_create_table_ddl_is_exact_on_all_dialects() {
     assert_eq!(
-        lower_create(SqlDialect::Postgres, "ulids"),
+        lower_create(&zero_migrate::POSTGRES, "ulids"),
         "CREATE TABLE \"app\".\"ulids\" (\"id\" text COLLATE \"C\" CHECK (\"id\" IS NULL OR (octet_length(\"id\") = 26 AND (\"id\" COLLATE \"C\") ~ '^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$')))"
     );
     assert_eq!(
-        lower_create(SqlDialect::Mysql, "ulids"),
+        lower_create(&zero_migrate::MYSQL, "ulids"),
         "CREATE TABLE `app`.`ulids` (`id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin CHECK (`id` IS NULL OR (CHAR_LENGTH(`id`) = 26 AND REGEXP_LIKE(`id`, '^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$', 'c'))))"
     );
     assert_eq!(
-        lower_create(SqlDialect::Sqlite, "ulids"),
+        lower_create(&zero_migrate::SQLITE, "ulids"),
         "CREATE TABLE \"ulids\" (\"id\" TEXT COLLATE BINARY CHECK (\"id\" IS NULL OR (typeof(\"id\") = 'text' AND length(\"id\") = 26 AND length(CAST(\"id\" AS BLOB)) = 26 AND substr(\"id\", 1, 1) GLOB '[0-7]' AND substr(\"id\", 1, 26) NOT GLOB '*[^0123456789ABCDEFGHJKMNPQRSTVWXYZ]*')))"
     );
 }
@@ -148,15 +152,15 @@ fn ulid_create_table_ddl_is_exact_on_all_dialects() {
 #[test]
 fn ulid_add_column_ddl_keeps_the_same_storage_and_check() {
     assert_eq!(
-        lower_add(SqlDialect::Postgres, "ulids"),
+        lower_add(&zero_migrate::POSTGRES, "ulids"),
         "ALTER TABLE \"app\".\"ulids\" ADD COLUMN \"public_id\" text COLLATE \"C\" CHECK (\"public_id\" IS NULL OR (octet_length(\"public_id\") = 26 AND (\"public_id\" COLLATE \"C\") ~ '^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$'))"
     );
     assert_eq!(
-        lower_add(SqlDialect::Mysql, "ulids"),
+        lower_add(&zero_migrate::MYSQL, "ulids"),
         "ALTER TABLE `app`.`ulids` ADD COLUMN `public_id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin CHECK (`public_id` IS NULL OR (CHAR_LENGTH(`public_id`) = 26 AND REGEXP_LIKE(`public_id`, '^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$', 'c')))"
     );
     assert_eq!(
-        lower_add(SqlDialect::Sqlite, "ulids"),
+        lower_add(&zero_migrate::SQLITE, "ulids"),
         "ALTER TABLE \"ulids\" ADD COLUMN \"public_id\" TEXT COLLATE BINARY CHECK (\"public_id\" IS NULL OR (typeof(\"public_id\") = 'text' AND length(\"public_id\") = 26 AND length(CAST(\"public_id\" AS BLOB)) = 26 AND substr(\"public_id\", 1, 1) GLOB '[0-7]' AND substr(\"public_id\", 1, 26) NOT GLOB '*[^0123456789ABCDEFGHJKMNPQRSTVWXYZ]*'))"
     );
 }
@@ -164,7 +168,7 @@ fn ulid_add_column_ddl_keeps_the_same_storage_and_check() {
 #[test]
 fn sqlite_enforces_ulid_spelling_storage_and_bytewise_order() {
     let conn = rusqlite::Connection::open_in_memory().expect("open SQLite");
-    conn.execute_batch(&lower_create(SqlDialect::Sqlite, "ulids"))
+    conn.execute_batch(&lower_create(&zero_migrate::SQLITE, "ulids"))
         .expect("apply SQLite ULID table");
 
     for value in VALID_ULIDS_IN_BYTEWISE_ORDER.iter().rev() {
@@ -221,10 +225,10 @@ fn sqlite_enforces_ulid_spelling_storage_and_bytewise_order() {
 #[test]
 fn sqlite_ulid_and_empty_prefix_type_id_checks_are_case_distinct() {
     let conn = rusqlite::Connection::open_in_memory().expect("open SQLite");
-    conn.execute_batch(&lower_create(SqlDialect::Sqlite, "ulids"))
+    conn.execute_batch(&lower_create(&zero_migrate::SQLITE, "ulids"))
         .expect("apply SQLite ULID table");
     conn.execute_batch(&lower_create_for_schema(
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         "app",
         &bare_type_id_ir("type_ids"),
     ))
@@ -288,7 +292,7 @@ async fn postgres_enforces_ulid_fixtures_order_and_case_distinction() {
 
     async {
         for ir in [ulid_ir("ulids"), bare_type_id_ir("type_ids")] {
-            let ddl = lower_create_for_schema(SqlDialect::Postgres, &schema, &ir);
+            let ddl = lower_create_for_schema(&zero_migrate::POSTGRES, &schema, &ir);
             session
                 .batch(&ddl)
                 .await

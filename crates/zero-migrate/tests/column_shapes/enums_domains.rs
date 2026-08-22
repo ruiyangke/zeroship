@@ -1,7 +1,6 @@
 use crate::support;
 
 use zero_migrate::model::ir::ExistenceGuard;
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     BinaryOp, ColType, Expr, IrAuthor, IrColumn, IrDefault, IrFlagsOverride, IrLowerError,
     IrScalar, LiveSchema, MigrationIr, Op, CURRENT_IR_VERSION,
@@ -91,7 +90,7 @@ fn create_domain() -> Op {
     }
 }
 
-fn lower_all(dialect: SqlDialect, ops: Vec<Op>) -> Vec<String> {
+fn lower_all(dialect: &zero_migrate::DialectId, ops: Vec<Op>) -> Vec<String> {
     let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::no_inject("app"));
     author
         .lower(&ir(ops), &LiveSchema::default())
@@ -101,7 +100,7 @@ fn lower_all(dialect: SqlDialect, ops: Vec<Op>) -> Vec<String> {
         .collect()
 }
 
-fn lower_create_table(dialect: SqlDialect, ops: Vec<Op>) -> String {
+fn lower_create_table(dialect: &zero_migrate::DialectId, ops: Vec<Op>) -> String {
     lower_all(dialect, ops)
         .into_iter()
         .find(|sql| sql.starts_with("CREATE TABLE"))
@@ -111,7 +110,7 @@ fn lower_create_table(dialect: SqlDialect, ops: Vec<Op>) -> String {
 #[test]
 fn pg_enum_and_domain_render_standalone_types_and_column_refs() {
     let sql = lower_all(
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         vec![
             create_enum(),
             create_domain(),
@@ -158,6 +157,35 @@ fn pg_enum_and_domain_render_standalone_types_and_column_refs() {
 }
 
 #[test]
+fn pg_domain_over_enum_uses_the_materialized_enum_qname() {
+    let sql = lower_all(
+        &zero_migrate::POSTGRES,
+        vec![
+            create_enum(),
+            Op::CreateDomain {
+                name: "tier_domain".to_string(),
+                schema: None,
+                as_type: ColType::Enum {
+                    name: "plan_tier".to_string(),
+                    schema: None,
+                },
+                check: None,
+                default: None,
+                not_null: None,
+            },
+        ],
+    );
+
+    assert_eq!(
+        sql,
+        vec![
+            r#"CREATE TYPE "app"."plan_tier" AS ENUM ('free', 'pro')"#,
+            r#"CREATE DOMAIN "app"."tier_domain" AS "app"."plan_tier""#,
+        ]
+    );
+}
+
+#[test]
 fn pg_named_type_column_operations_honor_explicit_reference_schema() {
     let ops = vec![
         Op::AddColumn {
@@ -190,7 +218,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
             existence_guard: None,
         },
     ];
-    let sql = lower_all(SqlDialect::Postgres, ops.clone());
+    let sql = lower_all(&zero_migrate::POSTGRES, ops.clone());
 
     assert_eq!(
         sql[0],
@@ -224,7 +252,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
     let folded = zero_migrate::fold_ops_onto(
         &base,
         &ops,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -253,7 +281,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
 #[test]
 fn sqlite_enum_and_domain_inline_at_column_use_site() {
     let sql = lower_create_table(
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         vec![
             create_enum(),
             create_domain(),
@@ -292,7 +320,7 @@ fn sqlite_enum_and_domain_inline_at_column_use_site() {
 #[test]
 fn mysql_enum_and_domain_inline_at_column_use_site() {
     let sql = lower_create_table(
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         vec![
             create_enum(),
             create_domain(),
@@ -330,7 +358,12 @@ fn mysql_enum_and_domain_inline_at_column_use_site() {
 
 #[test]
 fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
-    let author = IrAuthor::new(SCHEMA, OWNER, SqlDialect::Mysql, &support::no_inject("app"));
+    let author = IrAuthor::new(
+        SCHEMA,
+        OWNER,
+        &zero_migrate::MYSQL,
+        &support::no_inject("app"),
+    );
     let err = author
         .lower(
             &ir(vec![
@@ -366,7 +399,7 @@ fn pg_guarded_type_drops_stamp_named_type_probes() {
     let author = IrAuthor::new(
         SCHEMA,
         OWNER,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject("app"),
     );
     let migrations = author

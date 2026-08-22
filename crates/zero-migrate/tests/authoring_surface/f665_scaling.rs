@@ -52,7 +52,7 @@ fn best_of(run: impl Fn() -> f64) -> f64 {
 }
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir, SqlDialect};
+use zero_migrate::model::validate::validate_ir;
 
 /// Validate `n` `createTable` ops of `c` columns each, returning seconds.
 fn validate_shape(n: usize, c: usize) -> f64 {
@@ -73,7 +73,7 @@ fn validate_shape(n: usize, c: usize) -> f64 {
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("envelope parses");
     let start = Instant::now();
-    validate_ir(&ir, SqlDialect::Postgres).expect("validates");
+    validate_ir(&ir, &zero_migrate::POSTGRES).expect("validates");
     start.elapsed().as_secs_f64()
 }
 

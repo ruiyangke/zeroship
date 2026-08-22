@@ -47,7 +47,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, snapshot_schema, Approval,
     EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, PostgresBackend, SqlDialect, StructuralDrift,
+    MigrationIr, PostgresBackend, StructuralDrift,
 };
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
@@ -159,8 +159,8 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Option<Applied>
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,
@@ -192,14 +192,18 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Option<Applied>
 
         let expected = fold_ops(
             &resolved.ops,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &cfg.project_schema,
             &policy,
         )
         .map_err(|error| format!("fold the applied PostgreSQL ops: {error}"))?;
-        let actual = snapshot_schema(&session, &cfg.project_schema)
-            .await
-            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let actual = snapshot_schema(
+            &zero_migrate_ir::dialect::POSTGRES,
+            &session,
+            &cfg.project_schema,
+        )
+        .await
+        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(Applied {
             drift: diff_snapshots(&expected, &actual),
         })
@@ -314,8 +318,8 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> Option<String> {
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,

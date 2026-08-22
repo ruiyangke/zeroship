@@ -98,17 +98,21 @@ use serde_json::Value;
 
 use zero_migrate::manifest_entry::sha256_hex;
 use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::{render_artifacts, EffectivePolicy, SqlDialect};
+use zero_migrate::{render_artifacts, EffectivePolicy};
 
 const SCHEMA: &str = "public";
 
-const DIALECTS: [SqlDialect; 3] = [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql];
+const DIALECTS: [&zero_migrate::DialectId; 3] = [
+    &zero_migrate::POSTGRES,
+    &zero_migrate::SQLITE,
+    &zero_migrate::MYSQL,
+];
 
 fn parse(ops: &str) -> Vec<Op> {
     serde_json::from_str(ops).expect("the stream parses")
 }
 
-fn env_db_ts(ops: &[Op], dialect: SqlDialect, policy: &EffectivePolicy) -> String {
+fn env_db_ts(ops: &[Op], dialect: &zero_migrate::DialectId, policy: &EffectivePolicy) -> String {
     render_artifacts(ops, dialect, SCHEMA, policy)
         .expect("the stream renders artifacts")
         .env_db_ts
@@ -268,7 +272,7 @@ fn the_per_field_reader_is_not_a_broken_instrument() {
    "runtimeOptions":{"softDelete":true,"versioning":false}}
 ]"#,
     );
-    let text = env_db_ts(&ops, SqlDialect::Postgres, &support::no_inject(SCHEMA));
+    let text = env_db_ts(&ops, &zero_migrate::POSTGRES, &support::no_inject(SCHEMA));
     let block = block(&text, "users");
     assert_eq!(
         block.columns.len(),
@@ -384,7 +388,7 @@ fn a_replaced_single_column_primary_key_moves_in_env_db_ts() {
 /// asserted separately rather than assumed to follow from the single-column arm.
 #[test]
 fn a_replaced_composite_primary_key_reaches_the_table_level_clause() {
-    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::POSTGRES, &zero_migrate::MYSQL] {
         let text = env_db_ts(
             &parse(PK_REPLACE_COMPOSITE),
             dialect,
@@ -407,7 +411,7 @@ fn a_replaced_composite_primary_key_reaches_the_table_level_clause() {
     assert!(
         render_artifacts(
             &parse(PK_REPLACE_COMPOSITE),
-            SqlDialect::Sqlite,
+            &zero_migrate::SQLITE,
             SCHEMA,
             &support::no_inject(SCHEMA)
         )
@@ -613,7 +617,7 @@ const EVERY_OTHER_FIELD: &str = r#"[
 /// cannot assert fields on them.
 #[test]
 fn every_other_field_of_the_authoring_map_reaches_env_db_ts_unchanged() {
-    let dialect = SqlDialect::Postgres;
+    let dialect = &zero_migrate::POSTGRES;
     {
         let text = env_db_ts(
             &parse(EVERY_OTHER_FIELD),
@@ -876,10 +880,19 @@ fn corpus_lines(
     stem: &str,
     ops: &[Op],
     policy: &EffectivePolicy,
-    dialect: SqlDialect,
+    dialect: &zero_migrate::DialectId,
     out: &mut Vec<String>,
 ) {
-    let d = format!("{dialect:?}");
+    // Preserve the closed enum's historical debug labels because these strings
+    // are part of the corpus golden wire, not merely assertion context.
+    let d = if dialect == &zero_migrate::POSTGRES {
+        "Postgres"
+    } else if dialect == &zero_migrate::SQLITE {
+        "Sqlite"
+    } else {
+        assert_eq!(dialect, &zero_migrate::MYSQL);
+        "Mysql"
+    };
     let rendered = match render_artifacts(ops, dialect, SCHEMA, policy) {
         Ok(rendered) => rendered,
         Err(error) => {
@@ -1334,7 +1347,7 @@ const CONTROL_ACCEPTANCES: usize = 102;
 #[test]
 fn the_refusal_probes_still_exercise_the_arms_they_name() {
     let open = support::no_inject(SCHEMA);
-    let outcome = |name: &str, dialect: SqlDialect| {
+    let outcome = |name: &str, dialect: &zero_migrate::DialectId| {
         let (_, source) = REFUSAL_PROBES
             .iter()
             .find(|(n, _)| *n == name)
@@ -1343,7 +1356,7 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
             .map(|_| "rendered".to_string())
             .unwrap_or_else(|e| e.to_string())
     };
-    let pg = SqlDialect::Postgres;
+    let pg = &zero_migrate::POSTGRES;
     assert!(
         outcome("alter_primary_key_without_a_candidate", pg).contains("UNIQUE candidate"),
         "the no-candidate probe must be refused for that reason: {}",
@@ -1365,9 +1378,9 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
         outcome("duplicate_enum", pg)
     );
     assert!(
-        outcome("table_level_check_off_postgres", SqlDialect::Sqlite).contains("CHECK"),
+        outcome("table_level_check_off_postgres", &zero_migrate::SQLITE).contains("CHECK"),
         "the table-level CHECK probe must be refused off Postgres: {}",
-        outcome("table_level_check_off_postgres", SqlDialect::Sqlite)
+        outcome("table_level_check_off_postgres", &zero_migrate::SQLITE)
     );
     // And the controls that stop the four above from passing for the wrong reason.
     assert_eq!(

@@ -4,15 +4,21 @@
 //! it is therefore the worked example step 3 followed: SQLite's now sits in
 //! `backends/sqlite.rs` in the same shape. PostgreSQL's is still in `render::vendor`.
 
-use zero_migrate_backend::dml::{self, DmlError};
+use std::collections::BTreeMap;
+
+use zero_migrate_backend::dml::{
+    self, BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest,
+};
 use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::renderer::{Capability, DmlRenderer};
+use zero_migrate_backend::renderer::{
+    Capability, DmlRenderer, FeatureSupportKey, MaterializedNamedTypeOp,
+};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::{DialectId, MYSQL};
-use zero_migrate_ir::expr::{AggFunc, CastTarget, ExtractField, ScalarFn};
+use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
-    ForEach, IrScalar, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
+    ForEach, IrScalar, IrValue, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
     TriggerTiming,
 };
 use zero_migrate_ir::validate::{
@@ -121,6 +127,79 @@ impl ExprDialectValidator for MysqlDmlRenderer {
     }
 }
 
+/// Return whether this backend's selected leg of an expression reads `column`.
+/// This mirrors the renderer's recursive closed-AST walk so an unsafe dependency
+/// cannot hide inside CASE, a helper, or a dialect branch.
+fn expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlError> {
+    Ok(match expr {
+        Expr::ColRef { name, .. } => name == column,
+        Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::PgInterval { .. } => false,
+        Expr::BinOp { lhs, rhs, .. } => {
+            expr_references_column(lhs, column)? || expr_references_column(rhs, column)?
+        }
+        Expr::UnaryOp { operand, .. }
+        | Expr::Cast { operand, .. }
+        | Expr::PgColumnSize { expr: operand }
+        | Expr::Extract { from: operand, .. }
+        | Expr::PgExtract { from: operand, .. }
+        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::InList { expr: operand, .. } => expr_references_column(operand, column)?,
+        Expr::Case { branches, r#else } => {
+            let mut found = false;
+            for branch in branches {
+                if expr_references_column(&branch.when, column)?
+                    || expr_references_column(&branch.then, column)?
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                if let Some(r#else) = r#else {
+                    found = expr_references_column(r#else, column)?;
+                }
+            }
+            found
+        }
+        Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
+            let mut found = false;
+            for arg in args {
+                if expr_references_column(arg, column)? {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        }
+        Expr::Between { operand, low, high } => {
+            expr_references_column(operand, column)?
+                || expr_references_column(low, column)?
+                || expr_references_column(high, column)?
+        }
+        Expr::Like { operand, pattern } => {
+            expr_references_column(operand, column)? || expr_references_column(pattern, column)?
+        }
+        Expr::DistinctFrom { left, right } => {
+            expr_references_column(left, column)? || expr_references_column(right, column)?
+        }
+        Expr::Agg { arg, delimiter, .. } => {
+            if let Some(arg) = arg {
+                if expr_references_column(arg, column)? {
+                    return Ok(true);
+                }
+            }
+            if let Some(delimiter) = delimiter {
+                expr_references_column(delimiter, column)?
+            } else {
+                false
+            }
+        }
+        Expr::Dialectal { legs } => {
+            expr_references_column(dml::select_dialect_leg(DIALECT, legs)?, column)?
+        }
+    })
+}
+
 impl DmlRenderer for MysqlDmlRenderer {
     fn dialect(&self) -> DialectId {
         DIALECT
@@ -132,6 +211,10 @@ impl DmlRenderer for MysqlDmlRenderer {
 
     fn descriptor(&self) -> &'static BackendDescriptor {
         &crate::descriptor::MYSQL_DESCRIPTOR
+    }
+
+    fn supports(&self, cap: zero_migrate_ir::backend::Capability) -> bool {
+        self.descriptor().capabilities.contains(cap)
     }
 
     fn preview_session_prologue(&self) -> &'static [&'static str] {
@@ -152,8 +235,38 @@ impl DmlRenderer for MysqlDmlRenderer {
         false
     }
 
-    fn op_support_refusal(&self, op: &Op, _variant: &str) -> Option<&'static str> {
+    fn op_support_refusal(&self, op: &Op, variant: &str) -> Option<&'static str> {
         match op {
+            Op::CreateTable { .. } if variant == "partitioned" => {
+                Some("partitioned tables are PostgreSQL-only")
+            }
+            Op::CreateTable { .. } if variant == "pgOnlyIndexFeature" => Some(
+                "createTable BRIN/INCLUDE/WITH/ONLY index features are PostgreSQL-only",
+            ),
+            Op::CreateTable { .. } if variant == "nextvalDefault" => Some(
+                "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+            ),
+            Op::CreateTable { .. } if variant == "identityAlways" => Some(
+                "identity({ always: true }) is PostgreSQL-only; SQLite/MySQL support only \
+                 identity({ always: false }) / autoIncrement() on the sole integer primary key",
+            ),
+            Op::CreateTable { .. } if variant == "nonportableByDefaultIdentity" => Some(
+                "identity({ always: false }) / autoIncrement() must be the sole primary-key \
+                 column on SQLite/MySQL",
+            ),
+            Op::CreatePartition { .. }
+            | Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
+            | Op::DropPartition { .. } => {
+                Some("partition lifecycle operations are PostgreSQL-only")
+            }
+            Op::AddColumn { .. } if variant == "identity" => Some(
+                "addColumn identity is PostgreSQL-only; SQLite/MySQL auto-increment \
+                 identity requires a createTable sole primary key",
+            ),
+            Op::AddColumn { .. } if variant == "nextvalDefault" => Some(
+                "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+            ),
             Op::CreateIndex {
                 columns, r#where, ..
             } => {
@@ -169,6 +282,10 @@ impl DmlRenderer for MysqlDmlRenderer {
                     Some("createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on MySQL")
                 }
             }
+            Op::Comment { .. } => Some("COMMENT ON is PostgreSQL-only in the current engine"),
+            Op::SetColumnDefault { .. } if variant == "nextval" => Some(
+                "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+            ),
             Op::SetColumnType { .. }
             | Op::SetColumnDefault { .. }
             | Op::SetColumnNotNull { .. }
@@ -179,6 +296,61 @@ impl DmlRenderer for MysqlDmlRenderer {
                  a nullability change the way it does for a retype — express it as a schema \
                  change rather than a stand-alone op",
             ),
+            Op::ValidateConstraint { .. } => Some(
+                "VALIDATE CONSTRAINT is PostgreSQL-only online constraint adoption (the second \
+                 half of NOT VALID → VALIDATE CONSTRAINT); SQLite and MySQL have no such \
+                 statement, so there is nothing to validate",
+            ),
+            Op::RenameColumn { .. } if variant != "existenceGuard" => {
+                Some("renameColumn is render-only for MySQL, not live-rendered")
+            }
+            Op::AddConstraint { .. } if variant == "check" => Some(
+                "addConstraint(check) expression rendering is PostgreSQL-only in the current engine",
+            ),
+            Op::AddConstraint { .. } if variant == "exclusion" => {
+                Some("exclusion constraints are PostgreSQL-only in the current engine")
+            }
+            Op::AddConstraint { .. } if variant == "fkNotValid" => Some(
+                "NOT VALID online constraint adoption (addForeignKey { notValid }) is PostgreSQL-only in the current engine",
+            ),
+            Op::Insert { .. } if variant == "onConflictDoNothing" => Some(
+                "MySQL cannot express targeted onConflict DO NOTHING without firing update triggers or suppressing unrelated errors",
+            ),
+            Op::CreateView { .. } if variant != "materializedReplace" => {
+                Some("materialized views are PostgreSQL-only in the current engine")
+            }
+            Op::DropView { .. } => {
+                Some("materialized views are PostgreSQL-only in the current engine")
+            }
+            Op::CreateDomain { .. } => Some(
+                "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+            ),
+            Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
+                Some("standalone sequence objects are PostgreSQL-only in the current engine")
+            }
+            Op::CreateSchema { .. } | Op::DropSchema { .. } => {
+                Some("schema vendor primitives are PostgreSQL-only")
+            }
+            Op::CreateExtension { .. } | Op::DropExtension { .. } => {
+                Some("extension vendor primitives are PostgreSQL-only")
+            }
+            Op::CreateRole { .. } if variant != "superuserIfNotExists" => {
+                Some("role vendor primitives are PostgreSQL-only")
+            }
+            Op::AlterRole { .. } | Op::DropRole { .. } | Op::DropOwnedBy { .. } => {
+                Some("role vendor primitives are PostgreSQL-only")
+            }
+            Op::Grant { .. } | Op::Revoke { .. } => {
+                Some("grant vendor primitives are PostgreSQL-only")
+            }
+            Op::SetRls { .. } => Some("RLS vendor primitives are PostgreSQL-only"),
+            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => {
+                Some("policy vendor primitives are PostgreSQL-only")
+            }
+            Op::CreateFunction { .. } | Op::DropFunction { .. } => {
+                Some("function vendor primitives are PostgreSQL-only")
+            }
+            Op::PgRaw { .. } => Some("pgRaw statements are PostgreSQL-only"),
             Op::CreateTrigger {
                 timing,
                 events,
@@ -220,6 +392,98 @@ impl DmlRenderer for MysqlDmlRenderer {
                 }
             }
             _ => None,
+        }
+    }
+
+    fn feature_support_refusal(&self, feature: FeatureSupportKey) -> Option<&'static str> {
+        match feature {
+            FeatureSupportKey::TableLevelForeignKey
+            | FeatureSupportKey::TableLevelUnique
+            | FeatureSupportKey::CompositeForeignKey
+            | FeatureSupportKey::NonIdForeignKey
+            | FeatureSupportKey::InsertOnConflict
+            | FeatureSupportKey::TriggerBody
+            | FeatureSupportKey::RawViewBody
+            | FeatureSupportKey::PartitionDdl => None,
+            FeatureSupportKey::ExistenceGuardProbe => Some(
+                "MySQL catalog probes enforce presence-only and non-column-type decisions, but any decision requiring column-type equality is refused until modifier-preserving equality is implemented",
+            ),
+            FeatureSupportKey::ForeignKeyNoLocalColumn => {
+                Some("foreign keys need at least one local column")
+            }
+            FeatureSupportKey::ExpressionIndex => {
+                Some("createIndex expression elements are not supported on MySQL")
+            }
+            FeatureSupportKey::PartialIndex => Some("MySQL does not support partial indexes"),
+            FeatureSupportKey::AlterColumnUsing => Some(
+                "setColumnType.using expression rendering is deferred in the current engine",
+            ),
+            FeatureSupportKey::RenameColumnGuard => Some(
+                "renameColumn ifExists guards cannot be attributed to a single migration unit today",
+            ),
+            FeatureSupportKey::CreateOrReplaceMaterializedView => Some(
+                "Postgres has no CREATE OR REPLACE MATERIALIZED VIEW and the other dialects have no materialized views",
+            ),
+            FeatureSupportKey::TriggerMultipleEvents => {
+                Some("MySQL CREATE TRIGGER accepts exactly one trigger event")
+            }
+            FeatureSupportKey::TriggerInsteadOfTiming => {
+                Some("MySQL does not support INSTEAD OF triggers")
+            }
+            FeatureSupportKey::TriggerWhen => {
+                Some("MySQL triggers do not support WHEN predicates")
+            }
+            FeatureSupportKey::TriggerRaiseIgnore => Some("MySQL cannot render RAISE IGNORE"),
+            FeatureSupportKey::TableLevelCheckExpression => {
+                Some("table-level CHECK expression rendering is PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::SequenceDefault => {
+                Some("nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences")
+            }
+            FeatureSupportKey::ConstraintNotValid => {
+                Some("NOT VALID online constraint adoption (addForeignKey/addCheck { notValid }) is PostgreSQL-only; SQLite/MySQL have no NOT VALID / VALIDATE CONSTRAINT")
+            }
+            FeatureSupportKey::Sequence => {
+                Some("standalone sequence objects are PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::Comment => {
+                Some("COMMENT ON is PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::MaterializedView => {
+                Some("materialized views are PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::ExclusionConstraint => {
+                Some("exclusion constraints are PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::IndexInclude => {
+                Some("index INCLUDE columns are PostgreSQL-only")
+            }
+            FeatureSupportKey::IndexStorageParams => {
+                Some("index WITH storage parameters are PostgreSQL-only")
+            }
+            FeatureSupportKey::IndexOnly => Some("CREATE INDEX ON ONLY is PostgreSQL-only"),
+            FeatureSupportKey::IndexNullsNotDistinct => {
+                Some("UNIQUE INDEX NULLS NOT DISTINCT is PostgreSQL-only (PG 15+)")
+            }
+            FeatureSupportKey::IndexOpclass => {
+                Some("per-column index operator classes are PostgreSQL-only")
+            }
+            FeatureSupportKey::IndexCollation => {
+                Some("per-column index collations are PostgreSQL-only")
+            }
+            FeatureSupportKey::NonBtreeIndexMethod => {
+                Some("non-btree index methods are unsupported on SQLite/MySQL")
+            }
+            FeatureSupportKey::TriggerExecuteFunction => {
+                Some("SQLite/MySQL have no CREATE TRIGGER EXECUTE FUNCTION form")
+            }
+            FeatureSupportKey::TriggerTruncateEvent => {
+                Some("SQLite/MySQL have no TRUNCATE trigger event")
+            }
+            FeatureSupportKey::TriggerStatementForEach => {
+                Some("SQLite/MySQL triggers are row-level only")
+            }
+            FeatureSupportKey::RawSql => Some("pgRaw statements are PostgreSQL-only"),
         }
     }
 
@@ -335,6 +599,130 @@ impl DmlRenderer for MysqlDmlRenderer {
             zero_migrate_backend::spelling::base64_standard(bytes),
         ));
         format!("FROM_BASE64({placeholder})")
+    }
+
+    /// MySQL evaluates a SET list from left to right. Refuse cross-assignment
+    /// reads rather than silently changing the simultaneous RHS semantics authors
+    /// get on PostgreSQL and SQLite. A self-reference remains safe because its RHS
+    /// is read before that column's sole assignment.
+    fn validate_assignment_semantics(
+        &self,
+        op: &'static str,
+        table: &str,
+        set: &BTreeMap<String, IrValue>,
+    ) -> Result<(), DmlError> {
+        for (column, value) in set {
+            let IrValue::Expr(expr) = value else {
+                continue;
+            };
+            for referenced_column in set.keys() {
+                if referenced_column != column && expr_references_column(expr, referenced_column)? {
+                    return Err(DmlError::MySqlCrossAssignmentDependency {
+                        op,
+                        table: table.to_string(),
+                        column: column.clone(),
+                        referenced_column: referenced_column.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Render MySQL 8's closest safe native equivalent to a named conflict
+    /// target. MySQL has no syntax for choosing one unique key. `DO NOTHING` is
+    /// refused because neither a no-op update nor `INSERT IGNORE` has the same
+    /// behavior.
+    fn render_on_conflict(
+        &self,
+        request: OnConflictRenderRequest<'_>,
+        ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError> {
+        let table = request.table;
+        let qtable = request.qualified_table;
+        let insert_columns = request.insert_columns;
+        let oc = request.on_conflict;
+        let qtarget_columns = request.quoted_target_columns;
+        let Some(set) = oc.do_update.as_ref().filter(|set| !set.is_empty()) else {
+            return Err(DmlError::MySqlConflictDoNothingNotExact);
+        };
+
+        for target in &oc.columns {
+            if set.contains_key(target) {
+                return Err(DmlError::MySqlConflictTargetUpdated {
+                    table: table.to_string(),
+                    column: target.clone(),
+                });
+            }
+        }
+        self.validate_assignment_semantics("onConflict.doUpdate", table, set)?;
+
+        let row_alias = dml::escape_quote_ident_for_backend("zero-migrate-incoming", ctx.backend);
+        let value_aliases = insert_columns
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                dml::escape_quote_ident_for_backend(
+                    &format!("zero-migrate-value-{index}"),
+                    ctx.backend,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut target_match = Vec::with_capacity(oc.columns.len());
+        for (target, qtarget) in oc.columns.iter().zip(qtarget_columns) {
+            let Some(index) = insert_columns.iter().position(|column| column == target) else {
+                return Err(DmlError::MySqlConflictTargetNotInserted {
+                    table: table.to_string(),
+                    column: target.clone(),
+                });
+            };
+            target_match.push(format!(
+                "({qtable}.{qtarget} = {row_alias}.{})",
+                value_aliases[index]
+            ));
+        }
+        let target_match = target_match.join(" AND ");
+        // Ordinary equality is intentional: MySQL UNIQUE indexes do not conflict
+        // on NULL, so NULL/NULL must never establish an authored-target match. The
+        // false branch is selected for both FALSE and NULL. Invalid JSON text is
+        // specified by MySQL as a statement error independently of `sql_mode`;
+        // division by zero is not, and under a permissive mode silently yields
+        // NULL. CONCAT keeps IF's false branch string-compatible with legitimate
+        // text, decimal, or binary assignment values. IF evaluates only the
+        // selected branch, so a genuine authored-target collision never touches
+        // the invalid document.
+        let non_target_conflict_error =
+            "CONCAT('', JSON_EXTRACT('zero-migrate conflict target mismatch', '$'))";
+
+        let mut assigns = Vec::with_capacity(set.len());
+        for (column, value) in set {
+            let qcolumn = dml::quote_ident_for_backend("column", column, ctx.backend)?;
+            let desired = dml::render_value_bound(value, ctx)?;
+            assigns.push(format!(
+                "{qcolumn} = IF({target_match}, {desired}, {non_target_conflict_error})"
+            ));
+        }
+
+        Ok(format!(
+            " AS {row_alias}({}) ON DUPLICATE KEY UPDATE {}",
+            value_aliases.join(", "),
+            assigns.join(", ")
+        ))
+    }
+
+    fn render_limited_delete(
+        &self,
+        request: LimitedDeleteRenderRequest<'_>,
+        ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError> {
+        let ph = ctx.push_bind(BindValue::Int(
+            i64::try_from(request.limit).unwrap_or(i64::MAX),
+        ));
+        Ok(format!(
+            "DELETE FROM {} WHERE {} LIMIT {ph}",
+            request.qualified_table, request.rendered_where
+        ))
     }
 
     fn render_in_list(
@@ -548,6 +936,44 @@ impl DmlRenderer for MysqlDmlRenderer {
                 "non-trigger op routed to trigger renderer",
             )),
         }
+    }
+
+    /// MySQL declares no sequence capability. Core refuses before calling this,
+    /// and this required body states the same fail-closed answer for direct users
+    /// of the backend contract.
+    fn render_sequence_op(
+        &self,
+        _op: &Op,
+        _eff_schema: &str,
+    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+        Err(IrLowerError::SequenceUnsupported {
+            kind: "sequence",
+            dialect: DIALECT,
+        })
+    }
+
+    /// MySQL represents authored enums/domains inline rather than as standalone
+    /// schema objects. Core therefore never calls this required method for the
+    /// shipping descriptor, and this body refuses any direct misuse explicitly.
+    fn render_materialized_named_type_op(
+        &self,
+        _op: MaterializedNamedTypeOp<'_>,
+    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+        Err(IrLowerError::UnsupportedOp(
+            "validated materialized named type unsupported by MySQL reached lower",
+        ))
+    }
+
+    /// MySQL declares no `COMMENT ON` capability. Column/table comment syntax is
+    /// a different DDL shape and must not be borrowed as an implicit fallback.
+    fn render_comment_op(
+        &self,
+        _op: &Op,
+        _eff_schema: &str,
+    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+        Err(IrLowerError::UnsupportedOp(
+            "validated COMMENT ON unsupported dialect reached lower",
+        ))
     }
 
     /// This vendor renders NO vendor ops, and that is written here rather than

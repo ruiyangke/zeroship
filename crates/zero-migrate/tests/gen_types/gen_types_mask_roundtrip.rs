@@ -25,11 +25,11 @@
 
 use crate::support;
 
+use zero_migrate::descriptors_to_create_ops;
 use zero_migrate::render::declarative::{
     descriptor_to_sdk_schema, CollectionDescriptor, FieldDescriptor,
 };
 use zero_migrate::render::fold::single_fold;
-use zero_migrate::{descriptors_to_create_ops, SqlDialect};
 
 const SCHEMA: &str = "public";
 
@@ -63,7 +63,7 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
     // GENERATED side: produce ops + fold-and-recover.
     let effective = support::confined_charter();
     let ops = descriptors_to_create_ops(&[descriptor], SCHEMA, &effective).expect("producer");
-    let generated = single_fold::fold(&ops, SqlDialect::Postgres, SCHEMA, &effective)
+    let generated = single_fold::fold(&ops, &zero_migrate::POSTGRES, SCHEMA, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("fold");
     let ssn = &generated["people"]["ssn"];

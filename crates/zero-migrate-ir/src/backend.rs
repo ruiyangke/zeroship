@@ -98,8 +98,8 @@ pub enum Capability {
     /// The render layer needs this to set `MigrationFlags::transactional`, and
     /// it is the SAME fact the apply layer already asks by property as
     /// `Backend::ddl_is_transactional`. Before this capability existed the
-    /// renderer asked it by NAME (`dialect != SqlDialect::Mysql`), so a fourth
-    /// backend would have silently claimed transactional DDL.
+    /// renderer asked it by NAME (comparing against the former closed enum's MySQL
+    /// variant), so a fourth backend would have silently claimed transactional DDL.
     ///
     /// Note this is stricter than MySQL 8.0's ATOMIC DDL: atomic DDL makes a
     /// single DDL statement all-or-nothing, but an implicit COMMIT still

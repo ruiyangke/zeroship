@@ -9,15 +9,21 @@
 //! has to finish, not a boundary that is done". This is that pass. MySQL's trigger
 //! spelling was the worked example of where it lands.
 
-use zero_migrate_backend::dml::{self, DmlError};
+use std::collections::BTreeMap;
+
+use zero_migrate_backend::dml::{
+    self, BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRenderRequest,
+};
 use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::renderer::{Capability, DmlRenderer};
+use zero_migrate_backend::renderer::{
+    Capability, DmlRenderer, FeatureSupportKey, MaterializedNamedTypeOp,
+};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::{DialectId, SQLITE};
 use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
-    ForEach, IrScalar, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
+    ForEach, IrScalar, IrValue, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
 };
 use zero_migrate_ir::validate::{
     ExprDialectFeature, ExprDialectRejection, ExprDialectValidator, UnsupportedKind,
@@ -119,9 +125,9 @@ impl ExprDialectValidator for SqliteDmlRenderer {
                 AggFunc::BoolAnd => Err(postgres_first_aggregate("boolAnd")),
                 AggFunc::BoolOr => Err(postgres_first_aggregate("boolOr")),
             },
-            ExprDialectFeature::ConcatWs { delimiter }
-                if matches!(delimiter, Expr::Literal { .. }) =>
-            {
+            ExprDialectFeature::ConcatWs {
+                delimiter: Expr::Literal { .. },
+            } => {
                 Ok(())
             }
             ExprDialectFeature::ConcatWs { delimiter } => Err(ExprDialectRejection {
@@ -208,6 +214,10 @@ impl DmlRenderer for SqliteDmlRenderer {
         &crate::descriptor::SQLITE_DESCRIPTOR
     }
 
+    fn supports(&self, cap: zero_migrate_ir::backend::Capability) -> bool {
+        self.descriptor().capabilities.contains(cap)
+    }
+
     fn preview_session_prologue(&self) -> &'static [&'static str] {
         &[]
     }
@@ -224,11 +234,45 @@ impl DmlRenderer for SqliteDmlRenderer {
         true
     }
 
-    fn op_support_refusal(&self, op: &Op, _variant: &str) -> Option<&'static str> {
+    fn op_support_refusal(&self, op: &Op, variant: &str) -> Option<&'static str> {
         match op {
+            Op::CreateTable { .. } if variant == "partitioned" => {
+                Some("partitioned tables are PostgreSQL-only")
+            }
+            Op::CreateTable { .. } if variant == "pgOnlyIndexFeature" => Some(
+                "createTable BRIN/INCLUDE/WITH/ONLY index features are PostgreSQL-only",
+            ),
+            Op::CreateTable { .. } if variant == "nextvalDefault" => Some(
+                "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+            ),
+            Op::CreateTable { .. } if variant == "identityAlways" => Some(
+                "identity({ always: true }) is PostgreSQL-only; SQLite/MySQL support only \
+                 identity({ always: false }) / autoIncrement() on the sole integer primary key",
+            ),
+            Op::CreateTable { .. } if variant == "nonportableByDefaultIdentity" => Some(
+                "identity({ always: false }) / autoIncrement() must be the sole primary-key \
+                 column on SQLite/MySQL",
+            ),
+            Op::CreatePartition { .. }
+            | Op::AttachPartition { .. }
+            | Op::DetachPartition { .. }
+            | Op::DropPartition { .. } => {
+                Some("partition lifecycle operations are PostgreSQL-only")
+            }
+            Op::AddColumn { .. } if variant == "identity" => Some(
+                "addColumn identity is PostgreSQL-only; SQLite/MySQL auto-increment \
+                 identity requires a createTable sole primary key",
+            ),
+            Op::AddColumn { .. } if variant == "nextvalDefault" => Some(
+                "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+            ),
             Op::CreateIndex { .. } => {
                 Some("createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on SQLite")
             }
+            Op::Comment { .. } => Some("COMMENT ON is PostgreSQL-only in the current engine"),
+            Op::SetColumnDefault { .. } if variant == "nextval" => Some(
+                "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+            ),
             Op::SetColumnType { .. }
             | Op::SetColumnDefault { .. }
             | Op::SetColumnNotNull { .. }
@@ -238,6 +282,65 @@ impl DmlRenderer for SqliteDmlRenderer {
                  differ's 12-step table rebuild, which needs the whole table definition — \
                  express it as a schema change rather than a stand-alone op",
             ),
+            Op::DropConstraint { .. } => Some(
+                "SQLite cannot add or drop a table constraint in place: it is applied only by \
+                 the declarative differ's 12-step table rebuild, which needs the whole table \
+                 definition — express it as a schema change rather than a stand-alone op",
+            ),
+            Op::AddConstraint { .. } if variant == "unique" => Some(
+                "SQLite cannot add or drop a table constraint in place: it is applied only by \
+                 the declarative differ's 12-step table rebuild, which needs the whole table \
+                 definition — express it as a schema change rather than a stand-alone op",
+            ),
+            Op::ValidateConstraint { .. } => Some(
+                "VALIDATE CONSTRAINT is PostgreSQL-only online constraint adoption (the second \
+                 half of NOT VALID → VALIDATE CONSTRAINT); SQLite and MySQL have no such \
+                 statement, so there is nothing to validate",
+            ),
+            Op::AddConstraint { .. } if variant == "check" => Some(
+                "addConstraint(check) expression rendering is PostgreSQL-only in the current engine",
+            ),
+            Op::AddConstraint { .. } if variant == "exclusion" => {
+                Some("exclusion constraints are PostgreSQL-only in the current engine")
+            }
+            Op::AddConstraint { .. } if variant == "fkNotValid" => Some(
+                "NOT VALID online constraint adoption (addForeignKey { notValid }) is PostgreSQL-only in the current engine",
+            ),
+            Op::CreateView { .. } if variant != "materializedReplace" => {
+                Some("materialized views are PostgreSQL-only in the current engine")
+            }
+            Op::DropView { .. } => {
+                Some("materialized views are PostgreSQL-only in the current engine")
+            }
+            Op::CreateDomain { .. } => Some(
+                "nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences",
+            ),
+            Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
+                Some("standalone sequence objects are PostgreSQL-only in the current engine")
+            }
+            Op::CreateSchema { .. } | Op::DropSchema { .. } => {
+                Some("schema vendor primitives are PostgreSQL-only")
+            }
+            Op::CreateExtension { .. } | Op::DropExtension { .. } => {
+                Some("extension vendor primitives are PostgreSQL-only")
+            }
+            Op::CreateRole { .. } if variant != "superuserIfNotExists" => {
+                Some("role vendor primitives are PostgreSQL-only")
+            }
+            Op::AlterRole { .. } | Op::DropRole { .. } | Op::DropOwnedBy { .. } => {
+                Some("role vendor primitives are PostgreSQL-only")
+            }
+            Op::Grant { .. } | Op::Revoke { .. } => {
+                Some("grant vendor primitives are PostgreSQL-only")
+            }
+            Op::SetRls { .. } => Some("RLS vendor primitives are PostgreSQL-only"),
+            Op::CreatePolicy { .. } | Op::DropPolicy { .. } => {
+                Some("policy vendor primitives are PostgreSQL-only")
+            }
+            Op::CreateFunction { .. } | Op::DropFunction { .. } => {
+                Some("function vendor primitives are PostgreSQL-only")
+            }
+            Op::PgRaw { .. } => Some("pgRaw statements are PostgreSQL-only"),
             Op::CreateTrigger {
                 events,
                 for_each,
@@ -260,6 +363,92 @@ impl DmlRenderer for SqliteDmlRenderer {
                 }
             }
             _ => None,
+        }
+    }
+
+    fn feature_support_refusal(&self, feature: FeatureSupportKey) -> Option<&'static str> {
+        match feature {
+            FeatureSupportKey::PartialIndex
+            | FeatureSupportKey::ExpressionIndex
+            | FeatureSupportKey::TableLevelForeignKey
+            | FeatureSupportKey::CompositeForeignKey
+            | FeatureSupportKey::NonIdForeignKey
+            | FeatureSupportKey::ExistenceGuardProbe
+            | FeatureSupportKey::InsertOnConflict
+            | FeatureSupportKey::TriggerInsteadOfTiming
+            | FeatureSupportKey::TriggerBody
+            | FeatureSupportKey::TriggerWhen
+            | FeatureSupportKey::TriggerRaiseIgnore
+            | FeatureSupportKey::RawViewBody
+            | FeatureSupportKey::PartitionDdl => None,
+            FeatureSupportKey::ForeignKeyNoLocalColumn => {
+                Some("foreign keys need at least one local column")
+            }
+            FeatureSupportKey::TableLevelUnique => Some(
+                "SQLite createTable table-level unique constraints are not threaded into the emitter",
+            ),
+            FeatureSupportKey::AlterColumnUsing => Some(
+                "setColumnType.using expression rendering is deferred in the current engine",
+            ),
+            FeatureSupportKey::RenameColumnGuard => Some(
+                "renameColumn ifExists guards cannot be attributed to a single migration unit today",
+            ),
+            FeatureSupportKey::CreateOrReplaceMaterializedView => Some(
+                "Postgres has no CREATE OR REPLACE MATERIALIZED VIEW and the other dialects have no materialized views",
+            ),
+            FeatureSupportKey::TriggerMultipleEvents => {
+                Some("SQLite CREATE TRIGGER accepts exactly one trigger event")
+            }
+            FeatureSupportKey::TableLevelCheckExpression => {
+                Some("table-level CHECK expression rendering is PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::SequenceDefault => {
+                Some("nextval sequence defaults are PostgreSQL-only; SQLite/MySQL have no standalone sequences")
+            }
+            FeatureSupportKey::ConstraintNotValid => {
+                Some("NOT VALID online constraint adoption (addForeignKey/addCheck { notValid }) is PostgreSQL-only; SQLite/MySQL have no NOT VALID / VALIDATE CONSTRAINT")
+            }
+            FeatureSupportKey::Sequence => {
+                Some("standalone sequence objects are PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::Comment => {
+                Some("COMMENT ON is PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::MaterializedView => {
+                Some("materialized views are PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::ExclusionConstraint => {
+                Some("exclusion constraints are PostgreSQL-only in the current engine")
+            }
+            FeatureSupportKey::IndexInclude => {
+                Some("index INCLUDE columns are PostgreSQL-only")
+            }
+            FeatureSupportKey::IndexStorageParams => {
+                Some("index WITH storage parameters are PostgreSQL-only")
+            }
+            FeatureSupportKey::IndexOnly => Some("CREATE INDEX ON ONLY is PostgreSQL-only"),
+            FeatureSupportKey::IndexNullsNotDistinct => {
+                Some("UNIQUE INDEX NULLS NOT DISTINCT is PostgreSQL-only (PG 15+)")
+            }
+            FeatureSupportKey::IndexOpclass => {
+                Some("per-column index operator classes are PostgreSQL-only")
+            }
+            FeatureSupportKey::IndexCollation => {
+                Some("per-column index collations are PostgreSQL-only")
+            }
+            FeatureSupportKey::NonBtreeIndexMethod => {
+                Some("non-btree index methods are unsupported on SQLite/MySQL")
+            }
+            FeatureSupportKey::TriggerExecuteFunction => {
+                Some("SQLite/MySQL have no CREATE TRIGGER EXECUTE FUNCTION form")
+            }
+            FeatureSupportKey::TriggerTruncateEvent => {
+                Some("SQLite/MySQL have no TRUNCATE trigger event")
+            }
+            FeatureSupportKey::TriggerStatementForEach => {
+                Some("SQLite/MySQL triggers are row-level only")
+            }
+            FeatureSupportKey::RawSql => Some("pgRaw statements are PostgreSQL-only"),
         }
     }
 
@@ -303,6 +492,82 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// the placeholder and NO base64 detour — the bytes stay bytes end to end.
     fn bind_bytes(&self, bytes: &[u8], push: &mut dyn FnMut(BindValue) -> String) -> String {
         push(BindValue::Bytes(bytes.to_vec()))
+    }
+
+    fn validate_assignment_semantics(
+        &self,
+        _op: &'static str,
+        _table: &str,
+        _set: &BTreeMap<String, IrValue>,
+    ) -> Result<(), DmlError> {
+        // SQLite evaluates every assignment RHS from the row before the SET list,
+        // so cross-assignment reads already have the authored simultaneous
+        // semantics.
+        Ok(())
+    }
+
+    fn render_on_conflict(
+        &self,
+        request: OnConflictRenderRequest<'_>,
+        ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError> {
+        let target = format!("ON CONFLICT ({})", request.quoted_target_columns.join(", "));
+        match &request.on_conflict.do_update {
+            None => Ok(format!(" {target} DO NOTHING")),
+            Some(set) => {
+                if set.is_empty() {
+                    return Ok(format!(" {target} DO NOTHING"));
+                }
+                // BTreeMap ⇒ deterministic column order (canonical).
+                let mut assigns = Vec::with_capacity(set.len());
+                for (col, val) in set {
+                    let qc = dml::quote_ident_for_backend("column", col, self)?;
+                    let ph = dml::render_value_bound(val, ctx)?;
+                    assigns.push(format!("{qc} = {ph}"));
+                }
+                Ok(format!(" {target} DO UPDATE SET {}", assigns.join(", ")))
+            }
+        }
+    }
+
+    fn render_limited_delete(
+        &self,
+        request: LimitedDeleteRenderRequest<'_>,
+        ctx: &mut BindCtx<'_>,
+    ) -> Result<String, DmlError> {
+        let table = request.table;
+        let qtable = request.qualified_table;
+        let w = request.rendered_where;
+        let n = request.limit;
+        let identity_columns = request
+            .catalog_identity_columns
+            .filter(|columns| !columns.is_empty())
+            .ok_or_else(|| DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                table: table.to_string(),
+            })?;
+        let quoted_identity: Result<Vec<_>, _> = identity_columns
+            .iter()
+            .map(|column| {
+                dml::quote_ident_checked_for_backend(column, self).map_err(|_| {
+                    DmlError::InvalidIdentifier {
+                        what: "catalog identity column",
+                        value: column.clone(),
+                    }
+                })
+            })
+            .collect();
+        let quoted_identity = quoted_identity?;
+        let selected_identity = quoted_identity.join(", ");
+        let compared_identity = if quoted_identity.len() == 1 {
+            selected_identity.clone()
+        } else {
+            format!("({selected_identity})")
+        };
+        let ph = ctx.push_bind(BindValue::Int(i64::try_from(n).unwrap_or(i64::MAX)));
+        Ok(format!(
+            "DELETE FROM {qtable} WHERE {compared_identity} IN \
+             (SELECT {selected_identity} FROM {qtable} WHERE {w} LIMIT {ph})"
+        ))
     }
 
     fn render_in_list(
@@ -417,9 +682,8 @@ impl DmlRenderer for SqliteDmlRenderer {
         }
         if n > SPLIT_PART_MAX_N {
             return Err(DmlError::UnrenderableExpr(format!(
-                "c.fn.splitPart part index n must be in 1..={} \
-                 (the proven inline-unroll bound) to lower portably on SQLite; got {n}",
-                SPLIT_PART_MAX_N
+                "c.fn.splitPart part index n must be in 1..={SPLIT_PART_MAX_N} \
+                 (the proven inline-unroll bound) to lower portably on SQLite; got {n}"
             )));
         }
         let dc = char::from(bytes[0]);
@@ -526,6 +790,44 @@ impl DmlRenderer for SqliteDmlRenderer {
         eff_schema: &str,
     ) -> Result<Vec<zero_migrate_backend::vendor::VendorStatement>, IrLowerError> {
         Ok(vec![render_sqlite_trigger_op(op, eff_schema)?])
+    }
+
+    /// SQLite declares no sequence capability. Core refuses before calling this,
+    /// and this required body states the same fail-closed answer for direct users
+    /// of the backend contract.
+    fn render_sequence_op(
+        &self,
+        _op: &Op,
+        _eff_schema: &str,
+    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+        Err(IrLowerError::SequenceUnsupported {
+            kind: "sequence",
+            dialect: DIALECT,
+        })
+    }
+
+    /// SQLite lowers authored enum/domain intent into columns and CHECK clauses,
+    /// not standalone schema objects. This required body makes that refusal
+    /// explicit for any caller that bypasses core's capability gate.
+    fn render_materialized_named_type_op(
+        &self,
+        _op: MaterializedNamedTypeOp<'_>,
+    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+        Err(IrLowerError::UnsupportedOp(
+            "validated materialized named type unsupported by SQLite reached lower",
+        ))
+    }
+
+    /// SQLite has no `COMMENT ON` statement. Its stored-DDL comments are not a
+    /// substitute, so this required implementation refuses explicitly.
+    fn render_comment_op(
+        &self,
+        _op: &Op,
+        _eff_schema: &str,
+    ) -> Result<zero_migrate_backend::vendor::VendorStatement, IrLowerError> {
+        Err(IrLowerError::UnsupportedOp(
+            "validated COMMENT ON unsupported dialect reached lower",
+        ))
     }
 
     /// This vendor renders NO vendor ops, and that is written here rather than

@@ -9,7 +9,7 @@
 //! a [`FieldDescriptor`](zero_migrate::render::declarative::FieldDescriptor) and a
 //! PostgreSQL-spelled `data_type`, and it keeps the promise.
 //!
-//! `schema::query::renderer(SqlDialect::Mysql).column_type` answers the SAME question
+//! `schema::query::renderer(&MYSQL).column_type` answers the SAME question
 //! from a raw SDK field def, and pinned NOTHING - not on `VARCHAR(n)`, not on
 //! `CHAR(n)`, not on `LONGTEXT`, not on the `VARCHAR(191)` a `ref` or an unknown token
 //! falls back to, not on the native `ENUM(...)`. Every one of those inherited the
@@ -25,9 +25,9 @@
 //! one integration test and not one live-server leg reached it. The static reason
 //! agrees: the only production caller of the dialect-generic emitter is
 //! `render::declarative`'s SQLite 12-step rebuild, which passes a hardcoded
-//! `SqlDialect::Sqlite`, and the three call sites of
+//! `SQLITE`, and the three call sites of
 //! `def_to_column_type_for_dialect` in `render::declarative` and `schema::diff` all
-//! pass a hardcoded `SqlDialect::Postgres`. MySQL column DDL is produced by
+//! pass a hardcoded `POSTGRES`. MySQL column DDL is produced by
 //! `render::declarative::column_type_for_render` instead.
 //!
 //! So this file does NOT claim to fix a defect a deployment can hit today. It claims
@@ -63,7 +63,6 @@ use zero_migrate::driver::{Bind, SqlSession};
 use zero_migrate::schema::query::{
     build_create_table_with_fks_for_dialect_scoped_statements, FkEmission,
 };
-use zero_migrate::SqlDialect;
 
 /// The table this file probes: one column per CHARACTER spelling the MySQL arm can
 /// produce, plus the non-character spellings that must stay bare.
@@ -106,7 +105,11 @@ const BARE_COLUMNS: [&str; 3] = ["id", "payload", "ratio"];
 ///
 /// This is the arm under test. Nothing in production calls it with `Mysql` (see the
 /// module header); this function IS the route.
-fn render_create(dialect: SqlDialect, schema_name: &str, table: &str) -> Result<String, String> {
+fn render_create(
+    dialect: &zero_migrate::DialectId,
+    schema_name: &str,
+    table: &str,
+) -> Result<String, String> {
     let mut schema = probe_schema();
     let object = schema
         .as_object_mut()
@@ -214,7 +217,7 @@ async fn show_create_table(
 /// Create the probe database and the probe table in it.
 async fn deploy_probe(session: &MysqlDevSession, database: &str) -> Result<(), String> {
     fresh_database(session, database).await?;
-    let create = render_create(SqlDialect::Mysql, database, "probe")?;
+    let create = render_create(&zero_migrate::MYSQL, database, "probe")?;
     session
         .batch(&create)
         .await
@@ -397,7 +400,7 @@ async fn postgres_keeps_the_same_two_cases_apart() {
             .batch(&format!("CREATE SCHEMA \"{schema}\""))
             .await
             .map_err(|e| format!("create the probe schema: {e}"))?;
-        let create = render_create(SqlDialect::Postgres, &schema, "probe")?;
+        let create = render_create(&zero_migrate::POSTGRES, &schema, "probe")?;
         session
             .batch(&create)
             .await
@@ -502,7 +505,7 @@ async fn a_case_insensitive_field_gets_the_case_insensitive_collation() {
             "ci_probe",
             &schema,
             &FkEmission::Inline,
-            SqlDialect::Mysql,
+            &zero_migrate::MYSQL,
             false,
             &support::no_inject(&database),
         )

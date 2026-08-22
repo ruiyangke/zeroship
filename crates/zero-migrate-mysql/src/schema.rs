@@ -3,7 +3,8 @@
 use crate::collation::{mysql_pin_collation, mysql_type_without_collation};
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{
-    char_len, decimal_precision_scale, def_case_sensitive, SchemaRenderer,
+    char_len, decimal_precision_scale, def_case_sensitive, AddColumnIfNotExistsRequest,
+    CreateIndexIfNotExistsRequest, KeyStorageEvidence, SchemaRenderer, StorageValidationRefusal,
 };
 use zero_migrate_backend::snapshot::{ColumnSnapshot, MysqlPhysicalType};
 use zero_migrate_ir::dialect::{DialectId, MYSQL};
@@ -15,6 +16,66 @@ const DIALECT: DialectId = MYSQL;
 pub(super) struct MysqlSchemaRenderer;
 
 pub(super) static RENDERER: MysqlSchemaRenderer = MysqlSchemaRenderer;
+
+/// The MySQL storage families whose DDL rules differ from every other column.
+///
+/// MySQL 8 refuses a bare literal `DEFAULT` on all four, and refuses a key over
+/// [`Self::Text`] / [`Self::Blob`] with no prefix length (error 1170). Callers
+/// classify the MySQL renderer's output, so this follows physical storage rather
+/// than guessing from an authored type name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MysqlStorage {
+    /// The `TEXT` family.
+    Text,
+    /// The `BLOB` family.
+    Blob,
+    /// `JSON`.
+    Json,
+    /// The spatial family.
+    Geometry,
+    /// Everything else: numeric, temporal, `ENUM`, `CHAR(n)`, `VARCHAR(n)`.
+    Other,
+}
+
+impl MysqlStorage {
+    /// Classify a MySQL base type spelling.
+    fn of(base: &str) -> Self {
+        let upper = base.trim().to_ascii_uppercase();
+        let head = upper
+            .split(|c: char| c == '(' || c.is_ascii_whitespace())
+            .next()
+            .unwrap_or("");
+        match head {
+            "TEXT" | "TINYTEXT" | "MEDIUMTEXT" | "LONGTEXT" => Self::Text,
+            "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" => Self::Blob,
+            "JSON" => Self::Json,
+            "GEOMETRY" | "POINT" | "LINESTRING" | "POLYGON" | "MULTIPOINT" | "MULTILINESTRING"
+            | "MULTIPOLYGON" | "GEOMETRYCOLLECTION" => Self::Geometry,
+            _ => Self::Other,
+        }
+    }
+
+    /// Whether MySQL refuses a bare literal `DEFAULT` on this storage.
+    const fn refuses_literal_default(self) -> bool {
+        matches!(self, Self::Text | Self::Blob | Self::Json | Self::Geometry)
+    }
+
+    /// Whether MySQL refuses a key over this storage with no prefix length.
+    const fn refuses_key_without_prefix_length(self) -> bool {
+        matches!(self, Self::Text | Self::Blob)
+    }
+
+    /// The human-facing name used in a refusal.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Text => "TEXT",
+            Self::Blob => "BLOB",
+            Self::Json => "JSON",
+            Self::Geometry => "GEOMETRY",
+            Self::Other => "other",
+        }
+    }
+}
 
 impl SchemaRenderer for MysqlSchemaRenderer {
     fn dialect(&self) -> DialectId {
@@ -35,6 +96,14 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         None
     }
 
+    fn table_rebuild_policy(
+        &self,
+    ) -> Option<&'static dyn zero_migrate_backend::table_rebuild::TableRebuildPolicy> {
+        // MySQL's declarative strategy refuses changes that require a complete
+        // column/table restatement; it does not borrow SQLite's rebuild grammar.
+        None
+    }
+
     fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
         format!("{}.{}", self.quote_ident(app_id), self.quote_ident(target))
     }
@@ -50,12 +119,14 @@ impl SchemaRenderer for MysqlSchemaRenderer {
 
         let rendered = if c.unbounded_text {
             "text".to_string()
+        } else if matches!(c.case_sensitive, Some(false))
+            && c.data_type.eq_ignore_ascii_case("text")
+        {
+            // Keep the moved renderer's ordering exact: case-insensitive text
+            // selected TEXT before a descriptor type definition was consulted.
+            "text".to_string()
         } else if let Some(def) = &c.type_def {
             mysql_base_column_type_for_def(def)
-        } else if matches!(c.case_sensitive, Some(false))
-            && (c.authored_type || c.data_type.eq_ignore_ascii_case("text"))
-        {
-            "text".to_string()
         } else {
             mysql_ddl_type(&c.data_type)
         };
@@ -118,6 +189,17 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     fn finalize_column_snapshot(&self, column: &mut ColumnSnapshot) {
         let rendered = self.column_type(column, false);
         column.mysql_physical_type = Some(MysqlPhysicalType::parse(&rendered));
+        if column.type_def.is_some() {
+            // `type_def` is the neutral compiler input, not durable snapshot
+            // identity. MySQL needs more than its canonical `data_type` to retain
+            // bounds and temporal/decimal parameters, so consume the token into the
+            // existing exact DDL-spelling carrier before dropping it. The stored
+            // value is the renderer's answer verbatim, including its already-pinned
+            // collation; the override path is therefore byte-identical on every
+            // later render.
+            column.ddl_type_override = Some(rendered);
+            column.type_def = None;
+        }
     }
 
     /// MySQL cannot build the derived indexes over these BLOB-backed columns
@@ -206,6 +288,62 @@ impl SchemaRenderer for MysqlSchemaRenderer {
             }
         }
         Ok(())
+    }
+
+    fn unprefixed_key_storage_refusal(
+        &self,
+        position: &str,
+        table: &str,
+        column: &str,
+        evidence: KeyStorageEvidence<'_>,
+    ) -> Option<StorageValidationRefusal> {
+        let (storage, witness) = match evidence {
+            KeyStorageEvidence::RenderedType(rendered) => {
+                (MysqlStorage::of(rendered), "renders as MySQL")
+            }
+            KeyStorageEvidence::CatalogColumn(column) => {
+                let MysqlPhysicalType::Lob { tier } = column.mysql_physical_type.as_ref()? else {
+                    return None;
+                };
+                (MysqlStorage::of(tier), "the live MySQL catalog reports as")
+            }
+        };
+        if !storage.refuses_key_without_prefix_length() {
+            return None;
+        }
+        Some(StorageValidationRefusal {
+            reason: format!(
+                "{position} keys {table}.{column}, which {witness} {} storage; \
+                 MySQL refuses a key over a TEXT or BLOB column with no prefix length",
+                storage.label()
+            ),
+            suggested_fix:
+                "bound the column with t.string({ length }) so it renders VARCHAR, or use a \
+                            dialectal PostgreSQL/SQLite leg"
+                    .to_string(),
+        })
+    }
+
+    fn literal_default_storage_refusal(
+        &self,
+        column: &str,
+        rendered_type: &str,
+        rendered_default: &str,
+    ) -> Option<StorageValidationRefusal> {
+        let storage = MysqlStorage::of(rendered_type);
+        if !storage.refuses_literal_default() || rendered_default.trim_start().starts_with('(') {
+            return None;
+        }
+        Some(StorageValidationRefusal {
+            reason: format!(
+                "column {column:?} declares the literal default {rendered_default} but renders as MySQL {} \
+                 storage; MySQL refuses a literal DEFAULT on TEXT, BLOB, JSON, and GEOMETRY columns",
+                storage.label()
+            ),
+            suggested_fix: "drop the default for MySQL, bound the column with t.string({ length }) so it renders \
+                            VARCHAR, or use a dialectal PostgreSQL/SQLite leg"
+                .to_string(),
+        })
     }
 
     fn existing_column_change_strategy(
@@ -335,6 +473,38 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         _schema: &serde_json::Value,
     ) -> Vec<String> {
         Vec::new()
+    }
+
+    fn add_foreign_key_statement(
+        &self,
+        _schema: &str,
+        _table: &str,
+        _clause: &str,
+    ) -> Result<String, &'static str> {
+        Err("MySQL register-model foreign-key changes are not live-rendered")
+    }
+
+    fn drop_foreign_key_if_exists_statement(
+        &self,
+        _schema: &str,
+        _table: &str,
+        _name: &str,
+    ) -> Result<String, &'static str> {
+        Err("MySQL has no DROP FOREIGN KEY IF EXISTS grammar")
+    }
+
+    fn add_column_if_not_exists_statements(
+        &self,
+        _request: AddColumnIfNotExistsRequest<'_>,
+    ) -> Result<Vec<String>, &'static str> {
+        Err("MySQL register-model column changes are not live-rendered")
+    }
+
+    fn create_index_if_not_exists_statement(
+        &self,
+        _request: CreateIndexIfNotExistsRequest<'_>,
+    ) -> Result<String, &'static str> {
+        Err("MySQL has no concurrent index-build grammar")
     }
 }
 

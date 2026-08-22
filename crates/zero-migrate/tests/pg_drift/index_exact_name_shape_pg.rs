@@ -30,10 +30,23 @@ use std::collections::HashMap;
 use crate::support::PgDevSession;
 
 use zero_migrate::{
-    desired_snapshot, snapshot_schema, Approval, CollectionDescriptor, DeclarativeAuthor,
-    DeclarativeError, EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig,
-    IndexDescriptor, MigrationEngine, PostgresBackend, SqlDialect,
+    snapshot_schema, Approval, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
+    EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
+    MigrationEngine, PostgresBackend,
 };
+
+fn desired_snapshot(
+    project_schema: &str,
+    descriptors: &[CollectionDescriptor],
+    effective: &EffectivePolicy,
+) -> Result<zero_migrate::DesiredSchema, DeclarativeError> {
+    zero_migrate::desired_snapshot_for_dialect(
+        project_schema,
+        descriptors,
+        &zero_migrate::POSTGRES,
+        effective,
+    )
+}
 
 /// The table every arm deploys.
 const TABLE: &str = "zz_idx_shape";
@@ -109,12 +122,16 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     )
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
-    DeclarativeAuthor::new(cfg.project_schema.clone(), "app_test")
+    DeclarativeAuthor::new_for_dialect(
+        cfg.project_schema.clone(),
+        "app_test",
+        zero_migrate::POSTGRES,
+    )
 }
 
 /// The collection every arm declares: two plain columns and one plain B-tree index
@@ -159,9 +176,13 @@ async fn deploy(session: &PgDevSession, cfg: &ExecutorConfig, engine: &Migration
         &effective_policy(cfg),
     )
     .expect("desired_snapshot");
-    let live = snapshot_schema(session, &cfg.project_schema)
-        .await
-        .expect("snapshot live");
+    let live = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -235,9 +256,13 @@ async fn replan(
         &effective_policy(cfg),
     )
     .expect("desired_snapshot");
-    let live = snapshot_schema(session, &cfg.project_schema)
-        .await
-        .expect("snapshot live (after)");
+    let live = snapshot_schema(
+        &zero_migrate_ir::dialect::POSTGRES,
+        session,
+        &cfg.project_schema,
+    )
+    .await
+    .expect("snapshot live (after)");
     engine.plan_declarative(
         &desired,
         &live,

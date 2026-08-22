@@ -10,7 +10,7 @@ use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
 use zero_migrate::{
     AlterPrimaryKeyStep, Approval, ApprovalScope, IrAuthor, LiveSchema, MigrationEngine, PlanStep,
-    SqlDialect, SqliteBackend,
+    SqliteBackend,
 };
 
 struct Paths {
@@ -51,7 +51,7 @@ fn step(name: &str, action: serde_json::Value) -> AlterPrimaryKeyStep {
     let plan = IrAuthor::new(
         "app",
         "app_test",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("app"),
     )
     .lower_plan(&ir, &LiveSchema::default())

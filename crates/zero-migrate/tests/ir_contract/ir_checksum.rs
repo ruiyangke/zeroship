@@ -524,7 +524,7 @@ fn of_and_of_ir_never_collide_even_with_equal_length_regions() {
     );
 }
 
-/// SqlDialect-stability (spec line 1267): a portable migration's `of_ir` is
+/// Dialect stability (spec line 1267): a portable migration's `of_ir` is
 /// IDENTICAL across the PG and `SQLite` renders, because `of_ir` is dialect-neutral
 /// by construction (no dialect parameter; it hashes the neutral op list + the
 /// derived-then-overridden flags). This pins the single-artifact / single-checksum

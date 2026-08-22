@@ -63,7 +63,6 @@
 //! one is the provenance half. Neither replaces the other.
 
 use zero_migrate::render::sql_preview::{render_ir_envelope_sql_statements, PreviewOpts};
-use zero_migrate::schema::query::SqlDialect;
 
 /// A trigger whose body reaches every identifier quote in the SQLite trigger path.
 const TRIGGER_IR: &str = r#"{
@@ -81,7 +80,7 @@ const TRIGGER_IR: &str = r#"{
   ]
 }"#;
 
-fn statements(ir: &str, dialect: SqlDialect) -> Vec<String> {
+fn statements(ir: &str, dialect: &zero_migrate::DialectId) -> Vec<String> {
     let opts = PreviewOpts {
         default_schema: "public".to_string(),
         owner_app: "app_sqlite_trigger_render_bytes".to_string(),
@@ -106,7 +105,7 @@ fn statements(ir: &str, dialect: SqlDialect) -> Vec<String> {
 /// that is already deployed.
 #[test]
 fn a_sqlite_trigger_renders_these_exact_bytes() {
-    let rendered = statements(TRIGGER_IR, SqlDialect::Sqlite);
+    let rendered = statements(TRIGGER_IR, &zero_migrate::SQLITE);
 
     let create = rendered
         .iter()
@@ -142,7 +141,7 @@ fn a_sqlite_trigger_renders_these_exact_bytes() {
 /// the invariant that no such edit is allowed to drop.
 #[test]
 fn no_identifier_in_a_rendered_sqlite_trigger_is_left_bare() {
-    let rendered = statements(TRIGGER_IR, SqlDialect::Sqlite);
+    let rendered = statements(TRIGGER_IR, &zero_migrate::SQLITE);
     let create = rendered
         .iter()
         .find(|s| s.contains("CREATE TRIGGER"))

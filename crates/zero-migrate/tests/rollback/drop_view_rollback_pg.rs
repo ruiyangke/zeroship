@@ -28,7 +28,7 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, snapshot_schema, Approval, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, MigrationEngine, PostgresBackend, SqlDialect,
+    LiveSchema, MigrationEngine, PostgresBackend,
 };
 
 const OWNER: &str = "app_drop_view_rollback_pg";
@@ -123,14 +123,14 @@ async fn apply_doc_under(
     approval: Approval,
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, policy);
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, policy);
     // Through the AUTHORIZED entry, the same one `IrAuthor` uses: a privileged
     // primitive's grant is read off the charter, and the plain `load_ir_document`
     // falls back to the confined creator profile, which grants none of them.
     let document = zero_migrate::model::load::load_ir_document_authorized(
         ir,
         OWNER,
-        zero_migrate::model::validate::SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         reg,
         None,
         Some(zero_migrate::model::validate::VendorAuthority {
@@ -139,8 +139,13 @@ async fn apply_doc_under(
         }),
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, policy)
-        .map_err(|error| format!("fold the applied history: {error}"))?;
+    let folded = fold_ops(
+        history,
+        &zero_migrate::POSTGRES,
+        &cfg.project_schema,
+        policy,
+    )
+    .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     history.extend(document.ops.iter().cloned());
     let plan = author
@@ -169,7 +174,7 @@ async fn apply_doc_under(
 
 /// The view's live body as `pg_get_viewdef` reports it, or `None` when absent.
 async fn live_view_body(session: &PgDevSession, schema: &str) -> Result<Option<String>, String> {
-    let snapshot = snapshot_schema(session, schema)
+    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, schema)
         .await
         .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
     Ok(snapshot
@@ -257,7 +262,7 @@ async fn rolling_back_a_dropped_view_restores_it_on_postgres() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                SqlDialect::Postgres.id(),
+                zero_migrate::POSTGRES.clone(),
             ))
             .as_ref(),
         )
@@ -489,7 +494,7 @@ async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                SqlDialect::Postgres.id(),
+                zero_migrate::POSTGRES.clone(),
             ))
             .as_ref(),
         )
@@ -648,7 +653,7 @@ async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refus
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 policy.clone(),
-                SqlDialect::Postgres.id(),
+                zero_migrate::POSTGRES.clone(),
             ))
             .as_ref(),
         )
@@ -769,7 +774,7 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                SqlDialect::Postgres.id(),
+                zero_migrate::POSTGRES.clone(),
             ))
             .as_ref(),
         )

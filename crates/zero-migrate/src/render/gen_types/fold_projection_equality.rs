@@ -60,7 +60,7 @@
 use std::collections::BTreeMap;
 
 use super::differential_corpus::{
-    parse, policy, read_golden, CASES, DIALECTS, SCHEMA, STEMS, STREAMS,
+    dialect_label, parse, policy, read_golden, CASES, DIALECTS, SCHEMA, STEMS, STREAMS,
 };
 use crate::model::ir::Op;
 use crate::model::snapshot::{
@@ -68,7 +68,7 @@ use crate::model::snapshot::{
 };
 use crate::render::fold::fold_ops;
 use crate::render::fold::single_fold;
-use crate::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, POSTGRES};
 
 /// The projections still measurable here, named for the walker each must reproduce.
 ///
@@ -105,7 +105,7 @@ type Answer = Result<String, String>;
 fn walker_answer(
     projection: Projection,
     ops: &[Op],
-    dialect: SqlDialect,
+    dialect: &DialectId,
     confined: bool,
 ) -> Answer {
     let effective = policy(confined);
@@ -194,7 +194,7 @@ fn corpus_streams() -> Vec<(String, Vec<Op>, bool)> {
     out
 }
 
-/// One aggregated observation: `stream|SqlDialect|projection`, over every PREFIX.
+/// One aggregated observation: `stream|dialect|projection`, over every PREFIX.
 struct Measured {
     key: String,
     equal: usize,
@@ -208,7 +208,7 @@ struct Measured {
 fn measure() -> Vec<Measured> {
     let mut out = Vec::new();
     for (name, ops, confined) in corpus_streams() {
-        for dialect in DIALECTS {
+        for dialect in &DIALECTS {
             let effective = policy(confined);
             // ONE fold per prefix, four projections read from it. Folding once per
             // projection would be four traversals, which is the thing being removed.
@@ -220,7 +220,7 @@ fn measure() -> Vec<Measured> {
                 .collect();
             for projection in PROJECTIONS {
                 let mut measured = Measured {
-                    key: format!("{name}|{dialect:?}|{}", projection.label()),
+                    key: format!("{name}|{}|{}", dialect_label(dialect), projection.label()),
                     equal: 0,
                     differs: 0,
                     both_refused: 0,
@@ -292,7 +292,7 @@ enum Side {
     ByDesign(&'static str),
 }
 
-/// One recorded divergence, `stream|SqlDialect|projection`.
+/// One recorded divergence, `stream|dialect|projection`.
 struct Divergence {
     key: &'static str,
     /// The first prefix length at which the two texts differ.
@@ -776,7 +776,7 @@ fn the_neutral_vendor_split_loses_no_field_on_a_folded_shape() {
     let mut differences: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut compared = 0usize;
     for (name, ops, confined) in corpus_streams() {
-        for dialect in DIALECTS {
+        for dialect in &DIALECTS {
             let effective = policy(confined);
             let Ok(folded) = single_fold::fold(&ops, dialect, SCHEMA, &effective) else {
                 continue;
@@ -788,7 +788,7 @@ fn the_neutral_vendor_split_loses_no_field_on_a_folded_shape() {
             for (table, theirs) in &walker.tables {
                 let Some(mine) = projected.tables.get(table) else {
                     differences
-                        .entry(format!("{name}|{dialect:?}|{table}"))
+                        .entry(format!("{name}|{}|{table}", dialect_label(dialect)))
                         .or_default()
                         .push("<table missing from the projection>".to_string());
                     continue;
@@ -797,7 +797,7 @@ fn the_neutral_vendor_split_loses_no_field_on_a_folded_shape() {
                 let fields = table_field_differences(mine, theirs);
                 if !fields.is_empty() {
                     differences
-                        .entry(format!("{name}|{dialect:?}|{table}"))
+                        .entry(format!("{name}|{}|{table}", dialect_label(dialect)))
                         .or_default()
                         .extend(fields);
                 }
@@ -850,7 +850,7 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
     let mut refused = 0usize;
     let mut accepted = 0usize;
     for (name, ops, confined) in corpus_streams() {
-        for dialect in DIALECTS {
+        for dialect in &DIALECTS {
             let effective = policy(confined);
             for i in 0..=ops.len() {
                 let prefix = &ops[..i];
@@ -861,16 +861,23 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
                         refused += 1;
                         if mine.to_string() != catalog.to_string() {
                             different_reason.push(format!(
-                                "{name}|{dialect:?}|{i} ops -> fold: {mine} / catalog: {catalog}"
+                                "{name}|{}|{i} ops -> fold: {mine} / catalog: {catalog}",
+                                dialect_label(dialect)
                             ));
                         }
                     }
                     (Ok(_), Ok(_)) => accepted += 1,
                     (Err(mine), Ok(_)) => {
-                        fold_only.push(format!("{name}|{dialect:?}|{i} ops -> {mine}"));
+                        fold_only.push(format!(
+                            "{name}|{}|{i} ops -> {mine}",
+                            dialect_label(dialect)
+                        ));
                     }
                     (Ok(_), Err(catalog)) => {
-                        catalog_only.push(format!("{name}|{dialect:?}|{i} ops -> {catalog}"));
+                        catalog_only.push(format!(
+                            "{name}|{}|{i} ops -> {catalog}",
+                            dialect_label(dialect)
+                        ));
                     }
                 }
             }
@@ -976,7 +983,7 @@ fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint(
     let ops = &stream[..5];
     let effective = policy(false);
 
-    let catalog = fold_ops(ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold_ops");
+    let catalog = fold_ops(ops, &POSTGRES, SCHEMA, &effective).expect("fold_ops");
     assert!(
         !catalog.tables["users"]
             .constraints
@@ -986,7 +993,7 @@ fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint(
          evidence of anything"
     );
 
-    let folded = single_fold::fold(ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold");
+    let folded = single_fold::fold(ops, &POSTGRES, SCHEMA, &effective).expect("fold");
     assert_eq!(
         folded.project_field_defs()["users"]["email"].get("unique"),
         None,
@@ -997,8 +1004,8 @@ fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint(
     // The SHIPPED consequence, not just the intermediate. `schema.runtime.json` is what
     // a deployed app installs its `env.db` types from, and - on SQLite - the same map
     // is what a table rebuild renders its `CREATE TABLE` from.
-    let artifacts = super::render_artifacts(ops, SqlDialect::Postgres, SCHEMA, &effective)
-        .expect("render artifacts");
+    let artifacts =
+        super::render_artifacts(ops, &POSTGRES, SCHEMA, &effective).expect("render artifacts");
     let runtime: serde_json::Value =
         serde_json::from_str(&artifacts.runtime_json).expect("runtime.json parses");
     assert_eq!(
@@ -1038,7 +1045,7 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
     // The bound is really recovered while the constraint is live, or the drop below
     // proves nothing. Measured through the projection, since the walker that used to
     // answer this is gone.
-    let with_check = single_fold::fold(&ops[..2], SqlDialect::Postgres, SCHEMA, &effective)
+    let with_check = single_fold::fold(&ops[..2], &POSTGRES, SCHEMA, &effective)
         .expect("fold")
         .project_field_defs();
     assert_eq!(
@@ -1047,7 +1054,7 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
         "the CHECK's lower bound reaches the FieldDef map while the constraint exists"
     );
 
-    let catalog = fold_ops(&ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold_ops");
+    let catalog = fold_ops(&ops, &POSTGRES, SCHEMA, &effective).expect("fold_ops");
     assert!(
         !catalog.tables["scores"]
             .constraints
@@ -1056,7 +1063,7 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
         "the catalog oracle must agree the constraint is gone"
     );
 
-    let folded = single_fold::fold(&ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold");
+    let folded = single_fold::fold(&ops, &POSTGRES, SCHEMA, &effective).expect("fold");
     let projected = folded.project_field_defs();
     assert_eq!(
         projected["scores"]["score"].get("min"),
@@ -1090,7 +1097,7 @@ fn the_catalog_and_the_authoring_artifact_agree_about_an_altered_primary_key() {
     let ops = &stream[..2];
     let effective = policy(false);
 
-    let catalog = fold_ops(ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold_ops");
+    let catalog = fold_ops(ops, &POSTGRES, SCHEMA, &effective).expect("fold_ops");
     let primary_key = catalog.tables["orders"]
         .constraints
         .iter()
@@ -1103,7 +1110,7 @@ fn the_catalog_and_the_authoring_artifact_agree_about_an_altered_primary_key() {
          anything: {primary_key}"
     );
 
-    let folded = single_fold::fold(ops, SqlDialect::Postgres, SCHEMA, &effective).expect("fold");
+    let folded = single_fold::fold(ops, &POSTGRES, SCHEMA, &effective).expect("fold");
     assert_eq!(
         folded.project_authoring_tables()["orders"]
             .primary_key
@@ -1115,8 +1122,8 @@ fn the_catalog_and_the_authoring_artifact_agree_about_an_altered_primary_key() {
 
     // The shipped consequence, not just the intermediate. `env.db.ts` is what an app
     // is regenerated from.
-    let artifacts = super::render_artifacts(ops, SqlDialect::Postgres, SCHEMA, &effective)
-        .expect("render artifacts");
+    let artifacts =
+        super::render_artifacts(ops, &POSTGRES, SCHEMA, &effective).expect("render artifacts");
     // A single-column key renders as a COLUMN modifier (`render_table`'s
     // `single_primary_key` path), so the key is visible as `.primaryKey()` on a column
     // rather than as a table-level clause.

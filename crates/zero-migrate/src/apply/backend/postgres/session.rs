@@ -381,7 +381,7 @@ pub(super) fn set_local_session_sql(
         "SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
-        cfg.search_path_clause()?,
+        cfg.search_path_clause(&super::DIALECT)?,
         effective_timeout_ms(cfg, m)?,
         effective_lock_timeout_ms(cfg, m)?,
     ))
@@ -392,7 +392,8 @@ pub(super) fn set_local_session_sql(
 /// caller `RESET ROLE`s before the journal write.
 ///
 /// The migrator role is an engine-supplied identifier, so it is quoted through
-/// the ONE shared engine seam ([`crate::render::dml::quote_ident_checked`]) — fail-closed
+/// the explicit backend seam
+/// ([`crate::render::dml::quote_ident_checked_for_dialect`]) — fail-closed
 /// on an empty / NUL name, byte-identical to the prior `escape_quote_ident` for
 /// every real role.
 pub(super) fn set_local_role_sql(
@@ -405,7 +406,7 @@ pub(super) fn set_local_role_sql(
         .map(|role| {
             Ok(format!(
                 "SET LOCAL ROLE {}",
-                crate::render::dml::quote_ident_checked(role)?
+                crate::render::dml::quote_ident_checked_for_dialect(role, &super::DIALECT)?
             ))
         })
         .transpose()
@@ -421,7 +422,7 @@ fn dml_set_local_session_sql(cfg: &ExecutorConfig, version: &str) -> Result<Stri
          SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
-        cfg.search_path_clause()?,
+        cfg.search_path_clause(&super::DIALECT)?,
         resolve_timeout_ms(
             version,
             "statement_timeout",
@@ -461,7 +462,7 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
 ) -> Result<(), ApplyError> {
     let stmt = format!(
         "SET search_path TO {}; SET statement_timeout = {}; SET lock_timeout = {};",
-        cfg.search_path_clause()?,
+        cfg.search_path_clause(&super::DIALECT)?,
         effective_timeout_ms(cfg, m)?,
         effective_lock_timeout_ms(cfg, m)?,
     );
@@ -669,7 +670,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     let session_sql = set_local_session_sql(cfg, m)?;
     let role_sql = set_local_role_sql(cfg)?;
     if let Some(probe) = &m.existence_guard {
-        authorize_existence_guard_schema(cfg, m, probe.schema())?;
+        authorize_existence_guard_schema(cfg, m, probe.schema(), &super::DIALECT)?;
     }
 
     // `transaction()` needs `&mut Client`; the apply flow owns the connection,
@@ -707,19 +708,22 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     //                     silent skip over a divergence).
     let mut skip_up = false;
     if let Some(probe) = &m.existence_guard {
-        let live = match crate::apply::drift::snapshot_schema_for(conn, probe.schema()).await {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = conn.batch("ROLLBACK").await;
-                // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
-                return Err(match e {
-                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
-                    crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
-                    crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
-                    crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
-                });
-            }
-        };
+        let live =
+            match crate::apply::drift::snapshot_schema_for(conn, probe.schema(), &super::DIALECT)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = conn.batch("ROLLBACK").await;
+                    // Reuse the same DriftError → ApplyError mapping `apply_locked` uses.
+                    return Err(match e {
+                        crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
+                        crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                        crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
+                        crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                    });
+                }
+            };
         match crate::render::existence_probe::decide(
             probe,
             &live,
@@ -813,7 +817,10 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         !supersedes.is_empty(),
         "kind='squash' iff supersedes is non-empty"
     );
-    let meta = crate::render::dml::quote_ident_checked(&cfg.confinement.meta_schema)?;
+    let meta = crate::render::dml::quote_ident_checked_for_dialect(
+        &cfg.confinement.meta_schema,
+        &super::DIALECT,
+    )?;
     if let Err(e) = conn
         .exec(
             &format!(
@@ -966,7 +973,10 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
         return Err(e);
     }
     let exec_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-    let meta = crate::render::dml::quote_ident_checked(&cfg.confinement.meta_schema)?;
+    let meta = crate::render::dml::quote_ident_checked_for_dialect(
+        &cfg.confinement.meta_schema,
+        &super::DIALECT,
+    )?;
     if let Err(e) = conn
         .exec(
             &format!(
@@ -1013,7 +1023,10 @@ async fn insert_supersedes_edges<D: SqlSession>(
     squash_version: &str,
     supersedes: &[&str],
 ) -> Result<(), JournalError> {
-    let meta = crate::render::dml::quote_ident_checked(&cfg.confinement.meta_schema)?;
+    let meta = crate::render::dml::quote_ident_checked_for_dialect(
+        &cfg.confinement.meta_schema,
+        &super::DIALECT,
+    )?;
     for sup in supersedes {
         conn.exec(
             &format!(
@@ -1049,19 +1062,22 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // apply path, so the two-phase path honors the same probe before it writes an
     // inflight marker or runs the bare `up`.
     if let Some(probe) = &m.existence_guard {
-        authorize_existence_guard_schema(cfg, m, probe.schema())?;
+        authorize_existence_guard_schema(cfg, m, probe.schema(), &super::DIALECT)?;
         let probe_started = Instant::now();
-        let live = match crate::apply::drift::snapshot_schema_for(conn, probe.schema()).await {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(match e {
-                    crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
-                    crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
-                    crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
-                    crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
-                });
-            }
-        };
+        let live =
+            match crate::apply::drift::snapshot_schema_for(conn, probe.schema(), &super::DIALECT)
+                .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(match e {
+                        crate::apply::drift::DriftError::Db(db) => ApplyError::Db(db),
+                        crate::apply::drift::DriftError::Journal(j) => ApplyError::Journal(j),
+                        crate::apply::drift::DriftError::Snapshot(s) => ApplyError::Backend(s),
+                        crate::apply::drift::DriftError::Backend(b) => ApplyError::Backend(b),
+                    });
+                }
+            };
         match crate::render::existence_probe::decide(
             probe,
             &live,
@@ -1119,7 +1135,16 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // the next apply would then skip the INVALID-index cleanup, and an interrupted
     // `CREATE INDEX CONCURRENTLY` left INVALID would satisfy `IF NOT EXISTS` and
     // never be rebuilt. Runs as admin (still before the `SET ROLE`).
-    journal::record_started(conn, cfg, version, &m.name, m.checksum.as_str(), applied_by).await?;
+    journal::record_started(
+        conn,
+        cfg,
+        &super::DIALECT,
+        version,
+        &m.name,
+        m.checksum.as_str(),
+        applied_by,
+    )
+    .await?;
 
     let started = Instant::now();
     // Bracket the `<up>` with SET ROLE / RESET ROLE so the migration's DDL
@@ -1128,7 +1153,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // the role never leaks onto the session even if the `<up>` fails — and
     // `apply`'s `restore_session` is an unconditional backstop.
     if let Some(role) = &cfg.confinement.postgres.migrator_role {
-        let role_q = crate::render::dml::quote_ident_checked(role)?;
+        let role_q = crate::render::dml::quote_ident_checked_for_dialect(role, &super::DIALECT)?;
         conn.batch(&format!("SET ROLE {role_q}")).await?;
     }
     let up_result = conn.batch(&m.up).await;
@@ -1198,6 +1223,7 @@ async fn finalize_non_txn<D: SqlSession>(
         journal::record_completed(
             conn,
             cfg,
+            &super::DIALECT,
             journal::CompletedRecord {
                 version,
                 name: &m.name,
@@ -1286,8 +1312,11 @@ async fn recover_non_transactional<D: SqlSession>(
         if is_invalid {
             let stmt = format!(
                 "DROP INDEX IF EXISTS {}.{}",
-                crate::render::dml::quote_ident_checked(&cfg.project_schema)?,
-                crate::render::dml::quote_ident_checked(&idx)?,
+                crate::render::dml::quote_ident_checked_for_dialect(
+                    &cfg.project_schema,
+                    &super::DIALECT,
+                )?,
+                crate::render::dml::quote_ident_checked_for_dialect(&idx, &super::DIALECT)?,
             );
             conn.batch(&stmt).await?;
         }
@@ -1455,15 +1484,12 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     //
     // Guarding engine-synthesized SQL is not novel: the apply path already runs this
     // guard over `up`, which is equally synthesized on the IR path.
-    crate::render::backends::guard_for(
-        &cfg.guard_config()
-            .for_dialect(crate::SqlDialect::Postgres.id()),
-    )
-    .check(down)
-    .map_err(|source| RollbackError::Guard {
-        version: m.version.as_str().to_string(),
-        source,
-    })?;
+    crate::render::backends::guard_for(&cfg.guard_config_for(&super::DIALECT))
+        .check(down)
+        .map_err(|source| RollbackError::Guard {
+            version: m.version.as_str().to_string(),
+            source,
+        })?;
 
     let started = Instant::now();
     // Render the fail-closed engine-identifier quote seams BEFORE `BEGIN`,
@@ -1527,7 +1553,10 @@ async fn append_rolled_back<D: SqlSession>(
     applied_by: &str,
     exec_ms: i64,
 ) -> Result<(), RollbackError> {
-    let meta = crate::render::dml::quote_ident_checked(&cfg.confinement.meta_schema)?;
+    let meta = crate::render::dml::quote_ident_checked_for_dialect(
+        &cfg.confinement.meta_schema,
+        &super::DIALECT,
+    )?;
     conn.exec(
         &format!(
             "INSERT INTO {meta}.schema_migrations

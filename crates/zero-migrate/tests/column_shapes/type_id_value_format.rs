@@ -7,7 +7,7 @@ use crate::support;
 
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
-use zero_migrate::{IrAuthor, LiveSchema, SqlDialect};
+use zero_migrate::{IrAuthor, LiveSchema};
 
 const VALID_BARE: &[&str] = &[
     "00000000000000000000000000",
@@ -69,7 +69,7 @@ fn type_id_ir(table: &str, prefix: &str) -> MigrationIr {
     .expect("TypeID create-table IR must deserialize")
 }
 
-fn lower_create(dialect: SqlDialect, table: &str, prefix: &str) -> String {
+fn lower_create(dialect: &zero_migrate::DialectId, table: &str, prefix: &str) -> String {
     let migrations = IrAuthor::new(
         "app",
         "app_type_id_samples",
@@ -82,7 +82,7 @@ fn lower_create(dialect: SqlDialect, table: &str, prefix: &str) -> String {
     migrations.into_iter().next().unwrap().up
 }
 
-fn lower_add(dialect: SqlDialect, table: &str, prefix: &str) -> String {
+fn lower_add(dialect: &zero_migrate::DialectId, table: &str, prefix: &str) -> String {
     let ir: MigrationIr = serde_json::from_value(serde_json::json!({
         "ir_version": CURRENT_IR_VERSION,
         "name": format!("add_{table}_id"),
@@ -111,28 +111,28 @@ fn lower_add(dialect: SqlDialect, table: &str, prefix: &str) -> String {
 #[test]
 fn type_id_create_table_ddl_is_exact_on_all_dialects() {
     assert_eq!(
-        lower_create(SqlDialect::Postgres, "type_ids", "prefix"),
+        lower_create(&zero_migrate::POSTGRES, "type_ids", "prefix"),
         "CREATE TABLE \"app\".\"type_ids\" (\"id\" text COLLATE \"C\" CHECK (\"id\" IS NULL OR (octet_length(\"id\") = 33 AND (\"id\" COLLATE \"C\") ~ '^prefix_[0-7][0123456789abcdefghjkmnpqrstvwxyz]{25}$')))"
     );
     assert_eq!(
-        lower_create(SqlDialect::Mysql, "type_ids", "prefix"),
+        lower_create(&zero_migrate::MYSQL, "type_ids", "prefix"),
         "CREATE TABLE `app`.`type_ids` (`id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin CHECK (`id` IS NULL OR (CHAR_LENGTH(`id`) = 33 AND REGEXP_LIKE(`id`, '^prefix_[0-7][0123456789abcdefghjkmnpqrstvwxyz]{25}$', 'c'))))"
     );
     assert_eq!(
-        lower_create(SqlDialect::Sqlite, "type_ids", "prefix"),
+        lower_create(&zero_migrate::SQLITE, "type_ids", "prefix"),
         "CREATE TABLE \"type_ids\" (\"id\" TEXT COLLATE BINARY CHECK (\"id\" IS NULL OR (typeof(\"id\") = 'text' AND length(\"id\") = 33 AND length(CAST(\"id\" AS BLOB)) = 33 AND substr(\"id\", 1, 7) = 'prefix_' COLLATE BINARY AND substr(\"id\", 8, 1) GLOB '[0-7]' AND substr(\"id\", 8, 26) NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*')))"
     );
 
     assert_eq!(
-        lower_create(SqlDialect::Postgres, "bare_type_ids", ""),
+        lower_create(&zero_migrate::POSTGRES, "bare_type_ids", ""),
         "CREATE TABLE \"app\".\"bare_type_ids\" (\"id\" text COLLATE \"C\" CHECK (\"id\" IS NULL OR (octet_length(\"id\") = 26 AND (\"id\" COLLATE \"C\") ~ '^[0-7][0123456789abcdefghjkmnpqrstvwxyz]{25}$')))"
     );
     assert_eq!(
-        lower_create(SqlDialect::Mysql, "bare_type_ids", ""),
+        lower_create(&zero_migrate::MYSQL, "bare_type_ids", ""),
         "CREATE TABLE `app`.`bare_type_ids` (`id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin CHECK (`id` IS NULL OR (CHAR_LENGTH(`id`) = 26 AND REGEXP_LIKE(`id`, '^[0-7][0123456789abcdefghjkmnpqrstvwxyz]{25}$', 'c'))))"
     );
     assert_eq!(
-        lower_create(SqlDialect::Sqlite, "bare_type_ids", ""),
+        lower_create(&zero_migrate::SQLITE, "bare_type_ids", ""),
         "CREATE TABLE \"bare_type_ids\" (\"id\" TEXT COLLATE BINARY CHECK (\"id\" IS NULL OR (typeof(\"id\") = 'text' AND length(\"id\") = 26 AND length(CAST(\"id\" AS BLOB)) = 26 AND substr(\"id\", 1, 1) GLOB '[0-7]' AND substr(\"id\", 1, 26) NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*')))"
     );
 }
@@ -140,15 +140,15 @@ fn type_id_create_table_ddl_is_exact_on_all_dialects() {
 #[test]
 fn type_id_add_column_ddl_keeps_the_same_storage_and_check() {
     assert_eq!(
-        lower_add(SqlDialect::Postgres, "type_ids", "prefix"),
+        lower_add(&zero_migrate::POSTGRES, "type_ids", "prefix"),
         "ALTER TABLE \"app\".\"type_ids\" ADD COLUMN \"public_id\" text COLLATE \"C\" CHECK (\"public_id\" IS NULL OR (octet_length(\"public_id\") = 33 AND (\"public_id\" COLLATE \"C\") ~ '^prefix_[0-7][0123456789abcdefghjkmnpqrstvwxyz]{25}$'))"
     );
     assert_eq!(
-        lower_add(SqlDialect::Mysql, "type_ids", "prefix"),
+        lower_add(&zero_migrate::MYSQL, "type_ids", "prefix"),
         "ALTER TABLE `app`.`type_ids` ADD COLUMN `public_id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin CHECK (`public_id` IS NULL OR (CHAR_LENGTH(`public_id`) = 33 AND REGEXP_LIKE(`public_id`, '^prefix_[0-7][0123456789abcdefghjkmnpqrstvwxyz]{25}$', 'c')))"
     );
     assert_eq!(
-        lower_add(SqlDialect::Sqlite, "type_ids", "prefix"),
+        lower_add(&zero_migrate::SQLITE, "type_ids", "prefix"),
         "ALTER TABLE \"type_ids\" ADD COLUMN \"public_id\" TEXT COLLATE BINARY CHECK (\"public_id\" IS NULL OR (typeof(\"public_id\") = 'text' AND length(\"public_id\") = 33 AND length(CAST(\"public_id\" AS BLOB)) = 33 AND substr(\"public_id\", 1, 7) = 'prefix_' COLLATE BINARY AND substr(\"public_id\", 8, 1) GLOB '[0-7]' AND substr(\"public_id\", 8, 26) NOT GLOB '*[^0123456789abcdefghjkmnpqrstvwxyz]*'))"
     );
 }
@@ -157,7 +157,7 @@ fn type_id_add_column_ddl_keeps_the_same_storage_and_check() {
 fn sqlite_enforces_official_type_id_fixtures_and_text_storage() {
     let conn = rusqlite::Connection::open_in_memory().expect("open SQLite");
     for (table, prefix) in [("bare", ""), ("prefixed", "prefix"), ("split", "pre_fix")] {
-        conn.execute_batch(&lower_create(SqlDialect::Sqlite, table, prefix))
+        conn.execute_batch(&lower_create(&zero_migrate::SQLITE, table, prefix))
             .unwrap_or_else(|error| panic!("apply TypeID table {table}: {error}"));
     }
 
@@ -237,7 +237,7 @@ async fn postgres_enforces_official_type_id_fixtures() {
             let migrations = IrAuthor::new(
                 &schema,
                 "app_type_id_samples",
-                SqlDialect::Postgres,
+                &zero_migrate::POSTGRES,
                 &support::no_inject(&schema),
             )
             .lower(&ir, &LiveSchema::default())

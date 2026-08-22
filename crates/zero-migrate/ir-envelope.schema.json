@@ -4116,7 +4116,7 @@
       ]
     },
     "SynthFn": {
-      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins. CLOSED. `splitPart` is admitted only within its pinned\nsingle-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);\n`concatWs` is the NULL-skipping join; `now` is an apply-time DB-evaluated\nscalar (the structured replacement for a frozen `Date.now()` literal).",
+      "description": "The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the\nengine pins. CLOSED. `splitPart` has dialect-neutral literal grammar and a\nbackend-owned portability envelope; `concatWs` is the NULL-skipping join;\n`now` is an apply-time DB-evaluated scalar (the structured replacement for a\nfrozen `Date.now()` literal).",
       "oneOf": [
         {
           "description": "NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (`SQLite`).",
@@ -4124,7 +4124,7 @@
           "const": "concatWs"
         },
         {
-          "description": "`split_part` (PG) / pinned `instr`/`substr` unroll (`SQLite`), in-envelope only.",
+          "description": "A backend-owned split operation, admitted only within that backend's envelope.",
           "type": "string",
           "const": "splitPart"
         },

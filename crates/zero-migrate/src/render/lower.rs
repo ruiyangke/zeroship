@@ -36,12 +36,12 @@ use crate::model::backfill::{
 };
 use crate::model::expr::Expr;
 use crate::model::ir::{
-    ColType, ColumnCollation, ColumnOrExpr, CommentTarget, EmptyContainerKind, ExclusionElement,
-    ExclusionMethod, ExclusionOperator, ExistenceGuard, IndexElement, IndexMethod,
-    IndexStorageParams, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, Join,
-    MigrationIr, Op, OrderDir, OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec,
-    RefAction, SafeI64, SelectAst, SelectItem, SequenceOwnedBy, TableRef, TableRuntimeOptions,
-    TriggerAction, TriggerStmt, ValueFormat, VectorMetric, ViewQuery,
+    ColType, ColumnCollation, ColumnOrExpr, EmptyContainerKind, ExclusionElement, ExclusionMethod,
+    ExclusionOperator, ExistenceGuard, IndexElement, IndexMethod, IndexStorageParams, IrColumn,
+    IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrMask, Join, MigrationIr, Op, OrderDir,
+    OrderItem, PartitionBoundValue, PartitionBounds, PartitionSpec, RefAction, SelectAst,
+    SelectItem, TableRef, TableRuntimeOptions, TriggerAction, TriggerStmt, ValueFormat,
+    VectorMetric, ViewQuery,
 };
 use crate::model::load::ir_created_tables;
 use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
@@ -57,7 +57,7 @@ use crate::render::declarative::{
     LoweredCreateTable, LoweredUnit,
 };
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
-use crate::render::renderer::{Capability, DmlRenderer};
+use crate::render::renderer::{Capability, DmlRenderer, MaterializedNamedTypeOp};
 use crate::render::step::{
     AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, PlanStep, RenameStep,
     SynchronizeIdentityStep,
@@ -922,7 +922,7 @@ fn limited_delete_identity(snapshot: &TableSnapshot) -> Option<Vec<String>> {
             else {
                 continue;
             };
-            if sqlite_identity_columns_are_safe(snapshot, &columns) {
+            if identity_columns_are_safe(snapshot, &columns) {
                 return Some(columns);
             }
         }
@@ -947,14 +947,14 @@ fn limited_delete_identity(snapshot: &TableSnapshot) -> Option<Vec<String>> {
             })
             .collect();
         let columns = columns?;
-        if columns != index.columns || !sqlite_identity_columns_are_safe(snapshot, &columns) {
+        if columns != index.columns || !identity_columns_are_safe(snapshot, &columns) {
             return None;
         }
         Some(columns)
     })
 }
 
-fn sqlite_identity_columns_are_safe(snapshot: &TableSnapshot, columns: &[String]) -> bool {
+fn identity_columns_are_safe(snapshot: &TableSnapshot, columns: &[String]) -> bool {
     if columns.is_empty() {
         return false;
     }
@@ -1395,114 +1395,30 @@ impl NamedTypeRegistry {
     }
 }
 
-pub(crate) fn render_enum_values(values: &[String], dialect: &DialectId) -> String {
-    let renderer = crate::render::backends::schema_renderer(dialect);
-    values
-        .iter()
-        .map(|value| renderer.schema_grammar_string_literal(value))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn quote_engine_ident(what: &'static str, ident: &str) -> Result<String, IrLowerError> {
-    crate::render::dml::quote_ident_checked(ident)
-        .map_err(|e| crate::render::dml::DmlError::InvalidIdentifier {
-            what,
-            value: e.value,
-        })
-        .map_err(IrLowerError::DmlAssemble)
-}
-
-fn pg_type_qname(schema: &str, name: &str) -> Result<String, IrLowerError> {
-    Ok(format!(
-        "{}.{}",
-        quote_engine_ident("schema", schema)?,
-        quote_engine_ident("type", name)?
-    ))
-}
-
-fn pg_sequence_qname(schema: &str, name: &str) -> Result<String, IrLowerError> {
-    Ok(format!(
-        "{}.{}",
-        quote_engine_ident("schema", schema)?,
-        quote_engine_ident("sequence", name)?
-    ))
-}
-
-fn pg_type_data_type(schema: &str, name: &str) -> String {
-    format!("{schema}.{name}")
-}
-
-/// Resolve the catalog-comparable and DDL spellings of a PostgreSQL named type
-/// reference carried directly by a column operation.
+/// Resolve the catalog-comparable and DDL spellings of a named type reference
+/// carried directly by a column operation.
 ///
 /// Named enum/domain references are self-describing: their [`ColType`] carries
 /// the type name and an optional schema. A missing schema means the operation's
 /// default project schema. This helper deliberately does not consult the
 /// per-envelope named-type registry, because a rename commonly references a
 /// type created by an earlier migration. The live source column remains the
-/// authority that proves the referenced type actually exists and matches.
+/// authority that proves the referenced type actually exists and matches. The
+/// selected backend owns whether this type family is materialized and how its
+/// catalog and DDL spellings are formed.
 ///
 /// # Errors
 /// Returns [`IrLowerError::DmlAssemble`] when the schema or type name is not a
 /// valid SQL identifier.
 #[doc(hidden)]
-pub fn postgres_named_type_metadata(
+pub fn named_type_metadata(
     ty: &ColType,
+    dialect: &DialectId,
     default_schema: &str,
 ) -> Result<Option<(String, String)>, IrLowerError> {
-    let (name, schema) = match ty {
-        ColType::Enum { name, schema } | ColType::Domain { name, schema } => {
-            (name, schema.as_deref().unwrap_or(default_schema))
-        }
-        _ => return Ok(None),
-    };
-    Ok(Some((
-        pg_type_data_type(schema, name),
-        pg_type_qname(schema, name)?,
-    )))
-}
-
-/// Canonicalize PostgreSQL's built-in type aliases without discarding type
-/// modifiers. This is shared by fresh rename lowering and the live resolver so
-/// both seams accept the same equivalent spellings while keeping, for example,
-/// `numeric(20,4)` distinct from `numeric(20,2)`.
-#[doc(hidden)]
-#[must_use]
-pub fn canonical_postgres_type_spelling(ty: &str) -> String {
-    let compact: String = ty
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect();
-    const ALIASES: &[(&str, &str)] = &[
-        ("timestampwithtimezone", "timestamptz"),
-        ("timestampwithouttimezone", "timestamp"),
-        ("timewithtimezone", "timetz"),
-        ("timewithouttimezone", "time"),
-        ("charactervarying", "varchar"),
-        ("character", "char"),
-        ("doubleprecision", "float8"),
-        ("decimal", "numeric"),
-        ("smallserial", "smallint"),
-        ("bigserial", "bigint"),
-        ("serial", "integer"),
-        ("int2", "smallint"),
-        ("int4", "integer"),
-        ("int8", "bigint"),
-        ("int", "integer"),
-        ("bool", "boolean"),
-        ("float4", "real"),
-    ];
-    for (alias, canonical) in ALIASES {
-        let Some(suffix) = compact.strip_prefix(alias) else {
-            continue;
-        };
-        if suffix.is_empty() || suffix.starts_with('(') || suffix.starts_with('[') {
-            return format!("{canonical}{suffix}");
-        }
-    }
-    compact
+    crate::render::backends::vendor(dialect)
+        .catalog_fold
+        .materialized_named_type_metadata(ty, default_schema)
 }
 
 pub(crate) fn render_ir_default(
@@ -2809,7 +2725,7 @@ impl IrAuthor {
             catalog,
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
-        crate::model::validate::validate_mysql_key_storage_for_lower(
+        crate::model::validate::validate_vendor_key_storage_for_lower(
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -2817,9 +2733,13 @@ impl IrAuthor {
             self.default_schema.as_deref(),
             catalog,
         )
-        .map_err(|error| IrLowerError::MysqlKeyStorage(Box::new(error)))?;
+        .map_err(|error| IrLowerError::KeyStorage(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
-        self.refuse_repeat_sqlite_rename_target(ir)?;
+        if let Some(policy) =
+            crate::render::backends::schema_renderer(&self.dialect).table_rebuild_policy()
+        {
+            policy.refuse_repeat_column_rename_target(&self.dialect, &ir.ops)?;
+        }
         let mut out: Vec<PlanStep> = Vec::new();
         let mut live_tables: BTreeSet<String> = live.tables.clone();
         let mut working_live = live.clone();
@@ -3049,7 +2969,10 @@ impl IrAuthor {
         // This transient validation carrier retains authored integer width even
         // on engines whose physical catalog spelling collapses every width. The
         // backend policy decides whether the neutral token matters.
-        if matches!(column.ty, ColType::SmallInt | ColType::Int | ColType::BigInt) {
+        if matches!(
+            column.ty,
+            ColType::SmallInt | ColType::Int | ColType::BigInt
+        ) {
             let (token, _) = col_type_to_token(&column.ty);
             snapshot.type_def = Some(serde_json::json!({ "type": token }));
         }
@@ -3679,66 +3602,6 @@ impl IrAuthor {
     /// - [`IrLowerError::Snapshot`] — the shared builder rejected the op's fields.
     /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML).
     /// - rename-lowering errors (see [`lower_steps`](Self::lower_steps)).
-    /// Refuse two `renameColumn` ops on ONE table in ONE envelope, on SQLite only.
-    ///
-    /// SQLite reconciles a rename with the 12-step table REBUILD, whose `CREATE` is
-    /// rendered from [`crate::model::snapshot::TableSnapshot::stored_create_sql`] -
-    /// the verbatim `sqlite_master.sql` text. That text is byte-faithful on purpose,
-    /// so the rebuild can hand the identifier rewrite to SQLite's own `ALTER TABLE
-    /// ... RENAME COLUMN` parser and let CHECKs, generated expressions, indexes and
-    /// triggers follow the rename untouched. The engine therefore cannot synthesise
-    /// an updated version of it for a SECOND rebuild in the same envelope without
-    /// doing the lossy SQL rewrite that design avoids.
-    ///
-    /// MEASURED before adding this: the second rebuild kept the first rebuild's
-    /// pre-rename `CREATE` while its value-copy list had moved on, and SQLite
-    /// rejected the mismatch with `table people__zero_migrate_rebuild has no column
-    /// named handle`. The transaction rolls back, so nothing was corrupted - but the
-    /// migration could not apply and the error named an intermediate table rather
-    /// than the repair.
-    ///
-    /// Deliberately NOT "two ops on one table": two `addColumn`s on one table lower
-    /// and apply fine today, and refusing them would reject working migrations. Only
-    /// the shape that was measured to fail is refused. The wider question - that
-    /// several other arms also read live structure an earlier op can invalidate - is
-    /// its own ticket, not this gate.
-    fn refuse_repeat_sqlite_rename_target(&self, ir: &MigrationIr) -> Result<(), IrLowerError> {
-        if self.backend.supports(Capability::NativeAlterColumn) {
-            return Ok(());
-        }
-        // Descends `Op::Dialectal` for the SAME reason the lowering below does: a
-        // rename authored inside a leg is a rename SQLite runs, and it rebuilds the
-        // table from the same stored CREATE text. Scanning the raw list let a wrapper
-        // hide the second rename from this preflight while the rebuild still happened,
-        // so the hazard survived and only the refusal that names it was lost.
-        //
-        // The SELECTED leg, not every leg: a rename sitting in the PostgreSQL leg is
-        // never executed here and rebuilds nothing, so refusing on it would reject a
-        // migration that is correct on this target. Selection goes through the fold's
-        // own `selected_dialectal_leg` rather than a second exact-id lookup rule
-        // written here, so the two cannot drift.
-        //
-        // One level deep is complete: a leg cannot hold a wrapper, refused by the
-        // validator before lowering is reached.
-        let mut seen: BTreeSet<&str> = BTreeSet::new();
-        for op in &ir.ops {
-            let effective: &[Op] = match op {
-                Op::Dialectal { legs } => {
-                    crate::render::fold::selected_dialectal_leg(&self.dialect, legs).unwrap_or(&[])
-                }
-                other => std::slice::from_ref(other),
-            };
-            for inner in effective {
-                if let Op::RenameColumn { table, .. } = inner {
-                    if !seen.insert(table.as_str()) {
-                        return Err(IrLowerError::SqliteRepeatRenameTarget(table.clone()));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn lower_one_op(
         &self,
         op_index: usize,
@@ -3842,13 +3705,22 @@ impl IrAuthor {
             Op::CreateEnum { name, values, .. } => {
                 named_types.create_enum(name, &eff_schema, values)?;
                 if self.backend.supports(Capability::MaterializedEnumType) {
-                    let qname = pg_type_qname(&eff_schema, name)?;
-                    let up = format!(
-                        "CREATE TYPE {qname} AS ENUM ({})",
-                        render_enum_values(values, &self.dialect)
-                    );
-                    let down = Some(format!("DROP TYPE {qname}"));
-                    vec![decl.lower_vendor_statement(&format!("create_enum_{name}"), up, down)]
+                    let ty = ColType::Enum {
+                        name: name.clone(),
+                        schema: Some(eff_schema.clone()),
+                    };
+                    let (_, qualified_name) = named_type_metadata(&ty, &self.dialect, &eff_schema)?
+                        .ok_or(IrLowerError::UnsupportedOp(
+                            "materialized enum metadata was not resolved",
+                        ))?;
+                    let stmt = self.backend.render_materialized_named_type_op(
+                        MaterializedNamedTypeOp::CreateEnum {
+                            name,
+                            qualified_name: &qualified_name,
+                            values,
+                        },
+                    )?;
+                    vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
                 } else {
                     Vec::new()
                 }
@@ -3864,12 +3736,21 @@ impl IrAuthor {
                 }
                 named_types.drop_enum(name);
                 if self.backend.supports(Capability::MaterializedEnumType) {
-                    let qname = pg_type_qname(&eff_schema, name)?;
-                    vec![decl.lower_vendor_statement(
-                        &format!("drop_enum_{name}"),
-                        format!("DROP TYPE {qname}"),
-                        None,
-                    )]
+                    let ty = ColType::Enum {
+                        name: name.clone(),
+                        schema: Some(eff_schema.clone()),
+                    };
+                    let (_, qualified_name) = named_type_metadata(&ty, &self.dialect, &eff_schema)?
+                        .ok_or(IrLowerError::UnsupportedOp(
+                            "materialized enum metadata was not resolved",
+                        ))?;
+                    let stmt = self.backend.render_materialized_named_type_op(
+                        MaterializedNamedTypeOp::DropEnum {
+                            name,
+                            qualified_name: &qualified_name,
+                        },
+                    )?;
+                    vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
                 } else {
                     Vec::new()
                 }
@@ -3891,34 +3772,38 @@ impl IrAuthor {
                     not_null.unwrap_or(false),
                 )?;
                 if self.backend.supports(Capability::MaterializedDomainType) {
-                    let qname = pg_type_qname(&eff_schema, name)?;
-                    let mut up = format!(
-                        "CREATE DOMAIN {qname} AS {}",
-                        self.render_materialized_domain_base_type(
-                            &eff_schema,
-                            as_type,
-                            named_types,
-                        )?
-                    );
-                    if let Some(default) = default {
-                        up.push_str(" DEFAULT ");
-                        up.push_str(&render_ir_default_for_type(
-                            default,
-                            as_type,
-                            &self.dialect,
-                        )?);
-                    }
-                    if not_null.unwrap_or(false) {
-                        up.push_str(" NOT NULL");
-                    }
-                    if let Some(check) = check {
-                        let expr = render_domain_check(check, &self.dialect, "VALUE")?;
-                        up.push_str(" CHECK (");
-                        up.push_str(&expr);
-                        up.push(')');
-                    }
-                    let down = Some(format!("DROP DOMAIN {qname}"));
-                    vec![decl.lower_vendor_statement(&format!("create_domain_{name}"), up, down)]
+                    let ty = ColType::Domain {
+                        name: name.clone(),
+                        schema: Some(eff_schema.clone()),
+                    };
+                    let (_, qualified_name) = named_type_metadata(&ty, &self.dialect, &eff_schema)?
+                        .ok_or(IrLowerError::UnsupportedOp(
+                            "materialized domain metadata was not resolved",
+                        ))?;
+                    let base_type = self.render_materialized_domain_base_type(
+                        &eff_schema,
+                        as_type,
+                        named_types,
+                    )?;
+                    let rendered_default = default
+                        .as_ref()
+                        .map(|default| render_ir_default_for_type(default, as_type, &self.dialect))
+                        .transpose()?;
+                    let rendered_check = check
+                        .as_ref()
+                        .map(|check| render_domain_check(check, &self.dialect, "VALUE"))
+                        .transpose()?;
+                    let stmt = self.backend.render_materialized_named_type_op(
+                        MaterializedNamedTypeOp::CreateDomain {
+                            name,
+                            qualified_name: &qualified_name,
+                            base_type: &base_type,
+                            default: rendered_default.as_deref(),
+                            not_null: not_null.unwrap_or(false),
+                            check: rendered_check.as_deref(),
+                        },
+                    )?;
+                    vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
                 } else {
                     Vec::new()
                 }
@@ -3934,18 +3819,33 @@ impl IrAuthor {
                 }
                 named_types.drop_domain(name);
                 if self.backend.supports(Capability::MaterializedDomainType) {
-                    let qname = pg_type_qname(&eff_schema, name)?;
-                    vec![decl.lower_vendor_statement(
-                        &format!("drop_domain_{name}"),
-                        format!("DROP DOMAIN {qname}"),
-                        None,
-                    )]
+                    let ty = ColType::Domain {
+                        name: name.clone(),
+                        schema: Some(eff_schema.clone()),
+                    };
+                    let (_, qualified_name) = named_type_metadata(&ty, &self.dialect, &eff_schema)?
+                        .ok_or(IrLowerError::UnsupportedOp(
+                            "materialized domain metadata was not resolved",
+                        ))?;
+                    let stmt = self.backend.render_materialized_named_type_op(
+                        MaterializedNamedTypeOp::DropDomain {
+                            name,
+                            qualified_name: &qualified_name,
+                        },
+                    )?;
+                    vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
                 } else {
                     Vec::new()
                 }
             }
             Op::CreateSequence { .. } | Op::AlterSequence { .. } => {
-                let stmt = render_sequence_op(op, &eff_schema, &self.dialect)?;
+                if !self.backend.supports(Capability::Sequence) {
+                    return Err(IrLowerError::SequenceUnsupported {
+                        kind: "sequence",
+                        dialect: self.dialect.clone(),
+                    });
+                }
+                let stmt = self.backend.render_sequence_op(op, &eff_schema)?;
                 vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
             }
             Op::DropSequence { name, .. } => {
@@ -3956,12 +3856,23 @@ impl IrAuthor {
                         direction: g.into(),
                     });
                 }
-                let stmt = render_sequence_op(op, &eff_schema, &self.dialect)?;
+                if !self.backend.supports(Capability::Sequence) {
+                    return Err(IrLowerError::SequenceUnsupported {
+                        kind: "sequence",
+                        dialect: self.dialect.clone(),
+                    });
+                }
+                let stmt = self.backend.render_sequence_op(op, &eff_schema)?;
                 vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
             }
             Op::Comment { .. } => {
-                let stmt = render_comment_op(op, &eff_schema, &self.dialect)?;
-                vec![decl.lower_vendor_statement(&stmt.name, stmt.up, None)]
+                if !self.backend.supports(Capability::CommentOn) {
+                    return Err(IrLowerError::UnsupportedOp(
+                        "validated COMMENT ON unsupported dialect reached lower",
+                    ));
+                }
+                let stmt = self.backend.render_comment_op(op, &eff_schema)?;
+                vec![decl.lower_vendor_statement(&stmt.name, stmt.up, stmt.down)]
             }
             Op::CreateTable {
                 name,
@@ -5085,7 +4996,7 @@ impl IrAuthor {
                     if guard.is_some() {
                         return Err(IrLowerError::GuardProbeUnbuildable("addConstraint"));
                     }
-                    let (rebuild, desired) = self.lower_sqlite_add_fk_rebuild(
+                    let (rebuild, desired) = self.lower_add_fk_table_rebuild(
                         &decl,
                         &eff_schema,
                         table,
@@ -5195,7 +5106,7 @@ impl IrAuthor {
                     desired
                         .constraints
                         .retain(|constraint| constraint.name != *name);
-                    let rebuild = decl.build_sqlite_constraint_rebuild(
+                    let rebuild = decl.build_table_constraint_rebuild(
                         table,
                         &live_table,
                         &mut desired,
@@ -5825,7 +5736,7 @@ impl IrAuthor {
                 } else {
                     None
                 };
-                let asm = crate::render::dml::assemble_delete_with_sqlite_identity(
+                let asm = crate::render::dml::assemble_delete_with_catalog_identity(
                     eff_schema,
                     dialect,
                     table,
@@ -6138,7 +6049,7 @@ impl IrAuthor {
             catalog,
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
-        crate::model::validate::validate_mysql_key_storage_for_lower(
+        crate::model::validate::validate_vendor_key_storage_for_lower(
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -6146,7 +6057,7 @@ impl IrAuthor {
             self.default_schema.as_deref(),
             catalog,
         )
-        .map_err(|error| IrLowerError::MysqlKeyStorage(Box::new(error)))?;
+        .map_err(|error| IrLowerError::KeyStorage(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
         let guard = guard_for(guard_cfg);
         let raw_island_guard = SqlGuard::new(guard_cfg.clone());
@@ -7142,32 +7053,30 @@ impl IrAuthor {
                 col.unbounded_text = base.unbounded_text;
                 col.type_def = base.type_def;
                 col.authored_type = base.authored_type;
-                if self.backend.supports(Capability::MaterializedDomainType) {
-                    col.data_type = pg_type_data_type(&def.schema, name);
-                    col.ddl_type_override = Some(pg_type_qname(&def.schema, name)?);
-                } else {
-                    if def.not_null {
-                        col.nullable = false;
+                // The materialized-domain case returned at the start of this arm.
+                // The former second capability check here was therefore unreachable;
+                // this tail is exclusively the inline-domain representation.
+                if def.not_null {
+                    col.nullable = false;
+                }
+                if col.default.is_none() {
+                    if let Some(default) = &def.default {
+                        col.default = Some(render_ir_default_for_type(
+                            default,
+                            &def.as_type,
+                            &self.dialect,
+                        )?);
                     }
-                    if col.default.is_none() {
-                        if let Some(default) = &def.default {
-                            col.default = Some(render_ir_default_for_type(
-                                default,
-                                &def.as_type,
-                                &self.dialect,
-                            )?);
-                        }
-                    }
-                    if let Some(check) = &def.check {
-                        let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
-                            "column",
-                            &source.name,
-                            self.backend,
-                        )
-                        .map_err(IrLowerError::DmlAssemble)?;
-                        let expr = render_domain_check(check, &self.dialect, &value_sql)?;
-                        col.inline_checks.push(format!("CHECK ({expr})"));
-                    }
+                }
+                if let Some(check) = &def.check {
+                    let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
+                        "column",
+                        &source.name,
+                        self.backend,
+                    )
+                    .map_err(IrLowerError::DmlAssemble)?;
+                    let expr = render_domain_check(check, &self.dialect, &value_sql)?;
+                    col.inline_checks.push(format!("CHECK ({expr})"));
                 }
             }
             _ => {}
@@ -7184,7 +7093,17 @@ impl IrAuthor {
         match as_type {
             ColType::Enum { name, .. } => {
                 let def = named_types.enum_def(name)?;
-                pg_type_qname(&def.schema, name)
+                let ty = ColType::Enum {
+                    name: name.clone(),
+                    schema: Some(def.schema.clone()),
+                };
+                let (_, qualified_name) =
+                    named_type_metadata(&ty, &self.dialect, effective_schema)?.ok_or(
+                        IrLowerError::UnsupportedOp(
+                            "materialized enum base metadata was not resolved",
+                        ),
+                    )?;
+                Ok(qualified_name)
             }
             ColType::Domain { name, .. } => Err(IrLowerError::NamedTypeUnsupported {
                 kind: "domain",
@@ -7288,9 +7207,9 @@ impl IrAuthor {
             None,
             None,
         )?;
-        if let Some((data_type, ddl_type)) = crate::render::backends::vendor(&self.dialect)
-            .catalog_fold
-            .materialized_named_type_metadata(ty, &self.project_schema)?
+        let policy = crate::render::backends::vendor(&self.dialect).catalog_fold;
+        if let Some((data_type, ddl_type)) =
+            policy.materialized_named_type_metadata(ty, &self.project_schema)?
         {
             col.data_type = data_type;
             col.ddl_type_override = Some(ddl_type);
@@ -7338,8 +7257,8 @@ impl IrAuthor {
             zero_migrate_backend::schema::ColumnRenameStrategy::ExpandContract
         ) && !matches!(ty, ColType::Enum { .. } | ColType::Domain { .. })
             && ir_ddl_type.as_deref().is_some_and(|authored| {
-                canonical_postgres_type_spelling(authored)
-                    != canonical_postgres_type_spelling(live_ddl_type)
+                policy.canonical_rename_type_spelling(authored)
+                    != policy.canonical_rename_type_spelling(live_ddl_type)
             });
         if live_from_type != ir_data_type || modifier_mismatch {
             return Err(IrLowerError::RenameTypeMismatch {
@@ -7530,7 +7449,7 @@ impl IrAuthor {
             .alter_column_refusal(op)
     }
 
-    fn lower_sqlite_add_fk_rebuild(
+    fn lower_add_fk_table_rebuild(
         &self,
         decl: &DeclarativeAuthor,
         eff_schema: &str,
@@ -7608,7 +7527,7 @@ impl IrAuthor {
         .map_err(|error| IrLowerError::Snapshot(DeclarativeError::Invalid(error)))?;
         desired.constraints.sort_by(|a, b| a.name.cmp(&b.name));
         desired.indexes.sort_by(|a, b| a.name.cmp(&b.name));
-        let rebuild = decl.build_sqlite_constraint_rebuild(
+        let rebuild = decl.build_table_constraint_rebuild(
             table,
             &live_table,
             &mut desired,
@@ -7832,17 +7751,6 @@ struct ViewStatement {
     down: Option<String>,
 }
 
-struct SequenceStatement {
-    name: String,
-    up: String,
-    down: Option<String>,
-}
-
-struct CommentStatement {
-    name: String,
-    up: String,
-}
-
 /// The `down` a trigger drop can recover from migration history, or `None` when
 /// the drop is not reversible.
 ///
@@ -7923,13 +7831,16 @@ fn vendor_inverse_from_history(
             let snapshot = live_schema.extensions.get(name)?;
             let mut sql = format!(
                 "CREATE EXTENSION {}",
-                crate::render::dml::quote_ident_checked(name).ok()?
+                zero_migrate_backend::dml::quote_ident_checked_for_backend(name, backend).ok()?
             );
             // The placement comes from the recorded CREATE. A DROP EXTENSION has no
             // schema qualifier, so the drop's effective schema would be a guess.
             if let Some(schema) = &snapshot.schema {
                 sql.push_str(" WITH SCHEMA ");
-                sql.push_str(&crate::render::dml::quote_ident_checked(schema).ok()?);
+                sql.push_str(
+                    &zero_migrate_backend::dml::quote_ident_checked_for_backend(schema, backend)
+                        .ok()?,
+                );
             }
             Some(sql)
         }
@@ -8017,291 +7928,19 @@ fn vendor_inverse_from_history(
             let snapshot = live_schema.schemas.get(name)?;
             let mut sql = format!(
                 "CREATE SCHEMA {}",
-                crate::render::dml::quote_ident_checked(name).ok()?
+                zero_migrate_backend::dml::quote_ident_checked_for_backend(name, backend).ok()?
             );
             if let Some(owner) = &snapshot.owner {
                 sql.push_str(" AUTHORIZATION ");
-                sql.push_str(&crate::render::dml::quote_ident_checked(owner).ok()?);
+                sql.push_str(
+                    &zero_migrate_backend::dml::quote_ident_checked_for_backend(owner, backend)
+                        .ok()?,
+                );
             }
             Some(sql)
         }
         _ => None,
     }
-}
-
-fn render_sequence_op(
-    op: &Op,
-    eff_schema: &str,
-    dialect: &DialectId,
-) -> Result<SequenceStatement, IrLowerError> {
-    if !crate::render::backends::renderer(dialect).supports(Capability::Sequence) {
-        return Err(IrLowerError::SequenceUnsupported {
-            kind: "sequence",
-            dialect: dialect.clone(),
-        });
-    }
-    match op {
-        Op::CreateSequence {
-            name,
-            as_type,
-            increment,
-            start,
-            min_value,
-            max_value,
-            cache,
-            cycle,
-            owned_by,
-            ..
-        } => {
-            let qname = pg_sequence_qname(eff_schema, name)?;
-            let mut up = format!("CREATE SEQUENCE {qname}");
-            if let Some(as_type) = as_type {
-                up.push_str(" AS ");
-                up.push_str(render_sequence_as_type(as_type)?);
-            }
-            if let Some(n) = increment {
-                up.push_str(" INCREMENT BY ");
-                up.push_str(&n.to_string());
-            }
-            if let Some(n) = start {
-                up.push_str(" START WITH ");
-                up.push_str(&n.to_string());
-            }
-            render_sequence_optional_bound(&mut up, "MINVALUE", "NO MINVALUE", min_value);
-            render_sequence_optional_bound(&mut up, "MAXVALUE", "NO MAXVALUE", max_value);
-            if let Some(n) = cache {
-                up.push_str(" CACHE ");
-                up.push_str(&n.to_string());
-            }
-            if let Some(cycle) = cycle {
-                up.push_str(if *cycle { " CYCLE" } else { " NO CYCLE" });
-            }
-            if let Some(owned_by) = owned_by {
-                up.push_str(" OWNED BY ");
-                up.push_str(&render_sequence_owned_by(owned_by.as_ref(), eff_schema)?);
-            }
-            Ok(SequenceStatement {
-                name: format!("create_sequence_{name}"),
-                up,
-                down: Some(format!("DROP SEQUENCE {qname}")),
-            })
-        }
-        Op::AlterSequence {
-            name,
-            increment,
-            restart,
-            min_value,
-            max_value,
-            cache,
-            cycle,
-            owned_by,
-            ..
-        } => {
-            // An alter that asks for nothing renders `ALTER SEQUENCE <name>` with no
-            // action clause, which is not a statement. PRESENCE of the option is the
-            // test, never its inner value: `restart: null` is a bare RESTART,
-            // `min_value: null` is NO MINVALUE and `owned_by: null` is OWNED BY NONE.
-            if increment.is_none()
-                && restart.is_none()
-                && min_value.is_none()
-                && max_value.is_none()
-                && cache.is_none()
-                && cycle.is_none()
-                && owned_by.is_none()
-            {
-                return Err(IrLowerError::AlterSequenceHasNoAction { name: name.clone() });
-            }
-            let qname = pg_sequence_qname(eff_schema, name)?;
-            let mut up = format!("ALTER SEQUENCE {qname}");
-            if let Some(n) = increment {
-                up.push_str(" INCREMENT BY ");
-                up.push_str(&n.to_string());
-            }
-            if let Some(restart) = restart {
-                up.push_str(" RESTART");
-                if let Some(n) = restart {
-                    up.push_str(" WITH ");
-                    up.push_str(&n.to_string());
-                }
-            }
-            render_sequence_optional_bound(&mut up, "MINVALUE", "NO MINVALUE", min_value);
-            render_sequence_optional_bound(&mut up, "MAXVALUE", "NO MAXVALUE", max_value);
-            if let Some(n) = cache {
-                up.push_str(" CACHE ");
-                up.push_str(&n.to_string());
-            }
-            if let Some(cycle) = cycle {
-                up.push_str(if *cycle { " CYCLE" } else { " NO CYCLE" });
-            }
-            if let Some(owned_by) = owned_by {
-                up.push_str(" OWNED BY ");
-                up.push_str(&render_sequence_owned_by(owned_by.as_ref(), eff_schema)?);
-            }
-            Ok(SequenceStatement {
-                name: format!("alter_sequence_{name}"),
-                up,
-                down: None,
-            })
-        }
-        Op::DropSequence {
-            name,
-            existence_guard,
-            ..
-        } => {
-            let qname = pg_sequence_qname(eff_schema, name)?;
-            let mut up = String::from("DROP SEQUENCE ");
-            if matches!(existence_guard, Some(ExistenceGuard::IfExists)) {
-                up.push_str("IF EXISTS ");
-            }
-            up.push_str(&qname);
-
-            // Refuse to synthesize an inverse: the definition is half the object
-            // and its runtime position is the other half. No IR history knows the
-            // position, so recreation could reissue values.
-            Ok(SequenceStatement {
-                name: format!("drop_sequence_{name}"),
-                up,
-                down: None,
-            })
-        }
-        _ => Err(IrLowerError::UnsupportedOp(
-            "non-sequence op routed to sequence renderer",
-        )),
-    }
-}
-
-fn render_comment_op(
-    op: &Op,
-    eff_schema: &str,
-    dialect: &DialectId,
-) -> Result<CommentStatement, IrLowerError> {
-    if !crate::render::backends::renderer(dialect).supports(Capability::CommentOn) {
-        return Err(IrLowerError::UnsupportedOp(
-            "validated COMMENT ON unsupported dialect reached lower",
-        ));
-    }
-    let Op::Comment { target, comment } = op else {
-        return Err(IrLowerError::UnsupportedOp(
-            "non-comment op routed to comment renderer",
-        ));
-    };
-    let object = render_comment_target(target, eff_schema)?;
-    let value = comment
-        .as_deref()
-        .map(crate::render::dml::sql_string_literal)
-        .unwrap_or_else(|| "NULL".to_string());
-    Ok(CommentStatement {
-        name: format!("comment_{}", comment_target_name_part(target)),
-        up: format!("COMMENT ON {object} IS {value}"),
-    })
-}
-
-fn comment_target_name_part(target: &CommentTarget) -> String {
-    match target {
-        CommentTarget::Table { name, .. }
-        | CommentTarget::Index { name, .. }
-        | CommentTarget::View { name, .. }
-        | CommentTarget::Type { name, .. }
-        | CommentTarget::Sequence { name, .. }
-        | CommentTarget::Function { name, .. } => name.clone(),
-        CommentTarget::Column { table, name, .. }
-        | CommentTarget::Constraint { table, name, .. } => format!("{table}_{name}"),
-    }
-}
-
-fn pg_comment_qname(kind: &'static str, schema: &str, name: &str) -> Result<String, IrLowerError> {
-    Ok(format!(
-        "{}.{}",
-        quote_engine_ident("schema", schema)?,
-        quote_engine_ident(kind, name)?
-    ))
-}
-
-/// `eff_schema` ALREADY accounts for the target's own qualifier: `Op::schema()` for a
-/// comment returns `target.schema()`, and `IrAuthor::effective_schema` canonicalizes a
-/// case-variant of the project schema before handing it here.
-///
-/// So do not re-read `target.schema()`. It is the author's casing, and the render seam
-/// quotes byte-verbatim while `SchemaScope::permits` matches case-insensitively - a
-/// target qualified `APP` under project `app` was blessed as `app` by the confinement
-/// gate and rendered `"APP"`, which PostgreSQL treats as a different schema entirely.
-fn render_comment_target(target: &CommentTarget, eff_schema: &str) -> Result<String, IrLowerError> {
-    let schema = eff_schema;
-    Ok(match target {
-        CommentTarget::Table { name, .. } => {
-            format!("TABLE {}", pg_comment_qname("table", schema, name)?)
-        }
-        CommentTarget::Column { table, name, .. } => format!(
-            "COLUMN {}.{}",
-            pg_comment_qname("table", schema, table)?,
-            quote_engine_ident("column", name)?
-        ),
-        CommentTarget::Index { name, .. } => {
-            format!("INDEX {}", pg_comment_qname("index", schema, name)?)
-        }
-        CommentTarget::Constraint { table, name, .. } => format!(
-            "CONSTRAINT {} ON {}",
-            quote_engine_ident("constraint", name)?,
-            pg_comment_qname("table", schema, table)?
-        ),
-        CommentTarget::View { name, .. } => {
-            format!("VIEW {}", pg_comment_qname("view", schema, name)?)
-        }
-        CommentTarget::Type { name, .. } => {
-            format!("TYPE {}", pg_comment_qname("type", schema, name)?)
-        }
-        CommentTarget::Sequence { name, .. } => {
-            format!("SEQUENCE {}", pg_comment_qname("sequence", schema, name)?)
-        }
-        CommentTarget::Function { name, .. } => {
-            format!("FUNCTION {}", pg_comment_qname("function", schema, name)?)
-        }
-    })
-}
-
-fn render_sequence_optional_bound(
-    sql: &mut String,
-    value_kw: &'static str,
-    none_kw: &'static str,
-    value: &Option<Option<SafeI64>>,
-) {
-    if let Some(value) = value {
-        sql.push(' ');
-        match value {
-            Some(n) => {
-                sql.push_str(value_kw);
-                sql.push(' ');
-                sql.push_str(&n.to_string());
-            }
-            None => sql.push_str(none_kw),
-        }
-    }
-}
-
-fn render_sequence_as_type(as_type: &ColType) -> Result<&'static str, IrLowerError> {
-    match as_type {
-        ColType::SmallInt => Ok("smallint"),
-        ColType::Int => Ok("integer"),
-        ColType::BigInt => Ok("bigint"),
-        _ => Err(IrLowerError::UnsupportedOp(
-            "sequence AS type must be smallInt, int, or bigInt",
-        )),
-    }
-}
-
-fn render_sequence_owned_by(
-    owned_by: Option<&SequenceOwnedBy>,
-    eff_schema: &str,
-) -> Result<String, IrLowerError> {
-    let Some(owned_by) = owned_by else {
-        return Ok("NONE".to_string());
-    };
-    Ok(format!(
-        "{}.{}.{}",
-        quote_engine_ident("schema", eff_schema)?,
-        quote_engine_ident("table", &owned_by.table)?,
-        quote_engine_ident("column", &owned_by.column)?
-    ))
 }
 
 /// Refuse a materialized view on a dialect whose descriptor does not grant it.
@@ -9515,22 +9154,23 @@ pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty
     field.encrypted = derived.encrypted;
 }
 
-/// The MySQL storage the declared facets of an authored column render into.
+/// The physical type the selected backend renders for an authored column's
+/// declared facets.
 ///
 /// The facets are routed through the same neutral snapshot input the vendor
-/// renderer consumes, so the load-and-validate gate classifies the spelling the
-/// renderer actually emits. `None` means the type-position validation already
-/// refused a token with no data type.
+/// renderer consumes, so a backend-owned validation policy classifies the same
+/// spelling the renderer actually emits. `None` means the type-position
+/// validation already refused a token with no data type.
 ///
 /// Only the four facets that move the storage are taken; nullability, defaults,
 /// keys, and generation do not change the rendered type.
-pub(crate) fn storage_for_column_facets(
+pub(crate) fn rendered_storage_for_column_facets(
     dialect: &DialectId,
     ty: &ColType,
     value_format: Option<&crate::model::ir::ValueFormat>,
     id_prefix: Option<&str>,
     case_sensitive: Option<bool>,
-) -> Option<crate::render::declarative::MysqlStorage> {
+) -> Option<String> {
     let column = IrColumn {
         name: String::new(),
         ty: ty.clone(),
@@ -9555,18 +9195,16 @@ pub(crate) fn storage_for_column_facets(
         unbounded_text: field.unbounded_text,
         ..Default::default()
     };
-    let rendered = crate::render::backends::schema_renderer(dialect).column_type(&snapshot, false);
-    Some(crate::render::declarative::MysqlStorage::of(&rendered))
+    Some(crate::render::backends::schema_renderer(dialect).column_type(&snapshot, false))
 }
 
-/// The `DEFAULT` clause body an authored column renders on MySQL, or `None` when
-/// it renders no `DEFAULT` at all.
+/// The `DEFAULT` clause body an authored column renders on the selected backend,
+/// or `None` when it renders no `DEFAULT` at all.
 ///
 /// Built from the SAME descriptor snapshot plus structured-default overlay the
 /// `createTable` lower runs, so the load-and-validate gate reads the exact
-/// spelling the DDL will carry, including the parenthesized forms MySQL accepts
-/// on `TEXT`/`BLOB`/`JSON` storage (`(X'..')`, `(JSON_OBJECT())`,
-/// `(CAST(.. AS JSON))`) and the defaults the descriptor bridge drops entirely.
+/// spelling the DDL will carry, including backend-required parenthesized forms
+/// and defaults the descriptor bridge drops entirely.
 pub(crate) fn rendered_column_default(dialect: &DialectId, c: &IrColumn) -> Option<String> {
     let field = ir_column_to_field(c);
     let mut snapshot =
@@ -11175,7 +10813,7 @@ mod tests {
                 // BOUNDED, not `text`. This fixture is about the explicit FK
                 // CONSTRAINT NAME, and the key/reference columns are incidental to
                 // that - but an unbounded `text` primary key is a table MySQL will
-                // not create (error 1170), and `validate_mysql_key_storage` has
+                // not create (error 1170), and the backend storage validator has
                 // always refused it. The fixture only rendered because it calls
                 // `lower` directly and so skipped validate; once the same rule ran
                 // at lower time it stopped rendering. `varchar(255)` is what the

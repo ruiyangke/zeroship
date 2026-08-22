@@ -20,8 +20,7 @@ use std::collections::BTreeMap;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::{
-    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, SqlDialect,
-    SqliteBackend,
+    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, SqliteBackend,
 };
 
 const PROJECT: &str = "prj_ir";
@@ -58,7 +57,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
     let artifact = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     )
     .load_and_lower_guarded(
@@ -66,7 +65,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
         APP,
         &registry,
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id()),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE.clone()),
     )
     .expect("the two-step plan lowers");
     assert_eq!(

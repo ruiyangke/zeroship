@@ -32,7 +32,7 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, snapshot_schema, Approval, EffectivePolicy, ExecutorConfig, GuardConfig,
-    IrAuthor, LiveSchema, MigrationEngine, PostgresBackend, SqlDialect,
+    IrAuthor, LiveSchema, MigrationEngine, PostgresBackend,
 };
 
 const OWNER: &str = "app_drop_schema_rollback_pg";
@@ -95,9 +95,9 @@ async fn apply_doc(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &pol);
-    let guard = GuardConfig::from_policy(pol.clone(), SqlDialect::Postgres.id());
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &pol)
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &pol);
+    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate::POSTGRES.clone());
+    let folded = fold_ops(history, &zero_migrate::POSTGRES, &cfg.project_schema, &pol)
         .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     let artifact = author
@@ -131,7 +131,7 @@ async fn apply_doc(
 /// Does the schema PHYSICALLY exist? `snapshot_schema` looks it up in
 /// `pg_namespace` by name, so an empty `schemas` map means absent.
 async fn schema_exists(session: &PgDevSession, name: &str) -> Result<bool, String> {
-    let snapshot = snapshot_schema(session, name)
+    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, name)
         .await
         .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
     Ok(snapshot.schemas.contains_key(name))
@@ -140,7 +140,7 @@ async fn schema_exists(session: &PgDevSession, name: &str) -> Result<bool, Strin
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         policy(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     ))
 }
 

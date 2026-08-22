@@ -21,7 +21,6 @@
 
 use zero_migrate::model::expr::Expr;
 use zero_migrate::model::ir::{IrValue, MigrationIr, Op, CURRENT_IR_VERSION};
-use zero_migrate::model::support::SqlDialect;
 use zero_migrate::model::validate::validate_ir_scoped;
 use zero_migrate::SchemaScope;
 
@@ -49,7 +48,7 @@ fn refusal_for(op: Op) -> Option<String> {
         preconditions: Vec::new(),
         checksum: None,
     };
-    validate_ir_scoped(&ir, SqlDialect::Postgres, Some(&SchemaScope::Unconfined))
+    validate_ir_scoped(&ir, &zero_migrate::POSTGRES, Some(&SchemaScope::Unconfined))
         .err()
         .map(|error| format!("{} {}", error.code, error.reason))
 }

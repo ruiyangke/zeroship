@@ -14,9 +14,7 @@ use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStatusManifest};
-use zero_migrate::{
-    shipping_backends, DialectId, LiveSchema, MigrationEngine, SqlDialect, MYSQL, POSTGRES,
-};
+use zero_migrate::{shipping_backends, DialectId, LiveSchema, MigrationEngine, MYSQL, POSTGRES};
 
 use crate::wire::{
     ApplyPendingContractDto, ApplyReply, BlockedPlanDto, PendingContractStatusDto, PlanStatusDto,
@@ -96,15 +94,12 @@ pub fn effective_policy_from_wire_layers(
 /// Map the wire dialect spelling to the render dialect. Unlike
 /// [`ApplyDialect::parse`] this accepts `"sqlite"`: an offline render needs no
 /// host driver.
-pub fn preview_dialect(s: &str) -> std::result::Result<SqlDialect, String> {
-    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
-        if dialect.id().as_str() == s {
-            return Ok(dialect);
-        }
-    }
-    Err(format!(
-        "unknown dialect {s:?} (expected postgres|sqlite|mysql)"
-    ))
+pub fn preview_dialect(s: &str) -> std::result::Result<DialectId, String> {
+    shipping_backends()
+        .iter()
+        .find(|descriptor| descriptor.id.as_str() == s)
+        .map(|descriptor| descriptor.id.clone())
+        .ok_or_else(|| format!("unknown dialect {s:?} (expected postgres|sqlite|mysql)"))
 }
 
 /// Project an [`ApplyOutcome`] and the lock-coherent outstanding rename set into
@@ -786,8 +781,7 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
         let request = zero_migrate::RollbackRequest::new(target).with_options(options);
         // The guard the engine's own apply sites use. Composing one from the same
         // charter here would drop the config's host-selected mode.
-        let guard =
-            zero_migrate::guard_for(&cfg.guard_config().for_dialect(backend.dialect().id()));
+        let guard = zero_migrate::guard_for(&cfg.guard_config_for(&backend.dialect()));
         let outcome = zero_migrate::rollback_with_lock_and_inverse_plans(
             backend,
             cfg,
@@ -1227,7 +1221,7 @@ mod status_projection_tests {
         let unknown = ApplyDialect::parse("Postgres").expect_err("the spelling is exact");
         assert!(unknown.contains("unknown dialect"), "{unknown}");
         // The offline renderer has no host driver to route at, so it takes sqlite.
-        assert_eq!(preview_dialect("sqlite"), Ok(SqlDialect::Sqlite));
+        assert_eq!(preview_dialect("sqlite"), Ok(zero_migrate::SQLITE));
         assert!(preview_dialect("oracle").is_err());
     }
 

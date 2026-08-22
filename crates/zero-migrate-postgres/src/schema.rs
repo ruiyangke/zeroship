@@ -3,7 +3,8 @@
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{
     build_encryption_sentinel_comments, build_mask_sentinel_comments, char_len,
-    decimal_precision_scale, max_length, SchemaRenderer,
+    decimal_precision_scale, max_length, AddColumnDefinition, AddColumnIfNotExistsRequest,
+    CreateIndexIfNotExistsRequest, SchemaRenderer,
 };
 use zero_migrate_backend::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::{DialectId, POSTGRES};
@@ -32,6 +33,13 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     /// PostgreSQL snapshots expose structured catalog facts rather than retaining
     /// a vendor CREATE statement for surgical rewrites.
     fn stored_ddl(&self) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
+        None
+    }
+
+    fn table_rebuild_policy(
+        &self,
+    ) -> Option<&'static dyn zero_migrate_backend::table_rebuild::TableRebuildPolicy> {
+        // PostgreSQL reconciles the supported existing-table changes natively.
         None
     }
 
@@ -112,6 +120,29 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         _live: &zero_migrate_backend::snapshot::SchemaSnapshot,
     ) -> Result<(), String> {
         Ok(())
+    }
+
+    fn unprefixed_key_storage_refusal(
+        &self,
+        _position: &str,
+        _table: &str,
+        _column: &str,
+        _evidence: zero_migrate_backend::schema::KeyStorageEvidence<'_>,
+    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+        // PostgreSQL accepts the physical storage families this engine exposes as
+        // key columns without a MySQL-style prefix-length requirement.
+        None
+    }
+
+    fn literal_default_storage_refusal(
+        &self,
+        _column: &str,
+        _rendered_type: &str,
+        _rendered_default: &str,
+    ) -> Option<zero_migrate_backend::schema::StorageValidationRefusal> {
+        // PostgreSQL accepts these literal defaults; it has no storage-family
+        // exception corresponding to MySQL's LOB/JSON/spatial rule.
+        None
     }
 
     fn existing_column_change_strategy(
@@ -262,6 +293,96 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         ));
         statements
     }
+
+    fn add_foreign_key_statement(
+        &self,
+        schema: &str,
+        table: &str,
+        clause: &str,
+    ) -> Result<String, &'static str> {
+        let table = format!("{}.{}", self.quote_ident(schema), self.quote_ident(table));
+        Ok(format!("ALTER TABLE {table} ADD {clause}"))
+    }
+
+    fn drop_foreign_key_if_exists_statement(
+        &self,
+        schema: &str,
+        table: &str,
+        name: &str,
+    ) -> Result<String, &'static str> {
+        let table = format!("{}.{}", self.quote_ident(schema), self.quote_ident(table));
+        Ok(format!(
+            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
+            table,
+            self.quote_ident(name)
+        ))
+    }
+
+    fn add_column_if_not_exists_statements(
+        &self,
+        request: AddColumnIfNotExistsRequest<'_>,
+    ) -> Result<Vec<String>, &'static str> {
+        let (data_type, constraints) = match request.definition {
+            AddColumnDefinition::Rendered {
+                data_type,
+                constraints,
+            } => (data_type, constraints),
+            AddColumnDefinition::NullableUnboundedText => ("TEXT", "NULL"),
+        };
+        let table = format!(
+            "{}.{}",
+            self.quote_ident(request.schema),
+            self.quote_ident(request.table)
+        );
+        let mut statements = vec![format!(
+            "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {} {}",
+            table,
+            self.quote_ident(request.column),
+            data_type,
+            constraints
+        )
+        .trim()
+        .to_string()];
+        if let Some(sentinel) = request.comment_sentinel {
+            let escaped = sentinel.replace('\'', "''");
+            statements.push(format!(
+                "COMMENT ON COLUMN {}.{}.{} IS '{}'",
+                self.quote_ident(request.schema),
+                self.quote_ident(request.table),
+                self.quote_ident(request.column),
+                escaped,
+            ));
+        }
+        Ok(statements)
+    }
+
+    fn create_index_if_not_exists_statement(
+        &self,
+        request: CreateIndexIfNotExistsRequest<'_>,
+    ) -> Result<String, &'static str> {
+        let table = format!(
+            "{}.{}",
+            self.quote_ident(request.schema),
+            self.quote_ident(request.table)
+        );
+        let columns = request
+            .columns
+            .iter()
+            .map(|column| self.quote_ident(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let kind = if request.unique {
+            "UNIQUE INDEX"
+        } else {
+            "INDEX"
+        };
+        Ok(format!(
+            "CREATE {kind} CONCURRENTLY IF NOT EXISTS {} ON {} ({})",
+            self.quote_ident(request.name),
+            table,
+            columns,
+        ))
+    }
 }
 
 fn column_type_for_def(def: &serde_json::Value) -> String {
@@ -397,7 +518,25 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{SchemaRenderer, RENDERER};
+    use super::{AddColumnDefinition, AddColumnIfNotExistsRequest, SchemaRenderer, RENDERER};
+
+    #[test]
+    fn nullable_unbounded_text_addition_keeps_exact_postgres_bytes() {
+        let statements = RENDERER
+            .add_column_if_not_exists_statements(AddColumnIfNotExistsRequest {
+                schema: "app1",
+                table: "users",
+                column: "secret_masked",
+                definition: AddColumnDefinition::NullableUnboundedText,
+                comment_sentinel: None,
+            })
+            .expect("PostgreSQL renders the semantic mask-sibling request");
+        assert_eq!(
+            statements,
+            ["ALTER TABLE \"app1\".\"users\" ADD COLUMN IF NOT EXISTS \
+              \"secret_masked\" TEXT NULL"]
+        );
+    }
 
     #[test]
     fn collation_hooks_are_explicit_postgres_pass_throughs() {

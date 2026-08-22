@@ -146,12 +146,13 @@ pub enum BaselineError {
 pub(crate) async fn baseline<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &zero_migrate_ir::dialect::DialectId,
     baseline_migration: &Migration,
     applied_by: &str,
 ) -> Result<BaselineOutcome, BaselineError> {
     // GUARD (defense in depth) — BEFORE the lock, no DB needed. A baseline that
     // carries a denied/cross-schema construct is refused even though it never runs.
-    let guard = SqlGuard::new(cfg.guard_config());
+    let guard = SqlGuard::new(cfg.guard_config_for(dialect));
     guard
         .check(&baseline_migration.up)
         .map_err(|source| BaselineError::Guard {
@@ -167,7 +168,7 @@ pub(crate) async fn baseline<D: SqlSession>(
     // advisory lock and still fail the acquiring statement, and a caller told the
     // acquisition failed has nothing to release with.
     crate::apply::backend::postgres::session::acquire_project_lock(conn, &cfg.project_id).await?;
-    let result = baseline_locked(conn, cfg, baseline_migration, applied_by).await;
+    let result = baseline_locked(conn, cfg, dialect, baseline_migration, applied_by).await;
     let unlock =
         crate::apply::backend::postgres::session::release_project_lock(conn, &cfg.project_id).await;
     match result {
@@ -181,15 +182,16 @@ pub(crate) async fn baseline<D: SqlSession>(
 async fn baseline_locked<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &zero_migrate_ir::dialect::DialectId,
     baseline_migration: &Migration,
     applied_by: &str,
 ) -> Result<BaselineOutcome, BaselineError> {
-    journal::ensure_journal(conn, cfg).await?;
+    journal::ensure_journal(conn, cfg, dialect).await?;
 
     let version = baseline_migration.version.as_str();
 
     // Idempotency + first-entry check. Read net-applied state once.
-    let applied = journal::applied(conn, cfg).await?;
+    let applied = journal::applied(conn, cfg, dialect).await?;
     let net_applied: Vec<&str> = applied
         .iter()
         .filter(|e| e.phase == journal::Phase::Completed)
@@ -209,7 +211,7 @@ async fn baseline_locked<D: SqlSession>(
     // generic already-managed error.
     if !net_applied.is_empty() {
         // Is the existing net-applied entry a baseline? Report the clearer error.
-        if let Some(existing_baseline) = first_baseline_version(conn, cfg).await? {
+        if let Some(existing_baseline) = first_baseline_version(conn, cfg, dialect).await? {
             return Err(BaselineError::ConflictingBaseline {
                 project: cfg.project_id.clone(),
                 requested: version.to_string(),
@@ -227,6 +229,7 @@ async fn baseline_locked<D: SqlSession>(
     journal::record_baseline(
         conn,
         cfg,
+        dialect,
         journal::BaselineRecord {
             version,
             name: &baseline_migration.name,
@@ -249,13 +252,15 @@ async fn baseline_locked<D: SqlSession>(
 async fn first_baseline_version<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
+    dialect: &zero_migrate_ir::dialect::DialectId,
 ) -> Result<Option<String>, BaselineError> {
     // Engine-supplied meta schema: route through the ONE shared engine seam so it
     // fails closed on an empty / NUL name, byte-identical to the prior
     // `escape_quote_ident`. This is a journal-table read, so the fail-closed error
     // is mapped through `JournalError` (which carries `From<IdentQuoteError>`).
-    let meta = crate::render::dml::quote_ident_checked(&cfg.confinement.meta_schema)
-        .map_err(JournalError::from)?;
+    let meta =
+        crate::render::dml::quote_ident_checked_for_dialect(&cfg.confinement.meta_schema, dialect)
+            .map_err(JournalError::from)?;
     let rows = conn
         .query(
             &format!(

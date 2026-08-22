@@ -20,7 +20,7 @@ use crate::support;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
-    diff_snapshots, fold_ops, snapshot_schema, IrAuthor, LiveSchema, SchemaSnapshot, SqlDialect,
+    diff_snapshots, fold_ops, snapshot_schema, IrAuthor, LiveSchema, SchemaSnapshot,
     StructuralDrift,
 };
 
@@ -119,7 +119,7 @@ async fn snapshot_after_mutation(
         let _ = session.batch("ROLLBACK").await;
         return Err(format!("apply drift mutation `{mutation}`: {error}"));
     }
-    let snapshot = snapshot_schema(session, schema)
+    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, schema)
         .await
         .map_err(|error| format!("snapshot after `{mutation}`: {error}"));
     let rollback = session
@@ -208,7 +208,7 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
         let ir = fixture(&schema);
         let expected = fold_ops(
             &ir.ops,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &schema,
             &support::no_inject("app"),
         )
@@ -216,7 +216,7 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
         let migrations = IrAuthor::new(
             &schema,
             OWNER,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())
@@ -232,7 +232,7 @@ async fn live_postgres_reports_ordinary_column_default_drift() {
         // `'active'::text`, `{}` as `'{}'::jsonb`. A default comparison that
         // compared authored text against catalog text would report every one of
         // these columns as drifted on a schema nobody has touched.
-        let clean = snapshot_schema(&session, &schema)
+        let clean = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("introspect clean plain-default fixture: {error}"))?;
         let clean_drift = diff_snapshots(&expected, &clean);

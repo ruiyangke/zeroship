@@ -65,7 +65,7 @@ use zero_migrate::model::snapshot::MysqlPhysicalType;
 use zero_migrate::{
     diff_snapshots, fold_ops, model::ir::Op, resolve_create_table_policy, snapshot_schema,
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    SchemaSnapshot, SqlDialect, SqliteBackend, StructuralDrift,
+    SchemaSnapshot, SqliteBackend, StructuralDrift,
 };
 
 const OWNER: &str = "app_drift_column_physical_type";
@@ -101,8 +101,8 @@ async fn apply_doc(
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Mysql, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Mysql.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL.clone());
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
@@ -225,7 +225,7 @@ async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see(
 
         let expected = fold_ops(
             &ops,
-            SqlDialect::Mysql,
+            &zero_migrate::MYSQL,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -427,7 +427,7 @@ async fn assert_mysql_clean(
 ) -> Result<(), String> {
     let expected = fold_ops(
         ops,
-        SqlDialect::Mysql,
+        &zero_migrate::MYSQL,
         &cfg.project_schema,
         &support::no_inject(&cfg.project_schema),
     )
@@ -548,7 +548,7 @@ async fn an_untouched_postgres_table_reports_clean() {
         );
         let expected = fold_ops(
             &ir.ops,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &schema,
             &support::no_inject(&schema),
         )
@@ -556,7 +556,7 @@ async fn an_untouched_postgres_table_reports_clean() {
         let migrations = IrAuthor::new(
             &schema,
             OWNER,
-            SqlDialect::Postgres,
+            &zero_migrate::POSTGRES,
             &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())
@@ -567,7 +567,7 @@ async fn an_untouched_postgres_table_reports_clean() {
                 .await
                 .map_err(|error| format!("apply {}: {error}", migration.name))?;
         }
-        let actual = snapshot_schema(&session, &schema)
+        let actual = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
             .await
             .map_err(|error| format!("introspect the postgres control schema: {error}"))?;
         let drift = diff_snapshots(&expected, &actual);
@@ -602,7 +602,7 @@ async fn an_untouched_sqlite_table_reports_clean() {
     );
     let expected = fold_ops(
         &ir.ops,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         "main",
         &support::no_inject("main"),
     )
@@ -610,7 +610,7 @@ async fn an_untouched_sqlite_table_reports_clean() {
     let migrations = IrAuthor::new(
         "main",
         OWNER,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())

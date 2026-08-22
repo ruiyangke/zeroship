@@ -16,8 +16,8 @@
 //! the const is the only edit each module needs, because nothing else in it can
 //! observe which vendor it is.
 //!
-//! The rule is invisible to every behaviour test. A `backends/postgres.rs` that
-//! reaches for `SqlDialect::Mysql` still emits correct PostgreSQL today; what it
+//! The rule is invisible to every behaviour test. A PostgreSQL backend module that
+//! reaches for the `MYSQL` dialect constant still emits correct PostgreSQL today; what it
 //! costs is the extraction, and no assertion about emitted SQL can see that. So the
 //! rule gets its own check or it has none, which is what it had.
 //!
@@ -39,14 +39,14 @@
 ///
 /// # What this does NOT catch, and it is the important half
 ///
-/// This sees EXPLICIT coupling only - a foreign `SqlDialect::` literal written
+/// This sees EXPLICIT coupling only - a foreign shipping dialect constant written
 /// inside a backend module. It is blind to a backend that reaches another vendor's
 /// spelling THROUGH a core helper that hard-codes a dialect, because the offending
 /// literal then lives in core and no grep of the backend module can see it.
 ///
 /// That is not hypothetical. When this test was written it was TRUE OF THIS TREE
 /// while the test passed: `render::dml::quote_ident` and `quote_ident_checked` both
-/// pinned `SqlDialect::Postgres` (and `quote_bare_ident` delegated to the first), so
+/// pinned the `POSTGRES` dialect constant (and `quote_bare_ident` delegated to the first), so
 /// every identifier `backends/sqlite.rs` emitted was quoted by the POSTGRESQL
 /// renderer - correct only because both vendors spell an identifier `"x"`.
 ///
@@ -94,88 +94,76 @@
 /// in this file.
 #[test]
 fn a_backend_module_names_only_its_own_dialect_and_only_once() {
+    fn code_identifier_hits(src: &str, identifier: &str) -> usize {
+        src.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
+            .filter(|token| *token == identifier)
+            .count()
+    }
+
     let cases = [
         (
             "zero-migrate-postgres/src/dml.rs",
             include_str!("../../../zero-migrate-postgres/src/dml.rs"),
-            "Postgres",
+            "POSTGRES",
         ),
         (
             "zero-migrate-sqlite/src/dml.rs",
             include_str!("../../../zero-migrate-sqlite/src/dml.rs"),
-            "Sqlite",
+            "SQLITE",
         ),
         (
             "zero-migrate-mysql/src/dml.rs",
             include_str!("../../../zero-migrate-mysql/src/dml.rs"),
-            "Mysql",
+            "MYSQL",
         ),
         (
             "zero-migrate-postgres/src/schema.rs",
             include_str!("../../../zero-migrate-postgres/src/schema.rs"),
-            "Postgres",
+            "POSTGRES",
         ),
         (
             "zero-migrate-sqlite/src/schema.rs",
             include_str!("../../../zero-migrate-sqlite/src/schema.rs"),
-            "Sqlite",
+            "SQLITE",
         ),
         (
             "zero-migrate-mysql/src/schema.rs",
             include_str!("../../../zero-migrate-mysql/src/schema.rs"),
-            "Mysql",
+            "MYSQL",
         ),
         (
             "zero-migrate-postgres/src/ddl.rs",
             include_str!("../../../zero-migrate-postgres/src/ddl.rs"),
-            "Postgres",
+            "POSTGRES",
         ),
         (
             "zero-migrate-sqlite/src/ddl.rs",
             include_str!("../../../zero-migrate-sqlite/src/ddl.rs"),
-            "Sqlite",
+            "SQLITE",
         ),
         (
             "zero-migrate-mysql/src/ddl.rs",
             include_str!("../../../zero-migrate-mysql/src/ddl.rs"),
-            "Mysql",
+            "MYSQL",
         ),
-    ];
-
-    let open_id_cases = [
         (
             "zero-migrate-postgres/src/value_format.rs",
             include_str!("../../../zero-migrate-postgres/src/value_format.rs"),
-            "postgres",
+            "POSTGRES",
         ),
         (
             "zero-migrate-sqlite/src/value_format.rs",
             include_str!("../../../zero-migrate-sqlite/src/value_format.rs"),
-            "sqlite",
+            "SQLITE",
         ),
         (
             "zero-migrate-mysql/src/value_format.rs",
             include_str!("../../../zero-migrate-mysql/src/value_format.rs"),
-            "mysql",
+            "MYSQL",
         ),
     ];
-    for (file, src, own) in open_id_cases {
-        for other in ["postgres", "sqlite", "mysql"] {
-            let needle = format!("DialectId::new(\"{other}\")");
-            let hits = src.matches(needle.as_str()).count();
-            let expected = usize::from(other == own);
-            assert_eq!(
-                hits, expected,
-                "{file} names {needle} {hits} time(s); expected {expected} (its own open \
-                 dialect id exactly once, as the DIALECT const; no other dialect)"
-            );
-        }
-        let declaration = format!("const DIALECT: DialectId = DialectId::new(\"{own}\");");
-        assert!(
-            src.lines().map(str::trim).any(|line| line == declaration),
-            "{file} must carry its identity in `{declaration}`"
-        );
-    }
 
     // The two vendor-crate files that carry spelling but NO renderer, and therefore
     // no `DIALECT` const: PostgreSQL's vendor-op renderer is PostgreSQL by
@@ -192,24 +180,38 @@ fn a_backend_module_names_only_its_own_dialect_and_only_once() {
         (
             "zero-migrate-postgres/src/vendor.rs",
             include_str!("../../../zero-migrate-postgres/src/vendor.rs"),
-            "Postgres",
+            "POSTGRES",
         ),
         (
             "zero-migrate-mysql/src/collation.rs",
             include_str!("../../../zero-migrate-mysql/src/collation.rs"),
-            "Mysql",
+            "MYSQL",
+        ),
+        (
+            "zero-migrate-postgres/src/validation.rs",
+            include_str!("../../../zero-migrate-postgres/src/validation.rs"),
+            "POSTGRES",
+        ),
+        (
+            "zero-migrate-sqlite/src/validation.rs",
+            include_str!("../../../zero-migrate-sqlite/src/validation.rs"),
+            "SQLITE",
+        ),
+        (
+            "zero-migrate-mysql/src/validation.rs",
+            include_str!("../../../zero-migrate-mysql/src/validation.rs"),
+            "MYSQL",
         ),
     ];
     for (file, src, own) in unanchored {
-        for other in ["Postgres", "Sqlite", "Mysql"] {
+        for other in ["POSTGRES", "SQLITE", "MYSQL"] {
             if other == own {
                 continue;
             }
-            let needle = format!("SqlDialect::{other}");
             assert_eq!(
-                src.matches(needle.as_str()).count(),
+                code_identifier_hits(src, other),
                 0,
-                "{file} names {needle}; it is a {own}-only module in a {own}-only \
+                "{file} names the foreign `{other}` dialect constant; it is a {own}-only module in a {own}-only \
                  crate and must not reach another vendor's spelling. See the \
                  one-dialect-literal rule in render/backends/mod.rs."
             );
@@ -217,30 +219,24 @@ fn a_backend_module_names_only_its_own_dialect_and_only_once() {
     }
 
     for (file, src, own) in cases {
-        for other in ["Postgres", "Sqlite", "Mysql"] {
-            let needle = format!("SqlDialect::{other}");
-            let hits = src.matches(needle.as_str()).count();
-            let expected = usize::from(other == own);
+        for other in ["POSTGRES", "SQLITE", "MYSQL"] {
+            let hits = code_identifier_hits(src, other);
+            // The module imports its own constant and assigns it to `DIALECT`.
+            let expected = if other == own { 2 } else { 0 };
             assert_eq!(
                 hits, expected,
-                "{file} names {needle} {hits} time(s); expected {expected} \
-                 (its own dialect exactly once, as the DIALECT const; no other dialect). \
+                "{file} names the `{other}` dialect constant {hits} time(s); expected {expected} \
+                 (its own constant once in the import and once in the DIALECT declaration; no other dialect). \
                  See the one-dialect-literal rule in backends/mod.rs."
             );
         }
 
-        // ...and the one occurrence is the const, not merely some single line.
-        let carriers: Vec<&str> = src
-            .lines()
-            .map(str::trim)
-            .filter(|line| line.contains("SqlDialect::"))
-            .collect();
-        let declaration = format!("const DIALECT: SqlDialect = SqlDialect::{own};");
+        // ...and the use-site occurrence is the const, not merely some other line.
+        let declaration = format!("const DIALECT: DialectId = {own};");
         assert!(
-            carriers.len() == 1 && carriers[0].contains(declaration.as_str()),
-            "{file} must carry its dialect literal on exactly one line and that \
-             line must declare `{declaration}`; a module whose single mention is somewhere \
-             else has lost the const that makes the vendor deletable. Found: {carriers:?}"
+            src.lines().map(str::trim).any(|line| line == declaration),
+            "{file} must carry its dialect identity in `{declaration}`; a module whose \
+             own constant appears elsewhere has lost the const that makes the vendor deletable"
         );
     }
 }

@@ -39,7 +39,6 @@ use crate::support;
 use std::collections::BTreeMap;
 use zero_migrate::model::snapshot::{IndexSnapshot, TableSnapshot};
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::MigrationIr;
 
 fn index(name: &str, unique: bool, columns: &[&str]) -> IndexSnapshot {
@@ -86,7 +85,7 @@ fn lower(op: &str, live: &LiveSchema) -> Result<(), String> {
     let author = IrAuthor::new(
         "public",
         "f721",
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::confined_charter(),
     );
     author

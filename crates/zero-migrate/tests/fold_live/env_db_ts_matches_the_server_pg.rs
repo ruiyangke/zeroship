@@ -38,7 +38,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     effective_policy_from_charter_toml, render_artifacts, resolve_create_table_policy, Approval,
     EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, PostgresBackend, SqlDialect,
+    MigrationIr, PostgresBackend,
 };
 
 const OWNER: &str = "app_env_db_ts_server";
@@ -252,8 +252,8 @@ async fn apply_ir(
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), SqlDialect::Postgres.id());
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -313,10 +313,14 @@ async fn measure(label: &str, charter: Charter, ops: &str) -> Measured {
         let identity_columns = live_identity_columns(&session, &cfg.project_schema).await?;
         // The SAME resolved ops and the SAME charter the server just applied, through
         // the real artifact entry point.
-        let env_db_ts =
-            render_artifacts(&ir.ops, SqlDialect::Postgres, &cfg.project_schema, &policy)
-                .map_err(|error| format!("render artifacts for the applied ops: {error}"))?
-                .env_db_ts;
+        let env_db_ts = render_artifacts(
+            &ir.ops,
+            &zero_migrate::POSTGRES,
+            &cfg.project_schema,
+            &policy,
+        )
+        .map_err(|error| format!("render artifacts for the applied ops: {error}"))?
+        .env_db_ts;
         Ok(Measured {
             relations,
             primary_keys,

@@ -34,7 +34,6 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::Op;
 use zero_migrate::{
     fold_ops, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, PostgresBackend,
-    SqlDialect,
 };
 
 const OWNER: &str = "app_alter_sequence_needs_an_action";
@@ -80,17 +79,22 @@ async fn apply_doc(
 ) -> Result<Vec<String>, String> {
     let backend = PostgresBackend::new_generic(session);
     let policy = support::no_inject(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
     let document = zero_migrate::model::load::load_ir_document(
         ir,
         OWNER,
-        zero_migrate::model::validate::SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeMap::new(),
         None,
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &policy)
-        .map_err(|error| format!("fold the applied history: {error}"))?;
+    let folded = fold_ops(
+        history,
+        &zero_migrate::POSTGRES,
+        &cfg.project_schema,
+        &policy,
+    )
+    .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     let plan = author
         .lower_plan(&document, &live)
@@ -126,17 +130,22 @@ fn lower_only(
     history: &[Op],
 ) -> Result<Result<Vec<String>, String>, String> {
     let policy = support::no_inject(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &policy);
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
     let document = zero_migrate::model::load::load_ir_document(
         ir,
         OWNER,
-        zero_migrate::model::validate::SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &BTreeMap::new(),
         None,
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &policy)
-        .map_err(|error| format!("fold the applied history: {error}"))?;
+    let folded = fold_ops(
+        history,
+        &zero_migrate::POSTGRES,
+        &cfg.project_schema,
+        &policy,
+    )
+    .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     Ok(match author.lower_plan(&document, &live) {
         Ok(plan) => Ok(plan

@@ -52,7 +52,7 @@ use super::authorizer::{make_authorizer, AuthMode, DenialLog, Mode, MIG_ALIAS};
 /// deny-on-`_mig` proof cannot silently no-op against an exotic build.
 const SQLITE_VERSION_FLOOR: i32 = 3_035_000; // 3.35.0 — the highest single floor (RETURNING)
 
-/// An error from the migration SQLite actor. SqlDialect-neutral `String` payloads so
+/// An error from the migration SQLite actor. Vendor-neutral `String` payloads so
 /// it can flow through the generic backend errors (which add a `Backend(String)`
 /// arm) without leaking a PG error type.
 #[derive(Debug, thiserror::Error)]

@@ -16,9 +16,7 @@ use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
 use zero_migrate::model::snapshot::IdDefaultSnapshot;
-use zero_migrate::{
-    fold_ops, fold_ops_onto, IrAuthor, LiveSchema, SchemaSnapshot, SqlDialect, SqliteBackend,
-};
+use zero_migrate::{fold_ops, fold_ops_onto, IrAuthor, LiveSchema, SchemaSnapshot, SqliteBackend};
 
 struct Paths {
     _dir: TempDir,
@@ -109,7 +107,7 @@ fn lower_id_table_sql(
     let migrations = IrAuthor::new(
         "main",
         "app_sqlite_drift",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -749,7 +747,7 @@ async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {
     .expect("portable SQLite ID fixture must deserialize");
     let mut expected = fold_ops(
         &ir.ops,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         "main",
         &support::no_inject("app"),
     )
@@ -757,7 +755,7 @@ async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {
     let migrations = IrAuthor::new(
         "main",
         "app_sqlite_drift",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -825,7 +823,7 @@ async fn catalog_seeded_fold_preserves_non_rowid_integer_primary_keys() {
     let projected = fold_ops_onto(
         &live,
         &[],
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         "main",
         &support::no_inject("app"),
     )
@@ -885,7 +883,7 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
     .expect("typed-reference literal fixture must deserialize");
     let mut expected = fold_ops(
         &ir.ops,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         "main",
         &support::no_inject("app"),
     )
@@ -893,7 +891,7 @@ async fn typed_reference_literal_defaults_use_expected_driven_catalog_comparison
     let migrations = IrAuthor::new(
         "main",
         "app_sqlite_drift",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())
@@ -1309,7 +1307,7 @@ async fn authored_composite_reference_snapshot_matches_live_sqlite() {
     .expect("authored composite-reference fixture must deserialize");
     let mut expected = fold_ops(
         &ir.ops,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         "main",
         &support::no_inject("app"),
     )
@@ -1317,7 +1315,7 @@ async fn authored_composite_reference_snapshot_matches_live_sqlite() {
     let migrations = IrAuthor::new(
         "main",
         "app_sqlite_drift",
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())

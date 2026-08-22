@@ -19,7 +19,7 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, MigrationEngine, PostgresBackend, SqlDialect,
+    LiveSchema, MigrationEngine, PostgresBackend,
 };
 
 const OWNER: &str = "app_drop_function_rollback_pg";
@@ -88,7 +88,7 @@ fn lower_drop_from_history(
     arg_types: &[&str],
     if_exists: Option<bool>,
 ) -> Migration {
-    let dialect = SqlDialect::Postgres;
+    let dialect = &zero_migrate::POSTGRES;
     let pol = policy(PROJECT_SCHEMA);
     let folded =
         fold_ops(history, dialect, PROJECT_SCHEMA, &pol).expect("the function history must fold");
@@ -109,7 +109,7 @@ fn lower_drop_from_history(
         "ops": [drop],
     })
     .to_string();
-    let guard = GuardConfig::from_policy(pol.clone(), dialect.id());
+    let guard = GuardConfig::from_policy(pol.clone(), (*dialect).clone());
     let artifact = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &pol)
         .load_and_lower_guarded(&document, OWNER, &BTreeMap::new(), &live, &guard)
         .expect("the function drop must lower");
@@ -172,9 +172,9 @@ async fn apply_doc(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, SqlDialect::Postgres, &pol);
-    let guard = GuardConfig::from_policy(pol.clone(), SqlDialect::Postgres.id());
-    let folded = fold_ops(history, SqlDialect::Postgres, &cfg.project_schema, &pol)
+    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &pol);
+    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate::POSTGRES.clone());
+    let folded = fold_ops(history, &zero_migrate::POSTGRES, &cfg.project_schema, &pol)
         .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     let artifact = author
@@ -226,7 +226,7 @@ async fn live_function_body(
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         policy(&cfg.project_schema),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     ))
 }
 
@@ -245,7 +245,7 @@ async fn unguarded_drop_function_from_folded_history_has_create_inverse() {
     assert_eq!(migration.down.as_deref(), Some(integer_inverse()));
     guard_for(&GuardConfig::from_policy(
         policy(PROJECT_SCHEMA),
-        SqlDialect::Postgres.id(),
+        zero_migrate::POSTGRES.clone(),
     ))
     .as_ref()
     .check(migration.down.as_deref().expect("the inverse exists"))
@@ -305,7 +305,7 @@ async fn dropping_one_overload_restores_only_that_overload() {
 
     let folded_overloads = fold_ops(
         &overloads,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         PROJECT_SCHEMA,
         &policy(PROJECT_SCHEMA),
     )
@@ -330,7 +330,7 @@ async fn dropping_one_overload_restores_only_that_overload() {
     let history_after_drop = vec![integer, text, drop_function_op("integer", None)];
     let folded_after_drop = fold_ops(
         &history_after_drop,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         PROJECT_SCHEMA,
         &policy(PROJECT_SCHEMA),
     )

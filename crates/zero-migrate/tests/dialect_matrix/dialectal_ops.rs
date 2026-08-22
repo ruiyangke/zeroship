@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::model::ir::{IndexElement, IndexMethod, IrFlagsOverride, Op};
-use zero_migrate::model::validate::{validate_ir, SqlDialect, CODE_OP_INVALID};
+use zero_migrate::model::validate::{validate_ir, CODE_OP_INVALID};
 use zero_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PlanStep,
@@ -68,7 +68,7 @@ fn lower_selects_postgres_leg_and_refuses_absent_sqlite_mysql_legs() {
     let pg_steps = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Postgres,
+        &zero_migrate::POSTGRES,
         &support::no_inject("app"),
     )
     .lower_steps(&pg_only_ir(), &LiveSchema::default())
@@ -83,7 +83,7 @@ fn lower_selects_postgres_leg_and_refuses_absent_sqlite_mysql_legs() {
         mig.up
     );
 
-    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
         let err = IrAuthor::new(PROJECT, APP, dialect, &support::no_inject("app"))
             .lower_steps(&pg_only_ir(), &LiveSchema::default())
             .expect_err("an absent exact dialectal leg must fail closed");
@@ -187,8 +187,8 @@ fn authored_create_table_lowers_under_the_charter_that_shaped_it() {
     .expect("authored IR parses");
     let resolved =
         resolve_create_table_policy(&authored, &policy, PROJECT).expect("table shape resolves");
-    let author = IrAuthor::new(PROJECT, APP, SqlDialect::Postgres, &policy);
-    let guard_cfg = GuardConfig::from_policy(policy, SqlDialect::Postgres.id());
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::POSTGRES, &policy);
+    let guard_cfg = GuardConfig::from_policy(policy, zero_migrate::POSTGRES);
     let (steps, _fragments) = author
         .lower_guarded(&resolved, &guard_cfg, &LiveSchema::default())
         .expect("an authored createTable lowers under the charter that shaped it");
@@ -214,7 +214,7 @@ async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        SqlDialect::Sqlite,
+        &zero_migrate::SQLITE,
         &support::confined_charter(),
     );
     let migrations = author
@@ -227,7 +227,7 @@ async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
     );
 
     let engine = MigrationEngine::new();
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), SqlDialect::Sqlite.id());
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE);
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -263,7 +263,7 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
             legs: BTreeMap::new(),
         }],
     );
-    let err = validate_ir(&empty, SqlDialect::Postgres).unwrap_err();
+    let err = validate_ir(&empty, &zero_migrate::POSTGRES).unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
 
     let nested = ir(
@@ -277,14 +277,14 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
             )]),
         }],
     );
-    let err = validate_ir(&nested, SqlDialect::Postgres).unwrap_err();
+    let err = validate_ir(&nested, &zero_migrate::POSTGRES).unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
 }
 
 #[test]
 fn validate_rejects_absent_and_misspelled_target_dialectal_legs() {
     let absent = pg_only_ir();
-    let err = validate_ir(&absent, SqlDialect::Sqlite)
+    let err = validate_ir(&absent, &zero_migrate::SQLITE)
         .expect_err("an absent exact target leg must fail closed");
     assert_eq!(err.code, CODE_OP_INVALID);
     assert!(err.reason.contains("sqlite target"), "got: {err}");
@@ -298,7 +298,7 @@ fn validate_rejects_absent_and_misspelled_target_dialectal_legs() {
             )]),
         }],
     );
-    let err = validate_ir(&misspelled, SqlDialect::Postgres)
+    let err = validate_ir(&misspelled, &zero_migrate::POSTGRES)
         .expect_err("a misspelled key cannot cover the postgres target");
     assert_eq!(err.code, CODE_OP_INVALID);
     assert!(err.reason.contains("postgres target"), "got: {err}");
