@@ -1,0 +1,289 @@
+//! Randomised backend frames, to generalise the hand-written hostile shapes.
+//!
+//! `tests/hostile_peer.rs` pins eight specific violations - an unknown tag, a
+//! lying length, a message out of order. Each was chosen by a person, which
+//! means the set is exactly as imaginative as whoever wrote it. This file feeds
+//! the same client bytes nobody chose.
+//!
+//! WHAT IS ASSERTED, and deliberately no more:
+//!
+//!   * the operation TERMINATES inside a watchdog - the driver never waits
+//!     forever for bytes that are not coming, and never spins,
+//!   * it does not PANIC - a panic in a network client is reachable by the peer,
+//!   * whatever it returns, the CLIENT IS LEFT IN A DEFINED STATE, so a
+//!     follow-up either works or fails, and never hangs.
+//!
+//! It is NOT asserted that a random response produces an error. Random bytes
+//! occasionally form a legitimate reply, and a test demanding failure would be
+//! wrong about the protocol rather than about the driver. This is the standard
+//! fuzzing bargain: weak per-case assertions, enormous case count.
+//!
+//! DETERMINISTIC BY CONSTRUCTION. The generator is a seeded xorshift written
+//! inline - no `rand`, no dependency added to a manifest - and the seed for each
+//! case is printed when it fails, so any failure replays exactly. A fuzzer whose
+//! failures cannot be reproduced is a rumour generator.
+//!
+//! The case count is deliberately modest so this stays inside a normal test run.
+//! It is a floor on coverage, not a soak: raise `CASES` locally to hunt.
+
+use compio_postgres::config::SslMode;
+use compio_postgres::{Config, NoTls};
+use std::io::{ErrorKind, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[allow(dead_code)]
+mod common;
+
+const ASYNC_WATCHDOG: Duration = Duration::from_secs(30);
+const SOCKET_WATCHDOG: Duration = Duration::from_secs(2);
+const THREAD_WATCHDOG: Duration = Duration::from_secs(3);
+const OPERATION_WATCHDOG: Duration = Duration::from_secs(2);
+/// Enough to cover the generator's shapes several times over while keeping the
+/// whole file well inside a normal `cargo test` run.
+const CASES: u32 = 48;
+/// Fixed so the corpus is identical on every machine and every run. Changing it
+/// explores a different corpus; it does not make a previous failure disappear,
+/// because the failing case prints its own seed.
+const ROOT_SEED: u64 = 0x5eed_c0de_1234_9abc;
+
+/// xorshift64*, inline so this file adds no dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        // A zero state is a fixed point for xorshift, so never allow one.
+        Self(if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed })
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn below(&mut self, bound: u32) -> u32 {
+        u32::try_from(self.next_u64() % u64::from(bound)).expect("bound fits u32")
+    }
+
+    fn byte(&mut self) -> u8 {
+        u8::try_from(self.next_u64() & 0xff).expect("masked to a byte")
+    }
+}
+
+/// Every backend message tag PostgreSQL actually uses, so the generator spends
+/// part of its budget on frames that are plausible rather than obviously wrong.
+/// A wholly random tag is rejected immediately by the codec and exercises much
+/// less of the driver than a real tag carrying a wrong body.
+const REAL_TAGS: &[u8] = b"RKZTDCEInsvW1235AGHcdfGNS";
+
+/// Build one scripted response. The shapes are weighted towards near-miss
+/// frames, because bytes that are obviously not PostgreSQL get rejected at the
+/// first check and tell us little.
+fn generate_response(rng: &mut Rng) -> Vec<u8> {
+    let mut out = Vec::new();
+    let frames = 1 + rng.below(3);
+    for _ in 0..frames {
+        let tag = if rng.below(4) == 0 {
+            rng.byte()
+        } else {
+            REAL_TAGS[rng.below(u32::try_from(REAL_TAGS.len()).expect("tag count fits")) as usize]
+        };
+        let body_len = rng.below(24) as usize;
+        let mut body = Vec::with_capacity(body_len);
+        for _ in 0..body_len {
+            body.push(rng.byte());
+        }
+        // The declared length is usually honest, sometimes a lie in either
+        // direction, and occasionally unrepresentable.
+        let declared = match rng.below(8) {
+            0 => rng.below(8),
+            1 => u32::try_from(body.len() + 4).expect("body fits") + 1 + rng.below(64),
+            2 => u32::try_from(body.len() + 4)
+                .expect("body fits")
+                .saturating_sub(1 + rng.below(4)),
+            _ => u32::try_from(body.len() + 4).expect("body fits"),
+        };
+        out.push(tag);
+        out.extend_from_slice(&declared.to_be_bytes());
+        out.extend_from_slice(&body);
+    }
+    out
+}
+
+struct StubServer {
+    addr: SocketAddr,
+    done: std::sync::mpsc::Receiver<()>,
+    thread: thread::JoinHandle<()>,
+}
+
+impl StubServer {
+    fn spawn(script: impl FnOnce(TcpListener) + Send + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind scripted PostgreSQL peer");
+        listener
+            .set_nonblocking(true)
+            .expect("make scripted listener bounded");
+        let addr = listener.local_addr().expect("scripted listener address");
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let thread = thread::spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                script(listener);
+            }));
+            let _ = done_tx.send(());
+            if let Err(panic) = outcome {
+                std::panic::resume_unwind(panic);
+            }
+        });
+        Self { addr, done, thread }
+    }
+
+    fn finish(self) {
+        self.done
+            .recv_timeout(THREAD_WATCHDOG)
+            .expect("scripted PostgreSQL peer exceeded its thread watchdog");
+        self.thread
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+}
+
+fn accept_bounded(listener: &TcpListener) -> TcpStream {
+    let deadline = Instant::now() + SOCKET_WATCHDOG;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_read_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("set scripted peer read watchdog");
+                stream
+                    .set_write_timeout(Some(SOCKET_WATCHDOG))
+                    .expect("set scripted peer write watchdog");
+                return stream;
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                assert!(
+                    Instant::now() < deadline,
+                    "client did not connect before the scripted accept watchdog"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("scripted accept failed: {error}"),
+        }
+    }
+}
+
+fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(5 + body.len());
+    frame.push(tag);
+    frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+    frame.extend_from_slice(body);
+    frame
+}
+
+fn complete_startup(stream: &mut TcpStream, process_id: i32) {
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read startup packet length");
+    let length = u32::from_be_bytes(length) as usize;
+    assert!(length >= 8, "startup packet is shorter than its header");
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read startup packet body");
+
+    let mut response = backend_frame(b'R', &0u32.to_be_bytes());
+    let mut key_data = Vec::with_capacity(8);
+    key_data.extend_from_slice(&process_id.to_be_bytes());
+    key_data.extend_from_slice(&1234i32.to_be_bytes());
+    response.extend_from_slice(&backend_frame(b'K', &key_data));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream
+        .write_all(&response)
+        .expect("write scripted startup response");
+    stream.flush().expect("flush scripted startup response");
+}
+
+fn stub_config(addr: SocketAddr) -> Config {
+    let mut config = Config::new();
+    config
+        .user("scripted-user")
+        .hostaddr(addr.ip())
+        .port(addr.port())
+        .ssl_mode(SslMode::Disable)
+        .connect_timeout(Duration::from_secs(1));
+    config
+}
+
+/// Feed one generated response to a real client. Returns nothing: the claim is
+/// that this function RETURNS AT ALL, without panicking, for every input.
+async fn drive_one_case(seed: u64, response: Vec<u8>) {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, 900);
+        // Drain the query frame if it arrives; the client may also give up
+        // first, and neither is a failure of the peer.
+        let mut scratch = [0u8; 512];
+        let _ = stream.read(&mut scratch);
+        let _ = stream.write_all(&response);
+        let _ = stream.flush();
+        thread::sleep(Duration::from_millis(120));
+    });
+
+    let (client, connection) = match stub_config(server.addr).connect(NoTls).await {
+        Ok(pair) => pair,
+        Err(_) => {
+            // A handshake this generator never touches; nothing to drive.
+            server.finish();
+            return;
+        }
+    };
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    // (1) TERMINATION. The failure this catches is a hang, which without the
+    // timeout would present as the whole suite wedging on one unlucky seed.
+    let _outcome = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+        .await
+        .unwrap_or_else(|_| {
+            panic!("seed {seed:#x}: the driver hung on a generated response instead of returning")
+        });
+
+    // (2) DEFINED STATE. Whatever happened, the client answers a follow-up one
+    // way or the other. A client that hangs here has been left mid-protocol
+    // with no way back, which is the shape of every poisoning bug this crate
+    // has had.
+    let reuse = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
+    assert!(
+        reuse.is_ok(),
+        "seed {seed:#x}: the client hung on reuse after a generated response"
+    );
+
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    drop(client);
+    server.finish();
+}
+
+/// The whole corpus, one case at a time. Panics are not caught: a panic
+/// anywhere below is a real finding and should fail loudly with its seed.
+#[compio::test]
+async fn generated_backend_frames_never_hang_or_panic_the_driver() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut root = Rng::new(ROOT_SEED);
+        for case in 0..CASES {
+            let seed = root.next_u64();
+            let mut rng = Rng::new(seed);
+            let response = generate_response(&mut rng);
+            assert!(
+                !response.is_empty(),
+                "case {case} generated an empty response, which exercises nothing"
+            );
+            drive_one_case(seed, response).await;
+        }
+    })
+    .await
+    .expect("frame fuzzing exceeded its outer watchdog");
+}
