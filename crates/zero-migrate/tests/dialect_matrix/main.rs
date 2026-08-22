@@ -17,6 +17,7 @@ mod backend_modules_name_one_dialect;
 mod backend_snapshot_privates_stay_core_only;
 mod checksum_corpus_stability;
 mod core_does_not_spell_a_vendors_bytes;
+mod core_names_no_vendor_backend_module;
 mod core_names_no_vendor_crate;
 mod created_tables_dialect_legs;
 mod dialect_conformance_live;
