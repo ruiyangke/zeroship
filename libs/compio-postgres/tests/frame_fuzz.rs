@@ -287,3 +287,145 @@ async fn generated_backend_frames_never_hang_or_panic_the_driver() {
     .await
     .expect("frame fuzzing exceeded its outer watchdog");
 }
+
+// ---------------------------------------------------------------------------
+// Handshake fuzzing.
+//
+// Everything above fuzzes frames AFTER a clean startup, so it never reaches
+// `src/connect_raw.rs` - which holds 12 of the driver's 44
+// `unexpected_message()` sites, the largest single cluster, and which neither
+// `tests/hostile_peer.rs` nor the corpus above touches. The handshake is also
+// the part a client runs before it trusts anything, so a panic or a hang there
+// is reachable by any peer that can complete a TCP accept.
+//
+// The generator answers the startup packet with plausible-looking authentication
+// traffic rather than noise: real `R` frames carrying random auth codes, key
+// data of the wrong size, `ReadyForQuery` arriving early, and error responses
+// with malformed field sequences. Random bytes would be refused by the first
+// length check and would leave the interesting states unvisited.
+//
+// MEASURED, so this is coverage rather than hope. Instrumenting the 48-case
+// corpus to print each outcome gave eight distinct error classes, and 23 of the
+// 48 reported "unexpected message from server" - that is
+// `Error::unexpected_message()`, the connect_raw cluster this file exists to
+// reach. The rest were unexpected EOF (16), two different length-validation
+// failures (4), an unknown authentication tag, and an unsupported
+// authentication method. No generated handshake ever completed successfully,
+// so this corpus bounds the FAILURE paths and says nothing about the success
+// path.
+// ---------------------------------------------------------------------------
+
+/// Build a scripted answer to a startup packet. Shapes are drawn from what a
+/// broken or hostile server plausibly emits, not from uniform noise.
+fn generate_handshake(rng: &mut Rng) -> Vec<u8> {
+    let mut out = Vec::new();
+    let steps = 1 + rng.below(4);
+    for _ in 0..steps {
+        match rng.below(6) {
+            // An authentication request with an arbitrary code. Real codes are
+            // 0, 2, 3, 5, 7, 8, 9, 10, 12; anything else must be refused rather
+            // than treated as "no authentication required".
+            0 => {
+                let code = rng.below(16);
+                out.extend_from_slice(&backend_frame(b'R', &code.to_be_bytes()));
+            }
+            // BackendKeyData with a body that is not the required eight bytes.
+            1 => {
+                let len = rng.below(16) as usize;
+                let mut body = Vec::with_capacity(len);
+                for _ in 0..len {
+                    body.push(rng.byte());
+                }
+                out.extend_from_slice(&backend_frame(b'K', &body));
+            }
+            // ParameterStatus with a body that may lack its NUL terminators.
+            2 => {
+                let len = rng.below(20) as usize;
+                let mut body = Vec::with_capacity(len);
+                for _ in 0..len {
+                    body.push(rng.byte());
+                }
+                out.extend_from_slice(&backend_frame(b'S', &body));
+            }
+            // ReadyForQuery, possibly with an invalid transaction status byte
+            // and possibly arriving before authentication has completed.
+            3 => {
+                let status = if rng.below(2) == 0 {
+                    b"I".to_vec()
+                } else {
+                    vec![rng.byte()]
+                };
+                out.extend_from_slice(&backend_frame(b'Z', &status));
+            }
+            // An ErrorResponse whose field sequence may not terminate.
+            4 => {
+                let len = rng.below(24) as usize;
+                let mut body = Vec::with_capacity(len);
+                for _ in 0..len {
+                    body.push(rng.byte());
+                }
+                out.extend_from_slice(&backend_frame(b'E', &body));
+            }
+            // A message that is well formed but has no business in a handshake.
+            _ => {
+                out.extend_from_slice(&backend_frame(b'D', b"\x00\x00"));
+            }
+        }
+    }
+    out
+}
+
+/// Attempt one connection against a scripted handshake. The claim is that this
+/// RETURNS - with either a client or an error - and never panics or hangs.
+async fn drive_one_handshake(seed: u64, response: Vec<u8>) {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        // Read the startup packet, then answer with whatever was generated.
+        let mut length = [0u8; 4];
+        if stream.read_exact(&mut length).is_ok() {
+            let length = u32::from_be_bytes(length) as usize;
+            if (8..=1024 * 1024).contains(&length) {
+                let mut body = vec![0u8; length - 4];
+                let _ = stream.read_exact(&mut body);
+            }
+        }
+        let _ = stream.write_all(&response);
+        let _ = stream.flush();
+        thread::sleep(Duration::from_millis(120));
+    });
+
+    // A connection that SUCCEEDS is a legitimate outcome: some generated
+    // sequences are a valid trust handshake. Both arms are acceptable; only a
+    // hang or a panic is not.
+    let outcome = compio::time::timeout(OPERATION_WATCHDOG, stub_config(server.addr).connect(NoTls))
+        .await
+        .unwrap_or_else(|_| {
+            panic!("seed {seed:#x}: connect hung on a generated handshake instead of returning")
+        });
+
+    if let Ok((client, connection)) = outcome {
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    }
+    server.finish();
+}
+
+#[compio::test]
+async fn generated_handshakes_never_hang_or_panic_the_driver() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut root = Rng::new(ROOT_SEED ^ 0x484e_4453_484b_4521);
+        for case in 0..CASES {
+            let seed = root.next_u64();
+            let mut rng = Rng::new(seed);
+            let response = generate_handshake(&mut rng);
+            assert!(
+                !response.is_empty(),
+                "case {case} generated an empty handshake, which exercises nothing"
+            );
+            drive_one_handshake(seed, response).await;
+        }
+    })
+    .await
+    .expect("handshake fuzzing exceeded its outer watchdog");
+}
