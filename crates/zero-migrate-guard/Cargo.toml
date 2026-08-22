@@ -10,8 +10,14 @@ description = "The zero-migrate SQL security layer: the pg_query(libpg_query)-ba
 # guard sees exactly what Postgres would execute. A deny-list must not misparse
 # or miss a dangerous statement; a pure-Rust parser (sqlparser-rs) is incomplete
 # for exotic PG syntax, which is a security gap. pg_query carries a C build dep
-# (libpg_query) — this crate is the ONLY owner of that C dep on the non-SQLite
-# path.
+# (libpg_query).
+#
+# This crate is NOT the only owner of that C dep, though this comment claimed to
+# be for as long as it was wrong. `crates/zero-migrate/Cargo.toml` declares
+# `pg_query` independently, so the engine pulls libpg_query in whether or not it
+# goes through this crate. Two crates declare it; no other crate in the workspace
+# does. Sole ownership is a GOAL, and reaching it means the engine's remaining
+# direct parse calls move behind a vendor seam first.
 pg_query = "6"
 # The guard walks the serialized `pg_query` parse tree and builds structured
 # advisory/classification values as JSON-ish data.
