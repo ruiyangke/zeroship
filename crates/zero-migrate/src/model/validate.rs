@@ -322,7 +322,7 @@ fn validate_authored_identifier_lengths_op(
     Ok(())
 }
 
-/// Bound one author-supplied identifier at [`crate::plan::author::PG_MAX_IDENT_BYTES`].
+/// Bound one author-supplied identifier at [`crate::plan::author::pg_max_ident_bytes`].
 ///
 /// The bound is BYTES, not characters, because PostgreSQL's NAMEDATALEN is a byte
 /// budget: a name short in characters but long in bytes is truncated exactly as an
@@ -334,7 +334,7 @@ fn authored_name_within_bound(
     op_index: usize,
     target_dialect: Dialect,
 ) -> Result<(), AuthoringError> {
-    let max = crate::plan::author::PG_MAX_IDENT_BYTES;
+    let max = crate::plan::author::pg_max_ident_bytes();
     if name.len() <= max {
         return Ok(());
     }
@@ -8196,11 +8196,11 @@ fn validate_column_reference_constraint_name(name: &str) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if name.len() > crate::plan::author::PG_MAX_IDENT_BYTES {
+    if name.len() > crate::plan::author::pg_max_ident_bytes() {
         return Err(format!(
             "is {} bytes; the maximum is {} bytes",
             name.len(),
-            crate::plan::author::PG_MAX_IDENT_BYTES
+            crate::plan::author::pg_max_ident_bytes()
         ));
     }
     Ok(())
@@ -8489,7 +8489,7 @@ fn validate_column_facets(
                 ),
                 format!(
                     "use a non-empty bare identifier of at most {} bytes, starting with an ASCII letter or '_' and containing only ASCII letters, digits, or '_'",
-                    crate::plan::author::PG_MAX_IDENT_BYTES
+                    crate::plan::author::pg_max_ident_bytes()
                 ),
             ));
         }
@@ -12649,7 +12649,7 @@ mod tests {
 
     #[test]
     fn column_reference_rejects_an_overlong_explicit_constraint_name() {
-        let name = "f".repeat(crate::plan::author::PG_MAX_IDENT_BYTES + 1);
+        let name = "f".repeat(crate::plan::author::pg_max_ident_bytes() + 1);
         let ir = ir_with(vec![create_with_reference_name(&name)]);
         let error = validate_ir_platform(&ir, Dialect::Postgres)
             .expect_err("an overlong foreign-key constraint name must fail closed");
@@ -12657,7 +12657,7 @@ mod tests {
         assert!(
             error
                 .reason
-                .contains(&crate::plan::author::PG_MAX_IDENT_BYTES.to_string()),
+                .contains(&crate::plan::author::pg_max_ident_bytes().to_string()),
             "the error must name the length cap: {error}"
         );
     }

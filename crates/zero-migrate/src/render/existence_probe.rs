@@ -100,7 +100,7 @@
 
 use crate::model::probe::{ExpectColumn, GuardDir, GuardProbe};
 use crate::model::snapshot::SchemaSnapshot;
-use crate::plan::author::PG_MAX_IDENT_BYTES;
+use crate::plan::author::pg_max_ident_bytes;
 use crate::render::renderer::{Capability, DialectSupports};
 use crate::schema::query::{canonical_type_for_dialect, SqlDialect};
 
@@ -961,7 +961,7 @@ fn normalize_fk_definition(def: &str) -> String {
 }
 
 /// PostgreSQL's OWN spelling of an over-long identifier: the longest prefix of WHOLE
-/// characters that fits in [`PG_MAX_IDENT_BYTES`].
+/// characters that fits in [`pg_max_ident_bytes`].
 ///
 /// The budget is bytes (NAMEDATALEN) but the clip is on a character boundary — verified
 /// against a live PostgreSQL 18 server, where a 62-ASCII-byte prefix plus a two-byte
@@ -969,9 +969,9 @@ fn normalize_fk_definition(def: &str) -> String {
 /// split the codepoint. Mirrors the char-boundary discipline of
 /// [`crate::plan::author::cap_ident_name`].
 fn pg_truncated_identifier(name: &str) -> String {
-    let mut out = String::with_capacity(PG_MAX_IDENT_BYTES);
+    let mut out = String::with_capacity(pg_max_ident_bytes());
     for ch in name.chars() {
-        if out.len() + ch.len_utf8() > PG_MAX_IDENT_BYTES {
+        if out.len() + ch.len_utf8() > pg_max_ident_bytes() {
             break;
         }
         out.push(ch);
@@ -1007,7 +1007,7 @@ fn truncated_identifier_backstop(
     dialect: SqlDialect,
     present: impl Fn(&str) -> bool,
 ) -> Option<GuardVerdict> {
-    if !matches!(dialect, SqlDialect::Postgres) || name.len() <= PG_MAX_IDENT_BYTES {
+    if !matches!(dialect, SqlDialect::Postgres) || name.len() <= pg_max_ident_bytes() {
         return None;
     }
     let truncated = pg_truncated_identifier(name);
@@ -1464,7 +1464,7 @@ mod tests {
         // The truncation backstop refuses EVERY over-long `IfNotExists` name. An
         // unguarded create carries no author request to be refused on a name
         // PostgreSQL accepts today, so the ownership path returns before it.
-        let long = "i".repeat(PG_MAX_IDENT_BYTES + 8);
+        let long = "i".repeat(pg_max_ident_bytes() + 8);
         let live = snapshot_with("users", empty_table());
         assert_eq!(
             decide_pg(&ownership_probe("users", &long), &live),

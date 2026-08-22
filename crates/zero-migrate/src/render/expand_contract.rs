@@ -271,10 +271,11 @@ fn rename_id_seed(
     seed
 }
 
-/// The Postgres identifier length limit (`NAMEDATALEN - 1`), in bytes. Mirrors
-/// [`crate::plan::author`]'s constant: an over-long name is silently truncated
-/// server-side, desyncing the name we emit in `up`/`down`. We cap it ourselves.
-const PG_MAX_IDENT_BYTES: usize = 63;
+// The Postgres identifier length limit (`NAMEDATALEN - 1`), in bytes, used to live
+// here as a second literal `63` that MIRRORED `plan::author`'s constant. A mirror is
+// exactly the drift that constant's doc promises cannot happen, so the four call sites
+// below now call `crate::plan::author::pg_max_ident_bytes()` — the one definition,
+// which reads PostgreSQL's DECLARED cap off its descriptor.
 
 /// Deterministically derive the dual-write function name for a rename, capped to
 /// Postgres's 63-byte identifier limit. Stable across re-authoring (so the
@@ -297,12 +298,12 @@ pub(crate) fn dual_write_trg_name(table: &str, from: &str, to: &str) -> String {
 /// [`crate::plan::author`]'s `index_name`, factored for the function/trigger names.
 fn capped_name(natural: &str) -> String {
     use sha2::{Digest, Sha256};
-    if natural.len() <= PG_MAX_IDENT_BYTES {
+    if natural.len() <= crate::plan::author::pg_max_ident_bytes() {
         return natural.to_string();
     }
     let digest = Sha256::digest(natural.as_bytes());
     let suffix = hex::encode(&digest[..5]); // 10 hex chars
-    let budget = PG_MAX_IDENT_BYTES - (1 + suffix.len());
+    let budget = crate::plan::author::pg_max_ident_bytes() - (1 + suffix.len());
     let mut prefix = String::with_capacity(budget);
     for ch in natural.chars() {
         if prefix.len() + ch.len_utf8() > budget {
@@ -1249,12 +1250,12 @@ mod tests {
         let fn_name = dual_write_fn_name(&"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
         let trg_name = dual_write_trg_name(&"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
         assert!(
-            fn_name.len() <= PG_MAX_IDENT_BYTES,
+            fn_name.len() <= crate::plan::author::pg_max_ident_bytes(),
             "fn {} bytes",
             fn_name.len()
         );
         assert!(
-            trg_name.len() <= PG_MAX_IDENT_BYTES,
+            trg_name.len() <= crate::plan::author::pg_max_ident_bytes(),
             "trg {} bytes",
             trg_name.len()
         );

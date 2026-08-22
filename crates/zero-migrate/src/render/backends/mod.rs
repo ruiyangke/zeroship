@@ -112,16 +112,32 @@ static SHIPPING: [&BackendVendor; 3] = [
 
 pub(crate) const VENDORS: VendorSet = VendorSet::new(&SHIPPING);
 
-/// PostgreSQL's registered byte limit, exposed for the existing deterministic
-/// identifier-name precomputation until that PostgreSQL-named surface moves.
-pub(crate) const POSTGRES_IDENTIFIER_LIMIT_BYTES: usize =
-    match zero_migrate_postgres::VENDOR.descriptor.limits.identifier {
+/// PostgreSQL's registered byte limit, for the deterministic identifier-name
+/// precomputation that is still PostgreSQL-shaped.
+///
+/// Resolved through the registry by [`DialectId`], NOT by naming the backend crate.
+/// Both spellings read the same declared descriptor, but an id is not a crate name:
+/// the shipping list above stays the ONE place core names a backend crate, and
+/// `core_names_no_vendor_crate` keeps its exact count of three.
+///
+/// A fn rather than a `const` because the registry lookup is not const-evaluable.
+/// Nothing needed const-ness - every call site is a runtime expression - so this
+/// costs no generality. Indexing `SHIPPING[0]` would have kept the `const` and also
+/// dropped the crate name, but it identifies PostgreSQL POSITIONALLY: reorder the
+/// list and it silently reads a different vendor's cap. An id cannot do that.
+pub(crate) fn postgres_identifier_limit_bytes() -> usize {
+    match vendor(&zero_migrate_ir::dialect::POSTGRES)
+        .descriptor
+        .limits
+        .identifier
+    {
         zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
         zero_migrate_ir::backend::IdentifierLimit::Unbounded
         | zero_migrate_ir::backend::IdentifierLimit::Characters(_) => {
             panic!("PostgreSQL declares a BYTE identifier cap")
         }
-    };
+    }
+}
 
 /// The vendor for a dialect.
 ///

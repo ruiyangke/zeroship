@@ -152,10 +152,15 @@ fn column_def(c: &Column) -> Result<String, AuthorError> {
 /// number the backend DECLARES cannot drift apart. The `Bytes` arm is not
 /// incidental: MySQL's cap is 64 CHARACTERS and SQLite has none, which is why
 /// this bound is PostgreSQL's and not everyone's.
-pub(crate) const PG_MAX_IDENT_BYTES: usize =
-    crate::render::backends::POSTGRES_IDENTIFIER_LIMIT_BYTES;
+///
+/// This is the ONE definition. It used to be three - `apply::role` and
+/// `render::expand_contract` each restated `63` - so the sentence above was true of
+/// one site and false of the other two.
+pub(crate) fn pg_max_ident_bytes() -> usize {
+    crate::render::backends::postgres_identifier_limit_bytes()
+}
 
-/// Cap an arbitrary generated identifier to ≤ `PG_MAX_IDENT_BYTES` (63 bytes),
+/// Cap an arbitrary generated identifier to ≤ `pg_max_ident_bytes()` (63 bytes),
 /// deterministically: when `natural` fits, return it verbatim; when it would
 /// overflow, keep a readable prefix and append a short hash of the *full* name so
 /// distinct long inputs still map to distinct, stable names.
@@ -183,7 +188,7 @@ pub(crate) const PG_MAX_IDENT_BYTES: usize =
 /// equal.
 pub fn cap_ident_name(natural: &str) -> String {
     use sha2::{Digest, Sha256};
-    if natural.len() <= PG_MAX_IDENT_BYTES {
+    if natural.len() <= pg_max_ident_bytes() {
         return natural.to_string();
     }
     // Overflow: deterministic 10-hex-char hash of the full natural name, plus a
@@ -193,7 +198,7 @@ pub fn cap_ident_name(natural: &str) -> String {
                                             // Reserve room for the `_<suffix>` (1 + 10 = 11 bytes). Truncate the readable
                                             // part on a char boundary so we never split a multi-byte UTF-8 sequence
                                             // (identifiers are ASCII in practice, but be safe).
-    let budget = PG_MAX_IDENT_BYTES - (1 + suffix.len());
+    let budget = pg_max_ident_bytes() - (1 + suffix.len());
     let mut prefix = String::with_capacity(budget);
     for ch in natural.chars() {
         if prefix.len() + ch.len_utf8() > budget {
@@ -604,9 +609,10 @@ mod tests {
         // Must fit Postgres's NAMEDATALEN-1 limit so the name we emit in `up`
         // matches the on-disk name and the `down`'s DROP INDEX.
         assert!(
-            n1.len() <= PG_MAX_IDENT_BYTES,
-            "index name {} bytes exceeds {PG_MAX_IDENT_BYTES}",
-            n1.len()
+            n1.len() <= pg_max_ident_bytes(),
+            "index name {} bytes exceeds {}",
+            n1.len(),
+            pg_max_ident_bytes()
         );
         // Deterministic: same inputs → same name (so re-authoring the same shape
         // is idempotent and the `down` can target it).
@@ -620,7 +626,7 @@ mod tests {
             n1, n2,
             "distinct column sets must yield distinct index names"
         );
-        assert!(n2.len() <= PG_MAX_IDENT_BYTES);
+        assert!(n2.len() <= pg_max_ident_bytes());
         // A valid Postgres identifier (starts with a letter, then [a-z0-9_]).
         assert!(
             n1.starts_with("idx_"),
@@ -653,7 +659,7 @@ mod tests {
         };
         let m = &det().author(&req).expect("author")[0];
         let expected = index_name(&long_table, &["x".repeat(30), "y".repeat(30)]);
-        assert!(expected.len() <= PG_MAX_IDENT_BYTES);
+        assert!(expected.len() <= pg_max_ident_bytes());
         assert!(m.up.contains(&format!("\"{expected}\"")), "up = {}", m.up);
         assert!(
             m.down
