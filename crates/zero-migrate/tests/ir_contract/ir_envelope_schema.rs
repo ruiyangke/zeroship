@@ -202,7 +202,8 @@ fn precondition_variant_names_from_schema() {
     // A unit variant is the obvious way a branch becomes unreadable - externally
     // tagged, it emits a bare `const` with no `required` key - and it is NOT the
     // way this fires, which was measured rather than assumed. Adding one to
-    // `Precondition` does not reach any test: `apply::precondition::evaluate`
+    // `Precondition` does not reach any test:
+    // `apply::backend::postgres::precondition::evaluate`
     // matches the enum exhaustively, so the build stops first with E0004
     // "non-exhaustive patterns". The compiler is the earlier gate for any variant
     // an evaluator must handle.

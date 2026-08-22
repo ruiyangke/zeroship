@@ -62,7 +62,8 @@
 //! `information_schema` / `&Client` appears in the generic executor body — it is
 //! all contained here, the PG leaf.
 
-use crate::apply::backend::{MigrationBackend, PostgresBackend};
+use super::PostgresBackend;
+use crate::apply::backend::MigrationBackend;
 use crate::driver::SqlSession;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;

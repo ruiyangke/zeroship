@@ -622,7 +622,8 @@ pub trait MigrationBackend {
 
     /// Evaluate a migration's preconditions read-only under the apply lock.
     /// Behind the trait so the generic body never holds a concrete connection;
-    /// the PG impl delegates to [`crate::apply::precondition::evaluate`].
+    /// the PG impl delegates to
+    /// [`crate::apply::backend::postgres::precondition::evaluate`].
     async fn evaluate_preconditions(
         &self,
         cfg: &ExecutorConfig,
@@ -642,7 +643,7 @@ pub trait MigrationBackend {
     /// ([`Self::evaluate_preconditions`]). Abstaining leaves SQLite and MySQL
     /// byte-identical: the same refusal, at the same seam, with the same wording.
     /// Only the PostgreSQL impl answers, routing to the SAME
-    /// `apply::precondition` body the per-migration seam uses, so the two cannot
+    /// `apply::backend::postgres::precondition` body the per-migration seam uses, so the two cannot
     /// disagree about one assertion.
     ///
     /// # Errors

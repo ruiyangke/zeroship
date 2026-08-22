@@ -29,6 +29,7 @@ mod dml_emitters_do_not_relookup_a_backend;
 mod gen_types_dialectal_runtime_metadata;
 mod gen_types_dialectal_table_shape;
 mod gen_types_drop_column_dialect_legs;
+mod neutral_apply_layer_names_no_vendor;
 mod op_support_matrix;
 mod partition_recording_dialect_legs;
 mod plan_vocabulary_names_strategies_not_vendors;

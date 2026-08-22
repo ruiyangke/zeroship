@@ -41,17 +41,18 @@ description = "Portable, security-first, multi-dialect DB migration engine — d
 #     their own answer and never touch this.
 #   - `apply/backend/postgres/backfill_sql.rs` — the assembled-backfill cursor
 #     mutation check.
-#   - `apply/precondition.rs` — the `SqlBoolean` boolean-SELECT shape gate. Despite
-#     the neutral-looking path this is a PostgreSQL leaf too, reached only via
-#     `PostgresBackend::evaluate_preconditions`; both other backends refuse a
-#     migration that declares a precondition.
+#   - `apply/backend/postgres/precondition.rs` — the `SqlBoolean` boolean-SELECT
+#     shape gate, reached only via `PostgresBackend::evaluate_preconditions`; both
+#     other backends refuse a migration that declares a precondition. It used to
+#     sit at the neutral-looking `apply/precondition.rs`, which is what made this
+#     entry need a "despite the path" caveat; the path says PostgreSQL now.
 #
 # The raw-view-body scan is NO LONGER on this list: it goes through
 # `ValidationPolicy::raw_view_body_refusal` so each backend vets its own grammar.
 #
-# This dependency cannot leave until `apply/backend/postgres/**` and
-# `apply/precondition.rs` relocate into `zero-migrate-postgres`. pg_query carries a
-# C build dep (libpg_query).
+# This dependency cannot leave until `apply/backend/postgres/**` relocates into
+# `zero-migrate-postgres` — which now covers the precondition evaluator too, since
+# it moved under that directory. pg_query carries a C build dep (libpg_query).
 pg_query = "6"
 sha2 = { workspace = true }
 hmac = { workspace = true }

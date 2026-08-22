@@ -19,6 +19,11 @@ mod baseline_sql;
 pub mod drift_sql;
 mod identity_sql;
 pub mod journal_sql;
+/// The Postgres precondition evaluator: the `pg_query` shape gate that proves a
+/// `SqlBoolean` cannot mutate state, and the `information_schema` catalog reads the
+/// structured checks run. `pub(crate)` because the crate root re-exports its two
+/// public entry points at their historical `zero_migrate::…` paths.
+pub(crate) mod precondition;
 mod primary_key_sql;
 /// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
 /// backend drives — relocated out of the generic `apply::executor` so no
@@ -314,7 +319,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         cfg: &ExecutorConfig,
         m: &Migration,
     ) -> Result<crate::apply::executor::PreconditionVerdict, ApplyError> {
-        crate::apply::precondition::evaluate_all(self.conn, cfg, &DIALECT, m).await
+        precondition::evaluate_all(self.conn, cfg, &DIALECT, m).await
     }
 
     /// The blocking-dependency predicate, MEASURED against a live server by
@@ -360,8 +365,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         check: &crate::model::precondition::Precondition,
     ) -> Result<crate::apply::backend::PlanPreconditionVerdict, ApplyError> {
         let (met, blockers) =
-            crate::apply::precondition::evaluate_one(self.conn, cfg, &DIALECT, version, check)
-                .await?;
+            precondition::evaluate_one(self.conn, cfg, &DIALECT, version, check).await?;
         if met {
             return Ok(crate::apply::backend::PlanPreconditionVerdict::Met);
         }

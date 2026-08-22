@@ -944,7 +944,7 @@ fn order_repeatables<'a>(
 }
 
 /// The per-migration precondition verdict loop now lives in
-/// [`crate::apply::precondition::evaluate_all`] — the **Postgres** leaf reached only via
+/// [`crate::apply::backend::postgres::precondition::evaluate_all`] — the **Postgres** leaf reached only via
 /// [`MigrationBackend::evaluate_preconditions`]
 /// (multi-engine abstraction). The generic apply body calls the backend method
 /// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no

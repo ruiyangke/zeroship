@@ -435,8 +435,8 @@ pub use render::step::{
 // DB-free surfacing/formatting layer over the SQL `IrAuthor::lower_*` already
 // lowers; DB-state-dependent ops are labeled `-- [runtime-resolved]`, never
 // fabricated.
-pub use apply::precondition::evaluate as evaluate_precondition;
-pub use apply::precondition::PreconditionError;
+pub use apply::backend::postgres::precondition::evaluate as evaluate_precondition;
+pub use apply::backend::postgres::precondition::PreconditionError;
 pub use model::precondition::{CmpOp, OnUnmet, Precondition, PreconditionCheck};
 pub use render::sql_preview::{
     render_ir_envelope_sql, render_ir_envelope_sql_onto, render_ir_envelope_sql_statements,

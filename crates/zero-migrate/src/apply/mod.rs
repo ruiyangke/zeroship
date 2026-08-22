@@ -7,7 +7,13 @@ pub mod executor;
 // `crate::apply::journal::…` reference resolves unchanged.
 pub use zero_migrate_backend::journal;
 pub mod plan_precondition;
-pub mod precondition;
+// The precondition EVALUATOR was PostgreSQL's alone — `pg_query` shape validation,
+// `information_schema` catalog reads, and a `&Client`-bound `SqlBoolean` run, with
+// `PostgresBackend` named in its own body. It lives in
+// `apply::backend::postgres::precondition` now, beside the backend that was its only
+// caller. It could not follow the renderers into the PostgreSQL crate: it needs
+// `SqlSession`/`ExecutorConfig`/`ApplyError`/`Migration`, and that crate must not
+// depend on the engine.
 // The least-privilege `migrator` role name derivation was PostgreSQL's alone — the
 // `NOLOGIN` + `SET ROLE` model, the `[a-z0-9_]` charset, and the 63-BYTE cap this
 // vendor declares (MySQL's is 64 CHARACTERS; SQLite has no roles at all). It lives
