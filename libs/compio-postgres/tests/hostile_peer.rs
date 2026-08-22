@@ -468,18 +468,21 @@ async fn a_misplaced_message_after_the_parameter_description_is_refused() {
 // a driver that resynchronises would start handing the caller bytes from frames
 // it never parsed as data.
 //
-// A LIMIT ON WHAT THESE THREE PROVE, stated because three green tests imply
-// more than was established. The mid-stream case demonstrably REACHES its site:
-// instrumenting it reports "unexpected message from server", which is
-// `Error::unexpected_message()` at copy_out.rs:88. But the one-variable control
-// used elsewhere in this file - feed the same helper a VALID stream and require
-// the test to fail - could not be built here. A scripted CopyOutResponse plus
-// CopyData, CopyDone, CommandComplete and ReadyForQuery still errors, so the
-// fixture is not a valid COPY and the control is inconclusive rather than
-// negative. The happy path IS covered, against a real server, by
-// `copy_out_error_surfaces_and_recovers_the_same_connection` and the rest of the
-// copy family in integration.rs. Treat these three as "the refusal path is
-// reached", not as "the refusal is proven necessary".
+// WHAT THESE THREE REACH, and it took a correction to get right. The first
+// version of this helper answered the FIRST frontend batch - but `copy_out(&str)`
+// prepares before it copies, so that batch is Parse, Describe, Sync. Logging the
+// frontend tags showed "PDS": the violation was answering the PREPARE, the error
+// came from prepare.rs, and no COPY code ran at all. The helper now answers the
+// prepare correctly and applies the violation to the SECOND batch, which logs as
+// "BES" - Bind, Execute, Sync. That is the copy batch.
+//
+// STILL NOT ESTABLISHED: the one-variable control used elsewhere in this file -
+// feed the same helper a VALID stream and require the test to FAIL - could not be
+// built. A scripted CopyOutResponse plus CopyData, CopyDone, CommandComplete and
+// ReadyForQuery still errors, so the fixture is not a valid COPY and the control
+// is INCONCLUSIVE rather than negative. The happy path is covered against a real
+// server by the copy family in integration.rs. Read these three as "the COPY
+// refusal path is reached", not as "the refusal is proven necessary".
 // ---------------------------------------------------------------------------
 
 /// Drive `copy_out` against a peer answering with `response`, requiring the same
@@ -490,6 +493,24 @@ async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) ->
     let server = StubServer::spawn(move |listener| {
         let mut stream = accept_bounded(&listener);
         complete_startup(&mut stream, process_id);
+
+        // `copy_out(&str)` PREPARES first: the client sends Parse, Describe,
+        // Sync as one batch, and only then Bind/Execute for the copy itself.
+        // Answering that first batch with the violation answers the PREPARE,
+        // so the error comes from prepare.rs and no COPY code runs at all.
+        // An earlier version of this helper did exactly that; logging the
+        // frontend tags showed "PDS" and settled it.
+        expect_frontend_until_sync(&mut stream);
+        let mut prepared = backend_frame(b'1', b"");
+        let mut params = Vec::new();
+        params.extend_from_slice(&0u16.to_be_bytes());
+        prepared.extend_from_slice(&backend_frame(b't', &params));
+        prepared.extend_from_slice(&backend_frame(b'n', b""));
+        prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+        let _ = stream.write_all(&prepared);
+        let _ = stream.flush();
+
+        // The copy batch arrives second, and that is what the violation answers.
         expect_frontend_until_sync(&mut stream);
         let _ = stream.write_all(&response);
         let _ = stream.flush();
