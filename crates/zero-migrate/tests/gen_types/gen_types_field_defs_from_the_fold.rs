@@ -626,19 +626,19 @@ fn the_move_changed_no_refusal_that_the_old_path_already_made() {
 
 /// Stream/dialect cases in which BOTH sides refuse.
 ///
-/// 76 of 171 — 57 streams (27 fixtures, 23 carriers, 7 probes) times 3 dialects, with
-/// none rejected by the policy resolution before either side is reached (76 + 95 = 171,
-/// which is the identity that says so).
+/// This and [`CONTROL_ACCEPTANCES`] partition `streams x DIALECTS`, with nothing
+/// rejected by the policy resolution before either side is reached - so THEIR SUM IS
+/// that product, and the sum is the discriminator. A case trading between the two
+/// conserves it and is a redistribution; a change in the SUM means a stream entered or
+/// left the corpus, which no re-pin should paper over. Check the sum first.
 ///
-/// The consumer move left this at 74. Removing dialectal fallbacks deliberately moved
-/// the SQLite and MySQL attempts over the postgres-only `dialectal_ops` fixture here.
-const CONTROL_REFUSALS: usize = 76;
-/// Stream/dialect cases in which BOTH sides accept. 95 of the same 171.
-///
-/// Measured at 94 before the `column_level_reference_policy` carrier was added and 97
-/// after. Removing dialectal fallbacks then moved exactly two of those acceptances to
-/// refusals, leaving 95.
-const CONTROL_ACCEPTANCES: usize = 95;
+/// Adding a carrier moves the pair one way; the dialectal coverage rule moves it the
+/// other, via the SQLite and MySQL attempts over the postgres-only `dialectal_ops`
+/// fixture.
+const CONTROL_REFUSALS: usize = 74;
+/// Stream/dialect cases in which BOTH sides accept. The complement of
+/// [`CONTROL_REFUSALS`] over the same set.
+const CONTROL_ACCEPTANCES: usize = 97;
 
 /// The control above compares two Rust functions. This one checks that the probe streams
 /// still reach the arms they were written for, by asserting the exact refusal each

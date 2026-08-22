@@ -64,6 +64,35 @@
 # one refusal apiece instead of artifacts for the prefix before the wrapper; an absent
 # exact target leg is not permission to silently discard the operation.
 #
+# FOURTH EDIT, AND IT REVERSES THE THIRD. An `Op::Dialectal` whose `legs` map has no key
+# for the render target now CONTRIBUTES NOTHING instead of refusing. `Expr::Dialectal`
+# still refuses, and that asymmetry is deliberate. The two refusal lines the third edit
+# installed are gone: -2 lines, +21, all on `fixture:dialectal_ops` under Sqlite and
+# Mysql.
+#
+# The 20 `sha`/`field` rows are byte-identical to the Postgres rows above them with the
+# dialect token swapped, `sha|runtime.json` INCLUDED (731b2f05… on all three dialects —
+# the postgres-only leg declares an index, and no index reaches the `FieldDef` map). The
+# `sha|env.db.ts` CONTROL is a5ce483e… on Sqlite and Mysql against 0e86a8cb… on
+# Postgres, which is the absent `docs_embedding_hnsw_idx` in the OTHER artifact.
+#
+# THE 21ST ROW IS A REFUSAL THAT CHANGED ITS REASON RATHER THAN GOING AWAY, and it is
+# the one line in this edit that a diff summary would mis-read as a no-op:
+#
+#   BEFORE  fixture:dialectal_ops|Sqlite|refused|gen-types: fold the declared ops into a
+#           schema failed: fold: unsupported op: dialectal op has no leg for target
+#           dialect
+#   AFTER   fixture:dialectal_ops|Sqlite|sqlite_create_refused|docs|reserved system
+#           field name: Field name 'id' is reserved by the active table-injection
+#           policy. …
+#
+# The stream no longer stops at the fold, so it reaches the SQLite 12-step rebuild's
+# `CREATE TABLE`, and the confined charter that owns the recorded fixtures injects `id`.
+# That is not new behaviour: `ddl_create`, `fluent_scalars`, `p2a_facets` and
+# `runtime_options` each already carry the identical `sqlite_create_refused` row for the
+# identical reason, so `dialectal_ops` is the fifth confined fixture to record it and
+# the first four are the control that says the reason is the charter, not the fold.
+#
 # There is deliberately NO re-bless environment variable, matching
 # tests/op_fixture_goldens.rs and both predecessors.
 fixture:alter_primary_key|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
@@ -145,8 +174,27 @@ fixture:dialectal_ops|Postgres|field|docs|updated_by|{"type":"string","maxLength
 fixture:dialectal_ops|Postgres|field|docs|version|{"type":"int","required":true}
 fixture:dialectal_ops|Postgres|field|docs|deleted_at|{"type":"date"}
 fixture:dialectal_ops|Postgres|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine"}
-fixture:dialectal_ops|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: dialectal op has no leg for target dialect
-fixture:dialectal_ops|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: dialectal op has no leg for target dialect
+fixture:dialectal_ops|Sqlite|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Sqlite|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
+fixture:dialectal_ops|Sqlite|field|docs|id|{"type":"string","maxLength":255,"required":true}
+fixture:dialectal_ops|Sqlite|field|docs|created_at|{"type":"date","required":true}
+fixture:dialectal_ops|Sqlite|field|docs|updated_at|{"type":"date","required":true}
+fixture:dialectal_ops|Sqlite|field|docs|created_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Sqlite|field|docs|updated_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Sqlite|field|docs|version|{"type":"int","required":true}
+fixture:dialectal_ops|Sqlite|field|docs|deleted_at|{"type":"date"}
+fixture:dialectal_ops|Sqlite|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine"}
+fixture:dialectal_ops|Sqlite|sqlite_create_refused|docs|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:dialectal_ops|Mysql|sha|runtime.json|731b2f0508849e2e1c9c100ab1f74b124ff2e7c055e29d471c28b991ad9dcf5f
+fixture:dialectal_ops|Mysql|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
+fixture:dialectal_ops|Mysql|field|docs|id|{"type":"string","maxLength":255,"required":true}
+fixture:dialectal_ops|Mysql|field|docs|created_at|{"type":"date","required":true}
+fixture:dialectal_ops|Mysql|field|docs|updated_at|{"type":"date","required":true}
+fixture:dialectal_ops|Mysql|field|docs|created_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Mysql|field|docs|updated_by|{"type":"string","maxLength":255}
+fixture:dialectal_ops|Mysql|field|docs|version|{"type":"int","required":true}
+fixture:dialectal_ops|Mysql|field|docs|deleted_at|{"type":"date"}
+fixture:dialectal_ops|Mysql|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine"}
 fixture:dml|Postgres|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
 fixture:dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
 fixture:dml|Sqlite|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d

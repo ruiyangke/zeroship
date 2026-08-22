@@ -64,7 +64,7 @@ fn pg_only_ir() -> MigrationIr {
 }
 
 #[test]
-fn lower_selects_postgres_leg_and_refuses_absent_sqlite_mysql_legs() {
+fn lower_selects_postgres_leg_and_emits_nothing_for_absent_sqlite_mysql_legs() {
     let pg_steps = IrAuthor::new(
         PROJECT,
         APP,
@@ -83,14 +83,21 @@ fn lower_selects_postgres_leg_and_refuses_absent_sqlite_mysql_legs() {
         mig.up
     );
 
+    // An absent op leg CONTRIBUTES NOTHING rather than refusing. Refusing would
+    // make shipping a fourth backend retroactively break every migration authored
+    // before that backend existed, and the legs record into checksummed history
+    // that cannot be edited forward without tripping ChecksumDrift.
+    //
+    // Asserting the step list is EXACTLY EMPTY, not merely "no HNSW step": the
+    // whole claim is that the op vanished, and a length check is what catches a
+    // future change that emits some other step in its place.
     for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
-        let err = IrAuthor::new(PROJECT, APP, dialect, &support::no_inject("app"))
+        let steps = IrAuthor::new(PROJECT, APP, dialect, &support::no_inject("app"))
             .lower_steps(&pg_only_ir(), &LiveSchema::default())
-            .expect_err("an absent exact dialectal leg must fail closed");
+            .expect("an absent dialectal leg contributes nothing, it does not refuse");
         assert!(
-            err.to_string()
-                .contains("dialectal op has no leg for target dialect"),
-            "{dialect:?} should refuse an absent postgres-only leg: {err}"
+            steps.is_empty(),
+            "{dialect:?} has no leg in this op, so it must emit no steps: {steps:#?}"
         );
     }
 }
@@ -282,13 +289,17 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
 }
 
 #[test]
-fn validate_rejects_absent_and_misspelled_target_dialectal_legs() {
+fn validate_accepts_absent_and_misspelled_target_dialectal_legs() {
+    // Validate must agree with the fold: an absent target leg contributes nothing,
+    // so there is nothing to refuse. If validate refused while the fold skipped,
+    // every migration would be rejected for ops the target was never going to run.
     let absent = pg_only_ir();
-    let err = validate_ir(&absent, &zero_migrate::SQLITE)
-        .expect_err("an absent exact target leg must fail closed");
-    assert_eq!(err.code, CODE_OP_INVALID);
-    assert!(err.reason.contains("sqlite target"), "got: {err}");
+    validate_ir(&absent, &zero_migrate::SQLITE)
+        .expect("an absent exact target leg contributes nothing, it does not refuse");
 
+    // A misspelled key is INDISTINGUISHABLE from a deliberate skip. That is the
+    // accepted cost of emit-nothing: refusing an unrecognised key would also refuse
+    // every already-checksummed migration the moment a new backend ships.
     let misspelled = ir(
         "misspelled_postgres",
         vec![Op::Dialectal {
@@ -298,8 +309,6 @@ fn validate_rejects_absent_and_misspelled_target_dialectal_legs() {
             )]),
         }],
     );
-    let err = validate_ir(&misspelled, &zero_migrate::POSTGRES)
-        .expect_err("a misspelled key cannot cover the postgres target");
-    assert_eq!(err.code, CODE_OP_INVALID);
-    assert!(err.reason.contains("postgres target"), "got: {err}");
+    validate_ir(&misspelled, &zero_migrate::POSTGRES)
+        .expect("a misspelled key leaves postgres uncovered, which emits nothing");
 }

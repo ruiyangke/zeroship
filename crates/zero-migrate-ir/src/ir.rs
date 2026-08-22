@@ -3400,7 +3400,16 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// Per-backend op sequences. A target with no own leg is refused as not portable.
+    /// Per-backend op sequences. A target with no own leg EMITS NOTHING.
+    ///
+    /// Deliberately NOT symmetric with [`crate::expr::Expr::Dialectal`], which
+    /// refuses an uncovered target (`EXPR_NOT_PORTABLE`). An absent EXPRESSION leg
+    /// leaves no value to write in a statement that runs anyway; an absent OP leg
+    /// just means this backend has no work here.
+    ///
+    /// Refusing would also make shipping a new backend retroactively refuse every
+    /// migration authored before it existed, and the legs record into checksummed
+    /// history that cannot be edited forward.
     Dialectal {
         /// Op sequences keyed by the backend identity that owns each sequence.
         #[serde(default)]

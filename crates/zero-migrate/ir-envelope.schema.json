@@ -1534,7 +1534,7 @@
           ]
         },
         {
-          "description": "Per-backend op sequences. A target with no own leg is refused as not portable.",
+          "description": "Per-backend op sequences. A target with no own leg EMITS NOTHING.\n\nDeliberately NOT symmetric with [`crate::expr::Expr::Dialectal`], which\nrefuses an uncovered target (`EXPR_NOT_PORTABLE`). An absent EXPRESSION leg\nleaves no value to write in a statement that runs anyway; an absent OP leg\njust means this backend has no work here.\n\nRefusing would also make shipping a new backend retroactively refuse every\nmigration authored before it existed, and the legs record into checksummed\nhistory that cannot be edited forward.",
           "type": "object",
           "properties": {
             "legs": {

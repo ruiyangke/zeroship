@@ -3507,12 +3507,9 @@ impl IrAuthor {
         pending_foreign_keys: &mut Vec<DeferredForeignKeyUnit>,
     ) -> Result<(), IrLowerError> {
         if let Op::Dialectal { legs } = op {
-            let leg = self
-                .selected_dialectal_leg(legs)
-                .ok_or(IrLowerError::UnsupportedOp(
-                    "dialectal op has no leg for target dialect",
-                ))?;
-            for inner in leg {
+            // No own leg contributes no ops. See `model::validate`'s dialectal
+            // scope check for why this does not refuse.
+            for inner in self.selected_dialectal_leg(legs).unwrap_or_default() {
                 if matches!(inner, Op::Dialectal { .. }) {
                     return Err(IrLowerError::UnsupportedOp(
                         "nested dialectal op reached lower",
@@ -6233,12 +6230,9 @@ impl IrAuthor {
         skips_static_guard: bool,
     ) -> Result<(), IrGuardedLowerError> {
         if let Op::Dialectal { legs } = op {
-            let leg = self
-                .selected_dialectal_leg(legs)
-                .ok_or(IrLowerError::UnsupportedOp(
-                    "dialectal op has no leg for target dialect",
-                ))?;
-            for inner in leg {
+            // No own leg contributes no ops. See `model::validate`'s dialectal
+            // scope check for why this does not refuse.
+            for inner in self.selected_dialectal_leg(legs).unwrap_or_default() {
                 if matches!(inner, Op::Dialectal { .. }) {
                     return Err(
                         IrLowerError::UnsupportedOp("nested dialectal op reached lower").into(),

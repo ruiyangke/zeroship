@@ -102,15 +102,26 @@ fn a_dialectal_leg_naming_a_dropped_column_is_refused() {
     );
 }
 
+/// The CONTRAST to the test above, and the pair is the whole point.
+///
+/// Same dropped column, same inner op. Spelled `postgres`, the leg is SELECTED and
+/// its dangling column reference is refused. Spelled `postgre`, the leg is not
+/// selected, so its contents are never validated and nothing is refused - an
+/// unselected leg cannot make a claim about this catalog.
+///
+/// That is the accepted cost of emit-nothing: a typo is indistinguishable from a
+/// deliberate skip. Refusing unrecognised keys instead would refuse every migration
+/// authored before a newly shipped backend existed, and the legs live in checksummed
+/// history that cannot be edited forward.
 #[test]
 fn a_misspelled_leg_key_is_not_selected_for_postgres() {
-    let error = verdict(&format!(
+    let verdict = verdict(&format!(
         r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"postgre":[{INDEX_V}]}}}}"#
-    ))
-    .expect_err("a misspelled key cannot cover the postgres target");
+    ));
     assert!(
-        error.contains("no leg for the postgres target"),
-        "the typo must fail closed as missing exact coverage: {error}"
+        verdict.is_ok(),
+        "an unselected leg contributes nothing, so its dropped column is not this \
+         target's problem: {verdict:?}"
     );
 }
 

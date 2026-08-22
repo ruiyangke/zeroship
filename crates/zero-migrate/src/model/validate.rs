@@ -389,7 +389,7 @@ fn validate_authored_identifier_lengths_op(
             // against this target's catalog, so bounding it would refuse an IR that is
             // correct here. `dialectal` inside `dialectal` is refused elsewhere, so one
             // level of descent covers the shape.
-            for inner in dialectal_leg(target_dialect, legs, op_index)? {
+            for inner in dialectal_leg(target_dialect, legs) {
                 validate_authored_identifier_lengths_op(inner, target_dialect, op_index)?;
             }
         }
@@ -1378,7 +1378,7 @@ fn validate_per_row_op(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs, op_index)? {
+            for inner in dialectal_leg(target_dialect, legs) {
                 validate_per_row_op(
                     inner,
                     target_dialect,
@@ -1771,7 +1771,6 @@ fn replay_logical_declarations_for_lower(
 fn collect_logical_declarations_op(
     op: &crate::model::ir::Op,
     target_dialect: &DialectId,
-    op_index: usize,
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
 ) -> Result<(), AuthoringError> {
@@ -1779,14 +1778,8 @@ fn collect_logical_declarations_op(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs, op_index)? {
-                collect_logical_declarations_op(
-                    inner,
-                    target_dialect,
-                    op_index,
-                    declared,
-                    schema_mode,
-                )?;
+            for inner in dialectal_leg(target_dialect, legs) {
+                collect_logical_declarations_op(inner, target_dialect, declared, schema_mode)?;
             }
         }
         Op::CreateTable {
@@ -2229,7 +2222,7 @@ fn validate_column_references_op(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs, op_index)? {
+            for inner in dialectal_leg(target_dialect, legs) {
                 validate_column_references_op(
                     inner,
                     target_dialect,
@@ -2296,8 +2289,8 @@ fn validate_column_references(
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
-    for (op_index, op) in ir.ops.iter().enumerate() {
-        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_column_references_op(
@@ -2334,8 +2327,8 @@ fn validate_vendor_key_storage(
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
-    for (op_index, op) in ir.ops.iter().enumerate() {
-        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_vendor_key_storage_op(
@@ -2386,8 +2379,8 @@ pub(crate) fn validate_vendor_key_storage_for_lower(
         default_schema,
     };
     let mut declared = seed.clone();
-    for (op_index, op) in ir.ops.iter().enumerate() {
-        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_vendor_key_storage_op(
@@ -2483,7 +2476,7 @@ fn validate_vendor_key_storage_op(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs, op_index)? {
+            for inner in dialectal_leg(target_dialect, legs) {
                 validate_vendor_key_storage_op(
                     inner,
                     target_dialect,
@@ -2663,8 +2656,8 @@ pub(crate) fn validate_column_references_for_lower(
         default_schema,
     };
     let mut declared = seed.clone();
-    for (op_index, op) in ir.ops.iter().enumerate() {
-        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_column_references_op(
@@ -4315,7 +4308,7 @@ fn effective_ops<'a>(
         target_dialect: &DialectId,
     ) -> Result<(), AuthoringError> {
         if let Op::Dialectal { legs } = op {
-            for nested in dialectal_leg(target_dialect, legs, index)? {
+            for nested in dialectal_leg(target_dialect, legs) {
                 push(out, index, nested, target_dialect)?;
             }
         } else {
@@ -4335,9 +4328,16 @@ fn effective_ops<'a>(
 ///
 /// Descending into a leg that will NOT run would refuse a migration on a
 /// reference the server never sees, so the choice is made here once and shared.
-/// A missing own leg is refused here too. Semantic walks are reachable directly
-/// from lowering, so none may rely on an earlier structural validation pass or
-/// turn absence into either an empty leg or a panic.
+/// An absent target leg yields NO OPS rather than refusing - validate must agree
+/// with the fold here, or it judges ops the target will never run.
+///
+/// INFALLIBLE, and deliberately not a `Result`. It used to return one so it could
+/// refuse an uncovered target; now that an absent leg is empty rather than an
+/// error, a `Result` would be a return type whose `Err` no caller can ever
+/// observe, and every `?` on it would be a branch that reads as a guard while
+/// guarding nothing. `op_index` went with it - it existed only to locate that
+/// refusal for the author.
+///
 /// DELEGATES to [`crate::render::fold::selected_dialectal_leg`] rather than
 /// repeating the exact-id lookup, because that helper is `pub(crate)` for
 /// exactly this reason - its doc comment asks callers outside the fold to select
@@ -4346,30 +4346,14 @@ fn effective_ops<'a>(
 ///
 /// The first version of this function re-derived it anyway. The two happened to
 /// agree, so nothing broke and nothing would have flagged it; a later change to
-/// one is what a second copy costs. Validate refusing on one leg while the fold
+/// one is what a second copy costs. Validate selecting one leg while the fold
 /// runs another is a divergence no test in either module would catch, since each
 /// would still be self-consistent.
 fn dialectal_leg<'a>(
     target_dialect: &DialectId,
     legs: &'a BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
-    op_index: usize,
-) -> Result<&'a [crate::model::ir::Op], AuthoringError> {
-    crate::render::fold::selected_dialectal_leg(target_dialect, legs).ok_or_else(|| {
-        AuthoringError {
-            code: CODE_OP_INVALID.to_string(),
-            kind: Some(UnsupportedKind::Op),
-            op_index,
-            dialect: target_dialect.clone(),
-            // Preserve lower/fold's established refusal text. This semantic gate is
-            // earlier on direct lowering paths, but must not turn a panic repair into
-            // an unrelated diagnostic-byte change.
-            reason: "dialectal op has no leg for target dialect".to_string(),
-            suggested_fix: Some(format!(
-                "add a {} leg to the dialectal op",
-                target_dialect.as_str()
-            )),
-        }
-    })
+) -> &'a [crate::model::ir::Op] {
+    crate::render::fold::selected_dialectal_leg(target_dialect, legs).unwrap_or_default()
 }
 
 /// Refuse an operation that names a column an earlier `dropColumn` removed.
@@ -5085,7 +5069,7 @@ fn validate_table_foreign_keys_op(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs, op_index)? {
+            for inner in dialectal_leg(target_dialect, legs) {
                 validate_table_foreign_keys_op(
                     inner,
                     target_dialect,
@@ -5228,8 +5212,8 @@ fn validate_table_foreign_keys(
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
-    for (op_index, op) in ir.ops.iter().enumerate() {
-        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_table_foreign_keys_op(
@@ -5263,8 +5247,8 @@ pub(crate) fn validate_table_foreign_keys_for_lower(
         default_schema,
     };
     let mut declared = seed.clone();
-    for (op_index, op) in ir.ops.iter().enumerate() {
-        collect_logical_declarations_op(op, target_dialect, op_index, &mut declared, schema_mode)?;
+    for op in &ir.ops {
+        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_table_foreign_keys_op(
@@ -5290,7 +5274,7 @@ fn validate_online_rename_isolation_op<'a>(
 
     match op {
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs, op_index)? {
+            for inner in dialectal_leg(target_dialect, legs) {
                 validate_online_rename_isolation_op(inner, target_dialect, op_index, seen)?;
             }
         }
@@ -6115,21 +6099,20 @@ fn validate_dialectal_op(
             }
         }
     }
-    if legs.contains_key(target_dialect) {
-        return Ok(());
-    }
-    Err(mk(
-        target_dialect,
-        op_index,
-        format!(
-            "dialectal op has no leg for the {} target; the per-dialect operation does not cover this dialect",
-            target_dialect.as_str()
-        ),
-        format!(
-            "add a {} leg to the dialectal op",
-            target_dialect.as_str()
-        ),
-    ))
+    // A TARGET WITH NO OWN LEG CONTRIBUTES NOTHING, and that is not an error.
+    //
+    // Refusing here would make shipping a new backend retroactively refuse every
+    // migration authored before that backend existed - none of them can name it -
+    // and the legs record into CHECKSUMMED history, so the author cannot add the
+    // missing leg after the fact without tripping `ChecksumDrift`. An upgrade would
+    // wedge deployments that were correct when they were written.
+    //
+    // This is deliberately NOT symmetric with `Expr::Dialectal`, which still
+    // refuses (`EXPR_NOT_PORTABLE`). An absent EXPRESSION leg means "no value to
+    // write" in a statement that runs regardless, so proceeding would silently
+    // write something wrong. An absent OP leg means "this backend has no work
+    // here", which nothing is corrupted by skipping.
+    Ok(())
 }
 
 /// [`validate_op`] threaded with the active
@@ -9141,7 +9124,7 @@ pub fn validate_op_resolved(
         //
         // One level deep is complete: a leg cannot hold a wrapper.
         Op::Dialectal { legs } => {
-            for inner in dialectal_leg(target_dialect, legs, op_index)? {
+            for inner in dialectal_leg(target_dialect, legs) {
                 validate_op_resolved(inner, target_dialect, live_columns, op_index)?;
             }
         }
@@ -11487,16 +11470,22 @@ mod tests {
         );
     }
 
+    /// The SAME rule as the test above, taken to its limit: there the PostgreSQL leg
+    /// is explicitly empty, here it is absent entirely. Both mean "this target runs
+    /// nothing from this op", so both must pass rather than one passing and one
+    /// refusing on a distinction the author never drew.
+    ///
+    /// `without_panicking` is the original point and still is. An absent leg used to
+    /// reach an `unwrap` here; the guarantee is that it resolves to no ops instead of
+    /// either panicking or inventing a refusal.
     #[test]
-    fn validate_ir_resolved_refuses_a_missing_target_leg_without_panicking() {
+    fn validate_ir_resolved_skips_a_missing_target_leg_without_panicking() {
         let ir = ir_with(vec![dialectal_legs(None, Some(vec![ghost_update()]))]);
-        let err = validate_ir_resolved(&ir, &POSTGRES, &live_users())
-            .expect_err("the public resolved validator must enforce exact target coverage");
-        assert_eq!(err.code, CODE_OP_INVALID);
-        assert_eq!(err.op_index, 0);
-        assert!(err
-            .reason
-            .contains("dialectal op has no leg for the postgres target"));
+        assert!(
+            validate_ir_resolved(&ir, &POSTGRES, &live_users()).is_ok(),
+            "an absent postgres leg contributes no ops, so the mysql leg's unresolved \
+             column is not this target's to satisfy"
+        );
     }
 
     /// A resolvable ColRef inside the selected leg still passes, so the arm above is

@@ -2432,13 +2432,24 @@ export function countStar(): ExprChainType {
  * ```
  *
  * Op-level legs are thunks. Each present thunk records normal ops into a
- * sub-buffer that becomes a `dialectal` op leg. A missing own leg is refused
- * for that target, just like a missing expression leg.
+ * sub-buffer that becomes a `dialectal` op leg. A missing own leg is SKIPPED on
+ * that target (unlike expression `dialect()`, which fails closed).
+ *
+ * That asymmetry is deliberate. A missing expression leg leaves no value to write
+ * in a statement that runs regardless, so proceeding would write something wrong.
+ * A missing op leg just means this backend has no work here. Refusing instead
+ * would mean that shipping a new backend retroactively refuses every migration
+ * you authored before it existed, and the legs record into the CHECKSUMMED IR, so
+ * you could not add the missing leg afterwards without tripping a checksum drift.
+ *
+ * CAUTION: because leg keys are validated for SHAPE only, an unregistered key is
+ * indistinguishable from a deliberate skip. `dialect({ pg: ... })` is a well-formed
+ * id that matches no backend, so it contributes nothing on EVERY target and the
+ * deploy still reports success. There is no `pg` alias; the id is `postgres`.
  *
  * At least one leg must be present; the legs record in full in the checksummed
  * IR in lexical backend-id order. A target with no own expression leg is
- * refused (`EXPR_NOT_PORTABLE`); a target with no own op leg is likewise
- * refused as not portable.
+ * refused (`EXPR_NOT_PORTABLE`).
  */
 export function dialect(legs: DialectOpLegs): void;
 export function dialect(legs: DialectExprLegs): ExprChainType;

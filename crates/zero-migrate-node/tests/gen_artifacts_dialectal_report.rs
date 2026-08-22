@@ -107,7 +107,7 @@ fn a_selected_dialectal_leg_reports_true() {
 
 /// A target absent from `legs` is a refusal, not an empty op.
 #[test]
-fn an_absent_target_leg_fails_closed() {
+fn an_absent_target_leg_emits_nothing() {
     for dialect in ["sqlite", "mysql"] {
         let reply = gen_artifacts_from_envelopes(
             &postgres_only_leg_history(),
@@ -116,31 +116,46 @@ fn an_absent_target_leg_fails_closed() {
             &[charter().as_str()],
         );
         assert!(
-            !reply.ok,
-            "{dialect} must refuse a dialectal op without its target leg: {:?}",
+            reply.ok,
+            "{dialect} must fold the history and skip the absent op leg: {:?}",
             reply.error
         );
         assert_eq!(
-            reply.has_dialectal_ops, None,
-            "a refused fold has no dialectal-op answer",
+            reply.has_dialectal_ops,
+            Some(true),
+            "{dialect} selected no leg, but the dialect argument is what emptied the op",
+        );
+        // The fold SUCCEEDED, so it owes artifacts. Asserting their presence is the
+        // inverse of the fail-closed spelling's emptiness check, and it is what
+        // separates "skipped one op" from "produced nothing at all".
+        assert!(
+            reply.env_db_ts.is_some() && reply.runtime_json.is_some(),
+            "a successful fold must still emit its artifacts on {dialect}",
         );
         assert!(
-            reply.env_db_ts.is_none() && reply.runtime_json.is_none(),
-            "a refused fold must emit no artifacts",
-        );
-        assert!(
-            reply
-                .error
+            !reply
+                .runtime_json
                 .as_deref()
-                .is_some_and(|error| error.contains("dialectal op has no leg for target dialect")),
-            "the refusal must name the absent target leg: {:?}",
-            reply.error,
+                .expect("successful fold renders runtime JSON")
+                .contains("postgres_only"),
+            "{dialect} must not select the postgres-only column",
         );
     }
 }
 
+/// An unregistered leg key is INDISTINGUISHABLE from a deliberate skip, by design.
+///
+/// `pg` and `postgre` are well-formed [`DialectId`] strings that match no backend,
+/// so they contribute nothing on every target and the fold reports success. That is
+/// the accepted cost of the emit-nothing rule: refusing here would mean that
+/// SHIPPING a new backend retroactively refuses every migration authored before it
+/// existed, and migrations are checksummed history that cannot be edited forward.
+///
+/// The typo hazard this leaves open is real and is tracked separately: the fix is to
+/// reject unregistered leg keys at AUTHORING time only, never on replay of recorded
+/// history.
 #[test]
-fn pg_alias_and_misspelled_postgres_leg_fail_closed() {
+fn pg_alias_and_misspelled_postgres_leg_emit_nothing() {
     for wrong_key in ["pg", "postgre"] {
         let mut history = postgres_only_leg_history();
         let legs = history[1]["ops"][0]["legs"]
@@ -154,22 +169,18 @@ fn pg_alias_and_misspelled_postgres_leg_fail_closed() {
         let reply =
             gen_artifacts_from_envelopes(&history, "postgres", Some(SCHEMA), &[charter().as_str()]);
         assert!(
-            !reply.ok,
-            "{wrong_key:?} is not a postgres alias and must leave postgres uncovered: {:?}",
+            reply.ok,
+            "{wrong_key:?} is an unselected op leg, not a postgres alias: {:?}",
             reply.error
         );
-        assert_eq!(reply.has_dialectal_ops, None);
+        assert_eq!(reply.has_dialectal_ops, Some(true));
         assert!(
-            reply.env_db_ts.is_none() && reply.runtime_json.is_none(),
-            "a misspelled leg must emit no artifacts",
-        );
-        assert!(
-            reply
-                .error
+            !reply
+                .runtime_json
                 .as_deref()
-                .is_some_and(|error| error.contains("dialectal op has no leg for target dialect")),
-            "{wrong_key:?} must fail as an absent postgres leg: {:?}",
-            reply.error,
+                .expect("successful fold renders runtime JSON")
+                .contains("postgres_only"),
+            "{wrong_key:?} must not select the postgres-only column",
         );
     }
 }

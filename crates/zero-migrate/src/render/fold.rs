@@ -808,10 +808,9 @@ fn push_fold_op<'a>(
             if inside_dialectal {
                 return Err(FoldError::Unsupported("nested dialectal op reached fold"));
             }
-            let leg = selected_dialectal_leg(dialect, legs).ok_or(FoldError::Unsupported(
-                "dialectal op has no leg for target dialect",
-            ))?;
-            for inner in leg {
+            // No own leg contributes no ops. See `model::validate`'s dialectal
+            // scope check for why this does not refuse.
+            for inner in selected_dialectal_leg(dialect, legs).unwrap_or_default() {
                 push_fold_op(out, inner, dialect, true)?;
             }
             Ok(())

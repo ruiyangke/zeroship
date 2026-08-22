@@ -693,9 +693,11 @@ pub struct GenArtifactsReply {
     /// can pass as a clean result.
     ///
     /// Reports PRESENCE on a successful fold, not how many legs were selected. A
-    /// wrapper without a target leg fails closed, so a refusal reports `None`
-    /// together with no artifacts. The descriptor source cannot carry a wrapper at
-    /// all and reports `false` by construction.
+    /// wrapper without a leg for the target contributes NOTHING rather than
+    /// refusing, so it still reports `true`: the dialect argument is what emptied
+    /// the op, which is exactly the fact this field exists to report. The
+    /// descriptor source cannot carry a wrapper at all and reports `false` by
+    /// construction. `None` is reserved for a REFUSED fold, which has no answer.
     ///
     /// `false` does NOT mean the artifacts are dialect-independent. The
     /// materialized enum/domain capability gates and the identity/primary-key reuse
