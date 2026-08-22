@@ -1381,6 +1381,7 @@ where
                     in_flight_requests,
                     read_deadline,
                     read_error_release,
+                    _live.clone(),
                 )
                 .await
             }
@@ -1473,6 +1474,7 @@ where
         in_flight_requests: Arc<AtomicUsize>,
         read_deadline: Option<ReadDeadline>,
         read_error_release: Option<crate::release::ConnectionDropRelease>,
+        _read_live: crate::live::LiveConnectionGuard,
     ) -> Result<(), Error> {
         // ---- Spawn the dedicated read task. It OWNS `read_half` and loops
         // `read_backend` forever, forwarding each frame over a bounded
@@ -1505,6 +1507,9 @@ where
         let read_error_status = Arc::clone(&tx_status);
         let acknowledge_reads = read_deadline.is_some();
         let read_handle = compio::runtime::spawn(async move {
+            // Keep the one connection count armed until this task releases
+            // the split read half, including deferred task cancellation.
+            let _read_live = _read_live;
             let mut read_half = read_half;
             loop {
                 match read_backend(&mut read_half).await {
@@ -1982,10 +1987,12 @@ mod tests {
     }
 
     struct TimeoutSplitStream {
+        read_half_started: Rc<Cell<bool>>,
         read_half_dropped: Rc<Cell<bool>>,
     }
 
     struct ParkedReadHalf {
+        started: Option<Rc<Cell<bool>>>,
         dropped: Rc<Cell<bool>>,
     }
 
@@ -2094,6 +2101,7 @@ mod tests {
 
     impl AsyncRead for TimeoutSplitStream {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.read_half_started.set(true);
             std::future::pending::<()>().await;
             BufResult(Ok(0), buf)
         }
@@ -2116,6 +2124,9 @@ mod tests {
 
     impl AsyncRead for ParkedReadHalf {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            if let Some(started) = &self.started {
+                started.set(true);
+            }
             std::future::pending::<()>().await;
             BufResult(Ok(0), buf)
         }
@@ -2204,6 +2215,7 @@ mod tests {
         fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
             Ok((
                 ParkedReadHalf {
+                    started: None,
                     dropped: self.read_half_dropped,
                 },
                 FailingWriteHalf,
@@ -2218,6 +2230,7 @@ mod tests {
         fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
             Ok((
                 ParkedReadHalf {
+                    started: Some(self.read_half_started),
                     dropped: self.read_half_dropped,
                 },
                 SuccessfulWriteHalf,
@@ -2641,6 +2654,76 @@ mod tests {
     }
 
     #[compio::test]
+    async fn live_count_covers_a_parked_split_reader_until_its_half_drops() {
+        compio::time::timeout(Duration::from_secs(1), async {
+            assert_eq!(
+                crate::live::live_connections(),
+                0,
+                "the isolated fixture started with a live connection"
+            );
+            let read_half_started = Rc::new(Cell::new(false));
+            let read_half_dropped = Rc::new(Cell::new(false));
+            let stream: BufStream<MaybeTlsStream<_, TimeoutSplitStream>> = BufStream::new(
+                MaybeTlsStream::Raw(TimeoutSplitStream {
+                    read_half_started: Rc::clone(&read_half_started),
+                    read_half_dropped: Rc::clone(&read_half_dropped),
+                }),
+            );
+            let (_request_tx, request_rx) = mpsc::unbounded();
+            let connection = Connection::new(
+                stream,
+                VecDeque::new(),
+                HashMap::new(),
+                request_rx,
+                Arc::new(AtomicU8::new(b'I')),
+                Arc::new(AtomicUsize::new(0)),
+                None,
+            );
+            assert_eq!(crate::live::live_connections(), 1);
+
+            let mut driver = Box::pin(connection.run());
+            assert!(
+                futures_util::poll!(driver.as_mut()).is_pending(),
+                "the idle split connection did not park"
+            );
+            while !read_half_started.get() {
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+
+            let count_with_both_halves = crate::live::live_connections();
+            let reader_open_before_driver_drop = !read_half_dropped.get();
+            drop(driver);
+            let reader_open_after_driver_drop = !read_half_dropped.get();
+            let count_after_driver_drop = crate::live::live_connections();
+
+            while !read_half_dropped.get() {
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let count_after_reader_drop = crate::live::live_connections();
+
+            assert!(
+                reader_open_before_driver_drop,
+                "the parked reader released its half before driver cancellation"
+            );
+            assert_eq!(
+                count_with_both_halves, 1,
+                "one physical connection was counted more than once"
+            );
+            assert!(
+                reader_open_after_driver_drop,
+                "dropping the driver synchronously dropped its spawned read half"
+            );
+            assert_eq!(
+                count_after_driver_drop, 1,
+                "the count reached zero while the spawned reader still owned its socket half"
+            );
+            assert_eq!(count_after_reader_drop, 0);
+        })
+        .await
+        .expect("parked split-reader live-count test exceeded its watchdog");
+    }
+
+    #[compio::test]
     async fn write_error_teardown_drops_the_parked_read_half() {
         compio::time::timeout(Duration::from_secs(1), async {
             let read_half_dropped = Rc::new(Cell::new(false));
@@ -2678,6 +2761,7 @@ mod tests {
                     Arc::new(AtomicUsize::new(1)),
                     None,
                     None,
+                    crate::live::LiveConnectionGuard::new(),
                 )
                 .await;
 
@@ -2701,6 +2785,7 @@ mod tests {
         compio::time::timeout(Duration::from_secs(1), async {
             let read_half_dropped = Rc::new(Cell::new(false));
             let mut stream = BufStream::new(TimeoutSplitStream {
+                read_half_started: Rc::new(Cell::new(false)),
                 read_half_dropped: Rc::clone(&read_half_dropped),
             });
             stream.set_read_timeout(Some(Duration::ZERO));
@@ -2748,6 +2833,7 @@ mod tests {
                 Arc::new(AtomicUsize::new(1)),
                 read_deadline,
                 None,
+                crate::live::LiveConnectionGuard::new(),
             )
             .await;
 
