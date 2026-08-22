@@ -118,11 +118,35 @@ pub struct ConfinementConfig {
 
 /// The confinement settings **only the PostgreSQL backend reads**.
 ///
-/// Measured: every field below is referenced solely from
-/// `apply/backend/postgres/` and the precondition evaluator.
-/// The MySQL and SQLite backends read none of them, and would have nothing to do
+/// The MySQL and SQLite backends read neither field, and would have nothing to do
 /// with them if they did — MySQL has no `SET ROLE`-per-transaction confinement
 /// model and SQLite has neither roles nor schemas.
+///
+/// # Where they are read from, measured
+///
+/// This doc used to claim every field was referenced "solely from
+/// `apply/backend/postgres/` and the precondition evaluator". Half of that has
+/// become true — the precondition evaluator IS `apply/backend/postgres/` now — and
+/// the other half was never true, which is why the claim is replaced by the
+/// measurement rather than trimmed.
+///
+/// `migrator_role` is read only from `apply/backend/postgres/`
+/// (`session`, `backfill_sql`, `primary_key_sql`, `precondition`) and written by
+/// [`ExecutorConfig::with_migrator_role`], the host's provisioning seam.
+///
+/// `extension_schemas` is read from exactly ONE place and it is NOT the PostgreSQL
+/// backend: `ExecutorConfig::search_path_clause`, in this file. That method is
+/// itself PostgreSQL-only — a `search_path` is PostgreSQL's concept, its three
+/// callers are all in `apply/backend/postgres/session.rs`, and all three pass
+/// `POSTGRES` as the dialect it takes.
+///
+/// That is the real reason the neutral [`ConfinementConfig`] still carries a
+/// vendor-typed field. The block is genuinely one vendor's and is named for it
+/// correctly; what keeps it here is that a PostgreSQL-only METHOD hangs off the
+/// neutral [`ExecutorConfig`] and reads it. Relocating the field without first
+/// relocating `search_path_clause` would only move the coupling, and a per-dialect
+/// carrier for run-time config does not exist: `BackendVendor` holds `&'static dyn`
+/// policy objects, and these are per-project host input.
 #[derive(Debug, Clone)]
 pub struct PostgresConfinement {
     /// The least-privilege `migrator` role the apply flow runs each migration's
