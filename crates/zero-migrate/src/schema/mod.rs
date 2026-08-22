@@ -31,8 +31,7 @@
 //!   / [`mask_codec::parse_mask_sentinel`]).
 //! - [`descriptors`] — the schema-shape **enums** ([`descriptors::VectorMetric`],
 //!   [`descriptors::EncryptionMode`]) + [`descriptors::GeoPoint`].
-//! - [`error`] - leaf error types (`SchemaError` under the `introspect` feature
-//!   and [`error::MaskSentinelError`]).
+//! - [`error`] - leaf error types ([`error::MaskSentinelError`]).
 
 // **Inherited lint posture.** `query.rs` and `diff.rs` were relocated verbatim
 // out of the original data-plane crate; the moved code trips a handful of style

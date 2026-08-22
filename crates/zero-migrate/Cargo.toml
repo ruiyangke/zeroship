@@ -154,10 +154,6 @@ compio = { workspace = true }
 # (every confinement claim proven on a REAL temp-file SQLite, never a shim).
 # Auto-cleaning; workspace-pinned.
 tempfile = { workspace = true }
-# The guard-vendor-lower behaviour-lock tests mint the operator-gated
-# Platform/Trusted profiles via `OperatorCapability::for_test`, which the ir leaf
-# exposes behind `test-support`.
-zero-migrate-ir = { workspace = true, features = ["test-support"] }
 # TEST-ONLY live-Postgres driver. The blocking `postgres` crate
 # backs `PgDevSession`, a `driver::SqlSession` impl that drives the SHIPPED generic
 # PostgresBackend/executor/journal/drift path against a live PG (:5440) in-crate, so

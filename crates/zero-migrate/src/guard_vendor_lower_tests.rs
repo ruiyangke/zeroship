@@ -32,10 +32,10 @@ use crate::model::policy::{DestructiveOps, SchemaScope};
 use crate::{DialectId, GuardMode, MYSQL, POSTGRES, SQLITE};
 
 /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
-/// the two ported extensions. Minted via the `for_test` seam, which
-/// `zero-migrate-ir` gates behind its `test-support` feature. This crate enables
-/// that feature as a dev-dependency only, so the seam never reaches a production
-/// build.
+/// the two ported extensions. Minted via the `for_test` seam, a named alias for
+/// `OperatorCapability::new` that `zero-migrate-ir` exposes unconditionally. The
+/// token authorises nothing on its own; privilege comes from the composed
+/// `EffectivePolicy`.
 fn platform_guard() -> SqlGuard {
     SqlGuard::new(platform_guard_config())
 }

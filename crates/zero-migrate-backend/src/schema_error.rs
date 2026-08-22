@@ -1,65 +1,12 @@
 //! Error types for the schema layer.
 //!
-//! The schema layer keeps a minimal dependency surface (`serde_json` + `sha2`,
-//! plus `compio-postgres` behind the `introspect` feature). It therefore
-//! does NOT depend on a data plane's `DbError`, which is
-//! built on a runtime `OpError`. Instead the two fallible surfaces this layer exposes —
-//! live introspection and the mask-sentinel codec — return small,
-//! self-contained error types. A data-plane consumer maps them back into its
-//! own error at the call boundary via `From` impls, so the wire shape and
+//! The schema layer keeps a minimal dependency surface (`serde_json` + `sha2`).
+//! It therefore does NOT depend on a data plane's `DbError`, which is
+//! built on a runtime `OpError`. Instead the fallible surface this layer exposes —
+//! the mask-sentinel codec — returns a small,
+//! self-contained error type. A data-plane consumer maps it back into its
+//! own error at the call boundary via a `From` impl, so the wire shape and
 //! SQLSTATE-derived `.code` the SDK sees stay byte-identical to before the extraction.
-
-/// Error from the live-schema introspection helpers
-/// ([`crate::schema::diff::read_live_schema`], [`crate::schema::diff::estimate_row_count`]).
-///
-/// Carries the per-call-site context phrase (e.g. `"read columns failed"`)
-/// plus the underlying `compio_postgres::Error`. plugin-db's
-/// `From<SchemaError> for DbError` re-creates the exact
-/// `coded_sql("diff: <context>", e)` shape — the SQLSTATE classification
-/// is preserved because the raw driver error is carried through, and the
-/// `"diff: "` module prefix is re-attached at the boundary.
-///
-/// Gated behind the `introspect` feature: it names `compio_postgres::Error`,
-/// so it rides the introspection profile with the PG driver. The write/diff
-/// profile (the migration engine's consumer path) never sees it.
-#[cfg(feature = "introspect")]
-#[derive(Debug)]
-pub struct SchemaError {
-    /// The module-local context phrase (no `"diff: "` prefix — plugin-db
-    /// adds that when mapping to `DbError` so the operator-facing message
-    /// is `"diff: <context>: <driver-msg>"`, identical to the pre-extraction
-    /// `crate::schema::diff::coded_sql` shape).
-    pub context: String,
-    /// The underlying driver error — carried verbatim so the SQLSTATE-driven
-    /// classification stays the single source of truth.
-    pub source: compio_postgres::Error,
-}
-
-#[cfg(feature = "introspect")]
-impl SchemaError {
-    /// Wrap a `compio_postgres::Error` with a context phrase.
-    #[must_use]
-    pub fn new(context: impl Into<String>, source: compio_postgres::Error) -> Self {
-        Self {
-            context: context.into(),
-            source,
-        }
-    }
-}
-
-#[cfg(feature = "introspect")]
-impl std::fmt::Display for SchemaError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.context, self.source)
-    }
-}
-
-#[cfg(feature = "introspect")]
-impl std::error::Error for SchemaError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
-    }
-}
 
 /// Error from parsing a `zero-migrate:mask:` sentinel string
 /// (`crate::schema::mask_codec::parse_mask_sentinel`).

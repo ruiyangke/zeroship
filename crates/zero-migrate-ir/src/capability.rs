@@ -31,8 +31,7 @@ use crate::policy::{SchemaScope, TrustProfile};
 /// so operator-side engine seams can name it without depending on the runner. The
 /// PRIVATE `()` field blocks only the struct-literal form. The token is freely
 /// mintable by any dependent crate through the public [`OperatorCapability::new`],
-/// through `Default`, and through `for_test` when a downstream turns on the additive
-/// `test-support` feature.
+/// through `Default`, and through `for_test` — all three are the same mint.
 ///
 /// It authorises nothing. The two functions that take one bind it and never read it,
 /// and the config they build is what the public `ExecutorConfig::new` returns anyway.
@@ -58,9 +57,9 @@ impl OperatorCapability {
     }
 
     /// **Test-support seam.** Lets the engine-crate test suite exercise
-    /// operator-gated entry points. Gated behind the `test-support` feature, so it
-    /// never reaches a production build.
-    #[cfg(feature = "test-support")]
+    /// operator-gated entry points. A named alias for [`Self::new`], which is
+    /// already the public production mint — it grants nothing extra, it only
+    /// spells the intent at the call site.
     #[must_use]
     pub const fn for_test() -> Self {
         Self::new()
