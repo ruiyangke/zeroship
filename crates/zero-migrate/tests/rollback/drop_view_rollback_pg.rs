@@ -185,7 +185,7 @@ async fn live_view_body(session: &PgDevSession, schema: &str) -> Result<Option<S
 
 #[compio::test]
 async fn rolling_back_a_dropped_view_restores_it_on_postgres() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(
@@ -377,7 +377,7 @@ fn rename_doc(from: &str, to: &str) -> String {
 /// reject the down with `relation ... does not exist`.
 #[compio::test]
 async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(
@@ -550,7 +550,7 @@ async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
 /// restored body reads the table under its CURRENT name.
 #[compio::test]
 async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refused() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     // The operator charter, not `no_inject`: a raw view body is a vendor capability
@@ -708,7 +708,7 @@ async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refus
 /// on rollback would conjure a view that never existed on this database.
 #[compio::test]
 async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(
@@ -828,7 +828,7 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
 /// this is not and which nobody has produced yet.
 #[compio::test]
 async fn a_rust_embedding_refuses_an_absent_view_drop_at_the_database() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(

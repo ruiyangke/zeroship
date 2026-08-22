@@ -201,7 +201,7 @@ async fn assert_roundtrip(
     source: &str,
     precondition: impl FnOnce(&[PrimaryKeyCatalogRow]) -> Result<(), String>,
 ) {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = cfg_for(&schema);
@@ -384,7 +384,7 @@ async fn assert_lifecycle_roundtrip(
     checkpoints: &[(&str, usize)],
     policy_for: fn(&str) -> EffectivePolicy,
 ) {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy_for(&schema));

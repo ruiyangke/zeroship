@@ -99,7 +99,7 @@ fn read_within_deadline<T: Send + 'static>(
 /// the reader having simply outlived a lock that was released underneath it.
 #[test]
 fn plan_status_reports_a_busy_project_lock_instead_of_waiting_for_a_peer() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let holder = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -149,7 +149,7 @@ fn plan_status_reports_a_busy_project_lock_instead_of_waiting_for_a_peer() {
 /// stopped doing any work.
 #[test]
 fn plan_status_still_locks_reads_and_reconciles_when_no_peer_holds_the_lock() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let observer = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);

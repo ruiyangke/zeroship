@@ -34,7 +34,7 @@
 //!    against the live server via `load_and_lower_guarded` + the engine's
 //!    `apply_plan`, and every facet survives.
 //!
-//! Gated on `ZERO_MIGRATE_MYSQL_URL` through `skip_if_no_mysql!`.
+//! Gated on `ZERO_MIGRATE_MYSQL_URL` through `require_live_mysql!`.
 
 use crate::support;
 
@@ -149,7 +149,7 @@ async fn setup(session: &MysqlDevSession, database: &str) -> Result<(), String> 
 /// merely learns to spell `MODIFY COLUMN` would be WORSE than today's refusal.
 #[compio::test]
 async fn a_naive_modify_column_drops_every_facet_it_omits() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("naivemod");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);
@@ -210,7 +210,7 @@ async fn a_naive_modify_column_drops_every_facet_it_omits() {
 /// updated, not silently pass.
 #[compio::test]
 async fn the_engine_snapshot_of_a_mysql_column_is_lossy_against_show_create_table() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("snaploss");
     let cfg = cfg_for(&database);
@@ -314,7 +314,7 @@ async fn the_engine_snapshot_of_a_mysql_column_is_lossy_against_show_create_tabl
 /// result.
 #[compio::test]
 async fn a_show_create_table_restate_preserves_every_facet() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("restate");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);
@@ -379,7 +379,7 @@ async fn a_show_create_table_restate_preserves_every_facet() {
 /// design works.
 #[compio::test]
 async fn an_authored_set_column_type_applies_on_mysql_and_keeps_every_facet() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("sctapply");
     let cfg = cfg_for(&database);

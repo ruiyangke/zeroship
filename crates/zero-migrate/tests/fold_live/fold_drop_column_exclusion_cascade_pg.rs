@@ -93,9 +93,8 @@ fn quote_ident(identifier: &str) -> String {
 }
 
 /// Apply every op of `source` through the real engine, fold the SAME resolved ops
-/// offline, and return the drift between the fold and live introspection. `None`
-/// when no live database is configured (the caller then skips its assertion).
-async fn drift_after_applying(source: &str) -> Option<StructuralDrift> {
+/// offline, and return the drift between the fold and live introspection.
+async fn drift_after_applying(source: &str) -> StructuralDrift {
     drift_between_fold_and_live(source, &[], source).await
 }
 
@@ -110,11 +109,8 @@ async fn drift_between_fold_and_live(
     applied: &str,
     native_sql: &[&str],
     folded: &str,
-) -> Option<StructuralDrift> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+) -> StructuralDrift {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -210,7 +206,7 @@ async fn drift_between_fold_and_live(
         ))
         .await;
     match (work, cleanup) {
-        (Ok(drift), Ok(())) => Some(drift),
+        (Ok(drift), Ok(())) => drift,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -240,9 +236,7 @@ async fn drop_column_cascades_an_added_exclusion_over_it() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "PostgreSQL cascades an EXCLUDE away when a column its `conkey` names is \
@@ -274,9 +268,7 @@ async fn drop_column_cascades_a_create_table_exclusion_over_it() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "a `createTable` EXCLUDE cascades in PostgreSQL exactly as an added one does; \
@@ -309,9 +301,7 @@ async fn drop_column_cascades_a_composite_exclusion_naming_it() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "PostgreSQL drops a composite EXCLUDE whole when any column it names is \
@@ -344,9 +334,7 @@ async fn drop_of_an_unrelated_column_keeps_an_exclusion() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "an EXCLUDE that does not name the dropped column survives in PostgreSQL and \
@@ -383,9 +371,7 @@ async fn drop_column_keeps_an_exclusion_that_only_spells_it_in_a_literal() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "a column name spelled inside a string LITERAL is not a column reference; \
@@ -447,9 +433,7 @@ async fn rename_then_drop_cascades_an_exclusion_through_the_new_name() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(applied, &native_sql, folded).await else {
-        return;
-    };
+    let drift = drift_between_fold_and_live(applied, &native_sql, folded).await;
     assert!(
         drift.is_clean(),
         "PostgreSQL keeps `conkey` pointing at the renamed attribute, so dropping the \

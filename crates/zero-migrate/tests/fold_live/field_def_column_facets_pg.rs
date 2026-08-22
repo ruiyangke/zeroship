@@ -166,7 +166,7 @@ fn server_checks(
 /// catalog.
 #[test]
 fn a_declared_default_and_range_reach_the_postgres_catalog() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let mut client =
         postgres::Client::connect(&url, postgres::NoTls).expect("connect to the live server");
     let schema = test_schema();

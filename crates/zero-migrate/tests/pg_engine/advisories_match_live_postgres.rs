@@ -28,8 +28,6 @@
 //!
 //! GATE: `ZERO_MIGRATE_TEST_PG_URL`.
 
-use crate::support;
-
 use zero_migrate_guard::analysis::analyze::analyze;
 
 /// Does any advisory tell the operator this statement rewrites the table?
@@ -103,10 +101,7 @@ fn filenode(client: &mut postgres::Client) -> i64 {
 
 #[test]
 fn a_rewrite_is_advised_exactly_when_postgresql_performs_one() {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
+    let url = require_live_pg!();
     let mut client = postgres::Client::connect(&url, postgres::NoTls).expect("connect to live PG");
 
     for (label, sql, expected_rewrite) in REWRITE_CASES {
@@ -153,10 +148,7 @@ fn a_rewrite_is_advised_exactly_when_postgresql_performs_one() {
 #[test]
 fn not_valid_is_advised_exactly_when_it_validates() {
     const TBL: &str = "adv_notvalid";
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
+    let url = require_live_pg!();
     let mut client = postgres::Client::connect(&url, postgres::NoTls).expect("connect to live PG");
 
     // One row violating the constraint, so validation is observable: the plain
@@ -202,10 +194,7 @@ fn not_valid_is_advised_exactly_when_it_validates() {
 #[test]
 fn a_plain_create_index_takes_the_lock_the_advisory_names() {
     const TBL: &str = "adv_index";
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
+    let url = require_live_pg!();
     let mut client = postgres::Client::connect(&url, postgres::NoTls).expect("connect to live PG");
     client
         .batch_execute(&seed_rows(TBL))

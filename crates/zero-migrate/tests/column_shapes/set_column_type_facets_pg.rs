@@ -122,11 +122,8 @@ struct Applied {
 
 /// Author → lower → apply `source`, then run `native_sql`, then compare the fold of
 /// the SAME ops against the live catalog.
-async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Option<Applied> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Applied {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token(tag);
     let policy = charter(&schema);
@@ -217,7 +214,7 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Option<Applied>
         ))
         .await;
     match (work, cleanup) {
-        (Ok(applied), Ok(())) => Some(applied),
+        (Ok(applied), Ok(())) => applied,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -250,9 +247,7 @@ async fn a_plain_retype_reports_no_difference_that_does_not_exist() {
         ("varchar(24) -> integer", r#""int""#),
         ("varchar(24) -> text", r#""text""#),
     ] {
-        let Some(applied) = deploy("plain", &envelope(STRING_24, Some(to_type)), &[]).await else {
-            return;
-        };
+        let applied = deploy("plain", &envelope(STRING_24, Some(to_type)), &[]).await;
         assert_clean(label, &applied.drift);
     }
 }
@@ -261,9 +256,7 @@ async fn a_plain_retype_reports_no_difference_that_does_not_exist() {
 async fn a_column_that_is_never_retyped_stays_clean() {
     // The control's control. Without it, a "fix" that stopped modelling the
     // facets AT ALL would pass the test above just as well.
-    let Some(applied) = deploy("untouched", &envelope(STRING_24, None), &[]).await else {
-        return;
-    };
+    let applied = deploy("untouched", &envelope(STRING_24, None), &[]).await;
     assert_clean("varchar(24), never retyped", &applied.drift);
 }
 
@@ -278,11 +271,8 @@ async fn a_column_that_is_never_retyped_stays_clean() {
 /// precisely why the justification has to be measured HERE. `native_sql` runs after
 /// a successful deploy of the typed-id column, so the CHECK it hits is the engine's
 /// own, not a hand-written imitation.
-async fn server_verdict(tag: &str, rendered_type: &str) -> Option<String> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+async fn server_verdict(tag: &str, rendered_type: &str) -> String {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token(tag);
     let policy = charter(&schema);
@@ -362,7 +352,7 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> Option<String> {
         ))
         .await;
     match (work, cleanup) {
-        (Ok(verdict), Ok(())) => Some(verdict),
+        (Ok(verdict), Ok(())) => verdict,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -371,9 +361,7 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> Option<String> {
 
 #[compio::test]
 async fn postgresql_refuses_a_value_format_retype_to_a_non_text_type() {
-    let Some(verdict) = server_verdict("vf_int", "integer").await else {
-        return;
-    };
+    let verdict = server_verdict("vf_int", "integer").await;
     assert!(
         verdict.contains("octet_length(integer) does not exist"),
         "the reason the fold refuses this op is that the SERVER refuses it: the \
@@ -386,9 +374,7 @@ async fn postgresql_refuses_a_value_format_retype_to_a_non_text_type() {
 #[compio::test]
 async fn postgresql_accepts_a_value_format_retype_to_a_text_type_and_keeps_an_unrecognisable_check()
 {
-    let Some(verdict) = server_verdict("vf_vc", "character varying(50)").await else {
-        return;
-    };
+    let verdict = server_verdict("vf_vc", "character varying(50)").await;
     // The half the previous investigation guessed at and this measures: the ALTER
     // SUCCEEDS and the CHECK survives. It is NOT a licence to keep `value_format` -
     // PostgreSQL re-parses the body with casts injected

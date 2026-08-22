@@ -392,11 +392,8 @@ struct Measured {
 /// Create everything through the real engine, rename both columns with PostgreSQL's own
 /// DDL, introspect, and fold the same history offline. `None` when no live database is
 /// configured.
-async fn measure() -> Option<Measured> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+async fn measure() -> Measured {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -462,7 +459,7 @@ async fn measure() -> Option<Measured> {
         ))
         .await;
     match (work, cleanup) {
-        (Ok(measured), Ok(())) => Some(measured),
+        (Ok(measured), Ok(())) => measured,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -475,9 +472,7 @@ async fn measure() -> Option<Measured> {
 /// new field as a carrier and then never exercising it fails HERE.
 #[compio::test]
 async fn does_the_fixture_populate_every_carrier_the_inventory_declares() {
-    let Some(measured) = measure().await else {
-        return;
-    };
+    let measured = measure().await;
     let spellings = carrier_spellings_that_reference_a_column(&measured.folded);
 
     let declared: BTreeSet<&str> = spellings.keys().copied().collect();
@@ -548,9 +543,7 @@ async fn does_the_fixture_populate_every_carrier_the_inventory_declares() {
 /// the old column name.
 #[compio::test]
 async fn does_every_folded_carrier_follow_a_column_rename() {
-    let Some(measured) = measure().await else {
-        return;
-    };
+    let measured = measure().await;
     let spellings = carrier_spellings_that_reference_a_column(&measured.folded);
 
     let mut stale: Vec<String> = Vec::new();
@@ -580,9 +573,7 @@ async fn does_every_folded_carrier_follow_a_column_rename() {
 /// carrier. Without this, a fold that simply dropped the objects would pass.
 #[compio::test]
 async fn does_live_postgresql_follow_the_rename_into_every_carrier_it_reports() {
-    let Some(measured) = measure().await else {
-        return;
-    };
+    let measured = measure().await;
     let live = carrier_spellings_that_reference_a_column(&measured.live);
 
     let mut stale: Vec<String> = Vec::new();
@@ -623,9 +614,7 @@ async fn does_live_postgresql_follow_the_rename_into_every_carrier_it_reports() 
 /// rewrite repairs.
 #[compio::test]
 async fn have_the_carriers_that_hold_rendered_sql_kept_their_string_literals() {
-    let Some(measured) = measure().await else {
-        return;
-    };
+    let measured = measure().await;
 
     for (label, snapshot) in [("the fold", &measured.folded), ("live", &measured.live)] {
         let check = snapshot

@@ -70,17 +70,13 @@ fn quote_ident(identifier: &str) -> String {
 
 /// Apply `applied` through the real engine, run `native_sql` (each statement with
 /// `{schema}` replaced by the quoted test schema) on the same real session, then
-/// fold `folded` offline and diff it against live introspection. `None` when no
-/// live database is configured (the caller then skips its assertion).
+/// fold `folded` offline and diff it against live introspection.
 async fn drift_between_fold_and_live(
     applied: &str,
     native_sql: &[&str],
     folded: &str,
-) -> Option<StructuralDrift> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+) -> StructuralDrift {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -176,7 +172,7 @@ async fn drift_between_fold_and_live(
         ))
         .await;
     match (work, cleanup) {
-        (Ok(drift), Ok(())) => Some(drift),
+        (Ok(drift), Ok(())) => drift,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -217,15 +213,12 @@ async fn rename_column_rewrites_a_unique_constraint_definition() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"rename_uq\" RENAME COLUMN \"a\" TO \"b\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "PostgreSQL deparses a UNIQUE constraint over the NEW column name the instant \
@@ -283,15 +276,12 @@ async fn rename_column_rewrites_a_foreign_key_local_column() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"rename_fk_child\" RENAME COLUMN \"a\" TO \"b\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "a FOREIGN KEY's LOCAL column follows the rename in PostgreSQL; the fold must \
@@ -334,15 +324,12 @@ async fn rename_column_keeps_composite_unique_column_order() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"rename_uq_multi\" RENAME COLUMN \"a\" TO \"b\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "a composite UNIQUE keeps its declared column ORDER across a rename; the fold \
@@ -385,15 +372,12 @@ async fn rename_column_into_a_reserved_word_requotes_the_constraint_definition()
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"rename_uq_reserved\" RENAME COLUMN \"a\" TO \"order\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "renaming into a reserved word makes PostgreSQL deparse UNIQUE (\"order\"); the \
@@ -430,15 +414,12 @@ async fn rename_column_rewrites_a_primary_key_definition() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"rename_pk\" RENAME COLUMN \"a\" TO \"b\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "a PRIMARY KEY definition follows the rename in PostgreSQL and the differ \
@@ -493,15 +474,12 @@ async fn rename_column_rewrites_an_incoming_foreign_key_reference() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"xfk_parent\" RENAME COLUMN \"id\" TO \"uid\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "a FK in ANOTHER table names the referenced column in its REFERENCES tail, and \
@@ -574,15 +552,12 @@ async fn rename_column_leaves_an_incoming_fk_on_another_parent_alone() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"xfk_p1\" RENAME COLUMN \"k\" TO \"uid\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "only the FK whose REFERENCES tail names the RENAMED table may follow the \
@@ -630,15 +605,12 @@ async fn rename_column_rewrites_a_self_referencing_foreign_key() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"xfk_self\" RENAME COLUMN \"id\" TO \"uid\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "a self-referencing FK targets the renamed column from inside the renamed \
@@ -701,15 +673,12 @@ async fn rename_column_rewrites_one_position_of_a_composite_fk_reference() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"xfk_pair_parent\" RENAME COLUMN \"a\" TO \"c\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "a composite FK's referenced list is positional and pairs with the local \
@@ -754,15 +723,12 @@ async fn rename_of_an_unrelated_column_leaves_constraint_definitions_alone() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"rename_uq_ctl\" RENAME COLUMN \"note\" TO \"memo\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "renaming a column no constraint covers must leave every constraint definition \

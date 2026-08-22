@@ -21,7 +21,8 @@
 //! The remedy is the last assertion: name the constraint as the catalog holds it, and
 //! the drop applies, the object goes, and the journal tells the truth.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`; skips cleanly when unset.
+//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support;
 
@@ -148,7 +149,7 @@ fn drop_constraint_ir(name: &str) -> MigrationIr {
 async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a_lie() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);

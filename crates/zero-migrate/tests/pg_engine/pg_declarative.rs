@@ -6,7 +6,8 @@
 //! `apply_declarative` deploy the diff — the whole flow driven through the shipped
 //! `PostgresBackend<PgDevSession>` over the `driver::SqlSession` seam against real PG.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`; skips cleanly when unset.
+//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support;
 
@@ -154,7 +155,7 @@ async fn table_exists(session: &PgDevSession, schema: &str, table: &str) -> bool
 /// structural drift - the type-fidelity proof, over the shipped seam.
 #[compio::test]
 async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -269,7 +270,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
 /// additive `ALTER TABLE … ADD COLUMN` and applies cleanly (desired ⊃ live).
 #[compio::test]
 async fn declarative_add_column_diff_applies() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -426,7 +427,7 @@ async fn declarative_add_column_diff_applies() {
 async fn an_out_of_band_alter_lands_in_altered_objects() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -576,7 +577,7 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
 async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -707,7 +708,7 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
 /// rows in it are gone.
 #[compio::test]
 async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -833,7 +834,7 @@ async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
 async fn rows_survive_a_postgres_online_rename() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);

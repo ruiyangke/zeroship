@@ -86,7 +86,7 @@ async fn namespace_exists(session: &PgDevSession, name: &str) -> bool {
 
 #[compio::test]
 async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("proj");
     let other = token("other");

@@ -366,7 +366,7 @@ async fn positive_same_named_triggers_on_two_tables_restore_only_the_dropped_one
 
 #[compio::test]
 async fn positive_rolling_back_a_dropped_trigger_restores_its_definition() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));

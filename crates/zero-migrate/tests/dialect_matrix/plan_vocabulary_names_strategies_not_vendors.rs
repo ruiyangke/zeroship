@@ -37,7 +37,7 @@
 //! A rename is byte-identical at runtime by construction: same variants, same
 //! payloads, same order, same SQL. Every other test in the workspace is indifferent
 //! to which spelling this vocabulary is in — 37 suites / 3396 passed / 0 failed / 11
-//! ignored against live PostgreSQL and MySQL with `ZERO_MIGRATE_REQUIRE_LIVE_DB=1`,
+//! ignored against live PostgreSQL and MySQL with both DSNs exported,
 //! identical before and after. That indifference cuts both ways: nothing stops the
 //! vendor spelling coming back, and nothing would notice. So the rule gets its own
 //! check or it has none.

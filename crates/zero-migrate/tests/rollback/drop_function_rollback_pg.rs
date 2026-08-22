@@ -405,7 +405,7 @@ async fn alias_spelled_drop_never_leaves_a_stale_inverse() {
 
 #[compio::test]
 async fn rolling_back_a_dropped_function_restores_its_body() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));

@@ -2233,8 +2233,8 @@ mod constraint_definition_tests {
 
     /// These cover the differ directly rather than through a live database. The
     /// PostgreSQL round-trip oracle that found the CHECK mismatch is behind
-    /// `skip_if_no_pg!`, so on a checkout with no database configured it reports a
-    /// pass without running, and nothing else would notice this contract changing.
+    /// `require_live_pg!`, so on a checkout with no database configured it cannot run
+    /// at all, and these are what still measure this contract.
     fn snapshot_with(constraints: Vec<ConstraintSnapshot>) -> SchemaSnapshot {
         let mut snapshot = SchemaSnapshot::default();
         snapshot.tables.insert(

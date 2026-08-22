@@ -17,7 +17,8 @@
 //! "structurally changed" with strict table equality and so had to learn the same
 //! pairing or it refused a non-owner over an index the differ had already accepted.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`; skips cleanly when unset.
+//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support;
 
@@ -256,7 +257,7 @@ async fn deploy(
 /// plan must be empty and drift must be clean.
 #[compio::test]
 async fn a_data_plane_named_index_re_diffs_clean() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -397,7 +398,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
 /// drift today. The fix must not buy arm A by breaking this.
 #[compio::test]
 async fn b_engine_named_index_still_round_trips_clean() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -474,7 +475,7 @@ async fn b_engine_named_index_still_round_trips_clean() {
 /// silently keep the old name on disk forever.
 #[compio::test]
 async fn c_author_supplied_rename_still_creates_and_drops() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -562,7 +563,7 @@ async fn c_author_supplied_rename_still_creates_and_drops() {
 /// and emits nothing.
 #[compio::test]
 async fn d_alias_accepted_no_op_does_not_trip_ownership() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);

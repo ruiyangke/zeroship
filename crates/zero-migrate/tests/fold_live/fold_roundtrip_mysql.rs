@@ -25,10 +25,9 @@
 //! engine creates the `<db>_migrations` meta database itself on the first
 //! `ensure_journal`. [`support::mysql::DatabaseGuard`] guards both.
 //!
-//! Gated on `ZERO_MIGRATE_MYSQL_URL` through [`skip_if_no_mysql!`], which routes into
-//! the same `announce_live_db_skip` the PostgreSQL suites use: a skip prints a banner
-//! that survives libtest's output capture, and `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` turns
-//! it into a failure. A skip must never read as a pass.
+//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` through [`require_live_mysql!`], the same
+//! requirement the PostgreSQL suites carry: a missing DSN fails the test. A skip must
+//! never read as a pass, so there is no skip.
 
 use crate::support;
 
@@ -133,7 +132,7 @@ fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 
 #[compio::test]
 async fn fold_equals_introspect_mysql() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("fold");
     let cfg = cfg_for(&database);

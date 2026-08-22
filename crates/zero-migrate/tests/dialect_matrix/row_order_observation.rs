@@ -594,14 +594,8 @@ fn the_oracle_separates_agreement_from_disagreement() {
 /// are required to be equal TO EACH OTHER.
 #[compio::test]
 async fn row_order_agrees_across_the_three_backends_when_the_column_pins_bytewise() {
-    let Some(pg_url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
-    let Some(mysql_url) = support::mysql::mysql_url() else {
-        support::announce_live_db_skip(support::mysql::MYSQL_URL_ENV);
-        return;
-    };
+    let pg_url = require_live_pg!();
+    let mysql_url = require_live_mysql!();
     let pg_session = PgDevSession::connect(&pg_url);
     let mysql_session = MysqlDevSession::connect(&mysql_url);
     refuse_a_saturated_instrument(&pg_session, &mysql_session).await;
@@ -655,14 +649,8 @@ async fn row_order_agrees_across_the_three_backends_when_the_column_pins_bytewis
 /// agreement test above is measuring the harness rather than the servers.
 #[compio::test]
 async fn row_order_disagrees_across_the_three_backends_without_the_pin() {
-    let Some(pg_url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
-    let Some(mysql_url) = support::mysql::mysql_url() else {
-        support::announce_live_db_skip(support::mysql::MYSQL_URL_ENV);
-        return;
-    };
+    let pg_url = require_live_pg!();
+    let mysql_url = require_live_mysql!();
     let pg_session = PgDevSession::connect(&pg_url);
     let mysql_session = MysqlDevSession::connect(&mysql_url);
     refuse_a_saturated_instrument(&pg_session, &mysql_session).await;

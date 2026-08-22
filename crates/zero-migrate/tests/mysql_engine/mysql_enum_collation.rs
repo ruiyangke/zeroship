@@ -238,7 +238,7 @@ async fn show_create_table(
 /// exact false reassurance this file exists to prevent.
 #[compio::test]
 async fn the_probe_server_is_case_insensitive_by_default() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("enumcollinstr");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);
@@ -267,7 +267,7 @@ async fn the_probe_server_is_case_insensitive_by_default() {
 /// author never declared silently became one that was.
 #[compio::test]
 async fn a_wrong_case_enum_member_is_refused_on_mysql_as_it_is_on_postgres() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("enumcase");
     let cfg = cfg_for(&database);
@@ -345,7 +345,7 @@ async fn a_wrong_case_enum_member_is_refused_on_mysql_as_it_is_on_postgres() {
 /// between two servers rather than an opinion about one.
 #[compio::test]
 async fn a_wrong_case_enum_member_is_refused_on_postgres() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("zm_enumcase_{}", std::process::id());
     let _guard = support::SchemaGuard::arm(&session, [schema.clone()]);
@@ -385,7 +385,7 @@ async fn a_wrong_case_enum_member_is_refused_on_postgres() {
 /// authored schema deploys on two dialects and fails on the third.
 #[compio::test]
 async fn an_enum_whose_members_differ_only_in_case_deploys_on_mysql() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("enumdup");
     let cfg = cfg_for(&database);
@@ -478,7 +478,7 @@ async fn an_enum_whose_members_differ_only_in_case_deploys_on_mysql() {
 /// single pass cannot tell a one-off from a permanent one.
 #[compio::test]
 async fn a_deployed_enum_column_does_not_drift_against_its_own_fold() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("enumdrift");
     let cfg = cfg_for(&database);
@@ -650,7 +650,7 @@ fn descriptor_create_ddl(
 /// one: `'ACTIVE'` is not `'active'`.
 #[compio::test]
 async fn a_descriptor_authored_enum_is_case_sensitive_on_the_server() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("enumdesc");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);
@@ -713,7 +713,7 @@ async fn a_descriptor_authored_enum_is_case_sensitive_on_the_server() {
 /// parameter instead of being a constant suffix.
 #[compio::test]
 async fn a_descriptor_enum_asking_for_case_insensitivity_gets_it() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("enumdescci");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);

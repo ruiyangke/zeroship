@@ -835,7 +835,7 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
 
 #[compio::test]
 async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storage() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("typed_refs_{}", live_pg_token());
     // Dropped on an unwind that skips the explicit cleanup below.

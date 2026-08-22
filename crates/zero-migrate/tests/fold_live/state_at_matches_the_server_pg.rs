@@ -197,11 +197,8 @@ async fn prefixes(
     seeded: &[Seeded],
     source: &str,
     policy_for: fn(&str) -> EffectivePolicy,
-) -> Option<Vec<Prefix>> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+) -> Vec<Prefix> {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy_for(&schema));
@@ -390,7 +387,7 @@ async fn prefixes(
         ))
         .await;
     match (work, cleanup) {
-        (Ok(measured), Ok(())) => Some(measured),
+        (Ok(measured), Ok(())) => measured,
         (Err(work), Ok(())) => panic!("{label}: {work}"),
         (Ok(_), Err(cleanup)) => panic!("{label}: drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => {
@@ -436,7 +433,7 @@ fn live_view_body<'a>(prefix: &'a Prefix, view: &str) -> &'a str {
 #[compio::test]
 async fn a_drop_cascades_through_dependents_only_the_live_base_carries() {
     let label = "drop cascade over a pre-existing index and CHECK";
-    let Some(measured) = prefixes(
+    let measured = prefixes(
         label,
         "CREATE TABLE {schema}.acct (id integer PRIMARY KEY, email text, region text); \
          CREATE INDEX acct_email_idx ON {schema}.acct (email); \
@@ -452,10 +449,7 @@ async fn a_drop_cascades_through_dependents_only_the_live_base_carries() {
             "ops":[{"op":"dropColumn","table":"acct","column":"email"}]}"#,
         support::no_inject,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert_every_prefix_agrees(label, &measured);
 
     // The cascade actually happened, rather than the two sides agreeing on a schema
@@ -501,7 +495,7 @@ async fn a_drop_cascades_through_dependents_only_the_live_base_carries() {
 #[compio::test]
 async fn a_replaced_view_moves_the_blocker_a_later_drop_needs() {
     let label = "CREATE OR REPLACE VIEW over a pre-existing view, then the drop it unblocks";
-    let Some(measured) = prefixes(
+    let measured = prefixes(
         label,
         "CREATE TABLE {schema}.src (id integer PRIMARY KEY, a text, b text); \
          CREATE VIEW {schema}.labelled AS SELECT id, a AS label FROM {schema}.src;",
@@ -516,10 +510,7 @@ async fn a_replaced_view_moves_the_blocker_a_later_drop_needs() {
             ]}"#,
         support::operator_charter,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert_every_prefix_agrees(label, &measured);
 
     // The seeded body really did read `a` - otherwise the replacement moves nothing.
@@ -579,7 +570,7 @@ async fn a_replaced_view_moves_the_blocker_a_later_drop_needs() {
 #[compio::test]
 async fn a_table_rename_is_followed_into_a_pre_existing_view() {
     let label = "rename a table a pre-existing view reads";
-    let Some(measured) = prefixes(
+    let measured = prefixes(
         label,
         "CREATE TABLE {schema}.orig (id integer PRIMARY KEY, v text); \
          CREATE VIEW {schema}.over_orig AS SELECT id, v FROM {schema}.orig;",
@@ -588,10 +579,7 @@ async fn a_table_rename_is_followed_into_a_pre_existing_view() {
             "ops":[{"op":"renameTable","table":"orig","to":"renamed"}]}"#,
         support::operator_charter,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert_every_prefix_agrees(label, &measured);
 
     let after = &measured[1];
@@ -614,7 +602,7 @@ async fn a_table_rename_is_followed_into_a_pre_existing_view() {
 #[compio::test]
 async fn an_attach_and_detach_relocate_a_pre_existing_relation() {
     let label = "attach then detach a pre-existing table as a partition";
-    let Some(measured) = prefixes(
+    let measured = prefixes(
         label,
         "CREATE TABLE {schema}.evt (bucket integer NOT NULL, id integer NOT NULL) \
            PARTITION BY RANGE (bucket); \
@@ -629,10 +617,7 @@ async fn an_attach_and_detach_relocate_a_pre_existing_relation() {
             ]}"#,
         support::operator_charter,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert_every_prefix_agrees(label, &measured);
 
     // The relocation really happened in both directions, so the three clean prefixes
@@ -672,7 +657,7 @@ async fn an_attach_and_detach_relocate_a_pre_existing_relation() {
 #[compio::test]
 async fn the_identity_does_not_hold_across_an_online_rename() {
     let label = "an online rename leaves the server mid-expand";
-    let Some(measured) = prefixes(
+    let measured = prefixes(
         label,
         "CREATE TABLE {schema}.person (id integer PRIMARY KEY, nick text); \
          CREATE INDEX person_nick_idx ON {schema}.person (nick); \
@@ -687,9 +672,7 @@ async fn the_identity_does_not_hold_across_an_online_rename() {
         support::no_inject,
     )
     .await
-    else {
-        return;
-    };
+   ;
 
     // Prefix 0 still holds: the base folds onto itself. Only the op diverges.
     assert!(

@@ -80,7 +80,7 @@ async fn attempt(
     target_table: &str,
     target_column: &str,
     view: &str,
-) -> Option<Outcome> {
+) -> Outcome {
     attempt_under(
         setup,
         mutation,
@@ -105,11 +105,8 @@ async fn attempt_under(
     target_column: &str,
     view: &str,
     policy_for: fn(&str) -> zero_migrate::EffectivePolicy,
-) -> Option<Outcome> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+) -> Outcome {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = policy_for(&schema);
@@ -185,7 +182,7 @@ async fn attempt_under(
         ))
         .await;
     match (work, cleanup) {
-        (Ok(outcome), Ok(())) => Some(outcome),
+        (Ok(outcome), Ok(())) => outcome,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -339,7 +336,7 @@ fn fixture(table: &str, view: &str, column: &str) -> String {
 /// residue is read from `information_schema`, not from the engine's report.
 #[compio::test]
 async fn a_blocked_drop_behind_a_committing_op_leaves_nothing_behind() {
-    let Some(outcome) = attempt(
+    let outcome = attempt(
         &fixture("dropsrc", "dropsrc_reader", "doomed"),
         &format!(
             r#"{{
@@ -357,9 +354,7 @@ async fn a_blocked_drop_behind_a_committing_op_leaves_nothing_behind() {
         "dropsrc_reader",
     )
     .await
-    else {
-        return;
-    };
+   ;
 
     let error = outcome
         .applied
@@ -410,10 +405,7 @@ async fn a_blocked_drop_behind_a_committing_op_leaves_nothing_behind() {
 /// clears nothing" MEANS, and it is measured rather than reasoned about.
 #[compio::test]
 async fn a_drop_behind_a_created_matview_leaves_nothing_behind() {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
+    let url = require_live_pg!();
 
     // ---- STAGE 1: the external oracle. PostgreSQL's answer, before the engine's.
     {
@@ -478,7 +470,7 @@ async fn a_drop_behind_a_created_matview_leaves_nothing_behind() {
     }
 
     // ---- STAGE 2: the engine, against the answer the server just gave.
-    let Some(outcome) = attempt_under(
+    let outcome = attempt_under(
         &fixture("mvsrc", "mvsrc_reader", "doomed"),
         &format!(
             r#"{{
@@ -501,10 +493,7 @@ async fn a_drop_behind_a_created_matview_leaves_nothing_behind() {
         "mvsrc_residue",
         support::operator_charter,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let error = outcome
         .applied
@@ -534,7 +523,7 @@ async fn a_drop_behind_a_created_matview_leaves_nothing_behind() {
 /// a measurement rather than a claim.
 #[compio::test]
 async fn a_lone_blocked_drop_reports_what_it_always_did() {
-    let Some(outcome) = attempt(
+    let outcome = attempt(
         &fixture("lonedrop", "lonedrop_reader", "doomed"),
         &format!(
             r#"{{
@@ -550,10 +539,7 @@ async fn a_lone_blocked_drop_reports_what_it_always_did() {
         "doomed",
         "lonedrop_reader",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     let error = outcome
         .applied
@@ -583,7 +569,7 @@ async fn a_lone_blocked_drop_reports_what_it_always_did() {
 /// does not understand that refuses a plan PostgreSQL honours.
 #[compio::test]
 async fn a_drop_whose_blocker_the_same_plan_removes_still_applies() {
-    let Some(outcome) = attempt(
+    let outcome = attempt(
         &fixture("repairdrop", "repairdrop_reader", "doomed"),
         &format!(
             r#"{{
@@ -600,10 +586,7 @@ async fn a_drop_whose_blocker_the_same_plan_removes_still_applies() {
         "doomed",
         "repairdrop_reader",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     outcome
         .applied
@@ -626,7 +609,7 @@ async fn a_drop_whose_blocker_the_same_plan_removes_still_applies() {
 /// succeeds when run.
 #[compio::test]
 async fn a_retype_whose_blocker_the_same_plan_removes_still_applies() {
-    let Some(outcome) = attempt(
+    let outcome = attempt(
         &fixture("repairretype", "repairretype_reader", "widened"),
         &format!(
             r#"{{
@@ -643,10 +626,7 @@ async fn a_retype_whose_blocker_the_same_plan_removes_still_applies() {
         "widened",
         "repairretype_reader",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     outcome
         .applied
@@ -672,7 +652,7 @@ async fn a_retype_whose_blocker_the_same_plan_removes_still_applies() {
 /// gets it right, because the additive answer has to look at `replace`.
 #[compio::test]
 async fn a_drop_behind_a_replaced_view_still_applies() {
-    let Some(outcome) = attempt(
+    let outcome = attempt(
         &fixture("replacedview", "replacedview_reader", "doomed"),
         &format!(
             r#"{{
@@ -693,10 +673,7 @@ async fn a_drop_behind_a_replaced_view_still_applies() {
         "doomed",
         "replacedview_reader",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     outcome
         .applied
@@ -725,10 +702,7 @@ async fn a_drop_behind_a_replaced_view_still_applies() {
 /// completed long ago.
 #[compio::test]
 async fn a_replayed_plan_is_not_re_judged_against_a_world_that_moved() {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -860,7 +834,7 @@ async fn a_replayed_plan_is_not_re_judged_against_a_world_that_moved() {
 /// step earlier and must apply.
 #[compio::test]
 async fn a_rename_whose_blocker_the_same_plan_removes_still_applies() {
-    let Some(outcome) = attempt(
+    let outcome = attempt(
         &fixture("repairrename", "repairrename_reader", "qty"),
         &format!(
             r#"{{
@@ -878,10 +852,7 @@ async fn a_rename_whose_blocker_the_same_plan_removes_still_applies() {
         "amount",
         "repairrename_reader",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
 
     outcome
         .applied
@@ -898,7 +869,7 @@ async fn a_rename_whose_blocker_the_same_plan_removes_still_applies() {
 /// database at all. Nothing may refuse the plan on that basis.
 #[compio::test]
 async fn a_drop_of_a_column_the_same_plan_adds_still_applies() {
-    let Some(outcome) = attempt(
+    let outcome = attempt(
         &fixture("addthendrop", "addthendrop_reader", "kept"),
         &format!(
             r#"{{
@@ -917,9 +888,7 @@ async fn a_drop_of_a_column_the_same_plan_adds_still_applies() {
         "addthendrop_reader",
     )
     .await
-    else {
-        return;
-    };
+   ;
 
     outcome
         .applied

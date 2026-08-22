@@ -188,7 +188,7 @@ async fn sequence_min_value(session: &PgDevSession, schema: &str) -> Result<i64,
 
 #[compio::test]
 async fn an_option_less_alter_sequence_is_refused_before_any_sql_exists() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(

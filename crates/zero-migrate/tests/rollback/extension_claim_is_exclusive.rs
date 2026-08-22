@@ -105,7 +105,7 @@ async fn the_extension_claim_key_names_the_extension_and_nothing_else() {
 
 #[compio::test]
 async fn a_held_extension_claim_excludes_a_second_run_and_is_released_for_the_next() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let name = probe("exclusion");
     let holder = PgDevSession::connect(&url);
     let contender = PgDevSession::connect(&url);
@@ -132,7 +132,7 @@ async fn a_held_extension_claim_excludes_a_second_run_and_is_released_for_the_ne
 
 #[compio::test]
 async fn an_unobtainable_extension_claim_is_an_error_that_names_the_key() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let name = probe("timeout");
     let wedged = PgDevSession::connect(&url);
     let loser = PgDevSession::connect(&url);

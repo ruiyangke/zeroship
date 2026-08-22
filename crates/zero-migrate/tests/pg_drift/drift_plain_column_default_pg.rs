@@ -194,7 +194,7 @@ fn require_no_generated_drift(drift: &StructuralDrift, column: &str) -> Result<(
 
 #[compio::test]
 async fn live_postgres_reports_ordinary_column_default_drift() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);

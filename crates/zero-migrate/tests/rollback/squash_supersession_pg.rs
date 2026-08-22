@@ -256,7 +256,7 @@ async fn applied_project(
 
 #[compio::test]
 async fn squashing_a_fully_applied_prefix_records_a_supersession_and_is_idempotent() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("all");
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
@@ -373,7 +373,7 @@ async fn squashing_a_fully_applied_prefix_records_a_supersession_and_is_idempote
 
 #[compio::test]
 async fn squashing_a_partially_applied_prefix_is_refused_and_writes_nothing() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("partial");
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
@@ -452,7 +452,7 @@ async fn squashing_a_partially_applied_prefix_is_refused_and_writes_nothing() {
 
 #[compio::test]
 async fn squashing_an_unapplied_prefix_is_refused_as_not_applied() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("none");
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
@@ -577,7 +577,7 @@ fn reversible_squash(name: &str, up: &str, down: &str, supersedes: Vec<Migration
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("noskip");
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));
@@ -702,7 +702,7 @@ async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn a_squash_that_can_reverse_itself_still_rolls_back_under_force() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("revsquash");
     let cfg = ExecutorConfig::new(format!("project_{schema}"), &schema, policy(&schema));

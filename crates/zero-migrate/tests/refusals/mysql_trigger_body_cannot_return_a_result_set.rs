@@ -139,7 +139,7 @@ async fn apply<B: MigrationBackend>(
 
 #[compio::test]
 async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("trigsel");
     let cfg = ExecutorConfig::new(

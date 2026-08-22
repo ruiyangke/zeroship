@@ -52,9 +52,8 @@ fn quote_ident(identifier: &str) -> String {
 }
 
 /// Apply every op of `source` through the real engine, fold the SAME resolved ops
-/// offline, and return the drift between the fold and live introspection. `None`
-/// when no live database is configured (the caller then skips its assertion).
-async fn drift_after_applying(source: &str) -> Option<StructuralDrift> {
+/// offline, and return the drift between the fold and live introspection.
+async fn drift_after_applying(source: &str) -> StructuralDrift {
     drift_between_fold_and_live(source, &[], source).await
 }
 
@@ -76,11 +75,8 @@ async fn drift_between_fold_and_live(
     applied: &str,
     native_sql: &[&str],
     folded: &str,
-) -> Option<StructuralDrift> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+) -> StructuralDrift {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -176,7 +172,7 @@ async fn drift_between_fold_and_live(
         ))
         .await;
     match (work, cleanup) {
-        (Ok(drift), Ok(())) => Some(drift),
+        (Ok(drift), Ok(())) => drift,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -206,9 +202,7 @@ async fn drop_column_cascades_a_table_level_check_the_way_postgresql_does() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "PostgreSQL drops a CHECK when the column it constrains is dropped; the fold \
@@ -239,9 +233,7 @@ async fn drop_column_cascades_a_standalone_check_the_way_postgresql_does() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "PostgreSQL drops a stand-alone CHECK when the column it constrains is dropped; \
@@ -274,9 +266,7 @@ async fn drop_of_an_unrelated_column_keeps_the_check() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "dropping an unrelated column must leave the CHECK in place on both sides: \
@@ -334,7 +324,7 @@ async fn drop_of_a_renamed_column_cascades_the_check() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &[
             "ALTER TABLE {schema}.\"renamed_cascade\" RENAME COLUMN \"qty\" TO \"amount\"",
@@ -342,10 +332,7 @@ async fn drop_of_a_renamed_column_cascades_the_check() {
         ],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "a rename must carry the CHECK's recorded cascade columns with it, so dropping \
@@ -377,9 +364,7 @@ async fn drop_of_one_column_cascades_a_two_column_check() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "PostgreSQL drops a two-column CHECK when EITHER column goes; the fold must \
@@ -416,9 +401,7 @@ async fn a_literal_that_spells_a_column_name_does_not_cascade() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "a column name appearing only as a string literal is not a reference; \
@@ -450,9 +433,7 @@ async fn a_check_referencing_no_column_survives_every_drop() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "a CHECK with no column reference has a NULL conkey and never cascades; the \

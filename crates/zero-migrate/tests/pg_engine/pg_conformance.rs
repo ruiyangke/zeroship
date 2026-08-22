@@ -7,8 +7,8 @@
 //! conformance surface, so a driver that silently pools connections, swallows errors, or
 //! sends the wrong param format is caught here BEFORE any scenario relies on it.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`: skips cleanly when unset so DB-free CI stays
-//! green.
+//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support::PgDevSession;
 use zero_migrate::driver::conformance;
@@ -24,7 +24,7 @@ fn scratch_ident(tag: &str) -> String {
 
 #[compio::test]
 async fn pg_dev_session_passes_seam_conformance() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let scratch = scratch_ident("pin");
     conformance::run(&session, &scratch)

@@ -146,7 +146,7 @@ fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
 
 #[compio::test]
 async fn rolling_back_a_dropped_schema_restores_it() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("home");
     let target = token("target");
@@ -243,7 +243,7 @@ async fn rolling_back_a_dropped_schema_restores_it() {
 /// The planner must refuse instead.
 #[compio::test]
 async fn a_cascading_schema_drop_keeps_no_inverse() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("home");
     let target = token("cascade");

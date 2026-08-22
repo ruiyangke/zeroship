@@ -118,7 +118,7 @@ scope = "all"
 
 #[compio::test]
 async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     // Before anything is created, so a case that cannot get the claim has nothing to
     // reclaim - and LOUD, never a skip: without the extension this case cannot ask
@@ -308,7 +308,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
 /// the attributes are really being compared.
 #[compio::test]
 async fn role_attributes_round_trip_and_drift_is_named() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let role = token("rolattr").to_lowercase();
@@ -474,7 +474,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
 /// migrator role. This pins the engine's half.
 #[compio::test]
 async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let owner_role = token("owned").to_lowercase();
@@ -618,7 +618,7 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
 /// not fail because the role it dropped is already gone.
 #[compio::test]
 async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let plain_role = token("plain").to_lowercase();
@@ -809,7 +809,7 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
 /// its own parser.
 #[compio::test]
 async fn grant_and_revoke_move_exactly_the_named_privilege() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token("schema");
     let grantee = token("grantee").to_lowercase();

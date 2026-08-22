@@ -55,42 +55,26 @@ use mysql::{Conn, Opts, Value as MyValue};
 
 use zero_migrate::driver::{Bind, DbError, Row, SqlSession, Value};
 
-/// The env var gating the live-MySQL tests. When unset, every live MySQL test skips
-/// cleanly through [`announce_live_db_skip`](super::announce_live_db_skip); when set
-/// to a DSN, the suite runs against it.
+/// The env var carrying the live-MySQL DSN. It is REQUIRED: when unset, every test
+/// that needs MySQL fails rather than skipping into a green report.
 ///
 /// The SAME name the TypeScript host suite and the CI `host` job already use, so a
 /// developer or a workflow that exports one DSN lights up both layers.
 pub const MYSQL_URL_ENV: &str = "ZERO_MIGRATE_MYSQL_URL";
 
-/// Read the live-MySQL DSN from [`MYSQL_URL_ENV`], or `None` when unset (-> skip).
+/// The live-MySQL DSN from [`MYSQL_URL_ENV`], or a panic naming it.
 ///
 /// Expects the `mysql://user:password@host:port/database` URL form; the `mysql`
 /// crate's `Opts::from_url` parses it.
-#[must_use]
-pub fn mysql_url() -> Option<String> {
-    std::env::var(MYSQL_URL_ENV)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-}
-
-/// Yield the live-MySQL DSN, or announce the skip and return from the calling test
-/// when [`MYSQL_URL_ENV`] is unset.
 ///
-/// Routes through the SAME [`announce_live_db_skip`](crate::support::announce_live_db_skip)
-/// the PostgreSQL gate uses, so `ZERO_MIGRATE_REQUIRE_LIVE_DB` turns a missing MySQL
-/// DSN into a FAILURE rather than a green run with no coverage. A skip must never
-/// read as a pass.
+/// Routes through the SAME
+/// [`require_live_db_dsn`](crate::support::require_live_db_dsn) the PostgreSQL side
+/// uses, so a missing MySQL DSN is a FAILURE rather than a green run with no
+/// coverage. A skip must never read as a pass, so there is no skip.
 #[macro_export]
-macro_rules! skip_if_no_mysql {
+macro_rules! require_live_mysql {
     () => {{
-        match $crate::support::mysql::mysql_url() {
-            Some(url) => url,
-            None => {
-                $crate::support::announce_live_db_skip($crate::support::mysql::MYSQL_URL_ENV);
-                return;
-            }
-        }
+        $crate::support::require_live_db_dsn($crate::support::mysql::MYSQL_URL_ENV, "MySQL")
     }};
 }
 
@@ -147,8 +131,8 @@ impl MysqlDevSession {
     ///
     /// # Panics
     /// Panics if the connection fails - a test-support harness, so a connect failure
-    /// is a setup error (the caller skips via [`skip_if_no_mysql!`] when the DSN is
-    /// simply absent).
+    /// is a setup error. It is a DIFFERENT failure from the absent-DSN case, which
+    /// [`require_live_mysql!`] has already reported by the time this runs.
     #[must_use]
     pub fn connect(dsn: &str) -> Self {
         let opts =

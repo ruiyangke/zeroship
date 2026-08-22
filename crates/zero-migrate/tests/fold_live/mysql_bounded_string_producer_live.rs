@@ -36,8 +36,8 @@
 //! both "the value is not in the database", and a test that asserted on the error alone
 //! would pass on one server and fail on the other.
 //!
-//! Gated on `ZERO_MIGRATE_MYSQL_URL` through `skip_if_no_mysql!`, so read the SKIP
-//! banner before reading the pass count.
+//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` through `require_live_mysql!`: with no DSN the
+//! pass count cannot be mistaken for coverage, because there is none to read.
 
 use crate::support;
 
@@ -135,9 +135,7 @@ async fn measure(
     label: &str,
     make_ops: impl FnOnce(&str, &EffectivePolicy) -> Vec<Op>,
 ) -> Measured {
-    let Some(url) = support::mysql::mysql_url() else {
-        unreachable!("callers gate on `skip_if_no_mysql!` before reaching here")
-    };
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("bstr");
     let policy = support::no_inject(&database);
@@ -268,7 +266,7 @@ async fn write_and_read_back(
 /// opinion this file happens to dislike.
 #[compio::test]
 async fn a_bounded_string_authored_as_ops_is_a_varchar_mysql_enforces() {
-    let _url = skip_if_no_mysql!();
+    let _url = require_live_mysql!();
     let measured = measure("a bounded string authored as ops", authored_ops).await;
 
     assert_eq!(
@@ -303,7 +301,7 @@ async fn a_bounded_string_authored_as_ops_is_a_varchar_mysql_enforces() {
 /// value stored in full.
 #[compio::test]
 async fn a_bounded_string_through_the_descriptor_producer_loses_its_bound_and_its_family() {
-    let _url = skip_if_no_mysql!();
+    let _url = require_live_mysql!();
     let measured = measure(
         "a bounded string through the descriptor producer",
         |schema, policy| {

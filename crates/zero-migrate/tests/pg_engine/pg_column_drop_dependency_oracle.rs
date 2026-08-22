@@ -180,7 +180,7 @@ const SHAPES: &[(&str, bool)] = &[
 
 #[compio::test]
 async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_drop() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("zm_dep_oracle_{}", std::process::id());
     // The fixture outlives an assertion failure without this: a panic unwinds past

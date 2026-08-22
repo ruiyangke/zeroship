@@ -189,7 +189,7 @@ async fn live_function_body(
 /// the harness is correct up to that gate and states what the measurement needs.
 #[compio::test]
 async fn rolling_back_a_function_replace_on_postgres() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(

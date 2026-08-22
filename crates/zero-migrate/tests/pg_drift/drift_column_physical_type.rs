@@ -46,10 +46,9 @@
 //! the fixture intends, and that each reported side PARSES BACK to the contract it came
 //! from. Any of those failing is a broken instrument and says so.
 //!
-//! Gated on `ZERO_MIGRATE_MYSQL_URL` / `ZERO_MIGRATE_TEST_PG_URL` through
-//! `skip_if_no_mysql!` / `skip_if_no_pg!`, which route into `announce_live_db_skip`:
-//! `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` turns a missing DSN into a failure rather than a
-//! green run with no coverage. The SQLite leg needs no server.
+//! REQUIRES `ZERO_MIGRATE_MYSQL_URL` / `ZERO_MIGRATE_TEST_PG_URL` through
+//! `require_live_mysql!` / `require_live_pg!`: a missing DSN is a failure rather than
+//! a green run with no coverage. The SQLite leg needs no server.
 
 use crate::support;
 
@@ -195,7 +194,7 @@ fn data_type_line<'d>(
 /// assertion is the `data_type` LINE for the named column.
 #[compio::test]
 async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("widthdrift");
     let cfg = cfg_for(&database);
@@ -350,7 +349,7 @@ async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see(
 /// print two spellings of the same type.
 #[compio::test]
 async fn an_untouched_mysql_table_reports_clean() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("mysqlclean");
     let cfg = cfg_for(&database);
@@ -531,7 +530,7 @@ fn sqlite_corpus_columns() -> serde_json::Value {
 /// carry one. A deployed-and-untouched table must stay clean.
 #[compio::test]
 async fn an_untouched_postgres_table_reports_clean() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("physdrift_{}_pg", std::process::id());
     let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);

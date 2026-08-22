@@ -321,10 +321,7 @@ async fn with_deployment<F>(tag: &str, body: F)
 where
     F: AsyncFnOnce(&Deployment<'_>) -> Result<(), String>,
 {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let deployment = Deployment::open(&session, tag).await;
     let _schema_guard = support::SchemaGuard::arm(

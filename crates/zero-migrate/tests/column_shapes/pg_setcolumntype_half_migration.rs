@@ -82,11 +82,8 @@ async fn attempt_retype(
     mutation: &str,
     retyped_table: &str,
     retyped_column: &str,
-) -> Option<Outcome> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+) -> Outcome {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -168,7 +165,7 @@ async fn attempt_retype(
         ))
         .await;
     match (work, cleanup) {
-        (Ok(outcome), Ok(())) => Some(outcome),
+        (Ok(outcome), Ok(())) => outcome,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -302,11 +299,7 @@ async fn a_retype_a_view_blocks_applies_nothing_at_all() {
           ]
         }}"#
     );
-    let Some(outcome) =
-        attempt_retype(&setup, &[], &mutation_for("vw_src", "v"), "vw_src", "v").await
-    else {
-        return;
-    };
+    let outcome = attempt_retype(&setup, &[], &mutation_for("vw_src", "v"), "vw_src", "v").await;
     assert_blocked(&outcome, "rule _RETURN on view");
 }
 
@@ -335,11 +328,7 @@ async fn a_retype_a_generated_column_reads_applies_nothing_at_all() {
           ]
         }}"#
     );
-    let Some(outcome) =
-        attempt_retype(&setup, &[], &mutation_for("gen_src", "v"), "gen_src", "v").await
-    else {
-        return;
-    };
+    let outcome = attempt_retype(&setup, &[], &mutation_for("gen_src", "v"), "gen_src", "v").await;
     assert_blocked(&outcome, "default value for column doubled");
 }
 
@@ -366,11 +355,7 @@ async fn a_retype_of_a_partition_key_column_applies_nothing_at_all() {
           ]
         }}"#
     );
-    let Some(outcome) =
-        attempt_retype(&setup, &[], &mutation_for("pk_src", "v"), "pk_src", "v").await
-    else {
-        return;
-    };
+    let outcome = attempt_retype(&setup, &[], &mutation_for("pk_src", "v"), "pk_src", "v").await;
     assert_blocked(&outcome, "partition key of");
 }
 
@@ -406,17 +391,14 @@ async fn a_retype_of_a_foreign_key_target_column_still_applies() {
           ]
         }}"#
     );
-    let Some(outcome) = attempt_retype(
+    let outcome = attempt_retype(
         &setup,
         &[],
         &mutation_for("fk_target", "v"),
         "fk_target",
         "v",
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert_applied(&outcome);
 }
 
@@ -448,11 +430,7 @@ async fn a_retype_with_constraint_shaped_companions_still_applies() {
           ]
         }}"#
     );
-    let Some(outcome) =
-        attempt_retype(&setup, &[], &mutation_for("ok_src", "v"), "ok_src", "v").await
-    else {
-        return;
-    };
+    let outcome = attempt_retype(&setup, &[], &mutation_for("ok_src", "v"), "ok_src", "v").await;
     assert_applied(&outcome);
 }
 
@@ -490,11 +468,7 @@ async fn an_uncastable_default_is_still_a_half_migration() {
           ]
         }}"#
     );
-    let Some(outcome) =
-        attempt_retype(&setup, &[], &mutation_for("def_src", "v"), "def_src", "v").await
-    else {
-        return;
-    };
+    let outcome = attempt_retype(&setup, &[], &mutation_for("def_src", "v"), "def_src", "v").await;
 
     let error = outcome
         .applied

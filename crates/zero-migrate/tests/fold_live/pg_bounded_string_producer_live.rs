@@ -59,8 +59,8 @@
 //!   `zero-migrate-node/tests/collection_export_round_trip.rs` is where that is pinned.
 //!   This file is about the leg after it.
 //!
-//! Gated on `ZERO_MIGRATE_TEST_PG_URL` and skips cleanly without it, so read the SKIP
-//! banner before reading the pass count.
+//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL` through `require_live_pg!`: with no DSN the
+//! pass count cannot be mistaken for coverage, because there is none to read.
 
 use crate::support;
 
@@ -168,9 +168,7 @@ async fn measure(
     label: &str,
     make_ops: impl FnOnce(&str, &EffectivePolicy) -> Vec<Op>,
 ) -> Measured {
-    let Some(url) = support::pg_url() else {
-        unreachable!("callers gate on `skip_if_no_pg!` before reaching here")
-    };
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -314,7 +312,7 @@ async fn measure_column(session: &PgDevSession, schema: &str) -> Result<Measured
 /// only opinion there is.
 #[compio::test]
 async fn a_bounded_string_authored_as_ops_is_a_varchar_the_server_enforces() {
-    let _url = skip_if_no_pg!();
+    let _url = require_live_pg!();
     let measured = measure("a bounded string authored as ops", |schema, policy| {
         authored_ops(schema, policy)
     })
@@ -348,7 +346,7 @@ async fn a_bounded_string_authored_as_ops_is_a_varchar_the_server_enforces() {
 /// stored over-long row is a lost CONSTRAINT.
 #[compio::test]
 async fn a_bounded_string_through_the_descriptor_producer_reaches_the_server_unbounded() {
-    let _url = skip_if_no_pg!();
+    let _url = require_live_pg!();
     let measured = measure(
         "a bounded string through the descriptor producer",
         |schema, policy| {
@@ -388,10 +386,7 @@ async fn a_bounded_string_through_the_descriptor_producer_reaches_the_server_unb
 /// widens a constraint the author is still declaring.
 #[compio::test]
 async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column() {
-    let _url = skip_if_no_pg!();
-    let Some(url) = support::pg_url() else {
-        unreachable!("gated above")
-    };
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);

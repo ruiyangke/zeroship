@@ -37,10 +37,10 @@
 //! the shipped behaviour is pinned AND the gap it leaves is legible, rather than the
 //! refusals reading as the finished answer.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`: every test skips cleanly when unset, so a
-//! contributor without a database still gets a green run. The skip announces itself and
-//! `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` turns it into a failure, which is what CI sets. The
-//! DSN itself is NOT repeated here - `docker-compose.test.yml` carries the canonical
+//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`: every test FAILS when it is unset. A run
+//! without a database used to report the same passed count as a run with one, which
+//! made "no coverage" and "coverage passed" indistinguishable, so the skip is gone.
+//! The DSN itself is NOT repeated here - `docker-compose.test.yml` carries the canonical
 //! value in its own header, and the port this comment used to name was a third value
 //! that no longer serves anything. Each test runs in its OWN meta + project
 //! schema (suffixed by a unique token) so the shared DB stays clean and re-runs are
@@ -316,7 +316,7 @@ async fn standard_conforming_strings(session: &PgDevSession) -> String {
 async fn structured_data_steps_pin_standard_strings_and_restore_the_session() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -451,7 +451,7 @@ async fn a_backfill_refuses_a_config_timeout_that_truncates_to_zero() {
     use std::time::Duration;
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -563,7 +563,7 @@ async fn a_backfill_refuses_a_config_timeout_that_truncates_to_zero() {
 async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -750,7 +750,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
 async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -859,7 +859,7 @@ async fn backfill_rejects_a_before_update_trigger_that_rewrites_values() {
 async fn backfill_rejects_a_stored_generated_unique_cursor_before_guard_or_cohort() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -970,7 +970,7 @@ async fn backfill_rejects_a_stored_generated_unique_cursor_before_guard_or_cohor
 async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let mut cfg = cfg_for(&tok);
@@ -1086,7 +1086,7 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
 async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -1309,7 +1309,7 @@ async fn composite_guard_backfill_survives_crash_and_cleans_up_after_resume() {
 async fn a_resumed_backfill_stops_at_the_boundary_its_first_run_captured() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -1485,7 +1485,7 @@ async fn a_resumed_backfill_stops_at_the_boundary_its_first_run_captured() {
 async fn guard_detects_representation_changes_under_case_insensitive_cursor_semantics() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -1596,7 +1596,7 @@ async fn guard_detects_representation_changes_under_case_insensitive_cursor_sema
 async fn backfill_resume_rejects_a_when_false_guard_replacement() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -1705,7 +1705,7 @@ async fn backfill_resume_rejects_a_when_false_guard_replacement() {
 async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -1878,7 +1878,7 @@ async fn backfill_resume_rejects_cursor_metadata_and_cohort_bound_corruption() {
 async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -1994,7 +1994,7 @@ async fn backfill_rejects_a_progress_table_with_any_extra_stale_column() {
 async fn external_cursor_invariant_requires_explicit_approval_and_is_recorded() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -2079,7 +2079,7 @@ async fn external_cursor_invariant_requires_explicit_approval_and_is_recorded() 
 async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_write_triggers() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -2387,7 +2387,7 @@ async fn interrupt_online_rename_deploy(
 /// as the finished answer.
 #[compio::test]
 async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -2559,7 +2559,7 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
 #[ignore = "aspirational: a deploy-recovery driver would make this pass; today no driver exists so a retry cannot progress (#222)"]
 #[compio::test]
 async fn interrupted_online_rename_is_automatically_recovered_on_same_deploy_retry() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -2600,7 +2600,7 @@ async fn interrupted_online_rename_is_automatically_recovered_on_same_deploy_ret
 
 #[compio::test]
 async fn transactional_apply_creates_table_and_journals_completed() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -2684,7 +2684,7 @@ async fn transactional_apply_creates_table_and_journals_completed() {
 /// the assertion that names the table catches it, rather than only the reply.
 #[compio::test]
 async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -2804,7 +2804,7 @@ async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused(
 /// held it appears in `pg_locks`.
 #[compio::test]
 async fn apply_acquires_and_releases_the_project_advisory_lock() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -2854,7 +2854,7 @@ async fn apply_acquires_and_releases_the_project_advisory_lock() {
 /// `completed`) triggers the idempotent recovery on the next apply.
 #[compio::test]
 async fn non_transactional_two_phase_apply_and_recovery() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -2969,7 +2969,7 @@ async fn non_transactional_two_phase_apply_and_recovery() {
 /// disagreeing case had no coverage by construction.
 #[compio::test]
 async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3104,7 +3104,7 @@ async fn inflight_marker_armed(
 /// amount of re-deploying moves it.
 #[compio::test]
 async fn a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_kept() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3214,7 +3214,7 @@ async fn a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_k
 /// converge without an operator.
 #[compio::test]
 async fn a_committed_non_txn_concurrent_index_still_recovers_on_replay() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3307,7 +3307,7 @@ async fn a_committed_non_txn_concurrent_index_still_recovers_on_replay() {
 /// the body is fine, it is `transaction:false` that removes the rollback.
 #[compio::test]
 async fn a_transactional_create_table_rolls_back_at_the_same_boundary_and_replays() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3377,7 +3377,7 @@ async fn a_transactional_create_table_rolls_back_at_the_same_boundary_and_replay
 /// than the halt arm.
 #[compio::test]
 async fn an_armed_marker_outranks_a_skip_precondition() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3459,7 +3459,7 @@ async fn an_armed_marker_outranks_a_skip_precondition() {
 /// recorded completed event reads back over the seam.
 #[compio::test]
 async fn journal_ensure_is_idempotent_and_records_read_back() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3509,7 +3509,7 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
 /// reports no drift.
 #[compio::test]
 async fn checksum_drift_detects_a_tampered_applied_migration() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3582,7 +3582,7 @@ async fn checksum_drift_detects_a_tampered_applied_migration() {
 /// `information_schema` decode path through `PgDevSession`).
 #[compio::test]
 async fn snapshot_schema_reflects_the_live_catalog() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3628,7 +3628,7 @@ async fn snapshot_schema_reflects_the_live_catalog() {
 async fn snapshot_schema_preserves_quoted_named_type_identity() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let mut cfg = cfg_for(&tok);
@@ -3691,7 +3691,7 @@ async fn snapshot_schema_preserves_quoted_named_type_identity() {
 /// concurrent deploys for the same project.
 #[compio::test]
 async fn second_session_blocks_on_the_held_project_lock() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let holder = PgDevSession::connect(&url);
     let contender = PgDevSession::connect(&url);
     let tok = token();
@@ -3750,7 +3750,7 @@ async fn second_session_blocks_on_the_held_project_lock() {
 /// version becomes pending again (re-appliable).
 #[compio::test]
 async fn rollback_runs_down_appends_event_and_is_reappliable() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3850,7 +3850,7 @@ async fn rollback_runs_down_appends_event_and_is_reappliable() {
 /// up it would error. It must record it `completed` and leave the table intact.
 #[compio::test]
 async fn baseline_records_completed_without_running_up() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3910,7 +3910,7 @@ async fn baseline_records_completed_without_running_up() {
 /// applied event — both driven generically over the `SqlSession` seam.
 #[compio::test]
 async fn status_and_history_report_over_the_seam() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -3963,7 +3963,7 @@ async fn status_and_history_report_over_the_seam() {
 /// (all-up-front guard): a bare-DML non-txn `up` is refused, and nothing is applied.
 #[compio::test]
 async fn non_idempotent_non_txn_dml_aborts_before_any_apply() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -4008,7 +4008,7 @@ async fn non_idempotent_non_txn_dml_aborts_before_any_apply() {
 async fn limited_delete_honors_its_cap_across_partitions() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -4075,7 +4075,7 @@ async fn limited_delete_honors_its_cap_across_partitions() {
 async fn pending_online_renames_can_be_completed_or_aborted_safely() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -4819,7 +4819,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
 async fn a_partially_journaled_resolution_cannot_switch_actions() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -5031,7 +5031,7 @@ async fn a_partially_journaled_resolution_cannot_switch_actions() {
 async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -5184,7 +5184,7 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
 /// moment anything rolls back. The migrator role is line 2, not a substitute.
 #[compio::test]
 async fn a_guard_denied_down_is_refused_before_it_runs() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -5310,7 +5310,7 @@ async fn journal_applied(
 /// catalog. That residue is a hole.
 #[compio::test]
 async fn a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -5364,7 +5364,7 @@ async fn a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply() {
 /// exists to make re-runnable.
 #[compio::test]
 async fn a_crash_between_the_masked_add_column_units_still_adds_the_sibling_on_resume() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -5445,7 +5445,7 @@ async fn a_crash_between_the_masked_add_column_units_still_adds_the_sibling_on_r
 /// exists for still works, and the fix must not turn it into a duplicate-column error.
 #[compio::test]
 async fn a_guarded_masked_add_column_is_a_clean_noop_when_both_columns_are_present() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -5694,7 +5694,7 @@ async fn drop_partition_outcome(
 /// no guard verdict for any layer to get wrong.
 #[compio::test]
 async fn a_guarded_drop_partition_drops_the_child_and_its_rows() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -5720,7 +5720,7 @@ async fn a_guarded_drop_partition_drops_the_child_and_its_rows() {
 /// two isolates the guard as the cause.
 #[compio::test]
 async fn an_unguarded_drop_partition_drops_the_child_and_its_rows() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -5799,7 +5799,7 @@ async fn apply_second_partition_plan(
 /// re-created the child; the catalog assertion covers the observable outcome only.
 #[compio::test]
 async fn a_guarded_create_partition_replay_is_a_clean_noop() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -5860,7 +5860,7 @@ async fn a_guarded_create_partition_replay_is_a_clean_noop() {
 /// author means to remove.
 #[compio::test]
 async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
 
     let cases: [(&str, &str, &str, &str); 3] = [
@@ -5959,7 +5959,7 @@ async fn a_guarded_partition_probe_fails_closed_on_a_divergent_child() {
 async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_starts() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -6050,7 +6050,7 @@ async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_star
 async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -6177,7 +6177,7 @@ async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -6271,7 +6271,7 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
 async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -6364,7 +6364,7 @@ async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
 async fn a_resumed_backfill_honours_a_filter_that_permanently_excludes_rows() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -6518,7 +6518,7 @@ async fn a_resumed_backfill_honours_a_filter_that_permanently_excludes_rows() {
 async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -6705,7 +6705,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
 async fn a_scope_naming_another_version_does_not_authorise_this_one() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -6834,7 +6834,7 @@ async fn a_scope_naming_another_version_does_not_authorise_this_one() {
 /// refusal is equally consistent with a batch that could never have run.
 #[compio::test]
 async fn a_migration_edited_after_it_applied_aborts_the_next_deploy() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -6974,7 +6974,7 @@ async fn a_migration_edited_after_it_applied_aborts_the_next_deploy() {
 /// would be.
 #[compio::test]
 async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -7272,7 +7272,7 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
 /// holds equally for a build where this rename never works.
 #[compio::test]
 async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -7467,7 +7467,7 @@ async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
 /// which both refusals hold equally on a build where a contract never applies.
 #[compio::test]
 async fn a_contract_whose_expand_never_landed_is_refused() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -7692,7 +7692,7 @@ async fn a_contract_whose_expand_never_landed_is_refused() {
 /// where a squash never applies at all.
 #[compio::test]
 async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     use zero_migrate::driver::SqlSession;
 
@@ -7911,7 +7911,7 @@ async fn a_squash_over_a_partly_applied_prefix_is_refused_and_records_nothing() 
 /// hold equally on a build where a repeatable never applies.
 #[compio::test]
 async fn malformed_repeatable_shapes_are_refused_before_anything_runs() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
 
     let tok = token();
@@ -8097,7 +8097,7 @@ async fn malformed_repeatable_shapes_are_refused_before_anything_runs() {
 /// squash's `up` is the failure the pre-flight exists to prevent.
 #[compio::test]
 async fn two_pending_squashes_may_not_claim_the_same_superseded_version() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     use zero_migrate::driver::SqlSession;
 
@@ -8247,7 +8247,7 @@ async fn two_pending_squashes_may_not_claim_the_same_superseded_version() {
 /// would return Ok too, and would reopen a window the operator already closed.
 #[compio::test]
 async fn re_supplying_settled_work_is_a_no_op_rather_than_a_refusal() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     use zero_migrate::driver::SqlSession;
 

@@ -231,7 +231,7 @@ async fn deploy_probe(session: &MysqlDevSession, database: &str) -> Result<(), S
 /// exact false reassurance this file exists to prevent.
 #[compio::test]
 async fn the_probe_server_is_case_insensitive_by_default() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("qrycollinstr");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);
@@ -260,7 +260,7 @@ async fn the_probe_server_is_case_insensitive_by_default() {
 /// database default.
 #[compio::test]
 async fn every_character_column_compares_two_cases_as_different_values() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("qrycollcmp");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);
@@ -339,7 +339,7 @@ async fn every_character_column_compares_two_cases_as_different_values() {
 /// change cannot quietly become the thing under test.
 #[compio::test]
 async fn a_unique_index_keeps_two_cases_apart_on_mysql() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("qrycolluniq");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);
@@ -390,7 +390,7 @@ async fn a_unique_index_keeps_two_cases_apart_on_mysql() {
 /// already case-sensitive.
 #[compio::test]
 async fn postgres_keeps_the_same_two_cases_apart() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("zm_qrycoll_{}", std::process::id());
     let _guard = support::SchemaGuard::arm(&session, [schema.clone()]);
@@ -439,7 +439,7 @@ async fn postgres_keeps_the_same_two_cases_apart() {
 /// The catalog half, and the witness that separates PINNED from INHERITED.
 #[compio::test]
 async fn the_catalog_reports_a_pinned_case_sensitive_collation_on_every_character_column() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("qrycollcat");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);
@@ -489,7 +489,7 @@ async fn the_catalog_reports_a_pinned_case_sensitive_collation_on_every_characte
 /// it, and the server must then agree that `'Active'` is `'active'`.
 #[compio::test]
 async fn a_case_insensitive_field_gets_the_case_insensitive_collation() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("qrycollci");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);
@@ -567,7 +567,7 @@ async fn a_case_insensitive_field_gets_the_case_insensitive_collation() {
 /// server assigned no collation to any of them.
 #[compio::test]
 async fn a_non_character_column_takes_no_collation() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("qrycollbare");
     let _guard = DatabaseGuard::arm(&session, [database.clone()]);

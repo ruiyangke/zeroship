@@ -211,13 +211,9 @@ async fn apply_through_engine(
 
 /// Create the table through the real engine, rename the constrained column with
 /// PostgreSQL's own DDL, then read BOTH projections of the CHECK and drive the
-/// guarded re-add to whatever the existence guard decides. `None` when no live
-/// database is configured (the caller then skips its assertions).
-async fn measure() -> Option<Measured> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+/// guarded re-add to whatever the existence guard decides.
+async fn measure() -> Measured {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -317,7 +313,7 @@ async fn measure() -> Option<Measured> {
         ))
         .await;
     match (work, cleanup) {
-        (Ok(measured), Ok(())) => Some(measured),
+        (Ok(measured), Ok(())) => measured,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -326,9 +322,7 @@ async fn measure() -> Option<Measured> {
 
 #[compio::test]
 async fn a_rename_moves_the_folded_check_body_and_nothing_reads_it_anyway() {
-    let Some(measured) = measure().await else {
-        return;
-    };
+    let measured = measure().await;
     let Measured {
         fold_definition,
         live_definition,

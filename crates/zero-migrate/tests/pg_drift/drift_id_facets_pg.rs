@@ -491,7 +491,7 @@ fn require_missing(drift: &StructuralDrift, object: &str) -> Result<(), String> 
 
 #[compio::test]
 async fn live_postgres_introspects_identity_default_format_and_reference_drift() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);

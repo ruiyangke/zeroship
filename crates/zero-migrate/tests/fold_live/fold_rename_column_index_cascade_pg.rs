@@ -69,8 +69,7 @@ fn quote_ident(identifier: &str) -> String {
 
 /// Apply `applied` through the real engine, then run `native_sql` (each statement
 /// with `{schema}` replaced by the quoted test schema) on the same real session,
-/// then fold `folded` offline and diff it against live introspection. `None` when
-/// no live database is configured (the caller then skips its assertion).
+/// then fold `folded` offline and diff it against live introspection.
 ///
 /// `native_sql` exists for ONE op: PostgreSQL `renameColumn`. The engine lowers it
 /// to an expand-contract plan that ADDS the new column and leaves the old one live
@@ -86,11 +85,8 @@ async fn drift_between_fold_and_live(
     applied: &str,
     native_sql: &[&str],
     folded: &str,
-) -> Option<StructuralDrift> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+) -> StructuralDrift {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -186,7 +182,7 @@ async fn drift_between_fold_and_live(
         ))
         .await;
     match (work, cleanup) {
-        (Ok(drift), Ok(())) => Some(drift),
+        (Ok(drift), Ok(())) => drift,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -230,15 +226,12 @@ async fn rename_column_carries_its_index_key_columns() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         CREATE_INDEXED_TABLE,
         &["ALTER TABLE {schema}.\"rename_idx\" RENAME COLUMN \"a\" TO \"b\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "PostgreSQL indexes reference the attribute, not the name, so a rename moves \
@@ -270,7 +263,7 @@ async fn drop_of_a_renamed_column_cascades_its_index() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         CREATE_INDEXED_TABLE,
         &[
             "ALTER TABLE {schema}.\"rename_idx\" RENAME COLUMN \"a\" TO \"b\"",
@@ -278,10 +271,7 @@ async fn drop_of_a_renamed_column_cascades_its_index() {
         ],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "dropping a renamed column cascades its index in PostgreSQL; a fold that still \
@@ -313,7 +303,7 @@ async fn rename_column_leaves_the_index_name_alone() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         r#"{
           "ir_version": 1,
           "name": "rename_index_keeps_name_create",
@@ -331,10 +321,7 @@ async fn rename_column_leaves_the_index_name_alone() {
         &["ALTER TABLE {schema}.\"rename_idx\" RENAME COLUMN \"a\" TO \"a_renamed\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "PostgreSQL keeps an index's name when the column it covers is renamed; the \
@@ -379,15 +366,12 @@ async fn rename_column_carries_one_key_of_a_multi_column_index() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"rename_multi\" RENAME COLUMN \"a\" TO \"b\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "a rename must rewrite exactly the key it renames and keep index key ORDER: \
@@ -430,15 +414,12 @@ async fn rename_column_carries_an_index_include_column() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         applied,
         &["ALTER TABLE {schema}.\"rename_include\" RENAME COLUMN \"a\" TO \"b\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "an INCLUDE payload column follows the rename in PostgreSQL; the fold must \
@@ -509,7 +490,7 @@ async fn drop_of_a_renamed_column_cascades_its_partial_index() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         CREATE_PARTIAL_INDEXED_TABLE,
         &[
             "ALTER TABLE {schema}.\"rename_pred\" RENAME COLUMN \"a\" TO \"b\"",
@@ -517,10 +498,7 @@ async fn drop_of_a_renamed_column_cascades_its_partial_index() {
         ],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "dropping a renamed column cascades the partial index whose predicate reads \
@@ -552,7 +530,7 @@ async fn drop_of_a_renamed_column_cascades_its_expression_index() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         CREATE_EXPR_INDEXED_TABLE,
         &[
             "ALTER TABLE {schema}.\"rename_expr\" RENAME COLUMN \"a\" TO \"b\"",
@@ -560,10 +538,7 @@ async fn drop_of_a_renamed_column_cascades_its_expression_index() {
         ],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "dropping a renamed column cascades the index keyed on an expression over it; \
@@ -594,15 +569,12 @@ async fn rename_of_an_unrelated_column_leaves_the_index_untouched() {
       ]
     }"#;
 
-    let Some(drift) = drift_between_fold_and_live(
+    let drift = drift_between_fold_and_live(
         CREATE_INDEXED_TABLE,
         &["ALTER TABLE {schema}.\"rename_idx\" RENAME COLUMN \"note\" TO \"memo\""],
         folded,
     )
-    .await
-    else {
-        return;
-    };
+    .await;
     assert!(
         drift.is_clean(),
         "renaming a column no index covers must leave every index alone on both sides: \

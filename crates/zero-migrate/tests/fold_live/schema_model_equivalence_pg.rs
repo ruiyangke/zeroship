@@ -189,11 +189,8 @@ struct Measured {
     live: SchemaSnapshot,
 }
 
-async fn measure() -> Option<Measured> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+async fn measure() -> Measured {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -242,7 +239,7 @@ async fn measure() -> Option<Measured> {
         ))
         .await;
     match (work, cleanup) {
-        (Ok(measured), Ok(())) => Some(measured),
+        (Ok(measured), Ok(())) => measured,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -256,9 +253,7 @@ async fn measure() -> Option<Measured> {
 /// independent assertions inside one run, and each names itself in its failure message.
 #[compio::test]
 async fn the_neutral_model_preserves_postgresql_behaviour_exactly() {
-    let Some(measured) = measure().await else {
-        return;
-    };
+    let measured = measure().await;
 
     // ---- Claim 1: the neutral/vendor split loses nothing -------------------
     //

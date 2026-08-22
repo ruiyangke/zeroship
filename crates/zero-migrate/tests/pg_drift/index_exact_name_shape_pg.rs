@@ -21,7 +21,8 @@
 //! equality, and they are invisible to this check too. A pair that passes it agrees
 //! on everything the live snapshot observes, and nothing more.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`; skips cleanly when unset.
+//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support;
 
@@ -307,7 +308,7 @@ fn assert_refused(
 /// exact-name check saw an unchanged index and the differ planned nothing.
 #[compio::test]
 async fn a_access_method_change_is_surfaced() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -341,7 +342,7 @@ async fn a_access_method_change_is_surfaced() {
 /// declared index covers.
 #[compio::test]
 async fn b_predicate_change_is_surfaced() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -368,7 +369,7 @@ async fn b_predicate_change_is_surfaced() {
 /// index-only scan the declared index cannot serve now succeeds.
 #[compio::test]
 async fn c_include_change_is_surfaced() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -395,7 +396,7 @@ async fn c_include_change_is_surfaced() {
 /// exact-name pair would pass arms A, B and C.
 #[compio::test]
 async fn d_unchanged_index_still_plans_nothing() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);

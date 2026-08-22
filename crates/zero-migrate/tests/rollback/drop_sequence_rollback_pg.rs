@@ -154,7 +154,7 @@ fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
 
 #[compio::test]
 async fn rolling_back_an_unconsumed_dropped_sequence_is_deliberately_refused() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(
@@ -274,7 +274,7 @@ async fn rolling_back_an_unconsumed_dropped_sequence_is_deliberately_refused() {
 /// rollback would conjure a sequence that never existed here.
 #[compio::test]
 async fn a_guarded_sequence_drop_keeps_no_inverse() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let cfg = ExecutorConfig::new(

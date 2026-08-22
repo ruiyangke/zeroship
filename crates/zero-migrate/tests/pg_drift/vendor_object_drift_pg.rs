@@ -38,7 +38,7 @@ fn token() -> String {
 
 #[compio::test]
 async fn live_postgres_reports_a_hand_dropped_function_policy_and_trigger() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);
@@ -193,7 +193,7 @@ async fn live_postgres_reports_a_policy_narrowed_out_of_band() {
     // policy still exists under the same name, but no longer applies to the same
     // command or the same roles. The predicate is NOT part of this - PostgreSQL
     // re-deparses it, so comparing it would report drift on every project.
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);

@@ -438,7 +438,7 @@ async fn database_collation(session: &support::PgDevSession) -> Result<String, S
 
 #[compio::test]
 async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = token("pinned");
     let _guard = support::SchemaGuard::arm(&session, [schema.clone()]);
@@ -563,7 +563,7 @@ async fn server_collation(session: &support::mysql::MysqlDevSession) -> Result<S
 
 #[compio::test]
 async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order_on_mysql() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = support::mysql::MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("pinned");
     let _guard = support::mysql::DatabaseGuard::arm(&session, [database.clone()]);
@@ -591,7 +591,7 @@ async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order_on_my
 
 #[compio::test]
 async fn injected_id_without_a_pinned_collation_loses_creation_order_on_mysql() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = support::mysql::MysqlDevSession::connect(&url);
     let database = support::mysql::database_token("unpinned");
     let _guard = support::mysql::DatabaseGuard::arm(&session, [database.clone()]);
@@ -619,7 +619,7 @@ async fn injected_id_without_a_pinned_collation_loses_creation_order_on_mysql() 
 
 #[compio::test]
 async fn injected_id_without_a_pinned_collation_loses_creation_order() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = token("unpinned");
     let _guard = support::SchemaGuard::arm(&session, [schema.clone()]);

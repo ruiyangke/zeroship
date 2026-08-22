@@ -20,7 +20,8 @@
 //! checksum, so silently substituting a different budget would run a migration
 //! whose behaviour no longer matches its checksummed identity.
 //!
-//! GATED behind `ZERO_MIGRATE_TEST_PG_URL`; skips cleanly when unset.
+//! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`. An unset DSN FAILS these tests: a skipped
+//! live suite reports exactly like a passing one, so there is no skip.
 
 use crate::support;
 
@@ -140,7 +141,7 @@ fn mig_with_flags(name: &str, up: &str, flags: MigrationFlags) -> Migration {
 async fn postgres_reads_a_zero_timeout_as_no_limit_on_both_budgets() {
     use zero_migrate::driver::SqlSession;
 
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
 
     for setting in ["statement_timeout", "lock_timeout"] {
@@ -183,7 +184,7 @@ async fn postgres_reads_a_zero_timeout_as_no_limit_on_both_budgets() {
 /// A per-migration `lock_timeout_ms: 0` is refused, and its `up` never runs.
 #[compio::test]
 async fn a_zero_lock_timeout_override_is_refused_before_any_ddl_runs() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -221,7 +222,7 @@ async fn a_zero_lock_timeout_override_is_refused_before_any_ddl_runs() {
 /// statement-timeout override is spelled `timeout_ms`, not `statement_timeout_ms`.
 #[compio::test]
 async fn a_zero_statement_timeout_override_is_refused_before_any_ddl_runs() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -260,7 +261,7 @@ async fn a_zero_statement_timeout_override_is_refused_before_any_ddl_runs() {
 /// same no-limit sentinel. No IR-level validation can see this one.
 #[compio::test]
 async fn a_config_timeout_that_truncates_to_zero_milliseconds_is_refused() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let mut cfg = cfg_for(&tok);
@@ -300,7 +301,7 @@ async fn a_config_timeout_that_truncates_to_zero_milliseconds_is_refused() {
 /// helper than the transactional one, so it is refused on its own evidence.
 #[compio::test]
 async fn a_zero_budget_on_the_non_transactional_path_is_refused() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -345,7 +346,7 @@ async fn a_zero_budget_on_the_non_transactional_path_is_refused() {
 /// refusal test with no positive control proves only that something errored.
 #[compio::test]
 async fn finite_timeout_overrides_still_apply() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);
@@ -395,7 +396,7 @@ async fn finite_timeout_overrides_still_apply() {
 /// zero refusal.
 #[compio::test]
 async fn a_one_millisecond_budget_is_finite_and_still_applies() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let tok = token();
     let cfg = cfg_for(&tok);

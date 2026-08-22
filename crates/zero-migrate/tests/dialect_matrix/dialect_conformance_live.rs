@@ -176,7 +176,7 @@ use zero_migrate::{
 /// part of the same change as the leg.
 ///
 /// 1. DONE BEFORE THIS LEG, in `tests/support/mysql.rs`: `MYSQL_URL_ENV`,
-///    `mysql_url()`, `skip_if_no_mysql!`, and `MysqlDevSession`, which implements
+///    `mysql_url()`, `require_live_mysql!`, and `MysqlDevSession`, which implements
 ///    `driver::SqlSession` over the blocking `mysql` crate exactly as `PgDevSession`
 ///    does over the PostgreSQL one. `DatabaseGuard` is the `SchemaGuard` sibling.
 ///    Three live MySQL suites already ride it (`tests/fold_live/*_mysql.rs`).
@@ -1809,10 +1809,7 @@ async fn probe_schemas(session: &PgDevSession) -> (i64, Vec<String>) {
 
 #[compio::test]
 async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
 
     // The isolation claim is VERIFIED, not asserted, and it is verified HERE rather
@@ -1882,7 +1879,7 @@ async fn every_postgres_row_of_the_dialect_table_answers_to_a_live_server() {
 
 #[compio::test]
 async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
 
     // Name the server, in the ledger, before anything is measured. The proposal
@@ -1955,10 +1952,7 @@ async fn every_mysql_row_of_the_dialect_table_answers_to_a_live_server() {
 /// its process has actually been reaped.
 #[compio::test]
 async fn a_probe_schema_is_judged_by_the_pid_in_its_name_not_by_its_prefix() {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let me = std::process::id();
 
@@ -2079,10 +2073,7 @@ async fn the_extension_claim_is_exclusive_and_only_the_extension_rows_take_it() 
         "if every row claimed the extension the assertion above would be vacuous"
     );
 
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return;
-    };
+    let url = require_live_pg!();
     let holder = PgDevSession::connect(&url);
     let contender = PgDevSession::connect(&url);
 

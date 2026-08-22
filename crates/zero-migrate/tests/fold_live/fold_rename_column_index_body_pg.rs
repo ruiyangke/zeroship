@@ -310,13 +310,9 @@ async fn apply_through_engine(
 
 /// Create the table and both indexes through the real engine, rename the referenced
 /// column with PostgreSQL's own DDL, then read BOTH projections of each rendered body
-/// and run the differ over the stale pair and the two witnesses. `None` when no live
-/// database is configured (the caller then skips its assertions).
-async fn measure() -> Option<Measured> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+/// and run the differ over the stale pair and the two witnesses.
+async fn measure() -> Measured {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -402,7 +398,7 @@ async fn measure() -> Option<Measured> {
         ))
         .await;
     match (work, cleanup) {
-        (Ok(measured), Ok(())) => Some(measured),
+        (Ok(measured), Ok(())) => measured,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -411,9 +407,7 @@ async fn measure() -> Option<Measured> {
 
 #[compio::test]
 async fn a_rename_moves_both_folded_index_bodies_and_their_spelling_stays_unreported() {
-    let Some(measured) = measure().await else {
-        return;
-    };
+    let measured = measure().await;
     let Measured {
         fold_predicate,
         live_predicate,

@@ -310,7 +310,7 @@ fn require_view_still_paired(drift: &StructuralDrift, view: &str) -> Result<(), 
 /// believe a catalog can yield a typed body.
 #[compio::test]
 async fn both_sides_of_a_view_body_are_measured() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);
@@ -396,7 +396,7 @@ async fn both_sides_of_a_view_body_are_measured() {
 /// body has to be visible, and a schema nobody has touched has to stay clean.
 #[compio::test]
 async fn live_postgres_reports_view_body_drift() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);

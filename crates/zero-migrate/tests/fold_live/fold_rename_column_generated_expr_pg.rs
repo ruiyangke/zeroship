@@ -203,11 +203,8 @@ async fn apply_create(
         .map_err(|error| format!("{error}"))
 }
 
-async fn measure() -> Option<Measured> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+async fn measure() -> Measured {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -307,7 +304,7 @@ async fn measure() -> Option<Measured> {
         ))
         .await;
     match (work, cleanup) {
-        (Ok(measured), Ok(())) => Some(measured),
+        (Ok(measured), Ok(())) => measured,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -319,9 +316,7 @@ async fn measure() -> Option<Measured> {
 // value twice.
 #[compio::test]
 async fn a_rename_leaves_the_folded_generated_body_naming_what_the_server_names() {
-    let Some(measured) = measure().await else {
-        return;
-    };
+    let measured = measure().await;
     let Measured {
         live,
         folded,

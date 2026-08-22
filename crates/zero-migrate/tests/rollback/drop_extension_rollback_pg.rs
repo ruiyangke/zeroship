@@ -295,7 +295,7 @@ async fn drop_extension_inverse_uses_only_the_recorded_schema() {
 
 #[compio::test]
 async fn rolling_back_a_dropped_extension_restores_it() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let ext = EXT;
     let session = PgDevSession::connect(&url);
     // Taken before anything else, so a case that cannot get the claim has created
@@ -410,7 +410,7 @@ async fn rolling_back_a_dropped_extension_restores_it() {
 /// unguarded and earn an inverse it must not have.
 #[compio::test]
 async fn a_guarded_extension_drop_keeps_no_inverse() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let ext = EXT_GUARDED;
     let session = PgDevSession::connect(&url);
     // The `pgcrypto` half of the claim - the one `dialect_matrix` also contends for.

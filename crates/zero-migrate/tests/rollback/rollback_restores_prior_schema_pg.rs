@@ -82,7 +82,7 @@ async fn catalog_of(session: &PgDevSession, schema: &str) -> Vec<String> {
 
 #[compio::test]
 async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
 
     // Each op gets its own schema so the two cases cannot disturb each other.

@@ -65,17 +65,13 @@ fn quote_ident(identifier: &str) -> String {
 }
 
 /// Apply every op of `source` through the real engine, fold the SAME resolved ops
-/// offline, and return the drift between the fold and live introspection. `None`
-/// when no live database is configured (the caller then skips its assertion).
+/// offline, and return the drift between the fold and live introspection.
 ///
 /// Unlike the rename oracle next door, no native SQL is needed: the engine lowers
 /// `dropColumn` to PostgreSQL's own `ALTER TABLE ... DROP COLUMN`, so the applied
 /// history and the folded history are the same ops.
-async fn drift_after_applying(source: &str) -> Option<StructuralDrift> {
-    let Some(url) = support::pg_url() else {
-        support::announce_live_db_skip(support::PG_URL_ENV);
-        return None;
-    };
+async fn drift_after_applying(source: &str) -> StructuralDrift {
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
     let schema = token();
     let policy = support::no_inject(&schema);
@@ -158,7 +154,7 @@ async fn drift_after_applying(source: &str) -> Option<StructuralDrift> {
         ))
         .await;
     match (work, cleanup) {
-        (Ok(drift), Ok(())) => Some(drift),
+        (Ok(drift), Ok(())) => drift,
         (Err(work), Ok(())) => panic!("{work}"),
         (Ok(_), Err(cleanup)) => panic!("drop PostgreSQL test schemas: {cleanup}"),
         (Err(work), Err(cleanup)) => panic!("{work}; cleanup failed: {cleanup}"),
@@ -186,9 +182,7 @@ async fn drop_column_cascades_an_index_that_only_includes_it() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "PostgreSQL drops an index when its INCLUDE payload column is dropped; a fold \
@@ -218,9 +212,7 @@ async fn drop_of_an_unrelated_column_keeps_an_index_with_an_include_list() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "an index that names neither the dropped column as a key nor in its INCLUDE \
@@ -253,9 +245,7 @@ async fn drop_column_cascades_a_partial_index_whose_predicate_reads_it() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "PostgreSQL drops a partial index when its WHERE predicate reads the dropped \
@@ -287,9 +277,7 @@ async fn drop_column_cascades_an_index_keyed_on_an_expression_over_it() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "PostgreSQL drops an index whose expression key reads the dropped column; a \
@@ -331,9 +319,7 @@ async fn drop_column_keeps_a_partial_index_whose_predicate_only_spells_it_in_a_l
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "a predicate that merely SPELLS the dropped column inside a string literal \
@@ -368,9 +354,7 @@ async fn drop_column_keeps_an_expression_index_whose_literal_spells_it() {
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "an expression key that merely SPELLS the dropped column inside a string \
@@ -407,9 +391,7 @@ async fn drop_column_keeps_a_partial_index_whose_predicate_leg_never_reads_it() 
       ]
     }"#;
 
-    let Some(drift) = drift_after_applying(source).await else {
-        return;
-    };
+    let drift = drift_after_applying(source).await;
     assert!(
         drift.is_clean(),
         "only the PostgreSQL leg of a dialectal predicate reaches the database, so a \

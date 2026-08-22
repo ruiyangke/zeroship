@@ -2,9 +2,8 @@
 //! the "end-to-end PostgreSQL, MySQL, and SQLite DDL tests" the id-system design asks
 //! for, beside `synchronize_identity_pg.rs` and `synchronize_identity_sqlite.rs`.
 //!
-//! Gated behind `ZERO_MIGRATE_MYSQL_URL`; DB-free runs skip cleanly through
-//! `announce_live_db_skip`, so `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` turns a missing DSN
-//! into a failure rather than a green run with no coverage. These tests drive the
+//! REQUIRES `ZERO_MIGRATE_MYSQL_URL`. An unset DSN FAILS these tests rather than
+//! reporting a green run with no coverage. These tests drive the
 //! shipped generic `MysqlBackend<MysqlDevSession>` seam.
 //!
 //! # This is NOT the PostgreSQL file with the nouns swapped, and the reason is a
@@ -336,7 +335,7 @@ async fn journal_rows(
 /// happen is only worth keeping if something checks it.
 #[compio::test]
 async fn the_counter_cannot_be_driven_below_the_live_maximum() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = database_token("ident_floor");
     let cfg = cfg_for(&database);
@@ -429,7 +428,7 @@ async fn the_counter_cannot_be_driven_below_the_live_maximum() {
 /// leave 51 here and pass every other check in this file.
 #[compio::test]
 async fn a_counter_short_of_the_required_floor_is_raised_by_the_session_increment() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = database_token("ident_raise");
     let cfg = cfg_for(&database);
@@ -492,7 +491,7 @@ async fn a_counter_short_of_the_required_floor_is_raised_by_the_session_incremen
 /// `dialect_conformance_live.rs` should read it in that light.
 #[compio::test]
 async fn on_a_stock_single_writer_mysql_the_operation_can_never_emit_ddl() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = database_token("ident_stock");
     let cfg = cfg_for(&database);
@@ -528,7 +527,7 @@ async fn on_a_stock_single_writer_mysql_the_operation_can_never_emit_ddl() {
 /// the only thing preventing 86 already-issued identities from being reissued.
 #[compio::test]
 async fn an_already_ahead_counter_is_never_lowered_to_the_required_floor() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = database_token("ident_ahead");
     let cfg = cfg_for(&database);
@@ -578,7 +577,7 @@ async fn an_already_ahead_counter_is_never_lowered_to_the_required_floor() {
 /// engines apart. This is the test that fails when the pin is deleted.
 #[compio::test]
 async fn a_stale_catalog_counter_never_moves_the_allocator_backward() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = database_token("ident_stale");
     let cfg = cfg_for(&database);
@@ -638,7 +637,7 @@ async fn a_stale_catalog_counter_never_moves_the_allocator_backward() {
 /// so the distinction is a test rather than a claim in a comment.
 #[compio::test]
 async fn an_empty_table_is_a_journaled_no_op_which_is_the_path_conformance_rides() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = database_token("ident_empty");
     let cfg = cfg_for(&database);
@@ -674,7 +673,7 @@ async fn an_empty_table_is_a_journaled_no_op_which_is_the_path_conformance_rides
 /// path exists to prevent.
 #[compio::test]
 async fn a_non_auto_increment_column_is_rejected_and_leaks_no_table_lock() {
-    let url = skip_if_no_mysql!();
+    let url = require_live_mysql!();
     let session = MysqlDevSession::connect(&url);
     let database = database_token("ident_plain");
     let cfg = cfg_for(&database);

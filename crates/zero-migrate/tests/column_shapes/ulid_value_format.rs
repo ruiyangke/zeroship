@@ -1,7 +1,7 @@
 //! ULID physical-storage and format-validation regressions.
 //!
 //! SQLite runs in-process on every test invocation. PostgreSQL uses the shared
-//! live-test seam and skips cleanly unless `ZERO_MIGRATE_TEST_PG_URL` is set.
+//! live-test seam and REQUIRES `ZERO_MIGRATE_TEST_PG_URL`; unset, it fails.
 
 use crate::support;
 
@@ -280,7 +280,7 @@ fn pg_literal(value: &str) -> String {
 
 #[compio::test]
 async fn postgres_enforces_ulid_fixtures_order_and_case_distinction() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("ulid_{}", token());
     // Dropped on an unwind that skips the explicit cleanup below.

@@ -107,7 +107,7 @@ const SHAPES: &[(&str, &str, &str, bool)] = &[
 
 #[compio::test]
 async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_retype() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("zm_retype_oracle_{}", std::process::id());
     let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);
@@ -258,7 +258,7 @@ async fn the_catalog_predicate_agrees_with_postgres_about_every_blocked_column_r
 /// somebody later collapsed the two queries back into one.
 #[compio::test]
 async fn the_retype_predicate_is_not_the_drop_predicate() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = format!("zm_retype_vs_drop_{}", std::process::id());
     let _schema_guard = support::SchemaGuard::arm(&session, [schema.clone()]);

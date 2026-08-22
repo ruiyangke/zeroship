@@ -31,8 +31,7 @@
 //! to notice.
 //!
 //! That is measured, not assumed. The commit that removed the eight lookups was run
-//! against live PostgreSQL 18 and MySQL 8 with `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` and
-//! zero skip banners, before and after: 37 suites, 3393 passed, 0 failed, 11 ignored,
+//! against live PostgreSQL 18 and MySQL 8 with both DSNs exported, before and after: 37 suites, 3393 passed, 0 failed, 11 ignored,
 //! both times. Every other test in the workspace is indifferent to which shape this
 //! file is in. So the rule gets its own check or it has none — and note that the
 //! indifference cuts both ways, which is why the RED for this test has to be

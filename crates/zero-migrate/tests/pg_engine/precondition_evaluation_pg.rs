@@ -164,7 +164,7 @@ async fn a_met_precondition_lets_the_ddl_run() {
     // THE CONTROL. Without it, the two arms below are satisfied by an engine that
     // refuses everything for an unrelated reason — which is precisely how the
     // SQLite version of this test passed while evaluating nothing.
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
 
     let (ok, created, journaled) = run_case(&session, "sentinel", OnUnmet::Halt, true).await;
@@ -179,7 +179,7 @@ async fn a_met_precondition_lets_the_ddl_run() {
 
 #[compio::test]
 async fn an_unmet_halting_precondition_aborts_and_runs_no_ddl() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
 
     let (ok, created, journaled) =
@@ -202,7 +202,7 @@ async fn an_unmet_halting_precondition_aborts_and_runs_no_ddl() {
 
 #[compio::test]
 async fn an_unmet_skipping_precondition_succeeds_and_still_runs_no_ddl() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
 
     // Skip SUCCEEDS by design, so the return value cannot be the oracle: a Skip

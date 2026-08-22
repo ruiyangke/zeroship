@@ -234,7 +234,7 @@ fn require_function_still_paired(
 
 #[compio::test]
 async fn live_postgres_reports_function_body_drift() {
-    let url = skip_if_no_pg!();
+    let url = require_live_pg!();
     let session = support::PgDevSession::connect(&url);
     let schema = token();
     let quoted_schema = quote_ident(&schema);
