@@ -2147,11 +2147,13 @@ pub fn check_raw_view_body_text(
     // immutability rule cannot fire, and that answer is only sound for text which
     // cannot carry a rename in the first place.
     //
-    // The engine's own caller (`validate_raw_view_body_sql` in
-    // crates/zero-migrate/src/model/validate.rs) refuses the same shapes first and
-    // keeps the user-facing diagnostics - which statement index, which dialect, what
-    // to write instead. It owns those messages because it has the authoring context;
-    // this check owns only the precondition, so the two do not compete.
+    // [`check_raw_view_body`] just below refuses the same shapes first, with a
+    // structured defect the PostgreSQL vendor turns into user-facing diagnostics -
+    // which statement index, which dialect, what to write instead. That path owns
+    // those messages; this check owns only the precondition, so the two do not
+    // compete. The engine no longer calls either one directly: it reaches
+    // PostgreSQL's answer through `ValidationPolicy::raw_view_body_refusal`, which
+    // is what stops a MySQL or SQLite body from being vetted against PG grammar.
     let parsed = pg_query::parse(body).map_err(|_| denied(rule::VIEW_BODY_NOT_A_SELECT, raw))?;
     let [only] = parsed.protobuf.stmts.as_slice() else {
         return Err(denied(rule::VIEW_BODY_NOT_A_SELECT, raw));
@@ -2167,6 +2169,74 @@ pub fn check_raw_view_body_text(
     // It does not turn that scope into an EffectivePolicy or invent policy grants.
     let decisions = BodyScopeDecisions { scope };
     GuardWalker { cfg: &decisions }.check_body_text(body, raw)
+}
+
+/// Why PostgreSQL's parser refuses a raw view body, as a structured fact rather
+/// than as prose.
+///
+/// Every variant is something only a PARSER can establish. That is precisely why
+/// this shape exists: the engine's authoring validator holds the op index, the
+/// target dialect and the error code, but it cannot derive any of these facts
+/// without a parser, and it must not acquire one — reaching `pg_query` from
+/// neutral core is what made a MySQL or SQLite raw view body get vetted against
+/// PostgreSQL's grammar. So the fact is derived HERE, mapped to operator-facing
+/// text by `zero-migrate-postgres` (the vendor owns its own wording), and wrapped
+/// in the authoring envelope by the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawViewBodyDefect {
+    /// PostgreSQL's parser rejected the body outright. Carries the parser's own
+    /// message.
+    Unparseable(String),
+    /// The body carries a statement count other than exactly one (a
+    /// semicolon-chained second statement, or none at all). Carries the count.
+    NotExactlyOneStatement(usize),
+    /// The single statement parsed, but is not a `SELECT` — DDL, DML, `COPY` and
+    /// the utility statements all land here.
+    NotASelect,
+    /// The `SELECT` carries an `INTO` clause, which creates a table and is
+    /// therefore not a read-only view body.
+    SelectInto,
+    /// The read-only body scanner denied a token (`pg_read_file`, `COPY PROGRAM`,
+    /// a network function, a dynamic-SQL literal) or a cross-schema reference.
+    BodyScanner(GuardError),
+}
+
+/// Vet a raw view body with PostgreSQL's parser: exactly one top-level statement,
+/// that statement a `SELECT`, no `SELECT INTO`, then the read-only body deny-list
+/// scan ([`check_raw_view_body_text`]).
+///
+/// This is the WHOLE of PostgreSQL's raw-view-body posture in one call, so that
+/// the vendor seam has a single thing to delegate to and neutral core has nothing
+/// left to parse. It performs exactly the checks the engine's
+/// `validate_raw_view_body_sql` used to perform inline, in the same order, so the
+/// PostgreSQL path is behaviour-identical.
+///
+/// # Errors
+/// [`RawViewBodyDefect`] naming which of the four shape rules, or the body
+/// scanner, refused the text.
+pub fn check_raw_view_body(
+    sql: &str,
+    scope: Option<&SchemaScope>,
+) -> Result<(), RawViewBodyDefect> {
+    let parsed = pg_query::parse(sql).map_err(|e| RawViewBodyDefect::Unparseable(e.to_string()))?;
+    if parsed.protobuf.stmts.len() != 1 {
+        return Err(RawViewBodyDefect::NotExactlyOneStatement(
+            parsed.protobuf.stmts.len(),
+        ));
+    }
+    let stmt = parsed
+        .protobuf
+        .stmts
+        .first()
+        .and_then(|raw| raw.stmt.as_ref())
+        .and_then(|stmt| stmt.node.as_ref());
+    let Some(NodeEnum::SelectStmt(select)) = stmt else {
+        return Err(RawViewBodyDefect::NotASelect);
+    };
+    if select.into_clause.is_some() {
+        return Err(RawViewBodyDefect::SelectInto);
+    }
+    check_raw_view_body_text(sql, sql, scope).map_err(RawViewBodyDefect::BodyScanner)
 }
 
 /// Scan a PL/pgSQL body's **bare string literals** for a cross-tenant schema
