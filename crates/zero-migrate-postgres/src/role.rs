@@ -13,9 +13,19 @@
 //!
 //! # Role model — `NOLOGIN` + `SET ROLE` (not a login role)
 //!
-//! `provision_migrator` creates a deterministic `migrator_<project>_<hash>` role
-//! as **`NOLOGIN`**. The
-//! executor connects as the privileged admin/control role and runs each
+//! The role is a deterministic `migrator_<project>_<hash>`, created as
+//! **`NOLOGIN`**.
+//!
+//! WHAT THIS MODULE ACTUALLY CONTAINS, because the rest of this header reads like
+//! it describes code that is here and it does not: [`migrator_role_name`], the NAME
+//! derivation, and nothing else. There is no `provision_migrator` in this
+//! repository and no `CREATE ROLE` is emitted anywhere in it — the provisioning
+//! ran over a `&Client` that left with the native PostgreSQL driver. **The grant
+//! set below is the SPEC the host implements**, and it is kept because
+//! `ExecutorConfig::with_migrator_role` is the seam the host's provisioned role
+//! arrives through, so the two halves have to agree on what that role may do.
+//!
+//! The executor connects as the privileged admin/control role and runs each
 //! migration under `SET ROLE` for that role (with `RESET ROLE` on exit, scoped
 //! exactly like the executor's session-GUC restore). This is chosen
 //! over a `LOGIN` role because:
@@ -83,8 +93,9 @@
 //!
 //! # Idempotency
 //!
-//! `provision_migrator` is safe to run on every deploy: role creation is guarded
-//! on `pg_roles`, and every `GRANT` / `ALTER` / `REVOKE` is naturally idempotent
+//! Provisioning (the host's, per the note above) is safe to run on every deploy:
+//! role creation is guarded on `pg_roles`, and every `GRANT` / `ALTER` / `REVOKE`
+//! is naturally idempotent
 //! (re-granting an existing grant is a no-op, re-altering `search_path` is a no-op).
 //! Schema ownership is only (re)assigned when it differs.
 
