@@ -570,9 +570,9 @@ pub struct CollectionDescriptor {
     /// [`DeclarativeError::ConflictingDeclaration`]. An IDENTICAL re-declaration is
     /// idempotent and, to keep the union order-independent, the
     /// retained owner is the lexicographically-smallest declaring app among the
-    /// identical declarers (see [`desired_snapshot`]).
+    /// identical declarers (see [`desired_snapshot_for_dialect`]).
     pub owner_app: String,
-    /// The author-declared fields. [`desired_snapshot`] adds exactly the columns
+    /// The author-declared fields. [`desired_snapshot_for_dialect`] adds exactly the columns
     /// selected by its explicit effective policy.
     #[serde(default)]
     pub fields: Vec<FieldDescriptor>,
@@ -1860,7 +1860,7 @@ pub(crate) fn non_unique_index_name(table: &str, col: &str) -> String {
 /// collections) PLUS the per-table ownership map.
 ///
 /// A project = one db = one project schema, and that schema is the UNION of all
-/// member apps' schema authoring declarations. [`desired_snapshot`]
+/// member apps' schema authoring declarations. [`desired_snapshot_for_dialect`]
 /// builds this: identical re-declarations of a table by two apps merge to one
 /// table (idempotent); a conflicting re-declaration is a hard
 /// [`DeclarativeError::ConflictingDeclaration`].
