@@ -134,9 +134,10 @@ pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
     MigrationBackend, MigrationResult, OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
 };
-// PG re-exports: `PgSessionSnapshot` is a pure-`String` struct, but its only
+// PG re-exports: `PostgresSessionSnapshot` is a pure-`String` struct, but its only
 // consumers are the PG session leaves.
-pub use apply::backend::{PgSessionSnapshot, PostgresBackend};
+pub use apply::backend::postgres::PostgresSessionSnapshot;
+pub use apply::backend::PostgresBackend;
 // The driver-neutral `SqlSession` seam types (the engine-root `crate::driver`
 // module). Public so a host (napi) driver can construct return values / binds,
 // and so error consumers read the neutral `DbError` (SQLSTATE in `.sqlstate`). The

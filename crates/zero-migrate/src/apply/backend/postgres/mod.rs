@@ -36,8 +36,8 @@ pub mod status_sql;
 
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
 use super::{
-    CrossDeployObligations, JournalFuture, MigrationBackend, PgSessionSnapshot,
-    ProjectLockAcquisition, PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
+    CrossDeployObligations, JournalFuture, MigrationBackend, ProjectLockAcquisition,
+    PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
 };
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::drift::DriftError;
@@ -52,6 +52,22 @@ use crate::render::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
 use zero_migrate_ir::dialect::{DialectId, POSTGRES};
 
 pub(crate) const DIALECT: DialectId = POSTGRES;
+
+/// The Postgres session GUCs the backend restores on exit so its per-apply
+/// settings never leak onto the pooled/long-lived connection.
+///
+/// The generic executor sees this only as
+/// [`MigrationBackend::SessionSnapshot`] and never inspects the fields.
+#[derive(Debug, Clone, Default)]
+pub struct PostgresSessionSnapshot {
+    /// PG `statement_timeout` GUC text (e.g. `"60s"`). Empty for a backend that
+    /// has no such setting.
+    pub statement_timeout: String,
+    /// PG `lock_timeout` GUC text.
+    pub lock_timeout: String,
+    /// PG `search_path` GUC text.
+    pub search_path: String,
+}
 
 /// The generic Postgres [`MigrationBackend`] implementation.
 ///
@@ -75,7 +91,7 @@ impl<'a, D: SqlSession> PostgresBackend<'a, D> {
 }
 
 impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
-    type SessionSnapshot = PgSessionSnapshot;
+    type SessionSnapshot = PostgresSessionSnapshot;
 
     fn dialect(&self) -> DialectId {
         DIALECT

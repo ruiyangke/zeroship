@@ -25,7 +25,8 @@ use std::time::Instant;
 use pg_query::protobuf::node::Node as NodeEnum;
 use pg_query::protobuf::ObjectType;
 
-use crate::apply::backend::{PgSessionSnapshot, ProjectLockHolder};
+use super::PostgresSessionSnapshot;
+use crate::apply::backend::ProjectLockHolder;
 use crate::apply::executor::{authorize_existence_guard_schema, ApplyError, RollbackError};
 use crate::apply::journal::{self, JournalError};
 use crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
@@ -237,7 +238,7 @@ pub(crate) async fn server_version_num<D: SqlSession>(conn: &D) -> Result<i32, A
 /// round-trips).
 pub(crate) async fn snapshot_session<D: SqlSession>(
     conn: &D,
-) -> Result<PgSessionSnapshot, ApplyError> {
+) -> Result<PostgresSessionSnapshot, ApplyError> {
     let row = conn
         .query_one(
             "SELECT current_setting('statement_timeout') AS st, \
@@ -246,7 +247,7 @@ pub(crate) async fn snapshot_session<D: SqlSession>(
             &[],
         )
         .await?;
-    Ok(PgSessionSnapshot {
+    Ok(PostgresSessionSnapshot {
         statement_timeout: row.try_get("st")?,
         lock_timeout: row.try_get("lt")?,
         search_path: row.try_get("sp")?,
@@ -259,7 +260,7 @@ pub(crate) async fn snapshot_session<D: SqlSession>(
 /// path regardless).
 pub(crate) async fn restore_session<D: SqlSession>(
     conn: &D,
-    snap: &PgSessionSnapshot,
+    snap: &PostgresSessionSnapshot,
 ) -> Result<(), ApplyError> {
     // RESET ROLE first: belt-and-suspenders behind `apply`'s unconditional
     // `RESET ROLE`. The non-txn path's `SET ROLE` mutates the session, so

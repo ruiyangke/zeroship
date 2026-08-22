@@ -90,21 +90,11 @@ fn legacy_debug_dialect_label(dialect: &DialectId) -> String {
     format!("{first}{}", chars.as_str())
 }
 
-/// The Postgres session GUCs the backend restores on exit so its per-apply
-/// settings never leak onto the pooled/long-lived connection.
-///
-/// The generic executor sees this only as
-/// [`MigrationBackend::SessionSnapshot`] and never inspects the fields.
-#[derive(Debug, Clone, Default)]
-pub struct PgSessionSnapshot {
-    /// PG `statement_timeout` GUC text (e.g. `"60s"`). Empty for a backend that
-    /// has no such setting.
-    pub statement_timeout: String,
-    /// PG `lock_timeout` GUC text.
-    pub lock_timeout: String,
-    /// PG `search_path` GUC text.
-    pub search_path: String,
-}
+// The PostgreSQL session snapshot is declared by the PostgreSQL backend, in
+// `postgres::PostgresSessionSnapshot` — not here. Its three fields are PostgreSQL
+// GUCs, so it is a vendor type, and MySQL's equivalent already lived in its own
+// module; this contract sees a snapshot only through the associated type
+// [`MigrationBackend::SessionSnapshot`] and never inspects it (SQLite's is `()`).
 
 /// How a backend renders a positional bind placeholder in the SQL it issues.
 ///

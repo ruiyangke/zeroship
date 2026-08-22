@@ -10,21 +10,34 @@
 //!
 //! The rule is invisible to every behaviour test. A PostgreSQL-only evaluator
 //! parked in the neutral layer still evaluates PostgreSQL preconditions
-//! correctly. What it costs is the crate extraction of
+//! correctly; a PostgreSQL-shaped struct declared on the neutral contract still
+//! carries the right GUCs. What either costs is the crate extraction of
 //! `docs/proposals/pluggable-backends.md`, and no assertion about behaviour can
 //! see that. So the rule gets its own check or it has none.
 //!
-//! # What this caught when it was written
+//! # What each half caught when it was written
 //!
-//! It was RED on the tree that introduced it, which is the only reason to
-//! believe it can see anything. It caught `apply/precondition.rs`: 685
-//! production lines of `pg_query`, `information_schema` and `&Client` whose own
-//! header called it "the POSTGRES precondition impl", sitting in the neutral
-//! layer and naming `PostgresBackend` three times in code. It moved to
+//! Both halves were RED on the tree that introduced them, which is the only
+//! reason to believe either can see anything.
+//!
+//! [`the_neutral_apply_layer_names_no_vendor_backend`] caught
+//! `apply/precondition.rs`: 685 production lines of `pg_query`,
+//! `information_schema` and `&Client` whose own header called it "the POSTGRES
+//! precondition impl", sitting in the neutral layer and naming
+//! `PostgresBackend` three times in code. It moved to
 //! `apply/backend/postgres/precondition.rs`, which is the only place it could
 //! go — it needs `SqlSession`/`ExecutorConfig`/`ApplyError`/`Migration`, so it
 //! cannot follow the renderers out into `zero-migrate-postgres`, which must not
 //! depend on the engine.
+//!
+//! [`the_backend_contract_declares_no_vendor_named_item`] caught
+//! `PgSessionSnapshot`, declared on the neutral contract in
+//! `apply/backend/mod.rs` while its own sibling `MysqlSessionSnapshot` was
+//! declared in `apply/backend/mysql/mod.rs` — the asymmetry being the tell. It
+//! is genuinely vendor (its three fields are PostgreSQL GUCs; `SqliteBackend`'s
+//! `SessionSnapshot` is `()`), so it kept a vendor name and moved to
+//! `apply/backend/postgres/mod.rs` beside the sibling, spelled the way the
+//! dialect id spells it.
 //!
 //! # What this does NOT catch
 //!
@@ -32,8 +45,8 @@
 //! backend type — PostgreSQL-only SQL reached through a neutral helper, say —
 //! is invisible here, the same blindness `backend_modules_name_one_dialect.rs`
 //! documents at length for its own check. A green run means "no neutral apply
-//! file NAMES a vendor backend". It does not mean the neutral layer is free of
-//! vendor logic.
+//! file NAMES a vendor backend, and the contract DECLARES no vendor-named
+//! item". It does not mean the neutral layer is free of vendor logic.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -44,6 +57,15 @@ use std::path::PathBuf;
 /// have no reason to spell a concrete one, and a vendor impl almost always
 /// constructs or bounds itself by its own.
 const VENDOR_BACKENDS: &[&str] = &["PostgresBackend", "MysqlBackend", "SqliteBackend"];
+
+/// Prefixes that make a DECLARED item a vendor's rather than the contract's.
+///
+/// `Pg` is listed alongside `Postgres` because the tree carried both, and the
+/// short one is the spelling that hides: it does not match a search for the
+/// dialect id, so it survives exactly the sweep that would find `Postgres`.
+/// There is no `pg` dialect — `DialectId` spells it `postgres` — so a `Pg`-named
+/// item is misnamed wherever it lives.
+const VENDOR_ITEM_PREFIXES: &[&str] = &["Pg", "Postgres", "Mysql", "MySql", "Sqlite", "SqLite"];
 
 /// Files the neutral-layer listing MUST contain.
 ///
@@ -149,4 +171,64 @@ fn the_neutral_apply_layer_names_no_vendor_backend() {
             );
         }
     }
+}
+
+/// The neutral backend contract declares the SEAM; each vendor declares its own
+/// types beside its own impl.
+///
+/// `mod` declarations are exempt and that is not a loophole: owning
+/// `mod postgres` / `mod mysql` / `mod sqlite` is precisely this file's job, and
+/// it names all three symmetrically. `pub use` is exempt for the same reason and
+/// because it is not a declaration — re-exporting `postgres::PostgresBackend` at
+/// a stable path is the contract publishing its vendors, not hosting one.
+#[test]
+fn the_backend_contract_declares_no_vendor_named_item() {
+    const CONTRACT: &str = "apply/backend/mod.rs";
+    let src = include_str!("../../src/apply/backend/mod.rs");
+
+    let mut offenders: Vec<(usize, String)> = Vec::new();
+    for (i, line) in src.lines().enumerate() {
+        if !is_code(line) {
+            continue;
+        }
+        let mut tokens = line.split_whitespace().peekable();
+        // Step past the visibility, if any.
+        if tokens.peek().is_some_and(|t| t.starts_with("pub")) {
+            tokens.next();
+        }
+        // ...and past the modifiers an item can carry before its keyword.
+        while tokens
+            .peek()
+            .is_some_and(|t| matches!(*t, "unsafe" | "async" | "default" | "extern"))
+        {
+            tokens.next();
+        }
+        let Some(keyword) = tokens.next() else {
+            continue;
+        };
+        // `mod` is absent on purpose; see this test's doc comment.
+        if !matches!(
+            keyword,
+            "struct" | "enum" | "trait" | "type" | "const" | "static" | "fn" | "union"
+        ) {
+            continue;
+        }
+        let Some(name) = tokens.next() else {
+            continue;
+        };
+        let name = name.trim_end_matches(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+        if VENDOR_ITEM_PREFIXES.iter().any(|p| name.starts_with(p)) {
+            offenders.push((i + 1, name.to_string()));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "{CONTRACT} declares vendor-named item(s) {offenders:?}. It is the \
+         DIALECT-NEUTRAL contract every backend implements; a type named after one \
+         vendor belongs in that vendor's own module beside its impl, the way \
+         `MysqlSessionSnapshot` is declared in apply/backend/mysql/mod.rs. Moving it \
+         there is the fix — keeping the vendor name is correct once it lives in the \
+         vendor's module, as long as the name is the one the dialect id uses."
+    );
 }
