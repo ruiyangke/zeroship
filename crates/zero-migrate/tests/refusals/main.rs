@@ -32,3 +32,4 @@ mod role_and_schema_use_after_drop;
 mod second_relation_reference_after_drop;
 mod sqlite_dangling_foreign_key;
 mod type_use_after_drop_beyond_create_table;
+mod virtual_generated_column_names_the_refusing_backend;

@@ -1302,9 +1302,18 @@ fn generated_column_snapshot(
     dialect: &DialectId,
 ) -> Result<GeneratedColumnSnapshot, DeclarativeError> {
     if !generated.stored && !dialect.supports(Capability::VirtualGeneratedColumn) {
-        return Err(DeclarativeError::Invalid(
-            r#"UNSUPPORTED { kind: "virtualColumn", dialect: "pg" }"#.to_string(),
-        ));
+        // The refusing backend is PROVENANCE: it is whichever dialect was handed
+        // to this call and answered `false`, never a name baked in here. This was
+        // a `const` reading `dialect: "pg"` — wrong twice over, since `pg` is not
+        // a dialect id (the canonical one is `postgres`, with no alias) and the
+        // literal ignored the parameter, so every backend without the capability
+        // reported itself as PostgreSQL. Shape follows the peer refusals on
+        // `IrLowerError` (`UNSUPPORTED { kind: {kind:?}, dialect: {dialect} }`):
+        // the kind token is quoted, the dialect id is the bare stable string.
+        return Err(DeclarativeError::Invalid(format!(
+            r#"UNSUPPORTED {{ kind: "virtualColumn", dialect: {} }}"#,
+            dialect.as_str()
+        )));
     }
     let expr = crate::render::dml::render_expr_inline(&generated.expr, dialect).map_err(|e| {
         DeclarativeError::Invalid(format!(
