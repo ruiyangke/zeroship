@@ -670,7 +670,8 @@ fn create_index_render_is_byte_identical_pg() {
 //
 // The cross-path byte-identity golden holds on BOTH PG and SQLite.
 // The SQLite createTable routes through the SHARED `zero_migrate::schema::query`
-// emitter (the same call the differ's `render_create_table_sqlite` makes), fed
+// emitter (the same call the differ makes - both reach the registered backend's
+// `DdlEmitter::create_table`, neither carries a SQLite-specific renderer), fed
 // the SDK schema `Value` IrAuthor builds from the op descriptor via the same
 // `descriptor_to_sdk_schema` bridge. So the SQLite leg is byte-identical BY
 // CONSTRUCTION, exactly as the PG leg is.
@@ -925,8 +926,10 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
 /// `ON DELETE CASCADE` on Postgres.** The earlier imperative FK silently dropped the
 /// actions; this is the regression test that would FAIL on that earlier code (the
 /// rendered DDL carried no `ON DELETE` clause). Applies on PG (the stand-alone
-/// addConstraint path is PG-only by `require_pg_for`; the `SQLite` leg refuses a
-/// stand-alone FK add, unchanged).
+/// addConstraint path is gated on a CAPABILITY rather than on a vendor name -
+/// `require_capability_for` fails closed unless the registered backend claims it - and
+/// the `SQLite` leg, which does not, still refuses a stand-alone FK add with
+/// `SqliteRebuildOnly`, unchanged).
 #[test]
 fn add_constraint_fk_renders_on_delete_cascade_pg() {
     use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
@@ -1439,7 +1442,7 @@ fn create_table_with_authored_index_is_byte_identical_sqlite() {
 // The SQLite peer of
 // `create_table_with_live_fk_render_is_byte_identical_pg`. A `posts` table with a
 // ref → an ALREADY-LIVE `authors` table: both the differ and `IrAuthor::lower`
-// route through `render_create_table_sqlite_value`, so the inline FK render is
+// route through the registered backend's `DdlEmitter::create_table`, so the inline FK render is
 // byte-identical BY CONSTRUCTION. This regression-pins the SQLite FK shape so a
 // future fork of the SQLite FK render is caught (pre-fix only the PG FK shape was
 // pinned; the SQLite leg had no cross-path golden).

@@ -365,7 +365,7 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
 // THIS TEST WAS REVERSED, DELIBERATELY. It previously asserted that the snapshot lane
 // KEEPS a stale generated body, on the stated grounds that "no reader exists". That
 // grounds is a testable claim and it was measured FALSE: on SQLite a rename is a
-// 12-step table REBUILD, and `render_create_table_sqlite_rebuild` renders the
+// 12-step table REBUILD, and `declarative::render_create_table_rebuild` renders the
 // new-table CREATE from the TABLE SNAPSHOT — not from the SDK descriptor — for exactly
 // the tables that carry a generated column. A stale body therefore reached emitted DDL
 // as `GENERATED ALWAYS AS (("qty" * "unit_cents"))` over a table whose column is now

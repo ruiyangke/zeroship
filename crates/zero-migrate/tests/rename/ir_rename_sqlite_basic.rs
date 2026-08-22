@@ -538,7 +538,8 @@ fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
 
 // Cross-app guard on the SQLite rebuild leg. The rebuild
 // routes through the declarative differ, whose `enforce_ownership` refuses a
-// structural change to a FOREIGN table. Pre-fix `sqlite_rename_rebuild` fabricated
+// structural change to a FOREIGN table. Pre-fix
+// `declarative::build_column_rename_rebuild` fabricated
 // BOTH ownership maps as the deploying app, so app B could silently rebuild app
 // A's table. Post-fix the REAL introspected owner is carried in
 // `LiveSchema::table_ownership`; a rename by a non-owner is rejected. Here the

@@ -396,7 +396,7 @@ async fn does_every_folded_carrier_follow_a_column_rename_on_sqlite() {
         stale.is_empty(),
         "these folded carriers still spell a PRE-rename column name after the SQLite \
          rebuild:\n{}\n\nOn SQLite this is not a quiet inconsistency: \
-         `render_create_table_sqlite_rebuild` renders the new table FROM THIS SNAPSHOT \
+         `declarative::render_create_table_rebuild` renders the new table FROM THIS SNAPSHOT \
          and the `CREATE TABLE` leads the statement spec, so a body naming a dead column \
          fails the migration at its first statement",
         stale.join("\n")

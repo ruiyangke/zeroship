@@ -910,7 +910,7 @@ impl FoldedSchema {
     ///
     /// The `live.sqlite_schemas` half is READ by exactly one caller - `render/lower.rs`'s
     /// SQLite `renameColumn` - and only its PRESENCE is load-bearing on the deploy path:
-    /// that rename takes `render_create_table_sqlite_rebuild`'s `preserve_stored_shape`
+    /// that rename takes `declarative::render_create_table_rebuild`'s `preserve_stored_shape`
     /// arm, which replays SQLite's own `CREATE TABLE` text. The map's CONTENT reaches a
     /// rebuilt `CREATE TABLE` only on the SDK-value arm, which needs a live snapshot with
     /// no `stored_create_sql` - the shape `engine::refresh_historical_live` builds. Both

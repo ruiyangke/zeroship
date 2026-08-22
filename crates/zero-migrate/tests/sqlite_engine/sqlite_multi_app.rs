@@ -1,7 +1,8 @@
 //! Multi-app UNION + per-table ownership coverage on the `SQLite` leg (Tier-2).
 //!
 //! REACHABILITY (investigated, not assumed): the dev `SQLite` tier runs ONE app
-//! file per app (`run_sqlite_via_engine`, `app_id` = the app), so a *single
+//! file per app - `SqliteBackend::open`'s `app_path` is the tenant's
+//! `zs-<app_id>.sqlite`, engine-constructed from the authenticated `app_id` - so a *single
 //! deploy* never mixes two apps. BUT the ownership / conflict / union machinery
 //! lives in `desired_snapshot` + `DeclarativeAuthor::diff`, which are
 //! dialect-agnostic and DO run on the `SQLite` author: the author carries one

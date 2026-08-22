@@ -56,9 +56,9 @@
 //!   Such a function is not a carrier, so it is not scanned. The census clause below
 //!   is the partial guard — converting a carrier back drops the count and fails —
 //!   but a brand-new dialect-taking emitter with a fresh lookup is invisible here.
-//! * The cross-stack edge. These emitters spell identifiers through
-//!   `quote_ident_for_dialect`, which forwards to
-//!   `render::dml::escape_quote_ident_for_dialect` and resolves through the OTHER
+//! * The cross-stack edge. These emitters spell identifiers through a single
+//!   forwarder into `render::dml::escape_quote_ident_for_dialect`, which resolves
+//!   through the OTHER
 //!   registry, `render::backends`. A carrier reaching a DML vendor that way is one
 //!   forwarder from anything this file can see. `schema/backends/mod.rs` carries the
 //!   reason that forwarder must stay single.

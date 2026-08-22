@@ -5,7 +5,7 @@
 //! The descriptor lane already does this (`fold_rename_column_generated_expr_runtime`).
 //! The snapshot lane did not, and the reason given was that nothing reads the folded
 //! body. That exclusion is a testable claim, and it is FALSE on SQLite: a rename is a
-//! 12-step table REBUILD, and `render_create_table_sqlite_rebuild` renders the
+//! 12-step table REBUILD, and `declarative::render_create_table_rebuild` renders the
 //! new-table `CREATE` from the TABLE SNAPSHOT — not from the SDK descriptor — for
 //! exactly the tables that have a generated column (`has_generated_or_identity`). A
 //! snapshot whose generated body still names the pre-rename column therefore emits

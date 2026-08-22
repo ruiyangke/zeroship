@@ -16,8 +16,9 @@
 //! Everything here goes through the real pipeline - `load_and_lower_guarded` +
 //! `MigrationEngine::apply_plan` over `MysqlBackend`, then the shipped
 //! `snapshot_schema` - and the ORACLE is always the server, never a literal written
-//! in this file. Three tests, each covering a different half of
-//! `render::fold::restamp_mysql_physical_types`:
+//! in this file. Three tests, each covering a different half of the contract-stamping
+//! pass - `render::fold::finalize_physical_types`, which hands each replay-decided
+//! column to `MysqlSchemaRenderer::finalize_column_snapshot`:
 //!
 //! 1. `a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target` - the
 //!    retype the field was named for, DEPLOYED. It used to pin the opposite fact,
@@ -407,7 +408,7 @@ async fn folded_column_shapes_describe_the_physical_type_mysql_holds() {
 /// Folding ONTO a live MySQL snapshot keeps the server's own contracts on the columns
 /// the replay never touched, and derives one for the column it adds.
 ///
-/// This is the half of `restamp_mysql_physical_types` that a from-empty fold cannot
+/// This is the half of `render::fold::finalize_physical_types` that a from-empty fold cannot
 /// reach, and it is the half that can do damage. A base read from the server carries
 /// contracts `MysqlPhysicalType::parse` recovered from `COLUMN_TYPE` - `decimal(12,2)`
 /// and `varchar(36)` - while the snapshot it rides in stores `data_type` "decimal" and

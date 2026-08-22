@@ -394,7 +394,7 @@ async fn fold_equals_introspect_mysql() {
         // SMALLER half, since the column was genuinely case-INSENSITIVE on MySQL and
         // case-sensitive on the other two backends. Neither half was caused by the
         // fold. Both are now fixed in the renderer
-        // (`declarative::mysql_pin_enum_collation`) with its own live gate in
+        // (`mysql::schema::mysql_pin_native_enum_collation`) with its own live gate in
         // `mysql_engine::mysql_enum_collation`, so the column belongs in this fixture
         // again: this stage is what makes a fold that loses enum membership visible,
         // and it would go RED again if the collation pin were removed.

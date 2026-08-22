@@ -14,7 +14,7 @@
 //!   SQLite `column_type` answers `REAL` for it.
 //!
 //! The 12-step rebuild picks ONE of those carriers per rebuild
-//! (`render_create_table_sqlite_rebuild` has three arms) and copies every existing row
+//! (`declarative::render_create_table_rebuild` has three arms) and copies every existing row
 //! into whatever shape the winner rendered. So the disagreement is not a cosmetic one:
 //! on the arm the map wins, a column the snapshot declared TEXT is re-declared REAL, and
 //! `INSERT INTO tmp SELECT … FROM old` pushes every stored decimal string through a
@@ -532,8 +532,9 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
 /// `preserve_stored_shape = pure_rename.is_some() && dt.stored_create_sql.is_some()`,
 /// and on [`zero_migrate::MigrationEngine::deploy_envelopes`] BOTH conjuncts hold for a
 /// `renameColumn`: the live snapshot is introspected out of the running database so it
-/// carries `stored_create_sql`, and `sqlite_rename_rebuild` builds its desired snapshot
-/// by CLONING that live one, so the rename is pure by construction. The rebuild
+/// carries `stored_create_sql`, and `declarative::build_column_rename_rebuild` builds
+/// its desired snapshot by CLONING that live one, so the rename is pure by
+/// construction. The rebuild
 /// therefore replays SQLite's OWN `CREATE TABLE` text and never reads the field-def
 /// map's content.
 ///

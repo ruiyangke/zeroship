@@ -241,8 +241,9 @@ fn both_mysql_carriers_pin_the_same_collation_for_the_same_column() {
 
     // The one place the two carriers DO still differ, recorded rather than asserted
     // away: the snapshot carrier spells a `caseSensitive: false` bounded string as
-    // `TEXT` (`render::declarative::mysql_base_column_type` routes it through the
-    // PostgreSQL `citext`/`text` mapping and loses the bound), while the field-def
+    // `TEXT` (`MysqlSchemaRenderer::column_type` short-circuits a case-INSENSITIVE
+    // `text` column to a bare `TEXT` before it ever reaches
+    // `mysql_base_column_type_for_def`, and loses the bound), while the field-def
     // carrier keeps `VARCHAR(n)`. That is a BASE-SPELLING divergence, not a collation
     // one, it predates this change, and nothing in production reaches the field-def
     // carrier's MySQL arm to be affected by it. Closing it would change storage, so it

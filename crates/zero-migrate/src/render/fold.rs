@@ -2114,7 +2114,7 @@ impl<'a> CatalogFold<'a> {
                 // `("qty_on_hand" + 1)` becomes `(quantity + 1)`), and the descriptor
                 // fold has rewritten it all along. This snapshot used to keep the old
                 // name, which is not merely cosmetic: on SQLite a rename is a table
-                // REBUILD, and `render_create_table_sqlite_rebuild` renders the
+                // REBUILD, and `declarative::render_create_table_rebuild` renders the
                 // new-table CREATE FROM THIS SNAPSHOT for exactly the tables that have
                 // a generated column, so the stale body emitted
                 // `GENERATED ALWAYS AS (("qty_on_hand" + 1))` over a table with no
@@ -3268,13 +3268,18 @@ pub fn fold_ops_onto(
     state.finish()
 }
 
-/// Re-derive every REPLAY-DECIDED column's MySQL physical contract from the column
-/// the replay FINISHED with. A no-op off MySQL.
+/// Hand every REPLAY-DECIDED column back to the registered backend's schema renderer
+/// so it can settle whatever vendor projection it keeps on a finished column.
 ///
-/// `ColumnSnapshot::mysql_physical_type` is not an independent fact about a column,
+/// Core does not know what that projection IS, and deliberately: it asks
+/// `SchemaRenderer::finalize_column_snapshot` and the backend decides. On MySQL that
+/// is `ColumnSnapshot::mysql_physical_type`; PostgreSQL and SQLite keep no separate
+/// physical projection and only consume the now-spent neutral `type_def`.
+///
+/// A vendor projection like the MySQL one is not an independent fact about a column,
 /// it is a projection of the type the renderer would emit for it - which is why the
-/// derivation lives in exactly one place (`declarative::stamp_mysql_physical_type`)
-/// and why this runs LAST rather than inside the arms.
+/// derivation lives in exactly one place, the backend's own
+/// `finalize_column_snapshot`, and why this runs LAST rather than inside the arms.
 ///
 /// Running it per arm was the shape that failed. The shared column builder stamps the
 /// contract, and then the arms keep deciding: the author type override rewrites
@@ -3296,30 +3301,34 @@ pub fn fold_ops_onto(
 /// and LOSE the precision and scale the server reported. Re-deriving a column the
 /// replay never touched would therefore corrupt the base rather than repair it.
 ///
-/// The test is the derivation's own inputs - the fields the MySQL schema renderer
-/// reads. When all are what the
-/// base had, the column renders to the same type it always did and its existing
-/// contract still describes it; when any moved, this fold decided the type and owes
-/// the matching contract.
+/// The test is the derivation's own inputs, and core does not enumerate them either:
+/// `CatalogFoldPolicy::physical_type_inputs_equal` is the backend's answer to "would
+/// my renderer still spell this column the same way". When it says yes, the column
+/// renders to the same type it always did and its existing contract still describes
+/// it; when it says no, this fold decided the type and owes the matching contract.
 ///
 /// Keyed on the column NAME, and that is sound HERE rather than in general: on MySQL
-/// a column's name never moves. `renameColumn` is `unsupported` on MySQL in
-/// `dialect-table.ts`, `render::lower`'s `refuse_mysql_alter_column` refuses every
-/// alter-column op, and the differential corpus measures `fold_ops` itself answering
-/// `refused` for a MySQL `renameColumn`. A renamed column WOULD defeat a name key -
-/// its live-read contract carries information the derivation cannot rebuild, and it
-/// would look like a column the base never had - so if that cell ever becomes
-/// supported, this lookup needs the rename alias before the op does.
+/// a column's name never moves. The MySQL backend declares `renameColumn`
+/// `unsupported` in its own support table, `render::lower`'s `lower_rename` asks that
+/// backend's `SchemaRenderer::column_rename_strategy` before it authors anything and
+/// MySQL answers `ColumnRenameStrategy::Refuse`, and the differential corpus measures
+/// `fold_ops` itself answering `refused` for a MySQL `renameColumn`.
+/// A renamed column WOULD defeat a name key - its live-read contract carries
+/// information the derivation cannot rebuild, and it would look like a column the
+/// base never had - so if that cell ever becomes supported, this lookup needs the
+/// rename alias before the op does.
 ///
 /// Idempotent on what it does touch: the input is the finished column and the
 /// derivation is pure, so re-deriving a contract that is already right rewrites it to
 /// itself.
 ///
-/// MySQL alone, deliberately. `apply::drift::column_data_types_eq` reads the contract
-/// only when BOTH sides carry one, and PostgreSQL and SQLite introspection leave the
-/// field `None` - so populating it under another dialect would compare a contract
-/// against an absent one, which that function says "would report a difference that
-/// says nothing about the database".
+/// The physical CONTRACT is MySQL's alone, deliberately, and that is the backend's
+/// choice rather than a dialect test here. `apply::drift::column_data_types_eq` reads
+/// the contract only when BOTH sides carry one, and PostgreSQL and SQLite
+/// introspection leave the field `None` - so a backend that populated it without a
+/// matching introspection side would compare a contract against an absent one, which
+/// that function says "would report a difference that says nothing about the
+/// database".
 fn finalize_physical_types(
     tables: &mut BTreeMap<String, TableSnapshot>,
     base: &SchemaSnapshot,

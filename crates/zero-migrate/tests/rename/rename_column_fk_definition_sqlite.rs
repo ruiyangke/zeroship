@@ -37,7 +37,7 @@
 //! desired table differ from the renamed live one, flip `pure_sqlite_column_rename` to
 //! `None`, turn `preserve_stored_shape` OFF and stop the CATALOG path replaying
 //! SQLite's own stored body. The rewrite therefore runs INSIDE
-//! `render_create_table_sqlite_rebuild`, AFTER that decision has been taken and after
+//! `declarative::render_create_table_rebuild`, AFTER that decision has been taken and after
 //! the stored-shape arm has already returned. Two tests below pin that: one asserts
 //! the catalog leg still replays its stored body, and one asserts the shape DECISION
 //! itself is unchanged through its only observable projection,

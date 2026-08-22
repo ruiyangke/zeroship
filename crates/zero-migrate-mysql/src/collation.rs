@@ -81,8 +81,8 @@ pub fn mysql_pin_collation(rendered: &str, case_sensitive: Option<bool>) -> Stri
 /// The spelling-level sibling of [`mysql_type_takes_collation`], including
 /// `ENUM(...)`. MySQL stores an enum as an index into its
 /// member list but compares and LOOKS UP members as strings, so an uncollated `ENUM`
-/// silently accepts `'ACTIVE'` for a declared `'active'` - see
-/// `mysql_pin_enum_collation`, which measured it. `SET(...)` is the same shape and
+/// silently accepts `'ACTIVE'` for a declared `'active'` - measured on a live server
+/// by `tests/mysql_engine/mysql_enum_collation.rs`. `SET(...)` is the same shape and
 /// is named here for the same reason, though nothing in the engine emits one today.
 ///
 /// Deliberately NOT here: `JSON` (MySQL refuses a collation on it outright), the BLOB
@@ -97,9 +97,10 @@ pub fn mysql_spelling_takes_collation(rendered: &str) -> bool {
 /// types do not take a general string collation here.
 ///
 /// `ENUM` is a character type and DOES pin a collation, but it is not listed here and
-/// never can be: this predicate is fed `mysql_base_column_type`, which only ever
-/// sees the PostgreSQL-mapped `field_data_type` spelling, and an enum column arrives
-/// there as `text`. The renderer's spelling-level pass pins `ENUM` directly.
+/// never can be: this is the TOKEN-level list, over the `VARCHAR`/`CHAR`/`TEXT` family
+/// names, and `ENUM(...)` is a parameterised spelling rather than a family name.
+/// [`mysql_spelling_takes_collation`] is the sibling that admits it, and
+/// `MysqlSchemaRenderer::column_type` pins native `ENUM` through that one.
 pub fn mysql_type_takes_collation(base: &str) -> bool {
     let u = base.trim().to_ascii_uppercase();
     u.starts_with("VARCHAR")

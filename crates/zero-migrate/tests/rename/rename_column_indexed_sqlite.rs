@@ -238,7 +238,7 @@ fn paths(tag: &str) -> Paths {
 
 /// No `[[inject]]`. The three earlier fixes' fixtures all carried a mandatory inject and
 /// a column (an enum, a generated expression, an inline CHECK) that routes
-/// `render_create_table_sqlite_rebuild` through its SNAPSHOT arm. This one deliberately
+/// `declarative::render_create_table_rebuild` through its SNAPSHOT arm. This one deliberately
 /// routes through the OTHER arm - the SDK-value one - which is where an ordinary table
 /// with no such column goes, and which is the shape the recorded reproduction used.
 /// `an_injected_table_cannot_reach_the_sdk_value_rebuild_arm_at_all` below pins WHY the
@@ -1201,7 +1201,7 @@ async fn a_rebuild_that_renames_one_column_and_drops_another_keeps_only_the_surv
 
 /// A SEPARATE defect, in a different layer, found while building the fixture.
 ///
-/// `render_create_table_sqlite_rebuild` has two arms. A table with a generated column,
+/// `declarative::render_create_table_rebuild` has two arms. A table with a generated column,
 /// an inline CHECK or a case-insensitive text column goes through the SNAPSHOT renderer;
 /// an ordinary table goes through the SDK-VALUE arm, which re-emits from
 /// `LiveSchema::sqlite_schemas` - the map the `FieldDef` projection builds, exactly as

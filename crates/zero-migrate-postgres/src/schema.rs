@@ -446,7 +446,7 @@ pub fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // `t.vector(dims)` maps to pgvector's `vector(N)`.
         // Returning the bare `"vector"` token would lose the dims, so
         // this arm is unused; column DDL composes the dims back in via
-        // [`def_to_pg_type_with_dims`]. Kept here to keep the
+        // `column_type_for_def`. Kept here to keep the
         // enumeration exhaustive at the type-vocabulary level — a
         // future caller that ignores dims (e.g. a generic introspection
         // path) gets the un-parameterised type.

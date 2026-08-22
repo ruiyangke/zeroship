@@ -148,7 +148,10 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     }
 
     /// Stamp [`ColumnSnapshot::mysql_physical_type`] from the column's FINAL rendered
-    /// type. A no-op off MySQL.
+    /// type. This is the MySQL backend's answer to the neutral
+    /// `SchemaRenderer::finalize_column_snapshot` hook, so it is reached only when
+    /// MySQL is the registered backend; PostgreSQL and SQLite keep no such projection
+    /// and their answers only consume the spent `type_def`.
     ///
     /// Derived from what the renderer DECIDES, not from `data_type`, so it accounts for
     /// `ddl_type_override` and the unbounded-text spelling the same way the emitted DDL
@@ -181,7 +184,9 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     /// that was exactly what had been deployed. A `uuid` column folded
     /// `Character { length: 191 }` against a live `Character { length: 36 }` at the same
     /// time. So the derivation has ONE spelling and gets applied wherever a column stops
-    /// changing - see `render::fold::restamp_mysql_physical_types`.
+    /// changing - core's `render::fold::finalize_physical_types` hands every
+    /// replay-decided column back through this method rather than deriving anything
+    /// itself.
     ///
     /// **Only MySQL.** `apply::drift::column_data_types_eq` consults the contract only
     /// when BOTH sides carry one, and PostgreSQL/SQLite introspection leaves it `None`;

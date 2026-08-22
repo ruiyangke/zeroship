@@ -34,7 +34,7 @@
 //!
 //! # The arm this drives
 //!
-//! `render_create_table_sqlite_rebuild` has two arms and only the SDK-value one reads
+//! `declarative::render_create_table_rebuild` has two arms and only the SDK-value one reads
 //! the map's CONTENT; the deploy path takes the other. `tests/fold_live/
 //! sqlite_rebuild_field_defs_live.rs` records that finding at length. This file uses
 //! the same fold-seeded `LiveSchema` it does, for the same reason: on the stored-shape

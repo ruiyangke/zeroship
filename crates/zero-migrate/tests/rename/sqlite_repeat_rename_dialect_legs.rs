@@ -3,8 +3,9 @@
 //! SQLite has no `ALTER TABLE ... RENAME COLUMN` that this engine can compose freely:
 //! a rename is lowered as a table REBUILD from the stored `CREATE` SQL. Two renames of
 //! the same table in one migration would run the second rebuild against SQL captured
-//! before the first, so `refuse_repeat_sqlite_rename_target` refuses the pair up front
-//! rather than emitting a rebuild from a stale definition.
+//! before the first, so the registered backend's table-rebuild policy is asked first -
+//! `refuse_repeat_column_rename_target` - and SQLite's refuses the pair up front rather
+//! than emitting a rebuild from a stale definition.
 //!
 //! That refusal scanned only the top-level ops and matched `Op::RenameColumn`
 //! directly, so a rename authored inside `dialect({ sqlite: ... })` was invisible to

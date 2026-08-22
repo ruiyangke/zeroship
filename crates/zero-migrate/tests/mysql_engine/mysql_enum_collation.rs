@@ -3,7 +3,8 @@
 //!
 //! # The contract, and the hole in it
 //!
-//! `render::declarative::mysql_type_override_with_collation` states the engine's
+//! The MySQL backend's `collation` module - `mysql_collation_clause` and the
+//! `MysqlSchemaRenderer::column_type` pin that calls it - states the engine's
 //! promise: *"every character type pins an explicit collation so string comparison is
 //! case-SENSITIVE by default (matching Postgres/SQLite) unless `caseSensitive: false`
 //! asks for a case-insensitive collation"*. `VARCHAR`, `CHAR` and the `TEXT` family
@@ -533,12 +534,12 @@ async fn a_deployed_enum_column_does_not_drift_against_its_own_fold() {
 /// the opposite-direction drift has no way to exist.
 ///
 /// This also RETIRES a guess worth recording, because it is the guess that made this
-/// look like a smaller defect than it is: `mysql_base_column_type` returns `"text"`
-/// whenever `case_sensitive` is `Some(false)`, which reads as "a `caseSensitive:false`
-/// enum silently stops being an enum". On the IR path it never gets that far - the
-/// gate refuses it first. `mysql_pin_enum_collation` still READS the facet, because
-/// the DESCRIPTOR path reaches `ENUM(...)` from a `text` column plus a CHECK, where
-/// the gate does allow it.
+/// look like a smaller defect than it is: `MysqlSchemaRenderer::column_type` returns
+/// `"text"` whenever `case_sensitive` is `Some(false)` on a `text` column, which reads
+/// as "a `caseSensitive:false` enum silently stops being an enum". On the IR path it
+/// never gets that far - the gate refuses it first. `mysql_pin_native_enum_collation`
+/// still READS the facet, because the DESCRIPTOR path reaches `ENUM(...)` from a
+/// `text` column plus a CHECK, where the gate does allow it.
 #[test]
 fn an_ir_enum_column_cannot_declare_case_insensitivity() {
     let policy = support::no_inject("app");
@@ -562,7 +563,7 @@ fn an_ir_enum_column_cannot_declare_case_insensitivity() {
         .unwrap_or_else(|| {
             panic!(
                 "a caseSensitive:false enum column was accepted; the unconditional \
-                 case-sensitive pin in mysql_pin_enum_collation would then be dropping \
+                 case-sensitive pin in mysql_pin_native_enum_collation would then be dropping \
                  a facet the author declared"
             )
         });
@@ -709,7 +710,7 @@ async fn a_descriptor_authored_enum_is_case_sensitive_on_the_server() {
 /// The descriptor route is also the ONE route where `caseSensitive: false` reaches an
 /// enum: the field is a `string`, so the load gate that refuses the facet on an IR
 /// enum column does not apply. The pin must therefore READ the facet rather than
-/// hard-code case sensitivity - which is why `mysql_pin_enum_collation` takes it as a
+/// hard-code case sensitivity - which is why `mysql_pin_native_enum_collation` takes it as a
 /// parameter instead of being a constant suffix.
 #[compio::test]
 async fn a_descriptor_enum_asking_for_case_insensitivity_gets_it() {

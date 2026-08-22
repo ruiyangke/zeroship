@@ -21,7 +21,7 @@
 //! # TWO legs, and only one of them reads the map's CONTENT
 //!
 //! This is the correction this file exists to record, and it was found by neutering
-//! rather than by reading. `render_create_table_sqlite_rebuild` chooses between two arms
+//! rather than by reading. `declarative::render_create_table_rebuild` chooses between two arms
 //! on `preserve_stored_shape = pure_rename.is_some() && dt.stored_create_sql.is_some()`:
 //!
 //! * the STORED-SHAPE arm replays SQLite's own `CREATE TABLE` text and defers the rename
@@ -245,7 +245,7 @@ async fn indexes(backend: &SqliteBackend, table: &str) -> Vec<(String, bool)> {
 ///
 /// Deliberately no generated column, no inline CHECK and no case-insensitive text: those
 /// three route the rebuild through the SNAPSHOT renderer instead
-/// (`render_create_table_sqlite_rebuild`'s first arm), which does NOT read
+/// (`declarative::render_create_table_rebuild`'s first arm), which does NOT read
 /// `sqlite_schemas`. A fixture carrying one of them would exercise a different arm and
 /// prove nothing about this leg. The charter is `no_inject` for the same reason: an
 /// injected table cannot reach the SDK-value arm at all, which

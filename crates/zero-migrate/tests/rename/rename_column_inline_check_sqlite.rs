@@ -2,8 +2,9 @@
 //!
 //! `ColumnSnapshot::inline_checks` is the enum / domain / UUID / TypeID-ULID
 //! membership and format predicates, rendered to SQL text at fold time. Every one of
-//! them names ITS OWN column. `sqlite_rename_rebuild` derives the post-rename table
-//! from the LIVE one by rewriting `ColumnSnapshot::name`, so before this fix the
+//! them names ITS OWN column. `declarative::build_column_rename_rebuild` derives the
+//! post-rename table from the LIVE one by rewriting `ColumnSnapshot::name`, so before
+//! this fix the
 //! rebuilt `CREATE TABLE` said
 //!
 //! ```sql

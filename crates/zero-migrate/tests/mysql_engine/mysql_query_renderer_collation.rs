@@ -3,7 +3,8 @@
 //!
 //! # Two renderers, one question
 //!
-//! `render::declarative::mysql_type_override_with_collation` states the engine's
+//! The MySQL backend's `collation` module - `mysql_collation_clause` and the
+//! `MysqlSchemaRenderer::column_type` pin that calls it - states the engine's
 //! promise: *"every character type pins an explicit collation so string comparison is
 //! case-SENSITIVE by default (matching Postgres/SQLite)"*. That renderer answers from
 //! a [`FieldDescriptor`](zero_migrate::render::declarative::FieldDescriptor) and a

@@ -255,8 +255,9 @@ impl ValueFormatRenderer for MysqlValueFormatRenderer {
     ) -> (String, Option<ColumnCollationSnapshot>) {
         let ddl_type = format!("{} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin", {
             // MySQL character types already carry an explicit charset+collation
-            // suffix from `mysql_type_override_with_collation`. Replace it rather
-            // than append a second one.
+            // suffix: `MysqlSchemaRenderer::column_type` pins one on every rendered
+            // character spelling via `collation::mysql_collation_clause`. Replace it
+            // rather than append a second one.
             rendered_type
                 .split_once(" CHARACTER SET ")
                 .map_or(rendered_type, |(base, _)| base)

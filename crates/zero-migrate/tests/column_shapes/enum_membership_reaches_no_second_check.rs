@@ -130,8 +130,9 @@ fn an_inlined_enum_column_gets_exactly_one_membership_check() {
 /// A SECOND, PRE-EXISTING defect this measurement exposed and did NOT fix, kept here
 /// because this test is where it was first seen: the inline CHECK's BODY still named
 /// the PRE-rename column (`CHECK ("status" IN (...))` on a column now called `state`),
-/// because `sqlite_rename_rebuild` renamed `ColumnSnapshot::name` and the generated
-/// expressions but not `inline_checks`. It was byte-identical with and without the
+/// because `declarative::build_column_rename_rebuild` renamed `ColumnSnapshot::name`
+/// and the generated expressions but not `inline_checks`. It was byte-identical with
+/// and without the
 /// membership lift, which is why it was recorded rather than blamed on it.
 ///
 /// IT IS NOW FIXED, and the assertion below was REVERSED accordingly - it used to pin
