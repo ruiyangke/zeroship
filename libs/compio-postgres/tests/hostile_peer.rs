@@ -1,6 +1,9 @@
 //! What the driver does when the peer violates the protocol.
 //!
-//! `src/` carries 44 `Error::unexpected_message()` sites across nine files -
+//! `src/` carries 43 `Error::unexpected_message()` sites across nine files -
+//! grepping the bare name reports 44, but one of those is a COMMENT at
+//! connect_raw.rs:146, and three are `ok_or_else(Error::unexpected_message)`,
+//! which ARE sites despite not looking like calls -
 //! every one a place the driver says "a PostgreSQL server cannot have sent that
 //! here". Before this file nothing drove any of them: a grep of `tests/` for a
 //! bad length, an unknown tag, or `unexpected_message` returned nothing. The
@@ -456,7 +459,7 @@ async fn a_misplaced_message_after_the_parameter_description_is_refused() {
 // ---------------------------------------------------------------------------
 // COPY sub-protocol violations.
 //
-// `src/copy_out.rs` and `src/copy_in.rs` hold 8 of the 44 refusal sites, and
+// `src/copy_out.rs` and `src/copy_in.rs` hold 8 of the 43 refusal sites, and
 // this file's header listed them as NOT covered. They are the last named
 // cluster. COPY has its own sub-protocol on top of the extended query one:
 // ParseComplete, BindComplete, then CopyOutResponse or CopyInResponse, and only

@@ -292,7 +292,7 @@ async fn generated_backend_frames_never_hang_or_panic_the_driver() {
 // Handshake fuzzing.
 //
 // Everything above fuzzes frames AFTER a clean startup, so it never reaches
-// `src/connect_raw.rs` - which holds 12 of the driver's 44
+// `src/connect_raw.rs` - which holds 11 of the driver's 43
 // `unexpected_message()` sites, the largest single cluster, and which neither
 // `tests/hostile_peer.rs` nor the corpus above touches. The handshake is also
 // the part a client runs before it trusts anything, so a panic or a hang there
