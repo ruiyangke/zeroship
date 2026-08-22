@@ -12,7 +12,67 @@ use crate::error::IrLowerError;
 use crate::snapshot::{
     ColumnSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
-use zero_migrate_ir::ir::ColType;
+use zero_migrate_ir::expr::Expr;
+use zero_migrate_ir::ir::{ColType, ValueFormat};
+use zero_migrate_ir::precondition::PreconditionCheck;
+
+/// Exact character storage used when a backend requires both sides of a
+/// reference to agree on more than a portable text/case-sensitivity token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceTextStorage {
+    pub character_set: String,
+    pub collation: String,
+}
+
+/// The backend-owned scalar family for one resumable-backfill cursor column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldCursorScalarType {
+    Int64,
+    Decimal,
+    String,
+}
+
+/// The backend-owned comparison contract for one cursor column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FoldCursorComparison {
+    Default,
+    CaseInsensitive,
+    NamedCollation {
+        schema: Option<String>,
+        name: String,
+    },
+    ExactText {
+        character_set: String,
+        collation: String,
+    },
+}
+
+/// The physical cursor facts a backend derives from its own catalog spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldCursorColumnContract {
+    pub scalar_type: FoldCursorScalarType,
+    pub database_type: String,
+    pub comparison: FoldCursorComparison,
+}
+
+/// A live-database feature required by one vendor's lowering of typed IR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldDatabaseFeature {
+    UuidV4Generation,
+    UuidV7Generation,
+    UuidValidation,
+    TypeIdValidation,
+    UlidValidation,
+}
+
+/// Type metadata that cannot survive the descriptor bridge's deliberately small
+/// token vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorTypeOverride {
+    pub data_type: String,
+    pub ddl_type: Option<String>,
+    pub quote_literal_default_as_text: bool,
+}
 
 /// Vendor policy consumed by the neutral catalog fold.
 ///
@@ -88,4 +148,86 @@ pub trait CatalogFoldPolicy: std::fmt::Debug + Sync {
     /// Whether two column snapshots feed this backend's physical-type finalizer
     /// identical inputs, so catalog-only metadata on the base must be preserved.
     fn physical_type_inputs_equal(&self, left: &ColumnSnapshot, right: &ColumnSnapshot) -> bool;
+
+    /// Select the physical type carrier used to compare a referencing column.
+    fn reference_catalog_type<'a>(&self, column: &'a ColumnSnapshot) -> &'a str;
+
+    /// Canonicalize a reference type without discarding backend-significant
+    /// integer-width evidence.
+    fn canonical_reference_catalog_type(
+        &self,
+        data_type: &str,
+        integer_width_is_logically_proven: bool,
+    ) -> String;
+
+    /// Recover explicit character storage from an authored DDL type, when this
+    /// backend requires it for foreign-key compatibility.
+    fn explicit_reference_text_storage(&self, ddl_type: &str) -> Option<ReferenceTextStorage>;
+
+    /// Recover exact character storage from a live catalog column.
+    fn catalog_reference_text_storage(
+        &self,
+        column: &ColumnSnapshot,
+    ) -> Option<ReferenceTextStorage>;
+
+    /// Whether named catalog collation is compared separately from exact text
+    /// storage for this backend.
+    fn compares_reference_named_collation(&self) -> bool;
+
+    /// Derive the persisted cursor contract for one catalog column.
+    fn cursor_column_contract(
+        &self,
+        column: &ColumnSnapshot,
+    ) -> Result<FoldCursorColumnContract, String>;
+
+    /// Apply this backend's grammar around an already-rendered DEFAULT expression.
+    fn wrap_default_expr(&self, expr: &Expr, rendered: String) -> String;
+
+    /// Project a column declaration into this backend's live-server requirements.
+    fn database_requirement_for_column(
+        &self,
+        ty: &ColType,
+        is_reference: bool,
+    ) -> Option<FoldDatabaseFeature>;
+
+    /// Project a logical value-format declaration into live-server requirements.
+    fn database_requirement_for_value_format(
+        &self,
+        value_format: &ValueFormat,
+    ) -> Option<FoldDatabaseFeature>;
+
+    /// Project one expression node into live-server requirements. The neutral
+    /// walker remains responsible for recursively visiting child expressions.
+    fn database_requirement_for_expr(&self, expr: &Expr) -> Option<FoldDatabaseFeature>;
+
+    /// A backend-owned dependency precondition for dropping one column.
+    fn drop_column_precondition(&self, table: &str, column: &str) -> Option<PreconditionCheck>;
+
+    /// Whether a type change must remain structured until apply can restate the
+    /// server's complete live column definition.
+    fn restates_column_type_at_apply(&self) -> bool;
+
+    /// A backend-owned dependency precondition for changing one column's type.
+    fn column_type_change_precondition(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Option<PreconditionCheck>;
+
+    /// Refuse an alter-column shape this engine does not yet render for this backend.
+    fn alter_column_refusal(&self, op: &'static str) -> Result<(), IrLowerError>;
+
+    /// Spell the populated-default guard used while collapsing a partition.
+    fn partition_collapse_mirror_guard(
+        &self,
+        table_sql: &str,
+        key_sql: &str,
+        predicate: &str,
+    ) -> Result<String, IrLowerError>;
+
+    /// Whether this backend admits expression elements in an index snapshot.
+    fn supports_expression_index(&self) -> bool;
+
+    /// Project authored IR types that the descriptor token bridge cannot express.
+    fn author_type_override(&self, ty: &ColType) -> Option<AuthorTypeOverride>;
 }

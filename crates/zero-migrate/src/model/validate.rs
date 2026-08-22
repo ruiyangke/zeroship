@@ -44,7 +44,7 @@
 //! # Structural vs. policy split
 //!
 //! The STRUCTURAL, policy-free validator — the closed-`Expr` allow-list walk, the
-//! structured-error envelope ([`AuthoringError`]), the `SqlDialect`/`UnsupportedKind`
+//! structured-error envelope ([`AuthoringError`]), the `DialectId`/`UnsupportedKind`
 //! vocabulary, the `CODE_*` codes, [`TargetScope`], and [`validate_expr`] — now
 //! lives in the [`zero_migrate_ir::validate`] leaf crate. It carries no
 //! [`SchemaScope`](crate::model::policy::SchemaScope) dependency and no `pg_query`.
@@ -55,7 +55,8 @@
 //! structural surface is re-exported below so callers name it unchanged.
 
 use crate::model::expr::{CaseBranch, Expr, ScalarFn};
-pub use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::backend::Capability;
+use zero_migrate_ir::dialect::{DialectId, MYSQL, POSTGRES, SQLITE};
 // The PG argument-type alias fold. It moved to `zero-migrate-backend` with the
 // snapshot value types, whose `canonical_pg_signature_type` is its other caller;
 // re-imported here under its historical name so this module's two call sites and
@@ -66,40 +67,35 @@ pub(crate) use zero_migrate_backend::snapshot::canonical_pg_arg_type;
 
 // The structural, policy-free validator moved to the `zero-migrate-ir` leaf crate.
 // Re-export its full surface so this policy-bound module (and the engine root)
-// name `SqlDialect`, `AuthoringError`, `validate_expr`, the `CODE_*` codes,
-// `TargetScope`, `validate_immutable_expr_context`, etc. exactly as before.
+// name `AuthoringError`, `validate_expr`, the `CODE_*` codes, `TargetScope`,
+// `validate_immutable_expr_context`, etc. exactly as before.
 pub use zero_migrate_ir::validate::{
-    validate_alter_primary_key_action, AuthoringError, ExprDialectFeature,
-    ExprDialectRejection, ExprDialectValidator, ExprDialectValidatorSet, TargetScope,
-    UnsupportedKind, CODE_AGGREGATE_IN_SCALAR_CONTEXT, CODE_COLUMN_DEFAULT_TYPE,
-    CODE_COLUMN_FACET_CONFLICT, CODE_CROSS_SCHEMA, CODE_DIALECT_SCOPE_PGONLY,
-    CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE, CODE_GUARD_DIRECTION,
-    CODE_IMMUTABLE_CONTEXT_VOLATILE, CODE_INVALID_ID_PREFIX, CODE_INVALID_SCHEMA_IDENT,
-    CODE_INVALID_TYPE_ID_PREFIX, CODE_OP_INVALID, CODE_OP_OUTSIDE_RECORDER,
-    CODE_PARTITION_BOUNDS_ILL_FORMED, CODE_PARTITION_BOUNDS_NOT_TOTAL,
+    validate_alter_primary_key_action, AuthoringError, ExprDialectFeature, ExprDialectRejection,
+    ExprDialectValidator, ExprDialectValidatorSet, TargetScope, UnsupportedKind,
+    CODE_AGGREGATE_IN_SCALAR_CONTEXT, CODE_COLUMN_DEFAULT_TYPE, CODE_COLUMN_FACET_CONFLICT,
+    CODE_CROSS_SCHEMA, CODE_DIALECT_SCOPE_PGONLY, CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE,
+    CODE_GUARD_DIRECTION, CODE_IMMUTABLE_CONTEXT_VOLATILE, CODE_INVALID_ID_PREFIX,
+    CODE_INVALID_SCHEMA_IDENT, CODE_INVALID_TYPE_ID_PREFIX, CODE_OP_INVALID,
+    CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED, CODE_PARTITION_BOUNDS_NOT_TOTAL,
     CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, CODE_PARTITION_HASH_DROP_UNDERIVABLE,
     CODE_PARTITION_KEY_COVERAGE, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
     CODE_PGRAW_REASON_REQUIRED, CODE_PRIMARY_KEY_INVALID, CODE_SEQUENCE_OPTION_INVALID,
-    CODE_TABLE_SHAPE_POLICY, CODE_UNSUPPORTED, CODE_VECTOR_METRIC_MISPLACED,
-    CODE_VENDOR_OP_DENIED, MAX_EXPR_DEPTH, MAX_ID_PREFIX_LEN,
+    CODE_TABLE_SHAPE_POLICY, CODE_UNSUPPORTED, CODE_VECTOR_METRIC_MISPLACED, CODE_VENDOR_OP_DENIED,
+    MAX_EXPR_DEPTH, MAX_ID_PREFIX_LEN,
 };
 
-/// Validate one expression against the backend registered for this temporary
-/// closed engine target.
-///
-/// The policy walker below still uses `SqlDialect` until its non-expression
-/// vendor rules move. This wrapper crosses that boundary in the only permitted
-/// direction: closed target to open id, then registry lookup. The IR validator
-/// itself has no closed dialect type.
+/// Validate one expression against the backend registered for this open target
+/// id. The IR validator resolves the id through the same shipping registry as
+/// rendering and refuses an unregistered backend rather than guessing a vendor.
 pub fn validate_expr(
     expr: &Expr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     scope: &TargetScope<'_>,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     zero_migrate_ir::validate::validate_expr(
         expr,
-        &target_dialect.id(),
+        target_dialect,
         &crate::render::backends::VENDORS,
         scope,
         op_index,
@@ -110,13 +106,13 @@ pub fn validate_expr(
 pub fn validate_immutable_expr_context(
     expr: &Expr,
     context: &str,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     zero_migrate_ir::validate::validate_immutable_expr_context(
         expr,
         context,
-        &target_dialect.id(),
+        target_dialect,
         op_index,
     )
 }
@@ -125,13 +121,13 @@ pub fn validate_immutable_expr_context(
 pub fn validate_no_aggregate_expr_context(
     expr: &Expr,
     context: &str,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     zero_migrate_ir::validate::validate_no_aggregate_expr_context(
         expr,
         context,
-        &target_dialect.id(),
+        target_dialect,
         op_index,
     )
 }
@@ -157,6 +153,45 @@ pub struct VendorAuthority<'a> {
     pub effective: &'a zero_migrate_policy::EffectivePolicy,
     /// The schema an op without its own qualifier renders into.
     pub default_schema: &'a str,
+}
+
+/// Resolve validation policy through the same open registry as rendering.
+///
+/// Validation must not manufacture a shipping vendor from an unfamiliar id. A
+/// missing target registration is therefore a structured refusal, including
+/// for an otherwise-empty migration. An unregistered non-target `dialectal`
+/// leg remains opaque and is never judged using the selected target's policy.
+fn registered_vendor(
+    target_dialect: &DialectId,
+    op_index: usize,
+) -> Result<&'static zero_migrate_backend::registry::BackendVendor, AuthoringError> {
+    crate::render::backends::VENDORS
+        .get(target_dialect)
+        .ok_or_else(|| AuthoringError {
+            code: CODE_UNSUPPORTED.to_string(),
+            kind: Some(UnsupportedKind::Op),
+            op_index,
+            dialect: target_dialect.clone(),
+            reason: format!(
+                "no backend is registered for dialect id {:?}; validation cannot borrow another vendor's policy",
+                target_dialect.as_str()
+            ),
+            suggested_fix: Some(format!(
+                "register a backend vendor whose descriptor id is {:?}, or target a registered backend",
+                target_dialect.as_str()
+            )),
+        })
+}
+
+fn target_supports(
+    target_dialect: &DialectId,
+    capability: Capability,
+    op_index: usize,
+) -> Result<bool, AuthoringError> {
+    Ok(registered_vendor(target_dialect, op_index)?
+        .descriptor
+        .capabilities
+        .contains(capability))
 }
 
 /// Walk an entire [`MigrationIr`](crate::model::ir::MigrationIr) and validate EVERY
@@ -197,7 +232,7 @@ pub struct VendorAuthority<'a> {
 /// Returns the first [`AuthoringError`] any embedded expression produces.
 pub fn validate_ir(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     validate_ir_scoped(ir, target_dialect, None)
 }
@@ -219,7 +254,7 @@ pub fn validate_ir(
 /// illegal guard direction, or an embedded-expression rejection).
 pub fn validate_ir_scoped(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
     validate_ir_authorized(ir, target_dialect, schema_scope, None)
@@ -237,10 +272,11 @@ pub fn validate_ir_scoped(
 /// rejection).
 pub fn validate_ir_authorized(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
     authority: Option<VendorAuthority<'_>>,
 ) -> Result<(), AuthoringError> {
+    registered_vendor(target_dialect, 0)?;
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_op_authorized(op, target_dialect, op_index, schema_scope, authority)?;
     }
@@ -321,7 +357,7 @@ enum NamePosition {
 /// The first over-long identifier, as an [`AuthoringError`].
 pub(crate) fn validate_authored_identifier_lengths(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_authored_identifier_lengths_op(op, target_dialect, op_index)?;
@@ -333,14 +369,17 @@ pub(crate) fn validate_authored_identifier_lengths(
 /// lowering will select.
 fn validate_authored_identifier_lengths_op(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
-    // Only PostgreSQL truncates, so only PostgreSQL can hold an object whose authored
-    // name cannot name it. Bounding the drop side elsewhere would strand real objects.
-    let bound_drops = matches!(target_dialect, SqlDialect::Postgres);
+    // Drop-side safety follows the backend's required catalog-identity policy.
+    // A backend that silently truncates this exact authored name must validate
+    // it; one that does not must not strand a legitimately long catalog object.
+    let vendor = registered_vendor(target_dialect, op_index)?;
+    let bounds_dropped_name =
+        |name: &str| vendor.existence_probe.truncated_identifier(name).is_some();
     let check = |kind: &str, name: &str, position: NamePosition| {
         authored_name_within_bound(kind, name, position, op_index, target_dialect)
     };
@@ -378,10 +417,12 @@ fn validate_authored_identifier_lengths_op(
                 }
             }
         }
-        Op::DropIndex { name, .. } if bound_drops => {
+        Op::DropIndex { name, .. } if bounds_dropped_name(name) => {
             check("index", name, NamePosition::Dropped)?;
         }
-        Op::DropConstraint { name, .. } | Op::ValidateConstraint { name, .. } if bound_drops => {
+        Op::DropConstraint { name, .. } | Op::ValidateConstraint { name, .. }
+            if bounds_dropped_name(name) =>
+        {
             check("constraint", name, NamePosition::Dropped)?;
         }
         _ => {}
@@ -399,7 +440,7 @@ fn authored_name_within_bound(
     name: &str,
     position: NamePosition,
     op_index: usize,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     let max = crate::plan::author::pg_max_ident_bytes();
     if name.len() <= max {
@@ -636,7 +677,7 @@ impl<'a> CatalogColumnEvidence<'a> {
 /// run over the same reference.
 fn catalog_proves_reference_format(
     catalog: CatalogColumnEvidence<'_>,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     table: &str,
     column: &str,
     local: &LogicalColumnContract,
@@ -650,9 +691,13 @@ fn catalog_proves_reference_format(
     if !matches!(local.ty, crate::model::ir::ColType::Uuid) {
         return false;
     }
-    match target_dialect {
-        SqlDialect::Postgres => target.data_type.trim().eq_ignore_ascii_case("uuid"),
-        SqlDialect::Mysql | SqlDialect::Sqlite => target.catalog_uuid_format_check,
+    let native_uuid = crate::render::backends::VENDORS
+        .get(target_dialect)
+        .is_some_and(|vendor| vendor.catalog_fold.is_native_uuid_type(&target.data_type));
+    if target_dialect == &POSTGRES {
+        native_uuid
+    } else {
+        native_uuid || target.catalog_uuid_format_check
     }
 }
 
@@ -1132,7 +1177,7 @@ fn remove_declared_per_row_table(
 }
 
 fn per_row_validation_error(
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     reason: String,
     suggested_fix: String,
@@ -1141,7 +1186,7 @@ fn per_row_validation_error(
         code: CODE_OP_INVALID.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason,
         suggested_fix: Some(suggested_fix),
     }
@@ -1153,14 +1198,14 @@ fn validate_backfill_cursor_fields(
     cursor_columns: &[String],
     cursor_stability: &crate::model::ir::CursorStability,
     set: &BTreeMap<String, crate::model::ir::BackfillSetValue>,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     let error = |reason: String, suggested_fix: String| AuthoringError {
         code: CODE_OP_INVALID.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason,
         suggested_fix: Some(suggested_fix),
     };
@@ -1184,7 +1229,7 @@ fn validate_backfill_cursor_fields(
                     .to_string(),
             ));
         }
-        let comparison_name = if target_dialect == SqlDialect::Postgres {
+        let comparison_name = if target_dialect == &POSTGRES {
             column.clone()
         } else {
             column.to_ascii_lowercase()
@@ -1198,7 +1243,7 @@ fn validate_backfill_cursor_fields(
             ));
         }
         if set.keys().any(|destination| {
-            if target_dialect == SqlDialect::Postgres {
+            if target_dialect == &POSTGRES {
                 destination == column
             } else {
                 destination.eq_ignore_ascii_case(column)
@@ -1239,7 +1284,7 @@ fn validate_per_row_destination(
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{ColType, PerRowGenerator, ValueFormat};
@@ -1250,7 +1295,7 @@ fn validate_per_row_destination(
                 code: CODE_INVALID_TYPE_ID_PREFIX.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
-                dialect: target_dialect.id(),
+                dialect: target_dialect.clone(),
                 reason: format!(
                     "backfill perRow.typeId({{ prefix: {prefix:?} }}) carries an invalid TypeID prefix: {error}"
                 ),
@@ -1263,7 +1308,7 @@ fn validate_per_row_destination(
     }
 
     if cursor_columns.iter().any(|cursor| {
-        if target_dialect == SqlDialect::Postgres {
+        if target_dialect == &POSTGRES {
             cursor == column
         } else {
             cursor.eq_ignore_ascii_case(column)
@@ -1363,7 +1408,7 @@ fn validate_per_row_destination(
 
 fn validate_per_row_op(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     declared: &mut LogicalColumnContracts,
     missing: MissingLogicalDeclaration,
@@ -1655,7 +1700,7 @@ fn validate_per_row_op(
 /// it from [`LogicalColumnContracts`] before an executable backfill exists.
 pub(crate) fn validate_per_row_destinations(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     let mut declared = LogicalColumnContracts::new();
     for (op_index, op) in ir.ops.iter().enumerate() {
@@ -1678,7 +1723,7 @@ pub(crate) fn validate_per_row_destinations(
 /// project/default-schema rule as SQL lowering; strict matching is then exact.
 pub(crate) fn validate_per_row_destinations_for_lower(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
@@ -1711,7 +1756,7 @@ pub(crate) fn validate_per_row_destinations_for_lower(
 /// destinations, and declared-but-mismatched destinations are all still rejected.
 pub(crate) fn accumulate_logical_declarations_for_lower(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
@@ -1733,7 +1778,7 @@ pub(crate) fn accumulate_logical_declarations_for_lower(
 /// identical either way.
 fn replay_logical_declarations_for_lower(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
@@ -1765,7 +1810,7 @@ fn replay_logical_declarations_for_lower(
 /// this graph is deterministic authored metadata.
 fn collect_logical_declarations_op(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
 ) {
@@ -1972,88 +2017,104 @@ fn integer_width(ty: &crate::model::ir::ColType) -> Option<u8> {
 /// compatibility. Exact logical matching still runs first, so SQLite's broad
 /// `INTEGER` and `TEXT` storage classes can never erase UUID semantics, integer
 /// width, char length, decimal precision, or named-type identity.
-fn lowered_reference_storage(ty: &crate::model::ir::ColType, dialect: SqlDialect) -> String {
+fn lowered_reference_storage(
+    ty: &crate::model::ir::ColType,
+    dialect: &DialectId,
+) -> Option<String> {
     use crate::model::ir::ColType;
 
-    match ty {
-        ColType::String { .. } | ColType::Text | ColType::Ref { .. } => "text".to_string(),
-        ColType::SmallInt => match dialect {
-            SqlDialect::Sqlite => "integer".to_string(),
-            _ => "smallint".to_string(),
-        },
-        ColType::Int => "integer".to_string(),
-        ColType::BigInt => match dialect {
-            SqlDialect::Sqlite => "integer".to_string(),
-            _ => "bigint".to_string(),
-        },
-        ColType::Double => match dialect {
-            SqlDialect::Mysql => "double".to_string(),
-            SqlDialect::Sqlite => "real".to_string(),
-            SqlDialect::Postgres => "double precision".to_string(),
-        },
-        ColType::Real => "real".to_string(),
-        ColType::Boolean => match dialect {
-            SqlDialect::Sqlite => "integer".to_string(),
-            _ => "boolean".to_string(),
-        },
-        ColType::Json => match dialect {
-            SqlDialect::Postgres => "jsonb".to_string(),
-            SqlDialect::Mysql => "json".to_string(),
-            SqlDialect::Sqlite => "text".to_string(),
-        },
-        ColType::Timestamp => match dialect {
-            SqlDialect::Postgres => "timestamp with time zone".to_string(),
-            SqlDialect::Mysql => "datetime".to_string(),
-            SqlDialect::Sqlite => "text".to_string(),
-        },
-        ColType::Date => match dialect {
-            SqlDialect::Sqlite => "text".to_string(),
-            _ => "date".to_string(),
-        },
-        ColType::Uuid => match dialect {
-            SqlDialect::Postgres => "uuid".to_string(),
-            SqlDialect::Mysql | SqlDialect::Sqlite => "text".to_string(),
-        },
-        ColType::Inet => match dialect {
-            SqlDialect::Postgres => "inet".to_string(),
-            SqlDialect::Mysql | SqlDialect::Sqlite => "text".to_string(),
-        },
-        ColType::TextArray => match dialect {
-            SqlDialect::Postgres => "text[]".to_string(),
-            SqlDialect::Mysql | SqlDialect::Sqlite => "text".to_string(),
-        },
-        ColType::Bytes | ColType::Encrypted { .. } => match dialect {
-            SqlDialect::Postgres => "bytea".to_string(),
-            SqlDialect::Mysql | SqlDialect::Sqlite => "blob".to_string(),
-        },
-        ColType::Char { length } => match dialect {
-            SqlDialect::Sqlite => "text".to_string(),
-            _ => format!("char({length})"),
-        },
-        ColType::Vector { vector } => format!("vector({vector})"),
-        ColType::GeoPoint => match dialect {
-            SqlDialect::Postgres => "geography(point,4326)".to_string(),
-            SqlDialect::Mysql | SqlDialect::Sqlite => "text".to_string(),
-        },
-        ColType::Decimal { precision, scale } => match dialect {
-            SqlDialect::Postgres => format!("numeric({precision},{scale})"),
-            SqlDialect::Mysql => format!("decimal({precision},{scale})"),
-            SqlDialect::Sqlite => "text".to_string(),
-        },
-        ColType::Enum { name, schema } => match dialect {
-            SqlDialect::Postgres => schema
-                .as_deref()
-                .map_or_else(|| name.clone(), |schema| format!("{schema}.{name}")),
-            SqlDialect::Mysql => format!("enum:{name}"),
-            SqlDialect::Sqlite => "text".to_string(),
-        },
-        ColType::Domain { name, schema } => match dialect {
-            SqlDialect::Postgres => schema
-                .as_deref()
-                .map_or_else(|| name.clone(), |schema| format!("{schema}.{name}")),
-            SqlDialect::Mysql | SqlDialect::Sqlite => format!("domain:{name}"),
-        },
+    // This spelling table still needs a required backend policy seam. Until it
+    // has one, refuse an unfamiliar registered backend instead of assigning it
+    // one shipping vendor's storage by a catch-all.
+    if dialect != &POSTGRES && dialect != &SQLITE && dialect != &MYSQL {
+        return None;
     }
+    let sqlite = dialect == &SQLITE;
+    let mysql = dialect == &MYSQL;
+    let postgres = dialect == &POSTGRES;
+
+    Some(match ty {
+        ColType::String { .. } | ColType::Text | ColType::Ref { .. } => "text".to_string(),
+        ColType::SmallInt => if sqlite { "integer" } else { "smallint" }.to_string(),
+        ColType::Int => "integer".to_string(),
+        ColType::BigInt => if sqlite { "integer" } else { "bigint" }.to_string(),
+        ColType::Double => if mysql {
+            "double"
+        } else if sqlite {
+            "real"
+        } else {
+            "double precision"
+        }
+        .to_string(),
+        ColType::Real => "real".to_string(),
+        ColType::Boolean => if sqlite { "integer" } else { "boolean" }.to_string(),
+        ColType::Json => if postgres {
+            "jsonb"
+        } else if mysql {
+            "json"
+        } else {
+            "text"
+        }
+        .to_string(),
+        ColType::Timestamp => if postgres {
+            "timestamp with time zone"
+        } else if mysql {
+            "datetime"
+        } else {
+            "text"
+        }
+        .to_string(),
+        ColType::Date => if sqlite { "text" } else { "date" }.to_string(),
+        ColType::Uuid => if postgres { "uuid" } else { "text" }.to_string(),
+        ColType::Inet => if postgres { "inet" } else { "text" }.to_string(),
+        ColType::TextArray => if postgres { "text[]" } else { "text" }.to_string(),
+        ColType::Bytes | ColType::Encrypted { .. } => {
+            if postgres { "bytea" } else { "blob" }.to_string()
+        }
+        ColType::Char { length } => {
+            if sqlite {
+                "text".to_string()
+            } else {
+                format!("char({length})")
+            }
+        }
+        ColType::Vector { vector } => format!("vector({vector})"),
+        ColType::GeoPoint => if postgres {
+            "geography(point,4326)"
+        } else {
+            "text"
+        }
+        .to_string(),
+        ColType::Decimal { precision, scale } => {
+            if postgres {
+                format!("numeric({precision},{scale})")
+            } else if mysql {
+                format!("decimal({precision},{scale})")
+            } else {
+                "text".to_string()
+            }
+        }
+        ColType::Enum { name, schema } => {
+            if postgres {
+                schema
+                    .as_deref()
+                    .map_or_else(|| name.clone(), |schema| format!("{schema}.{name}"))
+            } else if mysql {
+                format!("enum:{name}")
+            } else {
+                "text".to_string()
+            }
+        }
+        ColType::Domain { name, schema } => {
+            if postgres {
+                schema
+                    .as_deref()
+                    .map_or_else(|| name.clone(), |schema| format!("{schema}.{name}"))
+            } else {
+                format!("domain:{name}")
+            }
+        }
+    })
 }
 
 fn reference_is_format_bearing(contract: &LogicalColumnContract) -> bool {
@@ -2076,7 +2137,7 @@ fn reference_format_description(contract: &LogicalColumnContract) -> String {
 fn reference_validation_error(
     local: &LogicalColumnKey,
     reference: &crate::model::ir::ColumnReference,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     reason: String,
     suggested_fix: String,
@@ -2093,7 +2154,7 @@ fn reference_validation_error(
         code: CODE_OP_INVALID.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason: format!(
             "typed reference {local_table}.{} -> {target_table}.{} is incompatible: {reason}",
             local.column, reference.column
@@ -2110,7 +2171,7 @@ fn validate_one_column_reference(
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
     catalog: CatalogColumnEvidence<'_>,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     let matches = logical_column_matches(
@@ -2199,8 +2260,23 @@ fn validate_one_column_reference(
         }
     }
 
-    let local_storage = lowered_reference_storage(&local_contract.ty, target_dialect);
-    let target_storage = lowered_reference_storage(&target.ty, target_dialect);
+    let (Some(local_storage), Some(target_storage)) = (
+        lowered_reference_storage(&local_contract.ty, target_dialect),
+        lowered_reference_storage(&target.ty, target_dialect),
+    ) else {
+        return Err(reference_validation_error(
+            local,
+            reference,
+            target_dialect,
+            op_index,
+            format!(
+                "registered backend {:?} supplies no authored-reference storage policy",
+                target_dialect.as_str()
+            ),
+            "add the backend's required reference-storage validation policy before authoring typed references"
+                .to_string(),
+        ));
+    };
     if !logical_reference_types_match(&local_contract.ty, &target.ty) {
         return Err(reference_validation_error(
             local,
@@ -2265,7 +2341,7 @@ fn validate_one_column_reference(
 
 fn validate_column_references_op(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
@@ -2339,7 +2415,7 @@ fn validate_column_references_op(
 /// artifact whose graph is available only at lower time.
 fn validate_column_references(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
@@ -2382,9 +2458,9 @@ fn validate_column_references(
 /// and refuses the same-envelope mistake in CI, where no database exists.
 fn validate_mysql_key_storage(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
-    if !matches!(target_dialect, SqlDialect::Mysql) {
+    if target_dialect != &MYSQL {
         return Ok(());
     }
     let schema_mode = LogicalSchemaMode::Authored;
@@ -2432,13 +2508,13 @@ fn validate_mysql_key_storage(
 /// Returns [`CODE_DIALECT_UNSUPPORTED`] naming the keyed column and its storage.
 pub(crate) fn validate_mysql_key_storage_for_lower(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
     catalog: CatalogColumnEvidence<'_>,
 ) -> Result<(), AuthoringError> {
-    if !matches!(target_dialect, SqlDialect::Mysql) {
+    if target_dialect != &MYSQL {
         return Ok(());
     }
     let schema_mode = LogicalSchemaMode::Effective {
@@ -2467,7 +2543,7 @@ pub(crate) fn validate_mysql_key_storage_for_lower(
 /// for a column none of them describes.
 fn validate_mysql_key_storage_op(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     declared: &LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
@@ -2488,7 +2564,8 @@ fn validate_mysql_key_storage_op(
             let (storage, witness) =
                 match logical_column_matches(declared, schema_mode, schema, table, column).pop() {
                     Some(contract) => (
-                        crate::render::lower::mysql_storage_for_column_facets(
+                        crate::render::lower::storage_for_column_facets(
+                            target_dialect,
                             &contract.ty,
                             contract.value_format.as_ref(),
                             contract.id_prefix.as_deref(),
@@ -2511,7 +2588,7 @@ fn validate_mysql_key_storage_op(
                 code: CODE_DIALECT_UNSUPPORTED.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
-                dialect: target_dialect.id(),
+                dialect: target_dialect.clone(),
                 reason: format!(
                     "{position} keys {table}.{column}, which {witness} {} storage; \
                      MySQL refuses a key over a TEXT or BLOB column with no prefix length",
@@ -2708,7 +2785,7 @@ fn validate_mysql_key_storage_op(
 /// and no live catalog evidence.
 pub(crate) fn validate_column_references_for_lower(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
@@ -2739,7 +2816,7 @@ pub(crate) fn validate_column_references_for_lower(
 fn table_foreign_key_error(
     table: &str,
     constraint_name: Option<&str>,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     reason: String,
     suggested_fix: String,
@@ -2749,7 +2826,7 @@ fn table_foreign_key_error(
         code: CODE_OP_INVALID.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason: format!("table-level foreign key {table}.{name} is invalid: {reason}"),
         suggested_fix: Some(suggested_fix),
     }
@@ -2886,7 +2963,7 @@ fn roles_named_by(op: &crate::model::ir::Op) -> Vec<(&str, &'static str)> {
 /// a column, not names buried inside expressions.
 fn validate_no_column_uses_a_dropped_named_object(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -2928,7 +3005,7 @@ fn validate_no_column_uses_a_dropped_named_object(
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "this comment names view {name:?}, but an earlier dropView in \
                              this migration removed it, so it will not exist when this runs"
@@ -2951,7 +3028,7 @@ fn validate_no_column_uses_a_dropped_named_object(
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "this operation is qualified with schema {schema:?}, but an earlier \
                          dropSchema in this migration removed it, so it will not exist when \
@@ -2973,7 +3050,7 @@ fn validate_no_column_uses_a_dropped_named_object(
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "this operation names {role_of} {role:?}, but an earlier dropRole in \
                          this migration removed it, so it will not exist when this runs"
@@ -2995,7 +3072,7 @@ fn validate_no_column_uses_a_dropped_named_object(
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "this alterSequence names sequence {name:?}, but an earlier \
                          dropSequence in this migration removed it, so it will not exist \
@@ -3043,7 +3120,7 @@ fn validate_no_column_uses_a_dropped_named_object(
                         code: CODE_OP_INVALID.to_string(),
                         kind: Some(UnsupportedKind::Op),
                         op_index,
-                        dialect: target_dialect.id(),
+                        dialect: target_dialect.clone(),
                         reason: format!(
                             "column {column_name:?} depends on {kind} {name:?}, but an earlier \
                              drop in this migration removed it, so it will not exist when this \
@@ -3112,7 +3189,7 @@ fn validate_no_column_uses_a_dropped_named_object(
 /// dialect-aware, which is its own change.
 fn validate_no_name_is_claimed_twice(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{FuncArg, FuncArgMode, Op};
 
@@ -3120,7 +3197,7 @@ fn validate_no_name_is_claimed_twice(
         code: CODE_OP_INVALID.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason: what.to_string(),
         suggested_fix: Some(fix.to_string()),
     };
@@ -3163,8 +3240,8 @@ fn validate_no_name_is_claimed_twice(
     // Only EXPLICIT names participate. An absent name is derived later, and
     // treating absent as a value would collapse two ordinary anonymous
     // constraints into one repeated name.
-    let track_constraint_names = !matches!(target_dialect, SqlDialect::Sqlite);
-    let index_shares_relation_namespace = !matches!(target_dialect, SqlDialect::Mysql);
+    let track_constraint_names = target_dialect != &SQLITE;
+    let index_shares_relation_namespace = target_dialect != &MYSQL;
 
     // POSTGRESQL'S SECOND NAMESPACE. Enums and domains are types; every table and
     // view also creates a composite row type of its own name. Measured on a live
@@ -3179,7 +3256,7 @@ fn validate_no_name_is_claimed_twice(
     // PostgreSQL accepts. That asymmetry was re-measured in isolation before being
     // built on. Other dialects emulate enums and domains rather than declaring
     // them, so there is no second namespace there.
-    let track_type_namespace = matches!(target_dialect, SqlDialect::Postgres);
+    let track_type_namespace = target_dialect == &POSTGRES;
     let mut types: BTreeMap<Key, &str> = BTreeMap::new();
     let mut trigger_names: BTreeMap<Key, BTreeSet<&str>> = BTreeMap::new();
 
@@ -3945,21 +4022,15 @@ fn validate_no_name_is_claimed_twice(
 /// and guessing would refuse legitimate shapes.
 fn expression_column_references<'a>(
     op: &'a crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Vec<(&'a str, String)> {
     use crate::model::ir::{IrConstraintKind, Op, SelectItem, ViewQuery};
     use crate::render::dml::expr_column_refs;
 
-    let sql_dialect = match target_dialect {
-        SqlDialect::Postgres => crate::schema::query::SqlDialect::Postgres,
-        SqlDialect::Sqlite => crate::schema::query::SqlDialect::Sqlite,
-        SqlDialect::Mysql => crate::schema::query::SqlDialect::Mysql,
-    };
-
     // An extraction failure is NOT a refusal: a malformed expression is another
     // check's business, and refusing here would report the wrong reason.
     let refs = |table: &'a str, expr: &Expr| -> Vec<(&'a str, String)> {
-        expr_column_refs(expr, sql_dialect)
+        expr_column_refs(expr, target_dialect)
             .unwrap_or_default()
             .into_iter()
             .filter(|name| !name.is_empty())
@@ -4360,13 +4431,18 @@ fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'
 /// THE INDEX IS THE CONTAINER'S. A nested op has no top-level position of its
 /// own, and the author's envelope shows the `dialectal` op at that index, so that
 /// is the honest thing to point at.
-fn effective_ops(
-    ops: &[crate::model::ir::Op],
-    target_dialect: SqlDialect,
-) -> Vec<(usize, &crate::model::ir::Op)> {
+fn effective_ops<'a>(
+    ops: &'a [crate::model::ir::Op],
+    target_dialect: &DialectId,
+) -> Vec<(usize, &'a crate::model::ir::Op)> {
     use crate::model::ir::Op;
 
-    fn push<'a>(out: &mut Vec<(usize, &'a Op)>, index: usize, op: &'a Op, target_dialect: SqlDialect) {
+    fn push<'a>(
+        out: &mut Vec<(usize, &'a Op)>,
+        index: usize,
+        op: &'a Op,
+        target_dialect: &DialectId,
+    ) {
         if let Op::Dialectal { legs } = op {
             for nested in dialectal_leg(target_dialect, legs) {
                 push(out, index, nested, target_dialect);
@@ -4389,9 +4465,9 @@ fn effective_ops(
 /// Descending into a leg that will NOT run would refuse a migration on a
 /// reference the server never sees, so the choice is made here once and shared.
 /// DELEGATES to [`crate::render::fold::selected_dialectal_leg`] rather than
-/// repeating the own-then-default rule, because that helper is `pub(crate)` for
+/// repeating the exact-id lookup, because that helper is `pub(crate)` for
 /// exactly this reason - its doc comment asks callers outside the fold to select
-/// legs the SAME way "rather than re-deriving the own-then-default rule and
+/// legs the SAME way "rather than re-deriving the exact-id rule and
 /// drifting from it".
 ///
 /// The first version of this function re-derived it anyway. The two happened to
@@ -4399,16 +4475,11 @@ fn effective_ops(
 /// one is what a second copy costs. Validate refusing on one leg while the fold
 /// runs another is a divergence no test in either module would catch, since each
 /// would still be self-consistent.
-fn dialectal_leg(
-    target_dialect: SqlDialect,
-    legs: &BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
-) -> &[crate::model::ir::Op] {
-    let sql_dialect = match target_dialect {
-        SqlDialect::Postgres => crate::schema::query::SqlDialect::Postgres,
-        SqlDialect::Sqlite => crate::schema::query::SqlDialect::Sqlite,
-        SqlDialect::Mysql => crate::schema::query::SqlDialect::Mysql,
-    };
-    crate::render::fold::selected_dialectal_leg(sql_dialect, legs).unwrap_or_default()
+fn dialectal_leg<'a>(
+    target_dialect: &DialectId,
+    legs: &'a BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
+) -> &'a [crate::model::ir::Op] {
+    crate::render::fold::selected_dialectal_leg(target_dialect, legs).unwrap_or_default()
 }
 
 /// Refuse an operation that names a column an earlier `dropColumn` removed.
@@ -4427,7 +4498,7 @@ fn dialectal_leg(
 /// restores the name.
 fn validate_no_op_references_a_dropped_column(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -4457,7 +4528,7 @@ fn validate_no_op_references_a_dropped_column(
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "this {} names column {column:?} of table {table:?}, but an \
                          earlier dropColumn in this migration removed it, so it will not \
@@ -4569,7 +4640,7 @@ fn second_relation_references(op: &crate::model::ir::Op) -> Vec<(&str, &'static 
 
 fn validate_no_op_targets_a_renamed_away_table(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -4613,7 +4684,7 @@ fn validate_no_op_targets_a_renamed_away_table(
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "this operation names {role} {referenced:?}, but {what}, so it will \
                          not exist under that name when this runs"
@@ -4648,7 +4719,7 @@ fn validate_no_op_targets_a_renamed_away_table(
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     // Names the op for the same reason its column-walk sibling
                     // does: an operator reading this needs to know WHICH
                     // statement in the envelope targeted the missing table, and
@@ -4693,7 +4764,7 @@ fn validate_no_op_targets_a_renamed_away_table(
 /// A `dropTable` takes its indexes with it, so those names free up too.
 fn validate_index_names_across_ops(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
 
@@ -4708,14 +4779,14 @@ fn validate_index_names_across_ops(
         name: &str,
         table: &str,
         op_index: usize,
-        target_dialect: SqlDialect,
+        target_dialect: &DialectId,
     ) -> Result<(), AuthoringError> {
         if live.contains_key(name) {
             return Err(AuthoringError {
                 code: CODE_OP_INVALID.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
-                dialect: target_dialect.id(),
+                dialect: target_dialect.clone(),
                 reason: format!(
                     "index {name:?} is created twice in this migration without being \
                      dropped in between; it renders as `CREATE INDEX IF NOT EXISTS`, so \
@@ -4795,7 +4866,7 @@ fn validate_index_names_across_ops(
 fn validate_index_names_are_distinct(
     table: &str,
     indexes: &[crate::model::ir::IrIndex],
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     let mut seen = BTreeSet::new();
@@ -4810,7 +4881,7 @@ fn validate_index_names_are_distinct(
         code: CODE_OP_INVALID.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason: format!(
             "createTable {table:?} declares more than one index named {duplicate:?}; \
              they render as `CREATE INDEX IF NOT EXISTS`, so every one after the \
@@ -4836,7 +4907,7 @@ fn validate_index_names_are_distinct(
 fn validate_unique_constraint_columns(
     table: &str,
     constraint: &crate::model::ir::IrConstraint,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     let crate::model::ir::IrConstraintKind::Unique { columns } = &constraint.kind else {
@@ -4854,7 +4925,7 @@ fn validate_unique_constraint_columns(
         code: CODE_OP_INVALID.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason: format!(
             "unique constraint {table}.{name} names column {duplicate:?} more than once"
         ),
@@ -4873,7 +4944,7 @@ fn validate_table_foreign_key_constraint(
     schema_mode: LogicalSchemaMode<'_>,
     missing: MissingLogicalDeclaration,
     catalog: CatalogColumnEvidence<'_>,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::IrConstraintKind;
@@ -4933,13 +5004,25 @@ fn validate_table_foreign_key_constraint(
             ));
         }
     }
-    if target_dialect == SqlDialect::Mysql
+    if !target_supports(target_dialect, Capability::DeferrableConstraint, op_index)?
         && (deferrable == &Some(true) || initially_deferred == &Some(true))
     {
-        return Err(error(
-            "MySQL does not support deferrable foreign-key constraints".to_string(),
-            "omit deferrable/initiallyDeferred for MySQL, or use a dialectal PostgreSQL/SQLite leg",
-        ));
+        let (reason, suggested_fix) = if target_dialect == &MYSQL {
+            (
+                "MySQL does not support deferrable foreign-key constraints".to_string(),
+                "omit deferrable/initiallyDeferred for MySQL, or use a dialectal PostgreSQL/SQLite leg".to_string(),
+            )
+        } else {
+            (
+                format!(
+                    "backend {:?} does not support deferrable foreign-key constraints",
+                    target_dialect.as_str()
+                ),
+                "omit deferrable/initiallyDeferred or provide a backend-specific dialectal leg"
+                    .to_string(),
+            )
+        };
+        return Err(error(reason, &suggested_fix));
     }
 
     let local_table_declared =
@@ -5039,8 +5122,18 @@ fn validate_table_foreign_key_constraint(
                     ));
                 }
             }
-            let local_storage = lowered_reference_storage(&local.ty, target_dialect);
-            let target_storage = lowered_reference_storage(&target.ty, target_dialect);
+            let (Some(local_storage), Some(target_storage)) = (
+                lowered_reference_storage(&local.ty, target_dialect),
+                lowered_reference_storage(&target.ty, target_dialect),
+            ) else {
+                return Err(error(
+                    format!(
+                        "registered backend {:?} supplies no foreign-key storage policy",
+                        target_dialect.as_str()
+                    ),
+                    "add the backend's required reference-storage validation policy before authoring this foreign key",
+                ));
+            };
             if !logical_reference_types_match(&local.ty, &target.ty)
                 || local_storage != target_storage
             {
@@ -5103,7 +5196,7 @@ fn validate_table_foreign_key_constraint(
 
 fn validate_table_foreign_keys_op(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
@@ -5253,7 +5346,7 @@ fn validate_table_foreign_keys_op(
 
 fn validate_table_foreign_keys(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
@@ -5281,7 +5374,7 @@ fn validate_table_foreign_keys(
 /// when it carries the target's own format evidence.
 pub(crate) fn validate_table_foreign_keys_for_lower(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     seed: &LogicalColumnContracts,
     project_schema: &str,
     default_schema: Option<&str>,
@@ -5311,7 +5404,7 @@ pub(crate) fn validate_table_foreign_keys_for_lower(
 
 fn validate_online_rename_isolation_op<'a>(
     op: &'a crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     seen: &mut std::collections::BTreeMap<&'a str, Vec<TableOperationTarget<'a>>>,
 ) -> Result<(), AuthoringError> {
@@ -5354,7 +5447,7 @@ fn validate_online_rename_isolation_op<'a>(
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "renameColumn must be the only operation targeting table \
                          {qualified_table:?} in a migration; it conflicts with another operation \
@@ -5382,13 +5475,18 @@ fn validate_online_rename_isolation_op<'a>(
 
 fn validate_online_rename_sequence(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     // PostgreSQL keeps an online rename open across deploys, so every other
     // operation on that table must wait for resolution. SQLite performs the
     // rename as one rebuild and has no pending obligation; MySQL refuses the
     // rename through its dialect-support gate.
-    if target_dialect != SqlDialect::Postgres {
+    if !matches!(
+        registered_vendor(target_dialect, 0)?
+            .schema
+            .column_rename_strategy(),
+        zero_migrate_backend::schema::ColumnRenameStrategy::ExpandContract
+    ) {
         return Ok(());
     }
     let mut seen: std::collections::BTreeMap<&str, Vec<TableOperationTarget<'_>>> =
@@ -5418,7 +5516,7 @@ struct PartitionParentFold {
 fn partition_error(
     code: &'static str,
     op_index: usize,
-    dialect: SqlDialect,
+    dialect: &DialectId,
     reason: impl Into<String>,
     suggested_fix: impl Into<String>,
 ) -> AuthoringError {
@@ -5426,7 +5524,7 @@ fn partition_error(
         code: code.to_string(),
         kind: None,
         op_index,
-        dialect: dialect.id(),
+        dialect: dialect.clone(),
         reason: reason.into(),
         suggested_fix: Some(suggested_fix.into()),
     }
@@ -5533,7 +5631,7 @@ fn hash_lcm(a: u128, b: u128) -> Option<u128> {
 
 fn validate_partition_recording(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{IrConstraintKind, Op, PartitionSpec};
 
@@ -5662,7 +5760,7 @@ fn validate_partition_recording(
                     parent
                         .children
                         .insert(name.clone(), (op_index, bounds.clone()));
-                } else if !matches!(target_dialect, SqlDialect::Postgres) {
+                } else if target_dialect != &POSTGRES {
                     return Err(partition_error(
                         CODE_DIALECT_UNSUPPORTED,
                         op_index,
@@ -5684,7 +5782,7 @@ fn validate_partition_recording(
                     parent
                         .children
                         .insert(name.clone(), (op_index, bound.clone()));
-                } else if !matches!(target_dialect, SqlDialect::Postgres) {
+                } else if target_dialect != &POSTGRES {
                     return Err(partition_error(
                         CODE_DIALECT_UNSUPPORTED,
                         op_index,
@@ -5826,7 +5924,7 @@ fn validate_partition_recording(
 fn validate_partition_bounds_well_formed(
     table: &str,
     parent: &PartitionParentFold,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{PartitionBounds, PartitionSpec};
 
@@ -6020,7 +6118,7 @@ fn validate_partition_bounds_well_formed(
 fn validate_partition_bounds_total(
     table: &str,
     parent: &PartitionParentFold,
-    dialect: SqlDialect,
+    dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{PartitionBounds, PartitionSpec};
 
@@ -6087,7 +6185,7 @@ fn validate_partition_bounds_total(
 /// Returns the first [`AuthoringError`] any embedded expression produces.
 pub fn validate_op(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     // The bare entry keeps the Trusted posture (no cross-schema confinement); the
@@ -6097,13 +6195,13 @@ pub fn validate_op(
 
 fn validate_dialectal_op(
     legs: &BTreeMap<zero_migrate_ir::dialect::DialectId, Vec<crate::model::ir::Op>>,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
     authority: Option<VendorAuthority<'_>>,
 ) -> Result<(), AuthoringError> {
     fn mk(
-        target_dialect: SqlDialect,
+        target_dialect: &DialectId,
         op_index: usize,
         reason: impl Into<String>,
         suggested_fix: impl Into<String>,
@@ -6112,7 +6210,7 @@ fn validate_dialectal_op(
             code: CODE_OP_INVALID.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason: reason.into(),
             suggested_fix: Some(suggested_fix.into()),
         }
@@ -6138,23 +6236,16 @@ fn validate_dialectal_op(
                 "flatten the inner dialect() into the outer leg; nested op-level dialect() is not supported",
             ));
         }
-        let dialect = if id == &zero_migrate_ir::dialect::POSTGRES {
-            SqlDialect::Postgres
-        } else if id == &zero_migrate_ir::dialect::SQLITE {
-            SqlDialect::Sqlite
-        } else if id == &zero_migrate_ir::dialect::MYSQL {
-            SqlDialect::Mysql
-        } else {
-            // Cluster F makes the validator target an open DialectId. Until
-            // then, unknown legs are still structurally checked and exact-key
-            // selection ensures they never run for a shipping target.
-            target_dialect
-        };
-        for op in ops {
-            validate_op_authorized(op, dialect, op_index, schema_scope, authority)?;
+        if crate::render::backends::VENDORS.get(id).is_some() {
+            for op in ops {
+                // Validate against the backend the leg actually names. Never
+                // reinterpret it as the outer target through a DialectId ->
+                // vendor conversion.
+                validate_op_authorized(op, id, op_index, schema_scope, authority)?;
+            }
         }
     }
-    if legs.contains_key(&target_dialect.id()) {
+    if legs.contains_key(target_dialect) {
         return Ok(());
     }
     Err(mk(
@@ -6162,11 +6253,11 @@ fn validate_dialectal_op(
         op_index,
         format!(
             "dialectal op has no leg for the {} target; the per-dialect operation does not cover this dialect",
-            target_dialect.id().as_str()
+            target_dialect.as_str()
         ),
         format!(
             "add a {} leg to the dialectal op",
-            target_dialect.id().as_str()
+            target_dialect.as_str()
         ),
     ))
 }
@@ -6179,7 +6270,7 @@ fn validate_dialectal_op(
 /// Returns the first [`AuthoringError`] the gate or any embedded expression produces.
 pub fn validate_op_scoped(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
@@ -6192,7 +6283,7 @@ pub fn validate_op_scoped(
 /// Returns the first [`AuthoringError`] the gate or any embedded expression produces.
 pub fn validate_op_authorized(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
     authority: Option<VendorAuthority<'_>>,
@@ -6200,6 +6291,8 @@ pub fn validate_op_authorized(
     use crate::model::ir::{
         ColumnOrExpr, IndexElement, IrConstraintKind, Op, TriggerAction, ViewQuery,
     };
+
+    registered_vendor(target_dialect, op_index)?;
 
     if let Op::Dialectal { legs } = op {
         return validate_dialectal_op(legs, target_dialect, op_index, schema_scope, authority);
@@ -6318,7 +6411,7 @@ pub fn validate_op_authorized(
                             code: CODE_COLUMN_FACET_CONFLICT.to_string(),
                             kind: None,
                             op_index,
-                            dialect: target_dialect.id(),
+                            dialect: target_dialect.clone(),
                             reason: format!(
                                 "column {name:?} declares a {format} value format but index {:?} selects collation {collation:?}; {format} requires the bytewise C collation",
                                 ix.name
@@ -6588,7 +6681,7 @@ pub fn validate_op_authorized(
                     code: CODE_UNSUPPORTED.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "dropIndex of {name:?} omits its owning table, so the \
                          ownership check cannot resolve the index's owner — a \
@@ -6676,7 +6769,7 @@ pub fn validate_op_authorized(
             Ok(())
         }
         // CROSS-DIALECT CORE — trigger `WHEN` + body statements are CLOSED ASTs.
-        // SqlDialect-impossible actions/facets are refused per facet, not by a
+        // backend-impossible actions/facets are refused per facet, not by a
         // whole-construct vendor gate.
         Op::CreateTrigger { table, events, for_each, when, action, .. } => {
             validate_trigger_dialect(
@@ -6732,7 +6825,7 @@ pub fn validate_op_authorized(
             code: CODE_PGRAW_REASON_REQUIRED.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason: "pgRaw requires a non-empty reason for auditability".to_string(),
             suggested_fix: Some(
                 "pass pg.raw({ sql, reason }) with a short explanation for why raw SQL is required"
@@ -6746,7 +6839,7 @@ pub fn validate_op_authorized(
                 code: CODE_UNSUPPORTED.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
-                dialect: target_dialect.id(),
+                dialect: target_dialect.clone(),
                 reason: "createRole cannot combine superuser:true with ifNotExists:true; \
                          the idempotent form requires a PL/pgSQL DO wrapper and SUPERUSER \
                          must never be hidden inside an opaque body"
@@ -6776,7 +6869,7 @@ pub fn validate_op_authorized(
             code: CODE_OP_INVALID.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason: format!(
                 "renameTable names {table:?} as both its source and its target, so it \
                  renames the table to itself"
@@ -6797,7 +6890,7 @@ pub fn validate_op_authorized(
             code: CODE_OP_INVALID.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason: format!(
                 "renameColumn names {from:?} as both its source and its target on table \
                  {table:?}, so it renames the column to itself"
@@ -6820,7 +6913,7 @@ pub fn validate_op_authorized(
                 code: CODE_PRIMARY_KEY_INVALID.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
-                dialect: target_dialect.id(),
+                dialect: target_dialect.clone(),
                 reason,
                 suggested_fix: Some(
                     "provide exact non-empty ordered columns; replace must change the tuple, and dropIdentityFrom must be a non-empty subset of expectedColumns"
@@ -6836,7 +6929,7 @@ pub fn validate_op_authorized(
                     code: CODE_OP_INVALID.to_string(),
                     kind: Some(UnsupportedKind::Op),
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: "synchronizeIdentity writesQuiesced must contain non-whitespace text naming the no-concurrent-writer window or invariant"
                         .to_string(),
                     suggested_fix: Some(
@@ -6864,7 +6957,7 @@ pub fn validate_op_authorized(
                 code: CODE_OP_INVALID.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
-                dialect: target_dialect.id(),
+                dialect: target_dialect.clone(),
                 reason: "setRls needs at least one of { enabled, forced }".to_string(),
                 suggested_fix: Some(
                     "set enabled, forced, or both on the setRls op".to_string(),
@@ -6920,7 +7013,7 @@ pub fn validate_op_authorized(
 
 fn validate_create_table_primary_key_policy(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
@@ -6939,7 +7032,7 @@ fn validate_create_table_primary_key_policy(
         code: code.to_string(),
         kind: None,
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason,
         suggested_fix: Some(suggested_fix),
     };
@@ -6996,19 +7089,42 @@ fn validate_create_table_primary_key_policy(
 
 fn validate_op_support(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{
         IndexElement, IndexMethod, IrConstraintKind, IrDefault, Op, TriggerAction, TriggerEvent,
         TriggerStmt,
     };
-    use crate::model::support::{Feature, Support, SupportDecision};
+    use crate::model::support::{DialectSupport, Feature, Support, SupportDecision};
+
+    fn declared_decision(
+        declaration: &DialectSupport,
+        target_dialect: &DialectId,
+        op_index: usize,
+    ) -> Result<SupportDecision, AuthoringError> {
+        declaration
+            .decision_for(target_dialect)
+            .ok_or_else(|| AuthoringError {
+                code: CODE_UNSUPPORTED.to_string(),
+                kind: Some(UnsupportedKind::Op),
+                op_index,
+                dialect: target_dialect.clone(),
+                reason: format!(
+                    "the support declaration states no decision for registered backend {:?}; validation refuses the undeclared case",
+                    target_dialect.as_str()
+                ),
+                suggested_fix: Some(format!(
+                    "add an explicit support decision for backend {:?}",
+                    target_dialect.as_str()
+                )),
+            })
+    }
 
     fn error_from_decision(
         decision: SupportDecision,
         kind: UnsupportedKind,
-        target_dialect: SqlDialect,
+        target_dialect: &DialectId,
         op_index: usize,
     ) -> Option<AuthoringError> {
         let SupportDecision::Unsupported { code, reason } = decision else {
@@ -7026,7 +7142,7 @@ fn validate_op_support(
             code: code.to_string(),
             kind: Some(kind),
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason: reason.to_string(),
             suggested_fix: Some(suggested_fix.to_string()),
         })
@@ -7060,7 +7176,7 @@ fn validate_op_support(
     fn check_feature(
         support: &Support,
         feature: Feature,
-        target_dialect: SqlDialect,
+        target_dialect: &DialectId,
         op_index: usize,
     ) -> Result<(), AuthoringError> {
         let Some(feature_support) = support.features.iter().find(|decl| decl.feature == feature)
@@ -7068,7 +7184,7 @@ fn validate_op_support(
             return Ok(());
         };
         if let Some(err) = error_from_decision(
-            feature_support.decision(target_dialect),
+            declared_decision(&feature_support.dialects, target_dialect, op_index)?,
             feature_kind(feature),
             target_dialect,
             op_index,
@@ -7162,7 +7278,7 @@ fn validate_op_support(
                     code: CODE_OP_INVALID.to_string(),
                     kind: None,
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: "initiallyDeferred requires deferrable".to_string(),
                     suggested_fix: Some(
                         "set deferrable: true when initiallyDeferred is true, or omit initiallyDeferred"
@@ -7179,12 +7295,12 @@ fn validate_op_support(
             name,
             partition_by: Some(partition_by),
             ..
-        } if !matches!(target_dialect, SqlDialect::Postgres) && !partition_by.collapse() => {
+        } if target_dialect != &POSTGRES && !partition_by.collapse() => {
             return Err(AuthoringError {
                 code: CODE_DIALECT_UNSUPPORTED.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
-                dialect: target_dialect.id(),
+                dialect: target_dialect.clone(),
                 reason: format!(
                     "partitioned table {name:?} is native only on Postgres unless partitionBy.whenUnsupported is affirmed as \"collapse\""
                 ),
@@ -7197,7 +7313,7 @@ fn validate_op_support(
         _ => {}
     }
     if let Some(err) = error_from_decision(
-        support.decision(target_dialect),
+        declared_decision(&support.dialects, target_dialect, op_index)?,
         op_kind(op),
         target_dialect,
         op_index,
@@ -7238,7 +7354,7 @@ fn validate_op_support(
                         code: CODE_OP_INVALID.to_string(),
                         kind: None,
                         op_index,
-                        dialect: target_dialect.id(),
+                        dialect: target_dialect.clone(),
                         reason: "notValid is only valid on addForeignKey/addCheck (ALTER TABLE ADD CONSTRAINT); a create-time constraint cannot be NOT VALID".to_string(),
                         suggested_fix: Some(
                             "drop notValid from the create() constraint, or add the constraint after createTable via addForeignKey/addCheck with { notValid: true }".to_string(),
@@ -7476,7 +7592,7 @@ fn validate_op_support(
 /// A non-vendor op is a no-op here.
 fn validate_vendor_op(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
     authority: Option<VendorAuthority<'_>>,
@@ -7489,7 +7605,7 @@ fn validate_vendor_op(
     // (1) SQLite — every vendor op except RawViewBody is PgOnly. Refuse
     // fail-closed at load. RawViewBody is a raw surface but not PgOnly; SQLite can
     // create plain views from a SELECT body.
-    if matches!(target_dialect, SqlDialect::Sqlite)
+    if target_dialect == &SQLITE
         && caps
             .iter()
             .any(|cap| !matches!(cap, crate::model::capability::VendorCapability::RawViewBody))
@@ -7525,7 +7641,7 @@ fn validate_vendor_op(
             code: CODE_UNSUPPORTED.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason,
             suggested_fix: Some(fix),
         });
@@ -7578,7 +7694,7 @@ fn validate_vendor_op(
             code: CODE_VENDOR_OP_DENIED.to_string(),
             kind: None,
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason: format!(
                 "vendor PG primitive (op capability {:?}) requires the {} capability, which \
                  {reason_tail}",
@@ -7593,14 +7709,14 @@ fn validate_vendor_op(
 
 fn validate_function_type_refs(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     let reject = |slot: &'static str, value: &str| AuthoringError {
         code: CODE_UNSUPPORTED.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason: format!(
             "{slot} must be a conservative PostgreSQL type reference (bare or \
              schema-qualified name with optional precision and [] suffixes), not \
@@ -7643,7 +7759,7 @@ fn validate_function_type_refs(
 }
 
 fn view_body_error(
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     reason: String,
     suggested_fix: &'static str,
@@ -7652,7 +7768,7 @@ fn view_body_error(
         code: CODE_UNSUPPORTED.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason,
         suggested_fix: Some(suggested_fix.to_string()),
     }
@@ -7666,7 +7782,7 @@ fn view_body_error(
 /// reparse/string-literal/token deny-list used for function bodies.
 pub(crate) fn validate_raw_view_body_sql(
     sql: &str,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
@@ -7726,7 +7842,7 @@ pub(crate) fn validate_raw_view_body_sql(
 
 fn validate_table_ref(
     table: &crate::model::ir::TableRef,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
@@ -7736,7 +7852,7 @@ fn validate_table_ref(
                 code: CODE_INVALID_SCHEMA_IDENT.to_string(),
                 kind: None,
                 op_index,
-                dialect: target_dialect.id(),
+                dialect: target_dialect.clone(),
                 reason: format!(
                     "view SELECT table reference names schema {schema:?}, which is not a safe bare SQL identifier"
                 ),
@@ -7749,7 +7865,7 @@ fn validate_table_ref(
                     code: CODE_CROSS_SCHEMA.to_string(),
                     kind: None,
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "view SELECT table reference names schema {schema:?}, which the active schema scope does not permit"
                     ),
@@ -7766,7 +7882,7 @@ fn validate_table_ref(
 
 fn validate_select_ast(
     select: &crate::model::ir::SelectAst,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
@@ -7826,7 +7942,7 @@ fn validate_select_ast(
 ///    variant is refused ([`CODE_GUARD_DIRECTION`]).
 fn validate_op_schema_and_guard(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
@@ -7834,7 +7950,7 @@ fn validate_op_schema_and_guard(
         code: code.to_string(),
         kind: None,
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason,
         suggested_fix: Some(fix),
     };
@@ -7955,7 +8071,7 @@ fn validate_op_schema_and_guard(
 }
 
 fn sequence_option_error(
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     reason: String,
     suggested_fix: String,
@@ -7964,7 +8080,7 @@ fn sequence_option_error(
         code: CODE_SEQUENCE_OPTION_INVALID.to_string(),
         kind: None,
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason,
         suggested_fix: Some(suggested_fix),
     }
@@ -7975,7 +8091,7 @@ fn validate_sequence_numeric_options(
     min_value: &Option<Option<crate::model::ir::SafeI64>>,
     max_value: &Option<Option<crate::model::ir::SafeI64>>,
     cache: Option<crate::model::ir::SafeU64>,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     if matches!(increment, Some(n) if n.get() == 0) {
@@ -8014,7 +8130,7 @@ fn validate_sequence_numeric_options(
 
 fn validate_sequence_options(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::Op;
@@ -8046,7 +8162,7 @@ fn validate_sequence_options(
 
 fn unsupported_trigger(
     kind: &'static str,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     reason: String,
     suggested_fix: String,
@@ -8055,7 +8171,7 @@ fn unsupported_trigger(
         code: CODE_UNSUPPORTED.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason: format!("{kind}: {reason}"),
         suggested_fix: Some(suggested_fix),
     }
@@ -8065,25 +8181,39 @@ fn validate_trigger_dialect(
     events: &[crate::model::ir::TriggerEvent],
     for_each: crate::model::ir::ForEach,
     action: &crate::model::ir::TriggerAction,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
-    match (target_dialect, action) {
-        (SqlDialect::Postgres, crate::model::ir::TriggerAction::Body { .. }) => {
+    match action {
+        crate::model::ir::TriggerAction::Body { .. }
+            if !target_supports(target_dialect, Capability::TriggerBody, op_index)? =>
+        {
+            let (reason, suggested_fix) = if target_dialect == &POSTGRES {
+                (
+                    "Postgres triggers must execute a named trigger function; the closed inline body form renders only on SQLite".to_string(),
+                    "use action: { kind: \"executeFunction\", name: \"...\" } and create the trigger function separately".to_string(),
+                )
+            } else {
+                let backend_name = registered_vendor(target_dialect, op_index)?
+                    .descriptor
+                    .display_name;
+                (
+                    format!("{backend_name} triggers do not accept the closed inline body form"),
+                    "use a trigger action supported by this backend".to_string(),
+                )
+            };
             return Err(unsupported_trigger(
                 "triggerBody",
                 target_dialect,
                 op_index,
-                "Postgres triggers must execute a named trigger function; the closed inline body form renders only on SQLite".to_string(),
-                "use action: { kind: \"executeFunction\", name: \"...\" } and create the trigger function separately".to_string(),
+                reason,
+                suggested_fix,
             ));
         }
-        (
-            SqlDialect::Sqlite | SqlDialect::Mysql,
-            crate::model::ir::TriggerAction::ExecuteFunction { .. },
-        ) => {
-            let dialect_id = target_dialect.id();
-            let dialect_name = dialect_id.as_str();
+        crate::model::ir::TriggerAction::ExecuteFunction { .. }
+            if !target_supports(target_dialect, Capability::TriggerExecuteFunction, op_index)? =>
+        {
+            let dialect_name = target_dialect.as_str();
             return Err(unsupported_trigger(
                 "executeFunction",
                 target_dialect,
@@ -8095,13 +8225,12 @@ fn validate_trigger_dialect(
         _ => {}
     }
 
-    if matches!(target_dialect, SqlDialect::Sqlite | SqlDialect::Mysql)
+    if !target_supports(target_dialect, Capability::TriggerTruncateEvent, op_index)?
         && events
             .iter()
             .any(|e| matches!(e, crate::model::ir::TriggerEvent::Truncate))
     {
-        let dialect_id = target_dialect.id();
-        let dialect_name = dialect_id.as_str();
+        let dialect_name = target_dialect.as_str();
         return Err(unsupported_trigger(
             "triggerEventTruncate",
             target_dialect,
@@ -8113,7 +8242,7 @@ fn validate_trigger_dialect(
         ));
     }
 
-    if matches!(target_dialect, SqlDialect::Mysql) && events.len() > 1 {
+    if target_dialect == &MYSQL && events.len() > 1 {
         return Err(unsupported_trigger(
             "triggerMultipleEvents",
             target_dialect,
@@ -8123,11 +8252,13 @@ fn validate_trigger_dialect(
         ));
     }
 
-    if matches!(target_dialect, SqlDialect::Sqlite | SqlDialect::Mysql)
-        && matches!(for_each, crate::model::ir::ForEach::Statement)
+    if !target_supports(
+        target_dialect,
+        Capability::TriggerStatementForEach,
+        op_index,
+    )? && matches!(for_each, crate::model::ir::ForEach::Statement)
     {
-        let dialect_id = target_dialect.id();
-        let dialect_name = dialect_id.as_str();
+        let dialect_name = target_dialect.as_str();
         return Err(unsupported_trigger(
             "forEachStatement",
             target_dialect,
@@ -8143,7 +8274,7 @@ fn validate_trigger_dialect(
 fn validate_trigger_stmt(
     stmt: &crate::model::ir::TriggerStmt,
     outer_table: &str,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<(), AuthoringError> {
@@ -8156,7 +8287,7 @@ fn validate_trigger_stmt(
                 code: CODE_INVALID_SCHEMA_IDENT.to_string(),
                 kind: None,
                 op_index,
-                dialect: target_dialect.id(),
+                dialect: target_dialect.clone(),
                 reason: format!(
                     "trigger body statement schema qualifier {schema:?} is not a safe bare SQL identifier"
                 ),
@@ -8169,7 +8300,7 @@ fn validate_trigger_stmt(
                     code: CODE_CROSS_SCHEMA.to_string(),
                     kind: None,
                     op_index,
-                    dialect: target_dialect.id(),
+                    dialect: target_dialect.clone(),
                     reason: format!(
                         "trigger body statement names schema {schema:?}, which is outside the active schema scope"
                     ),
@@ -8240,7 +8371,7 @@ fn validate_trigger_stmt(
                         code: CODE_UNSUPPORTED.to_string(),
                         kind: Some(UnsupportedKind::Op),
                         op_index,
-                        dialect: target_dialect.id(),
+                        dialect: target_dialect.clone(),
                         reason: format!(
                             "raise errcode {code:?} is not a five-character SQLSTATE token"
                         ),
@@ -8294,7 +8425,7 @@ fn validate_default_for_type(
     position: &str,
     ty: &crate::model::ir::ColType,
     default: &crate::model::ir::IrDefault,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::{ColType, EmptyContainerKind, IrDefault};
@@ -8305,20 +8436,32 @@ fn validate_default_for_type(
     }
 
     if let IrDefault::Nextval { .. } = default {
-        if !matches!(target_dialect, SqlDialect::Postgres) {
+        if !target_supports(target_dialect, Capability::Sequence, op_index)? {
+            let (reason, suggested_fix) = if target_dialect == &SQLITE || target_dialect == &MYSQL {
+                (
+                    format!(
+                        "{position} declares a nextval sequence default, but standalone sequences and nextval defaults are PostgreSQL-only"
+                    ),
+                    "target PostgreSQL, use an identity/auto-increment shape for this dialect, or remove `.default(nextval(...))`"
+                        .to_string(),
+                )
+            } else {
+                (
+                    format!(
+                        "{position} declares a nextval sequence default, but backend {:?} does not support standalone sequences",
+                        target_dialect.as_str()
+                    ),
+                    "use a backend-supported identity/default shape or remove `.default(nextval(...))`"
+                        .to_string(),
+                )
+            };
             return Err(AuthoringError {
                 code: CODE_UNSUPPORTED.to_string(),
                 kind: Some(UnsupportedKind::Op),
                 op_index,
-                dialect: target_dialect.id(),
-                reason: format!(
-                    "{position} declares a nextval sequence default, but standalone \
-                     sequences and nextval defaults are PostgreSQL-only"
-                ),
-                suggested_fix: Some(
-                    "target PostgreSQL, use an identity/auto-increment shape for this dialect, or remove `.default(nextval(...))`"
-                        .to_string(),
-                ),
+                dialect: target_dialect.clone(),
+                reason,
+                suggested_fix: Some(suggested_fix),
             });
         }
         if matches!(ty, ColType::Int | ColType::BigInt | ColType::SmallInt) {
@@ -8328,7 +8471,7 @@ fn validate_default_for_type(
             code: CODE_COLUMN_DEFAULT_TYPE.to_string(),
             kind: None,
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason: format!(
                 "{position} declares a nextval sequence default on type {ty:?}; \
                  nextval defaults require an integer column"
@@ -8348,7 +8491,7 @@ fn validate_default_for_type(
             code: CODE_COLUMN_DEFAULT_TYPE.to_string(),
             kind: None,
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason: format!(
                 "{position} declares a JSON value default on type {ty:?}; \
                  JSON value defaults are valid only on json columns"
@@ -8383,7 +8526,7 @@ fn validate_default_for_type(
         code: CODE_COLUMN_DEFAULT_TYPE.to_string(),
         kind: None,
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason: format!(
             "{position} declares an empty {kind:?} container default on type {ty:?}; \
              empty object defaults require json, and empty array defaults require \
@@ -8398,19 +8541,19 @@ fn validate_default_for_type(
 fn validate_default_expr(
     position: &str,
     expr: &Expr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     let scope = TargetScope::structural_only(position);
     validate_expr(expr, target_dialect, &scope, op_index)?;
     validate_no_aggregate_expr_context(expr, position, target_dialect, op_index)?;
 
-    fn mk_err(reason: String, target_dialect: SqlDialect, op_index: usize) -> AuthoringError {
+    fn mk_err(reason: String, target_dialect: &DialectId, op_index: usize) -> AuthoringError {
         AuthoringError {
             code: CODE_OP_INVALID.to_string(),
             kind: Some(UnsupportedKind::Expr),
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason,
             suggested_fix: Some(
                 "use only literals, CASE, immutable scalar helpers, now(), uuidV4(), and uuidV7() in column defaults"
@@ -8419,7 +8562,11 @@ fn validate_default_expr(
         }
     }
 
-    fn walk(expr: &Expr, target_dialect: SqlDialect, op_index: usize) -> Result<(), AuthoringError> {
+    fn walk(
+        expr: &Expr,
+        target_dialect: &DialectId,
+        op_index: usize,
+    ) -> Result<(), AuthoringError> {
         match expr {
             Expr::ColRef { .. } => Err(mk_err(
                 "a column default cannot reference a column".to_string(),
@@ -8537,7 +8684,7 @@ fn validate_default_expr(
 /// [`CODE_VECTOR_METRIC_MISPLACED`] / [`CODE_OP_INVALID`] as above.
 fn validate_column_facets(
     col: &crate::model::ir::IrColumn,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     validate_col_type_position(&col.ty, "column.type", false, target_dialect, op_index)?;
@@ -8546,7 +8693,7 @@ fn validate_column_facets(
         code: code.to_string(),
         kind: None,
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason,
         suggested_fix: Some(fix),
     };
@@ -8554,7 +8701,7 @@ fn validate_column_facets(
         code: CODE_UNSUPPORTED.to_string(),
         kind: Some(kind),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason,
         suggested_fix: Some(fix),
     };
@@ -8672,18 +8819,32 @@ fn validate_column_facets(
 
     validate_mysql_literal_default_storage(col, target_dialect, op_index)?;
 
-    if matches!(target_dialect, SqlDialect::Postgres)
+    if !target_supports(target_dialect, Capability::VirtualGeneratedColumn, op_index)?
         && matches!(col.generated.as_ref(), Some(generated) if !generated.stored)
     {
+        let (reason, suggested_fix) = if target_dialect == &POSTGRES {
+            (
+                format!(
+                    "column {:?} requests a VIRTUAL generated column, but Postgres supports generated columns only as STORED",
+                    col.name
+                ),
+                "use `.generated(expr)` / `{ virtual: false }` for Postgres, or target SQLite"
+                    .to_string(),
+            )
+        } else {
+            (
+                format!(
+                    "column {:?} requests a VIRTUAL generated column, but backend {:?} does not support virtual generated columns",
+                    col.name,
+                    target_dialect.as_str()
+                ),
+                "use a stored generated column or a backend-specific dialectal leg".to_string(),
+            )
+        };
         return Err(unsupported(
             UnsupportedKind::VirtualColumn,
-            format!(
-                "column {:?} requests a VIRTUAL generated column, but Postgres supports \
-                 generated columns only as STORED",
-                col.name
-            ),
-            "use `.generated(expr)` / `{ virtual: false }` for Postgres, or target SQLite"
-                .to_string(),
+            reason,
+            suggested_fix,
         ));
     }
 
@@ -8832,7 +8993,7 @@ fn validate_column_facets(
 /// storages, and this engine already renders bytes defaults as `(X'..')` and JSON
 /// container/value defaults as `(JSON_OBJECT())` / `(CAST(.. AS JSON))`. The
 /// spelling is taken from the renderer itself
-/// ([`crate::render::lower::mysql_rendered_column_default`]) rather than inferred
+/// ([`crate::render::lower::rendered_column_default`]) rather than inferred
 /// from the IR variant, so the two cannot disagree about which form a default
 /// takes; a leading `(` is the parenthesized-expression form MySQL accepts.
 ///
@@ -8843,13 +9004,14 @@ fn validate_column_facets(
 /// a literal default happily.
 fn validate_mysql_literal_default_storage(
     col: &crate::model::ir::IrColumn,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
-    if !matches!(target_dialect, SqlDialect::Mysql) || col.default.is_none() {
+    if target_dialect != &MYSQL || col.default.is_none() {
         return Ok(());
     }
-    let Some(storage) = crate::render::lower::mysql_storage_for_column_facets(
+    let Some(storage) = crate::render::lower::storage_for_column_facets(
+        target_dialect,
         &col.ty,
         col.value_format.as_ref(),
         col.id_prefix.as_deref(),
@@ -8860,7 +9022,7 @@ fn validate_mysql_literal_default_storage(
     if !storage.refuses_literal_default() {
         return Ok(());
     }
-    let Some(rendered) = crate::render::lower::mysql_rendered_column_default(col) else {
+    let Some(rendered) = crate::render::lower::rendered_column_default(target_dialect, col) else {
         return Ok(());
     };
     if rendered.trim_start().starts_with('(') {
@@ -8871,7 +9033,7 @@ fn validate_mysql_literal_default_storage(
         code: CODE_DIALECT_UNSUPPORTED.to_string(),
         kind: Some(UnsupportedKind::Op),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason: format!(
             "column {:?} declares the literal default {rendered} but renders as MySQL {} \
              storage; MySQL refuses a literal DEFAULT on TEXT, BLOB, JSON, and GEOMETRY columns",
@@ -8890,7 +9052,7 @@ fn validate_col_type_position(
     ty: &crate::model::ir::ColType,
     position: &'static str,
     _allow_pg_domain_date_base: bool,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     use crate::model::ir::ColType;
@@ -8900,7 +9062,7 @@ fn validate_col_type_position(
             code: CODE_UNSUPPORTED.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
-            dialect: target_dialect.id(),
+            dialect: target_dialect.clone(),
             reason: format!(
                 "{position} uses `char(0)`; fixed-length char requires a positive length"
             ),
@@ -8913,7 +9075,7 @@ fn validate_col_type_position(
 
 fn validate_identity_placement(
     col: &crate::model::ir::IrColumn,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     pk_cols: Option<&[String]>,
     is_add_column: bool,
     op_index: usize,
@@ -8921,14 +9083,30 @@ fn validate_identity_placement(
     let Some(identity) = col.identity else {
         return Ok(());
     };
-    if !matches!(target_dialect, SqlDialect::Sqlite | SqlDialect::Mysql) {
+    if target_dialect == &POSTGRES {
         return Ok(());
+    }
+    if target_dialect != &SQLITE && target_dialect != &MYSQL {
+        return Err(AuthoringError {
+            code: CODE_UNSUPPORTED.to_string(),
+            kind: Some(UnsupportedKind::Identity),
+            op_index,
+            dialect: target_dialect.clone(),
+            reason: format!(
+                "registered backend {:?} supplies no identity-placement validation policy",
+                target_dialect.as_str()
+            ),
+            suggested_fix: Some(
+                "add the backend's required identity-placement policy before authoring identity columns"
+                    .to_string(),
+            ),
+        });
     }
     let err = |reason: String| AuthoringError {
         code: CODE_UNSUPPORTED.to_string(),
         kind: Some(UnsupportedKind::Identity),
         op_index,
-        dialect: target_dialect.id(),
+        dialect: target_dialect.clone(),
         reason,
         suggested_fix: Some(
             "use identity only on the sole integer primary key for this dialect, or remove \
@@ -8993,7 +9171,7 @@ fn validate_identity_placement(
 /// (c) `ColRef`-resolution failure now that the column set is known.
 pub fn validate_ir_resolved(
     ir: &crate::model::ir::MigrationIr,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     live_columns: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> Result<(), AuthoringError> {
     for (op_index, op) in ir.ops.iter().enumerate() {
@@ -9030,7 +9208,7 @@ pub fn validate_ir_resolved(
 /// rule (c) `ColRef`-resolution failure now that the column set is known.
 pub fn validate_op_resolved(
     op: &crate::model::ir::Op,
-    target_dialect: SqlDialect,
+    target_dialect: &DialectId,
     live_columns: &std::collections::BTreeMap<String, Vec<String>>,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
@@ -9278,7 +9456,7 @@ mod tests {
         let sc = scope("users", &c);
         // Comfortably past the bound — would stack-overflow a naive walker.
         let deep = nest_not(MAX_EXPR_DEPTH + 50, Expr::col("name"));
-        let err = validate_expr(&deep, SqlDialect::Postgres, &sc, 0)
+        let err = validate_expr(&deep, &POSTGRES, &sc, 0)
             .expect_err("an over-deep expression must be refused, not recursed");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
@@ -9297,7 +9475,7 @@ mod tests {
         // the bound never narrows the realistic accepted set.
         let ok = nest_not(MAX_EXPR_DEPTH - 2, Expr::col("name"));
         assert!(
-            validate_expr(&ok, SqlDialect::Postgres, &sc, 0).is_ok(),
+            validate_expr(&ok, &POSTGRES, &sc, 0).is_ok(),
             "a tree within the depth bound must validate"
         );
     }
@@ -9316,10 +9494,10 @@ mod tests {
                 args: vec![],
             };
             assert!(
-                validate_expr(&e, SqlDialect::Postgres, &sc, 0).is_ok(),
+                validate_expr(&e, &POSTGRES, &sc, 0).is_ok(),
                 "{f:?} must validate on Postgres"
             );
-            for d in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+            for d in [&SQLITE, &MYSQL] {
                 let err = validate_expr(&e, d, &sc, 0)
                     .expect_err("a PG-only vendor scalar must be refused off Postgres");
                 assert_eq!(err.code, CODE_UNSUPPORTED, "{f:?} on {d:?}: {err}");
@@ -9353,7 +9531,7 @@ mod tests {
                 rhs: Box::new(Expr::lit(IrScalar::Int(0))),
             }),
         };
-        assert!(validate_expr(&e, SqlDialect::Sqlite, &sc, 0).is_ok());
+        assert!(validate_expr(&e, &SQLITE, &sc, 0).is_ok());
 
         // Case + FnCall(coalesce) + concat.
         let case = Expr::Case {
@@ -9369,7 +9547,7 @@ mod tests {
                 args: vec![Expr::col("first"), Expr::lit(IrScalar::Str("".into()))],
             })),
         };
-        assert!(validate_expr(&case, SqlDialect::Postgres, &sc, 1).is_ok());
+        assert!(validate_expr(&case, &POSTGRES, &sc, 1).is_ok());
     }
 
     fn in_list(expr: Expr, elems: Vec<&str>) -> Expr {
@@ -9402,7 +9580,7 @@ mod tests {
             expr: Box::new(Expr::col("name")),
             pattern: "^[a-z]+$".to_string(),
         };
-        for d in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &MYSQL] {
             validate_expr(&regex, d, &sc, 0)
                 .unwrap_or_else(|err| panic!("regex expression must validate on {d:?}: {err}"));
         }
@@ -9419,7 +9597,7 @@ mod tests {
                 from: Box::new(Expr::col("total")),
             },
         ] {
-            validate_expr(&e, SqlDialect::Postgres, &sc, 0)
+            validate_expr(&e, &POSTGRES, &sc, 0)
                 .unwrap_or_else(|err| panic!("PG-only expression must validate on PG: {err}"));
         }
     }
@@ -9485,7 +9663,7 @@ mod tests {
             },
         ];
         for e in &nodes {
-            for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            for d in [&POSTGRES, &SQLITE, &MYSQL] {
                 validate_expr(e, d, &sc, 0).unwrap_or_else(|err| {
                     panic!("portable predicate/extract must validate on {d:?}: {err}")
                 });
@@ -9540,7 +9718,7 @@ mod tests {
             },
         ];
         for e in &nodes {
-            for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            for d in [&POSTGRES, &SQLITE, &MYSQL] {
                 validate_expr(e, d, &sc, 0).unwrap_or_else(|err| {
                     panic!("portable aggregate must validate on {d:?}: {err}")
                 });
@@ -9555,7 +9733,7 @@ mod tests {
             distinct: false,
         };
         assert!(
-            validate_expr(&bad, SqlDialect::Postgres, &sc, 0).is_err(),
+            validate_expr(&bad, &POSTGRES, &sc, 0).is_err(),
             "aggregate must still validate its argument's column ref"
         );
     }
@@ -9593,10 +9771,10 @@ mod tests {
         ];
 
         for e in &nodes {
-            validate_expr(e, SqlDialect::Postgres, &sc, 0).unwrap_or_else(|err| {
+            validate_expr(e, &POSTGRES, &sc, 0).unwrap_or_else(|err| {
                 panic!("PG-first aggregate must validate on Postgres: {err}")
             });
-            for d in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+            for d in [&SQLITE, &MYSQL] {
                 let err = validate_expr(e, d, &sc, 0)
                     .expect_err("PG-first aggregate must fail closed off Postgres");
                 assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED, "{d:?}: {err}");
@@ -9652,7 +9830,7 @@ mod tests {
             },
         ];
         for e in &nodes {
-            for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+            for d in [&POSTGRES, &SQLITE, &MYSQL] {
                 validate_expr(e, d, &sc, 0).unwrap_or_else(|err| {
                     panic!("portable scalar fn must validate on {d:?}: {err}")
                 });
@@ -9673,12 +9851,12 @@ mod tests {
                 from: Box::new(Expr::col("total")),
             },
         ] {
-            for d in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+            for d in [&SQLITE, &MYSQL] {
                 let err = validate_expr(&e, d, &sc, 0)
                     .expect_err("PG-only expression must reject on non-PG");
                 assert_eq!(err.code, CODE_UNSUPPORTED);
                 assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-                assert_eq!(err.dialect, d.id());
+                assert_eq!(err.dialect, d.clone());
                 assert!(err.reason.contains("PostgreSQL-only"), "got: {err}");
             }
         }
@@ -9692,15 +9870,15 @@ mod tests {
             expr: Box::new(Expr::col("name")),
             pattern: "^[a-z]+$".to_string(),
         };
-        for d in [SqlDialect::Postgres, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &MYSQL] {
             validate_expr(&expr, d, &sc, 0)
                 .unwrap_or_else(|err| panic!("regex match must validate on {d:?}: {err}"));
         }
-        let err = validate_expr(&expr, SqlDialect::Sqlite, &sc, 0)
+        let err = validate_expr(&expr, &SQLITE, &sc, 0)
             .expect_err("regex match must fail closed on SQLite");
         assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
-        assert_eq!(err.dialect, SqlDialect::Sqlite.id());
+        assert_eq!(err.dialect, SQLITE.clone());
         assert!(err.reason.contains("SQLite"), "got: {err}");
     }
 
@@ -9709,13 +9887,13 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         let empty_membership = in_list(Expr::col("name"), vec![]);
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &SQLITE, &MYSQL] {
             validate_expr(&empty_membership, d, &sc, 0)
                 .unwrap_or_else(|err| panic!("empty inList must validate on {d:?}: {err}"));
         }
 
         let nul_elem = in_list(Expr::col("name"), vec!["ok", "bad\0value"]);
-        let err = validate_expr(&nul_elem, SqlDialect::Postgres, &sc, 0).unwrap_err();
+        let err = validate_expr(&nul_elem, &POSTGRES, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(err.reason.contains("NUL"));
 
@@ -9724,7 +9902,7 @@ mod tests {
             elems: vec![IrScalar::Str("ok".into()), IrScalar::Int(200)],
             negated: false,
         };
-        let err = validate_expr(&mixed_elem, SqlDialect::Postgres, &sc, 0).unwrap_err();
+        let err = validate_expr(&mixed_elem, &POSTGRES, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(err.reason.contains("homogeneous"));
 
@@ -9733,7 +9911,7 @@ mod tests {
             elems: vec![IrScalar::Bytes(vec![1, 2, 3])],
             negated: false,
         };
-        let err = validate_expr(&bytes_elem, SqlDialect::Postgres, &sc, 0).unwrap_err();
+        let err = validate_expr(&bytes_elem, &POSTGRES, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(err.reason.contains("bytes are not allowed"));
 
@@ -9741,7 +9919,7 @@ mod tests {
             expr: Box::new(Expr::col("name")),
             pattern: String::new(),
         };
-        let err = validate_expr(&empty_pattern, SqlDialect::Postgres, &sc, 0).unwrap_err();
+        let err = validate_expr(&empty_pattern, &POSTGRES, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(err.reason.contains("non-empty"));
     }
@@ -9765,7 +9943,7 @@ mod tests {
         let sc = scope("users", &c);
         for n in 1..=8 {
             assert!(
-                validate_expr(&split(" ", n), SqlDialect::Sqlite, &sc, 0).is_ok(),
+                validate_expr(&split(" ", n), &SQLITE, &sc, 0).is_ok(),
                 "n={n} single-ASCII delim must be in-envelope"
             );
         }
@@ -9775,10 +9953,10 @@ mod tests {
     fn split_part_multichar_delim_rejected() {
         let c = cols();
         let sc = scope("users", &c);
-        let err = validate_expr(&split(", ", 1), SqlDialect::Sqlite, &sc, 2).unwrap_err();
+        let err = validate_expr(&split(", ", 1), &SQLITE, &sc, 2).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
         assert_eq!(err.op_index, 2);
-        assert_eq!(err.dialect, SqlDialect::Sqlite.id());
+        assert_eq!(err.dialect, SQLITE.clone());
         assert!(err.suggested_fix.is_some());
         // The structured payload leads with suggested_fix.
         let json = err.to_json();
@@ -9801,32 +9979,30 @@ mod tests {
         // The loads-on-PG / rejected-on-SQLite fixture: multi-char delim.
         let node = split(", ", 1);
         assert!(
-            validate_expr(&node, SqlDialect::Postgres, &sc, 0).is_ok(),
+            validate_expr(&node, &POSTGRES, &sc, 0).is_ok(),
             "an out-of-envelope-but-PG-renderable splitPart must VALIDATE on a Postgres target"
         );
         assert!(
-            validate_expr(&node, SqlDialect::Mysql, &sc, 0).is_ok(),
+            validate_expr(&node, &MYSQL, &sc, 0).is_ok(),
             "MySQL SUBSTRING_INDEX accepts a multi-character delimiter"
         );
-        let err = validate_expr(&node, SqlDialect::Sqlite, &sc, 0).unwrap_err();
+        let err = validate_expr(&node, &SQLITE, &sc, 0).unwrap_err();
         assert_eq!(
             err.code, CODE_EXPR_NOT_PORTABLE,
             "the same node must be EXPR_NOT_PORTABLE on a SQLite target"
         );
-        assert_eq!(err.dialect, SqlDialect::Sqlite.id());
+        assert_eq!(err.dialect, SQLITE.clone());
 
         // Likewise n>8 and a non-ASCII delim: PG-renderable, SQLite-rejected.
         for node in [split(" ", 9), split("·", 1)] {
-            for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
+            for dialect in [&POSTGRES, &MYSQL] {
                 assert!(
                     validate_expr(&node, dialect, &sc, 0).is_ok(),
                     "out-of-SQLite-envelope splitPart loads on {dialect:?}"
                 );
             }
             assert_eq!(
-                validate_expr(&node, SqlDialect::Sqlite, &sc, 0)
-                    .unwrap_err()
-                    .code,
+                validate_expr(&node, &SQLITE, &sc, 0).unwrap_err().code,
                 CODE_EXPR_NOT_PORTABLE
             );
         }
@@ -9855,7 +10031,7 @@ mod tests {
                 Expr::lit(IrScalar::Int(1)),
             ],
         };
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &SQLITE, &MYSQL] {
             let err = validate_expr(&runtime_delim, d, &sc, 0).unwrap_err();
             assert_eq!(
                 err.code, CODE_EXPR_NOT_PORTABLE,
@@ -9872,7 +10048,7 @@ mod tests {
                 Expr::lit(IrScalar::Int(1)),
             ],
         };
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &SQLITE, &MYSQL] {
             assert_eq!(
                 validate_expr(&int_delim, d, &sc, 0).unwrap_err().code,
                 CODE_EXPR_NOT_PORTABLE,
@@ -9889,7 +10065,7 @@ mod tests {
                 Expr::col("total"),
             ],
         };
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &SQLITE, &MYSQL] {
             assert_eq!(
                 validate_expr(&runtime_n, d, &sc, 0).unwrap_err().code,
                 CODE_EXPR_NOT_PORTABLE,
@@ -9898,7 +10074,7 @@ mod tests {
         }
 
         // (4) n is a non-POSITIVE integer literal (n<1) — grammar-broken on both.
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &SQLITE, &MYSQL] {
             assert_eq!(
                 validate_expr(&split(",", 0), d, &sc, 0).unwrap_err().code,
                 CODE_EXPR_NOT_PORTABLE,
@@ -9909,11 +10085,11 @@ mod tests {
         // GUARD: a grammar-VALID but out-of-ENVELOPE node (multi-char string-literal
         // delim, or n>8) is still PG-renderable — the envelope stays SQLite-gated.
         assert!(
-            validate_expr(&split(", ", 1), SqlDialect::Postgres, &sc, 0).is_ok(),
+            validate_expr(&split(", ", 1), &POSTGRES, &sc, 0).is_ok(),
             "a multi-char STRING-LITERAL delim is grammar-valid → still loads on PG"
         );
         assert!(
-            validate_expr(&split(",", 9), SqlDialect::Postgres, &sc, 0).is_ok(),
+            validate_expr(&split(",", 9), &POSTGRES, &sc, 0).is_ok(),
             "n>8 is grammar-valid (positive int literal) → still loads on PG"
         );
     }
@@ -9922,11 +10098,11 @@ mod tests {
     fn empty_split_part_delimiter_is_a_neutral_grammar_refusal() {
         let c = cols();
         let sc = scope("users", &c);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             let error = validate_expr(&split("", 1), dialect, &sc, 7).unwrap_err();
             assert_eq!(error.code, CODE_EXPR_NOT_PORTABLE);
             assert_eq!(error.op_index, 7);
-            assert_eq!(error.dialect, dialect.id());
+            assert_eq!(error.dialect, dialect.clone());
             assert_eq!(
                 error.reason,
                 "c.fn.splitPart delimiter must be a non-empty string literal"
@@ -9953,7 +10129,7 @@ mod tests {
             r#fn: SynthFn::SplitPart,
             args: vec![Expr::col("name"), Expr::lit(IrScalar::Str(" ".into()))],
         };
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for d in [&POSTGRES, &SQLITE] {
             let err = validate_expr(&two_arg, d, &sc, 0).unwrap_err();
             assert_eq!(
                 err.code, CODE_UNSUPPORTED,
@@ -9967,7 +10143,7 @@ mod tests {
     fn split_part_non_ascii_delim_rejected() {
         let c = cols();
         let sc = scope("users", &c);
-        let err = validate_expr(&split("·", 1), SqlDialect::Sqlite, &sc, 0).unwrap_err();
+        let err = validate_expr(&split("·", 1), &SQLITE, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
@@ -9976,11 +10152,11 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         for n in [0_i64, -1, 9, 100] {
-            let err = validate_expr(&split(" ", n), SqlDialect::Sqlite, &sc, 0).unwrap_err();
+            let err = validate_expr(&split(" ", n), &SQLITE, &sc, 0).unwrap_err();
             assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE, "n={n} must reject");
         }
         // n=8 is the boundary that PASSES.
-        assert!(validate_expr(&split(" ", 8), SqlDialect::Sqlite, &sc, 0).is_ok());
+        assert!(validate_expr(&split(" ", 8), &SQLITE, &sc, 0).is_ok());
     }
 
     // ── (b') the remaining SynthFn arities — structural backstop ───────────
@@ -9999,7 +10175,7 @@ mod tests {
         // SQLite (not a dialect-gated portability reject).
         let sc = TargetScope::structural_only("t");
         let e = synth(SynthFn::Now, vec![Expr::lit(IrScalar::Int(1))]);
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for d in [&POSTGRES, &SQLITE] {
             let err = validate_expr(&e, d, &sc, 0).unwrap_err();
             assert_eq!(
                 err.code, CODE_UNSUPPORTED,
@@ -10008,22 +10184,22 @@ mod tests {
             assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         }
         // zero-arg form passes on both.
-        assert!(validate_expr(&synth(SynthFn::Now, vec![]), SqlDialect::Postgres, &sc, 0).is_ok());
-        assert!(validate_expr(&synth(SynthFn::Now, vec![]), SqlDialect::Sqlite, &sc, 0).is_ok());
+        assert!(validate_expr(&synth(SynthFn::Now, vec![]), &POSTGRES, &sc, 0).is_ok());
+        assert!(validate_expr(&synth(SynthFn::Now, vec![]), &SQLITE, &sc, 0).is_ok());
     }
 
     #[test]
     fn exact_uuid_generator_dialect_support_is_validated() {
         let sc = TargetScope::structural_only("t");
-        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+        for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
             assert!(
                 validate_expr(&Expr::UuidV4, dialect, &sc, 0).is_ok(),
                 "UUIDv4 has an exact database lowering on {dialect:?}"
             );
         }
 
-        assert!(validate_expr(&Expr::UuidV7, SqlDialect::Postgres, &sc, 0).is_ok());
-        for dialect in [SqlDialect::Mysql, SqlDialect::Sqlite] {
+        assert!(validate_expr(&Expr::UuidV7, &POSTGRES, &sc, 0).is_ok());
+        for dialect in [&MYSQL, &SQLITE] {
             let error = validate_expr(&Expr::UuidV7, dialect, &sc, 0).unwrap_err();
             assert_eq!(error.code, CODE_EXPR_NOT_PORTABLE);
             assert!(error.reason.contains("PostgreSQL 18+"), "got: {error}");
@@ -10038,7 +10214,7 @@ mod tests {
         let sc = scope("users", &c);
         // 0 args and 1 arg (delimiter only, no values) are out of shape.
         for bad in [vec![], vec![Expr::lit(IrScalar::Str(",".into()))]] {
-            for d in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+            for d in [&POSTGRES, &SQLITE] {
                 let err =
                     validate_expr(&synth(SynthFn::ConcatWs, bad.clone()), d, &sc, 0).unwrap_err();
                 assert_eq!(
@@ -10052,7 +10228,7 @@ mod tests {
             SynthFn::ConcatWs,
             vec![Expr::lit(IrScalar::Str(",".into())), Expr::col("name")],
         );
-        assert!(validate_expr(&ok, SqlDialect::Sqlite, &sc, 0).is_ok());
+        assert!(validate_expr(&ok, &SQLITE, &sc, 0).is_ok());
     }
 
     #[test]
@@ -10071,11 +10247,11 @@ mod tests {
         );
         // PG: a non-literal delimiter is fine.
         assert!(
-            validate_expr(&e, SqlDialect::Postgres, &sc, 0).is_ok(),
+            validate_expr(&e, &POSTGRES, &sc, 0).is_ok(),
             "a non-literal concatWs delimiter must LOAD on a Postgres target"
         );
         // SQLite: the structural literal-delim gate rejects it.
-        let err = validate_expr(&e, SqlDialect::Sqlite, &sc, 0).unwrap_err();
+        let err = validate_expr(&e, &SQLITE, &sc, 0).unwrap_err();
         assert_eq!(
             err.code, CODE_EXPR_NOT_PORTABLE,
             "a non-literal concatWs delimiter must reject on SQLite (literal-delim gate); got: {err}"
@@ -10092,7 +10268,7 @@ mod tests {
             SynthFn::ConcatWs,
             vec![Expr::lit(IrScalar::Str(",".into())), split(", ", 1)],
         );
-        let err = validate_expr(&e, SqlDialect::Sqlite, &sc, 0).unwrap_err();
+        let err = validate_expr(&e, &SQLITE, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
@@ -10121,10 +10297,10 @@ mod tests {
         )]);
 
         assert!(
-            validate_expr(&e, SqlDialect::Postgres, &sc, 0).is_ok(),
+            validate_expr(&e, &POSTGRES, &sc, 0).is_ok(),
             "a postgres-only dialect() covers the PostgreSQL target"
         );
-        for d in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&SQLITE, &MYSQL] {
             let err = validate_expr(&e, d, &sc, 0).unwrap_err();
             assert_eq!(
                 err.code, CODE_EXPR_NOT_PORTABLE,
@@ -10150,7 +10326,7 @@ mod tests {
             ),
             (zero_migrate_ir::dialect::MYSQL, Expr::lit(IrScalar::Int(0))),
         ]);
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &SQLITE, &MYSQL] {
             assert!(
                 validate_expr(&e, d, &sc, 0).is_ok(),
                 "an explicit leg covers the {d:?} target"
@@ -10176,7 +10352,7 @@ mod tests {
             (zero_migrate_ir::dialect::SQLITE, Expr::col("name")),
             (zero_migrate_ir::dialect::MYSQL, Expr::col("name")),
         ]);
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &SQLITE, &MYSQL] {
             validate_expr(&e, d, &sc, 0).unwrap_or_else(|err| {
                 panic!("pgColumnSize in the postgres leg must validate on covered {d:?}: {err}")
             });
@@ -10196,7 +10372,7 @@ mod tests {
                 },
             ),
         ]);
-        validate_expr(&e, SqlDialect::Sqlite, &sc, 0).expect(
+        validate_expr(&e, &SQLITE, &sc, 0).expect(
             "an unregistered non-target leg must not borrow SQLite's refusal of a vendor node",
         );
     }
@@ -10216,9 +10392,9 @@ mod tests {
             ),
             (zero_migrate_ir::dialect::SQLITE, Expr::col("name")),
         ]);
-        assert!(validate_expr(&e, SqlDialect::Postgres, &sc, 0).is_ok());
-        assert!(validate_expr(&e, SqlDialect::Sqlite, &sc, 0).is_ok());
-        let err = validate_expr(&e, SqlDialect::Mysql, &sc, 0).unwrap_err();
+        assert!(validate_expr(&e, &POSTGRES, &sc, 0).is_ok());
+        assert!(validate_expr(&e, &SQLITE, &sc, 0).is_ok());
+        let err = validate_expr(&e, &MYSQL, &sc, 0).unwrap_err();
         assert_eq!(
             err.code, CODE_EXPR_NOT_PORTABLE,
             "a dialect() with no mysql leg must still refuse MySQL; got: {err}"
@@ -10232,7 +10408,7 @@ mod tests {
         // node, the structural gate refuses it).
         let sc = TargetScope::structural_only("t");
         let e = dialectal([]);
-        for d in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for d in [&POSTGRES, &SQLITE, &MYSQL] {
             let err = validate_expr(&e, d, &sc, 0).unwrap_err();
             assert_eq!(
                 err.code, CODE_UNSUPPORTED,
@@ -10257,7 +10433,7 @@ mod tests {
                 Expr::col("ghost"), // not a column on `users`
             ),
         ]);
-        let err = validate_expr(&e, SqlDialect::Postgres, &sc, 0).unwrap_err();
+        let err = validate_expr(&e, &POSTGRES, &sc, 0).unwrap_err();
         assert_eq!(
             err.code, CODE_UNSUPPORTED,
             "an unresolved ColRef in ANY leg must reject (rule c), even off-target; got: {err}"
@@ -10278,7 +10454,7 @@ mod tests {
                 Expr::lit(IrScalar::Int(1)),
             ],
         };
-        let err = validate_expr(&e, SqlDialect::Sqlite, &sc, 0).unwrap_err();
+        let err = validate_expr(&e, &SQLITE, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
@@ -10304,7 +10480,7 @@ mod tests {
                 Expr::lit(IrScalar::Int(1)),
             ],
         };
-        let err = validate_expr(&e, SqlDialect::Postgres, &sc, 0).unwrap_err();
+        let err = validate_expr(&e, &POSTGRES, &sc, 0).unwrap_err();
         assert_eq!(
             err.code, CODE_UNSUPPORTED,
             "an unresolved ColRef in the delim slot must reject on PG (rule c), got: {err}"
@@ -10325,7 +10501,7 @@ mod tests {
                 Expr::col("ghost"),
             ],
         };
-        let err = validate_expr(&e, SqlDialect::Postgres, &sc, 0).unwrap_err();
+        let err = validate_expr(&e, &POSTGRES, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
     }
@@ -10345,7 +10521,7 @@ mod tests {
             r#fn: SynthFn::SplitPart,
             args: vec![Expr::col("name"), bad_inner, Expr::lit(IrScalar::Int(1))],
         };
-        let err = validate_expr(&e, SqlDialect::Postgres, &sc, 0).unwrap_err();
+        let err = validate_expr(&e, &POSTGRES, &sc, 0).unwrap_err();
         assert_eq!(
             err.code, CODE_UNSUPPORTED,
             "a malformed nested splitPart in the delim slot must be reached on PG, got: {err}"
@@ -10402,7 +10578,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres).unwrap_err();
+        let err = validate_ir_platform(&ir, &POSTGRES).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
         assert_eq!(err.op_index, 0);
     }
@@ -10413,14 +10589,14 @@ mod tests {
     fn colref_on_target_table_validates() {
         let c = cols();
         let sc = scope("users", &c);
-        assert!(validate_expr(&Expr::col("name"), SqlDialect::Postgres, &sc, 0).is_ok());
+        assert!(validate_expr(&Expr::col("name"), &POSTGRES, &sc, 0).is_ok());
     }
 
     #[test]
     fn colref_not_on_target_table_rejected() {
         let c = cols();
         let sc = scope("users", &c);
-        let err = validate_expr(&Expr::col("nope"), SqlDialect::Postgres, &sc, 3).unwrap_err();
+        let err = validate_expr(&Expr::col("nope"), &POSTGRES, &sc, 3).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert_eq!(err.op_index, 3);
@@ -10434,8 +10610,7 @@ mod tests {
         // is not a column on `users` → rejected (cross-table is not expressible).
         let c = cols();
         let sc = scope("users", &c);
-        let err =
-            validate_expr(&Expr::col("customers.name"), SqlDialect::Postgres, &sc, 0).unwrap_err();
+        let err = validate_expr(&Expr::col("customers.name"), &POSTGRES, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
     }
@@ -10444,9 +10619,9 @@ mod tests {
     fn structural_only_scope_skips_colref_resolution() {
         let sc = TargetScope::structural_only("users");
         // A col not in any set still validates structurally (resolution deferred).
-        assert!(validate_expr(&Expr::col("anything"), SqlDialect::Sqlite, &sc, 0).is_ok());
+        assert!(validate_expr(&Expr::col("anything"), &SQLITE, &sc, 0).is_ok());
         // …but an out-of-envelope splitPart STILL rejects (structural).
-        let err = validate_expr(&split(", ", 1), SqlDialect::Sqlite, &sc, 0).unwrap_err();
+        let err = validate_expr(&split(", ", 1), &SQLITE, &sc, 0).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
@@ -10482,7 +10657,7 @@ mod tests {
         serde_json::from_str(json).expect("test op JSON")
     }
 
-    fn validate_ir_platform(ir: &MigrationIr, dialect: SqlDialect) -> Result<(), AuthoringError> {
+    fn validate_ir_platform(ir: &MigrationIr, dialect: &DialectId) -> Result<(), AuthoringError> {
         validate_ir_scoped(ir, dialect, None)
     }
 
@@ -10609,8 +10784,8 @@ mod tests {
             vec![],
         )]);
 
-        assert!(validate_ir_platform(&ir, SqlDialect::Postgres).is_ok());
-        let err = validate_ir_platform(&ir, SqlDialect::Sqlite)
+        assert!(validate_ir_platform(&ir, &POSTGRES).is_ok());
+        let err = validate_ir_platform(&ir, &SQLITE)
             .expect_err("non-affirmed partitioning must fail closed off Postgres");
         assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED, "got: {err}");
     }
@@ -10636,7 +10811,7 @@ mod tests {
             vec![],
             vec![unique_idx(&["tenant_id"])],
         )]);
-        let err = validate_ir_platform(&bad, SqlDialect::Postgres)
+        let err = validate_ir_platform(&bad, &POSTGRES)
             .expect_err("unique indexes on partitioned parents must cover the key");
         assert_eq!(err.code, CODE_PARTITION_KEY_COVERAGE, "got: {err}");
 
@@ -10648,7 +10823,7 @@ mod tests {
             vec![],
             vec![unique_idx(&["tenant_id", "ts"])],
         )]);
-        assert!(validate_ir_platform(&ok, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&ok, &POSTGRES).is_ok());
     }
 
     #[test]
@@ -10674,7 +10849,7 @@ mod tests {
                 },
             ),
         ]);
-        let err = validate_ir_platform(&range_missing_default, SqlDialect::Postgres)
+        let err = validate_ir_platform(&range_missing_default, &POSTGRES)
             .expect_err("collapse range without default must refuse");
         assert_eq!(err.code, CODE_PARTITION_BOUNDS_NOT_TOTAL, "got: {err}");
 
@@ -10698,7 +10873,7 @@ mod tests {
                 },
             ),
         ]);
-        let err = validate_ir_platform(&list_missing_default, SqlDialect::Postgres)
+        let err = validate_ir_platform(&list_missing_default, &POSTGRES)
             .expect_err("collapse list without default must refuse");
         assert_eq!(err.code, CODE_PARTITION_BOUNDS_NOT_TOTAL, "got: {err}");
 
@@ -10723,7 +10898,7 @@ mod tests {
                 },
             ),
         ]);
-        let err = validate_ir_platform(&hash_partial, SqlDialect::Postgres)
+        let err = validate_ir_platform(&hash_partial, &POSTGRES)
             .expect_err("collapse hash must cover every residue");
         assert_eq!(err.code, CODE_PARTITION_BOUNDS_NOT_TOTAL, "got: {err}");
 
@@ -10756,7 +10931,7 @@ mod tests {
                 },
             ),
         ]);
-        assert!(validate_ir_platform(&hash_total, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&hash_total, &POSTGRES).is_ok());
     }
 
     #[test]
@@ -10801,7 +10976,7 @@ mod tests {
             child_1(),
             drop_part("sessions", "sessions_0"),
         ]);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             let err = validate_ir_platform(&collapse_drop, dialect)
                 .expect_err("collapse hash child drop must be recording-level underivable");
             assert_eq!(err.code, CODE_PARTITION_HASH_DROP_UNDERIVABLE, "got: {err}");
@@ -10813,7 +10988,7 @@ mod tests {
             child_1(),
             drop_part("sessions", "sessions_0"),
         ]);
-        assert!(validate_ir_platform(&pg_only_drop, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&pg_only_drop, &POSTGRES).is_ok());
     }
 
     #[test]
@@ -10836,7 +11011,7 @@ mod tests {
             create_part("events_default", "events", PartitionBounds::Default),
         ]);
 
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("range collapse v1 supports one key column");
         assert_eq!(
             err.code, CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED,
@@ -10860,7 +11035,7 @@ mod tests {
             ),
             create_part("events_default", "events", PartitionBounds::Default),
         ]);
-        let err = validate_ir_platform(&nullable, SqlDialect::Postgres)
+        let err = validate_ir_platform(&nullable, &POSTGRES)
             .expect_err("collapse partition keys must be not null");
         assert_eq!(
             err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
@@ -10887,7 +11062,7 @@ mod tests {
                 existence_guard: None,
             },
         ]);
-        let err = validate_ir_platform(&dropped_later, SqlDialect::Postgres)
+        let err = validate_ir_platform(&dropped_later, &POSTGRES)
             .expect_err("later dropNotNull on a collapse key must refuse");
         assert_eq!(
             err.code, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
@@ -10926,7 +11101,7 @@ mod tests {
             range("events_a", 0, 10),
             range("events_b", 5, 20),
         ]);
-        let err = validate_ir_platform(&bad, SqlDialect::Postgres)
+        let err = validate_ir_platform(&bad, &POSTGRES)
             .expect_err("overlapping range siblings must refuse");
         assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
 
@@ -10935,7 +11110,7 @@ mod tests {
             range("events_a", 0, 10),
             range("events_b", 10, 20),
         ]);
-        assert!(validate_ir_platform(&ok, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&ok, &POSTGRES).is_ok());
     }
 
     #[test]
@@ -10964,8 +11139,8 @@ mod tests {
                 },
             ),
         ]);
-        let err = validate_ir_platform(&bad, SqlDialect::Postgres)
-            .expect_err("duplicate list values must refuse");
+        let err =
+            validate_ir_platform(&bad, &POSTGRES).expect_err("duplicate list values must refuse");
         assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
 
         let ok = ir_with(vec![
@@ -10985,7 +11160,7 @@ mod tests {
                 },
             ),
         ]);
-        assert!(validate_ir_platform(&ok, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&ok, &POSTGRES).is_ok());
     }
 
     #[test]
@@ -11023,7 +11198,7 @@ mod tests {
                 },
             ),
         ]);
-        let err = validate_ir_platform(&bad, SqlDialect::Postgres)
+        let err = validate_ir_platform(&bad, &POSTGRES)
             .expect_err("hash moduli must be comparable by divisibility");
         assert_eq!(err.code, CODE_PARTITION_BOUNDS_ILL_FORMED, "got: {err}");
 
@@ -11046,7 +11221,7 @@ mod tests {
                 },
             ),
         ]);
-        assert!(validate_ir_platform(&ok, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&ok, &POSTGRES).is_ok());
     }
 
     // ── schema confinement + guard direction + schema-ident safety ──────────────
@@ -11065,7 +11240,7 @@ mod tests {
             existence_guard: None,
         }]);
         let scope = SchemaScope::Single("app_a".into());
-        let err = validate_ir_scoped(&cross, SqlDialect::Postgres, Some(&scope)).unwrap_err();
+        let err = validate_ir_scoped(&cross, &POSTGRES, Some(&scope)).unwrap_err();
         assert_eq!(err.code, CODE_CROSS_SCHEMA, "got: {err}");
 
         // schema == project schema (case-insensitive) passes.
@@ -11075,7 +11250,7 @@ mod tests {
             schema: Some("APP_A".into()),
             existence_guard: None,
         }]);
-        assert!(validate_ir_scoped(&same, SqlDialect::Postgres, Some(&scope)).is_ok());
+        assert!(validate_ir_scoped(&same, &POSTGRES, Some(&scope)).is_ok());
 
         // Absent schema passes.
         let none = ir_with(vec![Op::DropTable {
@@ -11084,7 +11259,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        assert!(validate_ir_scoped(&none, SqlDialect::Postgres, Some(&scope)).is_ok());
+        assert!(validate_ir_scoped(&none, &POSTGRES, Some(&scope)).is_ok());
     }
 
     /// Defaulted public validation (`None` scope) has no project schema available,
@@ -11100,10 +11275,10 @@ mod tests {
             existence_guard: None,
         }]);
         // Defaulted public validation: permitted for non-vendor schema qualifiers.
-        assert!(validate_ir_scoped(&foreign, SqlDialect::Postgres, None).is_ok());
+        assert!(validate_ir_scoped(&foreign, &POSTGRES, None).is_ok());
         // Platform allow-list excluding "anything": refused.
         let scope = SchemaScope::Allowlist(vec!["zero_migrate".into(), "public".into()]);
-        let err = validate_ir_scoped(&foreign, SqlDialect::Postgres, Some(&scope)).unwrap_err();
+        let err = validate_ir_scoped(&foreign, &POSTGRES, Some(&scope)).unwrap_err();
         assert_eq!(err.code, CODE_CROSS_SCHEMA);
         // A schema IN the allow-list passes.
         let ok = ir_with(vec![Op::DropTable {
@@ -11112,7 +11287,7 @@ mod tests {
             schema: Some("zero_migrate".into()),
             existence_guard: None,
         }]);
-        assert!(validate_ir_scoped(&ok, SqlDialect::Postgres, Some(&scope)).is_ok());
+        assert!(validate_ir_scoped(&ok, &POSTGRES, Some(&scope)).is_ok());
     }
 
     /// A `schema` qualifier that is not a safe bare identifier (injection-shaped) is
@@ -11128,7 +11303,7 @@ mod tests {
                 existence_guard: None,
             }]);
             // Even defaulted public validation (None scope) rejects an injection-shaped ident.
-            let err = validate_ir_scoped(&ir, SqlDialect::Postgres, None).unwrap_err();
+            let err = validate_ir_scoped(&ir, &POSTGRES, None).unwrap_err();
             assert_eq!(
                 err.code, CODE_INVALID_SCHEMA_IDENT,
                 "schema {bad:?} got: {err}"
@@ -11155,7 +11330,7 @@ mod tests {
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfExists),
         }]);
-        let err = validate_ir_scoped(&bad_create, SqlDialect::Postgres, None).unwrap_err();
+        let err = validate_ir_scoped(&bad_create, &POSTGRES, None).unwrap_err();
         assert_eq!(err.code, CODE_GUARD_DIRECTION, "got: {err}");
 
         // ifNotExists on dropTable — illegal.
@@ -11165,7 +11340,7 @@ mod tests {
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
-        let err2 = validate_ir_scoped(&bad_drop, SqlDialect::Postgres, None).unwrap_err();
+        let err2 = validate_ir_scoped(&bad_drop, &POSTGRES, None).unwrap_err();
         assert_eq!(err2.code, CODE_GUARD_DIRECTION);
 
         // The LEGAL directions pass.
@@ -11182,14 +11357,14 @@ mod tests {
             schema: None,
             existence_guard: Some(crate::model::ir::ExistenceGuard::IfNotExists),
         }]);
-        assert!(validate_ir_scoped(&ok_create, SqlDialect::Postgres, None).is_ok());
+        assert!(validate_ir_scoped(&ok_create, &POSTGRES, None).is_ok());
     }
 
     #[test]
     fn alter_primary_key_structural_contract_is_portable_and_order_exact() {
         use crate::model::ir::AlterPrimaryKeyAction;
 
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             for action in [
                 AlterPrimaryKeyAction::Add {
                     columns: vec!["tenant_id".into(), "order_id".into()],
@@ -11244,7 +11419,7 @@ mod tests {
                     action,
                     schema: None,
                 },
-                SqlDialect::Postgres,
+                &POSTGRES,
                 7,
             )
             .expect_err("malformed lifecycle tuple must fail closed");
@@ -11287,7 +11462,7 @@ mod tests {
 
         let error = validate_ir_platform(
             &ir_with(vec![target.clone(), drop_pk.clone(), child.clone()]),
-            SqlDialect::Postgres,
+            &POSTGRES,
         )
         .expect_err("drop removes the primary key as a logical FK candidate");
         assert!(error
@@ -11301,11 +11476,8 @@ mod tests {
               "include":[]
             }"#,
         );
-        validate_ir_platform(
-            &ir_with(vec![target, alternate, drop_pk, child]),
-            SqlDialect::Postgres,
-        )
-        .expect("an exact alternate unique key survives the primary-key drop");
+        validate_ir_platform(&ir_with(vec![target, alternate, drop_pk, child]), &POSTGRES)
+            .expect("an exact alternate unique key survives the primary-key drop");
     }
 
     #[test]
@@ -11324,7 +11496,7 @@ mod tests {
             }"#,
         )]);
 
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             validate_ir_scoped(&ir, dialect, None).unwrap_or_else(|error| {
                 panic!(
                     "{dialect:?} must accept an ordered author-owned composite primary key: {error}"
@@ -11344,7 +11516,7 @@ mod tests {
             ),
         ];
 
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             for (primary_key, reason) in &invalid {
                 let ir = ir_with(vec![Op::CreateTable {
                     name: "memberships".into(),
@@ -11392,8 +11564,7 @@ mod tests {
             }"#,
         )]);
 
-        validate_ir_scoped(&ir, SqlDialect::Postgres, None)
-            .expect("platform profile accepts no primary key");
+        validate_ir_scoped(&ir, &POSTGRES, None).expect("platform profile accepts no primary key");
     }
 
     // The author-PK CONFORMANCE refusal is owned by the injection
@@ -11419,7 +11590,7 @@ mod tests {
 
         // The pure PK-column validation still passes (the columns exist); the shape
         // conformance is the injection resolver's job.
-        validate_ir_scoped(&ir, SqlDialect::Postgres, None)
+        validate_ir_scoped(&ir, &POSTGRES, None)
             .expect("pure primaryKey validation passes (columns present)");
 
         let err = crate::model::table_shape::resolve_create_table_policy(
@@ -11457,7 +11628,7 @@ mod tests {
         )
         .expect("confined table-shape resolution succeeds");
 
-        validate_ir_scoped(&resolved, SqlDialect::Postgres, None)
+        validate_ir_scoped(&resolved, &POSTGRES, None)
             .expect("resolved confined system shape remains valid");
     }
 
@@ -11482,7 +11653,7 @@ mod tests {
 
         // At LOAD: structural-only scope ⇒ the unresolved ColRef is NOT caught.
         assert!(
-            validate_ir(&ir, SqlDialect::Postgres).is_ok(),
+            validate_ir(&ir, &POSTGRES).is_ok(),
             "load-time validation is structural-only for DML (column set unknown)"
         );
 
@@ -11492,7 +11663,7 @@ mod tests {
             "users".to_string(),
             vec!["id".to_string(), "name".to_string()],
         );
-        let err = validate_ir_resolved(&ir, SqlDialect::Postgres, &live)
+        let err = validate_ir_resolved(&ir, &POSTGRES, &live)
             .expect_err("an unresolved ColRef must be rejected at the resolved apply seam");
         assert_eq!(
             err.code, CODE_UNSUPPORTED,
@@ -11544,7 +11715,7 @@ mod tests {
     #[test]
     fn validate_ir_resolved_rejects_an_unresolved_colref_inside_a_selected_leg() {
         let ir = ir_with(vec![dialectal_legs(Some(vec![ghost_update()]), None)]);
-        let err = validate_ir_resolved(&ir, SqlDialect::Postgres, &live_users())
+        let err = validate_ir_resolved(&ir, &POSTGRES, &live_users())
             .expect_err("a dialect() wrapper must not hide nested DML from resolution");
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(
@@ -11561,7 +11732,7 @@ mod tests {
     fn validate_ir_resolved_ignores_an_unresolved_colref_in_an_unselected_leg() {
         let ir = ir_with(vec![dialectal_legs(None, Some(vec![ghost_update()]))]);
         assert!(
-            validate_ir_resolved(&ir, SqlDialect::Postgres, &live_users()).is_ok(),
+            validate_ir_resolved(&ir, &POSTGRES, &live_users()).is_ok(),
             "PostgreSQL never runs the mysql leg, so its columns are not resolved here"
         );
     }
@@ -11582,9 +11753,47 @@ mod tests {
             None,
         )]);
         assert!(
-            validate_ir_resolved(&ir, SqlDialect::Postgres, &live_users()).is_ok(),
+            validate_ir_resolved(&ir, &POSTGRES, &live_users()).is_ok(),
             "`id` is a live column of `users`, so the leg's update resolves"
         );
+    }
+
+    #[test]
+    fn dialectal_unregistered_non_target_leg_never_borrows_selected_vendor_policy() {
+        let op = Op::Dialectal {
+            legs: [
+                (
+                    SQLITE,
+                    vec![Op::DropTable {
+                        table: "selected".to_string(),
+                        cascade: None,
+                        schema: None,
+                        existence_guard: None,
+                    }],
+                ),
+                (
+                    DialectId::new("duckdb"),
+                    vec![Op::PgRaw {
+                        sql: "SELECT 1".to_string(),
+                        reason: "the owning backend validates this leg".to_string(),
+                    }],
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        validate_ir(&ir_with(vec![op]), &SQLITE)
+            .expect("an unregistered non-target leg must not borrow SQLite's vendor-op refusal");
+    }
+
+    #[test]
+    fn an_unregistered_target_is_refused_even_for_an_empty_migration() {
+        let duckdb = DialectId::new("duckdb");
+        let err = validate_ir(&ir_with(Vec::new()), &duckdb)
+            .expect_err("validation needs the target backend's registered policy");
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.dialect, duckdb);
+        assert!(err.reason.contains("no backend is registered"));
     }
 
     #[test]
@@ -11610,7 +11819,7 @@ mod tests {
 
         // At LOAD: structural-only ⇒ the unresolved ColRef is NOT caught (this is
         // the asymmetry SA-18 closes — pre-fix the resolved seam also missed it).
-        assert!(validate_ir(&ir, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir(&ir, &POSTGRES).is_ok());
 
         // At APPLY: resolve against the live columns of `users` (no `ghost`).
         let mut live: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -11618,7 +11827,7 @@ mod tests {
             "users".to_string(),
             vec!["id".to_string(), "name".to_string()],
         );
-        let err = validate_ir_resolved(&ir, SqlDialect::Postgres, &live)
+        let err = validate_ir_resolved(&ir, &POSTGRES, &live)
             .expect_err("an unresolved ColRef in DO UPDATE must be rejected at the resolved seam");
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.op_index, 0);
@@ -11642,7 +11851,7 @@ mod tests {
             vec!["id".to_string(), "name".to_string()],
         );
         assert!(
-            validate_ir_resolved(&ir, SqlDialect::Postgres, &live).is_ok(),
+            validate_ir_resolved(&ir, &POSTGRES, &live).is_ok(),
             "a ColRef that resolves to a live column passes the apply-seam (c) check"
         );
     }
@@ -11721,8 +11930,8 @@ mod tests {
                 schema: None,
             },
         ]);
-        assert!(validate_ir_platform(&ir, SqlDialect::Postgres).is_ok());
-        assert!(validate_ir_platform(&ir, SqlDialect::Sqlite).is_ok());
+        assert!(validate_ir_platform(&ir, &POSTGRES).is_ok());
+        assert!(validate_ir_platform(&ir, &SQLITE).is_ok());
     }
 
     fn rename_column(table: &str, from: &str, to: &str) -> Op {
@@ -11743,7 +11952,7 @@ mod tests {
             rename_column("users", "name", "full_name"),
         ]);
 
-        let err = validate_ir(&ir, SqlDialect::Postgres)
+        let err = validate_ir(&ir, &POSTGRES)
             .expect_err("a migration cannot safely open two rename contracts on one table");
         assert_eq!(err.code, CODE_OP_INVALID);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
@@ -11758,7 +11967,7 @@ mod tests {
             rename_column("users", "last", "last_name"),
         ]);
 
-        let err = validate_ir(&ir, SqlDialect::Postgres)
+        let err = validate_ir(&ir, &POSTGRES)
             .expect_err("independent renames on one table have the same contract conflict");
         assert_eq!(err.code, CODE_OP_INVALID);
         assert_eq!(err.op_index, 1);
@@ -11776,7 +11985,7 @@ mod tests {
             rename_column("users", "name", "display_name"),
         ]);
 
-        let err = validate_ir(&ir, SqlDialect::Postgres)
+        let err = validate_ir(&ir, &POSTGRES)
             .expect_err("a same-table DDL step before a rename must be rejected");
         assert_eq!(err.code, CODE_OP_INVALID);
         assert_eq!(err.op_index, 1);
@@ -11795,7 +12004,7 @@ mod tests {
             },
         ]);
 
-        let err = validate_ir(&ir, SqlDialect::Postgres)
+        let err = validate_ir(&ir, &POSTGRES)
             .expect_err("a same-table DML step after a rename must be rejected");
         assert_eq!(err.code, CODE_OP_INVALID);
         assert_eq!(err.op_index, 1);
@@ -11814,9 +12023,9 @@ mod tests {
             },
         ]);
 
-        validate_ir(&ir, SqlDialect::Sqlite)
+        validate_ir(&ir, &SQLITE)
             .expect("SQLite applies renameColumn as one rebuild without a pending contract");
-        validate_ir(&ir, SqlDialect::Postgres)
+        validate_ir(&ir, &POSTGRES)
             .expect_err("PostgreSQL must still isolate its online rename contract");
     }
 
@@ -11827,7 +12036,7 @@ mod tests {
             rename_column("accounts", "label", "display_label"),
         ]);
 
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for dialect in [&POSTGRES, &SQLITE] {
             validate_ir(&ir, dialect).unwrap_or_else(|err| {
                 panic!("renames on different tables should remain valid on {dialect:?}: {err}")
             });
@@ -11852,7 +12061,7 @@ mod tests {
             },
         ]);
 
-        validate_ir(&ir, SqlDialect::Postgres)
+        validate_ir(&ir, &POSTGRES)
             .expect("DDL and DML on a different table remain valid companions");
     }
 
@@ -11876,19 +12085,19 @@ mod tests {
             .collect(),
         }]);
 
-        let err = validate_ir(&ir, SqlDialect::Postgres)
+        let err = validate_ir(&ir, &POSTGRES)
             .expect_err("the two renames in the selected PostgreSQL leg must be rejected");
         assert_eq!(err.code, CODE_OP_INVALID);
         assert_eq!(err.op_index, 0);
 
-        validate_ir(&ir, SqlDialect::Sqlite)
+        validate_ir(&ir, &SQLITE)
             .expect("mutually exclusive dialect legs do not run in one migration");
     }
 
     #[test]
     fn validate_ir_accepts_date_columns_on_all_dialects() {
         let ir = ir_with(vec![create_with_column("business_day", ColType::Date)]);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             validate_ir_platform(&ir, dialect)
                 .unwrap_or_else(|err| panic!("{dialect:?} should accept date columns: {err:?}"));
         }
@@ -11932,7 +12141,7 @@ mod tests {
 
         for op in [create_table, add_constraint] {
             let ir = ir_with(vec![op]);
-            let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+            let err = validate_ir_platform(&ir, &POSTGRES)
                 .expect_err("initiallyDeferred without deferrable must be rejected");
             assert_eq!(err.code, CODE_OP_INVALID);
             assert_eq!(err.reason, "initiallyDeferred requires deferrable");
@@ -11944,7 +12153,7 @@ mod tests {
         let ir = ir_with(vec![op_json(
             r#"{"op":"createSequence","name":"s","increment":0}"#,
         )]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres).unwrap_err();
+        let err = validate_ir_platform(&ir, &POSTGRES).unwrap_err();
         assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
         assert!(err.reason.contains("increment"));
     }
@@ -11954,7 +12163,7 @@ mod tests {
         let ir = ir_with(vec![op_json(
             r#"{"op":"alterSequence","name":"s","cache":0}"#,
         )]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres).unwrap_err();
+        let err = validate_ir_platform(&ir, &POSTGRES).unwrap_err();
         assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
         assert!(err.reason.contains("cache"));
     }
@@ -11964,7 +12173,7 @@ mod tests {
         let ir = ir_with(vec![op_json(
             r#"{"op":"createSequence","name":"s","minValue":10,"maxValue":9}"#,
         )]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres).unwrap_err();
+        let err = validate_ir_platform(&ir, &POSTGRES).unwrap_err();
         assert_eq!(err.code, CODE_SEQUENCE_OPTION_INVALID);
         assert!(err.reason.contains("minValue"));
     }
@@ -12029,11 +12238,11 @@ mod tests {
         )
         .expect("resolve confined table shape");
         assert!(
-            validate_ir(&ir, SqlDialect::Postgres).is_ok(),
+            validate_ir(&ir, &POSTGRES).is_ok(),
             "a partial index on `deleted_at` must resolve system fields (PG)"
         );
         assert!(
-            validate_ir(&ir, SqlDialect::Sqlite).is_ok(),
+            validate_ir(&ir, &SQLITE).is_ok(),
             "a partial index on `deleted_at` must resolve system fields (SQLite)"
         );
     }
@@ -12080,7 +12289,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres).unwrap_err();
+        let err = validate_ir_platform(&ir, &POSTGRES).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
     }
@@ -12127,7 +12336,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres).unwrap_err();
+        let err = validate_ir_platform(&ir, &POSTGRES).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert_eq!(err.op_index, 0);
@@ -12153,7 +12362,7 @@ mod tests {
                 schema: None,
             },
         ]);
-        let err = validate_ir(&ir, SqlDialect::Sqlite).unwrap_err();
+        let err = validate_ir(&ir, &SQLITE).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
         assert_eq!(
             err.op_index, 1,
@@ -12186,7 +12395,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir(&ir, SqlDialect::Sqlite).unwrap_err();
+        let err = validate_ir(&ir, &SQLITE).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
         assert_eq!(err.op_index, 0);
     }
@@ -12222,7 +12431,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir(&ir, SqlDialect::Postgres).unwrap_err();
+        let err = validate_ir(&ir, &POSTGRES).unwrap_err();
         assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert_eq!(err.op_index, 0);
@@ -12266,7 +12475,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir(&ir, SqlDialect::Postgres).unwrap_err();
+        let err = validate_ir(&ir, &POSTGRES).unwrap_err();
         assert_eq!(err.code, CODE_IMMUTABLE_CONTEXT_VOLATILE);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert_eq!(err.op_index, 0);
@@ -12290,7 +12499,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir(&ir, SqlDialect::Sqlite).unwrap_err();
+        let err = validate_ir(&ir, &SQLITE).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
         assert!(err.reason.contains("setColumnType.using"));
@@ -12314,7 +12523,7 @@ mod tests {
             name: "bf".into(),
             schema: None,
         }]);
-        let err = validate_ir(&ir, SqlDialect::Sqlite).unwrap_err();
+        let err = validate_ir(&ir, &SQLITE).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
     }
 
@@ -12339,7 +12548,7 @@ mod tests {
             schema: None,
         }]);
 
-        let err = validate_ir(&ir, SqlDialect::Sqlite).unwrap_err();
+        let err = validate_ir(&ir, &SQLITE).unwrap_err();
         assert_eq!(err.code, CODE_IMMUTABLE_CONTEXT_VOLATILE);
         assert!(err.reason.contains("backfill filter"), "{err}");
         assert!(err.reason.contains("now()"), "{err}");
@@ -12368,7 +12577,7 @@ mod tests {
             schema: None,
         }]);
 
-        let err = validate_ir(&ir, SqlDialect::Postgres).unwrap_err();
+        let err = validate_ir(&ir, &POSTGRES).unwrap_err();
         assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
         assert!(err.reason.contains("backfill filter"), "{err}");
         assert!(err.reason.contains("count()"), "{err}");
@@ -12392,7 +12601,7 @@ mod tests {
                 name: "bf".into(),
                 schema: None,
             }]);
-            let error = validate_ir(&ir, SqlDialect::Postgres)
+            let error = validate_ir(&ir, &POSTGRES)
                 .expect_err("cursor components are immutable destinations");
             assert_eq!(error.code, CODE_OP_INVALID);
             assert!(error.reason.contains(assigned), "{error}");
@@ -12402,7 +12611,7 @@ mod tests {
 
     #[test]
     fn case_insensitive_dialects_reject_case_variant_cursor_mutation() {
-        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&SQLITE, &MYSQL] {
             let ir = ir_with(vec![Op::Backfill {
                 table: "events".into(),
                 cursor_columns: vec!["event_id".into()],
@@ -12443,7 +12652,7 @@ mod tests {
                 name: "bf".into(),
                 schema: None,
             }]);
-            let error = validate_ir(&ir, SqlDialect::Postgres)
+            let error = validate_ir(&ir, &POSTGRES)
                 .expect_err("external invariant name is operator-visible metadata");
             assert_eq!(error.code, CODE_OP_INVALID);
             assert!(error.reason.contains("externalInvariant"), "{error}");
@@ -12466,7 +12675,7 @@ mod tests {
             name: "bf".into(),
             schema: None,
         }]);
-        validate_ir(&accepted, SqlDialect::Postgres)
+        validate_ir(&accepted, &POSTGRES)
             .expect("a named external invariant is explicitly authorable");
     }
 
@@ -12478,7 +12687,7 @@ mod tests {
             writes_quiesced: "   ".into(),
             schema: None,
         }]);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             let error = validate_ir(&rejected, dialect)
                 .expect_err("writer quiescence acknowledgment is required metadata");
             assert_eq!(error.code, CODE_OP_INVALID);
@@ -12492,7 +12701,7 @@ mod tests {
             writes_quiesced: "orders_import_window".into(),
             schema: None,
         }]);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             validate_ir(&accepted, dialect)
                 .expect("a named writer-quiescence invariant is explicitly authorable");
         }
@@ -12538,7 +12747,7 @@ mod tests {
         // LOAD-time (the tsc-analog): structural-only — the plain-string name is
         // ACCEPTED, exactly as tsc accepts the string literal. NOT rejected here.
         assert!(
-            validate_ir(&ir, SqlDialect::Postgres).is_ok(),
+            validate_ir(&ir, &POSTGRES).is_ok(),
             "a plain-string column name is accepted at load (the tsc-analog), never name-bound"
         );
 
@@ -12550,7 +12759,7 @@ mod tests {
             "users".to_string(),
             vec!["id".to_string(), "name".to_string()],
         );
-        let err = validate_ir_resolved(&ir, SqlDialect::Postgres, &live)
+        let err = validate_ir_resolved(&ir, &POSTGRES, &live)
             .expect_err("a non-existent column name must FAIL at the resolved apply seam");
         assert_eq!(
             err.code, CODE_UNSUPPORTED,
@@ -12744,7 +12953,7 @@ mod tests {
     fn p2a_create_table_accepts_a_valid_id_prefix() {
         let ir = ir_with(vec![create_with_id_prefix("post")]);
         assert!(
-            validate_ir_platform(&ir, SqlDialect::Postgres).is_ok(),
+            validate_ir_platform(&ir, &POSTGRES).is_ok(),
             "a well-formed, unreserved, in-length id prefix must validate"
         );
     }
@@ -12752,13 +12961,13 @@ mod tests {
     #[test]
     fn column_reference_accepts_a_valid_explicit_constraint_name() {
         let ir = ir_with(vec![create_with_reference_name("fk_orders_account")]);
-        assert!(validate_ir_platform(&ir, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&ir, &POSTGRES).is_ok());
     }
 
     #[test]
     fn column_reference_rejects_an_empty_explicit_constraint_name() {
         let ir = ir_with(vec![create_with_reference_name("")]);
-        let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let error = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("an empty foreign-key constraint name must fail closed");
         assert_eq!(error.code, CODE_OP_INVALID, "got: {error}");
         assert!(error.reason.contains("non-empty"), "got: {error}");
@@ -12768,7 +12977,7 @@ mod tests {
     fn column_reference_rejects_an_unsafe_explicit_constraint_name() {
         for name in ["9fk", "fk-orders", "fk orders", "fké"] {
             let ir = ir_with(vec![create_with_reference_name(name)]);
-            let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+            let error = validate_ir_platform(&ir, &POSTGRES)
                 .expect_err("an unsafe foreign-key constraint name must fail closed");
             assert_eq!(error.code, CODE_OP_INVALID, "{name:?}: {error}");
             assert!(
@@ -12782,7 +12991,7 @@ mod tests {
     fn column_reference_rejects_an_overlong_explicit_constraint_name() {
         let name = "f".repeat(crate::plan::author::pg_max_ident_bytes() + 1);
         let ir = ir_with(vec![create_with_reference_name(&name)]);
-        let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let error = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("an overlong foreign-key constraint name must fail closed");
         assert_eq!(error.code, CODE_OP_INVALID, "got: {error}");
         assert!(
@@ -12797,7 +13006,7 @@ mod tests {
     fn type_id_value_format_accepts_canonical_prefixes_on_exact_text() {
         let max_prefix = "a".repeat(crate::model::ir::TYPE_ID_MAX_PREFIX_LEN);
         for prefix in ["", "a", "my__type", max_prefix.as_str()] {
-            for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+            for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
                 let ir = ir_with(vec![create_with_type_id(prefix, ColType::Text, None)]);
                 assert!(
                     validate_ir_platform(&ir, dialect).is_ok(),
@@ -12820,7 +13029,7 @@ mod tests {
             overlong.as_str(),
         ] {
             let ir = ir_with(vec![create_with_type_id(prefix, ColType::Text, None)]);
-            let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+            let error = validate_ir_platform(&ir, &POSTGRES)
                 .expect_err("a noncanonical TypeID prefix must fail closed");
             assert_eq!(error.code, CODE_INVALID_TYPE_ID_PREFIX, "got: {error}");
         }
@@ -12836,7 +13045,7 @@ mod tests {
             },
         ] {
             let ir = ir_with(vec![create_with_type_id("user", ty, None)]);
-            let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+            let error = validate_ir_platform(&ir, &POSTGRES)
                 .expect_err("TypeID metadata on non-text storage must fail closed");
             assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
             assert!(error.reason.contains("exact text storage"), "got: {error}");
@@ -12850,7 +13059,7 @@ mod tests {
             ColType::Text,
             Some(false),
         )]);
-        let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let error = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("TypeID plus caseSensitive:false must fail closed");
         assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
         assert!(error.reason.contains("bytewise"), "got: {error}");
@@ -12879,7 +13088,7 @@ mod tests {
             nulls_not_distinct: None,
         });
 
-        let error = validate_ir_platform(&ir_with(vec![op]), SqlDialect::Postgres)
+        let error = validate_ir_platform(&ir_with(vec![op]), &POSTGRES)
             .expect_err("a non-bytewise TypeID index collation must fail closed");
         assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
         assert!(error.reason.contains("collation"), "got: {error}");
@@ -12891,19 +13100,19 @@ mod tests {
         let valid = ir_with(vec![op_json(
             r#"{"op":"addColumn","table":"things","column":"id","type":"text","valueFormat":{"typeId":{"prefix":"thing"}}}"#,
         )]);
-        assert!(validate_ir_platform(&valid, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&valid, &POSTGRES).is_ok());
 
         let wrong_storage = ir_with(vec![op_json(
             r#"{"op":"addColumn","table":"things","column":"id","type":"uuid","valueFormat":{"typeId":{"prefix":"thing"}}}"#,
         )]);
-        let error = validate_ir_platform(&wrong_storage, SqlDialect::Postgres)
+        let error = validate_ir_platform(&wrong_storage, &POSTGRES)
             .expect_err("addColumn TypeID metadata on UUID storage must fail closed");
         assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
     }
 
     #[test]
     fn ulid_value_format_accepts_exact_text_on_every_dialect() {
-        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+        for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
             let ir = ir_with(vec![create_with_ulid(ColType::Text, None)]);
             assert!(
                 validate_ir_platform(&ir, dialect).is_ok(),
@@ -12922,7 +13131,7 @@ mod tests {
             },
         ] {
             let ir = ir_with(vec![create_with_ulid(ty, None)]);
-            let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+            let error = validate_ir_platform(&ir, &POSTGRES)
                 .expect_err("ULID metadata on non-text storage must fail closed");
             assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
             assert!(error.reason.contains("exact text storage"), "got: {error}");
@@ -12933,7 +13142,7 @@ mod tests {
     #[test]
     fn ulid_value_format_rejects_case_insensitive_text() {
         let ir = ir_with(vec![create_with_ulid(ColType::Text, Some(false))]);
-        let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let error = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("ULID plus caseSensitive:false must fail closed");
         assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
         assert!(error.reason.contains("ULID"), "got: {error}");
@@ -12963,7 +13172,7 @@ mod tests {
             nulls_not_distinct: None,
         });
 
-        let error = validate_ir_platform(&ir_with(vec![op]), SqlDialect::Postgres)
+        let error = validate_ir_platform(&ir_with(vec![op]), &POSTGRES)
             .expect_err("a non-bytewise ULID index collation must fail closed");
         assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
         assert!(error.reason.contains("ULID"), "got: {error}");
@@ -12976,12 +13185,12 @@ mod tests {
         let valid = ir_with(vec![op_json(
             r#"{"op":"addColumn","table":"things","column":"id","type":"text","valueFormat":"ulid"}"#,
         )]);
-        assert!(validate_ir_platform(&valid, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&valid, &POSTGRES).is_ok());
 
         let wrong_storage = ir_with(vec![op_json(
             r#"{"op":"addColumn","table":"things","column":"id","type":"uuid","valueFormat":"ulid"}"#,
         )]);
-        let error = validate_ir_platform(&wrong_storage, SqlDialect::Postgres)
+        let error = validate_ir_platform(&wrong_storage, &POSTGRES)
             .expect_err("addColumn ULID metadata on UUID storage must fail closed");
         assert_eq!(error.code, CODE_COLUMN_FACET_CONFLICT, "got: {error}");
     }
@@ -12989,7 +13198,7 @@ mod tests {
     #[test]
     fn legacy_uuid_id_prefix_remains_valid() {
         let ir = ir_with(vec![create_with_id_prefix("post")]);
-        assert!(validate_ir_platform(&ir, SqlDialect::Postgres).is_ok());
+        assert!(validate_ir_platform(&ir, &POSTGRES).is_ok());
     }
 
     #[test]
@@ -12997,7 +13206,7 @@ mod tests {
         // `usr` is the platform user-id prefix (RESERVED_ID_PREFIXES); a creator
         // prefix that collides with it would mint ids colliding with platform users.
         let ir = ir_with(vec![create_with_id_prefix("usr")]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("a reserved id prefix must be refused at validate, fail-closed");
         assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
         assert_eq!(err.op_index, 0);
@@ -13007,7 +13216,7 @@ mod tests {
     fn p2a_create_table_rejects_a_malformed_id_prefix() {
         // An upper-case / non-`[a-z0-9_]` prefix is not a valid typed-id segment.
         let ir = ir_with(vec![create_with_id_prefix("Po-st")]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("a malformed id prefix must be refused at validate");
         assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
     }
@@ -13017,7 +13226,7 @@ mod tests {
         // Charset-valid but longer than MAX_ID_PREFIX_LEN — refused so the minted
         // `<prefix>_<22 base62>` typed-id keeps the compact platform shape.
         let ir = ir_with(vec![create_with_id_prefix("toolong")]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("an over-long id prefix must be refused at validate");
         assert_eq!(err.code, CODE_INVALID_ID_PREFIX, "got: {err}");
         assert!(
@@ -13059,7 +13268,7 @@ mod tests {
             schema: None,
             existence_guard: None,
         }]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("a vector_metric on a non-vector column must be refused");
         assert_eq!(err.code, CODE_VECTOR_METRIC_MISPLACED, "got: {err}");
     }
@@ -13093,7 +13302,7 @@ mod tests {
                 schema: None,
                 existence_guard: None,
             }]);
-            let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+            let err = validate_ir_platform(&ir, &POSTGRES)
                 .expect_err("caseSensitive:false on a non-text column must be refused");
             assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
             assert!(
@@ -13112,7 +13321,7 @@ mod tests {
                 kind: EmptyContainerKind::Object,
             },
         )]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("empty object defaults are valid only on json columns");
         assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
         assert!(
@@ -13129,7 +13338,7 @@ mod tests {
                 kind: EmptyContainerKind::Array,
             },
         )]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("empty array defaults are valid only on json/textArray columns");
         assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
         assert!(
@@ -13145,7 +13354,7 @@ mod tests {
             ColType::Int,
             json_value_default(),
         )]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("JSON value defaults are valid only on json columns");
         assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
         assert!(
@@ -13161,7 +13370,7 @@ mod tests {
             ColType::TextArray,
             json_value_default(),
         )]);
-        let err = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("JSON value defaults are valid only on json columns");
         assert_eq!(err.code, CODE_COLUMN_DEFAULT_TYPE, "got: {err}");
         assert!(
@@ -13202,7 +13411,7 @@ mod tests {
             existence_guard: None,
         }]);
         assert!(
-            validate_ir_platform(&ir, SqlDialect::Postgres).is_ok(),
+            validate_ir_platform(&ir, &POSTGRES).is_ok(),
             "a metric on a t.vector(n) column is the legitimate co-occurrence"
         );
     }
@@ -13287,7 +13496,7 @@ mod tests {
             ),
         ] {
             let ir = per_row_validation_ir(ty, format, generator);
-            validate_ir_platform(&ir, SqlDialect::Sqlite)
+            validate_ir_platform(&ir, &SQLITE)
                 .expect("an exact declared per-row destination family must validate");
         }
     }
@@ -13303,7 +13512,7 @@ mod tests {
                 prefix: "order".into(),
             },
         );
-        let error = validate_ir_platform(&ir, SqlDialect::Sqlite)
+        let error = validate_ir_platform(&ir, &SQLITE)
             .expect_err("a mismatched TypeID prefix must fail before lowering");
         assert_eq!(error.code, CODE_OP_INVALID);
         assert!(
@@ -13322,7 +13531,7 @@ mod tests {
             PerRowGenerator::Ulid,
         ] {
             let ir = per_row_validation_ir(ColType::Text, None, generator);
-            let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+            let error = validate_ir_platform(&ir, &POSTGRES)
                 .expect_err("generic text must not infer a TypeID or ULID contract");
             assert_eq!(error.code, CODE_OP_INVALID);
             assert!(
@@ -13337,7 +13546,7 @@ mod tests {
     #[test]
     fn per_row_uuid_rejects_text_even_without_a_value_format() {
         let ir = per_row_validation_ir(ColType::Text, None, PerRowGenerator::UuidV7);
-        let error = validate_ir_platform(&ir, SqlDialect::Sqlite)
+        let error = validate_ir_platform(&ir, &SQLITE)
             .expect_err("a UUID generator requires logical UUID, not text storage");
         assert_eq!(error.code, CODE_OP_INVALID);
         assert!(
@@ -13352,11 +13561,11 @@ mod tests {
     #[test]
     fn per_row_load_defers_a_missing_cross_artifact_declaration_but_lower_rejects_it() {
         let ir = ir_with(vec![per_row_backfill_op(PerRowGenerator::UuidV4)]);
-        validate_ir_platform(&ir, SqlDialect::Postgres)
+        validate_ir_platform(&ir, &POSTGRES)
             .expect("load cannot know whether an earlier ordered artifact declared the column");
         let error = validate_per_row_destinations_for_lower(
             &ir,
-            SqlDialect::Postgres,
+            &POSTGRES,
             &LogicalColumnContracts::new(),
             "app",
             None,
@@ -13376,7 +13585,7 @@ mod tests {
         let ir = ir_with(vec![per_row_backfill_op(PerRowGenerator::TypeId {
             prefix: "Not_Canonical".into(),
         })]);
-        let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let error = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("missing destination metadata must not defer generator validation");
         assert_eq!(error.code, CODE_INVALID_TYPE_ID_PREFIX);
         assert!(
@@ -13401,7 +13610,7 @@ mod tests {
             per_row_backfill_op(PerRowGenerator::UuidV4),
         ]);
 
-        let error = validate_ir_platform(&ir, SqlDialect::Postgres)
+        let error = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("an unqualified target must not guess between declarations");
         assert_eq!(error.code, CODE_OP_INVALID);
         assert!(error.reason.contains("is ambiguous"), "got: {error}");
@@ -13428,9 +13637,8 @@ mod tests {
             per_row_backfill_op(PerRowGenerator::UuidV4),
         ]);
 
-        validate_ir_platform(&ir, SqlDialect::Postgres)
-            .expect("the selected PG declaration is logical UUID");
-        let error = validate_ir_platform(&ir, SqlDialect::Sqlite)
+        validate_ir_platform(&ir, &POSTGRES).expect("the selected PG declaration is logical UUID");
+        let error = validate_ir_platform(&ir, &SQLITE)
             .expect_err("SQLite must use its generic-text leg, not the PostgreSQL leg");
         assert!(
             error
@@ -13513,7 +13721,7 @@ mod tests {
         );
         let ir = ir_with(vec![child, target]);
 
-        for dialect in [SqlDialect::Postgres, SqlDialect::Mysql, SqlDialect::Sqlite] {
+        for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
             validate_ir_platform(&ir, dialect).unwrap_or_else(|error| {
                 panic!("forward target must validate on {dialect:?}: {error}")
             });
@@ -13536,7 +13744,7 @@ mod tests {
             "accounts",
             typed_reference_column("id", ColType::BigInt, None, None, None),
         );
-        let error = validate_ir_platform(&ir_with(vec![child, target]), SqlDialect::Sqlite)
+        let error = validate_ir_platform(&ir_with(vec![child, target]), &SQLITE)
             .expect_err("SQLite INTEGER lowering must not erase int-vs-bigInt width");
         assert!(
             error.reason.contains("logical integer width differs"),
@@ -13570,11 +13778,9 @@ mod tests {
                 None,
             ),
         );
-        let type_id_error = validate_ir_platform(
-            &ir_with(vec![type_id_child, type_id_target]),
-            SqlDialect::Postgres,
-        )
-        .expect_err("different stored TypeID prefixes must fail closed");
+        let type_id_error =
+            validate_ir_platform(&ir_with(vec![type_id_child, type_id_target]), &POSTGRES)
+                .expect_err("different stored TypeID prefixes must fail closed");
         assert!(
             type_id_error.reason.contains("value formats differ")
                 && type_id_error.reason.contains("account")
@@ -13596,9 +13802,8 @@ mod tests {
             "accounts",
             typed_reference_column("id", ColType::String { length: 255 }, None, None, None),
         );
-        let ulid_error =
-            validate_ir_platform(&ir_with(vec![ulid_child, plain_target]), SqlDialect::Mysql)
-                .expect_err("ULID references must target the same exact value format");
+        let ulid_error = validate_ir_platform(&ir_with(vec![ulid_child, plain_target]), &MYSQL)
+            .expect_err("ULID references must target the same exact value format");
         assert!(
             ulid_error.reason.contains("value formats differ")
                 && ulid_error.reason.contains("ULID"),
@@ -13622,7 +13827,7 @@ mod tests {
             "accounts",
             typed_reference_column("name", ColType::Text, None, None, None),
         );
-        let error = validate_ir_platform(&ir_with(vec![child, target]), SqlDialect::Postgres)
+        let error = validate_ir_platform(&ir_with(vec![child, target]), &POSTGRES)
             .expect_err("reference collations must match exactly");
         assert!(
             error.reason.contains("collation intent differs"),
@@ -13644,11 +13849,11 @@ mod tests {
                 Some(("accounts", "id")),
             ),
         )]);
-        validate_ir_platform(&formatted, SqlDialect::Postgres)
+        validate_ir_platform(&formatted, &POSTGRES)
             .expect("load defers a target that may live in an earlier artifact");
         let error = validate_column_references_for_lower(
             &formatted,
-            SqlDialect::Postgres,
+            &POSTGRES,
             &LogicalColumnContracts::new(),
             "app",
             None,
@@ -13672,7 +13877,7 @@ mod tests {
         )]);
         validate_column_references_for_lower(
             &primitive,
-            SqlDialect::Sqlite,
+            &SQLITE,
             &LogicalColumnContracts::new(),
             "app",
             None,

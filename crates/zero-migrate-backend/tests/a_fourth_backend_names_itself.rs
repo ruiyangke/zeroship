@@ -26,7 +26,10 @@ use std::collections::BTreeMap;
 use zero_migrate_backend::dml::DmlError;
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::existence_probe::ExistenceProbePolicy;
-use zero_migrate_backend::fold::CatalogFoldPolicy;
+use zero_migrate_backend::fold::{
+    AuthorTypeOverride, CatalogFoldPolicy, FoldCursorColumnContract, FoldDatabaseFeature,
+    ReferenceTextStorage,
+};
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
@@ -44,6 +47,7 @@ use zero_migrate_ir::backend::{
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{ColType, IrScalar, Op, TableRef, ValueFormat};
+use zero_migrate_ir::precondition::PreconditionCheck;
 use zero_migrate_ir::validate::{
     validate_expr, ExprDialectFeature, ExprDialectRejection, ExprDialectValidator,
     ExprDialectValidatorSet, TargetScope,
@@ -159,6 +163,105 @@ impl CatalogFoldPolicy for DuckDbCatalogFoldPolicy {
 
     fn physical_type_inputs_equal(&self, _left: &ColumnSnapshot, _right: &ColumnSnapshot) -> bool {
         false
+    }
+
+    fn reference_catalog_type<'a>(&self, column: &'a ColumnSnapshot) -> &'a str {
+        &column.data_type
+    }
+
+    fn canonical_reference_catalog_type(
+        &self,
+        data_type: &str,
+        _integer_width_is_logically_proven: bool,
+    ) -> String {
+        data_type.trim().to_ascii_lowercase()
+    }
+
+    fn explicit_reference_text_storage(&self, _ddl_type: &str) -> Option<ReferenceTextStorage> {
+        None
+    }
+
+    fn catalog_reference_text_storage(
+        &self,
+        _column: &ColumnSnapshot,
+    ) -> Option<ReferenceTextStorage> {
+        None
+    }
+
+    fn compares_reference_named_collation(&self) -> bool {
+        true
+    }
+
+    fn cursor_column_contract(
+        &self,
+        column: &ColumnSnapshot,
+    ) -> Result<FoldCursorColumnContract, String> {
+        Err(format!(
+            "DuckDB stub has no cursor codec for {:?}",
+            column.data_type
+        ))
+    }
+
+    fn wrap_default_expr(&self, _expr: &Expr, rendered: String) -> String {
+        rendered
+    }
+
+    fn database_requirement_for_column(
+        &self,
+        _ty: &ColType,
+        _is_reference: bool,
+    ) -> Option<FoldDatabaseFeature> {
+        None
+    }
+
+    fn database_requirement_for_value_format(
+        &self,
+        _value_format: &ValueFormat,
+    ) -> Option<FoldDatabaseFeature> {
+        None
+    }
+
+    fn database_requirement_for_expr(&self, _expr: &Expr) -> Option<FoldDatabaseFeature> {
+        None
+    }
+
+    fn drop_column_precondition(&self, _table: &str, _column: &str) -> Option<PreconditionCheck> {
+        None
+    }
+
+    fn restates_column_type_at_apply(&self) -> bool {
+        false
+    }
+
+    fn column_type_change_precondition(
+        &self,
+        _table: &str,
+        _column: &str,
+    ) -> Option<PreconditionCheck> {
+        None
+    }
+
+    fn alter_column_refusal(&self, _op: &'static str) -> Result<(), IrLowerError> {
+        Ok(())
+    }
+
+    fn partition_collapse_mirror_guard(
+        &self,
+        _table_sql: &str,
+        _key_sql: &str,
+        _predicate: &str,
+    ) -> Result<String, IrLowerError> {
+        Err(IrLowerError::UnsupportedOp(
+            "DuckDB stub does not collapse partitions",
+        ))
+    }
+
+    fn supports_expression_index(&self) -> bool {
+        true
+    }
+
+    fn author_type_override(&self, _ty: &ColType) -> Option<AuthorTypeOverride> {
+        None
     }
 }
 

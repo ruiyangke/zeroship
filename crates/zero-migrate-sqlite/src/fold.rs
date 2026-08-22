@@ -1,12 +1,18 @@
 use std::collections::BTreeMap;
 
 use zero_migrate_backend::error::IrLowerError;
-use zero_migrate_backend::fold::CatalogFoldPolicy;
+use zero_migrate_backend::fold::{
+    AuthorTypeOverride, CatalogFoldPolicy, FoldCursorColumnContract, FoldCursorComparison,
+    FoldCursorScalarType, FoldDatabaseFeature, ReferenceTextStorage,
+};
+use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
 use zero_migrate_backend::stored_ddl::StoredDdl;
-use zero_migrate_ir::ir::ColType;
+use zero_migrate_ir::expr::Expr;
+use zero_migrate_ir::ir::{ColType, ValueFormat};
+use zero_migrate_ir::precondition::PreconditionCheck;
 
 #[derive(Debug)]
 pub(crate) struct SqliteCatalogFoldPolicy;
@@ -111,6 +117,185 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
     fn physical_type_inputs_equal(&self, _left: &ColumnSnapshot, _right: &ColumnSnapshot) -> bool {
         // SQLite's finalizer is an explicit no-op, so every answer is safe.
         false
+    }
+
+    fn reference_catalog_type<'a>(&self, column: &'a ColumnSnapshot) -> &'a str {
+        column
+            .ddl_type_override
+            .as_deref()
+            .unwrap_or(&column.data_type)
+    }
+
+    fn canonical_reference_catalog_type(
+        &self,
+        data_type: &str,
+        integer_width_is_logically_proven: bool,
+    ) -> String {
+        // Reference compatibility must retain the authored integer width.
+        // SQLite gives all three spellings INTEGER affinity, but PRAGMA
+        // `table_info` preserves an unmanaged target's declared type. Do
+        // not let the general drift-affinity canonicalizer make `int` and
+        // `bigInt` look interchangeable here. A project-declared target is
+        // different: the logical pass has already proved its exact authored
+        // width, while this engine deliberately renders every managed integer
+        // spelling as SQLite INTEGER. Compare that known physical form without
+        // weakening the unmanaged-catalog check.
+        let normalized = data_type.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "smallint" | "int2" | "integer" | "int" | "int4" | "bigint" | "int8"
+                if integer_width_is_logically_proven =>
+            {
+                "integer".to_string()
+            }
+            "smallint" | "int2" => "smallint".to_string(),
+            "integer" | "int" | "int4" => "int".to_string(),
+            "bigint" | "int8" => "bigint".to_string(),
+            _ => crate::schema::RENDERER.canonical_type(data_type),
+        }
+    }
+
+    fn explicit_reference_text_storage(&self, _ddl_type: &str) -> Option<ReferenceTextStorage> {
+        None
+    }
+
+    fn catalog_reference_text_storage(
+        &self,
+        _column: &ColumnSnapshot,
+    ) -> Option<ReferenceTextStorage> {
+        None
+    }
+
+    fn compares_reference_named_collation(&self) -> bool {
+        true
+    }
+
+    fn cursor_column_contract(
+        &self,
+        column: &ColumnSnapshot,
+    ) -> Result<FoldCursorColumnContract, String> {
+        let snapshot_database_type = column
+            .data_type
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        let upper = snapshot_database_type.to_ascii_uppercase();
+        let scalar_type = if upper.contains("INT") {
+            Some(FoldCursorScalarType::Int64)
+        } else if ["CHAR", "CLOB", "TEXT"]
+            .iter()
+            .any(|fragment| upper.contains(fragment))
+        {
+            Some(FoldCursorScalarType::String)
+        } else {
+            None
+        }
+        .ok_or_else(|| {
+            format!(
+                "cursor component {:?} has unsupported ordered type {:?}; its scalar/checkpoint comparison semantics cannot be proven",
+                column.name, column.data_type
+            )
+        })?;
+        let database_type = match scalar_type {
+            FoldCursorScalarType::Int64 => "integer".to_string(),
+            FoldCursorScalarType::String => "text".to_string(),
+            FoldCursorScalarType::Decimal => {
+                unreachable!("SQLite cursor scalar inference does not admit decimal")
+            }
+        };
+        let comparison = if let Some(collation) = &column.collation {
+            FoldCursorComparison::NamedCollation {
+                schema: collation.schema.clone(),
+                name: collation.name.clone(),
+            }
+        } else if column.case_sensitive == Some(false) || database_type == "citext" {
+            FoldCursorComparison::CaseInsensitive
+        } else {
+            FoldCursorComparison::Default
+        };
+        Ok(FoldCursorColumnContract {
+            scalar_type,
+            database_type,
+            comparison,
+        })
+    }
+
+    fn wrap_default_expr(&self, _expr: &Expr, rendered: String) -> String {
+        rendered
+    }
+
+    fn database_requirement_for_column(
+        &self,
+        _ty: &ColType,
+        _is_reference: bool,
+    ) -> Option<FoldDatabaseFeature> {
+        None
+    }
+
+    fn database_requirement_for_value_format(
+        &self,
+        _value_format: &ValueFormat,
+    ) -> Option<FoldDatabaseFeature> {
+        None
+    }
+
+    fn database_requirement_for_expr(&self, _expr: &Expr) -> Option<FoldDatabaseFeature> {
+        None
+    }
+
+    fn drop_column_precondition(&self, _table: &str, _column: &str) -> Option<PreconditionCheck> {
+        None
+    }
+
+    fn restates_column_type_at_apply(&self) -> bool {
+        false
+    }
+
+    fn column_type_change_precondition(
+        &self,
+        _table: &str,
+        _column: &str,
+    ) -> Option<PreconditionCheck> {
+        None
+    }
+
+    fn alter_column_refusal(&self, _op: &'static str) -> Result<(), IrLowerError> {
+        Ok(())
+    }
+
+    fn partition_collapse_mirror_guard(
+        &self,
+        table_sql: &str,
+        key_sql: &str,
+        predicate: &str,
+    ) -> Result<String, IrLowerError> {
+        // SQLite can use INSERT...SELECT NULL into the NOT NULL partition key:
+        // the constraint is checked only for selected rows. MySQL's guard uses
+        // a row-dependent JSON parse instead, because a constant invalid JSON
+        // expression can be folded by the optimizer before WHERE filters.
+        Ok(format!(
+            "/* zero-migrate: partition collapse populated-default mirror guard */\n\
+             INSERT INTO {table_sql} ({key_sql}) \
+             SELECT NULL FROM {table_sql} WHERE {predicate} LIMIT 1"
+        ))
+    }
+
+    fn supports_expression_index(&self) -> bool {
+        true
+    }
+
+    fn author_type_override(&self, ty: &ColType) -> Option<AuthorTypeOverride> {
+        match ty {
+            ColType::Decimal { .. } => Some(AuthorTypeOverride {
+                // SQLite has no fixed-precision decimal storage class. NUMERIC/REAL
+                // affinity converts a sufficiently wide decimal string through a
+                // binary float, so retain authored decimal text byte-for-byte.
+                data_type: "text".to_string(),
+                ddl_type: Some("TEXT".to_string()),
+                quote_literal_default_as_text: true,
+            }),
+            _ => None,
+        }
     }
 }
 
