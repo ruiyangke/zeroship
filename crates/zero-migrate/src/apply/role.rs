@@ -151,9 +151,9 @@ pub fn migrator_role_name(project_id: &str) -> Result<String, RoleError> {
     let suffix = base62_encode_bytes(&Sha256::digest(project_id.as_bytes()));
     const PREFIX: &str = "migrator_";
     const SEP_LEN: usize = 1;
-    // Was a third literal `63`. It now calls the one definition, which reads
-    // PostgreSQL's DECLARED identifier cap off its descriptor.
-    let prefix_budget = crate::plan::author::pg_max_ident_bytes()
+    // Was a third literal `63`. It now reads the one definition, which resolves
+    // the DECLARED identifier cap off the backend's descriptor.
+    let prefix_budget = crate::plan::author::GENERATED_IDENT_MAX_BYTES
         .saturating_sub(PREFIX.len())
         .saturating_sub(SEP_LEN)
         .saturating_sub(suffix.len());

@@ -1412,7 +1412,7 @@ mod tests {
         // Reads PostgreSQL's DECLARED cap off its descriptor rather than restating
         // `63`. A test that hardcodes the number still passes against a stale value
         // if the declared limit ever moves, which is the drift decision 3 closed.
-        let long = "i".repeat(crate::plan::author::pg_max_ident_bytes() + 8);
+        let long = "i".repeat(crate::plan::author::GENERATED_IDENT_MAX_BYTES + 8);
         let live = snapshot_with("users", empty_table());
         assert_eq!(
             decide_pg(&ownership_probe("users", &long), &live),

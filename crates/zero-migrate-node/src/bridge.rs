@@ -1219,7 +1219,7 @@ pub fn history(
 
     run_verb(env, host_driver, move |session| async move {
         let cfg = ExecutorConfig::new(project_id, project_schema, effective);
-        zero_migrate::ops::status::history(&zero_migrate_ir::dialect::POSTGRES, &session, &cfg)
+        zero_migrate::ops::status::history(&zero_migrate::POSTGRES, &session, &cfg)
             .await
             .map(|h| history_reply(&h))
             .map_err(|e| e.to_string())
