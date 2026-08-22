@@ -84,6 +84,9 @@
 //! precisely because a red count cannot tell it apart from an unrouted emission.
 //! Re-dialecting it would be a regression.
 
+use zero_migrate_backend::advisory::{
+    AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
+};
 use zero_migrate_backend::ddl::DdlEmitter;
 use zero_migrate_backend::guard::{GuardConfig, MigrationGuard};
 use zero_migrate_backend::registry::{BackendVendor, VendorSet};
@@ -205,6 +208,45 @@ pub(crate) fn ddl_emitter(dialect: &DialectId, project_schema: &str) -> Box<dyn 
 /// other's.
 pub(crate) fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
     (vendor(cfg.dialect()).guard)(cfg)
+}
+
+/// The OPERATIONAL analyzer for a dialect — this vendor's, run by this vendor.
+///
+/// The advisory counterpart of [`guard_for`], and it removed the same shape of
+/// coupling. Before it, `render::declarative` called `crate::analysis::analyze::…`
+/// directly: a re-export that resolved into the `libpg_query` analyzer crate, so the
+/// engine ran the PostgreSQL parser over every backend's DDL and reported the
+/// resulting parse failures as a clean, empty advisory list. That was the whole of
+/// the engine's advisory routing, and it named a parser rather than a vendor.
+pub(crate) fn advisor(dialect: &DialectId) -> &'static dyn OperationalAdvisor {
+    vendor(dialect).advisor
+}
+
+/// The operational advisories the backend registered for `dialect` finds in `sql`.
+///
+/// The verdict, not a list: see
+/// [`AdvisoryVerdict`](zero_migrate_backend::advisory::AdvisoryVerdict) for why a
+/// backend with no analyzer must not answer with an empty vector.
+#[must_use]
+pub fn advisories_for_sql(dialect: &DialectId, sql: &str) -> AdvisoryVerdict {
+    advisor(dialect).advise(sql)
+}
+
+/// Whether the backend registered for `dialect` ships an operational analyzer at
+/// all, answered without SQL.
+///
+/// A caller reporting on a SET of statements asks this ONCE, up front, so it can
+/// tell an operator the whole set is unchecked before it renders the first statement
+/// — and still say so when the set renders to nothing.
+#[must_use]
+pub fn analyzer_absence(dialect: &DialectId) -> Option<AnalyzerAbsent> {
+    advisor(dialect).analyzer_absence()
+}
+
+/// The index-coverage facts `dialect`'s backend reads out of `sql`, for the
+/// plan-wide `FK_WITHOUT_INDEX` suppression.
+pub(crate) fn index_coverage(dialect: &DialectId, sql: &str) -> IndexCoverage {
+    advisor(dialect).index_coverage(sql)
 }
 
 #[cfg(test)]

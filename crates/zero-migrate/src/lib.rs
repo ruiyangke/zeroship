@@ -128,6 +128,19 @@ pub use analysis::{analyze, classify};
 
 pub use analysis::analyze::{analyze, analyze_migration, Advisory, Severity};
 pub use approval::{Approval, ApprovalScope};
+// The ADVISORY seam: ask the registered backend for an analysis, never a vendor by
+// name. `advisories_for_sql` and `analyzer_absence` are the two entry points a host
+// needs; the verdict types come with them because a caller cannot handle
+// `NotAnalyzed` without being able to name it.
+//
+// This is what `analyze` above is being retired in favour of. `analyze` runs the
+// `libpg_query` analyzers on whatever it is handed, which on a MySQL or SQLite
+// statement is a parse failure reported as a clean, empty advisory list. It is still
+// exported because `zero-migrate-guard` has not moved yet; when it does, it goes.
+pub use render::backends::{advisories_for_sql, analyzer_absence};
+pub use zero_migrate_backend::advisory::{
+    AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
+};
 // V8-free, driver-neutral re-exports. Name no host-driver type and back the
 // SQLite path too — ungated.
 pub use apply::backend::{

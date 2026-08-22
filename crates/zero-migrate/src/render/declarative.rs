@@ -46,6 +46,7 @@ use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{ExpandContractAuthor, ExpandContractPlan, OnlineIntent};
 use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
+use zero_migrate_backend::advisory::Advisory;
 use zero_migrate_ir::dialect::DialectId;
 #[cfg(test)]
 use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
@@ -3288,7 +3289,17 @@ pub use zero_migrate_backend::error::DeclarativeError;
 /// [`MigrationEngine::apply_declarative`](crate::engine::MigrationEngine::apply_declarative),
 /// which runs the REAL backfill and surfaces the contract as a DEFERRED set for a
 /// later deploy.
-#[derive(Debug, Clone, Default)]
+/// # No `Default`, and that is the point
+///
+/// It used to derive one. A defaulted plan is a plan whose BACKEND was picked by
+/// omission, and [`DialectId`] deliberately has no `Default` for exactly that
+/// reason — an open backend id has no natural zero value, and manufacturing one
+/// would silently elect a vendor.
+///
+/// Nothing replaced it, because nothing used it: the derive was measured to have
+/// zero callers in the workspace before it was dropped. Do not add one back to make
+/// a test fixture shorter; write the dialect the fixture is for.
+#[derive(Debug, Clone)]
 pub struct DeclarativePlan {
     /// The plain additive / destructive migrations (CREATE TABLE, ADD/DROP
     /// COLUMN, indexes, FKs, type / nullability changes). A rename's `<from>` is
@@ -3321,6 +3332,15 @@ pub struct DeclarativePlan {
     /// [`plan_declarative`](crate::engine::MigrationEngine::plan_declarative) reads
     /// it to resolve `safety.require_rls` at each newly created table.
     pub created_tables: Vec<String>,
+    /// The backend this plan's SQL is spelled for — the differ's own
+    /// [`DeclarativeAuthor::dialect`], carried onto the plan it produced.
+    ///
+    /// A plan has ALWAYS been dialect-specific: its `up`/`down` are rendered by one
+    /// vendor's emitter and its `rebuilds` are a SQLite-only shape. The identity was
+    /// simply not carried, so anything downstream that needed to ask the backend a
+    /// question had to guess — and [`Self::advisories`] guessed PostgreSQL, by
+    /// calling the `libpg_query` analyzers on every dialect's DDL.
+    pub dialect: DialectId,
 }
 
 /// one SQLite 12-step table rebuild: the execution [`TableRebuildSpec`]
@@ -3383,54 +3403,85 @@ impl DeclarativePlan {
         all
     }
 
-    /// The operational [`Advisory`](crate::analyze::Advisory)s for every
-    /// generated migration in the plan, paired with the migration they apply to.
+    /// The operational [`Advisory`]s for every generated migration in the plan,
+    /// paired with the migration they apply to.
     ///
-    /// This is the differ's advisory seam (v3 Plan B): it runs
-    /// [`analyze_migration`](crate::analyze::analyze_migration) over each
-    /// generated migration (the plain set + every rename's expand/contract
-    /// migrations) so a plan/preview UI can show the operational footgun and the
-    /// safer alternative next to the migration that triggers it — e.g. a gated
-    /// `DROP COLUMN` (contract) surfaces the expand-contract suggestion, a
-    /// generated `SET NOT NULL` surfaces the `NOT VALID` → `VALIDATE` path.
+    /// This is the differ's advisory seam (v3 Plan B): it asks the backend
+    /// registered for [`self.dialect`](Self::dialect) about each generated migration
+    /// (the plain set + every rename's expand/contract migrations) so a plan/preview
+    /// UI can show the operational footgun and the safer alternative next to the
+    /// migration that triggers it — e.g. a gated `DROP COLUMN` (contract) surfaces
+    /// the expand-contract suggestion, a generated `SET NOT NULL` surfaces the
+    /// `NOT VALID` → `VALIDATE` path.
     ///
     /// These are **advisory only** — they never deny or gate the plan. A
     /// migration with no advisories is omitted. Order matches
     /// [`all_migrations`](Self::all_migrations).
-    /// Plan-aware: a `FK_WITHOUT_INDEX` Notice is suppressed
-    /// when the **same plan** creates a covering index for the FK's referencing
-    /// column(s) — even in a SEPARATE migration. The per-statement
-    /// [`analyze`](crate::analyze::analyze) only sees one statement, so it
+    ///
+    /// Plan-aware: a [`rule::FK_WITHOUT_INDEX`] Notice is suppressed when the **same
+    /// plan** creates a covering index for the FK's referencing column(s) — even in
+    /// a SEPARATE migration. A per-statement analyzer only sees one statement, so it
     /// suppresses only same-statement indexes; here we aggregate every migration's
-    /// covering-index columns ([`indexed_columns`](crate::analyze::indexed_columns))
-    /// and drop the FK Notice for any column the plan indexes. All other advisories
-    /// pass through unchanged.
+    /// covering-index columns ([`IndexCoverage`]) and drop the FK Notice for any
+    /// column the plan indexes. All other advisories pass through unchanged.
+    ///
+    /// # A backend with no analyzer is reported, not silently omitted
+    ///
+    /// This used to call the `libpg_query` analyzers directly, on every dialect. A
+    /// MySQL or SQLite plan therefore had every statement fail to parse and came
+    /// back with NO entries at all — a report that read as "clean" and meant "none
+    /// of this was read". Now the backend answers, and a backend that ships no
+    /// analyzer says so: every migration in the plan is returned carrying the single
+    /// [`rule::ANALYZER_DIALECT_UNSUPPORTED`] notice.
+    ///
+    /// The repetition is deliberate. This return shape is PER MIGRATION, and a
+    /// reader who opens one migration's advisories must not find an empty list when
+    /// the truth is that nobody looked.
+    ///
+    /// [`Advisory`]: zero_migrate_backend::advisory::Advisory
+    /// [`IndexCoverage`]: zero_migrate_backend::advisory::IndexCoverage
+    /// [`rule::FK_WITHOUT_INDEX`]: zero_migrate_backend::advisory::rule::FK_WITHOUT_INDEX
+    /// [`rule::ANALYZER_DIALECT_UNSUPPORTED`]: zero_migrate_backend::advisory::rule::ANALYZER_DIALECT_UNSUPPORTED
     #[must_use]
-    pub fn advisories(&self) -> Vec<(Migration, Vec<crate::analysis::analyze::Advisory>)> {
+    pub fn advisories(&self) -> Vec<(Migration, Vec<Advisory>)> {
         let all = self.all_migrations();
+
+        // Asked once, up front: a backend with no analyzer owes the operator that
+        // answer for the WHOLE plan, and there is no per-migration finding to
+        // aggregate under it.
+        if let Some(absent) = crate::render::backends::analyzer_absence(&self.dialect) {
+            let notice = absent.advisory();
+            return all.into_iter().map(|m| (m, vec![notice.clone()])).collect();
+        }
 
         // Plan-wide set of columns that gain a covering index ANYWHERE in the plan
         // (any migration). Case-insensitive membership mirrors the per-statement
         // FK-index match.
         let mut plan_indexed: Vec<String> = Vec::new();
         for m in &all {
-            plan_indexed.extend(crate::analysis::analyze::indexed_columns(&m.up));
+            plan_indexed.extend(
+                crate::render::backends::index_coverage(&self.dialect, &m.up).indexed_columns,
+            );
         }
 
         all.into_iter()
             .filter_map(|m| {
-                let mut advs = crate::analysis::analyze::analyze_migration(&m);
+                let mut advs =
+                    crate::render::backends::advisories_for_sql(&self.dialect, &m.up).into_report();
 
                 // If a migration carries a FK_WITHOUT_INDEX Notice, recompute it
                 // against the plan-wide index set: suppress it only when EVERY FK
                 // referencing column it covers is indexed somewhere in the plan.
-                let fk_cols = crate::analysis::analyze::fk_columns_needing_index(&m.up);
+                let fk_cols = crate::render::backends::index_coverage(&self.dialect, &m.up)
+                    .fk_columns_needing_index;
                 if !fk_cols.is_empty() {
                     let all_covered = fk_cols
                         .iter()
                         .all(|col| plan_indexed.iter().any(|i| i.eq_ignore_ascii_case(col)));
                     if all_covered {
-                        advs.retain(|a| a.rule != crate::analysis::analyze::rule::FK_WITHOUT_INDEX);
+                        advs.retain(|a| {
+                            a.rule != zero_migrate_backend::advisory::rule::FK_WITHOUT_INDEX
+                        });
                     }
                 }
 
@@ -4328,6 +4379,7 @@ impl DeclarativeAuthor {
             rebuilds,
             accepted_index_aliases,
             created_tables: created_version.into_keys().collect(),
+            dialect: self.dialect.clone(),
         })
     }
 
@@ -7154,6 +7206,7 @@ mod advisory_seam_tests {
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
             created_tables: Vec::new(),
+            dialect: POSTGRES,
         };
         let advisories = plan.advisories();
         // Only the drop produced an advisory entry (the additive create is silent).
@@ -7184,6 +7237,7 @@ mod advisory_seam_tests {
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
             created_tables: Vec::new(),
+            dialect: POSTGRES,
         };
         assert!(plan.advisories().is_empty());
     }
@@ -7207,6 +7261,7 @@ mod advisory_seam_tests {
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
             created_tables: Vec::new(),
+            dialect: POSTGRES,
         };
         let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
         assert!(
@@ -7228,6 +7283,7 @@ mod advisory_seam_tests {
             rebuilds: Vec::new(),
             accepted_index_aliases: Vec::new(),
             created_tables: Vec::new(),
+            dialect: POSTGRES,
         };
         let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
         assert!(

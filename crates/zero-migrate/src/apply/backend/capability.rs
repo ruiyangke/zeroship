@@ -1,12 +1,12 @@
 //! Optional backend capabilities shared by the generic apply orchestrator.
 
-use crate::analysis::analyze::Advisory;
 use crate::apply::drift::{DriftError, StructuralDrift};
 use crate::conn::{ConnectError, ExecutorConfig};
 use crate::engine::{DeclarativeDeployPlan, EngineError, OnlineError};
 use crate::model::migration::{Migration, MigrationId};
 use crate::render::declarative::{DeclarativeError, DesiredSchema};
 use crate::render::expand_contract::OnlineIntent;
+use zero_migrate_backend::advisory::Advisory;
 
 // ── What a backfill IS, what running one produces, and how one refuses: all four
 // now live with the backend contract, beside the `BackfillSpec` a vendor executor

@@ -29,7 +29,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::analysis::analyze::Advisory;
 use crate::guard::{GuardConfig, GuardError, MigrationGuard, SqlGuard};
 use crate::model::backfill::{
     CursorColumnContract, CursorComparison, CursorContract, CursorScalarType,
@@ -67,6 +66,7 @@ use crate::render::value_format::{
     column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
 use crate::ResolvedInject;
+use zero_migrate_backend::advisory::Advisory;
 use zero_migrate_backend::fold::{
     AuthorTypeOverride, FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature,
 };
