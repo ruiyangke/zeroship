@@ -709,7 +709,8 @@ impl SqlGuard {
     /// Is a raw island inside the reach of a `safety.require_rls` obligation?
     ///
     /// This is PostgreSQL's answer to
-    /// [`MigrationGuard::raw_island_escapes_rls_net_state`]. The neutral net-state
+    /// [`zero_migrate_backend::guard::MigrationGuard::raw_island_escapes_rls_net_state`].
+    /// The neutral net-state
     /// walk in `zero_migrate_backend::guard::check_ir_data_security_policy` decides
     /// `require_rls` over structured ops for every dialect; the raw island is the one
     /// op whose net table state is not derivable from the IR, so it is asked HERE,
