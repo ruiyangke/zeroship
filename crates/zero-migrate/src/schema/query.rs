@@ -336,7 +336,11 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     ReservedName::Prefix("_"),
     // Platform bookkeeping table prefixes. Mirrors the
     // `validate_collection` reservations for table-name shape.
-    ReservedName::Prefix("__zero_migrate_"),
+    //
+    // SHADOWED, and kept for the mirror rather than for effect: the scan returns on
+    // its first match and `Prefix("_")` above catches every name this could, so this
+    // entry is never reached. Do not "restore" it as a live rule. `sqlite_` below IS
+    // reachable, since it does not begin with an underscore.
     ReservedName::Prefix("__zero_migrate_"),
     ReservedName::Prefix("sqlite_"),
     // Masked-column sibling suffix. The platform
