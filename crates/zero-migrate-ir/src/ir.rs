@@ -3400,7 +3400,7 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
     },
-    /// Per-backend op sequences. A target with no own leg emits nothing.
+    /// Per-backend op sequences. A target with no own leg is refused as not portable.
     Dialectal {
         /// Op sequences keyed by the backend identity that owns each sequence.
         #[serde(default)]

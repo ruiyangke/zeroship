@@ -566,7 +566,7 @@ export type BackfillSetValue = DmlSetValue | PerRowGeneratorValue;
 export type DialectExprLegs = Readonly<Record<string, unknown>>;
 
 /** Op-position legs keyed by canonical backend identity. Each present leg is
- *  thunked and records normal ops; a missing own leg is skipped for that target. */
+ *  thunked and records normal ops; a missing own leg is refused for that target. */
 export type DialectOpLegs = Readonly<Record<string, (() => void) | undefined>>;
 
 /** Empty object/array defaults admitted for JSON/text-array columns. */

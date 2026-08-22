@@ -2432,12 +2432,13 @@ export function countStar(): ExprChainType {
  * ```
  *
  * Op-level legs are thunks. Each present thunk records normal ops into a
- * sub-buffer that becomes a `dialectal` op leg. A missing own leg
- * is skipped on that target (unlike expression dialect(), which fails closed).
+ * sub-buffer that becomes a `dialectal` op leg. A missing own leg is refused
+ * for that target, just like a missing expression leg.
  *
  * At least one leg must be present; the legs record in full in the checksummed
  * IR in lexical backend-id order. A target with no own expression leg is
- * refused (`EXPR_NOT_PORTABLE`).
+ * refused (`EXPR_NOT_PORTABLE`); a target with no own op leg is likewise
+ * refused as not portable.
  */
 export function dialect(legs: DialectOpLegs): void;
 export function dialect(legs: DialectExprLegs): ExprChainType;

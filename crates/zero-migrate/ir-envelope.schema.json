@@ -1534,7 +1534,7 @@
           ]
         },
         {
-          "description": "Per-backend op sequences. A target with no own leg emits nothing.",
+          "description": "Per-backend op sequences. A target with no own leg is refused as not portable.",
           "type": "object",
           "properties": {
             "legs": {
