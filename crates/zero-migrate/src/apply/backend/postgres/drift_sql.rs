@@ -19,10 +19,10 @@
 
 use std::collections::BTreeMap;
 
+use super::journal_sql;
 use crate::apply::drift::{
     compare_applied_to_set, parse_nextval_sequence_ref, ChecksumDriftReport, DriftError,
 };
-use super::journal_sql;
 use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
 use crate::model::ir::{
