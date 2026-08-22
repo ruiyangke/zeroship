@@ -512,6 +512,151 @@ fn raw_view_body_runs_function_body_deny_list_scan() {
     assert!(err.reason.contains("body scanner"), "{err:?}");
 }
 
+/// A raw view body is vetted by the TARGET backend, not by PostgreSQL's parser.
+///
+/// This is the regression bar for a defect that shipped: the engine's
+/// `validate_raw_view_body_sql` called `pg_query::parse` directly, so a MySQL or
+/// SQLite body was judged by PostgreSQL's grammar. Each dialect's own native
+/// identifier quoting was therefore refused ON ITS OWN DIALECT with a PostgreSQL
+/// syntax error — `` `id` `` on MySQL and `[id]` on SQLite both came back as
+/// "raw viewBody SQL must parse as exactly one top-level SELECT: syntax error".
+///
+/// No test covered this because every raw-view case in this file targeted
+/// PostgreSQL. That is exactly the shape a per-dialect defect hides in.
+#[test]
+fn raw_view_body_native_quoting_is_not_judged_by_the_postgres_parser() {
+    let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
+    // Each body uses the identifier quoting its OWN dialect spells natively, and
+    // which libpg_query cannot parse.
+    for (dialect, sql) in [
+        (&zero_migrate::MYSQL, "SELECT `id` FROM app.users"),
+        (&zero_migrate::SQLITE, "SELECT [id] FROM app.users"),
+    ] {
+        validate_ir_scoped(&ir(raw_view(sql, None)), dialect, Some(&operator)).unwrap_or_else(
+            |err| {
+                panic!(
+                    "{} must vet its own view-body grammar, but was refused: {err:?}",
+                    dialect.as_str()
+                )
+            },
+        );
+        // PostgreSQL still refuses both — it is not that the check was deleted, it
+        // is that the check belongs to whichever backend owns the grammar.
+        let err = validate_ir_scoped(
+            &ir(raw_view(sql, None)),
+            &zero_migrate::POSTGRES,
+            Some(&operator),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert!(
+            err.reason
+                .contains("must parse as exactly one top-level SELECT"),
+            "PostgreSQL must still refuse a body its own parser rejects: {err:?}"
+        );
+    }
+}
+
+/// PostgreSQL's raw-view-body gate did NOT weaken when it moved behind the vendor
+/// seam. All five refusals are pinned by their operator-facing text, because
+/// "still refused" is a weaker claim than "refused for the same stated reason" and
+/// only the second one catches a silently reworded or reordered gate.
+#[test]
+fn postgres_raw_view_body_gate_is_unchanged_behind_the_vendor_seam() {
+    let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
+    for (sql, expected_reason, expected_fix) in [
+        (
+            "SELECT `id` FROM app.users",
+            "raw viewBody SQL must parse as exactly one top-level SELECT:",
+            "rewrite the view body as a single SELECT, or use the structured SelectAst builder",
+        ),
+        (
+            "SELECT 1; SELECT 2",
+            "raw viewBody SQL must contain exactly one top-level SELECT statement; parsed 2 statements",
+            "remove semicolon-chained statements from the view body",
+        ),
+        (
+            "DROP TABLE x",
+            "raw viewBody SQL must be a single top-level SELECT; DDL, DML, COPY, and utility statements are refused",
+            "rewrite the view body as a SELECT, or use the structured SelectAst builder",
+        ),
+        (
+            "SELECT id INTO copied FROM app.users",
+            "raw viewBody SQL uses SELECT INTO, which creates a table and is not a read-only view body",
+            "drop the INTO clause; a view body must be read-only",
+        ),
+        (
+            "SELECT pg_read_file('/etc/passwd')",
+            "raw viewBody SQL failed the read-only body scanner:",
+            "remove host/file/network/dynamic-SQL escape tokens from the view body",
+        ),
+    ] {
+        let err = validate_ir_scoped(
+            &ir(raw_view(sql, None)),
+            &zero_migrate::POSTGRES,
+            Some(&operator),
+        )
+        .unwrap_err();
+        assert_eq!(err.code, CODE_UNSUPPORTED, "{sql}");
+        assert!(
+            err.reason.starts_with(expected_reason),
+            "{sql}: expected reason to start with {expected_reason:?}, got {:?}",
+            err.reason
+        );
+        assert_eq!(err.suggested_fix.as_deref(), Some(expected_fix), "{sql}");
+    }
+
+    // Cross-schema confinement is part of the same gate and is still enforced.
+    let err = validate_ir_scoped(
+        &ir(raw_view("SELECT id FROM other_tenant.users", None)),
+        &zero_migrate::POSTGRES,
+        Some(&operator),
+    )
+    .unwrap_err();
+    assert!(err.reason.contains("body scanner"), "{err:?}");
+}
+
+/// MySQL and SQLite currently BYPASS the raw-view-body gate entirely. This test
+/// exists to make that widening VISIBLE and load-bearing rather than incidental.
+///
+/// Each of these bodies is refused on PostgreSQL — one reaches the host
+/// filesystem, one chains a second statement, one is a `DROP TABLE`. On MySQL and
+/// SQLite they are all admitted, because
+/// `ValidationPolicy::raw_view_body_refusal` returns `None` for both (see each
+/// vendor's own `validation.rs` for what that costs and why it was chosen).
+///
+/// WHEN A REAL MySQL OR SQLite IMPLEMENTATION LANDS, THIS TEST SHOULD FAIL.
+/// That is the intended signal, not a regression: delete the dialect from the loop
+/// and add its real refusals. Do not weaken the assertion to keep it green.
+#[test]
+fn mysql_and_sqlite_bypass_the_raw_view_body_gate_for_now() {
+    let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
+    let bypassed = [
+        "SELECT pg_read_file('/etc/passwd')",
+        "SELECT 1; DROP TABLE x",
+        "DROP TABLE x",
+    ];
+    for sql in bypassed {
+        // Refused on PostgreSQL...
+        validate_ir_scoped(
+            &ir(raw_view(sql, None)),
+            &zero_migrate::POSTGRES,
+            Some(&operator),
+        )
+        .expect_err(sql);
+        // ...and admitted, unchecked, on both bypassing backends.
+        for dialect in [&zero_migrate::MYSQL, &zero_migrate::SQLITE] {
+            assert!(
+                validate_ir_scoped(&ir(raw_view(sql, None)), dialect, Some(&operator)).is_ok(),
+                "{} is documented as bypassing the raw-view-body gate, so {sql:?} is admitted \
+                 unchecked; if this now fails, a real gate landed and this test should be \
+                 UPDATED to assert it, never weakened",
+                dialect.as_str()
+            );
+        }
+    }
+}
+
 #[test]
 fn structured_select_supports_order_limit_and_closed_expr_projection() {
     let select = SelectAst {
