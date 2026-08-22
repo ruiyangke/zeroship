@@ -689,7 +689,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         m: &Migration,
         applied_by: &str,
     ) -> Result<BaselineOutcome, BaselineError> {
-        crate::apply::baseline::baseline(self.conn, cfg, &DIALECT, m, applied_by).await
+        crate::apply::baseline::baseline(self, self.conn, cfg, &DIALECT, m, applied_by).await
     }
 }
 
