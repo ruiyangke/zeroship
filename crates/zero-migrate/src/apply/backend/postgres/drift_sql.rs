@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use crate::apply::drift::{
     compare_applied_to_set, parse_nextval_sequence_ref, ChecksumDriftReport, DriftError,
 };
-use crate::apply::journal;
+use super::journal_sql;
 use crate::conn::ExecutorConfig;
 use crate::driver::SqlSession;
 use crate::model::ir::{
@@ -56,14 +56,14 @@ impl From<crate::driver::DbError> for DriftError {
 /// set.
 ///
 /// For each net-applied version (the latest event is `completed`, per
-/// [`journal::applied`]):
+/// [`journal_sql::applied`]):
 ///
 /// - the supplied set has a migration with that version whose checksum differs
 /// ⇒ [`ChecksumDrift`](crate::ChecksumDrift) (the migration SQL was mutated after apply, or the
 /// journal row was tampered — scenario 36);
 /// - the supplied set has NO migration with that version ⇒ [`OrphanJournal`](crate::OrphanJournal).
 ///
-/// The recorded checksum used is the one [`journal::applied`] returns, which is
+/// The recorded checksum used is the one [`journal_sql::applied`] returns, which is
 /// the **latest `completed` event's** checksum for the version — correct across
 /// rollback↔re-apply cycles (a re-applied migration's checksum is its newest
 /// incarnation, not a stale earlier one).
@@ -83,7 +83,7 @@ pub async fn check_checksum_drift<D: SqlSession>(
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> Result<ChecksumDriftReport, DriftError> {
-    let applied = journal::applied(conn, cfg, dialect).await?;
+    let applied = journal_sql::applied(conn, cfg, dialect).await?;
     Ok(compare_applied_to_set(&applied, migrations))
 }
 

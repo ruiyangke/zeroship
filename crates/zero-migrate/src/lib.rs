@@ -321,10 +321,11 @@ pub use apply::journal::{
     AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,
     PendingContractRecord, PendingState, Phase, Resolution, RolledBackEntry,
 };
-// The PG journal free functions (each takes a `&D: SqlSession` connection). The
-// SQLite backend has its own `sqlite/journal_sql.rs` peers. On the whole PG seam.
+// The PG journal free functions (each takes a `&D: SqlSession` connection), from
+// the PG backend's own `postgres/journal_sql.rs`. MySQL and SQLite have their
+// peer `journal_sql.rs` modules. On the whole PG seam.
 #[cfg(pg_seam)]
-pub use apply::journal::{
+pub use apply::backend::postgres::journal_sql::{
     applied, applied_count, ensure_journal, history as journal_history, latest_completed_checksums,
     net_rolled_back, outstanding_pending_contracts, record_baseline, record_completed,
     record_rolled_back, record_started, resolve_pending_contract, superseded_versions,

@@ -48,6 +48,7 @@ use std::collections::BTreeMap;
 
 use crate::apply::executor::BackendError;
 use crate::apply::journal::{AppliedEntry, JournalError, Phase};
+use crate::conn::ExecutorConfig;
 use crate::model::ir::{
     IndexSortOrder, IndexStorageParams, SafeI64, SequenceOwnedBy, SequenceRef, TriggerEvent,
 };
@@ -129,7 +130,42 @@ impl ChecksumDriftReport {
     }
 }
 
-/// The **dialect-agnostic** core of [`check_checksum_drift`](crate::check_checksum_drift): compare a set of
+/// Compare the journal's NET-applied checksums against the supplied migration
+/// set.
+///
+/// For each net-applied version (the latest event is `completed`, per
+/// [`crate::apply::backend::postgres::journal_sql::applied`]):
+///
+/// - the supplied set has a migration with that version whose checksum differs
+/// ⇒ [`ChecksumDrift`] (the migration SQL was mutated after apply, or the
+/// journal row was tampered — scenario 36);
+/// - the supplied set has NO migration with that version ⇒ [`OrphanJournal`].
+///
+/// The recorded checksum used is the one [`crate::apply::backend::postgres::journal_sql::applied`] returns, which is
+/// the **latest `completed` event's** checksum for the version — correct across
+/// rollback↔re-apply cycles (a re-applied migration's checksum is its newest
+/// incarnation, not a stale earlier one).
+///
+/// This is the canonical comparison; [`apply`](crate::apply()) calls it as its
+/// abort-on-drift pre-check (it aborts if [`checksum_drift`](ChecksumDriftReport::checksum_drift)
+/// is non-empty), so the report and the apply gate cannot diverge.
+///
+/// **Read-only.** No mutation, no DDL.
+///
+/// # Errors
+/// [`DriftError::Journal`] if the journal read fails.
+#[cfg(pg_seam)]
+pub async fn check_checksum_drift<D: SqlSession>(
+    dialect: &DialectId,
+    conn: &D,
+    cfg: &ExecutorConfig,
+    migrations: &[Migration],
+) -> Result<ChecksumDriftReport, DriftError> {
+    let applied = crate::apply::backend::postgres::journal_sql::applied(conn, cfg, dialect).await?;
+    Ok(compare_applied_to_set(&applied, migrations))
+}
+
+/// The **dialect-agnostic** core of [`check_checksum_drift`]: compare a set of
 /// net-applied journal entries (already read by the dialect-coupled `applied`)
 /// against the supplied migration set, producing the [`ChecksumDriftReport`].
 ///

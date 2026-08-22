@@ -274,13 +274,15 @@ mod tests {
             canonical
         );
         assert_eq!(
-            crate::apply::journal::quote_ident_for_test(schema).unwrap(),
+            crate::apply::backend::postgres::journal_sql::quote_ident_for_test(schema).unwrap(),
             canonical
         );
         // …and they fail closed uniformly on a NUL too.
         assert!(crate::plan::author::quote_ident_for_test("a\0b").is_err());
         assert!(crate::apply::role::quote_ident_for_test("a\0b").is_err());
-        assert!(crate::apply::journal::quote_ident_for_test("a\0b").is_err());
+        assert!(
+            crate::apply::backend::postgres::journal_sql::quote_ident_for_test("a\0b").is_err()
+        );
     }
 
     /// The BACKTICK half of the same invariant, and it is a separate test rather

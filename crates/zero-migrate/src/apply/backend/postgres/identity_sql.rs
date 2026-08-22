@@ -60,7 +60,7 @@ pub(super) async fn apply<D: SqlSession>(
     }
 
     let marker = &step.migration;
-    let completed = journal::applied(conn, cfg, &super::DIALECT)
+    let completed = super::journal_sql::applied(conn, cfg, &super::DIALECT)
         .await?
         .into_iter()
         .filter(|entry| matches!(entry.phase, Phase::Completed))

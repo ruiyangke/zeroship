@@ -187,12 +187,12 @@ async fn baseline_locked<D: SqlSession>(
     baseline_migration: &Migration,
     applied_by: &str,
 ) -> Result<BaselineOutcome, BaselineError> {
-    journal::ensure_journal(conn, cfg, dialect).await?;
+    crate::apply::backend::postgres::journal_sql::ensure_journal(conn, cfg, dialect).await?;
 
     let version = baseline_migration.version.as_str();
 
     // Idempotency + first-entry check. Read net-applied state once.
-    let applied = journal::applied(conn, cfg, dialect).await?;
+    let applied = crate::apply::backend::postgres::journal_sql::applied(conn, cfg, dialect).await?;
     let net_applied: Vec<&str> = applied
         .iter()
         .filter(|e| e.phase == journal::Phase::Completed)
@@ -227,7 +227,7 @@ async fn baseline_locked<D: SqlSession>(
 
     // First entry: journal the baseline as a `completed` event WITHOUT running the
     // `up`. ADMIN write (the migrator has no meta-schema grant), `kind='baseline'`.
-    journal::record_baseline(
+    crate::apply::backend::postgres::journal_sql::record_baseline(
         conn,
         cfg,
         dialect,

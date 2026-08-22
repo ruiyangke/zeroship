@@ -7,7 +7,7 @@
 //! every state transition the journal ever saw.
 //!
 //! This module emits NO DDL and mutates nothing — it surfaces journal state. It
-//! reuses the journal's NET-state reader ([`journal::applied`]) and the
+//! reuses the journal's NET-state reader ([`crate::apply::backend::postgres::journal_sql::applied`]) and the
 //! executor's pending-ordering (`crate::apply::executor::order_pending`) so status's
 //! view of "applied" and "pending" is byte-for-byte the view apply itself uses.
 
@@ -412,7 +412,7 @@ pub struct MigrationStatus {
     /// same total order apply advances through.
     pub current_version: Option<MigrationId>,
     /// Net-applied entries (latest event = `completed`), in version order. Reuses
-    /// [`journal::applied`]'s entries (version, checksum, phase).
+    /// [`crate::apply::backend::postgres::journal_sql::applied`]'s entries (version, checksum, phase).
     pub applied: Vec<AppliedEntry>,
     /// Versions in the supplied set that are NOT net-applied, in the SAME
     /// topological order apply will run them (`crate::apply::executor::order_pending`).
@@ -1136,9 +1136,9 @@ fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, 
 ///
 /// **Read-only.** Bootstraps the journal idempotently (so a fresh project reports
 /// cleanly), then derives every field from NET journal state. `applied` reuses
-/// [`journal::applied`]; `pending` reuses the executor's `order_pending` (same
+/// [`crate::apply::backend::postgres::journal_sql::applied`]; `pending` reuses the executor's `order_pending` (same
 /// topo order as apply); `current_version` is the highest net-applied version;
-/// `rolled_back` is from [`journal::net_rolled_back`].
+/// `rolled_back` is from [`crate::apply::backend::postgres::journal_sql::net_rolled_back`].
 ///
 /// **Consistent snapshot.** The two journal reads (`applied` and
 /// `net_rolled_back`) run inside ONE `REPEATABLE READ READ ONLY` transaction, so a
@@ -1171,7 +1171,7 @@ pub async fn status<D: SqlSession>(
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> Result<MigrationStatus, StatusError> {
-    journal::ensure_journal(conn, cfg, dialect).await?;
+    crate::apply::backend::postgres::journal_sql::ensure_journal(conn, cfg, dialect).await?;
 
     // One consistent snapshot over both journal reads (applied + rolled_back). A
     // REPEATABLE READ READ ONLY txn pins a single MVCC view, so a concurrent
@@ -1472,7 +1472,7 @@ async fn read_status_snapshot<D: SqlSession>(
     dialect: &zero_migrate_ir::dialect::DialectId,
     migrations: &[Migration],
 ) -> Result<MigrationStatus, StatusError> {
-    let entries = journal::applied(conn, cfg, dialect).await?;
+    let entries = crate::apply::backend::postgres::journal_sql::applied(conn, cfg, dialect).await?;
     // NET-applied entries only (drop lone `started` inflight markers — those are
     // crash-recovery keys, not settled applied state).
     let applied: Vec<AppliedEntry> = entries
@@ -1496,7 +1496,9 @@ async fn read_status_snapshot<D: SqlSession>(
     // Supersession (squash): a version superseded by a net-applied squash OR
     // by an in-set squash is NOT pending — status must agree with apply. Reuses the
     // executor's `compute_superseded` so the two views never diverge.
-    let journal_superseded = journal::superseded_versions(conn, cfg, dialect).await?;
+    let journal_superseded =
+        crate::apply::backend::postgres::journal_sql::superseded_versions(conn, cfg, dialect)
+            .await?;
     let superseded_owned =
         crate::apply::executor::compute_superseded(migrations, &journal_superseded);
     let superseded: std::collections::HashSet<&str> =
@@ -1505,13 +1507,17 @@ async fn read_status_snapshot<D: SqlSession>(
         order_pending(migrations, &completed, &superseded).map_err(StatusError::Ordering)?;
     let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
 
-    let rolled_back = journal::net_rolled_back(conn, cfg, dialect).await?;
+    let rolled_back =
+        crate::apply::backend::postgres::journal_sql::net_rolled_back(conn, cfg, dialect).await?;
 
     // Surface the outstanding cross-deploy pending contracts
     // (with orphan detection) + the plans blocked on a pending-contract
     // dependency. Read inside this same REPEATABLE READ READ ONLY snapshot so the
     // obligation view is consistent with the applied/rolled-back buckets.
-    let outstanding = journal::outstanding_pending_contracts(conn, cfg, dialect).await?;
+    let outstanding = crate::apply::backend::postgres::journal_sql::outstanding_pending_contracts(
+        conn, cfg, dialect,
+    )
+    .await?;
     let (pending_contracts, blocked) = derive_pending_contract_status(&outstanding, migrations);
 
     Ok(MigrationStatus {
@@ -1656,8 +1662,8 @@ pub async fn history<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<HistoryEvent>, StatusError> {
-    journal::ensure_journal(conn, cfg, dialect).await?;
-    Ok(journal::history(conn, cfg, dialect).await?)
+    crate::apply::backend::postgres::journal_sql::ensure_journal(conn, cfg, dialect).await?;
+    Ok(crate::apply::backend::postgres::journal_sql::history(conn, cfg, dialect).await?)
 }
 
 #[cfg(test)]

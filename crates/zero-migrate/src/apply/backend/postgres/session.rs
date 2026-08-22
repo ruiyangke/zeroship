@@ -813,7 +813,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     // is passed by the caller (the journaled kind is the tamper anchor — never
     // inferred from the supplied set): `'apply'` for an ordinary migration,
     // `'squash'` for a fresh-path squash (non-empty `supersedes`, so its
-    // supersession edges are honored by `journal::superseded_versions`, which filters
+    // supersession edges are honored by `super::journal_sql::superseded_versions`, which filters
     // on `kind='squash'`), `'repeatable'` for a re-applied repeatable.
     debug_assert_eq!(
         kind == "squash",
@@ -1141,7 +1141,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // the next apply would then skip the INVALID-index cleanup, and an interrupted
     // `CREATE INDEX CONCURRENTLY` left INVALID would satisfy `IF NOT EXISTS` and
     // never be rebuilt. Runs as admin (still before the `SET ROLE`).
-    journal::record_started(
+    super::journal_sql::record_started(
         conn,
         cfg,
         &super::DIALECT,
@@ -1226,7 +1226,7 @@ async fn finalize_non_txn<D: SqlSession>(
     };
     conn.batch("BEGIN").await?;
     let finalize = async {
-        journal::record_completed(
+        super::journal_sql::record_completed(
             conn,
             cfg,
             &super::DIALECT,

@@ -14,6 +14,7 @@ mod backfill_sql;
 /// public entry points at their historical `zero_migrate::…` paths.
 pub(crate) mod drift_sql;
 mod identity_sql;
+pub mod journal_sql;
 mod primary_key_sql;
 /// The Postgres dialect SQL leaves (session/lock/txn/journal/DML/rollback) this
 /// backend drives — relocated out of the generic `apply::executor` so no
@@ -249,18 +250,18 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
-        journal::ensure_journal(self.conn, cfg, &DIALECT).await
+        journal_sql::ensure_journal(self.conn, cfg, &DIALECT).await
     }
 
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError> {
-        journal::applied(self.conn, cfg, &DIALECT).await
+        journal_sql::applied(self.conn, cfg, &DIALECT).await
     }
 
     async fn net_rolled_back_versions(
         &self,
         cfg: &ExecutorConfig,
     ) -> Result<Vec<String>, JournalError> {
-        journal::net_rolled_back(self.conn, cfg, &DIALECT)
+        journal_sql::net_rolled_back(self.conn, cfg, &DIALECT)
             .await
             .map(|entries| entries.into_iter().map(|entry| entry.version).collect())
     }
@@ -273,14 +274,14 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     async fn superseded_versions(&self, cfg: &ExecutorConfig) -> Result<Vec<String>, JournalError> {
-        journal::superseded_versions(self.conn, cfg, &DIALECT).await
+        journal_sql::superseded_versions(self.conn, cfg, &DIALECT).await
     }
 
     async fn latest_completed_checksums(
         &self,
         cfg: &ExecutorConfig,
     ) -> Result<std::collections::HashMap<String, String>, JournalError> {
-        journal::latest_completed_checksums(self.conn, cfg, &DIALECT).await
+        journal_sql::latest_completed_checksums(self.conn, cfg, &DIALECT).await
     }
 
     async fn check_checksum_drift(
@@ -529,7 +530,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         applied_by: &str,
         supersedes: &[&str],
     ) -> Result<(), ApplyError> {
-        crate::apply::journal::record_baseline(
+        journal_sql::record_baseline(
             self.conn,
             cfg,
             &DIALECT,
@@ -842,16 +843,18 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         &'a self,
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::PendingContract>> {
-        Box::pin(
-            async move { journal::outstanding_pending_contracts(self.conn, cfg, &DIALECT).await },
-        )
+        Box::pin(async move {
+            journal_sql::outstanding_pending_contracts(self.conn, cfg, &DIALECT).await
+        })
     }
 
     fn resolved_pending_contracts<'a>(
         &'a self,
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::ResolvedPendingContract>> {
-        Box::pin(async move { journal::resolved_pending_contracts(self.conn, cfg, &DIALECT).await })
+        Box::pin(
+            async move { journal_sql::resolved_pending_contracts(self.conn, cfg, &DIALECT).await },
+        )
     }
 
     fn pending_contract_shape<'a>(
@@ -860,7 +863,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         contract: &'a journal::PendingContract,
     ) -> JournalFuture<'a, journal::PendingContractShape> {
         Box::pin(async move {
-            journal::pending_contract_shape(
+            journal_sql::pending_contract_shape(
                 self.conn,
                 cfg,
                 &DIALECT,
@@ -878,7 +881,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         scope: Option<journal::DeployRecoveryScope<'a>>,
     ) -> JournalFuture<'a, bool> {
         Box::pin(async move {
-            journal::record_pending_contract_with_recovery(self.conn, cfg, &DIALECT, rec, scope)
+            journal_sql::record_pending_contract_with_recovery(self.conn, cfg, &DIALECT, rec, scope)
                 .await
         })
     }
@@ -891,7 +894,8 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         by: &'a str,
     ) -> JournalFuture<'a, ()> {
         Box::pin(async move {
-            journal::resolve_pending_contract(self.conn, cfg, &DIALECT, pc, resolution, by).await
+            journal_sql::resolve_pending_contract(self.conn, cfg, &DIALECT, pc, resolution, by)
+                .await
         })
     }
 
@@ -903,7 +907,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         by: &'a str,
     ) -> JournalFuture<'a, ()> {
         Box::pin(async move {
-            journal::mark_deploy_recovery_committed_batch(
+            journal_sql::mark_deploy_recovery_committed_batch(
                 self.conn,
                 cfg,
                 &DIALECT,
@@ -923,7 +927,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         by: &'a str,
     ) -> JournalFuture<'a, ()> {
         Box::pin(async move {
-            journal::mark_deploy_recovery_reconciled(
+            journal_sql::mark_deploy_recovery_reconciled(
                 self.conn,
                 cfg,
                 &DIALECT,
@@ -939,9 +943,9 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         &'a self,
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::DeployRecovery>> {
-        Box::pin(
-            async move { journal::outstanding_deploy_recoveries(self.conn, cfg, &DIALECT).await },
-        )
+        Box::pin(async move {
+            journal_sql::outstanding_deploy_recoveries(self.conn, cfg, &DIALECT).await
+        })
     }
 }
 
@@ -1061,7 +1065,7 @@ mod recording_session_genericity {
         }
 
         /// Route a read to its canned rows by SQL shape. ONLY the journal net-state
-        /// read (`journal::applied`, recognisable by its `union_all` CTE + the
+        /// read (`journal_sql::applied`, recognisable by its `union_all` CTE + the
         /// `schema_migrations_inflight` UNION leg — a shape no other query has) gets
         /// the canned (version, checksum, mig_kind, event_seq, phase) journal rows; every other
         /// read (catalog introspection in `snapshot_schema`, the `superseded_versions`
@@ -1797,7 +1801,7 @@ mod recording_session_genericity {
 
         // 2. WRITE — a journal INSERT (`record_started`) through `exec` with
         //    neutral Bind params. Drives the param-side seam on a write.
-        crate::apply::journal::record_started(
+        journal_sql::record_started(
             &rec,
             &cfg,
             &DIALECT,

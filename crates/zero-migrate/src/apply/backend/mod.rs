@@ -723,7 +723,7 @@ pub trait MigrationBackend {
     ///
     /// Called only after the generic body has verified, under the project lock,
     /// that ALL of `supersedes` are net-applied (the existing-DB squash path). The
-    /// PG impl delegates to [`crate::apply::journal::record_baseline`] with
+    /// PG impl delegates to [`crate::apply::backend::postgres::journal_sql::record_baseline`] with
     /// `kind='squash'`; a SQLite impl writes the same row+edges atomically through
     /// its actor. The connection / `pg_advisory_lock` never cross this surface.
     ///
