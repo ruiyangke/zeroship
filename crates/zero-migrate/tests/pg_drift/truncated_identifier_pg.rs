@@ -33,8 +33,8 @@ use zero_migrate::model::ir::ExistenceGuard;
 use zero_migrate::model::probe::{GuardDir, GuardProbe};
 use zero_migrate::render::existence_probe::{decide, GuardVerdict};
 use zero_migrate::{
-    snapshot_schema, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase,
-    POSTGRES,
+    apply::backend::postgres::drift_sql::snapshot_schema, Approval, ExecutorConfig, IrAuthor,
+    LiveSchema, MigrationIr, Op, Phase, POSTGRES,
 };
 
 /// PostgreSQL's NAMEDATALEN-derived identifier bound, in bytes.
@@ -260,9 +260,13 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
         "apply reports the migration applied: {out:?}"
     );
 
-    let journal = zero_migrate::applied(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
-        .await
-        .expect("read the journal");
+    let journal = zero_migrate::apply::backend::postgres::journal_sql::applied(
+        &session,
+        &cfg,
+        &zero_migrate_ir::dialect::POSTGRES,
+    )
+    .await
+    .expect("read the journal");
     assert!(
         journal
             .iter()

@@ -110,9 +110,10 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::render::fold::effects::state_at;
 use zero_migrate::{
-    diff_snapshots, resolve_create_table_policy, snapshot_schema, Approval, EffectivePolicy,
-    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
-    PostgresBackend, SchemaSnapshot, StructuralDrift,
+    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots,
+    resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
+    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend, SchemaSnapshot,
+    StructuralDrift,
 };
 
 const OWNER: &str = "app_state_at_matches_the_server_pg";

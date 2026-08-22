@@ -45,9 +45,9 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    fold_ops, resolve_create_table_policy, snapshot_schema, Approval, EffectivePolicy,
-    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
-    PostgresBackend, SchemaSnapshot,
+    apply::backend::postgres::drift_sql::snapshot_schema, fold_ops, resolve_create_table_policy,
+    Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode,
+    MigrationEngine, MigrationIr, PostgresBackend, SchemaSnapshot,
 };
 
 const OWNER: &str = "app_schema_model_equivalence_pg";

@@ -1,22 +1,30 @@
 //! Status + history read API — **read-only**.
 //!
-//! [`status`] answers "where is this project's schema?" — what's applied, what's
-//! pending (in the exact order apply will run it), the current version, and what
-//! has been rolled back. [`history`] returns the FULL append-only audit log
-//! (every apply + every rollback event, in order), the tamper-evident record of
-//! every state transition the journal ever saw.
+//! [`status_via_backend`] answers "where is this project's schema?" — what's
+//! applied, what's pending (in the exact order apply will run it), and the current
+//! version. [`history_via_backend`] returns the FULL append-only audit log (every
+//! apply + every rollback event, in order), the tamper-evident record of every
+//! state transition the journal ever saw.
+//!
+//! Both go through [`MigrationBackend`](crate::apply::backend::MigrationBackend).
+//! Neither takes a connection plus a `dialect` argument any more: that shape is
+//! what let these verbs NAME a dialect and then read PostgreSQL's journal
+//! regardless. The one read the neutral trait cannot serve — full
+//! [`RolledBackEntry`] detail — stayed with the vendor that has it, in
+//! [`postgres::status_sql`](crate::apply::backend::postgres).
 //!
 //! This module emits NO DDL and mutates nothing — it surfaces journal state. It
-//! reuses the journal's NET-state reader ([`crate::apply::backend::postgres::journal_sql::applied`]) and the
+//! reuses the journal's NET-state reader (the backend's
+//! [`applied`](crate::apply::backend::MigrationBackend::applied)) and the
 //! executor's pending-ordering (`crate::apply::executor::order_pending`) so status's
 //! view of "applied" and "pending" is byte-for-byte the view apply itself uses.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-// `status`/`history`/`read_status_snapshot` are generic over the `SqlSession` seam
-// (`&D`), so a host (napi) driver can drive the "show me pending migrations" flow.
-use crate::driver::SqlSession;
-
+// No `SqlSession` here. Every verb in this module is generic over
+// `MigrationBackend` and emits SQL only through it; a raw connection plus a
+// `dialect` argument was exactly the shape that let the neutral verbs read
+// PostgreSQL's journal whatever dialect the caller named.
 use crate::apply::backend::{BackfillProgressEntry, ProjectLockAcquisition, ProjectLockHolder};
 use crate::apply::executor::{order_pending, ApplyError};
 use crate::apply::journal::{
@@ -410,7 +418,8 @@ pub struct MigrationStatus {
     /// same total order apply advances through.
     pub current_version: Option<MigrationId>,
     /// Net-applied entries (latest event = `completed`), in version order. Reuses
-    /// [`crate::apply::backend::postgres::journal_sql::applied`]'s entries (version, checksum, phase).
+    /// the backend's [`applied`](crate::apply::backend::MigrationBackend::applied)
+    /// entries (version, checksum, phase).
     pub applied: Vec<AppliedEntry>,
     /// Versions in the supplied set that are NOT net-applied, in the SAME
     /// topological order apply will run them (`crate::apply::executor::order_pending`).
@@ -435,7 +444,8 @@ pub struct MigrationStatus {
 }
 
 /// One cross-deploy online-rename pending-contract obligation surfaced by
-/// [`status`]. `orphaned` is computed against the supplied migration set:
+/// [`status_via_backend`]. `orphaned` is computed against the supplied migration
+/// set:
 /// an obligation whose `pending_version` is NOT among the supplied set's versions
 /// is orphaned (the rename was removed after its EXPAND applied) and emits the
 /// [`OrphanedPendingContract`](crate::plan::pending::OrphanedPendingContract) payload.
@@ -451,7 +461,8 @@ pub struct PendingContractStatus {
 }
 
 /// One plan blocked on a pending-contract dependency surfaced by
-/// [`status`] — a retained `blocked-awaiting-approval` state, not a failure.
+/// [`status_via_backend`] — a retained `blocked-awaiting-approval` state, not a
+/// failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockedPlan {
     /// The blocked plan's version (B).
@@ -1129,166 +1140,17 @@ fn order_plan_manifests(manifests: &[PlanStatusManifest]) -> Result<Vec<usize>, 
     Ok(ordered)
 }
 
-/// Compute the [`MigrationStatus`] of `migrations` against the journal — what is
-/// applied, pending, current, and rolled back (design scenarios 45/46).
-///
-/// **Read-only.** Bootstraps the journal idempotently (so a fresh project reports
-/// cleanly), then derives every field from NET journal state. `applied` reuses
-/// [`crate::apply::backend::postgres::journal_sql::applied`]; `pending` reuses the executor's `order_pending` (same
-/// topo order as apply); `current_version` is the highest net-applied version;
-/// `rolled_back` is from [`crate::apply::backend::postgres::journal_sql::net_rolled_back`].
-///
-/// **Consistent snapshot.** The two journal reads (`applied` and
-/// `net_rolled_back`) run inside ONE `REPEATABLE READ READ ONLY` transaction, so a
-/// concurrent apply/rollback committing between them can never split the view into
-/// an inconsistent applied-vs-rolled-back bucketing. The transaction is driven
-/// explicitly through the shared [`SqlSession`], mirroring how the
-/// executor drives its apply/rollback transactions. `ensure_journal` (which emits
-/// `CREATE … IF NOT EXISTS` DDL) runs BEFORE the snapshot, since a `READ ONLY`
-/// transaction forbids DDL and bootstrap must stay idempotent regardless.
-///
-/// "Current" = highest-VERSION net-applied (`UUIDv7`/`MigrationId` total order),
-/// NOT most-recently-applied. The two coincide unless a `depends_on` graph drove
-/// apply order away from version order.
-///
-/// # Preconditions
-/// The caller MUST pass an **admin/read** connection. This function takes whatever
-/// [`SqlSession`] implementation it is handed and never
-/// elevates to the `migrator` role; schema
-/// scoping by `cfg.meta_schema` keeps reads bound to this project's journal, but
-/// the privilege of the connection is the caller's obligation.
-///
-/// # Errors
-/// - [`StatusError::Journal`] on a journal read/bootstrap failure.
-/// - [`StatusError::Ordering`] if the supplied set's `depends_on` is
-///   unsatisfiable or cyclic (the same fault apply would surface).
-pub async fn status<D: SqlSession>(
-    dialect: &zero_migrate_ir::dialect::DialectId,
-    conn: &D,
-    cfg: &ExecutorConfig,
-    migrations: &[Migration],
-) -> Result<MigrationStatus, StatusError> {
-    crate::apply::backend::postgres::journal_sql::ensure_journal(conn, cfg, dialect).await?;
-
-    // One consistent snapshot over both journal reads (applied + rolled_back). A
-    // REPEATABLE READ READ ONLY txn pins a single MVCC view, so a concurrent
-    // commit between the two reads can't produce a split bucket view.
-    conn.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .await
-        .map_err(|e| StatusError::Journal(JournalError::Db(e.into())))?;
-    let snapshot = read_status_snapshot(conn, cfg, dialect, migrations).await;
-    finish_status_snapshot(conn, snapshot).await
-}
-
-async fn finish_status_snapshot<D: SqlSession, T>(
-    conn: &D,
-    snapshot: Result<T, StatusError>,
-) -> Result<T, StatusError> {
-    match snapshot {
-        Ok(status) => {
-            if let Err(commit_error) = conn.batch("COMMIT").await {
-                if let Err(rollback_error) = conn.batch("ROLLBACK").await {
-                    tracing::warn!(
-                        error = %rollback_error,
-                        "zero-migrate: PostgreSQL status rollback after COMMIT failure failed"
-                    );
-                }
-                return Err(StatusError::Journal(JournalError::Db(commit_error.into())));
-            }
-            Ok(status)
-        }
-        Err(snapshot_error) => {
-            if let Err(rollback_error) = conn.batch("ROLLBACK").await {
-                tracing::warn!(
-                    error = %rollback_error,
-                    "zero-migrate: PostgreSQL status snapshot rollback failed"
-                );
-            }
-            Err(snapshot_error)
-        }
-    }
-}
-
-#[cfg(test)]
-mod legacy_snapshot_transaction_tests {
-    use super::*;
-    use crate::driver::{Bind, DbError, Row};
-    use std::cell::{Cell, RefCell};
-
-    struct RecordingSession {
-        batches: RefCell<Vec<String>>,
-        fail_commit: Cell<bool>,
-    }
-
-    impl RecordingSession {
-        fn new(fail_commit: bool) -> Self {
-            Self {
-                batches: RefCell::new(Vec::new()),
-                fail_commit: Cell::new(fail_commit),
-            }
-        }
-    }
-
-    impl SqlSession for RecordingSession {
-        async fn batch(&self, sql: &str) -> Result<(), DbError> {
-            self.batches.borrow_mut().push(sql.to_string());
-            if sql == "COMMIT" && self.fail_commit.get() {
-                return Err(DbError::message("injected status COMMIT failure"));
-            }
-            Ok(())
-        }
-
-        async fn exec(&self, _sql: &str, _binds: &[Bind]) -> Result<u64, DbError> {
-            Err(DbError::message("unexpected exec"))
-        }
-
-        async fn exec_text(&self, _sql: &str, _params: &[Option<String>]) -> Result<u64, DbError> {
-            Err(DbError::message("unexpected exec_text"))
-        }
-
-        async fn query(&self, _sql: &str, _binds: &[Bind]) -> Result<Vec<Row>, DbError> {
-            Err(DbError::message("unexpected query"))
-        }
-
-        async fn query_one(&self, _sql: &str, _binds: &[Bind]) -> Result<Row, DbError> {
-            Err(DbError::message("unexpected query_one"))
-        }
-    }
-
-    #[compio::test]
-    async fn snapshot_error_rolls_back_instead_of_committing() {
-        let conn = RecordingSession::new(false);
-        let result: Result<(), StatusError> = finish_status_snapshot(
-            &conn,
-            Err(StatusError::PlanManifest(
-                "injected snapshot failure".into(),
-            )),
-        )
-        .await;
-
-        assert!(matches!(result, Err(StatusError::PlanManifest(_))));
-        assert_eq!(conn.batches.borrow().as_slice(), ["ROLLBACK"]);
-    }
-
-    #[compio::test]
-    async fn commit_failure_is_surfaced_and_cleanup_is_attempted() {
-        let conn = RecordingSession::new(true);
-        let error = finish_status_snapshot(&conn, Ok::<_, StatusError>(()))
-            .await
-            .expect_err("COMMIT failure must not be swallowed");
-
-        assert!(error.to_string().contains("injected status COMMIT failure"));
-        assert_eq!(conn.batches.borrow().as_slice(), ["COMMIT", "ROLLBACK"]);
-    }
-}
-
-/// Backend-generic [`status`]: compute the [`MigrationStatus`] over ANY
+/// Compute the [`MigrationStatus`] over ANY
 /// [`MigrationBackend`](crate::apply::backend::MigrationBackend), reading net journal
 /// state through the trait (`ensure_journal` + `applied` + `superseded_versions`)
-/// rather than a PG `&Client`. This is the multi-engine peer of [`status`] — the
-/// public CLI's SQLite leg routes here, where the PG leg keeps the
-/// `REPEATABLE READ READ ONLY` snapshot path above (the SQLite actor serializes
-/// structurally, so a single net-state read is already a consistent view).
+/// rather than a PG `&Client`. THE status verb: every dialect the CLI and the addon
+/// drive, PostgreSQL included, routes here.
+///
+/// PostgreSQL additionally keeps a `REPEATABLE READ READ ONLY` snapshot read of the
+/// same net state in
+/// [`postgres::status_sql`](crate::apply::backend::postgres) — the one path that can
+/// report full [`RolledBackEntry`] detail. It lives in that backend rather than
+/// here because the transaction it opens and the journal it reads are that vendor's.
 ///
 /// `applied` / `pending` / `current_version` are derived with the SAME rules and
 /// the SAME `order_pending` the executor uses, so status never disagrees with
@@ -1459,72 +1321,6 @@ async fn status_via_backend_locked_inner<B: crate::apply::backend::MigrationBack
     })
 }
 
-/// The body of [`status`]'s consistent-snapshot read: both journal reads + the
-/// derived fields, run inside the caller's open `REPEATABLE READ READ ONLY` txn.
-async fn read_status_snapshot<D: SqlSession>(
-    conn: &D,
-    cfg: &ExecutorConfig,
-    dialect: &zero_migrate_ir::dialect::DialectId,
-    migrations: &[Migration],
-) -> Result<MigrationStatus, StatusError> {
-    let entries = crate::apply::backend::postgres::journal_sql::applied(conn, cfg, dialect).await?;
-    // NET-applied entries only (drop lone `started` inflight markers — those are
-    // crash-recovery keys, not settled applied state).
-    let applied: Vec<AppliedEntry> = entries
-        .iter()
-        .filter(|e| e.phase == Phase::Completed)
-        .cloned()
-        .collect();
-
-    // current_version = highest net-applied version (MigrationId order).
-    let current_version = applied
-        .iter()
-        .filter_map(|e| MigrationId::parse(&e.version).ok())
-        .max();
-
-    // pending = set − net-applied − superseded, in the SAME order apply uses.
-    // order_pending wants a map of completed entries keyed by version; build it from
-    // the net-applied entries (NOT the raw rows — a rolled-back version must count
-    // as pending, and net state already excludes it).
-    let completed: HashMap<&str, &AppliedEntry> =
-        applied.iter().map(|e| (e.version.as_str(), e)).collect();
-    // Supersession (squash): a version superseded by a net-applied squash OR
-    // by an in-set squash is NOT pending — status must agree with apply. Reuses the
-    // executor's `compute_superseded` so the two views never diverge.
-    let journal_superseded =
-        crate::apply::backend::postgres::journal_sql::superseded_versions(conn, cfg, dialect)
-            .await?;
-    let superseded_owned =
-        crate::apply::executor::compute_superseded(migrations, &journal_superseded);
-    let superseded: std::collections::HashSet<&str> =
-        superseded_owned.iter().map(String::as_str).collect();
-    let ordered =
-        order_pending(migrations, &completed, &superseded).map_err(StatusError::Ordering)?;
-    let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
-
-    let rolled_back =
-        crate::apply::backend::postgres::journal_sql::net_rolled_back(conn, cfg, dialect).await?;
-
-    // Surface the outstanding cross-deploy pending contracts
-    // (with orphan detection) + the plans blocked on a pending-contract
-    // dependency. Read inside this same REPEATABLE READ READ ONLY snapshot so the
-    // obligation view is consistent with the applied/rolled-back buckets.
-    let outstanding = crate::apply::backend::postgres::journal_sql::outstanding_pending_contracts(
-        conn, cfg, dialect,
-    )
-    .await?;
-    let (pending_contracts, blocked) = derive_pending_contract_status(&outstanding, migrations);
-
-    Ok(MigrationStatus {
-        current_version,
-        applied,
-        pending,
-        rolled_back,
-        pending_contracts,
-        blocked,
-    })
-}
-
 /// Derive the [`MigrationStatus::pending_contracts`] + [`MigrationStatus::blocked`]
 /// fields from the OUTSTANDING obligation set and the supplied migration set.
 /// Pure — shared by the PG snapshot path and any
@@ -1550,7 +1346,7 @@ async fn read_status_snapshot<D: SqlSession>(
 /// which a re-lowered IR's `lower_plan().version` reproduces and a
 /// `depends_on: [A]` references — so both checks key on the identity the supplied
 /// set actually carries.
-fn derive_pending_contract_status(
+pub(crate) fn derive_pending_contract_status(
     outstanding: &[journal::PendingContract],
     migrations: &[Migration],
 ) -> (Vec<PendingContractStatus>, Vec<BlockedPlan>) {
@@ -1638,26 +1434,38 @@ fn derive_pending_contract_status_for_plans(
 /// Read the FULL append-only event log (every apply + rollback event) in
 /// `event_seq` order — the audit trail.
 ///
-/// **Read-only.** Unlike [`status`], this does NOT collapse to net state: a
-/// version applied → rolled back → re-applied shows all three events. Bootstraps
-/// the journal idempotently first so a fresh project returns an empty log.
+/// **Read-only.** Unlike [`status_via_backend`], this does NOT collapse to net
+/// state: a version applied → rolled back → re-applied shows all three events.
+/// Bootstraps the journal idempotently first so a fresh project returns an empty
+/// log.
+///
+/// Both reads go through the supplied
+/// [`MigrationBackend`](crate::apply::backend::MigrationBackend), so the audit
+/// trail a caller gets is the one the REGISTERED engine keeps. This function used
+/// to take a `&D: SqlSession` plus a `dialect` argument and then call PostgreSQL's
+/// journal by name, which meant "the engine's history" and "PostgreSQL's history"
+/// were the same function no matter which dialect the caller named.
+///
+/// Not every backend keeps a readable audit trail:
+/// [`MigrationBackend::history`](crate::apply::backend::MigrationBackend::history)
+/// is a REQUIRED method precisely so each one states its own posture rather than
+/// inheriting a default, and MySQL and SQLite currently refuse it explicitly.
 ///
 /// # Preconditions
-/// The caller MUST pass an **admin/read** connection. Like [`status`] and
-/// [`snapshot_schema`](crate::snapshot_schema), this takes whatever
-/// [`SqlSession`] implementation it is handed and never
-/// elevates to the `migrator` role; the reads are scoped to
-/// `cfg.meta_schema`, but the connection's privilege is the caller's obligation.
+/// The caller MUST supply an **admin/read** backend. This function drives whatever
+/// backend it is handed and never elevates to the `migrator` role; the reads are
+/// scoped to `cfg.meta_schema`, but the connection's privilege is the caller's
+/// obligation.
 ///
 /// # Errors
-/// [`StatusError::Journal`] on a journal read/bootstrap failure.
-pub async fn history<D: SqlSession>(
-    dialect: &zero_migrate_ir::dialect::DialectId,
-    conn: &D,
+/// [`StatusError::Journal`] on a journal read/bootstrap failure, including the
+/// refusal a backend without an audit trail returns.
+pub async fn history_via_backend<B: crate::apply::backend::MigrationBackend>(
+    backend: &B,
     cfg: &ExecutorConfig,
 ) -> Result<Vec<HistoryEvent>, StatusError> {
-    crate::apply::backend::postgres::journal_sql::ensure_journal(conn, cfg, dialect).await?;
-    Ok(crate::apply::backend::postgres::journal_sql::history(conn, cfg, dialect).await?)
+    backend.ensure_journal(cfg).await?;
+    Ok(backend.history(cfg).await?)
 }
 
 #[cfg(test)]

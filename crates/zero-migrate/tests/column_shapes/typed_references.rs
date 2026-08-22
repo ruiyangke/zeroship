@@ -10,8 +10,9 @@ use serde_json::{json, Value};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
-    fold_ops, snapshot_schema, validate_ir, ColumnSnapshot, ConstraintSnapshot, IrAuthor,
-    LiveSchema, MysqlTextStorageSnapshot, SchemaSnapshot, TableSnapshot,
+    apply::backend::postgres::drift_sql::snapshot_schema, fold_ops, validate_ir, ColumnSnapshot,
+    ConstraintSnapshot, IrAuthor, LiveSchema, MysqlTextStorageSnapshot, SchemaSnapshot,
+    TableSnapshot,
 };
 
 const PROJECT_SCHEMA: &str = "app";

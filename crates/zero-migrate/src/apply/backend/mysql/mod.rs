@@ -847,6 +847,22 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         journal_sql::applied(self.conn, cfg).await
     }
 
+    async fn history(
+        &self,
+        _cfg: &ExecutorConfig,
+    ) -> Result<Vec<crate::apply::journal::HistoryEvent>, JournalError> {
+        // MySQL's journal table records the events; what it has never had is the
+        // READER that projects them into `HistoryEvent`. Refusing by name is the
+        // honest posture: an empty Vec would be indistinguishable from a project
+        // with no history at all, and this is an AUDIT surface — a caller that gets
+        // a silent empty log cannot tell "nothing happened" from "I cannot see what
+        // happened". Adding the reader is a MySQL change, not a core one.
+        Err(JournalError::Backend(
+            "mysql backend: the append-only journal audit trail (history) has no MySQL reader"
+                .to_string(),
+        ))
+    }
+
     async fn net_rolled_back_versions(
         &self,
         cfg: &ExecutorConfig,

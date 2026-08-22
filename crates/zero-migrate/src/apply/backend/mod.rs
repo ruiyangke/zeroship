@@ -25,7 +25,7 @@
 //! - **drift schema introspection** — `snapshot_schema` over
 //!   `information_schema`/`pg_catalog` (PG) vs `sqlite_master` + PRAGMAs (SQLite);
 //!   the checksum/tamper comparison itself is dialect-agnostic and stays generic
-//!   ([`check_checksum_drift`](crate::check_checksum_drift)).
+//!   ([`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)).
 //!
 //! [`PostgresBackend`], [`sqlite::SqliteBackend`], and [`MysqlBackend`] are the live
 //! implementations. Postgres remains the richest regression bar; SQLite and MySQL
@@ -56,6 +56,10 @@ pub use mysql::{
     MysqlInflightResolution,
 };
 pub use postgres::PostgresBackend;
+// The SQLite backend's public entry points, re-exported HERE rather than reached
+// through `apply::backend::sqlite::…` from the crate root, so the root names no
+// vendor module — the same shape `PostgresBackend` above already had.
+pub use sqlite::{RebuildError, SqliteActorError, SqliteBackend};
 // The progress row a resumable backfill reads back. It moved down beside the
 // `BackfillSpec` it describes progress THROUGH; re-exported so
 // `apply::backend::BackfillProgressEntry` resolves unchanged.
@@ -67,7 +71,7 @@ use std::pin::Pin;
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
-use crate::apply::journal::{self, AppliedEntry, JournalError};
+use crate::apply::journal::{self, AppliedEntry, HistoryEvent, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
@@ -547,6 +551,25 @@ pub trait MigrationBackend {
 
     /// The net-applied + lone-`started` journal entries (the drift/pending input).
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError>;
+
+    /// The FULL append-only event log in `event_seq` order — the audit trail.
+    ///
+    /// The uncollapsed peer of [`applied`](Self::applied): where that returns NET
+    /// state (one row per version), this returns every event, so a version applied
+    /// → rolled back → re-applied shows all three.
+    ///
+    /// REQUIRED, with no default body, because "this engine keeps no readable audit
+    /// trail" is a POSTURE a backend must state rather than inherit. An empty
+    /// default would make a backend that cannot read its own log indistinguishable
+    /// from a project that has never been migrated, and the audit trail is the one
+    /// surface where that confusion is not survivable. Today only PostgreSQL
+    /// answers; MySQL and SQLite return an explicit
+    /// [`JournalError::Backend`] refusal naming themselves.
+    ///
+    /// # Errors
+    /// [`JournalError::Db`] on read failure, or [`JournalError::Backend`] from a
+    /// backend that has no audit-trail reader.
+    async fn history(&self, cfg: &ExecutorConfig) -> Result<Vec<HistoryEvent>, JournalError>;
 
     /// Versions whose latest journal event is a rollback, ordered by version.
     async fn net_rolled_back_versions(

@@ -788,6 +788,23 @@ impl MigrationBackend for SqliteBackend {
         journal_sql::applied(&self.actor).await.map_err(journal_err)
     }
 
+    async fn history(
+        &self,
+        _cfg: &ExecutorConfig,
+    ) -> Result<Vec<crate::apply::journal::HistoryEvent>, JournalError> {
+        // The SQLite journal keeps the same append-only events; what it has never
+        // had is the READER that projects them into `HistoryEvent`. Refusing by
+        // name is the honest posture: an empty Vec would be indistinguishable from
+        // a project with no history at all, and this is an AUDIT surface — a caller
+        // that gets a silent empty log cannot tell "nothing happened" from "I
+        // cannot see what happened". Adding the reader is a SQLite change, not a
+        // core one.
+        Err(JournalError::Backend(
+            "sqlite backend: the append-only journal audit trail (history) has no SQLite reader"
+                .to_string(),
+        ))
+    }
+
     async fn net_rolled_back_versions(
         &self,
         _cfg: &ExecutorConfig,

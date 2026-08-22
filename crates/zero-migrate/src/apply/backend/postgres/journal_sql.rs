@@ -1467,41 +1467,6 @@ pub async fn outstanding_deploy_recoveries<D: SqlSession>(
         .collect::<Result<Vec<_>, JournalError>>()
 }
 
-/// Count the number of versions the journal currently records as **net-applied**
-/// (latest event per version is `completed`) — the first-entry test for
-/// [`crate::apply::baseline`].
-///
-/// Baseline is a FIRST-entry operation: you cannot baseline a DB the engine
-/// already manages. This counts net-applied versions exactly as [`applied`]
-/// computes them (latest event per version is `completed`), so a version that was
-/// applied then rolled back does NOT count (it is pending again). A non-zero count
-/// means the engine already manages real history ⇒ baseline must refuse.
-///
-/// # Errors
-/// [`JournalError::Db`] on query failure.
-pub async fn applied_count<D: SqlSession>(
-    conn: &D,
-    cfg: &ExecutorConfig,
-    dialect: &DialectId,
-) -> Result<i64, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
-    let row = conn
-        .query_one(
-            &format!(
-                "WITH latest AS (
-                     SELECT DISTINCT ON (version) version, event_kind
-                       FROM {meta}.schema_migrations
-                      ORDER BY version, event_seq DESC
-                 )
-                 SELECT count(*)::bigint AS n FROM latest WHERE event_kind = '{applied}'",
-                applied = EventKind::Applied.as_str()
-            ),
-            &[],
-        )
-        .await?;
-    Ok(row.try_get("n")?)
-}
-
 /// Read the set of versions **superseded by a net-applied squash**.
 ///
 /// A version `v_i` is satisfied-by-supersession when some squash `S` with an edge

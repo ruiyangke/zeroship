@@ -146,7 +146,7 @@ pub use analysis::classify::{
     classify, drop_index_targets, relations_touched, DdlKind, DropIndexTarget, OwnershipNeed,
     ParseError, StatementClass, TouchedRelation,
 };
-pub use apply::backend::sqlite::{RebuildError, SqliteActorError, SqliteBackend};
+pub use apply::backend::{RebuildError, SqliteActorError, SqliteBackend};
 pub use apply::baseline::{BaselineError, BaselineOutcome};
 pub use apply::drift::{
     diff_snapshots, diff_snapshots_with_index_aliases, AlteredObject, ChecksumDrift,
@@ -170,16 +170,13 @@ pub use render::declarative::{
 pub use render::expand_contract::{
     ExpandContractAuthor, ExpandContractError, ExpandContractPlan, OnlineIntent,
 };
-// `check_checksum_drift` reads the journal over a `&D: SqlSession`; `snapshot_schema`
-// introspects `pg_catalog` — both generic over the seam (SQLite has its own peers).
-// On the whole PG seam.
-// `resolve_view_bodies` is the one drift helper that needs a live connection to
-// make a comparison POSSIBLE rather than to read a catalog: it re-prints an
-// authored view body through the server so `diff_snapshots` has the same
-// representation on both sides. See its own docs for why no offline pass can.
-pub use apply::backend::postgres::drift_sql::{
-    check_checksum_drift, resolve_view_bodies, snapshot_schema,
-};
+// `check_checksum_drift`, `snapshot_schema` and `resolve_view_bodies` are NOT
+// re-exported here. They read `pg_catalog`/`information_schema` and drive a
+// PostgreSQL savepoint probe; promising them at the crate root said the engine
+// offers them, when what the engine offers is whatever the REGISTERED backend
+// implements. They live at `apply::backend::postgres::drift_sql`, reached by that
+// name. The neutral surface is
+// `MigrationBackend::{check_checksum_drift, snapshot_schema}`.
 pub use apply::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict, RollbackError,
     RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
@@ -318,14 +315,13 @@ pub use apply::journal::{
     AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,
     PendingContractRecord, PendingState, Phase, Resolution, RolledBackEntry,
 };
-// The PG journal free functions (each takes a `&D: SqlSession` connection), from
-// the PG backend's own `postgres/journal_sql.rs`. MySQL and SQLite have their
-// peer `journal_sql.rs` modules. On the whole PG seam.
-pub use apply::backend::postgres::journal_sql::{
-    applied, applied_count, ensure_journal, history as journal_history, latest_completed_checksums,
-    net_rolled_back, outstanding_pending_contracts, record_baseline, record_completed,
-    record_rolled_back, record_started, resolve_pending_contract, superseded_versions,
-};
+// The PG journal free functions are NOT re-exported here. They stood at the crate
+// root as if they were THE engine's journal, and most had no consumer outside this
+// crate at all — those are simply gone from the public surface. MySQL and SQLite
+// have their own peer `journal_sql.rs` modules, and no caller reaching
+// `zero_migrate::applied` could ever have got one. The ones with real callers live
+// at `apply::backend::postgres::journal_sql`, reached by that name; the neutral
+// surface is `MigrationBackend`'s journal methods.
 // The structured pending-contract interlock payloads.
 pub use ops::squash::{squash, SquashError, SquashOutcome};
 pub use ops::status::{
@@ -341,9 +337,11 @@ pub use plan::pending::{
     CODE_DEPENDENCY_PENDING_CONTRACT, CODE_ORPHANED_PENDING_CONTRACT,
     CODE_TABLE_HAS_PENDING_CONTRACT,
 };
-// `history` / `status` are generic over the `SqlSession` seam —
-// on the whole PG seam so a host driver can drive the pending-migrations flow.
-pub use ops::status::{history, status};
+// `status_via_backend` / `history_via_backend` live at `ops::status`, reached
+// through the module path rather than promised at the crate root: the root once
+// exported a `status` and a `history` that took a raw connection plus a dialect
+// argument and then read PostgreSQL's journal regardless of what that argument
+// said.
 // The confined submit path is PG-only; gated with `mod ops::submit`.
 pub use model::migration::{
     migration_id_for_version, Checksum, ChecksumInput, IdError, Migration, MigrationFlags,

@@ -23,7 +23,7 @@ use crate::support;
 use crate::support::PgDevSession;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{PolicyCmd, TriggerEvent, TriggerTiming};
-use zero_migrate::{diff_snapshots, snapshot_schema};
+use zero_migrate::{apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots};
 
 fn token() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};

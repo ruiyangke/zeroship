@@ -1219,7 +1219,12 @@ pub fn history(
 
     run_verb(env, host_driver, move |session| async move {
         let cfg = ExecutorConfig::new(project_id, project_schema, effective);
-        zero_migrate::ops::status::history(&zero_migrate::POSTGRES, &session, &cfg)
+        // Through the backend, like every other verb in this file. The old call
+        // handed `ops::status::history` a raw session plus a `POSTGRES` dialect
+        // argument that the function then ignored in favour of PostgreSQL's journal
+        // module — naming the dialect and resolving it were two different things.
+        let backend = zero_migrate::PostgresBackend::new_generic(&session);
+        zero_migrate::ops::status::history_via_backend(&backend, &cfg)
             .await
             .map(|h| history_reply(&h))
             .map_err(|e| e.to_string())

@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 use crate::support::PgDevSession;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    snapshot_schema, ApplyError, Approval, DeclarativeApplyError, EngineError, ExecutorConfig,
-    GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, PlanStep,
-    PostgresBackend,
+    apply::backend::postgres::drift_sql::snapshot_schema, ApplyError, Approval,
+    DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
+    LockMode, MigrationEngine, MigrationIr, PlanStep, PostgresBackend,
 };
 
 const OWNER: &str = "app_drop_column_dependency_guard";

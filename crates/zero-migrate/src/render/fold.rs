@@ -2,7 +2,7 @@
 //!
 //! [`fold_ops`] replays an ordered [`Op`] list into a [`SchemaSnapshot`] — PURE,
 //! offline, NO database I/O. It is the offline companion of the live
-//! [`snapshot_schema`](crate::snapshot_schema): the SAME `SchemaSnapshot`
+//! [`snapshot_schema`](crate::apply::backend::MigrationBackend::snapshot_schema): the SAME `SchemaSnapshot`
 //! output, sourced from the migration set instead of `pg_catalog`. The
 //! migration-first design makes the `op.*` migrations the SOLE source of truth, and "the current
 //! schema" is the fold of that set; later phases (`gen-types`) emit the `env.db`
@@ -1153,7 +1153,7 @@ fn apply_fold_alter_primary_key(
 
 /// Replay an ordered [`Op`] list into the current logical [`SchemaSnapshot`].
 /// Pure, offline, NO DB I/O — the offline companion of the live
-/// [`snapshot_schema`](crate::snapshot_schema).
+/// [`snapshot_schema`](crate::apply::backend::MigrationBackend::snapshot_schema).
 ///
 /// `dialect` selects the per-dialect shaping the shared builder applies (PG vs
 /// SQLite shaping, etc.); `project_schema` is embedded in FK `definition`s

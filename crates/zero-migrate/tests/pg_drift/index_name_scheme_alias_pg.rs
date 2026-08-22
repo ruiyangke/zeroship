@@ -27,9 +27,10 @@ use std::collections::HashMap;
 use crate::support::PgDevSession;
 
 use zero_migrate::{
-    diff_snapshots, diff_snapshots_with_index_aliases, snapshot_schema, AcceptedIndexAlias,
-    Approval, CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig,
-    FieldDescriptor, GuardConfig, IndexDescriptor, MigrationEngine, PostgresBackend,
+    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots,
+    diff_snapshots_with_index_aliases, AcceptedIndexAlias, Approval, CollectionDescriptor,
+    DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig,
+    IndexDescriptor, MigrationEngine, PostgresBackend,
 };
 
 fn desired_snapshot(

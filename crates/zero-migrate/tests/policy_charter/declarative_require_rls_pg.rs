@@ -34,9 +34,9 @@ use crate::support::PgDevSession;
 
 use zero_migrate::render::declarative::DeclarativeError;
 use zero_migrate::{
-    effective_policy_from_charter_toml, snapshot_schema, Approval, CollectionDescriptor,
-    DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig,
-    MigrationEngine, PostgresBackend,
+    apply::backend::postgres::drift_sql::snapshot_schema, effective_policy_from_charter_toml,
+    Approval, CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig,
+    FieldDescriptor, GuardConfig, MigrationEngine, PostgresBackend,
 };
 
 fn desired_snapshot(

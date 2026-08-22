@@ -52,8 +52,9 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    diff_snapshots, fold_ops, snapshot_schema, Approval, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend,
+    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops, Approval,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
+    PostgresBackend,
 };
 
 const OWNER: &str = "app_fold_cross_schema";

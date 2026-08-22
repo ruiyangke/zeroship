@@ -25,8 +25,8 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::model::snapshot::SequenceSnapshot;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
-    fold_ops, guard_for, snapshot_schema, Approval, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, MigrationEngine, PostgresBackend,
+    apply::backend::postgres::drift_sql::snapshot_schema, fold_ops, guard_for, Approval,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, PostgresBackend,
 };
 
 const OWNER: &str = "app_drop_sequence_rollback_pg";

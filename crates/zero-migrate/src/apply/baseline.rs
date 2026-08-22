@@ -1,5 +1,14 @@
 //! Baseline an existing project DB (design "Baseline existing db", scenario
-//! 31) — the **adoption path**.
+//! 31) — the **adoption path**, and specifically its DIALECT-NEUTRAL vocabulary.
+//!
+//! [`BaselineOutcome`] and [`BaselineError`] are the
+//! [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
+//! signature, so all three backends speak them. The IMPLEMENTATIONS do not live
+//! here and never could have: PostgreSQL's is
+//! [`postgres::baseline_sql`](crate::apply::backend::postgres), SQLite's is its own
+//! `journal_sql::baseline`, and MySQL refuses. What this module used to hold was
+//! PostgreSQL's body reaching `postgres::journal_sql` by name, which made "core's
+//! baseline" and "PostgreSQL's baseline" the same code.
 //!
 //! A project DB may already physically carry its schema (created outside the
 //! engine, or a legacy DB being adopted). `baseline` records a baseline
@@ -12,7 +21,7 @@
 //! # Safety
 //!
 //! - **Guard-checked.** The baseline SQL is still run through the
-//! [`SqlGuard`] (defense-in-depth): it represents the
+//! [`SqlGuard`](crate::guard::SqlGuard) (defense-in-depth): it represents the
 //! real schema and must not carry a denied/cross-schema construct, even though
 //! it does not execute here.
 //! - **First-entry only.** Baseline refuses if the journal already records ANY
@@ -28,12 +37,8 @@
 //! immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
 //! deleted.
 
-use crate::driver::SqlSession;
-
-use crate::apply::journal::{self, JournalError};
-use crate::conn::ExecutorConfig;
-use crate::guard::{GuardError, SqlGuard};
-use crate::model::migration::Migration;
+use crate::apply::journal::JournalError;
+use crate::guard::GuardError;
 
 /// What `baseline` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,161 +119,4 @@ pub enum BaselineError {
     /// [`ApplyError::Backend`](crate::apply::executor::ApplyError::Backend).
     #[error("baseline backend error: {0}")]
     Backend(String),
-}
-
-/// Record `baseline_migration` as the project's baseline
-/// — a `completed` journal event WITHOUT running its `up`.
-///
-/// This is the **Postgres impl behind**
-/// [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
-/// (multi-engine abstraction): it is `pub(crate)`, reached only through
-/// [`PostgresBackend::baseline_one`](crate::apply::backend::PostgresBackend), which keeps the
-/// `&Client`/`pg_advisory_lock` confined to the PG backend. There is no longer a
-/// top-level PG-`&Client`-typed `baseline` on the public surface; callers go through
-/// `backend.baseline_one(…)`.
-///
-/// Idempotent for the same baseline version (a retried deploy is safe); refuses a
-/// *different* baseline once one exists, and refuses entirely if the engine
-/// already manages real (non-baseline) history.
-///
-/// `applied_by` is the actor recorded in the journal (operator / admin).
-///
-/// # Errors
-/// - [`BaselineError::Guard`] — the baseline SQL was denied (held to the same
-/// deny-list as any `up`).
-/// - [`BaselineError::AlreadyManaged`] — the journal already records net-applied
-/// migrations (not a first-entry DB).
-/// - [`BaselineError::ConflictingBaseline`] — a different baseline already exists.
-/// - [`BaselineError::Db`] / [`BaselineError::Journal`] — infrastructure failures.
-pub(crate) async fn baseline<B: crate::apply::backend::MigrationBackend, D: SqlSession>(
-    backend: &B,
-    conn: &D,
-    cfg: &ExecutorConfig,
-    dialect: &zero_migrate_ir::dialect::DialectId,
-    baseline_migration: &Migration,
-    applied_by: &str,
-) -> Result<BaselineOutcome, BaselineError> {
-    // GUARD (defense in depth) — BEFORE the lock, no DB needed. A baseline that
-    // carries a denied/cross-schema construct is refused even though it never runs.
-    let guard = SqlGuard::new(cfg.guard_config_for(dialect));
-    guard
-        .check(&baseline_migration.up)
-        .map_err(|source| BaselineError::Guard {
-            version: baseline_migration.version.as_str().to_string(),
-            source,
-        })?;
-
-    // Privileged: serialize against all migration activity, exactly like apply.
-    // Held for the whole operation; released on every exit.
-    //
-    // Through the backend seam rather than inlined SQL, so this acquire gets the
-    // grant compensation every other one has: an engine can record a session
-    // advisory lock and still fail the acquiring statement, and a caller told the
-    // acquisition failed has nothing to release with.
-    backend.acquire_project_lock(cfg).await?;
-    let result = baseline_locked(conn, cfg, dialect, baseline_migration, applied_by).await;
-    let unlock = backend.release_project_lock(cfg).await;
-    match result {
-        Ok(o) => unlock.map(|()| o).map_err(BaselineError::Lock),
-        Err(e) => Err(e),
-    }
-}
-
-/// The baseline body, run while holding the project advisory lock.
-async fn baseline_locked<D: SqlSession>(
-    conn: &D,
-    cfg: &ExecutorConfig,
-    dialect: &zero_migrate_ir::dialect::DialectId,
-    baseline_migration: &Migration,
-    applied_by: &str,
-) -> Result<BaselineOutcome, BaselineError> {
-    crate::apply::backend::postgres::journal_sql::ensure_journal(conn, cfg, dialect).await?;
-
-    let version = baseline_migration.version.as_str();
-
-    // Idempotency + first-entry check. Read net-applied state once.
-    let applied = crate::apply::backend::postgres::journal_sql::applied(conn, cfg, dialect).await?;
-    let net_applied: Vec<&str> = applied
-        .iter()
-        .filter(|e| e.phase == journal::Phase::Completed)
-        .map(|e| e.version.as_str())
-        .collect();
-
-    // Same baseline already present ⇒ idempotent no-op (retried deploy).
-    if net_applied.contains(&version) {
-        return Ok(BaselineOutcome {
-            version: version.to_string(),
-            already_present: true,
-        });
-    }
-
-    // A DIFFERENT net-applied migration exists ⇒ the engine already manages this
-    // DB. If it is itself a baseline, surface the precise conflict; otherwise the
-    // generic already-managed error.
-    if !net_applied.is_empty() {
-        // Is the existing net-applied entry a baseline? Report the clearer error.
-        if let Some(existing_baseline) = first_baseline_version(conn, cfg, dialect).await? {
-            return Err(BaselineError::ConflictingBaseline {
-                project: cfg.project_id.clone(),
-                requested: version.to_string(),
-                existing: existing_baseline,
-            });
-        }
-        return Err(BaselineError::AlreadyManaged {
-            project: cfg.project_id.clone(),
-            existing: i64::try_from(net_applied.len()).unwrap_or(i64::MAX),
-        });
-    }
-
-    // First entry: journal the baseline as a `completed` event WITHOUT running the
-    // `up`. ADMIN write (the migrator has no meta-schema grant), `kind='baseline'`.
-    crate::apply::backend::postgres::journal_sql::record_baseline(
-        conn,
-        cfg,
-        dialect,
-        journal::BaselineRecord {
-            version,
-            name: &baseline_migration.name,
-            checksum: baseline_migration.checksum.as_str(),
-            applied_by,
-            kind: "baseline",
-            supersedes: &[],
-        },
-    )
-    .await?;
-
-    Ok(BaselineOutcome {
-        version: version.to_string(),
-        already_present: false,
-    })
-}
-
-/// The version of the earliest recorded `kind='baseline'` event, if any.
-async fn first_baseline_version<D: SqlSession>(
-    conn: &D,
-    cfg: &ExecutorConfig,
-    dialect: &zero_migrate_ir::dialect::DialectId,
-) -> Result<Option<String>, BaselineError> {
-    // Engine-supplied meta schema: route through the ONE shared engine seam so it
-    // fails closed on an empty / NUL name, byte-identical to the prior
-    // `escape_quote_ident`. This is a journal-table read, so the fail-closed error
-    // is mapped through `JournalError` (which carries `From<IdentQuoteError>`).
-    let meta =
-        crate::render::dml::quote_ident_checked_for_dialect(&cfg.confinement.meta_schema, dialect)
-            .map_err(JournalError::from)?;
-    let rows = conn
-        .query(
-            &format!(
-                "SELECT version FROM {meta}.schema_migrations
-                  WHERE kind = 'baseline'
-                  ORDER BY event_seq ASC
-                  LIMIT 1"
-            ),
-            &[],
-        )
-        .await?;
-    Ok(rows
-        .first()
-        .map(|r| r.try_get::<_, String>("version"))
-        .transpose()?)
 }

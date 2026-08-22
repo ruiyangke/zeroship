@@ -61,8 +61,9 @@ use crate::support;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
-    diff_snapshots, fold_ops, resolve_view_bodies, snapshot_schema, IrAuthor, LiveSchema,
-    SchemaSnapshot, StructuralDrift,
+    apply::backend::postgres::drift_sql::resolve_view_bodies,
+    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops, IrAuthor,
+    LiveSchema, SchemaSnapshot, StructuralDrift,
 };
 
 const OWNER: &str = "app_drift_view_body";

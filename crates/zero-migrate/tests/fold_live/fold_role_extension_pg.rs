@@ -34,9 +34,9 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    diff_snapshots, effective_policy_from_charter_toml, fold_ops, snapshot_schema, Approval,
-    EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, PostgresBackend,
+    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots,
+    effective_policy_from_charter_toml, fold_ops, Approval, EffectivePolicy, ExecutorConfig,
+    GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend,
 };
 
 const OWNER: &str = "app_fold_role_extension";

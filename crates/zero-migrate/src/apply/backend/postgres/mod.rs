@@ -8,11 +8,15 @@
 use crate::driver::SqlSession;
 
 mod backfill_sql;
+/// The PostgreSQL adoption baseline (record-not-run), relocated out of the neutral
+/// `apply::baseline` module, which now holds only the vocabulary all three backends
+/// speak.
+mod baseline_sql;
 /// The Postgres catalog reads behind drift: the `pg_catalog`/`information_schema`
 /// introspection, the catalog-text parsers, and the PG journal read the checksum
-/// comparison runs on. `pub(crate)` because the crate root re-exports its three
-/// public entry points at their historical `zero_migrate::…` paths.
-pub(crate) mod drift_sql;
+/// comparison runs on. `pub` because these reads are PostgreSQL-shaped and are
+/// reached BY THAT NAME; the crate root promises nothing dialect-specific.
+pub mod drift_sql;
 mod identity_sql;
 pub mod journal_sql;
 mod primary_key_sql;
@@ -20,6 +24,10 @@ mod primary_key_sql;
 /// backend drives — relocated out of the generic `apply::executor` so no
 /// dialect-specific SQL lives in the shared executor.
 pub(crate) mod session;
+/// The PostgreSQL `REPEATABLE READ READ ONLY` status snapshot, relocated out of
+/// the neutral `ops::status` module, whose remaining verbs go through
+/// [`MigrationBackend`](super::MigrationBackend).
+pub mod status_sql;
 
 use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
 use super::{
@@ -253,6 +261,13 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
 
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError> {
         journal_sql::applied(self.conn, cfg, &DIALECT).await
+    }
+
+    async fn history(
+        &self,
+        cfg: &ExecutorConfig,
+    ) -> Result<Vec<crate::apply::journal::HistoryEvent>, JournalError> {
+        journal_sql::history(self.conn, cfg, &DIALECT).await
     }
 
     async fn net_rolled_back_versions(
@@ -693,7 +708,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         m: &Migration,
         applied_by: &str,
     ) -> Result<BaselineOutcome, BaselineError> {
-        crate::apply::baseline::baseline(self, self.conn, cfg, &DIALECT, m, applied_by).await
+        baseline_sql::baseline(self, self.conn, cfg, &DIALECT, m, applied_by).await
     }
 }
 
@@ -1830,9 +1845,10 @@ mod recording_session_genericity {
             "empty canned catalog → empty snapshot (decode chain ran clean)"
         );
 
-        // 5. READ — the status()/history() free fns over the SAME driver
-        //    (generalized to `<D: SqlSession>`).
-        let st = crate::ops::status::status(&DIALECT, &rec, &cfg, &[])
+        // 5. READ — the PostgreSQL status snapshot over the SAME driver
+        //    (generalized to `<D: SqlSession>`), and the neutral history verb
+        //    through the backend contract.
+        let st = status_sql::status(&DIALECT, &rec, &cfg, &[])
             .await
             .expect("status over host driver");
         // The canned journal row is net-applied, so status sees it as applied.
@@ -1841,7 +1857,7 @@ mod recording_session_genericity {
             "status decoded the net-applied version over Row: {:?}",
             st.applied
         );
-        let hist = crate::ops::status::history(&DIALECT, &rec, &cfg)
+        let hist = crate::ops::status::history_via_backend(&backend, &cfg)
             .await
             .expect("history over host driver");
         // history() over the empty canned history read returns an empty log without

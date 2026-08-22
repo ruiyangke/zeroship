@@ -11,7 +11,10 @@ use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::{diff_snapshots, snapshot_schema, IrAuthor, LiveSchema, SqliteBackend};
+use zero_migrate::{
+    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, IrAuthor, LiveSchema,
+    SqliteBackend,
+};
 
 const OWNER: &str = "app_collation_introspection";
 

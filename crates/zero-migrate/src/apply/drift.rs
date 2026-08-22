@@ -22,7 +22,7 @@
 //!
 //! Two independent axes:
 //!
-//! - **B1 — checksum / tamper / orphan drift** ([`check_checksum_drift`](crate::check_checksum_drift)):
+//! - **B1 — checksum / tamper / orphan drift** ([`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)):
 //! compares the journal's recorded checksum for each NET-applied version
 //! against the checksum of the same version in the supplied set. A mismatch
 //! means the migration SQL was edited after it applied, or the journal row was
@@ -34,7 +34,7 @@
 //! if it returns any [`ChecksumDrift`], so the report and the gate share one
 //! implementation.
 //!
-//! - **B2 — structural introspection** ([`snapshot_schema`](crate::snapshot_schema) +
+//! - **B2 — structural introspection** ([`snapshot_schema`](crate::apply::backend::MigrationBackend::snapshot_schema) +
 //! [`diff_snapshots`]):
 //! introspect the LIVE project schema into a deterministic [`SchemaSnapshot`]
 //! and `diff` it against an **expected** snapshot the CALLER supplies. The
@@ -76,7 +76,7 @@ pub use zero_migrate_backend::drift::{
 // B1 — checksum / tamper / orphan drift
 // ---------------------------------------------------------------------------
 
-/// The **dialect-agnostic** core of [`check_checksum_drift`](crate::check_checksum_drift): compare a set of
+/// The **dialect-agnostic** core of [`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift): compare a set of
 /// net-applied journal entries (already read by the dialect-coupled `applied`)
 /// against the supplied migration set, producing the [`ChecksumDriftReport`].
 ///
@@ -86,7 +86,7 @@ pub use zero_migrate_backend::drift::{
 /// tamper / orphan rules can never diverge across dialects (design: the
 /// comparison is dialect-agnostic; only the journal read underneath differs).
 ///
-/// Pure: no I/O. See [`check_checksum_drift`](crate::check_checksum_drift) for the per-rule rationale.
+/// Pure: no I/O. See [`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift) for the per-rule rationale.
 #[must_use]
 pub fn compare_applied_to_set(
     applied: &[AppliedEntry],

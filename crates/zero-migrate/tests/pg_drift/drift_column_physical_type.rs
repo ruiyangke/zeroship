@@ -62,9 +62,9 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::MigrationIr;
 use zero_migrate::model::snapshot::MysqlPhysicalType;
 use zero_migrate::{
-    diff_snapshots, fold_ops, model::ir::Op, resolve_create_table_policy, snapshot_schema,
-    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    SchemaSnapshot, SqliteBackend, StructuralDrift,
+    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops, model::ir::Op,
+    resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
+    LockMode, MigrationEngine, SchemaSnapshot, SqliteBackend, StructuralDrift,
 };
 
 const OWNER: &str = "app_drift_column_physical_type";
