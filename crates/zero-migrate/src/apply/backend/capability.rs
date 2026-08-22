@@ -2,7 +2,6 @@
 
 use crate::analysis::analyze::Advisory;
 use crate::apply::drift::{DriftError, StructuralDrift};
-use crate::apply::role::RoleError;
 use crate::conn::{ConnectError, ExecutorConfig};
 use crate::engine::{DeclarativeDeployPlan, EngineError, OnlineError};
 use crate::model::migration::{Migration, MigrationId};
@@ -84,9 +83,6 @@ pub enum DryRunError {
     /// Opening the second shadow session failed.
     #[error("connect to shadow db: {0}")]
     Connect(#[from] ConnectError),
-    /// Provisioning the shadow schema or migrator role failed.
-    #[error("provision shadow: {0}")]
-    Provision(#[from] RoleError),
     /// Introspecting the resulting shadow schema failed.
     #[error("snapshot shadow schema: {0}")]
     Drift(#[from] DriftError),
