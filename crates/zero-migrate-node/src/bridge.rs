@@ -67,7 +67,13 @@ use zero_migrate::apply::journal::{HistoryEvent, HistoryKind};
 use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::{Migration, MigrationId};
-use zero_migrate::{MigrationEngine, MigrationIr, SqliteBackend, POSTGRES, SQLITE};
+// `POSTGRES` is no longer imported here. It was, for exactly one reason: an
+// `if dialect != POSTGRES` in `advisories_for` that decided on the backends' behalf
+// which of them could be analyzed. The backends state that themselves now, through
+// `zero_migrate::analyzer_absence`, so this addon has one fewer vendor it names.
+// (`ops::status::history` still names `zero_migrate::POSTGRES` in full, on the
+// PG-only status path — a different coupling, untouched here.)
+use zero_migrate::{MigrationEngine, MigrationIr, SqliteBackend, SQLITE};
 
 use crate::api;
 use crate::descriptors::descriptor_dto_to_engine;
@@ -1267,23 +1273,27 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
 
     // F657. The analyzer parses PostgreSQL. MySQL renders identifiers with
     // backticks, which is not valid PostgreSQL, so every statement fails to parse
-    // and `analyze` returns an empty vector - for SQL THIS ENGINE EMITS and is
+    // and the analyzer returns an empty vector - for SQL THIS ENGINE EMITS and is
     // about to run. The result was a clean advisory report on MySQL that meant
     // "could not read any of this", indistinguishable from "looked and found
     // nothing". Say which one it is; an operator reading a silent report is
     // entitled to know the analyzer never spoke.
-    if dialect != POSTGRES {
+    //
+    // This used to be an `if dialect != POSTGRES` written HERE, with this host
+    // addon deciding on the backend's behalf which backends can be analyzed and
+    // spelling out why in a sentence that lived nowhere near the backend it was
+    // about. The backend answers now: `analyzer_absence` asks the registered vendor
+    // and the vendor states its own posture, in its own crate. Asked BEFORE the
+    // envelope loop, so an unchecked set is reported even when it renders to no
+    // statements at all.
+    if let Some(absent) = zero_migrate::analyzer_absence(&dialect) {
+        let advisory = absent.advisory();
         out.push(AdvisoryDto {
             migration: String::new(),
-            rule: "analyzer_dialect_unsupported".to_string(),
-            severity: "notice".to_string(),
-            message: format!(
-                "operational advisories are not available for {}: the analyzer reads \
-                 PostgreSQL syntax, so no rule was evaluated against these statements. \
-                 An empty advisory list here means UNCHECKED, not clean",
-                dialect.as_str()
-            ),
-            suggestion: None,
+            rule: advisory.rule.to_string(),
+            severity: format!("{:?}", advisory.severity).to_lowercase(),
+            message: advisory.message,
+            suggestion: advisory.suggestion,
             statement: String::new(),
         });
         return Ok(out);
@@ -1301,7 +1311,10 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
             continue;
         };
         for statement in statements {
-            for advisory in zero_migrate::analysis::analyze::analyze(&statement) {
+            // The registered backend's analyzer, reached through the contract. The
+            // `NotAnalyzed` arm is already handled above, before this loop; asking
+            // per statement here would re-ask a question whose answer cannot change.
+            for advisory in zero_migrate::advisories_for_sql(&dialect, &statement).into_report() {
                 out.push(AdvisoryDto {
                     migration: migration.clone(),
                     rule: advisory.rule.to_string(),
