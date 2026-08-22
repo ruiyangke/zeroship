@@ -647,7 +647,7 @@ pub enum FkEmission<'a> {
     Deferred(&'a std::collections::HashSet<String>),
 }
 
-/// Dialect-aware CREATE TABLE emitter.
+/// Backend-aware CREATE TABLE emitter.
 ///
 /// Prepends exactly the columns injected by `effective` for this table before
 /// user-declared columns, stamps its pinned primary key, and appends exactly its
@@ -2535,7 +2535,6 @@ columns = [
         super::field_to_column_for_dialect(
             field,
             def,
-            dialect,
             renderer(&dialect.id()),
             &confined_inject("posts"),
         )
