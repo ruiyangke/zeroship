@@ -9,6 +9,9 @@ use zero_migrate_ir::dialect::SqlDialect;
 use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::TableRef;
 use zero_migrate_ir::ir::{IrScalar, Op, TriggerAction};
+use zero_migrate_ir::validate::{
+    ExprDialectFeature, ExprDialectRejection, ExprDialectValidator,
+};
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs` for why. Deleting this const (and the
@@ -30,7 +33,56 @@ fn quote_engine_ident_as_dml(what: &'static str, ident: &str) -> Result<String, 
         .map_err(IrLowerError::DmlAssemble)
 }
 
+impl ExprDialectValidator for PostgresDmlRenderer {
+    fn validate_expr_feature(
+        &self,
+        feature: ExprDialectFeature<'_>,
+    ) -> Result<(), ExprDialectRejection> {
+        match feature {
+            ExprDialectFeature::ScalarFunction(function) => match function {
+                ScalarFn::Coalesce
+                | ScalarFn::Nullif
+                | ScalarFn::Lower
+                | ScalarFn::Upper
+                | ScalarFn::Trim
+                | ScalarFn::Length
+                | ScalarFn::Abs
+                | ScalarFn::Mod
+                | ScalarFn::Round
+                | ScalarFn::Floor
+                | ScalarFn::Ceil
+                | ScalarFn::Substr
+                | ScalarFn::Replace
+                | ScalarFn::CurrentSetting
+                | ScalarFn::CurrentUser => Ok(()),
+            },
+            ExprDialectFeature::Aggregate(function) => match function {
+                zero_migrate_ir::expr::AggFunc::Count
+                | zero_migrate_ir::expr::AggFunc::Sum
+                | zero_migrate_ir::expr::AggFunc::Avg
+                | zero_migrate_ir::expr::AggFunc::Min
+                | zero_migrate_ir::expr::AggFunc::Max
+                | zero_migrate_ir::expr::AggFunc::StringAgg
+                | zero_migrate_ir::expr::AggFunc::ArrayAgg
+                | zero_migrate_ir::expr::AggFunc::BoolAnd
+                | zero_migrate_ir::expr::AggFunc::BoolOr => Ok(()),
+            },
+            ExprDialectFeature::ConcatWs { .. }
+            | ExprDialectFeature::SplitPart { .. }
+            | ExprDialectFeature::UuidV7Generation
+            | ExprDialectFeature::RegexMatch
+            | ExprDialectFeature::PgColumnSize
+            | ExprDialectFeature::PgExtract
+            | ExprDialectFeature::PgInterval => Ok(()),
+        }
+    }
+}
+
 impl DmlRenderer for PostgresDmlRenderer {
+    fn expr_validator(&self) -> &dyn ExprDialectValidator {
+        self
+    }
+
     fn descriptor(&self) -> &'static BackendDescriptor {
         &crate::descriptor::POSTGRES_DESCRIPTOR
     }

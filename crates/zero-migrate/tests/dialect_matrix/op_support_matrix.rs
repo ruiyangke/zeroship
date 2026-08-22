@@ -10,13 +10,13 @@ use zero_migrate::model::ir::{
     ViewQuery,
 };
 use zero_migrate::model::op_support;
-use zero_migrate::model::support::{Dialect, RenderMode, SupportDecision, SupportTier};
+use zero_migrate::model::support::{SqlDialect, RenderMode, SupportDecision, SupportTier};
 use zero_migrate::model::validate::{validate_ir_scoped, CODE_DIALECT_UNSUPPORTED};
 use zero_migrate::{
-    IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, SchemaScope, SqlDialect, CURRENT_IR_VERSION,
+    IrAuthor, IrFlagsOverride, LiveSchema, MigrationIr, SchemaScope, CURRENT_IR_VERSION,
 };
 
-const DIALECTS: [Dialect; 3] = [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql];
+const DIALECTS: [SqlDialect; 3] = [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql];
 
 const EXPECTED_OPS: &[&str] = &[
     "createTable",
@@ -158,15 +158,15 @@ fn one_op_ir(op: Op) -> MigrationIr {
     }
 }
 
-const fn sql_dialect(dialect: Dialect) -> SqlDialect {
+const fn sql_dialect(dialect: SqlDialect) -> SqlDialect {
     match dialect {
-        Dialect::Postgres => SqlDialect::Postgres,
-        Dialect::Sqlite => SqlDialect::Sqlite,
-        Dialect::Mysql => SqlDialect::Mysql,
+        SqlDialect::Postgres => SqlDialect::Postgres,
+        SqlDialect::Sqlite => SqlDialect::Sqlite,
+        SqlDialect::Mysql => SqlDialect::Mysql,
     }
 }
 
-fn validate_current(op: &Op, dialect: Dialect) -> bool {
+fn validate_current(op: &Op, dialect: SqlDialect) -> bool {
     validate_ir_scoped(
         &one_op_ir(op.clone()),
         dialect,
@@ -175,7 +175,7 @@ fn validate_current(op: &Op, dialect: Dialect) -> bool {
     .is_ok()
 }
 
-fn lower_current(op: &Op, dialect: Dialect) -> bool {
+fn lower_current(op: &Op, dialect: SqlDialect) -> bool {
     let default_schema = op.schema().unwrap_or("app");
     // The matrix asks whether an op RENDERS, so the corpus runs under a charter that
     // grants every vendor capability. Authority at lower is that grant; the unconfined
@@ -213,7 +213,7 @@ fn assert_decision_well_formed(decision: SupportDecision, label: &str) {
     }
 }
 
-fn assert_current_cell_matches(op: &Op, dialect: Dialect) {
+fn assert_current_cell_matches(op: &Op, dialect: SqlDialect) {
     let support = op_support::support(op);
     let decision = support.decision(dialect);
     let label = format!("{} {dialect:?}", op_tag(op));
@@ -337,8 +337,8 @@ fn support_declarations_cover_every_op_and_dialect() {
                     "{tag}: support tier capabilities must match Op::vendor_capabilities"
                 );
                 assert!(
-                    !support.decision(Dialect::Sqlite).is_supported()
-                        && !support.decision(Dialect::Mysql).is_supported(),
+                    !support.decision(SqlDialect::Sqlite).is_supported()
+                        && !support.decision(SqlDialect::Mysql).is_supported(),
                     "{tag}: vendor-tier ops must be non-PG unsupported"
                 );
             }
@@ -597,7 +597,7 @@ fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
                 "{tag} {dialect:?}: support decision and validate() must agree"
             );
             let expected_supported =
-                matches!(op, Op::DropPartition { .. }) || matches!(dialect, Dialect::Postgres);
+                matches!(op, Op::DropPartition { .. }) || matches!(dialect, SqlDialect::Postgres);
             assert_eq!(decision_supported, expected_supported, "{tag} {dialect:?}");
         }
     }
@@ -607,11 +607,11 @@ fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
 fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
     let op = partitioned_create_table();
     assert!(
-        validate_current(&op, Dialect::Postgres),
+        validate_current(&op, SqlDialect::Postgres),
         "partitioned createTable must validate on PostgreSQL"
     );
 
-    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
         let err = validate_ir_scoped(
             &one_op_ir(op.clone()),
             dialect,
@@ -640,7 +640,7 @@ fn identity_always_support_decision_matches_validate_and_is_pg_only() {
             );
             assert_eq!(
                 decision_supported,
-                matches!(dialect, Dialect::Postgres),
+                matches!(dialect, SqlDialect::Postgres),
                 "{tag} {dialect:?}: identity(always:true) is PostgreSQL-only"
             );
         }
@@ -661,7 +661,7 @@ fn nextval_default_support_decision_matches_validate_and_is_pg_only() {
             );
             assert_eq!(
                 decision_supported,
-                matches!(dialect, Dialect::Postgres),
+                matches!(dialect, SqlDialect::Postgres),
                 "{tag} {dialect:?}: nextval defaults are PostgreSQL-only"
             );
         }

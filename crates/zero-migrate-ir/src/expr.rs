@@ -145,16 +145,16 @@ pub enum ScalarFn {
 }
 
 /// The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the
-/// engine pins. CLOSED. `splitPart` is admitted only within its pinned
-/// single-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);
-/// `concatWs` is the NULL-skipping join; `now` is an apply-time DB-evaluated
-/// scalar (the structured replacement for a frozen `Date.now()` literal).
+/// engine pins. CLOSED. `splitPart` has dialect-neutral literal grammar and a
+/// backend-owned portability envelope; `concatWs` is the NULL-skipping join;
+/// `now` is an apply-time DB-evaluated scalar (the structured replacement for a
+/// frozen `Date.now()` literal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum SynthFn {
     /// NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (`SQLite`).
     ConcatWs,
-    /// `split_part` (PG) / pinned `instr`/`substr` unroll (`SQLite`), in-envelope only.
+    /// A backend-owned split operation, admitted only within that backend's envelope.
     SplitPart,
     /// `now()` / current timestamp, evaluated at apply time.
     Now,
@@ -590,14 +590,45 @@ impl Expr {
 #[cfg(test)]
 mod dialectal_tests {
     use super::*;
-    use crate::dialect::DialectId;
+    use crate::dialect::{DialectId, POSTGRES};
     use crate::ir::Op;
     use crate::validate::{
-        validate_expr, Dialect, TargetScope, CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED,
+        validate_expr, ExprDialectFeature, ExprDialectRejection, ExprDialectValidator,
+        ExprDialectValidatorSet, TargetScope, CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED,
     };
 
-    fn literal(value: &str) -> Expr {
-        Expr::lit(IrScalar::Str(value.to_string()))
+    #[derive(Debug)]
+    struct AcceptAll;
+
+    impl ExprDialectValidator for AcceptAll {
+        fn validate_expr_feature(
+            &self,
+            feature: ExprDialectFeature<'_>,
+        ) -> Result<(), ExprDialectRejection> {
+            match feature {
+                ExprDialectFeature::ScalarFunction(_)
+                | ExprDialectFeature::ConcatWs { .. }
+                | ExprDialectFeature::SplitPart { .. }
+                | ExprDialectFeature::UuidV7Generation
+                | ExprDialectFeature::RegexMatch
+                | ExprDialectFeature::Aggregate(_)
+                | ExprDialectFeature::PgColumnSize
+                | ExprDialectFeature::PgExtract
+                | ExprDialectFeature::PgInterval => Ok(()),
+            }
+        }
+    }
+
+    struct Validators;
+
+    impl ExprDialectValidatorSet for Validators {
+        fn get(&self, dialect: &DialectId) -> Option<&dyn ExprDialectValidator> {
+            (dialect == &POSTGRES).then_some(&AcceptAll)
+        }
+    }
+
+    fn literal(value: &str) -> Box<Expr> {
+        Box::new(Expr::lit(IrScalar::Str(value.to_string())))
     }
 
     #[test]
@@ -660,7 +691,7 @@ mod dialectal_tests {
         let empty = Expr::Dialectal {
             legs: BTreeMap::new(),
         };
-        let err = validate_expr(&empty, Dialect::Postgres, &scope, 3).unwrap_err();
+        let err = validate_expr(&empty, &POSTGRES, &Validators, &scope, 3).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
 
         let typo = Expr::Dialectal {
@@ -668,8 +699,28 @@ mod dialectal_tests {
                 .into_iter()
                 .collect(),
         };
-        let err = validate_expr(&typo, Dialect::Postgres, &scope, 4).unwrap_err();
+        let err = validate_expr(&typo, &POSTGRES, &Validators, &scope, 4).unwrap_err();
         assert_eq!(err.code, CODE_EXPR_NOT_PORTABLE);
-        assert_eq!(err.dialect, Dialect::Postgres);
+        assert_eq!(err.dialect, POSTGRES);
+    }
+
+    #[test]
+    fn an_unregistered_target_fails_closed_under_its_own_id() {
+        let duckdb = DialectId::new("duckdb");
+        let scope = TargetScope::structural_only("items");
+        let err = validate_expr(
+            &Expr::lit(IrScalar::Int(1)),
+            &duckdb,
+            &Validators,
+            &scope,
+            7,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code, CODE_UNSUPPORTED);
+        assert_eq!(err.kind, Some(crate::validate::UnsupportedKind::Expr));
+        assert_eq!(err.op_index, 7);
+        assert_eq!(err.dialect, duckdb);
+        assert!(err.reason.contains("no expression validator is registered"));
     }
 }

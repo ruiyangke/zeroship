@@ -5,10 +5,9 @@ use std::collections::BTreeSet;
 use serde_json::json;
 use zero_migrate::model::ir::ExistenceGuard;
 use zero_migrate::model::validate::{
-    validate_ir, validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED,
+    validate_ir, validate_ir_scoped, SqlDialect, UnsupportedKind, CODE_UNSUPPORTED,
 };
 use zero_migrate::render::lower::IrAuthor;
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     fold_ops, BinaryOp, ColType, ColumnOrExpr, CommentTarget, ExclusionElement, ExclusionMethod,
     ExclusionOperator, Expr, IndexElement, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
@@ -220,7 +219,7 @@ fn postgres_renders_valid_descending_sequence() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_sequences() {
-    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
         let err = validate_ir(&ir(vec![create_sequence_op()]), dialect).unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
@@ -248,7 +247,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
     // table-shape gate returns Ok), so validation reaches the column-default-type
     // check — the realistic profile, since nextval defaults are used on the platform.
     let err =
-        validate_ir_scoped(&ir(vec![text_nextval.clone()]), Dialect::Postgres, None).unwrap_err();
+        validate_ir_scoped(&ir(vec![text_nextval.clone()]), SqlDialect::Postgres, None).unwrap_err();
     assert_eq!(
         err.code,
         zero_migrate::model::validate::CODE_COLUMN_DEFAULT_TYPE
@@ -257,7 +256,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
         .reason
         .contains("nextval defaults require an integer column"));
 
-    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
         // Platform profile so the createTable table-shape gate does not pre-empt the
         // dialect-level unsupported check (nextval defaults are PostgreSQL-only).
         let err = validate_ir_scoped(&ir(vec![text_nextval.clone()]), dialect, None).unwrap_err();
@@ -380,7 +379,7 @@ fn postgres_renders_comment_on_all_structured_targets() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_comment_on() {
-    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
         let err = validate_ir(
             &ir(vec![Op::Comment {
                 target: CommentTarget::Table {
@@ -594,7 +593,7 @@ fn mysql_fail_closes_on_expression_index_elements() {
             existence_guard: None,
             nulls_not_distinct: None,
         }]),
-        Dialect::Mysql,
+        SqlDialect::Mysql,
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -621,7 +620,7 @@ fn mysql_fail_closes_on_partial_index_predicate() {
             existence_guard: None,
             nulls_not_distinct: None,
         }]),
-        Dialect::Mysql,
+        SqlDialect::Mysql,
     )
     .unwrap_err();
     assert_eq!(err.code, CODE_UNSUPPORTED);
@@ -732,7 +731,7 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
 
 #[test]
 fn sqlite_and_mysql_fail_closed_on_exclusion_constraints() {
-    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
         let err = validate_ir(
             &ir(vec![Op::AddConstraint {
                 table: "bookings".into(),
@@ -804,7 +803,7 @@ fn an_over_long_index_name_is_refused() {
         nulls_not_distinct: None,
         existence_guard: None,
     };
-    let err = validate_ir(&ir(vec![op]), Dialect::Postgres)
+    let err = validate_ir(&ir(vec![op]), SqlDialect::Postgres)
         .expect_err("an index name past the identifier cap must be refused");
     assert!(
         err.reason.contains("truncates identifiers"),
@@ -835,6 +834,6 @@ fn an_over_long_index_name_is_refused() {
         nulls_not_distinct: None,
         existence_guard: None,
     };
-    validate_ir(&ir(vec![op_ok]), Dialect::Postgres)
+    validate_ir(&ir(vec![op_ok]), SqlDialect::Postgres)
         .expect("an index name within the cap stays valid");
 }

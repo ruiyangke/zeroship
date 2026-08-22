@@ -410,9 +410,9 @@ fn render_ir_envelope_rendered(
     .map_err(|e| format!("table-shape resolve for IR envelope: {e}"))?;
 
     let target = match dialect {
-        SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
-        SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
-        SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+        SqlDialect::Postgres => crate::model::validate::SqlDialect::Postgres,
+        SqlDialect::Sqlite => crate::model::validate::SqlDialect::Sqlite,
+        SqlDialect::Mysql => crate::model::validate::SqlDialect::Mysql,
     };
     crate::model::validate::validate_ir(&ir, target)
         .map_err(|e| format!("validate IR envelope: {e}"))?;

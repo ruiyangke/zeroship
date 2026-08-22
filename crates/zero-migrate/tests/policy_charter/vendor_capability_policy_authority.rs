@@ -13,12 +13,11 @@ use zero_migrate::guard::GuardConfig;
 use zero_migrate::model::capability::{VendorCapabilities, VendorCapability};
 use zero_migrate::model::load::{load_ir_document, IrLoadError};
 use zero_migrate::model::table_shape::resolve_create_table_policy;
-use zero_migrate::model::validate::{Dialect, CODE_VENDOR_OP_DENIED};
+use zero_migrate::model::validate::{SqlDialect, CODE_VENDOR_OP_DENIED};
 use zero_migrate::render::lower::{
     IrAuthor, IrGuardedLowerError, IrLowerError, LiveSchema, LoadAndLowerGuardedError,
     LoweredArtifact,
 };
-use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{effective_policy_from_charter_toml, EffectivePolicy, PlanStep, SchemaScope};
 
 const SCHEMA: &str = "app";
@@ -258,7 +257,7 @@ fn the_load_gate_without_a_charter_still_refuses_set_rls() {
     let error = load_ir_document(
         &resolved_json,
         OWNER,
-        Dialect::Postgres,
+        SqlDialect::Postgres,
         &BTreeMap::new(),
         Some(&scope),
     )

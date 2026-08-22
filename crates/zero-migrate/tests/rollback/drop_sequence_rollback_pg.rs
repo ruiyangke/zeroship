@@ -101,7 +101,7 @@ async fn apply_doc(
     let document = zero_migrate::model::load::load_ir_document(
         ir,
         OWNER,
-        zero_migrate::model::validate::Dialect::Postgres,
+        zero_migrate::model::validate::SqlDialect::Postgres,
         reg,
         None,
     )

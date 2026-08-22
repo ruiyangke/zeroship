@@ -1921,7 +1921,7 @@ pub(crate) fn column_snapshot_for_field(
     let encryption_sentinel = crate::schema::query::encryption_sentinel_for_field(&sdk_def);
     let comment_sentinel = encryption_meta_for_field(&sdk_def)
         .map(|m| crate::schema::mask_codec::build_encryption_sentinel(&m));
-    // Dialect-blind, and it has to be. `ColumnSnapshot::case_sensitive` is documented
+    // SqlDialect-blind, and it has to be. `ColumnSnapshot::case_sensitive` is documented
     // as "a drift-comparable catalog attribute on engines where the intent is
     // recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`, and MySQL
     // `information_schema.COLUMNS.COLLATION_NAME`)", and `diff_snapshots` compares it
@@ -2240,7 +2240,7 @@ pub fn desired_snapshot(
     desired_snapshot_for_dialect(project_schema, descriptors, SqlDialect::Postgres, effective)
 }
 
-/// Dialect-aware [`desired_snapshot`]. One piece of desired shape differs by
+/// SqlDialect-aware [`desired_snapshot`]. One piece of desired shape differs by
 /// engine:
 ///
 /// - **Foreign keys** — PostgreSQL/MySQL snapshot definitions qualify the target
@@ -8319,7 +8319,7 @@ mod mysql_storage_agreement_tests {
     #[test]
     fn a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it() {
         use crate::model::ir::{ColType, IrColumn, MigrationIr, Op};
-        use crate::model::validate::{validate_ir, Dialect};
+        use crate::model::validate::{validate_ir, SqlDialect};
 
         let ci_column = |name: &str, ty: ColType| IrColumn {
             name: name.into(),
@@ -8341,7 +8341,7 @@ mod mysql_storage_agreement_tests {
 
         // Every dialect, because the rule is not dialect-gated and MySQL is only the
         // dialect where breaking it costs the width rather than the facet.
-        for dialect in [Dialect::Mysql, Dialect::Postgres, Dialect::Sqlite] {
+        for dialect in [SqlDialect::Mysql, SqlDialect::Postgres, SqlDialect::Sqlite] {
             let op = Op::CreateTable {
                 name: "things".into(),
                 columns: vec![bounded_ci_column()],

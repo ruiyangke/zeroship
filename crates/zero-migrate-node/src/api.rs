@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use zero_migrate::model::ir::{MigrationIr, Op, CURRENT_IR_VERSION};
 use zero_migrate::model::load::load_ir_document;
-use zero_migrate::model::validate::Dialect;
+use zero_migrate::model::validate::SqlDialect;
 use zero_migrate::render::declarative::CollectionDescriptor;
 use zero_migrate::{
     effective_policy_from_charter_layers, render_schema_export,
@@ -52,12 +52,12 @@ pub fn build_info() -> BuildInfo {
     }
 }
 
-/// Map the wire dialect spelling to [`Dialect`]. Unknown → `Err`.
-fn parse_dialect(s: &str) -> Result<Dialect, String> {
+/// Map the wire dialect spelling to [`SqlDialect`]. Unknown → `Err`.
+fn parse_dialect(s: &str) -> Result<SqlDialect, String> {
     match s {
-        "postgres" => Ok(Dialect::Postgres),
-        "sqlite" => Ok(Dialect::Sqlite),
-        "mysql" => Ok(Dialect::Mysql),
+        "postgres" => Ok(SqlDialect::Postgres),
+        "sqlite" => Ok(SqlDialect::Sqlite),
+        "mysql" => Ok(SqlDialect::Mysql),
         other => Err(format!(
             "unknown dialect {other:?} (expected postgres|sqlite|mysql)"
         )),

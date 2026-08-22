@@ -9,10 +9,10 @@
 //!   load); this walk additionally rejects the structural shapes that *are*
 //!   well-typed nodes but out of policy (an out-of-envelope `FnSynth(splitPart)`,
 //!   a non-portable cast target).
-//! - **(b)** `c.fn.splitPart` args are in-envelope — `delim` is a single ASCII
-//!   character `Literal` (one byte, code point `< 0x80`), `n` is a positive
-//!   integer `Literal` with `1 ≤ n ≤ 8`, and the column arg is a `ColRef` /
-//!   in-AST sub-expression.
+//! - **(b)** `c.fn.splitPart` has dialect-neutral grammar — `delim` is a non-empty
+//!   string `Literal`, `n` is a positive integer `Literal`, and the column arg is
+//!   a `ColRef` / in-AST sub-expression. Each registered backend owns any narrower
+//!   portability envelope required by its lowering.
 //! - **(c)** every `ColRef` resolves to a column on the ENCLOSING target table —
 //!   an apply/render-time check scoped to the single target table of the
 //!   enclosing op. A cross-table reference is impossible by
@@ -345,48 +345,6 @@ mod alter_primary_key_tests {
     }
 }
 
-/// The dialect a structured rejection pertains to (the `dialect` field).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dialect {
-    /// Postgres.
-    Postgres,
-    /// `SQLite`.
-    Sqlite,
-    /// `MySQL`.
-    Mysql,
-}
-
-impl Dialect {
-    /// The open [`DialectId`] this closed variant
-    /// denotes.
-    ///
-    /// One-way, exactly like [`SqlDialect::id`](crate::dialect::SqlDialect::id):
-    /// an id does NOT convert back to a variant, because that is the direction a
-    /// fourth backend cannot satisfy.
-    #[must_use]
-    pub const fn id(self) -> crate::dialect::DialectId {
-        match self {
-            Self::Postgres => crate::dialect::POSTGRES,
-            Self::Sqlite => crate::dialect::SQLITE,
-            Self::Mysql => crate::dialect::MYSQL,
-        }
-    }
-
-    /// The lower-case wire spelling used in the structured payload.
-    ///
-    /// This IS the id's string, and the `dialect_wire_spelling_is_the_id` test
-    /// pins that: the structured-rejection payload and the dialect id must never
-    /// drift into two spellings of one dialect.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Postgres => "postgres",
-            Self::Sqlite => "sqlite",
-            Self::Mysql => "mysql",
-        }
-    }
-}
-
 /// The `UNSUPPORTED { kind }` discriminant — an internal op-vs-expr
 /// distinction carried as a field, not two top-level codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -428,7 +386,7 @@ pub struct AuthoringError {
     /// The 0-based index of the offending op in the migration's op list.
     pub op_index: usize,
     /// The dialect the rejection pertains to.
-    pub dialect: Dialect,
+    pub dialect: DialectId,
     /// A precise human-readable reason.
     pub reason: String,
     /// A concrete remedy the AI loop can act on (leads the human rendering).
@@ -491,9 +449,87 @@ impl std::fmt::Display for AuthoringError {
 
 impl std::error::Error for AuthoringError {}
 
-/// The MAX literal part index `c.fn.splitPart` admits (the O(2ⁿ) inline-unroll
-/// bound — `~17 KB` at `n=8`).
-pub const SPLIT_PART_MAX_N: i64 = 8;
+/// A vendor-sensitive expression question the structural walker asks the
+/// backend that would render the expression.
+///
+/// This enum is deliberately exhaustive rather than a stringly feature name.
+/// Every [`ExprDialectValidator`] implementation must match every variant with
+/// no catch-all, so adding a new vendor-sensitive expression question produces
+/// a compile error in every backend until that backend writes its own answer.
+#[derive(Debug, Clone, Copy)]
+pub enum ExprDialectFeature<'a> {
+    /// Whether this allow-listed scalar function has a faithful backend form.
+    ScalarFunction(ScalarFn),
+    /// Whether `concatWs` accepts the authored delimiter shape.
+    ConcatWs {
+        /// The authored delimiter expression.
+        delimiter: &'a Expr,
+    },
+    /// Whether `splitPart` accepts this grammar-valid literal envelope.
+    SplitPart {
+        /// The non-empty literal delimiter.
+        delimiter: &'a str,
+        /// The positive literal part index.
+        part_index: i64,
+    },
+    /// Whether the backend has an exact database UUIDv7 generator.
+    UuidV7Generation,
+    /// Whether the backend has a stock regular-expression match operation.
+    RegexMatch,
+    /// Whether this aggregate has a faithful native renderer.
+    Aggregate(AggFunc),
+    /// The vendor-named `pg_column_size` IR node.
+    PgColumnSize,
+    /// The vendor-named PostgreSQL `EXTRACT` IR node.
+    PgExtract,
+    /// The vendor-named PostgreSQL interval-literal IR node.
+    PgInterval,
+}
+
+/// A backend's structured refusal of one [`ExprDialectFeature`].
+///
+/// The structural walker supplies the backend id and op index. A backend owns
+/// the fact, reason and remedy, but cannot stamp another backend's provenance by
+/// mistake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExprDialectRejection {
+    /// Stable machine-actionable code.
+    pub code: &'static str,
+    /// The optional unsupported-kind payload.
+    pub kind: Option<UnsupportedKind>,
+    /// Precise operator-facing reason.
+    pub reason: String,
+    /// Concrete remedy.
+    pub suggested_fix: Option<String>,
+}
+
+/// One backend's required, exhaustive answers to vendor-sensitive expression
+/// questions.
+///
+/// There is intentionally no default method. A fourth backend must implement
+/// the complete request enum in its own crate; it cannot inherit the policy of
+/// any shipping backend or disappear behind a catch-all arm in core.
+pub trait ExprDialectValidator: std::fmt::Debug + Sync {
+    /// Accept or refuse one vendor-sensitive expression feature.
+    ///
+    /// # Errors
+    /// Returns this backend's structured refusal when the feature has no faithful
+    /// lowering on the backend.
+    fn validate_expr_feature(
+        &self,
+        feature: ExprDialectFeature<'_>,
+    ) -> Result<(), ExprDialectRejection>;
+}
+
+/// The open registry view the structural walker uses for dialectal legs.
+///
+/// Registered legs are judged by their own backend validator. An unregistered
+/// non-target leg is still walked for dialect-neutral structural defects, but is
+/// never judged using the current target's validator.
+pub trait ExprDialectValidatorSet: Sync {
+    /// Look up the validator registered under an exact backend id.
+    fn get(&self, dialect: &DialectId) -> Option<&dyn ExprDialectValidator>;
+}
 
 /// The single-target-table scope a transform validates against.
 ///
@@ -573,12 +609,31 @@ impl<'a> TargetScope<'a> {
 /// the structural policy rejects (a). Allow-listed in-policy nodes validate.
 pub fn validate_expr(
     expr: &Expr,
-    target_dialect: Dialect,
+    target_dialect: &DialectId,
+    validators: &dyn ExprDialectValidatorSet,
     scope: &TargetScope<'_>,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
+    let Some(validator) = validators.get(target_dialect) else {
+        return Err(AuthoringError {
+            code: CODE_UNSUPPORTED.to_string(),
+            kind: Some(UnsupportedKind::Expr),
+            op_index,
+            dialect: target_dialect.clone(),
+            reason: format!(
+                "no expression validator is registered for the {} target",
+                target_dialect.as_str()
+            ),
+            suggested_fix: Some(format!(
+                "register the {} backend with its own exhaustive expression validator",
+                target_dialect.as_str()
+            )),
+        });
+    };
     let ctx = Ctx {
-        target_dialect,
+        target_dialect: target_dialect.clone(),
+        validator: Some(validator),
+        validators,
         scope,
         op_index,
     };
@@ -658,13 +713,6 @@ const fn agg_func_name(f: AggFunc) -> &'static str {
         AggFunc::BoolAnd => "boolAnd",
         AggFunc::BoolOr => "boolOr",
     }
-}
-
-const fn agg_func_is_pg_first(f: AggFunc) -> bool {
-    matches!(
-        f,
-        AggFunc::StringAgg | AggFunc::ArrayAgg | AggFunc::BoolAnd | AggFunc::BoolOr
-    )
 }
 
 fn first_aggregate(expr: &Expr) -> Option<&'static str> {
@@ -767,7 +815,7 @@ fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
 pub fn validate_immutable_expr_context(
     expr: &Expr,
     context: &str,
-    target_dialect: Dialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     validate_no_aggregate_expr_context(expr, context, target_dialect, op_index)?;
@@ -778,7 +826,7 @@ pub fn validate_immutable_expr_context(
         code: CODE_IMMUTABLE_CONTEXT_VOLATILE.to_string(),
         kind: Some(UnsupportedKind::Expr),
         op_index,
-        dialect: target_dialect,
+        dialect: target_dialect.clone(),
         reason: format!(
             "{context} requires an immutable expression, but contains volatile function {function_name}()"
         ),
@@ -791,7 +839,7 @@ pub fn validate_immutable_expr_context(
 pub fn validate_no_aggregate_expr_context(
     expr: &Expr,
     context: &str,
-    target_dialect: Dialect,
+    target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
     let Some(aggregate_name) = first_aggregate(expr) else {
@@ -801,7 +849,7 @@ pub fn validate_no_aggregate_expr_context(
         code: CODE_AGGREGATE_IN_SCALAR_CONTEXT.to_string(),
         kind: Some(UnsupportedKind::Expr),
         op_index,
-        dialect: target_dialect,
+        dialect: target_dialect.clone(),
         reason: format!(
             "{context} requires a scalar expression, but contains aggregate {aggregate_name}()"
         ),
@@ -825,7 +873,9 @@ pub fn validate_no_aggregate_expr_context(
 pub const MAX_EXPR_DEPTH: u32 = 128;
 
 struct Ctx<'a> {
-    target_dialect: Dialect,
+    target_dialect: DialectId,
+    validator: Option<&'a dyn ExprDialectValidator>,
+    validators: &'a dyn ExprDialectValidatorSet,
     scope: &'a TargetScope<'a>,
     op_index: usize,
 }
@@ -835,7 +885,6 @@ impl Ctx<'_> {
         &self,
         code: &str,
         kind: Option<UnsupportedKind>,
-        dialect: Dialect,
         reason: String,
         suggested_fix: Option<String>,
     ) -> AuthoringError {
@@ -843,10 +892,27 @@ impl Ctx<'_> {
             code: code.to_string(),
             kind,
             op_index: self.op_index,
-            dialect,
+            dialect: self.target_dialect.clone(),
             reason,
             suggested_fix,
         }
+    }
+
+    fn validate_feature(
+        &self,
+        feature: ExprDialectFeature<'_>,
+    ) -> Result<(), AuthoringError> {
+        let Some(validator) = self.validator else {
+            return Ok(());
+        };
+        validator.validate_expr_feature(feature).map_err(|rejection| {
+            self.err(
+                rejection.code,
+                rejection.kind,
+                rejection.reason,
+                rejection.suggested_fix,
+            )
+        })
     }
 
     fn walk(&self, expr: &Expr) -> Result<(), AuthoringError> {
@@ -858,7 +924,6 @@ impl Ctx<'_> {
             return Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
-                self.target_dialect,
                 format!(
                     "expression nesting exceeds the maximum supported depth ({MAX_EXPR_DEPTH}); \
                      flatten the expression"
@@ -881,7 +946,6 @@ impl Ctx<'_> {
                     Err(self.err(
                         CODE_UNSUPPORTED,
                         Some(UnsupportedKind::Expr),
-                        self.target_dialect,
                         format!(
                             "column reference {qualifier}.{name} names a table other than the \
                              statement's target {:?}; a DML statement has one target table and \
@@ -901,7 +965,7 @@ impl Ctx<'_> {
                 None => self.check_colref(name),
             },
             Expr::Literal { .. } | Expr::UuidV4 => Ok(()),
-            Expr::UuidV7 => self.check_uuid_v7_generation(),
+            Expr::UuidV7 => self.validate_feature(ExprDialectFeature::UuidV7Generation),
             Expr::BinOp { lhs, rhs, .. } => {
                 self.walk_depth(lhs, d)?;
                 self.walk_depth(rhs, d)
@@ -924,9 +988,7 @@ impl Ctx<'_> {
             // core exactly like the other PG-only expr nodes below — otherwise a
             // portable op carrying them validates clean and breaks at apply.
             Expr::FnCall { r#fn, args } => {
-                if matches!(r#fn, ScalarFn::CurrentSetting | ScalarFn::CurrentUser) {
-                    self.check_pg_only_expr("current_setting / current_user")?;
-                }
+                self.validate_feature(ExprDialectFeature::ScalarFunction(*r#fn))?;
                 for a in args {
                     self.walk_depth(a, d)?;
                 }
@@ -968,16 +1030,16 @@ impl Ctx<'_> {
             } => self.check_in_list(expr, elems, d),
             Expr::PgRegexMatch { expr, pattern } => self.check_pg_regex_match(expr, pattern, d),
             Expr::PgColumnSize { expr } => {
-                self.check_pg_only_expr("pg_column_size")?;
+                self.validate_feature(ExprDialectFeature::PgColumnSize)?;
                 self.walk_depth(expr, d)
             }
             Expr::Extract { field: _, from } => self.walk_depth(from, d),
             Expr::PgExtract { field: _, from } => {
-                self.check_pg_only_expr("PG EXTRACT")?;
+                self.validate_feature(ExprDialectFeature::PgExtract)?;
                 self.walk_depth(from, d)
             }
             Expr::PgInterval { duration } => {
-                self.check_pg_only_expr("PG interval literal")?;
+                self.validate_feature(ExprDialectFeature::PgInterval)?;
                 self.check_duration(duration)
             }
             // The one Layer-2 portability escape: a per-dialect value
@@ -1017,7 +1079,6 @@ impl Ctx<'_> {
             return Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
-                self.target_dialect,
                 "dialect({}) carries no legs; a per-dialect value escape must \
                  provide at least one backend id"
                     .to_string(),
@@ -1028,29 +1089,17 @@ impl Ctx<'_> {
         // same, but vendor-specific portability gates must be judged against the
         // leg that could render them.
         for (id, leg) in legs {
-            let leg_target = if id == &crate::dialect::POSTGRES {
-                Dialect::Postgres
-            } else if id == &crate::dialect::SQLITE {
-                Dialect::Sqlite
-            } else if id == &crate::dialect::MYSQL {
-                Dialect::Mysql
-            } else {
-                // This validator's target becomes an open DialectId in Cluster F.
-                // Until then, an unknown leg is still walked structurally under
-                // the current target; it can never cover a shipping target by
-                // accident because coverage below is exact key equality.
-                self.target_dialect
-            };
-            self.walk_depth_as(leg_target, leg, depth)?;
+            self.walk_depth_as(id.clone(), self.validators.get(id), leg, depth)?;
         }
         // (3) SCOPE CHECK, per-TARGET: only an exact id key covers the target.
-        if legs.contains_key(&self.target_dialect.id()) {
+        // An unregistered non-target leg is in neutral-structural mode: it has
+        // no backend authority with which to judge a nested dialectal escape.
+        if self.validator.is_none() || legs.contains_key(&self.target_dialect) {
             return Ok(());
         }
         Err(self.err(
             CODE_EXPR_NOT_PORTABLE,
             Some(UnsupportedKind::Expr),
-            self.target_dialect,
             format!(
                 "dialect() has no leg for the {} target; the per-dialect \
                  divergence does not cover this dialect",
@@ -1063,22 +1112,21 @@ impl Ctx<'_> {
         ))
     }
 
-    const fn with_target_dialect(&self, target_dialect: Dialect) -> Ctx<'_> {
-        Ctx {
-            target_dialect,
-            scope: self.scope,
-            op_index: self.op_index,
-        }
-    }
-
     fn walk_depth_as(
         &self,
-        target_dialect: Dialect,
+        target_dialect: DialectId,
+        validator: Option<&'_ dyn ExprDialectValidator>,
         expr: &Expr,
         depth: u32,
     ) -> Result<(), AuthoringError> {
-        self.with_target_dialect(target_dialect)
-            .walk_depth(expr, depth)
+        Ctx {
+            target_dialect,
+            validator,
+            validators: self.validators,
+            scope: self.scope,
+            op_index: self.op_index,
+        }
+        .walk_depth(expr, depth)
     }
 
     /// Rule (c): a `ColRef` must resolve to a column on the enclosing target
@@ -1094,7 +1142,6 @@ impl Ctx<'_> {
         Err(self.err(
             CODE_UNSUPPORTED,
             Some(UnsupportedKind::Expr),
-            self.target_dialect,
             format!(
                 "column {name:?} does not resolve on the enclosing target table {:?}; \
                  a transform may only reference columns of its own target table \
@@ -1180,16 +1227,9 @@ impl Ctx<'_> {
                 // SQLite target. Mirror the splitPart structural gate so a hand-crafted
                 // IR cannot slip a non-literal delimiter past and defer the corruption
                 // to render.
-                if self.target_dialect == Dialect::Sqlite
-                    && !matches!(args[0], Expr::Literal { .. })
-                {
-                    return Err(self.concat_ws_delim_envelope_err(format!(
-                        "c.fn.concatWs delimiter must be a literal on SQLite (a \
-                         runtime/computed delimiter is not portable — the NULL-skip \
-                         head-trim needs a fixed delimiter length); got {:?}",
-                        args[0]
-                    )));
-                }
+                self.validate_feature(ExprDialectFeature::ConcatWs {
+                    delimiter: &args[0],
+                })?;
                 for a in args {
                     self.walk_depth(a, depth)?;
                 }
@@ -1209,34 +1249,11 @@ impl Ctx<'_> {
         self.err(
             CODE_UNSUPPORTED,
             Some(UnsupportedKind::Expr),
-            // The shape is broken regardless of target; report the current target
-            // so the payload's `dialect` field is faithful to the deploy.
-            self.target_dialect,
             reason,
             Some(
                 "call the synth helper with its pinned argument shape \
                  (now takes no args; concatWs takes a delimiter + \
                  >=1 value; splitPart takes exactly (column, delim, n))"
-                    .to_string(),
-            ),
-        )
-    }
-
-    /// A splitPart **portability-boundary** reject: the call is well-formed and
-    /// PG-renderable (`split_part` accepts it), but OUT of the pinned `SQLite`
-    /// envelope. It is therefore a hard error ONLY on the `SQLite` leg and
-    /// loads fine on a Postgres target — the loads-on-PG/rejected-on-SQLite
-    /// verdict. The caller must only reach this when `target_dialect == Sqlite`.
-    fn split_part_envelope_err(&self, reason: String) -> AuthoringError {
-        self.err(
-            CODE_EXPR_NOT_PORTABLE,
-            None,
-            Dialect::Sqlite,
-            reason,
-            Some(
-                "use a single-ASCII delimiter with 1<=n<=8, restructure to stay \
-                 in-envelope (split into <=8 parts), or mark the migration PG-only \
-                 (dialect_scope=PgOnly)"
                     .to_string(),
             ),
         )
@@ -1254,117 +1271,13 @@ impl Ctx<'_> {
         self.err(
             CODE_EXPR_NOT_PORTABLE,
             None,
-            self.target_dialect,
             reason,
             Some(
-                "pass a single-ASCII string LITERAL delimiter and a positive integer \
+                "pass a non-empty string LITERAL delimiter and a positive integer \
                  LITERAL part index (a runtime/computed delim or n is not portable)"
                     .to_string(),
             ),
         )
-    }
-
-    /// A concatWs **portability-boundary** reject: the call is well-formed and
-    /// PG-renderable (`concat_ws` takes any expression delimiter), but the `SQLite`
-    /// lowering's literal-delimiter head-trim assumption is violated by a
-    /// non-literal delimiter. Like [`Self::split_part_envelope_err`], it is a hard
-    /// error ONLY on the `SQLite` leg; the caller only reaches it when
-    /// `target_dialect == Sqlite`.
-    fn concat_ws_delim_envelope_err(&self, reason: String) -> AuthoringError {
-        self.err(
-            CODE_EXPR_NOT_PORTABLE,
-            None,
-            Dialect::Sqlite,
-            reason,
-            Some(
-                "pass a string literal as the concatWs delimiter, or mark the \
-                 migration PG-only (dialect_scope=PgOnly)"
-                    .to_string(),
-            ),
-        )
-    }
-
-    /// A Tier-PG expression node. These are not portable-envelope misses: they are
-    /// PostgreSQL-only value nodes, so SQLite/MySQL validation refuses them as
-    /// `UNSUPPORTED { kind:"expr" }` before rendering.
-    fn check_pg_only_expr(&self, name: &'static str) -> Result<(), AuthoringError> {
-        // Read the PG-only verdict off the generated dialect vocabulary (a
-        // `pg = portable, else = unsupported` disposition) rather than a bespoke
-        // `== Postgres` dialect arm — the same `Disposition::is_supported` reading
-        // `Op::support` uses when assembling per-dialect support cells.
-        if matches!(self.target_dialect, Dialect::Postgres) {
-            return Ok(());
-        }
-        Err(self.err(
-            CODE_UNSUPPORTED,
-            Some(UnsupportedKind::Expr),
-            self.target_dialect,
-            format!(
-                "{name} is a PostgreSQL-only expression node and has no \
-                 SQLite/MySQL renderer"
-            ),
-            Some(
-                "use this node only in a PostgreSQL-targeted migration, or rewrite \
-                 the predicate using portable expression nodes"
-                    .to_string(),
-            ),
-        ))
-    }
-
-    /// Database UUIDv7 generation currently has one exact lowering:
-    /// PostgreSQL 18+'s native `uuidv7()`. MySQL and SQLite must fail before
-    /// rendering rather than substituting UUIDv1, UUIDv4, or an engine-side
-    /// value. PostgreSQL server-version validation remains an apply capability
-    /// concern because the structural IR validator has no live server version.
-    fn check_uuid_v7_generation(&self) -> Result<(), AuthoringError> {
-        if matches!(self.target_dialect, Dialect::Postgres) {
-            return Ok(());
-        }
-        Err(self.err(
-            CODE_EXPR_NOT_PORTABLE,
-            None,
-            self.target_dialect,
-            "uuidV7 database generation requires PostgreSQL 18+; MySQL and SQLite have no exact database UUIDv7 generator"
-                .to_string(),
-            Some(
-                "use an externally supplied UUIDv7 on this target, or use uuidV4() when database-generated random UUIDs are acceptable"
-                    .to_string(),
-            ),
-        ))
-    }
-
-    fn check_pg_or_mysql_expr(&self, name: &'static str) -> Result<(), AuthoringError> {
-        if matches!(self.target_dialect, Dialect::Postgres | Dialect::Mysql) {
-            return Ok(());
-        }
-        Err(self.err(
-            CODE_DIALECT_UNSUPPORTED,
-            Some(UnsupportedKind::Expr),
-            self.target_dialect,
-            format!("{name} is supported on PostgreSQL and MySQL, but SQLite has no stock REGEXP"),
-            Some(
-                "use dialect({ postgres: ..., sqlite: ..., mysql: ... }) to provide an explicit \
-                 SQLite leg, or avoid regex on SQLite"
-                    .to_string(),
-            ),
-        ))
-    }
-
-    fn check_pg_first_aggregate(&self, name: &'static str) -> Result<(), AuthoringError> {
-        if matches!(self.target_dialect, Dialect::Postgres) {
-            return Ok(());
-        }
-        Err(self.err(
-            CODE_DIALECT_UNSUPPORTED,
-            Some(UnsupportedKind::Expr),
-            self.target_dialect,
-            format!("{name} aggregate is PostgreSQL-first and has no native SQLite/MySQL renderer"),
-            Some(
-                "wrap this aggregate in dialect({ postgres: ..., sqlite: ..., mysql: ... }) with \
-                 explicit non-Postgres legs, or target Postgres only"
-                    .to_string(),
-            ),
-        ))
     }
 
     fn check_agg(
@@ -1374,16 +1287,13 @@ impl Ctx<'_> {
         delimiter: Option<&Expr>,
         depth: u32,
     ) -> Result<(), AuthoringError> {
-        if agg_func_is_pg_first(func) {
-            self.check_pg_first_aggregate(agg_func_name(func))?;
-        }
+        self.validate_feature(ExprDialectFeature::Aggregate(func))?;
         if let Some(arg) = arg {
             self.walk_depth(arg, depth)?;
         } else if !matches!(func, AggFunc::Count) {
             return Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
-                self.target_dialect,
                 format!("{} aggregate requires an argument", agg_func_name(func)),
                 Some(
                     "call the aggregate as a receiver chain method, e.g. col(\"x\").arrayAgg()"
@@ -1396,7 +1306,6 @@ impl Ctx<'_> {
             (AggFunc::StringAgg, None) => Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
-                self.target_dialect,
                 "stringAgg aggregate requires a delimiter".to_string(),
                 Some(
                     "call col(\"x\").stringAgg(delimiter) with a string or expression delimiter"
@@ -1406,7 +1315,6 @@ impl Ctx<'_> {
             (_, Some(_)) => Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
-                self.target_dialect,
                 "aggregate delimiter is only valid for stringAgg".to_string(),
                 Some("remove delimiter unless func is stringAgg".to_string()),
             )),
@@ -1419,7 +1327,6 @@ impl Ctx<'_> {
             return Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
-                self.target_dialect,
                 format!("{what} must be a non-empty text literal"),
                 Some(format!("pass a non-empty string literal for {what}")),
             ));
@@ -1428,7 +1335,6 @@ impl Ctx<'_> {
             return Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
-                self.target_dialect,
                 format!("{what} must not contain a NUL byte"),
                 Some(format!("remove the NUL byte from {what}")),
             ));
@@ -1467,7 +1373,6 @@ impl Ctx<'_> {
                     return Err(self.err(
                         CODE_UNSUPPORTED,
                         Some(UnsupportedKind::Expr),
-                        self.target_dialect,
                         format!(
                             "inList element {idx} must be string, number, boolean, or null; bytes are not allowed"
                         ),
@@ -1480,7 +1385,6 @@ impl Ctx<'_> {
                     return Err(self.err(
                         CODE_UNSUPPORTED,
                         Some(UnsupportedKind::Expr),
-                        self.target_dialect,
                         "inList elements must be homogeneous".to_string(),
                         Some(
                             "use one scalar kind per in() / notIn() list, or split the predicate"
@@ -1501,7 +1405,7 @@ impl Ctx<'_> {
         pattern: &str,
         depth: u32,
     ) -> Result<(), AuthoringError> {
-        self.check_pg_or_mysql_expr("regex match")?;
+        self.validate_feature(ExprDialectFeature::RegexMatch)?;
         self.walk_depth(expr, depth)?;
         self.check_pg_text_literal(pattern, "PG regex pattern")
     }
@@ -1511,7 +1415,6 @@ impl Ctx<'_> {
             return Err(self.err(
                 CODE_UNSUPPORTED,
                 Some(UnsupportedKind::Expr),
-                self.target_dialect,
                 "PG interval duration must include at least one field".to_string(),
                 Some("use a structured duration such as {\"minutes\":1}".to_string()),
             ));
@@ -1542,7 +1445,14 @@ impl Ctx<'_> {
         let delim = match &args[1] {
             Expr::Literal {
                 value: crate::ir::IrScalar::Str(s),
-            } => s,
+            } if !s.is_empty() => s,
+            Expr::Literal {
+                value: crate::ir::IrScalar::Str(_),
+            } => {
+                return Err(self.split_part_grammar_err(
+                    "c.fn.splitPart delimiter must be a non-empty string literal".to_string(),
+                ));
+            }
             Expr::Literal { value: other } => {
                 return Err(self.split_part_grammar_err(format!(
                     "c.fn.splitPart delimiter must be a string literal; got {other:?}"
@@ -1580,28 +1490,9 @@ impl Ctx<'_> {
             }
         };
 
-        // ── ENVELOPE (SQLite-only) — the grammar-valid node is renderable on
-        //    Postgres but a multi-char/non-ASCII delim or n>8 is out of the pinned
-        //    SQLite envelope. On a POSTGRES target the node loads fine; only a
-        //    SQLITE target rejects it.
-        if self.target_dialect == Dialect::Postgres {
-            return Ok(());
-        }
-        // delim — a single ASCII character (one byte, code point < 0x80).
-        let bytes = delim.as_bytes();
-        if bytes.len() != 1 || bytes[0] >= 0x80 {
-            return Err(self.split_part_envelope_err(format!(
-                "c.fn.splitPart delimiter must be a single ASCII character \
-                 (one byte, code point < 0x80); got {delim:?}"
-            )));
-        }
-        // n — within the proven inline-unroll bound.
-        if n > SPLIT_PART_MAX_N {
-            return Err(self.split_part_envelope_err(format!(
-                "c.fn.splitPart part index n must be <= {SPLIT_PART_MAX_N} \
-                 (the proven inline-unroll bound); got {n}"
-            )));
-        }
-        Ok(())
+        self.validate_feature(ExprDialectFeature::SplitPart {
+            delimiter: delim,
+            part_index: n,
+        })
     }
 }

@@ -322,11 +322,11 @@ fn render_partitioned_parent_create_table_pg() {
 #[compio::test]
 async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
     use zero_migrate::apply::backend::sqlite::Mode;
-    use zero_migrate::model::validate::{validate_ir_scoped, Dialect};
+    use zero_migrate::model::validate::{validate_ir_scoped, SqlDialect};
 
     let ops = collapse_events_ops();
     let migration_ir = ir_ops(ops);
-    validate_ir_scoped(&migration_ir, Dialect::Sqlite, None)
+    validate_ir_scoped(&migration_ir, SqlDialect::Sqlite, None)
         .expect("collapse-affirmed partition recording validates on SQLite");
 
     let steps = IrAuthor::new(
@@ -736,7 +736,7 @@ fn render_index_element_collation_precedes_opclass_pg() {
 
 #[test]
 fn pg_vendor_index_features_refused_fail_closed_off_pg() {
-    use zero_migrate::model::validate::{validate_ir, Dialect, CODE_UNSUPPORTED};
+    use zero_migrate::model::validate::{validate_ir, SqlDialect, CODE_UNSUPPORTED};
 
     let cases: Vec<(&str, Op)> = vec![
         (
@@ -770,7 +770,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
 
     for (label, op) in cases {
         let migration = ir(op);
-        for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
             let err = validate_ir(&migration, dialect)
                 .expect_err(&format!("{label} must be refused on {dialect:?}"));
             assert_eq!(
@@ -779,7 +779,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
             );
         }
         // The same op validates cleanly on PostgreSQL.
-        validate_ir(&migration, Dialect::Postgres)
+        validate_ir(&migration, SqlDialect::Postgres)
             .unwrap_or_else(|e| panic!("{label} must validate on Postgres: {e:?}"));
     }
 }
@@ -839,7 +839,7 @@ fn render_attach_partition_pg() {
 #[test]
 fn attach_partition_refused_fail_closed_off_pg() {
     use zero_migrate::model::validate::{
-        validate_ir_scoped, Dialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
+        validate_ir_scoped, SqlDialect, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
     };
 
     let migration = ir(attach_range_partition(
@@ -847,7 +847,7 @@ fn attach_partition_refused_fail_closed_off_pg() {
         int_bound(100),
         int_bound(200),
     ));
-    for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
         let err = validate_ir_scoped(&migration, dialect, None)
             .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
         assert!(

@@ -12,7 +12,6 @@ use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
     fold_ops, snapshot_schema, validate_ir, ColumnSnapshot, ConstraintSnapshot, IrAuthor,
     LiveSchema, MysqlTextStorageSnapshot, SchemaSnapshot, SqlDialect, TableSnapshot,
-    ValidatorDialect,
 };
 
 const PROJECT_SCHEMA: &str = "app";
@@ -441,9 +440,9 @@ fn sqlite_inlines_a_typed_reference_to_a_later_declared_parent() {
 
 fn assert_declared_mismatch(ir: &MigrationIr, expected: &[&str]) {
     for dialect in [
-        ValidatorDialect::Postgres,
-        ValidatorDialect::Mysql,
-        ValidatorDialect::Sqlite,
+        SqlDialect::Postgres,
+        SqlDialect::Mysql,
+        SqlDialect::Sqlite,
     ] {
         let error = validate_ir(ir, dialect)
             .expect_err("each dialect must reject the declared reference mismatch");
@@ -534,9 +533,9 @@ fn declared_reference_targets_must_be_single_column_keys() {
     ] {
         let ir = reference_target_ir(name, parent);
         for dialect in [
-            ValidatorDialect::Postgres,
-            ValidatorDialect::Mysql,
-            ValidatorDialect::Sqlite,
+            SqlDialect::Postgres,
+            SqlDialect::Mysql,
+            SqlDialect::Sqlite,
         ] {
             validate_ir(&ir, dialect).unwrap_or_else(|error| {
                 panic!("{name} must be a valid reference key on {dialect:?}: {error}")
@@ -544,7 +543,7 @@ fn declared_reference_targets_must_be_single_column_keys() {
         }
     }
     let ir = reference_target_ir("table_unique_key", table_unique_parent);
-    for dialect in [ValidatorDialect::Postgres, ValidatorDialect::Mysql] {
+    for dialect in [SqlDialect::Postgres, SqlDialect::Mysql] {
         validate_ir(&ir, dialect).unwrap_or_else(|error| {
             panic!("table UNIQUE must be a valid reference key on {dialect:?}: {error}")
         });

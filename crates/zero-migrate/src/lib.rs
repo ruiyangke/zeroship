@@ -310,7 +310,7 @@ pub fn shipping_backends() -> BackendRegistry {
         .descriptors()
         .expect("the shipping backend crates must declare well-formed, distinct dialect ids")
 }
-// Dialect-neutral journal types (the SQLite path constructs/imports these too).
+// SqlDialect-neutral journal types (the SQLite path constructs/imports these too).
 pub use apply::journal::{
     AppliedEntry, HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract,
     PendingContractRecord, PendingState, Phase, Resolution, RolledBackEntry,
@@ -408,13 +408,12 @@ pub use model::expr::{
 // No parser, no fuzzer — a pure allow-list walk.
 pub use model::validate::{
     validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
-    AuthoringError, Dialect as ValidatorDialect, LogicalColumnContract, LogicalColumnContracts,
+    AuthoringError, LogicalColumnContract, LogicalColumnContracts,
     LogicalColumnKey, TargetScope, UnsupportedKind, CODE_COLUMN_FACET_CONFLICT,
     CODE_DIALECT_SCOPE_PGONLY, CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE,
     CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED, CODE_PARTITION_BOUNDS_NOT_TOTAL,
     CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, CODE_PARTITION_HASH_DROP_UNDERIVABLE,
     CODE_PARTITION_KEY_COVERAGE, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, CODE_UNSUPPORTED,
-    SPLIT_PART_MAX_N,
 };
 // The `op.*` DSL plan model. Distinct from the dry-run `MigrationPlan`
 // (re-exported from `engine`): these are the ordered

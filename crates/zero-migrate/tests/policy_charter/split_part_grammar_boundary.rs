@@ -12,9 +12,8 @@ use std::collections::BTreeMap;
 use zero_migrate::model::expr::{Expr, SynthFn};
 use zero_migrate::model::ir::{IrScalar, IrValue};
 use zero_migrate::model::load::load_ir_document;
-use zero_migrate::model::validate::Dialect;
+use zero_migrate::model::validate::SqlDialect;
 use zero_migrate::render::dml::assemble_backfill_clauses;
-use zero_migrate::SqlDialect;
 
 const APP: &str = "app_grammar";
 
@@ -57,7 +56,7 @@ fn raw_split_funcs_rejected_at_load_both_dialects() {
                       {{"node":"colRef","name":"v"}},{{"node":"literal","value":","}}]}}}}}}
             ]}}"#
         );
-        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let err = load_ir_document(&ir, APP, dialect, &registry(), None).expect_err(&format!(
                 "raw `{raw_fn}` must be rejected at load on {dialect:?}"
             ));
@@ -84,7 +83,7 @@ fn in_envelope_split_part_helper_accepted() {
              {"node":"colRef","name":"v"},{"node":"literal","value":","},{"node":"literal","value":1}]}}}
     ],
     "irreversible":"grammar-boundary fixture: the pre-image of the overwritten column is not recorded"}"#;
-    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
         load_ir_document(ir, APP, dialect, &registry(), None)
             .unwrap_or_else(|e| panic!("in-envelope .splitPart must load on {dialect:?}: {e}"));
     }
@@ -101,9 +100,9 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
              {"node":"colRef","name":"v"},{"node":"literal","value":", "},{"node":"literal","value":1}]}}}
     ],
     "irreversible":"grammar-boundary fixture: the pre-image of the overwritten column is not recorded"}"#;
-    load_ir_document(ir, APP, Dialect::Postgres, &registry(), None)
+    load_ir_document(ir, APP, SqlDialect::Postgres, &registry(), None)
         .expect("out-of-envelope splitPart is PG-renderable → loads on PG");
-    let err = load_ir_document(ir, APP, Dialect::Sqlite, &registry(), None)
+    let err = load_ir_document(ir, APP, SqlDialect::Sqlite, &registry(), None)
         .expect_err("out-of-envelope splitPart must reject on SQLite");
     assert!(
         err.to_string().contains("EXPR_NOT_PORTABLE")

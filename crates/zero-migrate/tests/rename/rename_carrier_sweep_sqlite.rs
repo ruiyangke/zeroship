@@ -219,7 +219,7 @@ async fn apply_doc(
     let document = zero_migrate::model::load::load_ir_document(
         &ir,
         APP,
-        zero_migrate::model::validate::Dialect::Sqlite,
+        zero_migrate::model::validate::SqlDialect::Sqlite,
         registry,
         None,
     )

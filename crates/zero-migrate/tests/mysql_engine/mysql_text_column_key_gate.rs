@@ -39,10 +39,10 @@ use std::collections::BTreeMap;
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use zero_migrate::apply::backend::MysqlBackend;
 use zero_migrate::driver::SqlSession;
-use zero_migrate::model::validate::{validate_ir, Dialect};
+use zero_migrate::model::validate::{validate_ir, SqlDialect};
 use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, SqlDialect,
+    MigrationIr,
 };
 
 const OWNER: &str = "app_mysql_text_key";
@@ -78,7 +78,7 @@ fn a_text_key_in_the_same_envelope_is_refused_at_the_gate() {
     // which is not the finding - the finding is that the ENGINE refuses one of these
     // and not the other, from the same two operations.
     let ir: MigrationIr = serde_json::from_str(SAME_ENVELOPE).expect("same-envelope IR parses");
-    let error = validate_ir(&ir, Dialect::Mysql)
+    let error = validate_ir(&ir, SqlDialect::Mysql)
         .expect_err("a key over a bare TEXT column must not pass the MySQL load gate");
     let rendered = format!("{error}");
     assert!(
@@ -88,8 +88,8 @@ fn a_text_key_in_the_same_envelope_is_refused_at_the_gate() {
 
     // And the same envelope is fine on the other two dialects, so the rule is scoped
     // to the server that actually refuses it.
-    validate_ir(&ir, Dialect::Postgres).expect("PostgreSQL indexes a text column");
-    validate_ir(&ir, Dialect::Sqlite).expect("SQLite indexes a text column");
+    validate_ir(&ir, SqlDialect::Postgres).expect("PostgreSQL indexes a text column");
+    validate_ir(&ir, SqlDialect::Sqlite).expect("SQLite indexes a text column");
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn the_second_envelope_alone_carries_nothing_the_gate_could_key_on() {
     // not declare, and `validate_ir` is given no live schema to resolve it against.
     // This is the mechanism, provable with no database at all.
     let ir: MigrationIr = serde_json::from_str(SECOND_ENVELOPE).expect("index-only IR parses");
-    validate_ir(&ir, Dialect::Mysql)
+    validate_ir(&ir, SqlDialect::Mysql)
         .expect("the index-only envelope passes the MySQL gate - it declares no column");
 }
 

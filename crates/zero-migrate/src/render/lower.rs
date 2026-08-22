@@ -691,9 +691,9 @@ impl LiveSchema {
         default_schema: Option<&str>,
     ) -> Result<(), crate::model::validate::AuthoringError> {
         let target = match dialect {
-            SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
-            SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
-            SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+            SqlDialect::Postgres => crate::model::validate::SqlDialect::Postgres,
+            SqlDialect::Sqlite => crate::model::validate::SqlDialect::Sqlite,
+            SqlDialect::Mysql => crate::model::validate::SqlDialect::Mysql,
         };
         // The accumulator's own introspected tables are the catalog evidence a
         // reference into an unmanaged target is proved against.
@@ -764,9 +764,9 @@ impl LiveSchema {
         default_schema: Option<&str>,
     ) -> Result<(), crate::model::validate::AuthoringError> {
         let target = match dialect {
-            SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
-            SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
-            SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+            SqlDialect::Postgres => crate::model::validate::SqlDialect::Postgres,
+            SqlDialect::Sqlite => crate::model::validate::SqlDialect::Sqlite,
+            SqlDialect::Mysql => crate::model::validate::SqlDialect::Mysql,
         };
         self.logical_columns = crate::model::validate::accumulate_logical_declarations_for_lower(
             ir,
@@ -2640,9 +2640,9 @@ impl IrAuthor {
         live: &LiveSchema,
     ) -> Result<Vec<Migration>, LoadAndLowerError> {
         let target = match self.dialect {
-            SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
-            SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
-            SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+            SqlDialect::Postgres => crate::model::validate::SqlDialect::Postgres,
+            SqlDialect::Sqlite => crate::model::validate::SqlDialect::Sqlite,
+            SqlDialect::Mysql => crate::model::validate::SqlDialect::Mysql,
         };
         // the non-guarded `load_and_lower` is the Confined creator entry;
         // pin the schema-confinement scope to the bound project schema, so a
@@ -2689,9 +2689,9 @@ impl IrAuthor {
         guard_cfg: &GuardConfig,
     ) -> Result<LoweredArtifact, LoadAndLowerGuardedError> {
         let target = match self.dialect {
-            SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
-            SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
-            SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+            SqlDialect::Postgres => crate::model::validate::SqlDialect::Postgres,
+            SqlDialect::Sqlite => crate::model::validate::SqlDialect::Sqlite,
+            SqlDialect::Mysql => crate::model::validate::SqlDialect::Mysql,
         };
         // derive the schema-confinement scope from the guard config's
         // trust posture: Confined ⇒ pin the project schema (refuse
@@ -3139,11 +3139,11 @@ impl IrAuthor {
             .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))
     }
 
-    const fn validation_dialect(&self) -> crate::model::validate::Dialect {
+    const fn validation_dialect(&self) -> crate::model::validate::SqlDialect {
         match self.dialect {
-            SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
-            SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
-            SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+            SqlDialect::Postgres => crate::model::validate::SqlDialect::Postgres,
+            SqlDialect::Sqlite => crate::model::validate::SqlDialect::Sqlite,
+            SqlDialect::Mysql => crate::model::validate::SqlDialect::Mysql,
         }
     }
 
@@ -3815,7 +3815,7 @@ impl IrAuthor {
             code: crate::model::validate::CODE_OP_INVALID.to_string(),
             kind: Some(crate::model::validate::UnsupportedKind::Op),
             op_index: site.op_index,
-            dialect: self.validation_dialect(),
+            dialect: self.validation_dialect().id(),
             reason: format!(
                 "table-level foreign key {}.{} is incompatible with the live catalog: {reason}",
                 site.table,
@@ -3840,7 +3840,7 @@ impl IrAuthor {
             code: crate::model::validate::CODE_OP_INVALID.to_string(),
             kind: Some(crate::model::validate::UnsupportedKind::Op),
             op_index: site.op_index,
-            dialect: self.validation_dialect(),
+            dialect: self.validation_dialect().id(),
             reason: format!(
                 "typed reference {}.{} -> {}.{} is incompatible with the live catalog: {reason}",
                 site.table, site.column.name, reference.table, reference.column
@@ -6029,9 +6029,9 @@ impl IrAuthor {
         use crate::model::ir::Op;
         let dialect = self.dialect;
         let target = match dialect {
-            SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
-            SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
-            SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+            SqlDialect::Postgres => crate::model::validate::SqlDialect::Postgres,
+            SqlDialect::Sqlite => crate::model::validate::SqlDialect::Sqlite,
+            SqlDialect::Mysql => crate::model::validate::SqlDialect::Mysql,
         };
         // Structural gate (a)/(b)/(d) BEFORE assembly. op_index 0 is a local
         // attribution; the loader's `validate_ir` already ran with the true op
@@ -8787,9 +8787,9 @@ pub(crate) fn render_view_query(
         ),
         ViewQuery::Raw { sql } => {
             let target = match dialect {
-                SqlDialect::Postgres => crate::model::validate::Dialect::Postgres,
-                SqlDialect::Sqlite => crate::model::validate::Dialect::Sqlite,
-                SqlDialect::Mysql => crate::model::validate::Dialect::Mysql,
+                SqlDialect::Postgres => crate::model::validate::SqlDialect::Postgres,
+                SqlDialect::Sqlite => crate::model::validate::SqlDialect::Sqlite,
+                SqlDialect::Mysql => crate::model::validate::SqlDialect::Mysql,
             };
             crate::model::validate::validate_raw_view_body_sql(sql, target, 0, scope)
                 .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
@@ -11049,7 +11049,7 @@ mod tests {
         }))
         .expect("backfill-only IR parses");
 
-        crate::model::validate::validate_ir(&backfill, crate::model::validate::Dialect::Postgres)
+        crate::model::validate::validate_ir(&backfill, crate::model::validate::SqlDialect::Postgres)
             .expect("load-time validation defers a declaration from an earlier artifact");
 
         let author = test_ir_author("app", "app_a", SqlDialect::Postgres);
@@ -11474,7 +11474,7 @@ mod tests {
 
     fn validate_ir_platform(
         ir: &MigrationIr,
-        dialect: crate::model::validate::Dialect,
+        dialect: crate::model::validate::SqlDialect,
     ) -> Result<(), crate::model::validate::AuthoringError> {
         crate::model::validate::validate_ir_scoped(
             ir,
@@ -11954,7 +11954,7 @@ mod tests {
         for (sql_dialect, validator_dialect, non_null_columns) in [
             (
                 SqlDialect::Postgres,
-                crate::model::validate::Dialect::Postgres,
+                crate::model::validate::SqlDialect::Postgres,
                 [
                     r#""account_id" uuid NOT NULL"#,
                     r#""team" character varying(255) NOT NULL"#,
@@ -11962,7 +11962,7 @@ mod tests {
             ),
             (
                 SqlDialect::Sqlite,
-                crate::model::validate::Dialect::Sqlite,
+                crate::model::validate::SqlDialect::Sqlite,
                 [
                     r#""account_id" TEXT COLLATE BINARY NOT NULL"#,
                     r#""team" TEXT NOT NULL"#,
@@ -11970,7 +11970,7 @@ mod tests {
             ),
             (
                 SqlDialect::Mysql,
-                crate::model::validate::Dialect::Mysql,
+                crate::model::validate::SqlDialect::Mysql,
                 [
                     r#"`account_id` VARCHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL"#,
                     r#"`team` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs NOT NULL"#,
@@ -12039,10 +12039,10 @@ mod tests {
         for (sql_dialect, validator_dialect) in [
             (
                 SqlDialect::Postgres,
-                crate::model::validate::Dialect::Postgres,
+                crate::model::validate::SqlDialect::Postgres,
             ),
-            (SqlDialect::Sqlite, crate::model::validate::Dialect::Sqlite),
-            (SqlDialect::Mysql, crate::model::validate::Dialect::Mysql),
+            (SqlDialect::Sqlite, crate::model::validate::SqlDialect::Sqlite),
+            (SqlDialect::Mysql, crate::model::validate::SqlDialect::Mysql),
         ] {
             validate_ir_platform(&column_spelling, validator_dialect).unwrap();
             validate_ir_platform(&table_spelling, validator_dialect).unwrap();
@@ -13847,7 +13847,7 @@ columns = [
     #[test]
     fn container_defaults_on_user_columns_render_on_pg() {
         use crate::model::ir::EmptyContainerKind;
-        use crate::model::validate::Dialect;
+        use crate::model::validate::SqlDialect;
 
         let ir = MigrationIr {
             inverse_ops: None,
@@ -13927,7 +13927,7 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir_platform(&ir, Dialect::Postgres)
+        validate_ir_platform(&ir, SqlDialect::Postgres)
             .expect("container defaults validate on matching column types");
         let migrations = test_ir_author("app", "app_a", SqlDialect::Postgres)
             .lower(&ir, &LiveSchema::default())
@@ -13954,13 +13954,13 @@ columns = [
         for (dialect, validation_dialect, object_default, array_default) in [
             (
                 SqlDialect::Sqlite,
-                Dialect::Sqlite,
+                SqlDialect::Sqlite,
                 "DEFAULT '{}'",
                 "DEFAULT '[]'",
             ),
             (
                 SqlDialect::Mysql,
-                Dialect::Mysql,
+                SqlDialect::Mysql,
                 "DEFAULT (JSON_OBJECT())",
                 "DEFAULT (JSON_ARRAY())",
             ),
@@ -14142,7 +14142,7 @@ columns = [
     // on PG instead of being silently mapped away by the descriptor bridge.
     #[test]
     fn synth_default_on_user_column_renders_on_pg_not_silently_dropped() {
-        use crate::model::validate::{validate_ir, Dialect};
+        use crate::model::validate::{validate_ir, SqlDialect};
 
         // createTable with a column whose default is a synth `now()`.
         let ir_create = MigrationIr {
@@ -14185,7 +14185,7 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir_platform(&ir_create, Dialect::Postgres)
+        validate_ir_platform(&ir_create, SqlDialect::Postgres)
             .expect("a createTable synth default on a user column validates on PG");
         let create_migrations = test_ir_author("app", "app_a", SqlDialect::Postgres)
             .lower(&ir_create, &LiveSchema::default())
@@ -14224,7 +14224,7 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&ir_add, Dialect::Postgres)
+        validate_ir(&ir_add, SqlDialect::Postgres)
             .expect("an addColumn synth default validates on PG");
         let add_migrations = test_ir_author("app", "app_a", SqlDialect::Postgres)
             .lower(&ir_add, &LiveSchema::default())
@@ -14274,7 +14274,7 @@ columns = [
 
     #[test]
     fn set_column_type_using_is_validate_refused() {
-        use crate::model::validate::{validate_ir, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+        use crate::model::validate::{validate_ir, SqlDialect, UnsupportedKind, CODE_UNSUPPORTED};
 
         let ir = MigrationIr {
             inverse_ops: None,
@@ -14300,7 +14300,7 @@ columns = [
             checksum: None,
         };
 
-        let err = validate_ir(&ir, Dialect::Postgres)
+        let err = validate_ir(&ir, SqlDialect::Postgres)
             .expect_err("setColumnType.using must be refused before render");
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
@@ -14310,7 +14310,7 @@ columns = [
     #[test]
     fn set_column_default_literal_and_synth_expr_render() {
         use crate::model::ir::IrScalar;
-        use crate::model::validate::{validate_ir, Dialect};
+        use crate::model::validate::{validate_ir, SqlDialect};
 
         let literal_ir = MigrationIr {
             inverse_ops: None,
@@ -14333,7 +14333,7 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&literal_ir, Dialect::Postgres).expect("literal setColumnDefault validates");
+        validate_ir(&literal_ir, SqlDialect::Postgres).expect("literal setColumnDefault validates");
         let migrations = test_ir_author("app", "app_a", SqlDialect::Postgres)
             .lower(&literal_ir, &LiveSchema::default())
             .expect("literal setColumnDefault lowers");
@@ -14365,7 +14365,7 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&synth_ir, Dialect::Postgres).expect("synth expr setColumnDefault validates");
+        validate_ir(&synth_ir, SqlDialect::Postgres).expect("synth expr setColumnDefault validates");
         let migrations = test_ir_author("app", "app_a", SqlDialect::Postgres)
             .lower(&synth_ir, &LiveSchema::default())
             .expect("synth expr setColumnDefault lowers");

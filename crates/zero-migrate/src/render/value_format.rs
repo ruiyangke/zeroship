@@ -1,4 +1,4 @@
-//! Dialect-specific physical metadata for validated textual value formats and
+//! SqlDialect-specific physical metadata for validated textual value formats and
 //! portable logical UUID storage.
 //!
 //! A [`ValueFormat`] is logical schema metadata carried separately from the

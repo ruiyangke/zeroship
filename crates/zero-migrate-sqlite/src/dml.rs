@@ -15,10 +15,16 @@ use zero_migrate_backend::renderer::{Capability, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::SqlDialect;
-use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
+use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
     ForEach, IrScalar, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
 };
+use zero_migrate_ir::validate::{
+    ExprDialectFeature, ExprDialectRejection, ExprDialectValidator, UnsupportedKind,
+    CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED,
+};
+
+const SPLIT_PART_MAX_N: i64 = 8;
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs`.
@@ -54,7 +60,146 @@ pub(super) struct SqliteDmlRenderer;
 
 pub(super) static RENDERER: SqliteDmlRenderer = SqliteDmlRenderer;
 
+fn postgres_only_expr(name: &'static str) -> ExprDialectRejection {
+    ExprDialectRejection {
+        code: CODE_UNSUPPORTED,
+        kind: Some(UnsupportedKind::Expr),
+        reason: format!(
+            "{name} is a PostgreSQL-only expression node and has no SQLite/MySQL renderer"
+        ),
+        suggested_fix: Some(
+            "use this node only in a PostgreSQL-targeted migration, or rewrite the predicate using portable expression nodes"
+                .to_string(),
+        ),
+    }
+}
+
+fn postgres_first_aggregate(name: &'static str) -> ExprDialectRejection {
+    ExprDialectRejection {
+        code: CODE_DIALECT_UNSUPPORTED,
+        kind: Some(UnsupportedKind::Expr),
+        reason: format!(
+            "{name} aggregate is PostgreSQL-first and has no native SQLite/MySQL renderer"
+        ),
+        suggested_fix: Some(
+            "wrap this aggregate in dialect({ postgres: ..., sqlite: ..., mysql: ... }) with explicit non-Postgres legs, or target Postgres only"
+                .to_string(),
+        ),
+    }
+}
+
+impl ExprDialectValidator for SqliteDmlRenderer {
+    fn validate_expr_feature(
+        &self,
+        feature: ExprDialectFeature<'_>,
+    ) -> Result<(), ExprDialectRejection> {
+        match feature {
+            ExprDialectFeature::ScalarFunction(function) => match function {
+                ScalarFn::Coalesce
+                | ScalarFn::Nullif
+                | ScalarFn::Lower
+                | ScalarFn::Upper
+                | ScalarFn::Trim
+                | ScalarFn::Length
+                | ScalarFn::Abs
+                | ScalarFn::Mod
+                | ScalarFn::Round
+                | ScalarFn::Floor
+                | ScalarFn::Ceil
+                | ScalarFn::Substr
+                | ScalarFn::Replace => Ok(()),
+                ScalarFn::CurrentSetting | ScalarFn::CurrentUser => {
+                    Err(postgres_only_expr("current_setting / current_user"))
+                }
+            },
+            ExprDialectFeature::Aggregate(function) => match function {
+                AggFunc::Count | AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max => Ok(()),
+                AggFunc::StringAgg => Err(postgres_first_aggregate("stringAgg")),
+                AggFunc::ArrayAgg => Err(postgres_first_aggregate("arrayAgg")),
+                AggFunc::BoolAnd => Err(postgres_first_aggregate("boolAnd")),
+                AggFunc::BoolOr => Err(postgres_first_aggregate("boolOr")),
+            },
+            ExprDialectFeature::ConcatWs { delimiter }
+                if matches!(delimiter, Expr::Literal { .. }) =>
+            {
+                Ok(())
+            }
+            ExprDialectFeature::ConcatWs { delimiter } => Err(ExprDialectRejection {
+                code: CODE_EXPR_NOT_PORTABLE,
+                kind: None,
+                reason: format!(
+                    "c.fn.concatWs delimiter must be a literal on SQLite (a runtime/computed delimiter is not portable — the NULL-skip head-trim needs a fixed delimiter length); got {delimiter:?}"
+                ),
+                suggested_fix: Some(
+                    "pass a string literal as the concatWs delimiter, or mark the migration PG-only (dialect_scope=PgOnly)"
+                        .to_string(),
+                ),
+            }),
+            ExprDialectFeature::SplitPart {
+                delimiter,
+                part_index,
+            } => {
+                let bytes = delimiter.as_bytes();
+                if bytes.len() != 1 || bytes[0] >= 0x80 {
+                    return Err(ExprDialectRejection {
+                        code: CODE_EXPR_NOT_PORTABLE,
+                        kind: None,
+                        reason: format!(
+                            "c.fn.splitPart delimiter must be a single ASCII character (one byte, code point < 0x80); got {delimiter:?}"
+                        ),
+                        suggested_fix: Some(
+                            "use a single-ASCII delimiter with 1<=n<=8, restructure to stay in-envelope (split into <=8 parts), or mark the migration PG-only (dialect_scope=PgOnly)"
+                                .to_string(),
+                        ),
+                    });
+                }
+                if part_index > SPLIT_PART_MAX_N {
+                    return Err(ExprDialectRejection {
+                        code: CODE_EXPR_NOT_PORTABLE,
+                        kind: None,
+                        reason: format!(
+                            "c.fn.splitPart part index n must be <= {SPLIT_PART_MAX_N} (the proven inline-unroll bound); got {part_index}"
+                        ),
+                        suggested_fix: Some(
+                            "use a single-ASCII delimiter with 1<=n<=8, restructure to stay in-envelope (split into <=8 parts), or mark the migration PG-only (dialect_scope=PgOnly)"
+                                .to_string(),
+                        ),
+                    });
+                }
+                Ok(())
+            }
+            ExprDialectFeature::UuidV7Generation => Err(ExprDialectRejection {
+                code: CODE_EXPR_NOT_PORTABLE,
+                kind: None,
+                reason: "uuidV7 database generation requires PostgreSQL 18+; MySQL and SQLite have no exact database UUIDv7 generator"
+                    .to_string(),
+                suggested_fix: Some(
+                    "use an externally supplied UUIDv7 on this target, or use uuidV4() when database-generated random UUIDs are acceptable"
+                        .to_string(),
+                ),
+            }),
+            ExprDialectFeature::RegexMatch => Err(ExprDialectRejection {
+                code: CODE_DIALECT_UNSUPPORTED,
+                kind: Some(UnsupportedKind::Expr),
+                reason: "regex match is supported on PostgreSQL and MySQL, but SQLite has no stock REGEXP"
+                    .to_string(),
+                suggested_fix: Some(
+                    "use dialect({ postgres: ..., sqlite: ..., mysql: ... }) to provide an explicit SQLite leg, or avoid regex on SQLite"
+                        .to_string(),
+                ),
+            }),
+            ExprDialectFeature::PgColumnSize => Err(postgres_only_expr("pg_column_size")),
+            ExprDialectFeature::PgExtract => Err(postgres_only_expr("PG EXTRACT")),
+            ExprDialectFeature::PgInterval => Err(postgres_only_expr("PG interval literal")),
+        }
+    }
+}
+
 impl DmlRenderer for SqliteDmlRenderer {
+    fn expr_validator(&self) -> &dyn ExprDialectValidator {
+        self
+    }
+
     fn descriptor(&self) -> &'static BackendDescriptor {
         &crate::descriptor::SQLITE_DESCRIPTOR
     }
@@ -211,11 +356,11 @@ impl DmlRenderer for SqliteDmlRenderer {
                  code point < 0x80) to lower portably on SQLite; got {delim:?}"
             )));
         }
-        if n > dml::SPLIT_PART_MAX_N {
+        if n > SPLIT_PART_MAX_N {
             return Err(DmlError::UnrenderableExpr(format!(
                 "c.fn.splitPart part index n must be in 1..={} \
                  (the proven inline-unroll bound) to lower portably on SQLite; got {n}",
-                dml::SPLIT_PART_MAX_N
+                SPLIT_PART_MAX_N
             )));
         }
         let dc = char::from(bytes[0]);

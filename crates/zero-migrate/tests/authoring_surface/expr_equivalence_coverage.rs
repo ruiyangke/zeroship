@@ -5,9 +5,9 @@ use zero_migrate::model::expr::{
     SynthFn, UnaryOp,
 };
 use zero_migrate::model::ir::{IrScalar, IrValue};
-use zero_migrate::model::validate::{validate_expr, Dialect, TargetScope};
+use zero_migrate::model::validate::{validate_expr, SqlDialect, TargetScope};
 use zero_migrate::render::dml::assemble_backfill_clauses;
-use zero_migrate::{SqlDialect, POSTGRES};
+use zero_migrate::POSTGRES;
 
 const EXPECTED_PORTABLE_EXPR_VARIANTS: &[&str] = &[
     "Agg",
@@ -295,11 +295,11 @@ fn portable_expr_samples() -> Vec<Expr> {
     ]
 }
 
-const fn dialect_pairs() -> [(Dialect, SqlDialect); 3] {
+const fn dialect_pairs() -> [(SqlDialect, SqlDialect); 3] {
     [
-        (Dialect::Postgres, SqlDialect::Postgres),
-        (Dialect::Sqlite, SqlDialect::Sqlite),
-        (Dialect::Mysql, SqlDialect::Mysql),
+        (SqlDialect::Postgres, SqlDialect::Postgres),
+        (SqlDialect::Sqlite, SqlDialect::Sqlite),
+        (SqlDialect::Mysql, SqlDialect::Mysql),
     ]
 }
 

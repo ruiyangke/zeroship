@@ -962,52 +962,24 @@ fn render_concat_ws(rendered: &[String], backend: &dyn DmlRenderer) -> String {
     backend.render_concat_ws(rendered)
 }
 
-/// The MAX literal part index `c.fn.splitPart` admits — the O(2ⁿ) inline-unroll
-/// bound (`~17 KB` at `n=8`). MUST equal
-/// [`zero_migrate_ir::validate::SPLIT_PART_MAX_N`] — the validator gates the envelope and
-/// this renderer assumes it; a fixture pins their equality.
-pub const SPLIT_PART_MAX_N: i64 = zero_migrate_ir::validate::SPLIT_PART_MAX_N;
-
-/// Render the PINNED `c.fn.splitPart(col, d, n)` per dialect, given the
-/// already-rendered `col_sql` fragment and the raw delimiter + `n` IR args. The
-/// renderer is **dialect-aware** because the portability ENVELOPE is dialect-gated
-/// (mirroring `validate::check_split_part`, which returns early on a Postgres
-/// target): PG's native `split_part` is multi-char-delimiter-capable and takes any
-/// positive `n`, so on a Postgres target a `dialect_scope=PgOnly` out-of-envelope
-/// splitPart is a first-class, renderable node — NOT a hard error.
+/// Render the PINNED `c.fn.splitPart(col, d, n)` through the selected backend,
+/// given the already-rendered `col_sql` fragment and the raw delimiter + `n` IR
+/// args. The structural validator has already asked that backend for its
+/// portability envelope. This shared seam enforces only the dialect-neutral
+/// grammar as a fail-closed rendering backstop:
 ///
-/// On BOTH dialects the GRAMMAR is enforced (the renderer's fail-closed backstop):
 /// the delimiter must be a non-empty string literal and `n` a positive integer
 /// literal — a non-literal delim/n, a non-string delim, an empty delim, or `n ≤ 0`
-/// is unrenderable everywhere. The widening on PG is of the envelope (multi-char /
-/// non-ASCII delim, `n > SPLIT_PART_MAX_N`), never the grammar.
-///
-/// - **Postgres:** `split_part(<col>, '<d>', n)` — verbatim for ANY literal
-///   delimiter (single-quotes `''`-escaped) and any positive literal `n`. Returns
-///   `''` past the token count.
-/// - **SQLite:** restricted to the proven envelope — a SINGLE-ASCII-byte delimiter
-///   and `1 ≤ n ≤ SPLIT_PART_MAX_N` — then the engine-owned `instr`/`substr`
-///   unroll, byte-identical to PG `split_part` against SQLite 3.51.2. The delimiter
-///   is required to be a single ASCII byte precisely because UTF-8 never embeds an
-///   ASCII byte inside a multibyte sequence, so the byte-wise `instr` scan finds
-///   exactly the boundaries PG's character-wise `split_part` does (the byte-identity
-///   proof). Append a sentinel delimiter (`cur₀ = col || 'd'`) so every token is
-///   delimiter-terminated, then walk the boundary to literal depth `n`:
-///   `curᵢ = substr(curᵢ₋₁, instr(curᵢ₋₁, 'd') + 1)` for `i = 1 … n−1`, and the
-///   result is `substr(cur_{n-1}, 1, instr(cur_{n-1}, 'd') − 1)`. The unroll
-///   references `curᵢ₋₁` twice per level, so it grows O(2ⁿ) (~17 KB at `n=8`) — the
-///   reason `n` is capped at 8. The delimiter is emitted as a single-quoted SQL
-///   literal (`''`-escaped), NOT a bind: it is an engine-pinned constant of the
-///   pinned expression, and the authorizer (with `instr` allow-listed) vets the
-///   whole statement.
+/// is unrenderable on every backend. Backend-specific lowering constraints stay
+/// behind [`DmlRenderer::render_split_part`].
 fn render_split_part(
     col_sql: &str,
     delim_arg: &Expr,
     n_arg: &Expr,
     backend: &dyn DmlRenderer,
 ) -> Result<String, DmlError> {
-    // GRAMMAR (both dialects): a string-literal delimiter, a positive integer
-    // literal n. These are unrenderable on EITHER backend.
+    // GRAMMAR (every backend): a string-literal delimiter and positive integer
+    // literal n. Other shapes are unrenderable everywhere.
     let delim = match delim_arg {
         Expr::Literal {
             value: IrScalar::Str(s),
@@ -1465,8 +1437,8 @@ fn render_synth_bound(f: SynthFn, args: &[Expr], ctx: &mut BindCtx) -> Result<St
         SynthFn::SplitPart => {
             // splitPart(col, delim, n): the column arg may itself be a ColRef or an
             // in-AST sub-expression — render it (binding any nested Literals), then
-            // extract the pinned single-ASCII delim + literal n envelope. The
-            // delim/n are engine-pinned constants of the lowering, NOT binds.
+            // extract the dialect-neutral literal grammar. The delim/n are
+            // engine-pinned constants of the lowering, NOT binds.
             if args.len() != 3 {
                 return Err(DmlError::UnrenderableExpr(format!(
                     "c.fn.splitPart takes exactly (column, delim, n); got {} args",

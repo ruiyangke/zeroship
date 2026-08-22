@@ -1166,7 +1166,7 @@ enum Status {
 
 /// One recorded row: a measured verdict plus how to read it.
 struct Row {
-    /// `case|Dialect|question`.
+    /// `case|SqlDialect|question`.
     key: &'static str,
     /// The measured verdict, verbatim.
     verdict: &'static str,
@@ -1473,7 +1473,7 @@ const ROWS: &[Row] = &[
 ];
 
 /// Which op variants each walker reaches, measured by prefix sweep, one line
-/// per `variant|Dialect`. Cells are `FO FFD ATO RMO`, `R`eaches / `S`ilent /
+/// per `variant|SqlDialect`. Cells are `FO FFD ATO RMO`, `R`eaches / `S`ilent /
 /// `-` unobserved.
 ///
 /// Step 4 consumer 2 moved EIGHTEEN cells - six variants across three dialects -

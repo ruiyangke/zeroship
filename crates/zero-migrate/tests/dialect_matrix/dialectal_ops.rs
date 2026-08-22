@@ -5,11 +5,11 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 use zero_migrate::model::ir::{IndexElement, IndexMethod, IrFlagsOverride, Op};
-use zero_migrate::model::validate::{validate_ir, Dialect, CODE_OP_INVALID};
+use zero_migrate::model::validate::{validate_ir, SqlDialect, CODE_OP_INVALID};
 use zero_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PlanStep,
-    SqlDialect, SqliteBackend, CURRENT_IR_VERSION, POSTGRES,
+    SqliteBackend, CURRENT_IR_VERSION, POSTGRES,
 };
 
 const PROJECT: &str = "prj_dialectal";
@@ -263,7 +263,7 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
             legs: BTreeMap::new(),
         }],
     );
-    let err = validate_ir(&empty, Dialect::Postgres).unwrap_err();
+    let err = validate_ir(&empty, SqlDialect::Postgres).unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
 
     let nested = ir(
@@ -277,14 +277,14 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
             )]),
         }],
     );
-    let err = validate_ir(&nested, Dialect::Postgres).unwrap_err();
+    let err = validate_ir(&nested, SqlDialect::Postgres).unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
 }
 
 #[test]
 fn validate_rejects_absent_and_misspelled_target_dialectal_legs() {
     let absent = pg_only_ir();
-    let err = validate_ir(&absent, Dialect::Sqlite)
+    let err = validate_ir(&absent, SqlDialect::Sqlite)
         .expect_err("an absent exact target leg must fail closed");
     assert_eq!(err.code, CODE_OP_INVALID);
     assert!(err.reason.contains("sqlite target"), "got: {err}");
@@ -298,7 +298,7 @@ fn validate_rejects_absent_and_misspelled_target_dialectal_legs() {
             )]),
         }],
     );
-    let err = validate_ir(&misspelled, Dialect::Postgres)
+    let err = validate_ir(&misspelled, SqlDialect::Postgres)
         .expect_err("a misspelled key cannot cover the postgres target");
     assert_eq!(err.code, CODE_OP_INVALID);
     assert!(err.reason.contains("postgres target"), "got: {err}");

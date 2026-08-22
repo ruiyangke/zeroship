@@ -252,3 +252,12 @@ impl VendorSet {
         BackendRegistry::build(&descriptors)
     }
 }
+
+impl zero_migrate_ir::validate::ExprDialectValidatorSet for VendorSet {
+    fn get(
+        &self,
+        dialect: &zero_migrate_ir::dialect::DialectId,
+    ) -> Option<&dyn zero_migrate_ir::validate::ExprDialectValidator> {
+        VendorSet::get(*self, dialect).map(|vendor| vendor.dml.expr_validator())
+    }
+}

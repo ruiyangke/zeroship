@@ -2890,10 +2890,4 @@ mod tests {
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
 
-    /// The renderer's envelope bound MUST equal the validator's, so a node the
-    /// validator admits the renderer can always lower.
-    #[test]
-    fn split_part_max_n_matches_validator() {
-        assert_eq!(SPLIT_PART_MAX_N, crate::model::validate::SPLIT_PART_MAX_N);
-    }
 }

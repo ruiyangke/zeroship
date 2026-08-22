@@ -565,7 +565,7 @@ pub fn apply_ir(
         .collect::<Result<Vec<_>>>()?;
     let registry_json = serde_json::to_string(&req.registry)
         .map_err(|e| Error::from_reason(format!("registry is not serializable: {e}")))?;
-    // Dialect selects the backend: Postgres and MySQL ride the
+    // SqlDialect selects the backend: Postgres and MySQL ride the
     // SAME `SqlSession` seam, but each dialect's lock / journal / placeholder SQL
     // lives in its own `MigrationBackend`. `apply` builds `PostgresBackend`;
     // `apply_with_lock_mysql` builds `MysqlBackend` (`GET_LOCK`, MySQL journal DDL,

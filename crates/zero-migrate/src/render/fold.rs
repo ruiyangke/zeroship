@@ -5814,7 +5814,7 @@ mod tests {
     use crate::model::table_shape::{
         effective_policy_from_charter_toml, resolve_create_table_policy,
     };
-    use crate::model::validate::{validate_ir_scoped, Dialect, UnsupportedKind, CODE_UNSUPPORTED};
+    use crate::model::validate::{validate_ir_scoped, SqlDialect, UnsupportedKind, CODE_UNSUPPORTED};
 
     const SCHEMA: &str = "proj_test";
 
@@ -5827,7 +5827,7 @@ mod tests {
         )
     }
 
-    fn validate_ops(ops: Vec<Op>, dialect: Dialect) -> crate::model::validate::AuthoringError {
+    fn validate_ops(ops: Vec<Op>, dialect: SqlDialect) -> crate::model::validate::AuthoringError {
         let ir = crate::model::ir::MigrationIr {
             inverse_ops: None,
             irreversible: None,
@@ -5844,7 +5844,7 @@ mod tests {
         validate_ir_scoped(&ir, dialect, Some(&SchemaScope::Unconfined)).unwrap_err()
     }
 
-    fn assert_validate_ops_ok(ops: Vec<Op>, dialect: Dialect) {
+    fn assert_validate_ops_ok(ops: Vec<Op>, dialect: SqlDialect) {
         let ir = crate::model::ir::MigrationIr {
             inverse_ops: None,
             irreversible: None,
@@ -7664,7 +7664,7 @@ columns = [
                 existence_guard: None,
             },
         ];
-        assert_validate_ops_ok(pg_ops.clone(), Dialect::Postgres);
+        assert_validate_ops_ok(pg_ops.clone(), SqlDialect::Postgres);
         let folded = fold(&pg_ops).expect("PG table-level CHECK constraints fold");
         let users = folded.tables.get("users").expect("users table folded");
         for name in ["users_true", "age_pos"] {
@@ -7677,7 +7677,7 @@ columns = [
             assert_eq!(constraint.definition, "CHECK (TRUE)");
         }
 
-        for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
             let err = validate_ops(
                 vec![
                     create("users", vec![col("age", ColType::Int, false)]),
@@ -8539,7 +8539,7 @@ columns = [
                 Vec::new(),
             ),
         ];
-        assert_validate_ops_ok(ops.clone(), Dialect::Sqlite);
+        assert_validate_ops_ok(ops.clone(), SqlDialect::Sqlite);
         let sqlite = fold_ops(
             &ops,
             SqlDialect::Sqlite,
@@ -8572,7 +8572,7 @@ columns = [
             vec![unique_constraint(Some("t_handle_uq"), &["handle"])],
             Vec::new(),
         );
-        let err = validate_ops(vec![op], Dialect::Sqlite);
+        let err = validate_ops(vec![op], SqlDialect::Sqlite);
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("unique"));
@@ -8603,7 +8603,7 @@ columns = [
                 nulls_not_distinct: None,
             }],
         );
-        let err = validate_ops(vec![op], Dialect::Sqlite);
+        let err = validate_ops(vec![op], SqlDialect::Sqlite);
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("non-btree"));

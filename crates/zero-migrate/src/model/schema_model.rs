@@ -385,7 +385,7 @@ pub struct Column {
     pub nullable: bool,
     /// The `DEFAULT` clause expression to emit at CREATE / ADD COLUMN.
     pub default: Option<String>,
-    /// Dialect-rendered type spelling to use in DDL instead of deriving from
+    /// SqlDialect-rendered type spelling to use in DDL instead of deriving from
     /// `data_type`.
     ///
     /// The VALUE is dialect-rendered; the FIELD is neutral, because every backend has a

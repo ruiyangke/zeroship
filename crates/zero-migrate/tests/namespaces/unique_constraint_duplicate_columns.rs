@@ -23,12 +23,12 @@
 //! an error.
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir, Dialect};
+use zero_migrate::model::validate::{validate_ir, SqlDialect};
 
 fn verdict(op: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, Dialect::Postgres).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, SqlDialect::Postgres).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 /// Assert WHICH rule refused, so the three kinds cannot cover for each other.

@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::model::op_support::FEATURE_SUPPORT_REGISTRY;
-use crate::model::support::{Dialect, Feature, SupportDecision};
+use crate::model::support::{SqlDialect, Feature, SupportDecision};
 
 const REGENERATE_COMMAND: &str = "ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX=1 cargo test -p zero-migrate --lib model::support_matrix::committed_support_matrix_is_current -- --exact";
 
@@ -105,17 +105,17 @@ pub(crate) fn render_support_matrix() -> String {
                 "support-matrix feature label must not be empty"
             );
             let postgres = render_cell(
-                feature.decision(Dialect::Postgres),
+                feature.decision(SqlDialect::Postgres),
                 &mut footnote_ids,
                 &mut footnotes,
             );
             let mysql = render_cell(
-                feature.decision(Dialect::Mysql),
+                feature.decision(SqlDialect::Mysql),
                 &mut footnote_ids,
                 &mut footnotes,
             );
             let sqlite = render_cell(
-                feature.decision(Dialect::Sqlite),
+                feature.decision(SqlDialect::Sqlite),
                 &mut footnote_ids,
                 &mut footnotes,
             );

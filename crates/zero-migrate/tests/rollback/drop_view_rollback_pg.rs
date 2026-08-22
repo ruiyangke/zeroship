@@ -130,7 +130,7 @@ async fn apply_doc_under(
     let document = zero_migrate::model::load::load_ir_document_authorized(
         ir,
         OWNER,
-        zero_migrate::model::validate::Dialect::Postgres,
+        zero_migrate::model::validate::SqlDialect::Postgres,
         reg,
         None,
         Some(zero_migrate::model::validate::VendorAuthority {

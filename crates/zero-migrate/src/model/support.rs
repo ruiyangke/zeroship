@@ -10,7 +10,7 @@ use crate::model::capability::VendorCapability;
 use crate::model::dialect_table::Disposition;
 use zero_migrate_ir::dialect::{DialectId, MYSQL, POSTGRES, SQLITE};
 
-pub use crate::model::validate::Dialect;
+pub use crate::model::validate::SqlDialect;
 
 impl Disposition {
     /// Whether this generated-table disposition admits the token on its dialect —
@@ -32,10 +32,10 @@ impl Disposition {
 /// PG-only-expression gate reads that shape off the generated [`Disposition`]
 /// vocabulary instead of a bespoke `== Postgres` arm.
 #[must_use]
-pub const fn pg_only_expr_disposition(dialect: Dialect) -> Disposition {
+pub const fn pg_only_expr_disposition(dialect: SqlDialect) -> Disposition {
     match dialect {
-        Dialect::Postgres => Disposition::Portable,
-        Dialect::Sqlite | Dialect::Mysql => Disposition::Unsupported,
+        SqlDialect::Postgres => Disposition::Portable,
+        SqlDialect::Sqlite | SqlDialect::Mysql => Disposition::Unsupported,
     }
 }
 
@@ -272,7 +272,7 @@ impl DialectSupport {
     /// declared, and treating it as unsupported invents a refusal with no reason
     /// to show anyone.
     #[must_use]
-    pub fn decision(&self, dialect: Dialect) -> SupportDecision {
+    pub fn decision(&self, dialect: SqlDialect) -> SupportDecision {
         let id = dialect.id();
         self.decision_for(&id)
             .unwrap_or_else(|| panic!("support declaration states no decision for {id}"))
@@ -367,7 +367,7 @@ impl FeatureSupport {
     }
 
     #[must_use]
-    pub fn decision(&self, dialect: Dialect) -> SupportDecision {
+    pub fn decision(&self, dialect: SqlDialect) -> SupportDecision {
         self.dialects.decision(dialect)
     }
 }
@@ -408,7 +408,7 @@ impl Support {
     }
 
     #[must_use]
-    pub fn decision(&self, dialect: Dialect) -> SupportDecision {
+    pub fn decision(&self, dialect: SqlDialect) -> SupportDecision {
         self.dialects.decision(dialect)
     }
 
@@ -962,7 +962,7 @@ mod tests {
             "SHIPPING_DIALECTS must be sorted and deduplicated: every declaration \
              built from it is binary-searched"
         );
-        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
             assert!(
                 SHIPPING_DIALECTS.contains(&dialect.id()),
                 "{dialect:?} is a closed-enum variant with no cell in the census"

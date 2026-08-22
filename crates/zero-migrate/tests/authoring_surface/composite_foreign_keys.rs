@@ -11,7 +11,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
     diff_snapshots, fold_ops, fold_ops_onto, snapshot_schema, validate_ir, IrAuthor, LiveSchema,
-    MysqlTextStorageSnapshot, PlanStep, RenameStep, SqlDialect, ValidatorDialect,
+    MysqlTextStorageSnapshot, PlanStep, RenameStep, SqlDialect,
 };
 
 const PROJECT_SCHEMA: &str = "app";
@@ -189,11 +189,11 @@ fn create_sql<'a>(
         .as_str()
 }
 
-fn validator_dialect(dialect: SqlDialect) -> ValidatorDialect {
+fn validator_dialect(dialect: SqlDialect) -> SqlDialect {
     match dialect {
-        SqlDialect::Postgres => ValidatorDialect::Postgres,
-        SqlDialect::Mysql => ValidatorDialect::Mysql,
-        SqlDialect::Sqlite => ValidatorDialect::Sqlite,
+        SqlDialect::Postgres => SqlDialect::Postgres,
+        SqlDialect::Mysql => SqlDialect::Mysql,
+        SqlDialect::Sqlite => SqlDialect::Sqlite,
     }
 }
 
@@ -546,16 +546,16 @@ fn dropping_the_only_ordered_candidate_key_before_a_composite_fk_is_rejected_eve
     let constraint_ir = lifecycle_ir("drop_unique_constraint_then_fk", constraint_ops);
 
     for dialect in [
-        ValidatorDialect::Postgres,
-        ValidatorDialect::Mysql,
-        ValidatorDialect::Sqlite,
+        SqlDialect::Postgres,
+        SqlDialect::Mysql,
+        SqlDialect::Sqlite,
     ] {
         // The UNIQUE-CONSTRAINT artifact is PostgreSQL/MySQL-only. `addConstraint`
         // of a unique constraint is declared `unsupported` on SQLite (there is no
         // in-place ADD CONSTRAINT), so on SQLite that IR is refused at its FIRST op
         // and never reaches the candidate-key check this test exists to pin. The
         // unique-INDEX artifact is portable on all three and carries SQLite here.
-        let artifacts: Vec<(&str, &MigrationIr)> = if matches!(dialect, ValidatorDialect::Sqlite) {
+        let artifacts: Vec<(&str, &MigrationIr)> = if matches!(dialect, SqlDialect::Sqlite) {
             vec![("drop unique index", &index_ir)]
         } else {
             vec![
@@ -882,9 +882,9 @@ fn sqlite_drop_then_add_change_uses_the_prior_rebuild_shape() {
 
 fn assert_rejected_on_every_dialect(label: &str, ir: &MigrationIr) {
     for dialect in [
-        ValidatorDialect::Postgres,
-        ValidatorDialect::Mysql,
-        ValidatorDialect::Sqlite,
+        SqlDialect::Postgres,
+        SqlDialect::Mysql,
+        SqlDialect::Sqlite,
     ] {
         let Err(error) = validate_ir(ir, dialect) else {
             panic!("{label} must be rejected on {dialect:?}");

@@ -25,14 +25,14 @@
 //! Only an operation that expects the OLD name to still be there is wrong.
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir, Dialect};
+use zero_migrate::model::validate::{validate_ir, SqlDialect};
 
 const TABLE: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"]}"#;
 
 fn verdict(tail: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{TABLE},{tail}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, Dialect::Postgres).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, SqlDialect::Postgres).map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 #[test]

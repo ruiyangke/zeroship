@@ -37,8 +37,12 @@ use zero_migrate_ir::backend::{
     BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
 };
 use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{CastTarget, Expr, ExtractField, ScalarFn};
+use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{IrScalar, Op, TableRef, ValueFormat};
+use zero_migrate_ir::validate::{
+    validate_expr, ExprDialectFeature, ExprDialectRejection, ExprDialectValidator,
+    ExprDialectValidatorSet, TargetScope,
+};
 
 /// The outsider's own identity, declared at item scope in a crate that owns
 /// neither `SqlDialect` nor the shipping registry. `DialectId::new` is `const`,
@@ -92,7 +96,64 @@ impl ExistenceProbePolicy for DuckDbExistenceProbePolicy {
     }
 }
 
+impl ExprDialectValidator for DuckDbDmlRenderer {
+    fn validate_expr_feature(
+        &self,
+        feature: ExprDialectFeature<'_>,
+    ) -> Result<(), ExprDialectRejection> {
+        match feature {
+            ExprDialectFeature::ScalarFunction(function) => match function {
+                ScalarFn::Coalesce
+                | ScalarFn::Nullif
+                | ScalarFn::Lower
+                | ScalarFn::Upper
+                | ScalarFn::Trim
+                | ScalarFn::Length
+                | ScalarFn::Abs
+                | ScalarFn::Mod
+                | ScalarFn::Round
+                | ScalarFn::Floor
+                | ScalarFn::Ceil
+                | ScalarFn::Substr
+                | ScalarFn::Replace
+                | ScalarFn::CurrentSetting
+                | ScalarFn::CurrentUser => Ok(()),
+            },
+            ExprDialectFeature::Aggregate(function) => match function {
+                AggFunc::Count
+                | AggFunc::Sum
+                | AggFunc::Avg
+                | AggFunc::Min
+                | AggFunc::Max
+                | AggFunc::StringAgg
+                | AggFunc::ArrayAgg
+                | AggFunc::BoolAnd
+                | AggFunc::BoolOr => Ok(()),
+            },
+            ExprDialectFeature::ConcatWs { .. }
+            | ExprDialectFeature::SplitPart { .. }
+            | ExprDialectFeature::UuidV7Generation
+            | ExprDialectFeature::RegexMatch
+            | ExprDialectFeature::PgColumnSize
+            | ExprDialectFeature::PgExtract
+            | ExprDialectFeature::PgInterval => Ok(()),
+        }
+    }
+}
+
+struct DuckDbValidators;
+
+impl ExprDialectValidatorSet for DuckDbValidators {
+    fn get(&self, dialect: &DialectId) -> Option<&dyn ExprDialectValidator> {
+        (dialect == &DUCKDB).then_some(&DuckDbDmlRenderer)
+    }
+}
+
 impl DmlRenderer for DuckDbDmlRenderer {
+    fn expr_validator(&self) -> &dyn ExprDialectValidator {
+        self
+    }
+
     fn descriptor(&self) -> &'static BackendDescriptor {
         &DUCKDB_DESCRIPTOR
     }
@@ -579,6 +640,22 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
 
     // And the leaf contract has no shipping list to edit: declaring this row is
     // sufficient for an outsider to answer its own identity and capabilities.
+}
+
+#[test]
+fn a_fourth_backend_validates_expressions_under_its_own_id() {
+    let expr = Expr::FnCall {
+        r#fn: ScalarFn::CurrentUser,
+        args: Vec::new(),
+    };
+    validate_expr(
+        &expr,
+        &DUCKDB,
+        &DuckDbValidators,
+        &TargetScope::structural_only("items"),
+        0,
+    )
+    .expect("the outsider's own exhaustive validator must answer for its id");
 }
 
 /// The stub is only a proof if it never touches the closed enum.

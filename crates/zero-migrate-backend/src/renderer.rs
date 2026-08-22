@@ -74,6 +74,12 @@ pub use zero_migrate_ir::backend::Capability;
 /// carrier losing its `Debug` to gain a backend would be a worse trade than
 /// asking each unit-struct renderer for the one derive it costs.
 pub trait DmlRenderer: std::fmt::Debug + Sync {
+    /// This backend's required, exhaustive expression-policy implementation.
+    ///
+    /// No default is provided: a backend cannot silently borrow another
+    /// vendor's portability envelope by omitting the method.
+    fn expr_validator(&self) -> &dyn zero_migrate_ir::validate::ExprDialectValidator;
+
     /// Which vendor this is.
     ///
     /// ADDED BY THE CRATE SPLIT, and it is the hinge the whole extraction turns on.

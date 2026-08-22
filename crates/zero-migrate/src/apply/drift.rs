@@ -2669,7 +2669,7 @@ fn pg_foreign_key_definition(
 }
 
 /// Canonical rendered form of a `nextval` default, or `None` when the expression
-/// is not one. Dialect-free on purpose: the sequence identity is the whole key.
+/// is not one. SqlDialect-free on purpose: the sequence identity is the whole key.
 fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
     let sequence = parse_nextval_sequence_ref(expr?)?;
     Some(crate::render::declarative::nextval_default_expr(&sequence))

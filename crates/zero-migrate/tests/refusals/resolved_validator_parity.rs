@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 
 use zero_migrate::model::expr::{AggFunc, BinaryOp, Expr};
 use zero_migrate::model::ir::{BackfillSetValue, CursorStability, IrScalar, IrValue, Op};
-use zero_migrate::model::support::Dialect;
+use zero_migrate::model::support::SqlDialect;
 use zero_migrate::model::validate::validate_op_resolved;
 
 /// A live column map that RESOLVES `events`, so the resolving branch is taken.
@@ -33,7 +33,7 @@ fn live() -> BTreeMap<String, Vec<String>> {
 }
 
 fn refusal(op: &Op) -> Option<String> {
-    validate_op_resolved(op, Dialect::Postgres, &live(), 0)
+    validate_op_resolved(op, SqlDialect::Postgres, &live(), 0)
         .err()
         .map(|error| format!("{} {}", error.code, error.reason))
 }

@@ -151,7 +151,7 @@ async fn pg_apply(
     let document = zero_migrate::model::load::load_ir_document_authorized(
         ir,
         OWNER,
-        zero_migrate::model::validate::Dialect::Postgres,
+        zero_migrate::model::validate::SqlDialect::Postgres,
         &registry(),
         None,
         Some(zero_migrate::model::validate::VendorAuthority {
@@ -303,7 +303,7 @@ async fn sqlite_apply(
     let document = zero_migrate::model::load::load_ir_document(
         ir,
         OWNER,
-        zero_migrate::model::validate::Dialect::Sqlite,
+        zero_migrate::model::validate::SqlDialect::Sqlite,
         &registry(),
         None,
     )

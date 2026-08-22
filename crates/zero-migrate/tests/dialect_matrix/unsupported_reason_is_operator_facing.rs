@@ -31,11 +31,11 @@
 use crate::dialect_corpus::corpus;
 use zero_migrate::model::dialect_table::{Disposition, DIALECT_TABLE};
 use zero_migrate::model::op_support::INTERNAL_NO_REFUSAL_REASON;
-use zero_migrate::model::support::Dialect as TableDialect;
-use zero_migrate::model::validate::{validate_op, Dialect as ValidateDialect};
+use zero_migrate::model::support::SqlDialect as TableDialect;
+use zero_migrate::model::validate::{validate_op, SqlDialect as ValidateDialect};
 
 /// The three dialects the sidecar declares. `dialect_table` and `validate` carry
-/// SEPARATE `Dialect` enums (engine-side support vs. the IR wire contract), so
+/// SEPARATE `SqlDialect` enums (engine-side support vs. the IR wire contract), so
 /// each row names both rather than converting one into the other silently.
 const DIALECTS: [(&str, TableDialect, ValidateDialect); 3] = [
     (

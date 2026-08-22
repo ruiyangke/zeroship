@@ -8,11 +8,11 @@ use zero_migrate::model::ir::{
     Privilege, SelectAst, TableRef, ViewQuery, CURRENT_IR_VERSION,
 };
 use zero_migrate::model::validate::{
-    validate_expr, validate_ir_scoped, Dialect, TargetScope, CODE_DIALECT_UNSUPPORTED,
+    validate_expr, validate_ir_scoped, SqlDialect, TargetScope, CODE_DIALECT_UNSUPPORTED,
     CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED, CODE_VENDOR_OP_DENIED,
 };
 use zero_migrate::render::dml::assemble_backfill_clauses;
-use zero_migrate::{IrAuthor, LiveSchema, SchemaScope, SqlDialect};
+use zero_migrate::{IrAuthor, LiveSchema, SchemaScope};
 
 const EXPECTED_PG_ONLY_EXPR_NODES: &[&str] = &[
     "FnCall::CurrentSetting",
@@ -139,7 +139,7 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
         let kind = pg_only_expr_kind(&expr).expect("sample must be PG-only");
         assert!(seen.insert(kind), "{kind} sampled twice");
 
-        validate_expr(&expr, Dialect::Postgres, &scope, 0)
+        validate_expr(&expr, SqlDialect::Postgres, &scope, 0)
             .unwrap_or_else(|err| panic!("{kind} must validate on Postgres: {err:?}"));
         let mut set = BTreeMap::new();
         set.insert("out".to_string(), IrValue::Expr(expr.clone()));
@@ -150,7 +150,7 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
             "{kind} PG render is empty"
         );
 
-        for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
             let err = validate_expr(&expr, dialect, &scope, 0)
                 .expect_err("PG-only expression must refuse off Postgres");
             let expected_code = if kind == "UuidV7" {
@@ -176,8 +176,8 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
     };
 
     for (validator_dialect, sql_dialect) in [
-        (Dialect::Postgres, SqlDialect::Postgres),
-        (Dialect::Mysql, SqlDialect::Mysql),
+        (SqlDialect::Postgres, SqlDialect::Postgres),
+        (SqlDialect::Mysql, SqlDialect::Mysql),
     ] {
         validate_expr(&expr, validator_dialect, &scope, 0)
             .unwrap_or_else(|err| panic!("regex must validate on {validator_dialect:?}: {err:?}"));
@@ -191,10 +191,10 @@ fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
         );
     }
 
-    let err = validate_expr(&expr, Dialect::Sqlite, &scope, 0)
+    let err = validate_expr(&expr, SqlDialect::Sqlite, &scope, 0)
         .expect_err("regex must fail closed on SQLite");
     assert_eq!(err.code, CODE_DIALECT_UNSUPPORTED);
-    assert_eq!(err.dialect, Dialect::Sqlite);
+    assert_eq!(err.dialect, SqlDialect::Sqlite.id());
     assert!(err.reason.contains("SQLite"), "got: {err}");
 }
 
@@ -451,7 +451,7 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
         assert!(seen.insert(kind), "{kind} sampled twice");
 
         let ir = ir_with(op.clone());
-        validate_ir_scoped(&ir, Dialect::Postgres, Some(&platform_scope)).unwrap_or_else(|err| {
+        validate_ir_scoped(&ir, SqlDialect::Postgres, Some(&platform_scope)).unwrap_or_else(|err| {
             panic!("{kind} must validate on PG under platform scope: {err:?}")
         });
 
@@ -473,14 +473,14 @@ fn pg_vendor_ops_render_on_pg_and_refuse_off_pg_at_validate() {
             "{kind} PG lower produced no SQL"
         );
 
-        let confined_err = validate_ir_scoped(&ir, Dialect::Postgres, Some(&confined_scope))
+        let confined_err = validate_ir_scoped(&ir, SqlDialect::Postgres, Some(&confined_scope))
             .expect_err("confined PG scope must refuse vendor ops by capability");
         assert_eq!(
             confined_err.code, CODE_VENDOR_OP_DENIED,
             "{kind} under confined PG must fail as VENDOR_OP_DENIED, got {confined_err:?}"
         );
 
-        for dialect in [Dialect::Sqlite, Dialect::Mysql] {
+        for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
             let err = validate_ir_scoped(&ir, dialect, Some(&platform_scope))
                 .expect_err("PG vendor op must refuse off Postgres");
             assert_eq!(

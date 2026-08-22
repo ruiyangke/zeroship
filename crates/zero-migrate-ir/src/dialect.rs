@@ -228,9 +228,9 @@ impl DialectSet {
         Self(Cow::Owned(members))
     }
 
-    /// Whether the closed [`crate::validate::Dialect`] variant is a member.
+    /// Whether the temporary closed SQL target is a member.
     #[must_use]
-    pub fn contains(&self, dialect: crate::validate::Dialect) -> bool {
+    pub fn contains(&self, dialect: SqlDialect) -> bool {
         self.contains_id(&dialect.id())
     }
 
@@ -308,23 +308,6 @@ mod tests {
                 "{good:?} must satisfy the id rule"
             );
         }
-    }
-
-    #[test]
-    fn dialect_wire_spelling_is_the_id() {
-        // `Dialect::as_str` is the `dialect` field of the structured authoring
-        // rejection — a WIRE spelling. It is derived from the id, so this pins
-        // that the two can never drift into two names for one dialect.
-        for dialect in [
-            crate::validate::Dialect::Postgres,
-            crate::validate::Dialect::Sqlite,
-            crate::validate::Dialect::Mysql,
-        ] {
-            assert_eq!(dialect.as_str(), dialect.id().as_str());
-        }
-        assert_eq!(crate::validate::Dialect::Postgres.as_str(), "postgres");
-        assert_eq!(crate::validate::Dialect::Sqlite.as_str(), "sqlite");
-        assert_eq!(crate::validate::Dialect::Mysql.as_str(), "mysql");
     }
 
     #[test]

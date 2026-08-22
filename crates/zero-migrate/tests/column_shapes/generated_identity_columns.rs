@@ -4,7 +4,7 @@ use zero_migrate::schema::query::SqlDialect;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, validate_ir, BinaryOp, ColType, Expr, GeneratedCol,
     IdentityCol, IrAuthor, IrColumn, IrDefault, IrFlagsOverride, IrLowerError, IrScalar,
-    LiveSchema, MigrationIr, Op, SchemaScope, UnsupportedKind, ValidatorDialect,
+    LiveSchema, MigrationIr, Op, SchemaScope, UnsupportedKind,
     CODE_COLUMN_FACET_CONFLICT, CODE_UNSUPPORTED, CURRENT_IR_VERSION,
 };
 
@@ -49,7 +49,7 @@ fn ir_platform(op: Op) -> MigrationIr {
 
 fn validate_platform(
     ir: &MigrationIr,
-    dialect: ValidatorDialect,
+    dialect: SqlDialect,
 ) -> Result<(), zero_migrate::AuthoringError> {
     zero_migrate::model::validate::validate_ir_scoped(ir, dialect, Some(&SchemaScope::Unconfined))
 }
@@ -170,7 +170,7 @@ fn sqlite_generated_stored_and_virtual_columns_render_exact_create_table_ddl() {
 
 #[test]
 fn pg_virtual_generated_column_is_unsupported() {
-    let err = validate_ir(&ir(generated_create(false)), ValidatorDialect::Postgres)
+    let err = validate_ir(&ir(generated_create(false)), SqlDialect::Postgres)
         .expect_err("Postgres supports generated columns only as STORED");
     assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
     assert_eq!(err.kind, Some(UnsupportedKind::VirtualColumn));
@@ -193,7 +193,7 @@ fn generated_column_cannot_also_have_default() {
             ],
             None,
         )),
-        ValidatorDialect::Postgres,
+        SqlDialect::Postgres,
     )
     .expect_err("generated + default is a column-facet conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -262,9 +262,9 @@ fn identity_always_is_postgres_only() {
     id.identity = Some(IdentityCol { always: true });
     let op = create_table(vec![id], pk_id());
 
-    validate_ir(&ir(op.clone()), ValidatorDialect::Postgres)
+    validate_ir(&ir(op.clone()), SqlDialect::Postgres)
         .expect("Postgres supports identity({ always:true })");
-    for dialect in [ValidatorDialect::Sqlite, ValidatorDialect::Mysql] {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
         let err = validate_ir(&ir(op.clone()), dialect)
             .expect_err("identity({ always:true }) must be PostgreSQL-only");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -278,10 +278,10 @@ fn auto_increment_requires_single_column_primary_key_on_sqlite_and_mysql() {
     seq.identity = Some(IdentityCol { always: false });
     validate_platform(
         &ir_platform(create_table(vec![seq.clone()], None)),
-        ValidatorDialect::Postgres,
+        SqlDialect::Postgres,
     )
     .expect("Postgres permits BY DEFAULT identity outside a primary key");
-    for dialect in [ValidatorDialect::Sqlite, ValidatorDialect::Mysql] {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
         let err = validate_platform(&ir_platform(create_table(vec![seq.clone()], None)), dialect)
             .expect_err("autoIncrement on a non-PK column has no sound emulation");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -293,9 +293,9 @@ fn auto_increment_requires_single_column_primary_key_on_sqlite_and_mysql() {
     id.identity = Some(IdentityCol { always: false });
     let tenant = col("tenant_id", ColType::Text);
     let composite = ir_platform(create_table(vec![id, tenant], pk(&["id", "tenant_id"])));
-    validate_platform(&composite, ValidatorDialect::Postgres)
+    validate_platform(&composite, SqlDialect::Postgres)
         .expect("a PostgreSQL-targeted BY DEFAULT identity may be one composite-PK component");
-    for dialect in [ValidatorDialect::Sqlite, ValidatorDialect::Mysql] {
+    for dialect in [SqlDialect::Sqlite, SqlDialect::Mysql] {
         let err = validate_platform(&composite, dialect)
             .expect_err("autoIncrement on a composite-PK column has no sound emulation");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
@@ -312,7 +312,7 @@ fn identity_cannot_also_have_default_or_generated() {
     });
     let err = validate_platform(
         &raw_ir(create_table(vec![id_with_default], pk_id())),
-        ValidatorDialect::Postgres,
+        SqlDialect::Postgres,
     )
     .expect_err("identity + default is a conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");
@@ -325,7 +325,7 @@ fn identity_cannot_also_have_default_or_generated() {
     });
     let err = validate_platform(
         &raw_ir(create_table(vec![id_with_generated], pk_id())),
-        ValidatorDialect::Postgres,
+        SqlDialect::Postgres,
     )
     .expect_err("identity + generated is a conflict");
     assert_eq!(err.code, CODE_COLUMN_FACET_CONFLICT, "got: {err}");

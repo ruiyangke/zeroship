@@ -44,7 +44,7 @@ pub fn support(op: &Op) -> crate::model::support::Support {
     // sidecar edit and nothing else — it used to need a fourth argument here and
     // a fourth field on `DialectSupport`.
     //
-    // `support_cell` still needs the closed `Dialect` for its per-dialect refusal
+    // `support_cell` still needs the closed `SqlDialect` for its per-dialect refusal
     // prose, so the ids are walked through the enum; `dialect_for_id` is the one
     // place that conversion happens, and it panics rather than guess.
     let dialects = crate::model::support::DialectSupport::from_cells(row.dispositions.iter().map(
@@ -56,13 +56,13 @@ pub fn support(op: &Op) -> crate::model::support::Support {
     Support::new(support_tier(op), dialects, support_features(op))
 }
 
-/// The closed [`Dialect`] variant an id denotes, for the ONE step that still
+/// The closed [`SqlDialect`] variant an id denotes, for the ONE step that still
 /// needs it.
 ///
 /// [`zero_migrate_ir::dialect`] refuses this direction on purpose — an id has no
 /// variant to map to once a backend ships from a crate core does not own — and
 /// this is not a general escape from that. [`unsupported_reason`] is a match over
-/// `Dialect` carrying per-dialect refusal PROSE, so a cell can only be filled in
+/// `SqlDialect` carrying per-dialect refusal PROSE, so a cell can only be filled in
 /// for a dialect this engine has written prose for. Panicking names the row and
 /// the id; the alternatives are worse in the way the rest of this area already
 /// decided: dropping the cell would silently narrow the declaration (the exact
@@ -72,9 +72,9 @@ fn dialect_for_id(
     id: &zero_migrate_ir::dialect::DialectId,
     kind: &str,
     variant: &str,
-) -> crate::model::support::Dialect {
-    use crate::model::support::Dialect;
-    for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+) -> crate::model::support::SqlDialect {
+    use crate::model::support::SqlDialect;
+    for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
         if &dialect.id() == id {
             return dialect;
         }
@@ -174,7 +174,7 @@ const BY_DEFAULT_IDENTITY_SINGLE_PK: &str =
 fn support_cell(
     op: &Op,
     disposition: crate::model::dialect_table::Disposition,
-    dialect: crate::model::support::Dialect,
+    dialect: crate::model::support::SqlDialect,
     variant: &'static str,
 ) -> crate::model::support::SupportDecision {
     use crate::model::dialect_table::Disposition;
@@ -211,11 +211,11 @@ fn support_cell(
 /// decision — so it is derived here, not from the generated dialect table.
 fn render_mode(
     op: &Op,
-    dialect: crate::model::support::Dialect,
+    dialect: crate::model::support::SqlDialect,
     variant: &'static str,
 ) -> crate::model::support::RenderMode {
-    use crate::model::support::{Dialect, RenderMode};
-    let sqlite_live = matches!(dialect, Dialect::Sqlite);
+    use crate::model::support::{SqlDialect, RenderMode};
+    let sqlite_live = matches!(dialect, SqlDialect::Sqlite);
     match op {
         // Backfill, column-rename, primary-key lifecycle, and identity
         // synchronization are live-rendered
@@ -257,10 +257,10 @@ fn render_mode(
 /// exactly, preserving the author-facing diagnostics.
 fn unsupported_reason(
     op: &Op,
-    dialect: crate::model::support::Dialect,
+    dialect: crate::model::support::SqlDialect,
     variant: &'static str,
 ) -> &'static str {
-    use crate::model::support::Dialect;
+    use crate::model::support::SqlDialect;
     match op {
             Op::CreateTable { .. } => match variant {
                 "partitioned" => "partitioned tables are PostgreSQL-only",
@@ -287,10 +287,10 @@ fn unsupported_reason(
             Op::CreateIndex {
                 columns, r#where, ..
             } => match dialect {
-                Dialect::Sqlite => {
+                SqlDialect::Sqlite => {
                     "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on SQLite"
                 }
-                Dialect::Mysql => {
+                SqlDialect::Mysql => {
                     if columns
                         .iter()
                         .any(|element| matches!(element, IndexElement::Expr { .. }))
@@ -302,7 +302,7 @@ fn unsupported_reason(
                         "createIndex BRIN/INCLUDE/WITH/ONLY features are unsupported on MySQL"
                     }
                 }
-                Dialect::Postgres => NEVER_REFUSED,
+                SqlDialect::Postgres => NEVER_REFUSED,
             },
             Op::Comment { .. } => "COMMENT ON is PostgreSQL-only in the current engine",
             // The ALTER-shaped column ops. All of them refuse on the same two
@@ -422,33 +422,33 @@ fn unsupported_reason(
 /// definition restated). PostgreSQL never refuses these on dialect grounds -
 /// every such cell is `portable` in the sidecar - so it can only be reached by a
 /// future flip, which the `debug_assert!` in `support_cell` will catch.
-fn alter_column_reason(dialect: crate::model::support::Dialect) -> &'static str {
-    use crate::model::support::Dialect;
+fn alter_column_reason(dialect: crate::model::support::SqlDialect) -> &'static str {
+    use crate::model::support::SqlDialect;
     match dialect {
-        Dialect::Sqlite => SQLITE_ALTER_COLUMN_REBUILD_ONLY,
-        Dialect::Mysql => MYSQL_ALTER_COLUMN_RESTATE,
-        Dialect::Postgres => NEVER_REFUSED,
+        SqlDialect::Sqlite => SQLITE_ALTER_COLUMN_REBUILD_ONLY,
+        SqlDialect::Mysql => MYSQL_ALTER_COLUMN_RESTATE,
+        SqlDialect::Postgres => NEVER_REFUSED,
     }
 }
 
 fn trigger_reason(
-    dialect: crate::model::support::Dialect,
+    dialect: crate::model::support::SqlDialect,
     timing: &TriggerTiming,
     events: &[TriggerEvent],
     for_each: &ForEach,
     action: &TriggerAction,
     when: &Option<Expr>,
 ) -> &'static str {
-    use crate::model::support::Dialect;
+    use crate::model::support::SqlDialect;
     match dialect {
-        Dialect::Postgres => {
+        SqlDialect::Postgres => {
             if matches!(action, TriggerAction::Body { .. }) {
                 "Postgres triggers must execute a named trigger function"
             } else {
                 NEVER_REFUSED
             }
         }
-        Dialect::Sqlite => {
+        SqlDialect::Sqlite => {
             if matches!(action, TriggerAction::ExecuteFunction { .. }) {
                 "SQLite has no CREATE TRIGGER EXECUTE FUNCTION form"
             } else if events.len() != 1 {
@@ -469,7 +469,7 @@ fn trigger_reason(
                 NEVER_REFUSED
             }
         }
-        Dialect::Mysql => {
+        SqlDialect::Mysql => {
             if matches!(action, TriggerAction::ExecuteFunction { .. }) {
                 "MySQL has no CREATE TRIGGER EXECUTE FUNCTION form"
             } else if events.len() != 1 {
@@ -1129,7 +1129,7 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
 mod alter_primary_key_tests {
     use super::*;
     use crate::model::ir::AlterPrimaryKeyAction;
-    use crate::model::support::{Dialect, RenderMode};
+    use crate::model::support::{SqlDialect, RenderMode};
 
     #[test]
     fn lifecycle_operation_is_portable_live_resolved_core() {
@@ -1147,7 +1147,7 @@ mod alter_primary_key_tests {
         assert!(!is_vendor(&op));
         assert!(vendor_capabilities(&op).is_empty());
         let support = support(&op);
-        for dialect in [Dialect::Postgres, Dialect::Sqlite, Dialect::Mysql] {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
             let decision = support.decision(dialect);
             assert!(decision.is_supported(), "{dialect:?}: {decision:?}");
             assert_eq!(decision.render_mode(), Some(RenderMode::LiveResolved));

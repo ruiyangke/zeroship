@@ -194,7 +194,7 @@ fn corpus_streams() -> Vec<(String, Vec<Op>, bool)> {
     out
 }
 
-/// One aggregated observation: `stream|Dialect|projection`, over every PREFIX.
+/// One aggregated observation: `stream|SqlDialect|projection`, over every PREFIX.
 struct Measured {
     key: String,
     equal: usize,
@@ -292,7 +292,7 @@ enum Side {
     ByDesign(&'static str),
 }
 
-/// One recorded divergence, `stream|Dialect|projection`.
+/// One recorded divergence, `stream|SqlDialect|projection`.
 struct Divergence {
     key: &'static str,
     /// The first prefix length at which the two texts differ.

@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 
 use zero_migrate::model::ir::{IrScalar, MigrationIr, Op};
 use zero_migrate::model::load::load_ir_document;
-use zero_migrate::model::validate::Dialect;
+use zero_migrate::model::validate::SqlDialect;
 
 const OWNER: &str = "app_inverse_guard";
 const TABLE: &str = "acct";
@@ -73,7 +73,7 @@ fn a_raw_sql_op_in_the_inverse_does_not_load_unprivileged() {
     let verdict = load_ir_document(
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        Dialect::Postgres,
+        SqlDialect::Postgres,
         &registry(),
         None,
     );
@@ -107,7 +107,7 @@ fn control_an_ordinary_dml_inverse_still_loads() {
     load_ir_document(
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        Dialect::Postgres,
+        SqlDialect::Postgres,
         &registry(),
         None,
     )

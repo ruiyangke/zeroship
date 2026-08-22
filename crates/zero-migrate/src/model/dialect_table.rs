@@ -19,7 +19,7 @@
 //! outside its own file; state the two sides separately, because they have
 //! already drifted apart once.
 
-use crate::model::support::Dialect;
+use crate::model::support::SqlDialect;
 use zero_migrate_ir::dialect::DialectId;
 
 /// The disposition of one (op-kind, variant) token on one dialect.
@@ -89,7 +89,7 @@ impl DispositionRow {
     /// answers hide it — treating it as supported fails open, and treating it as
     /// `Unsupported` invents a refusal the sidecar never authored.
     #[must_use]
-    pub fn disposition(&self, dialect: Dialect) -> Disposition {
+    pub fn disposition(&self, dialect: SqlDialect) -> Disposition {
         let id = dialect.id();
         self.disposition_for(&id).unwrap_or_else(|| {
             panic!(

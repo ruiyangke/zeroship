@@ -38,7 +38,7 @@
 use crate::support;
 
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::{validate_ir_authorized, Dialect, VendorAuthority};
+use zero_migrate::model::validate::{validate_ir_authorized, SqlDialect, VendorAuthority};
 
 fn verdict(ops: &str) -> Result<(), String> {
     let policy = support::operator_charter("public");
@@ -48,7 +48,7 @@ fn verdict(ops: &str) -> Result<(), String> {
         effective: &policy,
         default_schema: "public",
     };
-    validate_ir_authorized(&ir, Dialect::Postgres, None, Some(authority))
+    validate_ir_authorized(&ir, SqlDialect::Postgres, None, Some(authority))
         .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 

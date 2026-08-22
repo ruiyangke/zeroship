@@ -55,11 +55,9 @@
 //! [`error::IrLowerError`] sat in the 16,868-line `render::lower`, which reaches
 //! `engine`, `apply::*`, `model::validate` and `render::fold`.
 //!
-//! Moving four things collapses it to **7 modules / 7,733 lines**:
-//! [`error::IrLowerError`], [`error::DeclarativeError`], [`step::BindValue`] and
-//! `SPLIT_PART_MAX_N` (which was already a re-export of
-//! `zero_migrate_ir::validate::SPLIT_PART_MAX_N` and needed only to be named at its
-//! real home). Every other apparent edge dissolved on inspection: `crate::model::ir`,
+//! Moving three things collapses it to **7 modules / 7,733 lines**:
+//! [`error::IrLowerError`], [`error::DeclarativeError`] and [`step::BindValue`].
+//! Every other apparent edge dissolved on inspection: `crate::model::ir`,
 //! `crate::model::expr` and `crate::schema::query::SqlDialect` are `-ir` re-exports,
 //! and `BackfillSpec` / `PlanStep` appeared in doc links only.
 //!
