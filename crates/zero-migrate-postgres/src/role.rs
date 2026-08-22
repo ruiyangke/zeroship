@@ -19,11 +19,19 @@
 //! WHAT THIS MODULE ACTUALLY CONTAINS, because the rest of this header reads like
 //! it describes code that is here and it does not: [`migrator_role_name`], the NAME
 //! derivation, and nothing else. There is no `provision_migrator` in this
-//! repository and no `CREATE ROLE` is emitted anywhere in it — the provisioning
-//! ran over a `&Client` that left with the native PostgreSQL driver. **The grant
-//! set below is the SPEC the host implements**, and it is kept because
+//! repository — the two mentions of it were both in this header, describing a
+//! function that ran over a `&Client` and left with the native PostgreSQL driver.
+//! **The grant set below is the SPEC the host implements**, and it is kept because
 //! `ExecutorConfig::with_migrator_role` is the seam the host's provisioned role
 //! arrives through, so the two halves have to agree on what that role may do.
+//!
+//! Do NOT read that as "this repository never emits `CREATE ROLE`". It does, at
+//! `crate::vendor`'s `CreateRole` arm, which formats a real `CREATE ROLE` (with a
+//! PL/pgSQL `DO` wrapper for `ifNotExists`, since PostgreSQL has no native form).
+//! That is an AUTHORED op a user writes in a migration, and it has nothing to do
+//! with provisioning the migrator role this module names. The two are separate
+//! mechanisms that happen to share a keyword, and conflating them is what put the
+//! wrong claim here in the first place.
 //!
 //! The executor connects as the privileged admin/control role and runs each
 //! migration under `SET ROLE` for that role (with `RESET ROLE` on exit, scoped
