@@ -321,3 +321,134 @@ async fn a_truncated_frame_followed_by_silence_does_not_hang() {
     .await
     .expect("truncated-frame test exceeded its outer watchdog");
 }
+
+// ---------------------------------------------------------------------------
+// Out-of-order WELL-FORMED messages.
+//
+// Everything above is refused while the frame is being DECODED - a bad tag, a
+// lying length. Those never reach the driver's protocol state machine, which is
+// where the 44 `unexpected_message()` sites live. The tests below send messages
+// PostgreSQL really emits, correctly framed, in positions the protocol forbids.
+// That is the only way to drive those branches, and it is the shape a mangling
+// proxy or a confused pooler actually produces.
+//
+// `Client::prepare` drives the extended query protocol and expects, in order:
+// ParseComplete, then ParameterDescription, then RowDescription or NoData.
+// Each of the three tests below substitutes a legitimate message at one of
+// those positions, so exactly one expectation is violated per test.
+// ---------------------------------------------------------------------------
+
+fn expect_frontend_until_sync(stream: &mut TcpStream) {
+    // prepare() writes Parse + Describe + Sync as one batch. Drain to the Sync
+    // so the scripted reply cannot race the client's own write.
+    loop {
+        let mut tag = [0u8; 1];
+        if stream.read_exact(&mut tag).is_err() {
+            return;
+        }
+        let mut length = [0u8; 4];
+        if stream.read_exact(&mut length).is_err() {
+            return;
+        }
+        let length = u32::from_be_bytes(length) as usize;
+        assert!(length >= 4, "frontend frame length is below its header");
+        let mut body = vec![0u8; length - 4];
+        if stream.read_exact(&mut body).is_err() {
+            return;
+        }
+        if tag[0] == b'S' {
+            return;
+        }
+    }
+}
+
+/// Drive `prepare` against a peer that answers with `response`, and require the
+/// same three properties the simple-query helper does.
+async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> String {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        expect_frontend_until_sync(&mut stream);
+        let _ = stream.write_all(&response);
+        let _ = stream.flush();
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    let (client, connection) = stub_config(server.addr)
+        .connect(NoTls)
+        .await
+        .expect("connect to scripted PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let error = compio::time::timeout(OPERATION_WATCHDOG, client.prepare("SELECT $1::int4"))
+        .await
+        .expect("prepare hung instead of rejecting an out-of-order message")
+        .expect_err("the driver accepted an out-of-order message as a valid response");
+
+    let reuse = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
+    match reuse {
+        Err(_) => panic!("reusing the poisoned session hung instead of failing"),
+        Ok(Ok(_)) => panic!("the driver reused a session after an out-of-order message"),
+        Ok(Err(_)) => {}
+    }
+
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    drop(client);
+    server.finish();
+    common::error_chain(&error)
+}
+
+/// `BindComplete` is a real message, correctly framed - but Parse was what was
+/// owed. Accepting it would leave the driver believing a statement is prepared
+/// that the server never parsed.
+#[compio::test]
+async fn a_bind_complete_where_parse_complete_is_owed_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = hostile_prepare_retires_session(301, backend_frame(b'2', b"")).await;
+        assert!(
+            !chain.is_empty(),
+            "a misplaced BindComplete produced an error with no description"
+        );
+    })
+    .await
+    .expect("misplaced BindComplete test exceeded its outer watchdog");
+}
+
+/// ParseComplete lands correctly, then `NoData` arrives where the parameter
+/// description is owed. The statement's parameter types would otherwise be
+/// silently unknown.
+#[compio::test]
+async fn a_missing_parameter_description_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'1', b"");
+        response.extend_from_slice(&backend_frame(b'n', b""));
+        let chain = hostile_prepare_retires_session(302, response).await;
+        assert!(
+            !chain.is_empty(),
+            "a missing ParameterDescription produced an error with no description"
+        );
+    })
+    .await
+    .expect("missing ParameterDescription test exceeded its outer watchdog");
+}
+
+/// The first two steps land, then `BindComplete` arrives where the row
+/// description or `NoData` is owed - the last of prepare's three expectations.
+#[compio::test]
+async fn a_misplaced_message_after_the_parameter_description_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'1', b"");
+        let mut params = Vec::new();
+        params.extend_from_slice(&1u16.to_be_bytes());
+        params.extend_from_slice(&23u32.to_be_bytes());
+        response.extend_from_slice(&backend_frame(b't', &params));
+        response.extend_from_slice(&backend_frame(b'2', b""));
+        let chain = hostile_prepare_retires_session(303, response).await;
+        assert!(
+            !chain.is_empty(),
+            "a misplaced message after ParameterDescription produced an error with no description"
+        );
+    })
+    .await
+    .expect("misplaced post-ParameterDescription test exceeded its outer watchdog");
+}
