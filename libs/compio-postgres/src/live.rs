@@ -44,6 +44,7 @@
 //! thread whose runtime drives it.
 
 use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 thread_local! {
@@ -55,18 +56,23 @@ thread_local! {
 ///
 /// Held as a field of `Connection`, so the count falls exactly when the
 /// connection - and with it the socket - is released.
-pub(crate) struct LiveConnectionGuard;
+/// Clones share one counted token so split socket halves can release in either
+/// order without making the connection disappear from the count early.
+#[derive(Clone)]
+pub(crate) struct LiveConnectionGuard(Rc<()>);
 
 impl LiveConnectionGuard {
     pub(crate) fn new() -> Self {
         LIVE.with(|c| c.set(c.get() + 1));
-        Self
+        Self(Rc::new(()))
     }
 }
 
 impl Drop for LiveConnectionGuard {
     fn drop(&mut self) {
-        LIVE.with(|c| c.set(c.get().saturating_sub(1)));
+        if Rc::strong_count(&self.0) == 1 {
+            LIVE.with(|c| c.set(c.get().saturating_sub(1)));
+        }
     }
 }
 
