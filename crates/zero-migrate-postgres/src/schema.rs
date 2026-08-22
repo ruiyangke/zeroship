@@ -6,12 +6,10 @@ use zero_migrate_backend::schema::{
     decimal_precision_scale, max_length, SchemaRenderer,
 };
 use zero_migrate_backend::snapshot::ColumnSnapshot;
-use zero_migrate_ir::dialect::{DialectId, SqlDialect};
+use zero_migrate_ir::dialect::{DialectId, POSTGRES};
 
-/// This module's own vendor identity — the ONE dialect literal it is allowed to
-/// name. See `backends/mod.rs` for why. Deleting this const is the whole of the
-/// edit this module needs when it becomes its own crate.
-const DIALECT: SqlDialect = SqlDialect::Postgres;
+/// This module's own vendor identity.
+const DIALECT: DialectId = POSTGRES;
 
 #[derive(Debug)]
 pub(super) struct PostgresSchemaRenderer;
@@ -20,7 +18,7 @@ pub(super) static RENDERER: PostgresSchemaRenderer = PostgresSchemaRenderer;
 
 impl SchemaRenderer for PostgresSchemaRenderer {
     fn dialect(&self) -> DialectId {
-        DIALECT.id()
+        DIALECT
     }
 
     fn quote_ident(&self, ident: &str) -> String {

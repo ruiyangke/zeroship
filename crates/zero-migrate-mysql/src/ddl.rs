@@ -14,10 +14,10 @@ use zero_migrate_backend::snapshot::{
     IndexSnapshot, TableSnapshot,
 };
 use zero_migrate_backend::spelling::ansi_double_quote_ident;
-use zero_migrate_ir::dialect::{DialectId, SqlDialect};
+use zero_migrate_ir::dialect::{DialectId, MYSQL};
 
-/// This module's own vendor identity: its sole closed-dialect literal.
-const DIALECT: SqlDialect = SqlDialect::Mysql;
+/// This module's own vendor identity.
+const DIALECT: DialectId = MYSQL;
 
 fn mysql_quote_ident(ident: &str) -> String {
     crate::schema::RENDERER.quote_ident(ident)
@@ -247,7 +247,7 @@ impl MysqlEmitter {
 
 impl DdlEmitter for MysqlEmitter {
     fn dialect(&self) -> DialectId {
-        DIALECT.id()
+        DIALECT
     }
 
     fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {

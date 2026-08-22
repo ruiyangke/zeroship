@@ -3,11 +3,10 @@
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{decimal_precision_scale, SchemaRenderer};
 use zero_migrate_backend::snapshot::ColumnSnapshot;
-use zero_migrate_ir::dialect::{DialectId, SqlDialect};
+use zero_migrate_ir::dialect::{DialectId, SQLITE};
 
-/// This module's own vendor identity — the ONE dialect literal it is allowed to
-/// name. See `backends/mod.rs`.
-const DIALECT: SqlDialect = SqlDialect::Sqlite;
+/// This module's own vendor identity.
+const DIALECT: DialectId = SQLITE;
 
 #[derive(Debug)]
 pub(super) struct SqliteSchemaRenderer;
@@ -29,7 +28,7 @@ pub(super) fn sqlite_auto_increment_identity_pk(c: &ColumnSnapshot, inline_pk: b
 
 impl SchemaRenderer for SqliteSchemaRenderer {
     fn dialect(&self) -> DialectId {
-        DIALECT.id()
+        DIALECT
     }
 
     fn quote_ident(&self, ident: &str) -> String {

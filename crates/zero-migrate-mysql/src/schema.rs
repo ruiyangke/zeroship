@@ -6,11 +6,10 @@ use zero_migrate_backend::schema::{
     char_len, decimal_precision_scale, def_case_sensitive, SchemaRenderer,
 };
 use zero_migrate_backend::snapshot::ColumnSnapshot;
-use zero_migrate_ir::dialect::{DialectId, SqlDialect};
+use zero_migrate_ir::dialect::{DialectId, MYSQL};
 
-/// This module's own vendor identity — the ONE dialect literal it is allowed to
-/// name. See `backends/mod.rs`.
-const DIALECT: SqlDialect = SqlDialect::Mysql;
+/// This module's own vendor identity.
+const DIALECT: DialectId = MYSQL;
 
 #[derive(Debug)]
 pub(super) struct MysqlSchemaRenderer;
@@ -19,7 +18,7 @@ pub(super) static RENDERER: MysqlSchemaRenderer = MysqlSchemaRenderer;
 
 impl SchemaRenderer for MysqlSchemaRenderer {
     fn dialect(&self) -> DialectId {
-        DIALECT.id()
+        DIALECT
     }
 
     fn quote_ident(&self, ident: &str) -> String {

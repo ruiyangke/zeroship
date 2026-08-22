@@ -12,7 +12,7 @@ description = "The MySQL backend for zero-migrate: this vendor's DML, schema, DD
 # backend may depend on - depending on the engine is the cycle the split removed.
 zero-migrate-backend = { workspace = true }
 # The closed `Op` / `Expr` / `IrScalar` vocabulary the trait methods are handed, plus
-# `SqlDialect` and this vendor's `BackendDescriptor`.
+# open dialect identity and this vendor's `BackendDescriptor`.
 zero-migrate-ir = { workspace = true }
 # The schema-field shape `SchemaRenderer` reads is the SDK's field JSON.
 serde_json = { workspace = true }

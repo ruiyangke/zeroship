@@ -112,11 +112,8 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// carry an explicit fail-closed arm for an id they do not recognise, instead of
     /// a `match` the compiler would have completed for them.
     ///
-    /// The direction stays one-way: an id does not convert back to a variant. See
-    /// `SqlDialect::id`.
-    fn dialect(&self) -> DialectId {
-        self.descriptor().id.clone()
-    }
+    /// The direction stays one-way: an id never converts into a closed vendor variant.
+    fn dialect(&self) -> DialectId;
 
     /// What this backend IS: its id, its human-facing name, its capability set and
     /// its limits, all in one value the backend declares in its own crate.

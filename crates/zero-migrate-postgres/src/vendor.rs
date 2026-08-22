@@ -23,7 +23,7 @@
 //! # The identifier seam, resolved rather than forwarded
 //!
 //! `qid` used to call `dml::quote_ident_checked`, a PostgreSQL-PINNED wrapper that
-//! wrote `SqlDialect::Postgres` into its own body and resolved a renderer from it.
+//! wrote a closed PostgreSQL target into its own body and resolved a renderer from it.
 //! That is a vendor asking a registry to hand it back to itself. It now asks
 //! `self`. The bytes are identical — `PostgresDmlRenderer::quote_ident` was always
 //! what that lookup resolved to — and the round trip is gone.

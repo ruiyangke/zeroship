@@ -150,6 +150,10 @@ impl ExprDialectValidatorSet for DuckDbValidators {
 }
 
 impl DmlRenderer for DuckDbDmlRenderer {
+    fn dialect(&self) -> DialectId {
+        DUCKDB
+    }
+
     fn expr_validator(&self) -> &dyn ExprDialectValidator {
         self
     }

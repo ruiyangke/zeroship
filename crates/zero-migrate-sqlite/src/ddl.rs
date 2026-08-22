@@ -9,10 +9,10 @@ use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
 };
-use zero_migrate_ir::dialect::{DialectId, SqlDialect};
+use zero_migrate_ir::dialect::{DialectId, SQLITE};
 
-/// This module's own vendor identity: its sole closed-dialect literal.
-const DIALECT: SqlDialect = SqlDialect::Sqlite;
+/// This module's own vendor identity.
+const DIALECT: DialectId = SQLITE;
 
 fn sqlite_ident(ident: &str) -> String {
     crate::schema::RENDERER.quote_ident(ident)
@@ -108,7 +108,7 @@ impl SqliteEmitter {
 
 impl DdlEmitter for SqliteEmitter {
     fn dialect(&self) -> DialectId {
-        DIALECT.id()
+        DIALECT
     }
 
     fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {

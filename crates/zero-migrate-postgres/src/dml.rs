@@ -5,19 +5,17 @@ use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::renderer::{Capability, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, POSTGRES};
 use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::TableRef;
 use zero_migrate_ir::ir::{IrScalar, Op, TriggerAction};
-use zero_migrate_ir::validate::{
-    ExprDialectFeature, ExprDialectRejection, ExprDialectValidator,
-};
+use zero_migrate_ir::validate::{ExprDialectFeature, ExprDialectRejection, ExprDialectValidator};
 
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs` for why. Deleting this const (and the
 /// `DIALECT`-shaped error fields it feeds) is the whole of the edit this module
 /// needs when it becomes its own crate.
-const DIALECT: SqlDialect = SqlDialect::Postgres;
+const DIALECT: DialectId = POSTGRES;
 
 #[derive(Debug)]
 pub(super) struct PostgresDmlRenderer;
@@ -79,6 +77,10 @@ impl ExprDialectValidator for PostgresDmlRenderer {
 }
 
 impl DmlRenderer for PostgresDmlRenderer {
+    fn dialect(&self) -> DialectId {
+        DIALECT
+    }
+
     fn expr_validator(&self) -> &dyn ExprDialectValidator {
         self
     }
@@ -300,7 +302,7 @@ impl DmlRenderer for PostgresDmlRenderer {
             if !self.supports(Capability::TriggerBody) {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerBody",
-                    dialect: DIALECT.id(),
+                    dialect: DIALECT,
                 });
             }
         }
@@ -309,7 +311,7 @@ impl DmlRenderer for PostgresDmlRenderer {
             Err(zero_migrate_backend::vendor::VendorError::UnsupportedTriggerAction { kind }) => {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind,
-                    dialect: DIALECT.id(),
+                    dialect: DIALECT,
                 });
             }
             Err(e) => return Err(IrLowerError::Vendor(e)),

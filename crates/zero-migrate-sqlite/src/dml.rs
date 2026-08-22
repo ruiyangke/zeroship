@@ -14,7 +14,7 @@ use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::renderer::{Capability, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, SQLITE};
 use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
     ForEach, IrScalar, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
@@ -53,7 +53,7 @@ const SPLIT_PART_MAX_N: i64 = 8;
 /// Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`, whose
 /// count went 6 → 0 when the fix landed and whose subject-anchor followed the three
 /// functions here.
-const DIALECT: SqlDialect = SqlDialect::Sqlite;
+const DIALECT: DialectId = SQLITE;
 
 #[derive(Debug)]
 pub(super) struct SqliteDmlRenderer;
@@ -196,6 +196,10 @@ impl ExprDialectValidator for SqliteDmlRenderer {
 }
 
 impl DmlRenderer for SqliteDmlRenderer {
+    fn dialect(&self) -> DialectId {
+        DIALECT
+    }
+
     fn expr_validator(&self) -> &dyn ExprDialectValidator {
         self
     }
@@ -493,7 +497,7 @@ impl DmlRenderer for SqliteDmlRenderer {
         Vec<zero_migrate_backend::vendor::VendorStatement>,
         zero_migrate_backend::vendor::VendorError,
     > {
-        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT.id()))
+        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT))
     }
 }
 
@@ -524,7 +528,7 @@ fn render_sqlite_trigger_op(
             {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerEventTruncate",
-                    dialect: DIALECT.id(),
+                    dialect: DIALECT,
                 });
             }
             if matches!(for_each, ForEach::Statement)
@@ -532,14 +536,14 @@ fn render_sqlite_trigger_op(
             {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "forEachStatement",
-                    dialect: DIALECT.id(),
+                    dialect: DIALECT,
                 });
             }
             let TriggerAction::Body { statements } = action else {
                 if !RENDERER.supports(Capability::TriggerExecuteFunction) {
                     return Err(IrLowerError::TriggerUnsupported {
                         kind: "executeFunction",
-                        dialect: DIALECT.id(),
+                        dialect: DIALECT,
                     });
                 }
                 return Err(IrLowerError::UnsupportedOp(
@@ -549,7 +553,7 @@ fn render_sqlite_trigger_op(
             if !RENDERER.supports(Capability::TriggerBody) {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind: "triggerBody",
-                    dialect: DIALECT.id(),
+                    dialect: DIALECT,
                 });
             }
             if statements.is_empty() {

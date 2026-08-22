@@ -9,7 +9,7 @@ use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::renderer::{Capability, DmlRenderer};
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
-use zero_migrate_ir::dialect::SqlDialect;
+use zero_migrate_ir::dialect::{DialectId, MYSQL};
 use zero_migrate_ir::expr::{AggFunc, CastTarget, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
     ForEach, IrScalar, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
@@ -28,7 +28,7 @@ use zero_migrate_ir::validate::{
 /// LEGAL (semantics), this module owns how it is WRITTEN (spelling), and the
 /// round trip goes back out through the `DmlRenderer` trait object. The const is
 /// what keeps that from being a hard-coded vendor name inside a vendor module.
-const DIALECT: SqlDialect = SqlDialect::Mysql;
+const DIALECT: DialectId = MYSQL;
 
 #[derive(Debug)]
 pub(super) struct MysqlDmlRenderer;
@@ -115,6 +115,10 @@ impl ExprDialectValidator for MysqlDmlRenderer {
 }
 
 impl DmlRenderer for MysqlDmlRenderer {
+    fn dialect(&self) -> DialectId {
+        DIALECT
+    }
+
     fn expr_validator(&self) -> &dyn ExprDialectValidator {
         self
     }
@@ -347,7 +351,7 @@ impl DmlRenderer for MysqlDmlRenderer {
         if materialized && !self.supports(Capability::MaterializedView) {
             return Err(IrLowerError::ViewUnsupported {
                 kind: "materializedView",
-                dialect: DIALECT.id(),
+                dialect: DIALECT,
             });
         }
         let mut create = String::from("CREATE ");
@@ -473,7 +477,7 @@ impl DmlRenderer for MysqlDmlRenderer {
         Vec<zero_migrate_backend::vendor::VendorStatement>,
         zero_migrate_backend::vendor::VendorError,
     > {
-        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT.id()))
+        Err(zero_migrate_backend::vendor::VendorError::VendorOpsUnsupported(DIALECT))
     }
 }
 
@@ -529,37 +533,37 @@ fn render_mysql_trigger_create(
     if events.len() != 1 {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "triggerMultipleEvents",
-            dialect: DIALECT.id(),
+            dialect: DIALECT,
         });
     }
     if matches!(events[0], TriggerEvent::Truncate) {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "triggerEventTruncate",
-            dialect: DIALECT.id(),
+            dialect: DIALECT,
         });
     }
     if matches!(timing, TriggerTiming::InsteadOf) {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "triggerTimingInsteadOf",
-            dialect: DIALECT.id(),
+            dialect: DIALECT,
         });
     }
     if matches!(for_each, ForEach::Statement) {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "forEachStatement",
-            dialect: DIALECT.id(),
+            dialect: DIALECT,
         });
     }
     if when.is_some() {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "triggerWhen",
-            dialect: DIALECT.id(),
+            dialect: DIALECT,
         });
     }
     let TriggerAction::Body { statements } = action else {
         return Err(IrLowerError::TriggerUnsupported {
             kind: "executeFunction",
-            dialect: DIALECT.id(),
+            dialect: DIALECT,
         });
     };
     if statements.is_empty() {
@@ -716,14 +720,14 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
         // `tests/refusals/mysql_trigger_body_cannot_return_a_result_set.rs`.
         TriggerStmt::Select { .. } => Err(IrLowerError::TriggerUnsupported {
             kind: "selectStatement",
-            dialect: DIALECT.id(),
+            dialect: DIALECT,
         }),
         TriggerStmt::Raise {
             level: RaiseLevel::Ignore,
             ..
         } => Err(IrLowerError::TriggerUnsupported {
             kind: "raiseIgnore",
-            dialect: DIALECT.id(),
+            dialect: DIALECT,
         }),
         TriggerStmt::Raise {
             level: _,

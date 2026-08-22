@@ -9,11 +9,11 @@ use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
 };
-use zero_migrate_ir::dialect::{DialectId, SqlDialect};
+use zero_migrate_ir::dialect::{DialectId, POSTGRES};
 use zero_migrate_ir::ir::{IndexStorageParams, PartitionSpec};
 
-/// This module's own vendor identity: its sole closed-dialect literal.
-const DIALECT: SqlDialect = SqlDialect::Postgres;
+/// This module's own vendor identity.
+const DIALECT: DialectId = POSTGRES;
 
 fn quote_ident(ident: &str) -> String {
     crate::schema::RENDERER.quote_ident(ident)
@@ -205,7 +205,7 @@ impl PgEmitter {
 
 impl DdlEmitter for PgEmitter {
     fn dialect(&self) -> DialectId {
-        DIALECT.id()
+        DIALECT
     }
 
     fn fk_clause(&self, fk: &ConstraintSnapshot) -> String {

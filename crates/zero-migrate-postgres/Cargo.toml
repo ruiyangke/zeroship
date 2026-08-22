@@ -18,7 +18,7 @@ zero-migrate-backend = { workspace = true }
 # the other two still build without libpg_query.
 zero-migrate-guard = { workspace = true }
 # The closed `Op` / `Expr` / `IrScalar` vocabulary the trait methods are handed, plus
-# `SqlDialect` and this vendor's `BackendDescriptor`.
+# open dialect identity and this vendor's `BackendDescriptor`.
 zero-migrate-ir = { workspace = true }
 # The schema-field shape `SchemaRenderer` reads is the SDK's field JSON.
 serde_json = { workspace = true }
