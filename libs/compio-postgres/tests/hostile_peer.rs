@@ -452,3 +452,136 @@ async fn a_misplaced_message_after_the_parameter_description_is_refused() {
     .await
     .expect("misplaced post-ParameterDescription test exceeded its outer watchdog");
 }
+
+// ---------------------------------------------------------------------------
+// COPY sub-protocol violations.
+//
+// `src/copy_out.rs` and `src/copy_in.rs` hold 8 of the 44 refusal sites, and
+// this file's header listed them as NOT covered. They are the last named
+// cluster. COPY has its own sub-protocol on top of the extended query one:
+// ParseComplete, BindComplete, then CopyOutResponse or CopyInResponse, and only
+// then a CopyData stream. Each step is a place a mangling proxy can substitute
+// something legitimate-looking.
+//
+// The mid-stream case matters most. Once a COPY is established the driver is
+// reading a data stream, and a non-CopyData message there is the point at which
+// a driver that resynchronises would start handing the caller bytes from frames
+// it never parsed as data.
+//
+// A LIMIT ON WHAT THESE THREE PROVE, stated because three green tests imply
+// more than was established. The mid-stream case demonstrably REACHES its site:
+// instrumenting it reports "unexpected message from server", which is
+// `Error::unexpected_message()` at copy_out.rs:88. But the one-variable control
+// used elsewhere in this file - feed the same helper a VALID stream and require
+// the test to fail - could not be built here. A scripted CopyOutResponse plus
+// CopyData, CopyDone, CommandComplete and ReadyForQuery still errors, so the
+// fixture is not a valid COPY and the control is inconclusive rather than
+// negative. The happy path IS covered, against a real server, by
+// `copy_out_error_surfaces_and_recovers_the_same_connection` and the rest of the
+// copy family in integration.rs. Treat these three as "the refusal path is
+// reached", not as "the refusal is proven necessary".
+// ---------------------------------------------------------------------------
+
+/// Drive `copy_out` against a peer answering with `response`, requiring the same
+/// three properties as the other helpers: an error, a retired session, bounded.
+async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) -> String {
+    use futures_util::TryStreamExt;
+
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        expect_frontend_until_sync(&mut stream);
+        let _ = stream.write_all(&response);
+        let _ = stream.flush();
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    let (client, connection) = stub_config(server.addr)
+        .connect(NoTls)
+        .await
+        .expect("connect to scripted PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let error = compio::time::timeout(OPERATION_WATCHDOG, async {
+        let stream = client.copy_out("COPY t TO STDOUT").await?;
+        let mut stream = Box::pin(stream);
+        while stream.try_next().await?.is_some() {}
+        Ok::<(), compio_postgres::Error>(())
+    })
+    .await
+    .expect("copy_out hung instead of rejecting a malformed COPY response")
+    .expect_err("the driver accepted a malformed COPY response");
+
+    let reuse = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
+    match reuse {
+        Err(_) => panic!("reusing the poisoned session hung instead of failing"),
+        Ok(Ok(_)) => panic!("the driver reused a session after a malformed COPY response"),
+        Ok(Err(_)) => {}
+    }
+
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    drop(client);
+    server.finish();
+    common::error_chain(&error)
+}
+
+/// `CopyInResponse` where the OUT direction was requested. Both are real
+/// messages; only the direction is wrong, and a driver that ignored the
+/// distinction would wait for input on a stream the caller means to read.
+#[compio::test]
+async fn a_copy_in_response_to_a_copy_out_request_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'1', b"");
+        response.extend_from_slice(&backend_frame(b'2', b""));
+        // CopyInResponse: overall format byte, then a column count of zero.
+        response.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+        let chain = hostile_copy_out_retires_session(501, response).await;
+        assert!(
+            !chain.is_empty(),
+            "a wrong-direction COPY response produced an error with no description"
+        );
+    })
+    .await
+    .expect("wrong-direction COPY test exceeded its outer watchdog");
+}
+
+/// A COPY that is established correctly and then delivers a `DataRow` mid
+/// stream. This is the site at `copy_out.rs:88`, the one where resynchronising
+/// would hand the caller unparsed bytes as if they were copy data.
+#[compio::test]
+async fn a_non_copy_data_message_mid_stream_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'1', b"");
+        response.extend_from_slice(&backend_frame(b'2', b""));
+        // CopyOutResponse, then one legitimate CopyData, then a DataRow.
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'd', b"row-one\n"));
+        let mut data_row = Vec::new();
+        data_row.extend_from_slice(&1u16.to_be_bytes());
+        data_row.extend_from_slice(&1u32.to_be_bytes());
+        data_row.push(b'x');
+        response.extend_from_slice(&backend_frame(b'D', &data_row));
+        let chain = hostile_copy_out_retires_session(502, response).await;
+        assert!(
+            !chain.is_empty(),
+            "a mid-stream non-CopyData message produced an error with no description"
+        );
+    })
+    .await
+    .expect("mid-stream COPY test exceeded its outer watchdog");
+}
+
+/// `BindComplete` where `ParseComplete` is owed, inside the COPY path rather
+/// than the plain prepare path - the same violation one layer along.
+#[compio::test]
+async fn a_copy_out_missing_its_parse_complete_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = hostile_copy_out_retires_session(503, backend_frame(b'2', b"")).await;
+        assert!(
+            !chain.is_empty(),
+            "a COPY missing ParseComplete produced an error with no description"
+        );
+    })
+    .await
+    .expect("COPY missing ParseComplete test exceeded its outer watchdog");
+}
