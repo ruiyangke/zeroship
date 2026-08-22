@@ -1,9 +1,9 @@
 //! The caller's approval decision — shared by the engine gate AND the executor's
 //! own defense-in-depth gate.
 //!
-//! [`Approval`] lived in [`crate::engine`] originally, where it gated only the
-//! public [`MigrationEngine`](crate::engine::MigrationEngine) surface. But the
-//! executor's [`crate::apply::executor::apply`] is itself a public entry point a
+//! [`Approval`] lived in the engine's `engine` module originally, where it gated
+//! only the public `MigrationEngine` surface. But the executor's
+//! `apply::executor::apply` is itself a public entry point a
 //! caller can drive directly, bypassing the engine gate. The executor already
 //! re-runs the guard +
 //! the least-privilege role rather than trusting the engine; the approval gate is

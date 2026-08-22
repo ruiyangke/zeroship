@@ -6,20 +6,18 @@
 //! does not tighten the limit, it REMOVES it, and the DDL waits forever while
 //! holding whatever it already acquired.
 //!
-//! Zero is already outside the contract the engine states for itself:
-//! [`ExecutorConfig`](crate::conn::ExecutorConfig) documents the PG
+//! Zero is already outside the contract the engine states for itself: the engine's
+//! `conn::ExecutorConfig` documents the PG
 //! `statement_timeout` + `lock_timeout` as **mandatory** (no indefinite locks /
-//! DoS), and
-//! [`MigrationFlags::lock_timeout_ms`](crate::model::migration::MigrationFlags::lock_timeout_ms)
+//! DoS), and its `migration::MigrationFlags::lock_timeout_ms`
 //! documents the maintenance-window override as raising a FINITE budget.
 //!
 //! **Why the refusal lives here, at the value's resolution, and not only at the
 //! IR load gate.** The load gate is early author feedback, not a boundary: the IR
 //! path is not the only way a zero reaches a session render.
-//! [`Migration`](crate::model::migration::Migration) and
-//! [`MigrationFlags`](crate::model::migration::MigrationFlags) are public serde
+//! `Migration` and `MigrationFlags` are public serde
 //! structs with public fields, so an embedder can build `lock_timeout_ms: Some(0)`,
-//! compute a matching checksum, and call [`apply`](crate::apply::executor::apply)
+//! compute a matching checksum, and call the executor's `apply`
 //! with no loader involved. A zero can also arrive from CONFIG, which no IR
 //! validation can see: `ExecutorConfig::statement_timeout_ms` is
 //! `Duration::as_millis`, and `Duration::from_micros(500).as_millis() == 0`.
@@ -90,7 +88,7 @@ impl std::fmt::Display for TimeoutOrigin {
 ///
 /// # Errors
 /// [`IndefiniteTimeoutError`] when the resolved budget is `0`.
-pub(crate) fn resolve_timeout_ms(
+pub fn resolve_timeout_ms(
     version: &str,
     setting: &'static str,
     override_ms: Option<u64>,

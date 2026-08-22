@@ -24,6 +24,16 @@ serde_json = { workspace = true }
 # `advisory::Advisory` and `advisory::Severity` cross the wire to the SDK/CLI as the
 # operational lint output attached to a plan, so they derive Serialize/Deserialize.
 serde = { workspace = true }
+# `backfill::BackfillSpec::checksum` is a SHA-256 over the spec's canonical
+# encoding — the identity a resumed backfill's progress row is compared against.
+sha2 = { workspace = true }
+# The hex spelling of that SHA-256 — `bf_<32 hex chars>` is the backfill id itself,
+# so the encoding is part of the identity, not a display detail.
+hex = { workspace = true }
+# `backfill::generate_value` materializes a backfill's per-row generator
+# (`uuidv4`/`uuidv7`/`typeid`/`ulid`) host-side, so the generated identity is the
+# same shape on every dialect rather than each vendor's own function.
+uuid = { workspace = true }
 # Canonical (padded) base64 — the wire form PostgreSQL and MySQL both decode for a
 # binary value carried through TEXT. `spelling::base64_standard` is its one home.
 base64 = { workspace = true }

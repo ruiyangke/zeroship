@@ -72,7 +72,10 @@
 // `crate::guard::…` / `crate::analysis::…` references keep resolving unchanged.
 pub use zero_migrate_guard::{analysis, guard};
 pub mod apply;
-pub mod approval;
+// The caller's approval decision now lives with the backend contract, whose
+// `OnlineSchemaChange::run_online` names it. Re-exported here so every
+// `crate::approval::{Approval, ApprovalScope}` reference resolves unchanged.
+pub use zero_migrate_backend::approval;
 pub mod conn;
 pub mod db_url;
 pub mod engine;

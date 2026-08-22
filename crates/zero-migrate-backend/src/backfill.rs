@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::model::ir::{CursorStability, IrScalar, PerRowGenerator};
+use zero_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
 
 const CROCKFORD_UPPER: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const CROCKFORD_LOWER: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
@@ -275,7 +275,7 @@ pub struct PerRowAssignment {
 impl PerRowAssignment {
     /// Mint an assignment after planner validation of its destination contract.
     #[must_use]
-    pub(crate) fn validated(
+    pub fn validated(
         schema: impl Into<String>,
         table: impl Into<String>,
         column: impl Into<String>,
@@ -291,13 +291,13 @@ impl PerRowAssignment {
 
     /// Read the validated generator at the executor boundary.
     #[must_use]
-    pub(crate) fn generator(&self) -> &PerRowGenerator {
+    pub fn generator(&self) -> &PerRowGenerator {
         &self.generator
     }
 
     /// Confirm that a cloned planner token has not been moved to another target.
     #[must_use]
-    pub(crate) fn matches_target(&self, schema: &str, table: &str, column: &str) -> bool {
+    pub fn matches_target(&self, schema: &str, table: &str, column: &str) -> bool {
         self.schema == schema && self.table == table && self.column == column
     }
 }
@@ -402,7 +402,7 @@ impl BackfillSpec {
 /// generator enum, and executors call it anew inside the batch transaction for
 /// each destination row.
 #[must_use]
-pub(crate) fn generate_per_row_value(generator: &PerRowGenerator) -> String {
+pub fn generate_per_row_value(generator: &PerRowGenerator) -> String {
     match generator {
         PerRowGenerator::UuidV4 => uuid::Uuid::new_v4().to_string(),
         PerRowGenerator::UuidV7 => uuid::Uuid::now_v7().to_string(),

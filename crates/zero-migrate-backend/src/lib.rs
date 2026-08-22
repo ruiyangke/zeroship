@@ -70,6 +70,15 @@
 //! fact those algorithms consume.
 
 pub mod advisory;
+// The caller's approval decision. Named by `OnlineSchemaChange::run_online` and by
+// every gated apply/rollback entry point, so it sits with the traits rather than
+// above them. Zero dependencies of its own. The engine re-exports it at
+// `zero_migrate::approval`.
+pub mod approval;
+// Pure data for large-table backfill plan steps: the `BackfillSpec` a vendor's
+// backfill executor is handed, its cursor contract and its checksum. Depends on
+// `zero-migrate-ir` alone. The engine re-exports it at `zero_migrate::model::backfill`.
+pub mod backfill;
 pub mod ddl;
 pub mod descriptors;
 pub mod dml;
@@ -93,6 +102,10 @@ pub mod spelling;
 pub mod step;
 pub mod stored_ddl;
 pub mod table_rebuild;
+// The finite-timeout-budget rule every dialect's session render is bound by. Zero
+// dependencies of its own; the vendors are what resolve a budget, so the rule sits
+// with them. The engine re-exports it at `zero_migrate::apply::timeout`.
+pub mod timeout;
 pub mod validation;
 pub mod value_format;
 pub mod vendor;

@@ -1,4 +1,7 @@
-pub mod backfill;
+// Pure backfill plan-step data now sits with the backend contract, whose backfill
+// executors are handed a `BackfillSpec`. Re-exported so every
+// `crate::model::backfill::…` reference resolves unchanged.
+pub use zero_migrate_backend::backfill;
 // The fail-closed IR envelope load gate — POLICY-bound half (`load_ir_document`);
 // the policy-free half is re-exported from `zero_migrate_ir::load`.
 pub mod load;
