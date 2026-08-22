@@ -48,10 +48,10 @@ export type ScalarFn =
 
 /**
  * The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the
- * engine pins. CLOSED. `splitPart` is admitted only within its pinned
- * single-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);
- * `concatWs` is the NULL-skipping join; `now` is an apply-time DB-evaluated
- * scalar (the structured replacement for a frozen `Date.now()` literal).
+ * engine pins. CLOSED. `splitPart` has dialect-neutral literal grammar and a
+ * backend-owned portability envelope; `concatWs` is the NULL-skipping join;
+ * `now` is an apply-time DB-evaluated scalar (the structured replacement for a
+ * frozen `Date.now()` literal).
  */
 export type SynthFn = "concatWs" | "splitPart" | "now";
 
