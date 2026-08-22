@@ -136,7 +136,15 @@ impl DialectSupport {
             .unwrap_or_else(|| panic!("support declaration states no decision for {dialect}"))
     }
 
-    /// The dialects this declaration states a decision for, in ascending id order.
+    /// The dialects this declaration states a decision for.
+    ///
+    /// **The order differs by branch, and is NOT ascending in both.** A
+    /// `backend_feature` declaration yields the REGISTRY's order (shipping order:
+    /// `postgres, sqlite, mysql`); a decision-list declaration yields its own
+    /// `decisions` order, which IS ascending because `decision_for`
+    /// binary-searches it. Callers must not treat this iterator as sorted: this
+    /// doc previously claimed ascending order for both, and an ordering assertion
+    /// written against that claim failed on a correct tree.
     pub fn dialects(&self) -> Box<dyn Iterator<Item = DialectId> + '_> {
         if self.backend_feature.is_some() {
             Box::new(crate::render::backends::VENDORS.dialects())
@@ -535,6 +543,22 @@ mod tests {
                 census,
                 "{label} declares {cells:?}, not the registered census {census:?}"
             );
+            // NO SORTEDNESS ASSERTION HERE, DELIBERATELY. `decision_for`
+            // binary-searches `decisions`, so the ordering matters - but it is
+            // enforced BY CONSTRUCTION, not by this test. The fields are private
+            // and there are exactly two constructors: `backend_feature`, which
+            // leaves `decisions` empty, and `from_cells`, which sorts and dedups.
+            // No struct literal exists anywhere. An assertion here can therefore
+            // never fail.
+            //
+            // This was re-added once and had to be removed again, so it is worth
+            // the paragraph. Asserting it over `dialects()` is WORSE than vacuous:
+            // that iterator returns the REGISTRY's order for a `backend_feature`
+            // declaration (`postgres, sqlite, mysql` - shipping order), which is
+            // not ascending, and that branch never reaches the binary search at
+            // all (it returns early through `VENDORS.get`, a linear `find`). The
+            // assertion goes RED on a tree with no defect. If sortedness ever
+            // needs a guard again, the thing to guard is `from_cells`.
             for dialect in &census {
                 let _ = feature.decision(dialect);
             }
