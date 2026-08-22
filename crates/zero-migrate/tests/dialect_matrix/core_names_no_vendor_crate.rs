@@ -101,13 +101,36 @@ const ALLOWED: &[(&str, usize)] = &[
     ("render/backends/mod.rs", 3),
 ];
 
-/// The walk's floor. `crates/zero-migrate/src` held 87 `.rs` files when this was
-/// written; the floor sits under that with room for ordinary churn but nowhere near
-/// zero, so a walk that lost its root cannot pass.
+/// The walk's floor — the WEAKER of this file's two anti-blindness checks. See
+/// [`WALK_ANCHORS`] for the one that actually holds.
 ///
-/// Raise it deliberately if the crate grows a lot. NEVER lower it to get green — a
-/// drop means the walk stopped seeing files, which is the failure this defends.
+/// Its premise is inverted and saying so is the point. It was written assuming core
+/// churns around a stable size, so a big drop could only mean a broken walk. That is
+/// backwards: core is deliberately SHRINKING. Vendor code is being moved out of it
+/// on purpose, and the file count has already fallen from the 87 this comment was
+/// first written against. A count that falls is the project WORKING.
+///
+/// So this floor will eventually fire on a correct tree, and its old instruction
+/// ("NEVER lower it to get green") would then forbid the only correct response. The
+/// rule is therefore narrower than it looks: lower it when an extraction legitimately
+/// moved files OUT, and say which extraction in the commit. Never lower it to silence
+/// a walk that broke — [`WALK_ANCHORS`] is what tells those two apart, so check it
+/// first and trust it over this number.
 const SRC_FILE_FLOOR: usize = 70;
+
+/// Files the walk MUST reach, which is the real defence against a census that fails
+/// open.
+///
+/// A floor over a discovered set only bounds HOW MANY things were found; these bound
+/// WHICH, and they stay true at any crate size. `lib.rs` sits at the walk's root, so
+/// losing it means the root itself was wrong. `render/backends/mod.rs` is three
+/// levels down and is the registry the `ALLOWED` table above calls PERMANENT, so
+/// losing it means recursion stopped descending. Between them a walk cannot be
+/// narrowed to nothing and still pass, however small core gets.
+///
+/// Pick replacements only from files that cannot move. Anchoring on something inside
+/// `apply/backend/` would rot the moment that directory is extracted.
+const WALK_ANCHORS: &[&str] = &["lib.rs", "render/backends/mod.rs"];
 
 /// Whether a source line is CODE rather than a comment.
 ///
@@ -149,11 +172,35 @@ fn core_names_no_vendor_crate_outside_the_registry() {
     let files = src_files(&src);
 
     // FLOOR ONE — the WALK. A scan over a discovered set fails open.
+    //
+    // The anchors run FIRST because they are the check that survives core shrinking.
+    // They answer "did the walk reach the tree at all", which is the actual failure
+    // mode; the count below only answers "did it reach a lot of it".
+    let reached: std::collections::BTreeSet<String> = files
+        .iter()
+        .filter_map(|p| p.strip_prefix(&src).ok())
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect();
+    for anchor in WALK_ANCHORS {
+        assert!(
+            reached.contains(*anchor),
+            "the census walked {} files under {} but never reached `{anchor}`, so the \
+             walk is not seeing the tree it claims to census. This is the failure the \
+             floor below is too blunt to catch: fix the walk. Do NOT delete the anchor \
+             to get green — if `{anchor}` legitimately moved, point the anchor at \
+             another file that cannot move, and say which in the commit.",
+            files.len(),
+            src.display()
+        );
+    }
+
     assert!(
         files.len() >= SRC_FILE_FLOOR,
         "the census walked only {} files under {}, below the floor of {SRC_FILE_FLOOR}. \
-         A narrowed walk finds nothing and reports clean; fix the walk, do not lower \
-         the floor to get green.",
+         The anchors above PASSED, so the walk did reach the tree and this is most \
+         likely core legitimately shrinking as vendor code moves out — lower the floor \
+         and name the extraction that did it. If the anchors FAILED, fix the walk \
+         instead and ignore this number.",
         files.len(),
         src.display()
     );
