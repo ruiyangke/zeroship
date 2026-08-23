@@ -766,24 +766,36 @@ async fn a_normal_live_query_inside_the_deadline_is_untouched() {
 /// how this arrived as an unattributed flake. A 5x budget only halved the rate
 /// at load 18, so the fix is a budget with real headroom, not a nudge.
 ///
-/// WHAT THIS STILL DOES NOT SURVIVE: a machine loaded hard enough to stall a
-/// task for two seconds. A red here is evidence about the machine first and
-/// the driver second; check the load average before reading it as a
-/// regression. The deterministic half of this behaviour is pinned against a
-/// scripted peer by `copy_done_starts_a_deadline_for_the_final_server_response`,
-/// which needs no live server and no wall-clock margin.
+/// WIDENED A SECOND TIME on 2026-08-23, and the reason is the point: 2s was
+/// chosen as 4x headroom over the largest budget OBSERVED to fail, which is
+/// not the same as a measured worst case. It then failed at load 23.8 -- in
+/// ISOLATION, not just inside the suite -- on the fixture `CREATE TEMPORARY
+/// TABLE`, which is not this test's subject at all. Headroom over an observed
+/// failure is a guess; this is the third red run it has cost.
+///
+/// So the budget is now 8s against a 10s sleep. That is slow, and the slowness
+/// is the price of a live test on a shared machine.
+///
+/// WHAT IT STILL DOES NOT SURVIVE: a stall longer than eight seconds. A red
+/// here is evidence about the machine first and the driver second; check the
+/// load average before reading it as a regression. The deterministic half of
+/// this behaviour is pinned against a scripted peer by
+/// `copy_done_starts_a_deadline_for_the_final_server_response`, which needs no
+/// live server and no wall-clock margin -- if this test becomes a nuisance
+/// again, moving the claim there entirely is the answer rather than a fourth
+/// widening.
 #[compio::test]
 async fn copy_input_time_is_not_charged_as_server_read_silence() {
     use bytes::Bytes;
     use futures_util::SinkExt;
 
     /// Budget for one real round trip against a live server under load.
-    const COPY_READ_DEADLINE: Duration = Duration::from_secs(2);
+    const COPY_READ_DEADLINE: Duration = Duration::from_secs(8);
     /// Producer silence, which must exceed the deadline for the test to mean
     /// anything.
-    const COPY_PRODUCER_DELAY: Duration = Duration::from_secs(3);
+    const COPY_PRODUCER_DELAY: Duration = Duration::from_secs(10);
     /// This test deliberately sleeps for longer than `ASYNC_WATCHDOG`.
-    const COPY_WATCHDOG: Duration = Duration::from_secs(15);
+    const COPY_WATCHDOG: Duration = Duration::from_secs(40);
 
     const _: () = assert!(
         COPY_PRODUCER_DELAY.as_millis() > COPY_READ_DEADLINE.as_millis(),
