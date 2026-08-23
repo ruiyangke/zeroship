@@ -968,3 +968,87 @@ async fn a_representable_start_lsn_still_starts_replication() {
     .await
     .expect("representable start_lsn test exceeded its outer watchdog");
 }
+
+/// A malformed `IDENTIFY_SYSTEM` row must be refused, not filled in with
+/// plausible-looking defaults.
+///
+/// Every field was defaulted: a missing or NULL `systemid` became `""`, a
+/// missing, NULL or unparseable `timeline` became `0`, and `xlogpos` became
+/// `""`. Those are not neutral values. `systemid` is the CLUSTER identity, and
+/// callers compare it to notice they have been failed over onto a different
+/// cluster -- two empty strings compare equal, so the check silently passes
+/// exactly when it should fire. `0` is not a valid timeline either;
+/// PostgreSQL numbers them from 1.
+///
+/// A conforming server always sends all three as non-NULL, so reaching this
+/// needs a hostile or broken peer -- the threat model `tests/hostile_peer.rs`
+/// and the stubs in this file already work in. `dbname` is deliberately NOT in
+/// this test: it is genuinely NULL on a non-database-specific replication
+/// connection, which is why it alone is modelled as an `Option`.
+#[compio::test]
+async fn a_null_field_in_identify_system_is_refused_rather_than_defaulted() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+
+            // Four fields, but systemid and timeline are NULL (length -1).
+            let mut row = Vec::new();
+            row.extend_from_slice(&4u16.to_be_bytes());
+            row.extend_from_slice(&(-1i32).to_be_bytes()); // systemid NULL
+            row.extend_from_slice(&(-1i32).to_be_bytes()); // timeline NULL
+            for field in [b"0/10".as_slice(), b"scripted-db".as_slice()] {
+                row.extend_from_slice(&i32::try_from(field.len()).unwrap().to_be_bytes());
+                row.extend_from_slice(field);
+            }
+
+            let mut response = backend_frame(b'D', &row);
+            response.extend_from_slice(&backend_frame(b'C', b"IDENTIFY_SYSTEM\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let outcome =
+            compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system()).await;
+        let error = match outcome {
+            Err(_) => panic!("identify_system hung on a malformed row"),
+            Ok(Ok(identity)) => panic!(
+                "a NULL systemid and timeline were accepted as {:?} / {}",
+                identity.systemid, identity.timeline
+            ),
+            Ok(Err(error)) => error,
+        };
+
+        let rendered = format!("{error}");
+        let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+            std::error::Error::source(*error)
+        })
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+        assert!(
+            rendered.to_lowercase().contains("identify_system")
+                || chain.to_lowercase().contains("identify_system"),
+            "the refusal should name IDENTIFY_SYSTEM: {rendered} / {chain}"
+        );
+
+        // The peer waits for a close; the refusal leaves the connection in the
+        // caller's hands, so this test has to end the session itself.
+        drop(replication);
+
+        server.finish();
+    })
+    .await
+    .expect("malformed IDENTIFY_SYSTEM test exceeded its outer watchdog");
+}

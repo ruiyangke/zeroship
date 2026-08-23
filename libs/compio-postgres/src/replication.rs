@@ -1208,14 +1208,33 @@ fn parse_identify_system_row(row: &DataRowBody) -> Result<IdentifySystem, Error>
         }
     }
 
+    // Refused rather than defaulted. Every one of these used to fall back to a
+    // plausible-looking value -- `""` for the two strings, `0` for the
+    // timeline -- and none of those is neutral. `systemid` is the CLUSTER
+    // identity, which callers compare to notice they have been failed over
+    // onto a different cluster; two empty strings compare EQUAL, so the check
+    // passes silently in exactly the case it exists to catch. PostgreSQL
+    // numbers timelines from 1, so `0` is not a timeline at all, and an
+    // unparseable one became `0` as well.
+    //
+    // A conforming server sends all three non-NULL, so this only fires for a
+    // broken or hostile peer -- which is the threat model the rest of this
+    // module already works in. `dbname` stays optional because it is genuinely
+    // NULL on a replication connection that is not database-specific.
+    let required = |index: usize, name: &'static str| -> Result<&str, Error> {
+        fields
+            .get(index)
+            .and_then(|field| *field)
+            .ok_or_else(|| missing_identify_field(name))
+    };
+
+    let timeline = required(1, "timeline")?;
     Ok(IdentifySystem {
-        systemid: fields.first().and_then(|f| *f).unwrap_or("").to_string(),
-        timeline: fields
-            .get(1)
-            .and_then(|f| *f)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0),
-        xlogpos: fields.get(2).and_then(|f| *f).unwrap_or("").to_string(),
+        systemid: required(0, "systemid")?.to_string(),
+        timeline: timeline
+            .parse()
+            .map_err(|_| missing_identify_field("timeline"))?,
+        xlogpos: required(2, "xlogpos")?.to_string(),
         dbname: fields.get(3).and_then(|f| *f).map(|s| s.to_string()),
     })
 }
@@ -1226,6 +1245,18 @@ fn eof_identify_row() -> Error {
     Error::parse(std::io::Error::new(
         std::io::ErrorKind::UnexpectedEof,
         "IDENTIFY_SYSTEM DataRow truncated",
+    ))
+}
+
+/// A field `IDENTIFY_SYSTEM` must supply was absent, NULL, or unreadable.
+///
+/// Named so the caller learns WHICH field, because the three that are required
+/// mean quite different things and a caller cannot tell them apart from a
+/// generic parse failure.
+fn missing_identify_field(name: &str) -> Error {
+    Error::parse(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("IDENTIFY_SYSTEM did not return a usable {name}"),
     ))
 }
 
