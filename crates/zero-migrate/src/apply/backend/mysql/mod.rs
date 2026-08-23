@@ -47,7 +47,7 @@ pub use journal_sql::BINARY_IDENTITY_COLUMNS;
 pub(crate) mod primary_key_sql;
 pub(crate) mod session;
 
-use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
+use super::capability::{BackfillSpec, OnlineSchemaChange};
 use super::{
     CrossDeployObligations, MigrationBackend, PlaceholderStyle, ProjectLockAcquisition,
     PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
@@ -1112,12 +1112,6 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // (`DeclarativeError::MysqlRenameColumnUnsupported`) rather than because
         // anything about this `None` changed. Keep the two in step: re-enabling MySQL
         // renames means giving this seam a real harness, not relaxing the refusal.
-        None
-    }
-
-    fn shadow(&self) -> Option<&dyn ShadowDryRun> {
-        // No shadow dry-run harness on MySQL; `dry_run` surfaces
-        // `DryRunError::ShadowUnsupported` (the honest gap).
         None
     }
 
@@ -6499,7 +6493,6 @@ mod render_tests {
         assert!(backend.baseline_one(&cfg, &m, "t").await.is_err());
         assert!(backend.record_squash(&cfg, &m, "t", &["v1"]).await.is_err());
         assert!(backend.online().is_none(), "no online harness on MySQL");
-        assert!(backend.shadow().is_none(), "no shadow harness on MySQL");
         assert!(
             backend.pending_contracts().is_none(),
             "no cross-deploy pending-contract partition on MySQL"

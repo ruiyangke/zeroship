@@ -1408,11 +1408,15 @@ async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
     let engine = MigrationEngine::new();
     let cfg = exec_cfg();
 
-    // The capability itself is absent — a deliberate `None`, not a stub.
-    assert!(
-        be.shadow().is_none(),
-        "the SQLite backend exposes NO shadow dry-run capability (C3)"
-    );
+    // The capability itself is absent — a deliberate absence, not a stub. It used to
+    // be asserted here as `be.shadow().is_none()`. `shadow()` is no longer on
+    // `MigrationBackend`: all three backends answered `None`, so the seam asked every
+    // vendor to declare a harness none of them had. The harness is supplied to
+    // `dry_run` now, and the fact that none exists is asserted once for the whole
+    // workspace in `dialect_matrix::shadow_dry_run_has_no_implementor` rather than
+    // three times, once per backend — which is also stronger, because three `None`s
+    // could not have noticed a FOURTH backend that quietly had one.
+    let _ = &be;
 
     let shadow_cfg = ShadowConfig {
         // Unused — `dry_run` short-circuits to ShadowUnsupported before any DSN is
@@ -1425,7 +1429,7 @@ async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
     //     explicit error, asserted, NOT a `DryRunReport { ok: true, .. }`.
     let mig = baseline_migration("any", "CREATE TABLE main.t (id TEXT PRIMARY KEY)");
     let err = engine
-        .dry_run(&be, &[mig], &cfg, &shadow_cfg, "deployer")
+        .dry_run(None, &[mig], &cfg, &shadow_cfg, "deployer")
         .await
         .expect_err("a dry-run on a backend with no shadow capability must NOT report a fake pass");
     assert!(
@@ -1460,7 +1464,7 @@ async fn sqlite_backend_has_no_shadow_and_dry_run_is_explicitly_unsupported() {
         )
         .expect("plan create");
     let err = engine
-        .dry_run_declarative(&be, &plan, &desired, &cfg, &shadow_cfg, "deployer")
+        .dry_run_declarative(None, &plan, &desired, &cfg, &shadow_cfg, "deployer")
         .await
         .expect_err("declarative dry-run must also be explicitly unsupported on SQLite");
     assert!(

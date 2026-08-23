@@ -37,6 +37,7 @@ mod plan_vocabulary_names_strategies_not_vendors;
 mod registry_resolution_stays_core_only;
 mod row_order_observation;
 mod schema_emitters_do_not_relookup_a_backend;
+mod shadow_dry_run_has_no_implementor;
 mod sqlite_declaration_flip_over_refusal_control;
 mod sqlite_trigger_quoting_reaches_postgres;
 mod sqlite_trigger_render_bytes;

@@ -784,37 +784,6 @@ pub trait MigrationBackend {
     /// call site — a non-empty rename set with `online() == None` is a routing bug).
     fn online(&self) -> Option<&dyn crate::apply::backend::capability::OnlineSchemaChange>;
 
-    /// The **shadow dry-run capability** (multi-engine abstraction).
-    ///
-    /// `Some(&dyn ShadowDryRun)` for an engine that can preview a migration batch
-    /// against a throwaway shadow clone before the real apply (Postgres — a
-    /// `PgShadow` impl would own its admin connection
-    /// **internally**, so the connection NEVER appears on this neutral trait
-    /// surface). `None` for an engine with no shadow path.
-    ///
-    /// This REPLACES the old `MigrationEngine::dry_run(admin_conn: &Client, …)` /
-    /// `PostgresBackend::conn() -> &Client` escape hatch: the engine's
-    /// [`dry_run`](crate::engine::MigrationEngine::dry_run) /
-    /// [`dry_run_declarative`](crate::engine::MigrationEngine::dry_run_declarative)
-    /// branch on `shadow().is_some()`, never holding a concrete connection, and a
-    /// backend with no shadow capability surfaces a clear
-    /// [`DryRunError::ShadowUnsupported`]
-    /// rather than a false-success report.
-    ///
-    /// # Why SQLite is `None` (a deliberate capability gap, not a silent hole)
-    ///
-    /// The SQLite dev path applies only **TRUSTED descriptor-generated DDL** —
-    /// there is no untrusted/raw SQLite author whose DDL would need previewing
-    /// against a throwaway clone — and dev is **recoverable** (a local file the
-    /// developer can re-create), so a pre-apply shadow dry-run adds little. The
-    /// shadow exists to safely preview *untrusted/AI-authored* DDL before it
-    /// touches a *durable* schema; neither condition holds on the SQLite dev leg.
-    /// A future untrusted/prod non-PG engine WOULD provide a
-    /// `ShadowDryRun`. So `None` here is honest: a caller that asks for a dry-run
-    /// on SQLite gets the explicit `ShadowUnsupported` outcome, never a fake
-    /// "dry-run passed".
-    fn shadow(&self) -> Option<&dyn crate::apply::backend::capability::ShadowDryRun>;
-
     // -- baseline / adoption ------------------------------------------------
 
     /// Adopt the LIVE schema as the project's **baseline**

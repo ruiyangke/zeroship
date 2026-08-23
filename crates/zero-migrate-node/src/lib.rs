@@ -14,7 +14,7 @@
 //!   fired by a Rust-supplied `done` callback — NO `#[napi] async fn`, NO
 //!   `Promise::await`, NO `tokio_rt`.
 //!
-//! `dry_run` is **not** surfaced here: `backend.shadow()` is `None` for the
+//! `dry_run` is **not** surfaced here: no `ShadowDryRun` harness is supplied for the
 //! host-driven backends, so a shadow dry-run returns
 //! `DryRunError::ShadowUnsupported`.
 //! There is no host-side shadow harness.

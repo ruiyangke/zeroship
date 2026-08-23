@@ -3504,29 +3504,44 @@ impl MigrationEngine {
     /// recommendation is mandatory for destructive / AI-authored sets); this
     /// method is the primitive.
     ///
-    /// The dry-run goes through [`backend.shadow()`](crate::apply::backend::MigrationBackend::shadow)
-    /// rather than a raw `&Client`, so no PG-driver type appears on this surface.
-    /// A backend with no shadow capability (e.g. SQLite — its DDL is trusted +
-    /// dev-recoverable) yields the explicit
+    /// The harness is SUPPLIED by the caller rather than declared by the backend,
+    /// and never as a raw `&Client`, so no PG-driver type appears on this surface.
+    /// `None` — which is every caller today, because nothing in the workspace
+    /// implements [`ShadowDryRun`](crate::apply::backend::ShadowDryRun) — yields the
+    /// explicit
     /// [`DryRunError::ShadowUnsupported`](crate::apply::backend::DryRunError::ShadowUnsupported),
     /// NOT a false-success report: the caller must never believe a dry-run happened
     /// when it did not.
     ///
+    /// # Why the capability is a PARAMETER and not `backend.shadow()`
+    ///
+    /// It was a `MigrationBackend::shadow()` method, and all three backends returned
+    /// `None` — so the seam declared a capability none of them had, while being the
+    /// single remaining reason `MigrationBackend` could not move to the backend
+    /// contract crate (`ShadowDryRun::dry_run_declarative` names the engine's
+    /// `DeclarativeDeployPlan` and `DesiredSchema`, which are orchestration results
+    /// and are staying in the engine).
+    ///
+    /// Asking a backend to declare a harness it does not have bought nothing;
+    /// inverting it costs nothing and keeps the extension point exactly where a real
+    /// harness would arrive — a host that builds one passes it here. The refusal
+    /// behaviour is byte-identical, because `None` was already the universal answer.
+    ///
     /// # Errors
-    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] — the backend has no
-    ///   shadow dry-run capability.
+    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] — no shadow
+    ///   dry-run harness was supplied.
     /// - other [`crate::apply::backend::DryRunError`] — a harness failure (CREATE/DROP
     ///   DATABASE, the shadow connection, role provisioning). A *migration* failing
     ///   is not an error — it is reported in the [`crate::apply::backend::DryRunReport`].
-    pub async fn dry_run<B: MigrationBackend>(
+    pub async fn dry_run(
         &self,
-        backend: &B,
+        shadow: Option<&dyn crate::apply::backend::ShadowDryRun>,
         migrations: &[Migration],
         exec_cfg: &ExecutorConfig,
         shadow_cfg: &crate::apply::backend::ShadowConfig,
         applied_by: &str,
     ) -> Result<crate::apply::backend::DryRunReport, crate::apply::backend::DryRunError> {
-        let Some(shadow) = backend.shadow() else {
+        let Some(shadow) = shadow else {
             return Err(crate::apply::backend::DryRunError::ShadowUnsupported);
         };
         shadow
@@ -3539,24 +3554,31 @@ impl MigrationEngine {
     /// routed through the backend's [`ShadowDryRun`](crate::apply::backend::ShadowDryRun)
     /// capability.
     ///
-    /// Like [`dry_run`](Self::dry_run), a backend with no shadow capability yields
-    /// the explicit [`DryRunError::ShadowUnsupported`](crate::apply::backend::DryRunError::ShadowUnsupported),
+    /// Like [`dry_run`](Self::dry_run), the harness is supplied by the caller and a
+    /// `None` yields the explicit
+    /// [`DryRunError::ShadowUnsupported`](crate::apply::backend::DryRunError::ShadowUnsupported),
     /// never a false-success report.
     ///
+    /// This is the method whose signature keeps
+    /// [`ShadowDryRun`](crate::apply::backend::ShadowDryRun) in the engine: it takes
+    /// a [`DeclarativeDeployPlan`] and a
+    /// [`DesiredSchema`](crate::render::declarative::DesiredSchema), which are what
+    /// the engine DECIDED rather than vocabulary a backend speaks.
+    ///
     /// # Errors
-    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] — the backend has no
-    ///   shadow dry-run capability.
+    /// - [`crate::apply::backend::DryRunError::ShadowUnsupported`] — no shadow
+    ///   dry-run harness was supplied.
     /// - other [`crate::apply::backend::DryRunError`] — a harness failure.
-    pub async fn dry_run_declarative<B: MigrationBackend>(
+    pub async fn dry_run_declarative(
         &self,
-        backend: &B,
+        shadow: Option<&dyn crate::apply::backend::ShadowDryRun>,
         plan: &DeclarativeDeployPlan,
         desired: &crate::render::declarative::DesiredSchema,
         exec_cfg: &ExecutorConfig,
         shadow_cfg: &crate::apply::backend::ShadowConfig,
         applied_by: &str,
     ) -> Result<crate::apply::backend::DryRunReport, crate::apply::backend::DryRunError> {
-        let Some(shadow) = backend.shadow() else {
+        let Some(shadow) = shadow else {
             return Err(crate::apply::backend::DryRunError::ShadowUnsupported);
         };
         shadow

@@ -34,7 +34,7 @@ pub(crate) mod session;
 /// [`MigrationBackend`](super::MigrationBackend).
 pub mod status_sql;
 
-use super::capability::{BackfillSpec, OnlineSchemaChange, ShadowDryRun};
+use super::capability::{BackfillSpec, OnlineSchemaChange};
 use super::{
     CrossDeployObligations, JournalFuture, MigrationBackend, ProjectLockAcquisition,
     PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
@@ -709,13 +709,6 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
 
     fn online(&self) -> Option<&dyn OnlineSchemaChange> {
         Some(self)
-    }
-
-    // Host-pg build: no shadow harness → always `None`, so
-    // `dry_run`/`dry_run_declarative` return `DryRunError::ShadowUnsupported`
-    // (the honest v1 gap — host-side shadow is sequenced later).
-    fn shadow(&self) -> Option<&dyn ShadowDryRun> {
-        None
     }
 
     fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations> {
@@ -1663,10 +1656,6 @@ mod recording_session_genericity {
         assert!(
             backend.online().is_some(),
             "generic D must expose the host-capable online runner"
-        );
-        assert!(
-            backend.shadow().is_none(),
-            "generic D has no PgShadow harness"
         );
 
         let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
