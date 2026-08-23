@@ -1397,11 +1397,25 @@ impl Config {
 
     fn param(&mut self, key: &str, value: &str) -> Result<(), Error> {
         match key {
+            // An EMPTY credential means UNSET, not "a user whose name is the
+            // empty string". libpq resolves `?user=` by falling back to the
+            // operating-system user -- measured: psql on
+            // `postgres://:pw@127.0.0.1/postgres` fails with
+            // `role "root" does not exist`, the OS user, never having tried an
+            // empty one. Storing `Some("")` suppressed the same `whoami`
+            // fallback in `connect_raw`, so the driver sent an empty user name
+            // the server was certain to reject, and an empty password produced
+            // "password authentication failed" where libpq says
+            // "no password supplied".
             "user" => {
-                self.user(value);
+                if !value.is_empty() {
+                    self.user(value);
+                }
             }
             "password" => {
-                self.password(value);
+                if !value.is_empty() {
+                    self.password(value);
+                }
             }
             "dbname" => {
                 self.dbname(value);
@@ -2268,11 +2282,15 @@ impl<'a> UrlParser<'a> {
         };
         self.eat_byte();
 
+        // Empty means UNSET here too -- `postgres://:pw@h/db` names no user and
+        // `postgres://u:@h/db` no password. See the `"user"` arm of `param`.
         let mut it = creds.splitn(2, ':');
         let user = self.decode(it.next().unwrap())?;
-        self.config.user(user);
+        if !user.is_empty() {
+            self.config.user(user);
+        }
 
-        if let Some(password) = it.next() {
+        if let Some(password) = it.next().filter(|password| !password.is_empty()) {
             Self::validate_percent_escapes(password)?;
             let password = Cow::from(percent_encoding::percent_decode(password.as_bytes()));
             self.config.password(password);
