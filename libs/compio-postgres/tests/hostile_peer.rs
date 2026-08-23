@@ -460,6 +460,78 @@ async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> 
     common::error_chain(&error)
 }
 
+/// The extended-protocol twin of
+/// [`a_data_row_with_fewer_fields_than_its_description_is_refused`].
+///
+/// The arity check lives in TWO constructors -- `Row::new` for the extended
+/// path and `SimpleQueryRow::new` for the simple one -- and neither was driven
+/// by a test. The simple-query version needs one scripted reply; this one needs
+/// two, because the column count is fixed by the RowDescription that `prepare`
+/// receives and the offending DataRow only arrives on the later execute. That
+/// split is the whole reason the two constructors exist separately, so covering
+/// one says nothing about the other.
+#[compio::test]
+async fn an_extended_query_data_row_shorter_than_its_description_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        // prepare: ParseComplete, no parameters, two columns, ready.
+        let mut prepare_reply = backend_frame(b'1', b"");
+        prepare_reply.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        prepare_reply.extend_from_slice(&backend_frame(b'T', &row_description(&["a", "b"])));
+        prepare_reply.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        // execute: a row carrying one field where two columns were declared.
+        // Complete in every other respect, for the reason recorded on the
+        // simple-query twin -- truncating it here would make the driver fail on
+        // the truncation and the test would pass with the check removed.
+        let mut short_row = Vec::new();
+        short_row.extend_from_slice(&1u16.to_be_bytes());
+        short_row.extend_from_slice(&1u32.to_be_bytes());
+        short_row.push(b'x');
+        let mut query_reply = backend_frame(b'2', b"");
+        query_reply.extend_from_slice(&backend_frame(b'D', &short_row));
+        query_reply.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+        query_reply.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 211);
+            expect_frontend_until_sync(&mut stream);
+            let _ = stream.write_all(&prepare_reply);
+            let _ = stream.flush();
+            expect_frontend_until_sync(&mut stream);
+            let _ = stream.write_all(&query_reply);
+            let _ = stream.flush();
+            thread::sleep(Duration::from_millis(300));
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(NoTls)
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let statement = compio::time::timeout(OPERATION_WATCHDOG, client.prepare("SELECT 1"))
+            .await
+            .expect("prepare hung against the scripted peer")
+            .expect("the scripted prepare reply is well formed");
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, client.query(&statement, &[]))
+            .await
+            .expect("the query hung instead of rejecting a short DataRow")
+            .expect_err("the driver built a row with fewer fields than columns");
+        assert!(
+            !common::error_chain(&error).is_empty(),
+            "a short DataRow produced an error with no description"
+        );
+
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        drop(client);
+        server.finish();
+    })
+    .await
+    .expect("extended short-DataRow test exceeded its outer watchdog");
+}
+
 /// `BindComplete` is a real message, correctly framed - but Parse was what was
 /// owed. Accepting it would leave the driver believing a statement is prepared
 /// that the server never parsed.
