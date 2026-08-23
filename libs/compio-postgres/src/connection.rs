@@ -1046,6 +1046,39 @@ fn route_async(
         Message::ParameterStatus(body) => {
             let name = body.name().map_err(Error::parse)?.to_string();
             let value = body.value().map_err(Error::parse)?.to_string();
+
+            // A SESSION THAT STOPS BEING UTF8 RETIRES THE CONNECTION.
+            //
+            // `Config::param` already refuses a `client_encoding` it cannot
+            // decode, and says why: Rust strings are UTF-8, so anything else
+            // would be "decoded as something it is not". A mid-session
+            // `SET client_encoding` reaches the same state through a door that
+            // had no check on it, and the consequence is not an error but
+            // WRONG TEXT. Measured against the live server: the same value came
+            // back as "\u{e9}" after `SET client_encoding TO 'LATIN1'` where the
+            // server holds "\u{c3}\u{a9}", because the LATIN1 bytes happen to be
+            // valid UTF-8 for a different string. Where they are not valid
+            // UTF-8 the decoder already errors safely; it is only the
+            // overlapping case that is silent, and silence is the reason this
+            // has to be caught here rather than left to the decoder.
+            //
+            // Retiring is harsh -- a caller who sets the encoding deliberately
+            // loses the connection -- but the alternative is handing back
+            // strings the server did not send. The error names the setting so
+            // the cause is not a mystery.
+            if name.eq_ignore_ascii_case("client_encoding") {
+                let normalized = value.replace(['-', '_'], "").to_ascii_uppercase();
+                if !matches!(normalized.as_str(), "UTF8" | "UNICODE") {
+                    return Err(Error::config(
+                        format!(
+                            "session changed client_encoding to {value}; this driver \
+                             decodes text as UTF-8 and cannot read that encoding"
+                        )
+                        .into(),
+                    ));
+                }
+            }
+
             parameters.lock().insert(name, value);
         }
         _ => return Err(Error::unexpected_message()),

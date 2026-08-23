@@ -1,33 +1,37 @@
 //! What happens when the session's `client_encoding` stops being UTF8.
 //!
-//! This driver announces `client_encoding=UTF8` in its startup packet and
-//! REFUSES any other value in a connection string -- `config.rs` has
-//! `client_encoding_accepts_utf8_and_refuses_an_encoding_we_cannot_decode`,
-//! and the reason is stated there: Rust strings are UTF-8, so an encoding we
-//! cannot decode would be "silently decoded as something it is not".
-//!
-//! A mid-session `SET client_encoding` walks straight past that guard, and the
-//! consequence is exactly the one the DSN check exists to prevent. MEASURED
-//! against the live server, same statement, same server value:
+//! `Config::param` refuses a `client_encoding` it cannot decode, and says why:
+//! Rust strings are UTF-8, so another encoding would be "silently decoded as
+//! something it is not". A mid-session `SET client_encoding` reached the same
+//! state through a door with no check on it, and the consequence was not an
+//! error but WRONG TEXT. Measured against the live server before the fix, same
+//! statement, same server value:
 //!
 //! ```text
 //! UTF8 session:   "\u{c3}\u{a9}"  bytes c3 83 c2 a9
 //! LATIN1 session: "\u{e9}"        bytes c3 a9
 //! ```
 //!
-//! The bytes `c3 a9` are the LATIN1 encoding of U+00C3 U+00A9 AND a valid
-//! UTF-8 encoding of U+00E9, so nothing fails -- the caller is handed a
-//! different string than the server holds. Where the bytes are not valid UTF-8
-//! (`chr(233)` alone, byte `e9`) the driver does the safe thing and errors with
-//! "error deserializing column 0", leaving the session usable; it is only the
-//! overlapping case that is silent.
+//! The LATIN1 bytes of one string are a valid UTF-8 encoding of a different
+//! one, so nothing failed -- the caller was handed a string the server does not
+//! hold. Where the bytes are NOT valid UTF-8 the decoder already errored
+//! safely; it is only the overlapping case that was silent, and silence is why
+//! this is caught at the protocol layer rather than left to the decoder.
 //!
-//! THE TEST BELOW IS `#[ignore]`d AND RED ON PURPOSE. It asserts the behaviour
-//! this driver should have -- refusing to hand back text it cannot vouch for --
-//! and is the ready-made regression test for that fix. Drop the `#[ignore]`
-//! when the connection task acts on a `client_encoding` it did not ask for.
+//! The connection is now retired instead. That is harsh -- a caller who sets
+//! the encoding deliberately loses the connection -- and it is the only option
+//! that never returns text the server did not send.
+//!
+//! WHERE THE CAUSE LANDS, and it is a real limitation: the naming error is the
+//! CONNECTION TASK's return value. The caller's in-flight command fails with
+//! the generic "connection closed", because the request channel closes under
+//! it. So a caller who does not keep the `Connection` join handle sees only
+//! that the session died. Both halves are asserted below so the split is
+//! visible rather than discovered.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::{Client, Connection, Error, NoTls, Socket};
+use compio_postgres::tls::NoTlsStream;
+use compio::runtime::JoinHandle;
 use std::time::Duration;
 
 #[allow(dead_code)]
@@ -40,89 +44,76 @@ fn test_url() -> String {
         .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
-async fn connect() -> Client {
+/// Keeps the driver's join handle, because the cause of a retirement is its
+/// return value and not the caller's error.
+async fn connect_keeping_driver() -> (Client, JoinHandle<Result<(), Error>>) {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
-        .await
-        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
-    compio::runtime::spawn(async move {
-        if let Err(error) = connection.run().await {
-            eprintln!("connection error: {error}");
-        }
-    })
-    .detach();
-    client
+    let (client, connection): (Client, Connection<Socket, NoTlsStream>) =
+        compio_postgres::connect(&url, NoTls)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+    (client, driver)
 }
 
-/// Bytes that are invalid UTF-8 are refused rather than mangled. This half
-/// ALREADY HOLDS and is pinned so a future encoding change cannot quietly
-/// weaken it into the silent case below.
+/// A session that stops being UTF8 retires the connection, and the driver says
+/// which setting did it.
+///
+/// The `SET` itself is where this lands: PostgreSQL reports `client_encoding`
+/// with a `ParameterStatus` ahead of that command's `ReadyForQuery`, so the
+/// connection task sees the change while the command is still in flight. The
+/// driver therefore never reaches a state where it would decode a byte it
+/// cannot vouch for.
 #[compio::test]
-async fn undecodable_text_is_an_error_and_the_session_survives() {
+async fn a_non_utf8_session_encoding_retires_the_connection() {
     compio::time::timeout(WATCHDOG, async {
-        let client = connect().await;
+        let (client, driver) = connect_keeping_driver().await;
+
         client
             .batch_execute("SET client_encoding TO 'LATIN1'")
             .await
-            .expect("the server accepts the encoding change");
+            .expect_err("changing the session encoding must not be accepted silently");
 
-        // chr(233) is U+00E9; LATIN1 encodes it as the single byte 0xE9, which
-        // is not valid UTF-8 on its own.
-        let row = client
-            .query_one("SELECT chr(233)::text", &[])
+        // The connection is gone, not merely this command.
+        assert!(
+            client.batch_execute("SELECT 1").await.is_err(),
+            "the session kept serving queries after its encoding changed"
+        );
+
+        // The CAUSE is the driver's return value. Asserted separately because
+        // the caller above cannot see it -- that split is the limitation.
+        drop(client);
+        let outcome = driver.await.expect("the driver task panicked");
+        let error = outcome.expect_err("the driver must report why it retired");
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("client_encoding"),
+            "the driver's error must name the setting that caused it, got: {chain}"
+        );
+    })
+    .await
+    .expect("encoding-retirement test exceeded its watchdog");
+}
+
+/// THE ONE-VARIABLE CONTROL. Naming the encoding the driver already announced
+/// is a no-op and must NOT retire anything -- otherwise "retire when
+/// client_encoding is reported" would be satisfied by retiring on every report,
+/// and PostgreSQL reports this parameter at startup on every connection.
+#[compio::test]
+async fn setting_the_encoding_to_utf8_changes_nothing() {
+    compio::time::timeout(WATCHDOG, async {
+        let (client, _driver) = connect_keeping_driver().await;
+        client
+            .batch_execute("SET client_encoding TO 'UTF8'")
             .await
-            .expect("the row itself arrives");
-        row.try_get::<_, String>(0)
-            .expect_err("undecodable bytes must not be handed back as a String");
-
-        // The session is not poisoned by one undecodable value.
+            .expect("UTF8 is what the driver already announced");
         let alive: i32 = client
             .query_one("SELECT 1::int4", &[])
             .await
-            .expect("the session survives an undecodable column")
+            .expect("the session survives a no-op encoding change")
             .get(0);
         assert_eq!(alive, 1);
     })
     .await
-    .expect("undecodable-text test exceeded its watchdog");
-}
-
-/// The silent case: LATIN1 bytes that happen to be valid UTF-8.
-///
-/// RED ON PURPOSE -- this asserts the behaviour the driver SHOULD have. Today
-/// it returns "\u{e9}" for a server value of "\u{c3}\u{a9}" with no error at
-/// all, which is the failure the DSN-level `client_encoding` check exists to
-/// prevent, reached through a door that has no check on it.
-#[compio::test]
-#[ignore = "known defect: a mid-session client_encoding change is not acted on"]
-async fn a_non_utf8_session_encoding_does_not_silently_change_text() {
-    compio::time::timeout(WATCHDOG, async {
-        let client = connect().await;
-        let before: String = client
-            .query_one("SELECT chr(195) || chr(169)", &[])
-            .await
-            .expect("baseline query")
-            .get(0);
-
-        client
-            .batch_execute("SET client_encoding TO 'LATIN1'")
-            .await
-            .expect("the server accepts the encoding change");
-
-        // Either answer is acceptable: refuse the session, or keep decoding
-        // correctly. Returning a DIFFERENT string with no error is not.
-        match client.query_one("SELECT chr(195) || chr(169)", &[]).await {
-            Err(_) => {}
-            Ok(row) => {
-                let after: String = row.get(0);
-                assert_eq!(
-                    after, before,
-                    "the same server value decoded differently after the encoding \
-                     changed, and nothing reported it"
-                );
-            }
-        }
-    })
-    .await
-    .expect("encoding-change test exceeded its watchdog");
+    .expect("encoding-control test exceeded its watchdog");
 }
