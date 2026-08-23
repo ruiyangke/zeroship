@@ -1,20 +1,29 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Opens a fresh socket, picks its transport with the same ADDRESS-AWARE rule
-// the connection path uses, then routes through the shared cancel-packet
-// writer.
+// Opens a fresh socket on the SAME transport the session negotiated, then
+// routes through the shared cancel-packet writer.
 //
-// Address-aware is all it shares. It does NOT carry over the connect path's
-// RETRY, and that has a consequence worth knowing: a session that ended up in
-// plaintext because a `prefer` TLS handshake failed (`connect.rs`, the
-// `is_tls_handshake` arm) cannot be cancelled at all. This recomputes TLS,
-// hits the same handshake failure, and has no second leg to fall back to.
-// Deliberate - the retry belongs to a connection that has a caller waiting on
-// it - but it means cancellation is best-effort on exactly those sessions.
+// It REPLAYS that transport - `SocketConfig::encryption`, recorded by
+// `connect.rs` from the stream `negotiate_tls` actually produced - rather than
+// re-running the `sslmode` decision. Re-deriving it is wrong in both
+// directions, because `connect.rs` has a retry and this has none:
+//
+//   * `allow` offers plaintext first and re-dials with TLS when the server
+//     refuses, so an `hostssl`-only server yields an ENCRYPTED session. A
+//     re-derived cancel opens in plaintext and puts the backend PID and secret
+//     key - a bearer credential, see `cancel_query_raw` - on the wire in the
+//     clear. The postmaster dispatches `CancelRequest` before HBA, so it is
+//     accepted and nothing ever reports the downgrade.
+//   * `prefer` retries a failed handshake in plaintext, so the session is
+//     UNENCRYPTED. A re-derived cancel attempts TLS, hits the same handshake
+//     failure, and - having no second leg - cannot cancel that session at all.
+//
+// Replaying removes both. It still adds no retry: there is nothing to retry
+// for, because the transport is no longer a guess.
 
 use crate::client::SocketConfig;
 use crate::config::{SslMode, SslNegotiation};
-use crate::connect::{first_encryption_for_addr, with_connect_timeout};
+use crate::connect::with_connect_timeout;
 use crate::tls::MakeTlsConnect;
 use crate::{Error, Socket, cancel_query_raw, connect_socket};
 use std::io;
@@ -41,7 +50,7 @@ where
     };
 
     with_connect_timeout(config.connect_timeout, async move {
-        let encryption = first_encryption_for_addr(&config.addr, ssl_mode);
+        let encryption = config.encryption;
         let tls = tls
             .make_tls_connect(config.hostname.as_deref().unwrap_or(""))
             .map_err(|e| Error::tls(e.into()))?;
@@ -98,7 +107,7 @@ where
     };
 
     let stream = with_connect_timeout(config.connect_timeout, async move {
-        let encryption = first_encryption_for_addr(&config.addr, ssl_mode);
+        let encryption = config.encryption;
         let tls = tls
             .make_tls_connect(config.hostname.as_deref().unwrap_or(""))
             .map_err(|e| Error::tls(e.into()))?;
@@ -188,6 +197,7 @@ mod tests {
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
+            encryption: crate::connect_tls::Encryption::Plaintext,
         };
         let cancel = Box::pin(cancel_query_confirmed(
             Some(config),
@@ -224,7 +234,35 @@ mod tests {
             .expect("scripted cancel server panicked");
     }
 
-    #[cfg(unix)]
+    fn ssl_request() -> Vec<u8> {
+        let mut packet = bytes::BytesMut::new();
+        frontend::ssl_request(&mut packet);
+        packet.to_vec()
+    }
+
+    /// The `FATAL` an `hostssl`-only `pg_hba.conf` returns to a plaintext
+    /// startup: it arrives after the startup packet, so `sslmode=allow` sees it
+    /// as a failure of its first leg and re-dials with TLS.
+    fn hba_refusal() -> Vec<u8> {
+        let mut body = Vec::new();
+        for (field, value) in [
+            (b'S', "FATAL"),
+            (b'V', "FATAL"),
+            (b'C', "28000"),
+            (b'M', "no pg_hba.conf entry for host, SSL off"),
+        ] {
+            body.push(field);
+            body.extend_from_slice(value.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
+
+        let mut response = vec![b'E'];
+        response.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+        response.extend_from_slice(&body);
+        response
+    }
+
     fn startup_response() -> Vec<u8> {
         let mut response = Vec::new();
 
@@ -260,6 +298,38 @@ mod tests {
         let compio::BufResult(result, _) = stream.write_all(bytes).await;
         result.expect("scripted server write");
         stream.flush().await.expect("scripted server flush");
+    }
+
+    /// Consume one startup packet (`int32` length, then the body).
+    async fn read_startup<S>(stream: &mut S) -> Vec<u8>
+    where
+        S: AsyncRead + Unpin,
+    {
+        let length = read_exact(stream, 4).await;
+        let length = u32::from_be_bytes(length.try_into().expect("startup packet length"));
+        assert!(length >= 8, "startup packet is too short: {length}");
+        read_exact(stream, length as usize - 4).await
+    }
+
+    /// What the first bytes of a cancel connection were, and the full packet
+    /// when the client sent one.
+    async fn observe_cancel_connection<S>(stream: &mut S) -> (Vec<u8>, Option<Vec<u8>>)
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let opening = read_exact(stream, 8).await;
+        if opening == ssl_request() {
+            write_all(stream, vec![b'S']).await;
+            // Not `read_exact`'s panicking helper: a client whose handshake
+            // fails sends nothing more and closes, and that is an outcome to
+            // report rather than a reason to blow up the scripted peer.
+            let compio::BufResult(result, packet) = stream.read_exact(vec![0; 16]).await;
+            (opening, result.ok().map(|_| packet))
+        } else {
+            let mut packet = opening.clone();
+            packet.extend_from_slice(&read_exact(stream, 8).await);
+            (opening, Some(packet))
+        }
     }
 
     #[cfg(unix)]
@@ -435,6 +505,9 @@ mod tests {
             tcp_user_timeout: None,
             keepalive: None,
             require_peer: None,
+            // The only value `require` can record: `connect.rs` never offers
+            // it a plaintext leg, and a server refusal is fatal there.
+            encryption: crate::connect_tls::Encryption::Tls,
         };
         let connected = Arc::new(AtomicBool::new(false));
 
@@ -463,5 +536,235 @@ mod tests {
             connected.load(Ordering::Relaxed),
             "TCP require cancel did not use the TLS connector"
         );
+    }
+
+    /// The control for the two tests below: the SAME end-to-end shape, with
+    /// `sslmode` the single variable. `require` has one leg, so what
+    /// `connect.rs` records and what the mode would have re-derived agree, and
+    /// the cancel opens with an `SSLRequest` under either rule. It must stay
+    /// green while the `allow` and `prefer` cases move.
+    #[compio::test]
+    async fn require_records_tls_and_its_cancel_opens_encrypted() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted TLS-only server");
+        let addr = listener.local_addr().expect("scripted server address");
+
+        let server = compio::runtime::spawn(async move {
+            let (mut session, _) = listener.accept().await.expect("accept session");
+            assert_eq!(read_exact(&mut session, 8).await, ssl_request());
+            write_all(&mut session, vec![b'S']).await;
+            read_startup(&mut session).await;
+            write_all(&mut session, startup_response()).await;
+
+            let (mut cancel, _) = listener.accept().await.expect("accept cancel connection");
+            let observed = observe_cancel_connection(&mut cancel).await;
+            // Returned so neither socket closes before the test has read the
+            // observation off them.
+            (observed, session, cancel)
+        });
+
+        let tls = PassthroughTls {
+            connected: Arc::new(AtomicBool::new(false)),
+        };
+        let dsn = format!(
+            "host=localhost hostaddr=127.0.0.1 port={} user=postgres sslmode=require",
+            addr.port()
+        );
+        let (client, _connection) =
+            compio::time::timeout(Duration::from_secs(2), crate::connect(&dsn, tls.clone()))
+                .await
+                .expect("require connect timed out")
+                .expect("require connect failed");
+
+        compio::time::timeout(
+            Duration::from_secs(2),
+            client.cancel_token().cancel_query(tls),
+        )
+        .await
+        .expect("require cancel timed out")
+        .expect("require cancel failed");
+
+        let ((opening, packet), _session, _cancel) =
+            compio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("scripted TLS-only server timed out")
+                .expect("scripted TLS-only server panicked");
+
+        assert_eq!(
+            opening,
+            ssl_request(),
+            "a require session's cancel opened in plaintext"
+        );
+        assert_eq!(packet, Some(cancel_packet()));
+    }
+
+    /// A connector that always fails its handshake, which is what `prefer`
+    /// retries in plaintext.
+    #[derive(Clone)]
+    struct FailingTls;
+
+    impl<S> MakeTlsConnect<S> for FailingTls
+    where
+        S: AsyncRead + AsyncWrite + Unpin + 'static,
+    {
+        type Stream = PassthroughStream<S>;
+        type TlsConnect = FailingTls;
+        type Error = std::io::Error;
+
+        fn make_tls_connect(&mut self, _: &str) -> Result<Self::TlsConnect, Self::Error> {
+            Ok(self.clone())
+        }
+    }
+
+    impl<S> TlsConnect<S> for FailingTls
+    where
+        S: AsyncRead + AsyncWrite + Unpin + 'static,
+    {
+        type Stream = PassthroughStream<S>;
+        type Error = std::io::Error;
+        type Future = Pin<Box<dyn Future<Output = Result<PassthroughStream<S>, std::io::Error>>>>;
+
+        fn connect(self, _: S) -> Self::Future {
+            Box::pin(async move { Err(std::io::Error::other("scripted TLS handshake failure")) })
+        }
+    }
+
+    /// `sslmode=allow` offers plaintext first and re-dials with TLS when the
+    /// server refuses it, so an `hostssl`-only server yields an ENCRYPTED
+    /// session. The cancel key is a bearer credential; re-deriving the cancel
+    /// transport from the mode alone sends it in the clear on that session,
+    /// and the postmaster - which dispatches `CancelRequest` before HBA -
+    /// accepts it, so nothing observable ever reports the downgrade.
+    #[compio::test]
+    async fn allow_cancel_uses_the_transport_the_session_actually_negotiated() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted hostssl server");
+        let addr = listener.local_addr().expect("scripted server address");
+
+        let server = compio::runtime::spawn(async move {
+            // Leg 1: the plaintext attempt `allow` makes first, refused the
+            // way an `hostssl`-only pg_hba.conf refuses it.
+            let (mut plaintext, _) = listener.accept().await.expect("accept plaintext leg");
+            read_startup(&mut plaintext).await;
+            write_all(&mut plaintext, hba_refusal()).await;
+            drop(plaintext);
+
+            // Leg 2: the TLS retry, which is the session that exists.
+            let (mut session, _) = listener.accept().await.expect("accept TLS leg");
+            assert_eq!(read_exact(&mut session, 8).await, ssl_request());
+            write_all(&mut session, vec![b'S']).await;
+            read_startup(&mut session).await;
+            write_all(&mut session, startup_response()).await;
+
+            let (mut cancel, _) = listener.accept().await.expect("accept cancel connection");
+            let observed = observe_cancel_connection(&mut cancel).await;
+            // Returned so neither socket closes before the test has read the
+            // observation off them.
+            (observed, session, cancel)
+        });
+
+        let tls = PassthroughTls {
+            connected: Arc::new(AtomicBool::new(false)),
+        };
+        let dsn = format!(
+            "host=localhost hostaddr=127.0.0.1 port={} user=postgres sslmode=allow",
+            addr.port()
+        );
+        let (client, _connection) =
+            compio::time::timeout(Duration::from_secs(2), crate::connect(&dsn, tls.clone()))
+                .await
+                .expect("allow connect timed out")
+                .expect("allow must retry with TLS when plaintext is refused");
+
+        compio::time::timeout(
+            Duration::from_secs(2),
+            client.cancel_token().cancel_query(tls),
+        )
+        .await
+        .expect("allow cancel timed out")
+        .expect("allow cancel failed");
+
+        let ((opening, packet), _session, _cancel) =
+            compio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("scripted hostssl server timed out")
+                .expect("scripted hostssl server panicked");
+
+        assert_eq!(
+            opening,
+            ssl_request(),
+            "the session negotiated TLS but its cancel request opened in plaintext, putting the \
+             backend PID and secret key on the wire unencrypted"
+        );
+        assert_eq!(packet, Some(cancel_packet()));
+    }
+
+    /// The mirror case. `prefer` retries a failed handshake in plaintext, so
+    /// the session is UNENCRYPTED; re-deriving the cancel transport from the
+    /// mode makes the cancel attempt TLS, hit the same handshake failure, and
+    /// - having no second leg - fail outright. The session cannot be cancelled
+    /// at all.
+    #[compio::test]
+    async fn prefer_cancel_reaches_a_session_that_fell_back_to_plaintext() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted TLS-offering server");
+        let addr = listener.local_addr().expect("scripted server address");
+
+        let server = compio::runtime::spawn(async move {
+            // Leg 1: `prefer` offers TLS first. Accept the request so the
+            // client reaches the handshake its connector then fails.
+            let (mut attempted, _) = listener.accept().await.expect("accept TLS leg");
+            assert_eq!(read_exact(&mut attempted, 8).await, ssl_request());
+            write_all(&mut attempted, vec![b'S']).await;
+            drop(attempted);
+
+            // Leg 2: the plaintext retry, which is the session that exists.
+            let (mut session, _) = listener.accept().await.expect("accept plaintext leg");
+            read_startup(&mut session).await;
+            write_all(&mut session, startup_response()).await;
+
+            let (mut cancel, _) = listener.accept().await.expect("accept cancel connection");
+            let observed = observe_cancel_connection(&mut cancel).await;
+            // Returned so neither socket closes before the test has read the
+            // observation off them.
+            (observed, session, cancel)
+        });
+
+        let dsn = format!(
+            "host=localhost hostaddr=127.0.0.1 port={} user=postgres sslmode=prefer",
+            addr.port()
+        );
+        let (client, _connection) =
+            compio::time::timeout(Duration::from_secs(2), crate::connect(&dsn, FailingTls))
+                .await
+                .expect("prefer connect timed out")
+                .expect("prefer must fall back to plaintext after a handshake failure");
+
+        let cancelled = compio::time::timeout(
+            Duration::from_secs(2),
+            client.cancel_token().cancel_query(FailingTls),
+        )
+        .await
+        .expect("prefer cancel timed out");
+
+        let ((opening, packet), _session, _cancel) =
+            compio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .expect("scripted TLS-offering server timed out")
+                .expect("scripted TLS-offering server panicked");
+
+        cancelled.expect(
+            "the session runs in plaintext, but its cancel re-derived TLS from sslmode and died \
+             on the same handshake failure the session had already fallen back from",
+        );
+        assert_ne!(
+            opening,
+            ssl_request(),
+            "the cancel offered TLS to a session that had already fallen back to plaintext"
+        );
+        assert_eq!(packet, Some(cancel_packet()));
     }
 }

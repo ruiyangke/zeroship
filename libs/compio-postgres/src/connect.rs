@@ -522,7 +522,7 @@ where
     // Taken while the socket is still a `Socket` - `connect_raw` is generic
     // over the stream and the TLS wrapper hides the descriptor.
     let release = socket.release_handle();
-    let (mut client, connection) = connect_raw_with_target_session_attrs(
+    let (mut client, connection, negotiated) = connect_raw_with_target_session_attrs(
         socket,
         tls,
         encryption,
@@ -545,6 +545,9 @@ where
             None
         },
         require_peer: config.get_require_peer().map(str::to_owned),
+        // `negotiated`, not `encryption`: the argument above is what this leg
+        // ATTEMPTED. A cancel has to reproduce what the session got.
+        encryption: negotiated,
     });
 
     Ok((client, connection))

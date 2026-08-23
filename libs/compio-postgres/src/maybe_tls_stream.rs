@@ -4,6 +4,7 @@
 // methods), so the wrapper is a plain enum; no pin_project_lite needed.
 
 use crate::buf_stream::SplitStream;
+use crate::connect_tls::Encryption;
 use crate::tls::{ChannelBinding, ClientCertStatus, TlsStream};
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite};
@@ -15,6 +16,22 @@ pub enum MaybeTlsStream<S, T> {
     Raw(S),
     /// TLS-wrapped stream produced by a [`TlsConnect`](crate::tls::TlsConnect).
     Tls(T),
+}
+
+impl<S, T> MaybeTlsStream<S, T> {
+    /// Which transport this stream ACTUALLY ended up on.
+    ///
+    /// Not the same question as "which transport was attempted": a server that
+    /// answers `N` to `SSLRequest` leaves a `Tls` attempt running in plaintext
+    /// on the same socket. Anything that has to reproduce a session's transport
+    /// later - a `CancelRequest` in particular - must ask this, not re-run the
+    /// `sslmode` decision, because the two disagree exactly where it matters.
+    pub(crate) fn negotiated_encryption(&self) -> Encryption {
+        match self {
+            MaybeTlsStream::Raw(_) => Encryption::Plaintext,
+            MaybeTlsStream::Tls(_) => Encryption::Tls,
+        }
+    }
 }
 
 impl<S, T> AsyncRead for MaybeTlsStream<S, T>
