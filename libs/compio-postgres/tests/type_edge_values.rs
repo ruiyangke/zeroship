@@ -323,3 +323,86 @@ async fn a_multidimensional_array_is_refused_rather_than_flattened() {
         .expect("one-dimensional array");
     assert_eq!(row.get::<_, Vec<i32>>(0), vec![1, 2, 3, 4]);
 }
+
+/// A width mismatch is REFUSED, never silently narrowed or widened.
+///
+/// This is the same silent-wrong-value family as the rest of this file, and
+/// the narrowing direction is the dangerous one: an `int8` of 9_000_000_000
+/// does not fit an `i32`, so a driver that truncated would hand back a number
+/// the database does not hold, with no error. The widening direction is
+/// checked too, because a decoder loose enough to widen is loose enough to
+/// narrow -- they are the same missing gate.
+///
+/// The refusal is `accepts`-driven, so it happens before any bytes are
+/// interpreted; the assertions below are about that gate being wired into this
+/// driver's own accessor, not about the decoder in isolation.
+#[compio::test]
+async fn an_integer_width_mismatch_is_refused_not_truncated() {
+    let Some(url) = test_url() else {
+        eprintln!("PG_TEST_URL unset; skipping");
+        return;
+    };
+    let client = connect_client(&url).await;
+
+    // Narrowing: the value genuinely does not fit.
+    let row = client
+        .query_one("SELECT 9000000000::int8", &[])
+        .await
+        .expect("int8 out of i32 range");
+    row.try_get::<_, i32>(0)
+        .expect_err("an int8 must not be truncated into an i32");
+
+    // Narrowing where the value WOULD fit: still refused, because the gate is
+    // on the TYPE, not on the value. If this passed while the case above
+    // failed, the driver would be range-checking instead of type-checking --
+    // silently correct until the day a value grew.
+    let row = client
+        .query_one("SELECT 1::int8", &[])
+        .await
+        .expect("small int8");
+    row.try_get::<_, i32>(0)
+        .expect_err("an int8 that happens to fit an i32 is still an int8");
+
+    // Widening is refused as well.
+    let row = client.query_one("SELECT 1::int4", &[]).await.expect("int4");
+    row.try_get::<_, i64>(0)
+        .expect_err("an int4 must not be widened into an i64");
+
+    // Control, one variable away: the MATCHING width must decode, so none of
+    // the above can be satisfied by refusing every integer.
+    let row = client
+        .query_one("SELECT 9000000000::int8", &[])
+        .await
+        .expect("int8 again");
+    assert_eq!(row.get::<_, i64>(0), 9_000_000_000i64);
+}
+
+/// Reading a text column as a number is refused, and vice versa.
+#[compio::test]
+async fn a_type_mismatch_across_families_is_refused() {
+    let Some(url) = test_url() else {
+        eprintln!("PG_TEST_URL unset; skipping");
+        return;
+    };
+    let client = connect_client(&url).await;
+
+    let row = client
+        .query_one("SELECT '42'::text", &[])
+        .await
+        .expect("text row");
+    row.try_get::<_, i32>(0)
+        .expect_err("text that looks numeric is still text");
+    assert_eq!(
+        row.get::<_, String>(0),
+        "42",
+        "the control: text reads as text"
+    );
+
+    let row = client
+        .query_one("SELECT 42::int4", &[])
+        .await
+        .expect("int row");
+    row.try_get::<_, String>(0)
+        .expect_err("an int4 must not be rendered into a String by the decoder");
+    assert_eq!(row.get::<_, i32>(0), 42, "the control: int4 reads as int4");
+}
