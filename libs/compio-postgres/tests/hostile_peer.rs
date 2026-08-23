@@ -277,6 +277,65 @@ async fn a_data_row_without_a_row_description_is_refused() {
     .expect("out-of-place DataRow test exceeded its outer watchdog");
 }
 
+/// A `RowDescription` declaring more columns than the `DataRow` then carries.
+///
+/// This is the one malformed shape whose consequence was a PANIC rather than an
+/// error, and in the accessor whose entire contract is not panicking. The row
+/// accessors bounds-check the caller's index against the COLUMNS and then index
+/// the FIELDS, so the two lists agreeing is load-bearing; when they disagreed,
+/// `try_get` -- which returns a `Result` precisely so a caller need not trust
+/// the server -- panicked with an out-of-bounds index instead.
+///
+/// `src/row.rs` grew an arity check for it and carries a comment explaining the
+/// panic. Nothing drove that check from outside: it is enforced in two
+/// independent constructors and no test in the tree reached either. So this
+/// pins the one that the simple-query path uses.
+fn row_description(columns: &[&str]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&u16::try_from(columns.len()).expect("column count").to_be_bytes());
+    for name in columns {
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0u32.to_be_bytes()); // table oid: not from a table
+        body.extend_from_slice(&0i16.to_be_bytes()); // column id
+        body.extend_from_slice(&25u32.to_be_bytes()); // text
+        body.extend_from_slice(&(-1i16).to_be_bytes()); // varlena
+        body.extend_from_slice(&(-1i32).to_be_bytes()); // no type modifier
+        body.extend_from_slice(&0u16.to_be_bytes()); // text format
+    }
+    body
+}
+
+#[compio::test]
+async fn a_data_row_with_fewer_fields_than_its_description_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut short_row = Vec::new();
+        short_row.extend_from_slice(&1u16.to_be_bytes()); // one field ...
+        short_row.extend_from_slice(&1u32.to_be_bytes());
+        short_row.push(b'x');
+
+        // THE RESPONSE MUST OTHERWISE BE COMPLETE, and this is the whole
+        // difficulty of the test. Ending it after the DataRow makes the driver
+        // fail on the truncation instead, so the test passed with the arity
+        // check REMOVED -- verified by mutation, which is the only reason this
+        // is written the hard way. With CommandComplete and ReadyForQuery
+        // present the only thing wrong is the arity, so the error can only come
+        // from the check under test.
+        let mut response = backend_frame(b'T', &row_description(&["a", "b"])); // ... two columns
+        response.extend_from_slice(&backend_frame(b'D', &short_row));
+        response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let chain = hostile_response_retires_session(210, response).await;
+        assert!(
+            !chain.is_empty(),
+            "a short DataRow produced an error with no description"
+        );
+    })
+    .await
+    .expect("short-DataRow test exceeded its outer watchdog");
+}
+
 /// A length shorter than the payload leaves trailing bytes the driver will read
 /// as the start of the next frame. It must not resynchronise onto them.
 #[compio::test]
