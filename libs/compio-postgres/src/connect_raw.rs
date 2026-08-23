@@ -205,7 +205,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
 {
-    connect_raw_with_target_session_attrs(
+    // The negotiated transport is dropped here on purpose: a caller-owned
+    // stream has no `SocketConfig`, so it can never issue a `CancelToken`
+    // cancel that would need to reproduce the transport.
+    let (client, connection, _negotiated) = connect_raw_with_target_session_attrs(
         stream,
         tls,
         encryption,
@@ -214,11 +217,17 @@ where
         TargetSessionAttrs::Any,
         release,
     )
-    .await
+    .await?;
+    Ok((client, connection))
 }
 
 /// The normal host-routing connection path, including its session-property
 /// check before the raw stream is packaged into a `Connection`.
+///
+/// Reports the transport the session ACTUALLY negotiated alongside the pair.
+/// `encryption` is only what was attempted; a server that answers `N` to
+/// `SSLRequest` continues in plaintext on the same socket, so the caller cannot
+/// recover the answer from its own argument. `cancel_query` needs the real one.
 pub(crate) async fn connect_raw_with_target_session_attrs<S, T>(
     stream: S,
     tls: T,
@@ -227,7 +236,7 @@ pub(crate) async fn connect_raw_with_target_session_attrs<S, T>(
     config: &Config,
     target_session_attrs: TargetSessionAttrs,
     release: Option<crate::release::ConnectionRelease>,
-) -> Result<(Client, Connection<S, T::Stream>), Error>
+) -> Result<(Client, Connection<S, T::Stream>, Encryption), Error>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     T: TlsConnect<S>,
@@ -242,6 +251,7 @@ where
         has_hostname,
     )
     .await?;
+    let negotiated = stream.negotiated_encryption();
 
     let mut handshake = Handshake {
         stream: BufStream::new(stream),
@@ -299,7 +309,7 @@ where
         drop_release,
     );
 
-    Ok((client, connection))
+    Ok((client, connection, negotiated))
 }
 
 /// Refuse a TLS parameter before the connector can emit a ClientHello.
