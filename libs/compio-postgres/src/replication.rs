@@ -3402,63 +3402,140 @@ mod tests {
             .expect("feedback still works after reads");
     }
 
-    #[test]
-    fn standby_status_update_encoding_layout() {
-        // Build a StandbyStatusUpdate frame and check the bytes match
-        // the documented wire layout. This is a unit test for the
-        // encoder; integration testing is in `tests/integration.rs`
-        // (gated on wal_level=logical).
-        //
-        // Layout: 'd' + length(38) + 'r' + 4×i64 + reply
-        //       = 1 + 4 + 1 + 32 + 1 = 39 bytes total
-
-        let lsn: u64 = 0x16B3750;
-        let ts: i64 = 700_000_000_000;
-        let mut bytes = vec![0u8; 0];
-        bytes.push(COPY_DATA_TAG);
-        bytes.extend_from_slice(&(4u32 + 34).to_be_bytes());
-        bytes.push(STANDBY_STATUS_UPDATE_TAG);
-        bytes.extend_from_slice(&lsn.to_be_bytes());
-        bytes.extend_from_slice(&lsn.to_be_bytes());
-        bytes.extend_from_slice(&lsn.to_be_bytes());
-        bytes.extend_from_slice(&ts.to_be_bytes());
-        bytes.push(0);
-
-        assert_eq!(bytes.len(), 39);
-        assert_eq!(bytes[0], b'd');
-        assert_eq!(
-            u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
-            38
-        );
-        assert_eq!(bytes[5], b'r');
+    /// A peer that KEEPS what the driver wrote, so a test can assert what
+    /// actually went upstream.
+    ///
+    /// Every other peer in this module throws writes away: `ScriptedPeer`
+    /// returns the length and discards the bytes, `WriteFailingPeer` counts
+    /// calls without retaining them, and the socket-backed tests never read the
+    /// far end. So until 2026-08-23 NOTHING here asserted what a
+    /// `StandbyStatusUpdate` looks like on the wire -- measured by corrupting
+    /// `encode_standby_status_update` four ways at once (wrong `CopyData` tag,
+    /// declared length 999, wrong sub-tag, write and flush LSNs swapped) and
+    /// watching all 177 lib tests stay green.
+    struct CapturingPeer {
+        written: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
     }
 
-    #[test]
-    fn xlog_data_frame_parsing_smoke() {
-        // Hand-assemble the body of a CopyData('w') frame and check
-        // the field layout we expect. This is a unit test on the
-        // body parser only — it doesn't drive the BufStream.
-        //
-        // body[0]      = 'w'
-        // body[1..9]   = wal_start (u64 BE)
-        // body[9..17]  = wal_end   (u64 BE)
-        // body[17..25] = timestamp (i64 BE)
-        // body[25..]   = payload
-        let mut body = vec![XLOG_DATA_TAG];
-        body.extend_from_slice(&0x100u64.to_be_bytes());
-        body.extend_from_slice(&0x200u64.to_be_bytes());
-        body.extend_from_slice(&700_000_000_000i64.to_be_bytes());
-        body.extend_from_slice(b"pgoutput-payload");
-        assert_eq!(body.len(), 25 + 16);
-        let wal_start = u64::from_be_bytes([
-            body[1], body[2], body[3], body[4], body[5], body[6], body[7], body[8],
-        ]);
-        let wal_end = u64::from_be_bytes([
-            body[9], body[10], body[11], body[12], body[13], body[14], body[15], body[16],
-        ]);
-        assert_eq!(wal_start, 0x100);
-        assert_eq!(wal_end, 0x200);
-        assert_eq!(&body[25..], b"pgoutput-payload");
+    impl compio::io::AsyncRead for CapturingPeer {
+        async fn read<B: compio::buf::IoBufMut>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            // Nothing to read: the subject is what the driver sends.
+            compio::buf::BufResult(Ok(0), buf)
+        }
+    }
+
+    impl compio::io::AsyncWrite for CapturingPeer {
+        async fn write<B: compio::buf::IoBuf>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            self.written
+                .borrow_mut()
+                .extend_from_slice(compio::buf::IoBuf::as_init(&buf));
+            let len = compio::buf::IoBuf::buf_len(&buf);
+            compio::buf::BufResult(Ok(len), buf)
+        }
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The bytes `send_standby_status_update` puts on the wire are the bytes
+    /// PostgreSQL's protocol specifies.
+    ///
+    /// THIS TEST USED TO ASSERT ITS OWN LITERALS. It hand-built a 39-byte
+    /// vector and then checked that vector's length, first byte, length field
+    /// and sub-tag -- properties of the three lines above the assertions, not of
+    /// the encoder, which it never called. Its only contact with `src/` was two
+    /// constants. Its twin `xlog_data_frame_parsing_smoke` did the same in the
+    /// read direction, re-extracting fields with hand-written index arithmetic
+    /// rather than the parser; it is deleted rather than repaired, because
+    /// `a_notice_is_skipped_and_the_next_xlog_frame_decodes` already drives the
+    /// real framer over the same frame and asserts the same three fields plus
+    /// `last_received_lsn`.
+    ///
+    /// The distinct LSNs are the point of driving the whole call rather than
+    /// the free function: `standby_lsns` returns write, flush and apply in that
+    /// order, and three equal values -- which the old fixture used -- cannot
+    /// tell a correct encoder from one that emits them in any other order.
+    #[compio::test]
+    async fn a_standby_status_update_is_encoded_as_postgresql_specifies() {
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                written: std::rc::Rc::clone(&written),
+            })),
+            lsn: LsnTracker::new(0x16B_3750),
+            in_flight: InFlight::default(),
+            release: None,
+        };
+
+        let (write_lsn, flush_lsn, apply_lsn) = stream.lsn.standby_lsns();
+        let before = postgres_microseconds_since_epoch();
+        stream
+            .send_standby_status_update(true)
+            .await
+            .expect("a healthy peer accepts a standby status update");
+        let after = postgres_microseconds_since_epoch();
+
+        let frame = written.borrow().clone();
+        // 'd' + length(4) + 'r' + 4 x i64 + reply = 1 + 4 + 1 + 32 + 1.
+        assert_eq!(frame.len(), 39, "frame was {frame:02x?}");
+        assert_eq!(frame[0], COPY_DATA_TAG, "not a CopyData frame");
+        assert_eq!(
+            u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]),
+            38,
+            "the declared length must cover the body and itself, not the tag"
+        );
+        assert_eq!(frame[5], STANDBY_STATUS_UPDATE_TAG, "wrong sub-tag");
+
+        let field = |at: usize| u64::from_be_bytes(frame[at..at + 8].try_into().expect("8 bytes"));
+        assert_eq!(field(6), write_lsn, "write LSN is not the first field");
+        assert_eq!(field(14), flush_lsn, "flush LSN is not the second field");
+        assert_eq!(field(22), apply_lsn, "apply LSN is not the third field");
+
+        // The timestamp is read from the clock inside the call, so it is pinned
+        // by the interval that brackets it rather than by a literal.
+        let timestamp = i64::from_be_bytes(frame[30..38].try_into().expect("8 bytes"));
+        assert!(
+            (before..=after).contains(&timestamp),
+            "timestamp {timestamp} is outside the {before}..={after} the call ran in"
+        );
+        assert_eq!(frame[38], 1, "reply_requested=true must set the last byte");
+    }
+
+    /// The control for the byte above it: the same call with the flag cleared
+    /// must differ in exactly that byte.
+    ///
+    /// Without this, `frame[38] == 1` is satisfied by an encoder that hard-codes
+    /// a 1 there and ignores its argument.
+    #[compio::test]
+    async fn a_standby_status_update_reports_whether_a_reply_is_wanted() {
+        let written = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut stream: ReplicationStream<CapturingPeer, CapturingPeer> = ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(CapturingPeer {
+                written: std::rc::Rc::clone(&written),
+            })),
+            lsn: LsnTracker::new(0x16B_3750),
+            in_flight: InFlight::default(),
+            release: None,
+        };
+        stream
+            .send_standby_status_update(false)
+            .await
+            .expect("a healthy peer accepts a standby status update");
+        let frame = written.borrow().clone();
+        assert_eq!(frame.len(), 39, "frame was {frame:02x?}");
+        assert_eq!(
+            frame[38], 0,
+            "reply_requested=false must clear the last byte"
+        );
     }
 
     #[test]
