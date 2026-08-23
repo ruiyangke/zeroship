@@ -1036,6 +1036,20 @@ impl MakeRustlsConnect {
             // properties of its session-cache implementation.
             client_config.resumption = rustls::client::Resumption::disabled();
         }
+        // Leaving resumption ENABLED for every other configuration is safe for
+        // a reason that lives on the SERVER, not here, so it is worth writing
+        // down: PostgreSQL hands out no resumable session at all. Measured
+        // 2026-08-23 against the `tls_live_setup.sh` servers with
+        // `openssl s_client -starttls postgres -sess_out`, on both a TLS 1.2
+        // and a TLS 1.3 server -- the Session-ID comes back empty, no session
+        // ticket arrives, and `-sess_out` writes NO file, so there is nothing a
+        // client could present to resume. A resumed handshake, which is the
+        // thing that would skip `verify_server_cert`, therefore cannot occur.
+        //
+        // This is a property of the peer, so it can change. If PostgreSQL ever
+        // enables session tickets, the two arms above stop being the only ones
+        // that need `Resumption::disabled()` and this whole decision has to be
+        // re-taken. Re-run the probe above rather than assuming either way.
 
         let mut connector = MakeRustlsConnect::new(Arc::new(client_config));
         connector.ssl_cert_mode = config.get_ssl_cert_mode();
