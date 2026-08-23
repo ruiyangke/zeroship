@@ -680,6 +680,109 @@ async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) ->
     common::error_chain(&error)
 }
 
+/// Drive `copy_in` against a peer that answers the COPY batch with `response`.
+///
+/// The COPY IN direction had NO hostile coverage: all three tests below drive
+/// COPY OUT. That is the wrong way round for where the machinery is. The IN
+/// direction is the one with the `CopyInReceiver`, the read obligation's
+/// paused/terminal states and `copy_initial_flushed`, and it is where the
+/// producer-teardown and guard-window defects were found.
+///
+/// Same two-batch shape as [`hostile_copy_out_retires_session`], for the same
+/// measured reason: `copy_in(&str)` PREPARES first, so answering the first
+/// batch with the violation would only exercise `prepare.rs`.
+async fn hostile_copy_in_retires_session(process_id: i32, response: Vec<u8>) -> String {
+    use bytes::Bytes;
+    use futures_util::SinkExt;
+
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+
+        expect_frontend_until_sync(&mut stream);
+        let mut prepared = backend_frame(b'1', b"");
+        prepared.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        prepared.extend_from_slice(&backend_frame(b'n', b""));
+        prepared.extend_from_slice(&backend_frame(b'Z', b"I"));
+        let _ = stream.write_all(&prepared);
+        let _ = stream.flush();
+
+        expect_frontend_until_sync(&mut stream);
+        let _ = stream.write_all(&response);
+        let _ = stream.flush();
+
+        // COMPLETE THE CONVERSATION, so the only thing wrong is `response`.
+        // Without this the peer just falls silent, the client fails on the
+        // truncation rather than on the violation, and the test passes even
+        // when `response` is the CORRECT `CopyInResponse` -- measured, by
+        // running exactly that as a control. The short read timeout keeps the
+        // violation path fast: there the client has already errored and will
+        // send nothing, so this drain is expected to time out.
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+        expect_frontend_until_sync(&mut stream);
+        let mut completion = backend_frame(b'C', b"COPY 1\0");
+        completion.extend_from_slice(&backend_frame(b'Z', b"I"));
+        let _ = stream.write_all(&completion);
+        let _ = stream.flush();
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    let (client, connection) = stub_config(server.addr)
+        .connect(NoTls)
+        .await
+        .expect("connect to scripted PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let error = compio::time::timeout(OPERATION_WATCHDOG, async {
+        let sink = client.copy_in::<_, Bytes>("COPY t FROM STDIN").await?;
+        let mut sink = Box::pin(sink);
+        sink.as_mut().send(Bytes::from_static(b"1\n")).await?;
+        sink.as_mut().finish().await?;
+        Ok::<(), compio_postgres::Error>(())
+    })
+    .await
+    .expect("copy_in hung instead of rejecting a malformed COPY response")
+    .expect_err("the driver accepted a malformed COPY IN response");
+
+    let reuse = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
+    match reuse {
+        Err(_) => panic!("reusing the poisoned session hung instead of failing"),
+        Ok(Ok(_)) => panic!("the driver reused a session after a malformed COPY response"),
+        Ok(Err(_)) => {}
+    }
+
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    drop(client);
+    server.finish();
+    common::error_chain(&error)
+}
+
+/// `CopyOutResponse` where the IN direction was requested -- the mirror of
+/// [`a_copy_in_response_to_a_copy_out_request_is_refused`], and the more
+/// dangerous half. A driver that ignored the direction here would hold a sink
+/// the caller is about to write into while the server believes it is sending;
+/// the caller's rows would go to a server that never entered copy-in mode.
+#[compio::test]
+async fn a_copy_out_response_to_a_copy_in_request_is_refused() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        // BindComplete, then the WRONG direction. Exactly the frames a correct
+        // reply carries, with `H` where `G` belongs, so the direction is the
+        // only variable. Sending a `ParseComplete` here as well -- which the
+        // COPY OUT helper below does -- would be a second violation, and the
+        // measured control showed it masks this one entirely: with it present
+        // the test passed even when the direction was RIGHT.
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+        let chain = hostile_copy_in_retires_session(511, response).await;
+        assert!(
+            !chain.is_empty(),
+            "a wrong-direction COPY IN response produced an error with no description"
+        );
+    })
+    .await
+    .expect("wrong-direction COPY IN test exceeded its outer watchdog");
+}
+
 /// `CopyInResponse` where the OUT direction was requested. Both are real
 /// messages; only the direction is wrong, and a driver that ignored the
 /// distinction would wait for input on a stream the caller means to read.
