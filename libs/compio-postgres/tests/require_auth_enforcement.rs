@@ -165,8 +165,24 @@ fn trust_server(process_id: i32) -> impl FnOnce(TcpListener) + Send + 'static {
 
 /// A server that demands a cleartext password. `AuthenticationCleartextPassword`
 /// is `R` with a body of 3.
-fn cleartext_password_server(process_id: i32) -> impl FnOnce(TcpListener) + Send + 'static {
-    move |listener| {
+///
+/// REPORTS WHAT THE CLIENT SENT, which is the security half of a `Reject`
+/// policy and was unmeasurable here until 2026-08-23. The peer read the
+/// client's reply into a local and dropped it, so a driver that wrote the
+/// password to the socket and only THEN consulted the policy produced exactly
+/// the same refusal and passed. `src/connect_raw.rs` already holds the right
+/// shape for this in
+/// `require_scram_refuses_cleartext_without_sending_the_password`, which
+/// asserts the wire was empty; this is that assertion for the integration-level
+/// twin.
+fn cleartext_password_server(
+    process_id: i32,
+) -> (
+    impl FnOnce(TcpListener) + Send + 'static,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+    let script = move |listener: TcpListener| {
         let mut stream = accept_bounded(&listener);
         read_startup(&mut stream);
         let _ = stream.write_all(&backend_frame(b'R', &3u32.to_be_bytes()));
@@ -174,21 +190,28 @@ fn cleartext_password_server(process_id: i32) -> impl FnOnce(TcpListener) + Send
         // Read whatever the client sends back, then accept it. A real server
         // would verify; this one does not, because the claim under test is what
         // the CLIENT enforces before it gets here.
+        let mut sent = Vec::new();
         let mut tag = [0u8; 1];
         if stream.read_exact(&mut tag).is_ok() {
+            sent.extend_from_slice(&tag);
             let mut length = [0u8; 4];
             if stream.read_exact(&mut length).is_ok() {
+                sent.extend_from_slice(&length);
                 let length = u32::from_be_bytes(length) as usize;
                 let mut body = vec![0u8; length.saturating_sub(4)];
-                let _ = stream.read_exact(&mut body);
+                if stream.read_exact(&mut body).is_ok() {
+                    sent.extend_from_slice(&body);
+                }
             }
         }
+        let _ = sent_tx.send(sent);
         let mut response = backend_frame(b'R', &0u32.to_be_bytes());
         response.extend_from_slice(&session_established(process_id));
         let _ = stream.write_all(&response);
         let _ = stream.flush();
         thread::sleep(Duration::from_millis(200));
-    }
+    };
+    (script, sent_rx)
 }
 
 fn base_config(addr: SocketAddr) -> Config {
@@ -261,7 +284,8 @@ async fn the_same_server_is_accepted_when_no_policy_is_set() {
 #[compio::test]
 async fn a_rejected_method_is_refused_even_though_the_server_offers_it() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let server = StubServer::spawn(cleartext_password_server(403));
+        let (script, sent) = cleartext_password_server(403);
+        let server = StubServer::spawn(script);
         let mut config = base_config(server.addr);
         config.require_auth(RequireAuth::Reject(AuthMethods::new(AuthMethod::Password)));
 
@@ -276,7 +300,23 @@ async fn a_rejected_method_is_refused_even_though_the_server_offers_it() {
             chain.contains("cleartext password"),
             "refusal did not name the rejected method: {chain}"
         );
+
+        // THE SECURITY CLAIM, not just the error. A `Reject(password)` policy
+        // exists so the secret never reaches the wire; a driver that sent it
+        // and then refused would produce the identical error above. The peer
+        // reports what it received, and it must have received nothing before
+        // the client hung up.
         server.finish();
+        let sent = sent
+            .try_recv()
+            .expect("the scripted peer did not report what the client sent");
+        assert!(
+            sent.is_empty(),
+            "the driver put {} bytes on the wire for a method its policy rejects, and \
+             {:?} is the password among them",
+            sent.len(),
+            String::from_utf8_lossy(&sent)
+        );
     })
     .await
     .expect("require_auth rejected-method test exceeded its outer watchdog");
@@ -287,7 +327,8 @@ async fn a_rejected_method_is_refused_even_though_the_server_offers_it() {
 #[compio::test]
 async fn the_same_method_is_accepted_when_the_policy_requires_it() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let server = StubServer::spawn(cleartext_password_server(404));
+        let (script, sent) = cleartext_password_server(404);
+        let server = StubServer::spawn(script);
         let mut config = base_config(server.addr);
         config.require_auth(require_password());
 
@@ -299,6 +340,27 @@ async fn the_same_method_is_accepted_when_the_policy_requires_it() {
         drop(client);
         let _ = compio::time::timeout(CONNECT_WATCHDOG, driver).await;
         server.finish();
+
+        // THE OTHER HALF OF THE WIRE ASSERTION. Its twin requires the peer to
+        // have received NOTHING when the policy rejects the method; on its own
+        // that is satisfied by a peer that never reports anything, or by a
+        // client that cannot reach this server at all. Here the same peer, the
+        // same client and the same password must produce a PasswordMessage
+        // carrying the secret - so "nothing was sent" over there is a fact
+        // about the policy rather than about the fixture.
+        let sent = sent
+            .try_recv()
+            .expect("the scripted peer did not report what the client sent");
+        assert_eq!(
+            sent.first(),
+            Some(&b'p'),
+            "a permitted cleartext method must send a PasswordMessage, got {sent:02x?}"
+        );
+        assert!(
+            sent.windows(17).any(|w| w == b"scripted-password"),
+            "the permitted handshake did not carry the configured password: {:?}",
+            String::from_utf8_lossy(&sent)
+        );
     })
     .await
     .expect("require_auth accepted-method test exceeded its outer watchdog");
