@@ -1067,8 +1067,7 @@ fn route_async(
             // strings the server did not send. The error names the setting so
             // the cause is not a mystery.
             if name.eq_ignore_ascii_case("client_encoding") {
-                let normalized = value.replace(['-', '_'], "").to_ascii_uppercase();
-                if !matches!(normalized.as_str(), "UTF8" | "UNICODE") {
+                if !crate::config::is_decodable_encoding(&value) {
                     return Err(Error::config(
                         format!(
                             "session changed client_encoding to {value}; this driver \
