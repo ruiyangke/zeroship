@@ -32,9 +32,13 @@ use crate::dialect::{DialectId, DialectSet};
 
 /// A question CORE ASKS a backend. Never a vendor name.
 ///
-/// Promoted from `zero_migrate::render::renderer` (where it was `pub(crate)`)
-/// unchanged in spirit and unchanged in membership: the same 25 predicates, the
-/// same spellings, the same meanings.
+/// Promoted from `zero_migrate::render::renderer`, where it was `pub(crate)`.
+/// The promotion changed neither spelling nor meaning of any predicate it
+/// carried over; membership has grown since, which is what the paragraph below
+/// is about. (This doc used to pin a count of the promoted predicates. The count
+/// was already wrong by four before this variant was added, and a stale number
+/// in prose reads as authoritative — so the invariant is stated instead:
+/// `ALL` is the membership, and the shipping census asserts against its length.)
 ///
 /// Keep this enum CLOSED. Adding a capability is a core change and should be
 /// rare; adding a BACKEND is not a core change at all. A backend that needs a
@@ -122,6 +126,50 @@ pub enum Capability {
     /// such a primary key, because the generation it turns on was never
     /// authored.
     IntegerPrimaryKeyRowidAlias,
+    /// A partition is a RELATION IN ITS OWN RIGHT — it has a name the catalog
+    /// resolves, it is created against a declared parent with declared bounds,
+    /// and it can be attached to and detached from that parent as an
+    /// independent table.
+    ///
+    /// # Why the question is about relations and not about "partitioning"
+    ///
+    /// Naming this `NativePartitioning` would make one of the three shipping
+    /// answers a lie. MySQL HAS native partitioning: `PARTITION BY RANGE/LIST/
+    /// HASH/KEY` is first-class, server-enforced, and older than PostgreSQL's
+    /// declarative model. What MySQL does not have is a partition that is a
+    /// RELATION: its partitions are storage divisions of one table, unnamed in
+    /// the relation namespace, with no `CREATE TABLE … PARTITION OF`, no
+    /// `ATTACH PARTITION`, and no `DETACH` that yields a standalone table.
+    /// `EXCHANGE PARTITION` swaps rows between a partition and a
+    /// structurally-identical table; it is not the same operation and does not
+    /// leave the partition behind as its own object.
+    ///
+    /// So MySQL answers NO here, and the NO is true rather than merely
+    /// convenient: the engine's whole partition surface — `createPartition`,
+    /// `attachPartition`, `detachPartition`, `dropPartition`, and a parent
+    /// created by `createTable { partitionBy }` — is written in relations, and
+    /// MySQL has nowhere to put one.
+    ///
+    /// # What answering YES commits a backend to
+    ///
+    /// All four `DdlEmitter` partition methods returning `Some`. Those methods
+    /// are required with no default precisely so a backend states the complete
+    /// boundary, and the render layer `expect`s them once this capability says
+    /// yes — so a backend that claims the capability and refuses an emitter
+    /// would panic mid-render rather than refuse cleanly. The shipping registry
+    /// census
+    /// (`crates/zero-migrate/tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`)
+    /// holds the two answers together.
+    ///
+    /// # What answering NO means
+    ///
+    /// Not "partitions are refused". A backend that says NO still honours an
+    /// author's affirmed `partitionBy.whenUnsupported = "collapse"`, which folds
+    /// the children into the parent and mirrors the bounds as row predicates;
+    /// only the unaffirmed case, and `attachPartition`/`detachPartition` — which
+    /// have no collapsed spelling because there is no second relation to move —
+    /// are refused.
+    PartitionRelationDdl,
 }
 
 impl Capability {
@@ -157,6 +205,7 @@ impl Capability {
         Capability::DeferrableConstraint,
         Capability::UniqueConstraintDistinctFromIndex,
         Capability::IntegerPrimaryKeyRowidAlias,
+        Capability::PartitionRelationDdl,
     ];
 
     /// This capability's bit position in a [`CapabilitySet`].

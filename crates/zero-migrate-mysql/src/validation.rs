@@ -165,10 +165,6 @@ impl ValidationPolicy for MysqlValidationPolicy {
         false
     }
 
-    fn supports_native_partitioning(&self) -> bool {
-        false
-    }
-
     fn vendor_capability_refusal(&self, capability: VendorCapability) -> Option<ValidationRefusal> {
         match capability {
             VendorCapability::Extension

@@ -67,9 +67,14 @@ pub trait ValidationPolicy: std::fmt::Debug + Sync {
     /// Whether relations and named types share this backend's type namespace.
     fn tracks_relation_type_namespace(&self) -> bool;
 
-    /// Whether this backend implements native partition DDL.
-    fn supports_native_partitioning(&self) -> bool;
-
+    // NOTE: `supports_native_partitioning` used to live here. It was a THIRD
+    // spelling of a fact this contract already carried twice: `DdlEmitter`'s four
+    // required partition methods answer it by `Option`, and the render layer asked
+    // it as `dialect != POSTGRES`. It is now one question in the vocabulary both
+    // layers share — `Capability::PartitionRelationDdl`, off the backend's own
+    // descriptor — and the shipping census in
+    // `crates/zero-migrate/tests/dialect_matrix/vendor_registry_owns_shipping_descriptors.rs`
+    // holds that answer against the emitters, which this method never did.
     /// A fail-closed backend refusal before the operator-capability gate.
     fn vendor_capability_refusal(&self, capability: VendorCapability) -> Option<ValidationRefusal>;
 

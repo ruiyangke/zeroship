@@ -169,10 +169,6 @@ impl ValidationPolicy for PostgresValidationPolicy {
         true
     }
 
-    fn supports_native_partitioning(&self) -> bool {
-        true
-    }
-
     fn vendor_capability_refusal(&self, capability: VendorCapability) -> Option<ValidationRefusal> {
         match capability {
             VendorCapability::Extension

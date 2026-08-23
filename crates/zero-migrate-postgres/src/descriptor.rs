@@ -30,7 +30,11 @@ pub const POSTGRES_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
     .with(Capability::SchemaWideIndexNames)
     .with(Capability::TransactionalDdl)
     .with(Capability::DeferrableConstraint)
-    .with(Capability::UniqueConstraintDistinctFromIndex);
+    .with(Capability::UniqueConstraintDistinctFromIndex)
+    // A partition here is a relation: `CREATE TABLE … PARTITION OF`, `ATTACH`,
+    // `DETACH` (yielding a standalone table) and `DROP` all name one. The four
+    // `DdlEmitter` partition methods below spell every one of them.
+    .with(Capability::PartitionRelationDdl);
 
 /// The PostgreSQL backend descriptor.
 pub static POSTGRES_DESCRIPTOR: BackendDescriptor = BackendDescriptor {

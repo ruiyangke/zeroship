@@ -123,7 +123,10 @@ pub struct BackendVendor {
     /// Backend-owned authoring-validation facts and exact refusals.
     ///
     /// Required, never defaulted: a future backend must state its identifier,
-    /// namespace, partition, and unsupported-shape policy in its own crate.
+    /// namespace, and unsupported-shape policy in its own crate. (Its PARTITION
+    /// posture used to be one of these answers; it is now
+    /// `Capability::PartitionRelationDdl` on `descriptor`, so the render and
+    /// validate layers ask one question instead of two.)
     pub validation: &'static dyn ValidationPolicy,
     /// How this vendor spells schema-changing statements.
     ///

@@ -4,6 +4,10 @@ use zero_migrate_ir::backend::{
 use zero_migrate_ir::dialect::SQLITE;
 
 /// `SQLite`'s capability answers.
+///
+/// [`Capability::PartitionRelationDdl`] is absent because SQLite has no
+/// partitioning of any kind — no relation-valued partitions and no storage
+/// divisions either. All four `DdlEmitter` partition methods return `None`.
 pub const SQLITE_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
     .with(Capability::VirtualGeneratedColumn)
     .with(Capability::TableLevelForeignKey)

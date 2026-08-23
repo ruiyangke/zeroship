@@ -4,6 +4,22 @@ use zero_migrate_ir::backend::{
 use zero_migrate_ir::dialect::MYSQL;
 
 /// `MySQL`'s capability answers.
+///
+/// # The one absence worth stating out loud
+///
+/// [`Capability::PartitionRelationDdl`] is NOT here, and that is not the same
+/// claim as "MySQL cannot partition". MySQL's `PARTITION BY RANGE/LIST/HASH/KEY`
+/// is first-class and predates PostgreSQL's declarative model. What MySQL has no
+/// spelling for is a partition that is a RELATION — there is no
+/// `CREATE TABLE … PARTITION OF`, no `ATTACH PARTITION`, and no `DETACH` that
+/// leaves a standalone table behind, because a MySQL partition is a storage
+/// division of one table and never appears in the relation namespace.
+/// `EXCHANGE PARTITION` swaps rows with a structurally-identical table; it moves
+/// data, not catalog identity.
+///
+/// The engine's partition surface is written in relations, so this backend has
+/// nowhere to put one and its four `DdlEmitter` partition methods all return
+/// `None`. The NO is a fact about the catalog, not a gap in this crate.
 pub const MYSQL_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
     .with(Capability::VirtualGeneratedColumn)
     .with(Capability::CrossSchemaDdl)

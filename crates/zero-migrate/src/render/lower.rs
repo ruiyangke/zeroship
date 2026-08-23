@@ -70,7 +70,12 @@ use zero_migrate_backend::advisory::Advisory;
 use zero_migrate_backend::fold::{
     AuthorTypeOverride, FoldCursorComparison, FoldCursorScalarType, FoldDatabaseFeature,
 };
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+// `POSTGRES` is deliberately NOT imported here. Lowering no longer names a vendor
+// at all: the five partition branches that used to read `self.dialect != POSTGRES`
+// now ask `Capability::PartitionRelationDdl`, and they were the last of them. The
+// constant is imported by the test module below, which legitimately targets named
+// dialects; re-adding it up here would be the first step back.
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_policy::EffectivePolicy;
 
 /// The result of lowering ONE IR op. A DDL op lowers to a list of
@@ -3945,8 +3950,14 @@ impl IrAuthor {
                 // generic stamp is skipped for CreateTable).
                 let mut lowered =
                     decl.lower_create_table(name, &snap, live, guard.map(Into::into), &inject)?;
+                // Asked as a CAPABILITY, not as `dialect != POSTGRES`. Whether a
+                // parent table can BE a partitioned relation is a claim about the
+                // catalog, not about our renderer, and the author already affirmed
+                // what should happen when the answer is no. A fourth backend with
+                // relation-valued partitions keeps its parent partitioned instead
+                // of inheriting a collapse by falling into the else.
                 if partition_by.as_ref().is_some_and(PartitionSpec::collapse)
-                    && self.dialect != POSTGRES
+                    && !self.backend.supports(Capability::PartitionRelationDdl)
                 {
                     if let Some((mig, statements)) = lowered.immediate_units.first_mut() {
                         let note = "/* zero-migrate: partitionBy collapsed to a plain table on this dialect */\n";
@@ -4244,7 +4255,11 @@ impl IrAuthor {
             Op::CreatePartition {
                 name, of, bounds, ..
             } => {
-                if self.dialect != POSTGRES {
+                // A child partition is a RELATION on a backend that has them, and
+                // a set of rows in its parent on a backend that does not — so the
+                // capability, not the vendor, picks the lowering. The refusal text
+                // is a pinned diagnostic; only the PREDICATE moved.
+                if !self.backend.supports(Capability::PartitionRelationDdl) {
                     let spec = partition_state
                         .parent(of)
                         .filter(|parent| parent.spec.collapse())
@@ -4302,7 +4317,13 @@ impl IrAuthor {
                 bound,
                 ..
             } => {
-                if self.dialect != POSTGRES {
+                // ATTACH takes an EXISTING standalone relation and makes it a child.
+                // There is no collapsed spelling of that — with no second relation
+                // there is nothing to move — so unlike `createPartition` this
+                // refuses outright rather than degrading. Still a capability
+                // question: a fourth backend with relation-valued partitions
+                // answers for itself instead of inheriting PostgreSQL's yes.
+                if !self.backend.supports(Capability::PartitionRelationDdl) {
                     return Err(IrLowerError::UnsupportedOp(
                         "attachPartition is PostgreSQL-only",
                     ));
@@ -4316,7 +4337,11 @@ impl IrAuthor {
                 concurrently,
                 ..
             } => {
-                if self.dialect != POSTGRES {
+                // The mirror of ATTACH: DETACH promotes a child back to a standalone
+                // relation. Collapsed partitions have no child relation to promote,
+                // so this refuses rather than degrading. Same capability, same
+                // reason it is a capability.
+                if !self.backend.supports(Capability::PartitionRelationDdl) {
                     return Err(IrLowerError::UnsupportedOp(
                         "detachPartition is PostgreSQL-only",
                     ));
@@ -4330,7 +4355,11 @@ impl IrAuthor {
                 cascade,
                 ..
             } => {
-                if self.dialect != POSTGRES {
+                // Dropping a child is a DROP TABLE where partitions are relations
+                // and a bounded DELETE where they are rows in the parent. The
+                // capability picks which, so the rows a collapsed drop removes are
+                // decided by the backend's own answer.
+                if !self.backend.supports(Capability::PartitionRelationDdl) {
                     let delete_sql = self.render_partition_collapse_delete(
                         &eff_schema,
                         partition_state,
@@ -9847,7 +9876,7 @@ mod tests {
     use super::*;
     use crate::model::snapshot::MysqlTextStorageSnapshot;
     use crate::render::declarative::build_table_snapshot;
-    use zero_migrate_ir::dialect::{MYSQL, SQLITE};
+    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     fn test_ir_author(
         project_schema: impl Into<String>,

@@ -5502,9 +5502,7 @@ fn validate_partition_recording(
 
     let mut parents: std::collections::BTreeMap<String, PartitionParentFold> =
         std::collections::BTreeMap::new();
-    let native_partitioning = registered_vendor(target_dialect, 0)?
-        .validation
-        .supports_native_partitioning();
+    let native_partitioning = target_supports(target_dialect, Capability::PartitionRelationDdl, 0)?;
 
     // Replay the SELECTED leg's ops inline, in place, carrying the OUTER op index for
     // diagnostics. Partition recording is stateful across the whole migration - a parent
@@ -7130,9 +7128,8 @@ fn validate_op_support(
         };
 
     let support = crate::model::op_support::support_for_target(op, target_dialect);
-    let native_partitioning = registered_vendor(target_dialect, op_index)?
-        .validation
-        .supports_native_partitioning();
+    let native_partitioning =
+        target_supports(target_dialect, Capability::PartitionRelationDdl, op_index)?;
     match op {
         Op::CreateTable {
             name,
