@@ -1627,6 +1627,59 @@ mod tests {
         drop(connection);
     }
 
+    /// The MD5 response the driver actually puts on the wire.
+    ///
+    /// MD5 is reached today only through `require_auth=!md5`, which REFUSES
+    /// before any hash is computed -- the assertion there is
+    /// `md5_client_bytes.is_empty()`. So the SUCCESS path, where the driver
+    /// derives the response and sends it, has never been checked. It is three
+    /// arguments in an order nothing else would catch: PostgreSQL specifies
+    /// `"md5" + md5(md5(password + username) + salt)`, so swapping user and
+    /// password, or hashing the raw digest rather than its hex text, yields a
+    /// well-formed frame that every md5-configured server rejects. Nothing in
+    /// this suite talks to such a server, so the failure would first appear in
+    /// a deployment.
+    ///
+    /// THE EXPECTED VALUE IS A LITERAL COMPUTED OUTSIDE THIS CRATE (`md5sum`
+    /// over the two concatenations), not by calling the helper the driver
+    /// calls. An oracle that shares the implementation under test cannot fail.
+    #[compio::test]
+    async fn the_md5_response_is_the_digest_postgresql_specifies() {
+        let mut md5_request = 5i32.to_be_bytes().to_vec();
+        md5_request.extend_from_slice(&[1, 2, 3, 4]);
+        let (stream, client_bytes) = scripted_password_auth_server(md5_request, true).await;
+
+        // `scram_config` sets user `scripted-user`, password `scripted-password`.
+        let (client, connection) = scram_config()
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("the scripted MD5 exchange must complete");
+
+        let client_bytes = compio::time::timeout(Duration::from_secs(5), client_bytes)
+            .await
+            .expect("scripted MD5 server did not finish")
+            .expect("scripted MD5 server dropped its observation")
+            .expect("scripted MD5 server failed");
+
+        assert_eq!(
+            client_bytes.first(),
+            Some(&b'p'),
+            "an MD5 challenge is answered with a PasswordMessage"
+        );
+        // md5sum("scripted-passwordscripted-user")           -> 68b72f20...
+        // md5sum(that hex text || 0x01 0x02 0x03 0x04)       -> d2ba4564...
+        const EXPECTED: &[u8] = b"md5d2ba45640380329c74e4c87fb4a1bdfa";
+        assert!(
+            client_bytes
+                .windows(EXPECTED.len())
+                .any(|window| window == EXPECTED),
+            "the MD5 response is not the digest PostgreSQL specifies: {}",
+            String::from_utf8_lossy(&client_bytes)
+        );
+        drop(client);
+        drop(connection);
+    }
+
     #[compio::test]
     async fn none_and_negated_none_control_whether_authentication_may_be_skipped() {
         let mut none = scram_config();
