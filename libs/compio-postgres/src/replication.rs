@@ -3513,7 +3513,24 @@ mod tests {
             release: None,
         };
 
+        // THE THREE LSNs MUST NOT ALL BE EQUAL, or their POSITIONS are not
+        // pinned: `LsnTracker::new` seeds received and processed alike, so with
+        // it alone every field carries the same eight bytes and swapping two of
+        // them in the encoder is invisible. Verified: swapping the flush and
+        // apply writes left all 37 replication tests green.
+        //
+        // Advancing the received position separates `write` from the other two.
+        // `flush` and `apply` still cannot be told apart, and that is inherent
+        // rather than an omission -- `standby_lsns` returns the processed
+        // position for BOTH by definition, so no encoding can distinguish them
+        // and swapping them changes nothing on the wire.
+        stream.lsn.observe_received(0x16B_4000);
         let (write_lsn, flush_lsn, apply_lsn) = stream.lsn.standby_lsns();
+        assert_ne!(
+            write_lsn, flush_lsn,
+            "the fixture must make the write position differ from the flush one, \
+             or this test cannot tell the fields apart"
+        );
         let before = postgres_microseconds_since_epoch();
         stream
             .send_standby_status_update(true)
