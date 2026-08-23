@@ -38,9 +38,22 @@
 //! [CommandComplete(1)]". A version of this file that passed no matter what the
 //! peer sent would be worse than nothing, because it would read as coverage.
 //!
-//! NOT covered here: TLS, authentication, replication framing, COPY
-//! sub-protocol violations, or a peer that trickles bytes slowly rather than
-//! sending wrong ones.
+//! THE COPY TESTS DID EXACTLY THAT UNTIL 2026-08-23, which is why
+//! [`well_formed_copy_out`] exists as a named control rather than a habit. All
+//! three sent a `ParseComplete` the COPY batch never asked for -- it is `B E S`,
+//! measured by logging the frontend tags -- and then fell silent instead of
+//! finishing the conversation. Either one is a violation by itself, so the
+//! driver errored whatever else the response said and all three passed with
+//! their own violation REMOVED. One of them was additionally misnamed: it
+//! claimed to test a missing `ParseComplete` in a batch that contains no Parse,
+//! and what it actually drives is a missing `CopyOutResponse`.
+//!
+//! So: substitute the well-formed response and require the test to FAIL. That
+//! check is cheap, it is the only thing that catches this, and it belongs on
+//! every test in this file.
+//!
+//! NOT covered here: TLS, authentication, replication framing, or a peer that
+//! trickles bytes slowly rather than sending wrong ones.
 
 use compio_postgres::config::SslMode;
 use compio_postgres::{Config, NoTls};
@@ -783,16 +796,42 @@ async fn a_copy_out_response_to_a_copy_in_request_is_refused() {
     .expect("wrong-direction COPY IN test exceeded its outer watchdog");
 }
 
+/// The frames a HEALTHY server sends for `COPY t TO STDOUT`, after the prepare
+/// batch has already been answered.
+///
+/// Every COPY OUT test below is this sequence with exactly one thing wrong, and
+/// that is not cosmetic. Each of these tests used to send a `ParseComplete` the
+/// COPY batch never asked for (it is `B E S`; measured by logging the frontend
+/// tags) and then fall silent instead of finishing the conversation. Either one
+/// is a violation in its own right, so the driver errored whatever else the
+/// response said, and the tests passed WITH THE VIOLATION REMOVED -- verified by
+/// substituting this function for the response and watching them keep passing.
+///
+/// Substituting this must FAIL each test. That is the check that separates a
+/// hostile-peer test from a test of its own harness.
+fn well_formed_copy_out() -> Vec<u8> {
+    let mut response = backend_frame(b'2', b"");
+    // CopyOutResponse: overall format byte, then a column count of zero.
+    response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
+    response.extend_from_slice(&backend_frame(b'd', b"row-one\n"));
+    response.extend_from_slice(&backend_frame(b'c', b""));
+    response.extend_from_slice(&backend_frame(b'C', b"COPY 1\0"));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    response
+}
+
 /// `CopyInResponse` where the OUT direction was requested. Both are real
 /// messages; only the direction is wrong, and a driver that ignored the
 /// distinction would wait for input on a stream the caller means to read.
 #[compio::test]
 async fn a_copy_in_response_to_a_copy_out_request_is_refused() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let mut response = backend_frame(b'1', b"");
-        response.extend_from_slice(&backend_frame(b'2', b""));
-        // CopyInResponse: overall format byte, then a column count of zero.
+        // `G` where `H` belongs; the rest of the conversation is intact.
+        let mut response = backend_frame(b'2', b"");
         response.extend_from_slice(&backend_frame(b'G', b"\x00\x00\x00"));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 1\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
         let chain = hostile_copy_out_retires_session(501, response).await;
         assert!(
             !chain.is_empty(),
@@ -809,9 +848,9 @@ async fn a_copy_in_response_to_a_copy_out_request_is_refused() {
 #[compio::test]
 async fn a_non_copy_data_message_mid_stream_is_refused() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let mut response = backend_frame(b'1', b"");
-        response.extend_from_slice(&backend_frame(b'2', b""));
-        // CopyOutResponse, then one legitimate CopyData, then a DataRow.
+        // A DataRow spliced into an otherwise complete stream, between the
+        // legitimate CopyData and the CopyDone that ends it.
+        let mut response = backend_frame(b'2', b"");
         response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
         response.extend_from_slice(&backend_frame(b'd', b"row-one\n"));
         let mut data_row = Vec::new();
@@ -819,6 +858,9 @@ async fn a_non_copy_data_message_mid_stream_is_refused() {
         data_row.extend_from_slice(&1u32.to_be_bytes());
         data_row.push(b'x');
         response.extend_from_slice(&backend_frame(b'D', &data_row));
+        response.extend_from_slice(&backend_frame(b'c', b""));
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 1\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
         let chain = hostile_copy_out_retires_session(502, response).await;
         assert!(
             !chain.is_empty(),
@@ -832,14 +874,17 @@ async fn a_non_copy_data_message_mid_stream_is_refused() {
 /// `BindComplete` where `ParseComplete` is owed, inside the COPY path rather
 /// than the plain prepare path - the same violation one layer along.
 #[compio::test]
-async fn a_copy_out_missing_its_parse_complete_is_refused() {
+async fn a_copy_out_whose_copy_out_response_never_arrives_is_refused() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let chain = hostile_copy_out_retires_session(503, backend_frame(b'2', b"")).await;
+        let mut response = backend_frame(b'2', b"");
+        response.extend_from_slice(&backend_frame(b'C', b"COPY 0\0"));
+        response.extend_from_slice(&backend_frame(b'Z', b"I"));
+        let chain = hostile_copy_out_retires_session(503, response).await;
         assert!(
             !chain.is_empty(),
-            "a COPY missing ParseComplete produced an error with no description"
+            "a COPY OUT without its CopyOutResponse produced an error with no description"
         );
     })
     .await
-    .expect("COPY missing ParseComplete test exceeded its outer watchdog");
+    .expect("missing-CopyOutResponse test exceeded its outer watchdog");
 }
