@@ -198,6 +198,9 @@ struct ReadObligation {
 
 struct ReadObligationInner {
     deadline: Option<ReadDeadline>,
+    /// Whether this request owns a `CopyInReceiver`, i.e. whether the driver
+    /// has a producer that will eventually answer a `CopyInResponse`.
+    copy_producer: bool,
     state: Cell<ReadObligationState>,
 }
 
@@ -209,6 +212,7 @@ impl ReadObligation {
         let inner = (deadline.is_some() || track_copy_state).then(|| {
             Rc::new(ReadObligationInner {
                 deadline: deadline.cloned(),
+                copy_producer: track_copy_state,
                 state: Cell::new(ReadObligationState::PendingInitialFlush),
             })
         });
@@ -231,6 +235,16 @@ impl ReadObligation {
         let Some(inner) = &self.inner else {
             return;
         };
+        if !inner.copy_producer {
+            // Keyed to whether THIS DRIVER will feed the copy, not to what the
+            // server sent. `COPY ... FROM STDIN` issued as an ordinary query
+            // (`execute` / `batch_execute` / `simple_query`) also earns a
+            // `CopyInResponse`, and there is no `CopyInReceiver` behind it: no
+            // byte will ever be sent, so the session is deadlocked rather than
+            // waiting on a caller. Pausing the clock there hides precisely the
+            // stall the read deadline exists to retire.
+            return;
+        }
         match inner.state.get() {
             ReadObligationState::PendingInitialFlush => {
                 inner.state.set(ReadObligationState::PausedForCopyInput);
