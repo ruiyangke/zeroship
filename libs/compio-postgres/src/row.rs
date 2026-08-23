@@ -97,6 +97,31 @@ where
     }
 }
 
+/// Render an accessor failure and every `source()` beneath it, joined by
+/// `": "`.
+///
+/// `Error`'s own `Display` prints its KIND and nothing more, and for the two
+/// failures these accessors can hit that is either a restatement of the caller
+/// context (`Kind::FromSql` prints `error deserializing column 3`) or the whole
+/// story already (`Kind::Column` prints `invalid column \`x\``). Everything
+/// that says WHY a decode failed - `unexpected null`, or `cannot convert
+/// between the Rust type ... and the Postgres type ...` - lives in the cause.
+///
+/// A panic message is read once, by a person, with no `Debug` formatting and
+/// no chance to inspect `source()`. Printing the outer error alone made a NULL
+/// read into a non-`Option` and a wrong-`FromSql`-type read produce the
+/// identical sentence.
+fn render_with_causes(error: &Error) -> String {
+    let mut rendered = error.to_string();
+    let mut link = std::error::Error::source(error);
+    while let Some(cause) = link {
+        rendered.push_str(": ");
+        rendered.push_str(&cause.to_string());
+        link = cause.source();
+    }
+    rendered
+}
+
 /// A row of data returned from the database by a query.
 #[derive(Clone)]
 pub struct Row {
@@ -165,6 +190,9 @@ impl Row {
     /// # Panics
     ///
     /// Panics if the index is out of bounds or if the value cannot be converted to the specified type.
+    ///
+    /// The panic names the column AND the reason, down the whole cause chain -
+    /// see [`render_with_causes`] for why the reason is not in the outer error.
     #[track_caller]
     pub fn get<'a, I, T>(&'a self, idx: I) -> T
     where
@@ -173,7 +201,11 @@ impl Row {
     {
         match self.get_inner(&idx) {
             Ok(ok) => ok,
-            Err(err) => panic!("error retrieving column {}: {}", idx, err),
+            Err(err) => panic!(
+                "error retrieving column {}: {}",
+                idx,
+                render_with_causes(&err)
+            ),
         }
     }
 
@@ -313,6 +345,9 @@ impl SimpleQueryRow {
     /// # Panics
     ///
     /// Panics if the index is out of bounds or if the value cannot be converted to the specified type.
+    ///
+    /// The panic names the column AND the reason, down the whole cause chain -
+    /// see [`render_with_causes`] for why the reason is not in the outer error.
     #[track_caller]
     pub fn get<I>(&self, idx: I) -> Option<&str>
     where
@@ -320,7 +355,11 @@ impl SimpleQueryRow {
     {
         match self.get_inner(&idx) {
             Ok(ok) => ok,
-            Err(err) => panic!("error retrieving column {}: {}", idx, err),
+            Err(err) => panic!(
+                "error retrieving column {}: {}",
+                idx,
+                render_with_causes(&err)
+            ),
         }
     }
 
@@ -470,6 +509,107 @@ mod tests {
         assert_eq!(row.raw_value(0), Some(&7i32.to_be_bytes()[..]));
         assert!(row.try_get::<_, i32>("nope").is_err());
         assert!(row.try_get::<_, i32>(3).is_err());
+    }
+
+    /// Run `f`, and return the message of the panic it raised.
+    fn panic_message(f: impl FnOnce()) -> String {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            .err()
+            .expect("the operation was expected to panic");
+        std::panic::set_hook(previous);
+        payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&'static str>().copied())
+            .unwrap_or("<non-string panic payload>")
+            .to_string()
+    }
+
+    /// The panic `Row::get` raises has to say WHY, and the two ways a decode
+    /// fails are not the same mistake.
+    ///
+    /// `Error`'s `Display` renders its KIND and nothing else - `Kind::FromSql`
+    /// prints `error deserializing column N` - and everything that identifies
+    /// the failure hangs off `source()`. Formatting it with `{}` therefore
+    /// turned both of these into the same contentless sentence, `error
+    /// retrieving column 0: error deserializing column 0`, which restates the
+    /// prefix and drops the cause.
+    ///
+    /// Both readings below name column 0 of an int4 column, so the index cannot
+    /// be what tells them apart. What must is the cause: `unexpected null` for
+    /// one and the two type names for the other.
+    #[test]
+    fn a_get_panic_distinguishes_a_null_from_a_type_mismatch() {
+        let statement = Statement::unnamed(Vec::new(), int4_columns(&["a"]));
+        let null_row = Row::new(statement.clone(), data_row(&[None])).expect("well formed");
+        let value_row =
+            Row::new(statement, data_row(&[Some(&1i32.to_be_bytes())])).expect("well formed");
+
+        let on_null = panic_message(|| {
+            null_row.get::<_, i32>(0);
+        });
+        let on_wrong_type = panic_message(|| {
+            value_row.get::<_, String>(0);
+        });
+
+        assert_ne!(
+            on_null, on_wrong_type,
+            "reading a NULL into a non-Option and reading an int4 into a String \
+             are different mistakes and must not produce the same message"
+        );
+        assert!(
+            on_null.to_ascii_lowercase().contains("null"),
+            "the NULL panic does not say the value was null: {on_null}"
+        );
+        assert!(
+            on_wrong_type.contains("int4") && on_wrong_type.contains("String"),
+            "the type-mismatch panic names neither type it could not convert \
+             between: {on_wrong_type}"
+        );
+    }
+
+    /// The control, differing in ONE variable: this failure HAS NO CAUSE.
+    ///
+    /// `Kind::Column` carries the whole story in its own `Display`, so walking
+    /// the chain must add nothing - no trailing separator, no repetition. A fix
+    /// that appends unconditionally turns this red while the claim above stays
+    /// green.
+    #[test]
+    fn a_get_panic_for_a_missing_column_gains_nothing() {
+        let statement = Statement::unnamed(Vec::new(), int4_columns(&["a"]));
+        let row = Row::new(statement, data_row(&[Some(&1i32.to_be_bytes())])).expect("well formed");
+
+        assert_eq!(
+            panic_message(|| {
+                row.get::<_, i32>("nope");
+            }),
+            "error retrieving column nope: invalid column `nope`"
+        );
+        assert_eq!(
+            panic_message(|| {
+                row.get::<_, i32>(4);
+            }),
+            "error retrieving column 4: invalid column `4`"
+        );
+    }
+
+    /// The simple-query accessor shares the shape and so shares the defect: its
+    /// only decode failure is a value that is not UTF-8, and `Kind::FromSql`
+    /// renders that as `error deserializing column 0` too.
+    #[test]
+    fn a_simple_query_get_panic_names_the_decode_failure() {
+        let columns: Arc<[SimpleColumn]> = vec![SimpleColumn::new("a".to_string())].into();
+        let row = SimpleQueryRow::new(columns, data_row(&[Some(b"\xff")])).expect("well formed");
+
+        let message = panic_message(|| {
+            row.get(0);
+        });
+        assert!(
+            message.contains("utf-8") || message.contains("utf8"),
+            "the panic does not say the value was not valid UTF-8: {message}"
+        );
     }
 
     /// The control for the simple-query row.
