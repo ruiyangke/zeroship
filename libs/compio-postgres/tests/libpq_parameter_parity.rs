@@ -373,3 +373,80 @@ async fn url_shapes_parse_like_libpq_and_an_empty_host_is_refused_at_connect() {
         "the refusal must name what is absent, got: {chain}"
     );
 }
+
+/// `keepalives=0` DISABLES keepalives; the default is on.
+///
+/// libpq treats the value as a boolean where 0 is off and anything else is on,
+/// and this maps it with `keepalives != 0`. That is a truthiness mapping with a
+/// default of TRUE behind it, which is the shape that regresses quietly: invert
+/// it and every connection silently gains or loses TCP keepalives, with nothing
+/// in a test suite to notice, because the parity table only proves the key
+/// PARSES.
+///
+/// `connect.rs` is where the flag has its effect -- it passes
+/// `Some(&config.keepalive_config)` to `connect_socket` only when
+/// `get_keepalives()` is true -- so the flag below is the whole switch.
+#[test]
+fn keepalives_zero_means_off_and_the_default_is_on() {
+    assert!(
+        "host=h"
+            .parse::<Config>()
+            .expect("bare host")
+            .get_keepalives(),
+        "keepalives default to on, as in libpq"
+    );
+    assert!(
+        !"host=h keepalives=0"
+            .parse::<Config>()
+            .expect("keepalives=0")
+            .get_keepalives(),
+        "keepalives=0 must switch them off"
+    );
+
+    // Any non-zero value is on -- the mapping is truthiness, not "== 1".
+    for on in ["1", "2", "10"] {
+        assert!(
+            format!("host=h keepalives={on}")
+                .parse::<Config>()
+                .unwrap_or_else(|error| panic!("keepalives={on}: {error}"))
+                .get_keepalives(),
+            "keepalives={on} must be on"
+        );
+    }
+
+    // A non-numeric value is refused rather than silently read as off, which
+    // would be the dangerous reading of a boolean-ish option.
+    "host=h keepalives=yes"
+        .parse::<Config>()
+        .expect_err("a non-numeric keepalives must be refused, not treated as off");
+}
+
+/// A NEGATIVE `keepalives` is accepted by libpq and means ON.
+///
+/// libpq parses this with `strtol` into a signed long and then tests it against
+/// zero, so `keepalives=-1` is simply non-zero, i.e. enabled. Measured against
+/// the live server on 2026-08-23: `keepalives=-1` connects, exactly as `1`,
+/// `2` and `10` do, while `yes` and the empty string are refused with
+/// `invalid integer value`.
+///
+/// Parsing into an UNSIGNED integer instead silently turns that acceptance
+/// into a refusal, so a connection string psql accepts fails here. The
+/// direction matters: this driver being STRICTER than libpq breaks working
+/// DSNs, which is why it is a bug rather than a taste difference.
+#[test]
+fn negative_keepalives_is_accepted_and_means_on() {
+    let config = "host=h keepalives=-1"
+        .parse::<Config>()
+        .expect("libpq accepts keepalives=-1; refusing it breaks a working DSN");
+    assert!(
+        config.get_keepalives(),
+        "keepalives=-1 is non-zero, so keepalives are ON"
+    );
+
+    // The refusals stay refusals -- this must not become "parse anything".
+    for bad in ["yes", "", "1.5"] {
+        format!("host=h keepalives={bad}")
+            .parse::<Config>()
+            .expect_err("libpq refuses this with `invalid integer value`");
+    }
+}
