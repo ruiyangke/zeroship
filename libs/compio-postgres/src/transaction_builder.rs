@@ -143,7 +143,8 @@ impl<'a> TransactionBuilder<'a> {
                 client: self.client,
                 done: false,
             };
-            let result = crate::simple_query::finish_batch_execute(responses).await;
+            let result =
+                crate::simple_query::finish_batch_execute(cleaner.client.inner(), responses).await;
             cleaner.done = true;
             result?;
         }
