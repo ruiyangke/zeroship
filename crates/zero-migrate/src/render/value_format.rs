@@ -325,6 +325,18 @@ pub(crate) fn catalog_id_default_for_expected(
         if !matches!(recovered, IdDefaultSnapshot::Expression(_)) {
             return recovered;
         }
+    } else if let Some(literal) = sql_literal_fingerprint(default, None) {
+        // No dialect claims this snapshot, but a LITERAL is not a dialect's opinion:
+        // every registered vendor agrees on one, which is exactly what
+        // `AllRegisteredVendors` asks. Without this the arm below spells a plain `7`
+        // as `Expression("literal:7")` and leaks an internal fingerprint prefix into
+        // the operator's drift line, while the same input under any dialect reads
+        // `Literal("7")`.
+        //
+        // It cannot change a verdict. This arm is reached only when `expected` is
+        // neither `UuidLiteral` nor `Literal` - both return earlier - so the value
+        // here is compared against a non-literal expectation either way.
+        return IdDefaultSnapshot::Literal(literal);
     }
     IdDefaultSnapshot::Expression(catalog_expression_fingerprint_for(default, dialect))
 }
@@ -1239,6 +1251,48 @@ mod tests {
                 ),
                 IdDefaultSnapshot::UuidV4,
                 "a foreign-dialect generator must not satisfy a typed-reference default"
+            );
+        }
+    }
+
+    /// An unattributed snapshot still spells a plain literal as a LITERAL.
+    ///
+    /// `catalog_id_default_for_expected` reaches its last arm only when `expected`
+    /// is neither [`IdDefaultSnapshot::UuidLiteral`] nor [`IdDefaultSnapshot::Literal`]
+    /// — both are answered earlier — so the value it returns there can never make a
+    /// drift verdict flip: a `Literal` and an `Expression` are equally unequal to an
+    /// `Absent` expectation. What it CAN do is decide what the operator reads. With
+    /// no dialect the arm used to fall through to `Expression("literal:7")`, leaking
+    /// an internal fingerprint prefix into a report line, while every registered
+    /// dialect answered `Literal("7")` for the same input.
+    ///
+    /// The dialect-free answer already existed: [`sql_literal_fingerprint`] takes an
+    /// `Option<&DialectId>` and routes a `None` through `AllRegisteredVendors`. The
+    /// arm simply never asked it. This pins that it does, and pins the agreement —
+    /// an unattributed snapshot and a claimed one must not spell one literal two
+    /// ways, or a reader comparing two drift reports sees a difference that is not
+    /// in the database.
+    #[test]
+    fn an_unattributed_literal_is_spelled_as_a_literal_not_an_expression() {
+        let unattributed =
+            catalog_id_default_for_expected(&IdDefaultSnapshot::Absent, Some("7"), None, None);
+        assert_eq!(
+            unattributed,
+            IdDefaultSnapshot::Literal("7".to_string()),
+            "with no dialect a plain literal must still read as a literal, not as an \
+             expression fingerprint"
+        );
+        for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
+            assert_eq!(
+                catalog_id_default_for_expected(
+                    &IdDefaultSnapshot::Absent,
+                    Some("7"),
+                    Some(dialect),
+                    None,
+                ),
+                unattributed,
+                "a claimed snapshot and an unattributed one must spell one literal the \
+                 same way"
             );
         }
     }
