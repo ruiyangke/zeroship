@@ -219,6 +219,27 @@ impl Stream for BinaryCopyOutStream {
             }
         }
 
+        // Every byte of a binary tuple is accounted for above, so a conforming
+        // peer leaves NOTHING here: the PostgreSQL protocol's COPY Operations
+        // section binds the backend to "zero or more CopyData messages (always
+        // one per row)" in copy-out mode -- the frontend direction is
+        // explicitly free to frame arbitrarily, this one is not. Whatever is
+        // still in the chunk therefore belongs to tuples that will never be
+        // returned, because the next poll reads the NEXT message. Dropping
+        // them silently hands the caller a SHORT result with no error, which
+        // is the one failure a caller cannot detect. Parsing on instead would
+        // not close it: a peer free to pack two tuples into a message is
+        // equally free to split one across two.
+        if chunk.has_remaining() {
+            return Poll::Ready(Some(Err(Error::parse(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} trailing bytes after a binary COPY tuple",
+                    chunk.remaining()
+                ),
+            )))));
+        }
+
         Poll::Ready(Some(Ok(BinaryCopyOutRow {
             buf: chunk.into_inner(),
             ranges,

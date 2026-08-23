@@ -2787,6 +2787,79 @@ async fn binary_copy_round_trips_empty_and_null_fields() {
         .unwrap();
 }
 
+/// Binary COPY OUT of many rows of DIFFERENT widths, against the real server.
+///
+/// `BinaryCopyOutStream` parses one tuple per `CopyData` chunk and now REFUSES
+/// a chunk with bytes left over, on the protocol's guarantee that a backend
+/// sends "zero or more CopyData messages (always one per row)" in copy-out
+/// mode. That guarantee is the peer's, so this is the test that says the peer
+/// we actually ship against keeps it -- and keeps it where it would be easiest
+/// not to: rows whose encoded size varies from a few bytes to a few hundred,
+/// enough of them that the response crosses socket reads and arrives as
+/// several decoder batches rather than one.
+///
+/// `binary_copy_round_trips_empty_and_null_fields` above copies a SINGLE row,
+/// so it cannot see a framing decision at all. Without this one the refusal
+/// would be pinned only by a scripted peer, which is the wrong place to learn
+/// that a real one trips it.
+#[compio::test]
+async fn binary_copy_out_of_many_variable_width_rows_arrives_one_tuple_per_frame() {
+    use compio_postgres::binary_copy::BinaryCopyOutStream;
+    use compio_postgres::types::Type;
+    use futures_util::TryStreamExt;
+
+    const ROWS: i32 = 500;
+
+    let Some(url) = require_pg().await else { return };
+    let client = connect(&url).await.unwrap();
+    client
+        .execute(
+            "CREATE TEMPORARY TABLE cpg_copy_binary_widths (n int4, v text)",
+            &[],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO cpg_copy_binary_widths \
+             SELECT g, repeat('x', g % 300) FROM generate_series(0, $1 - 1) AS g",
+            &[&ROWS],
+        )
+        .await
+        .unwrap();
+
+    let stream = client
+        .copy_out("COPY (SELECT n, v FROM cpg_copy_binary_widths ORDER BY n) TO STDOUT BINARY")
+        .await
+        .unwrap();
+    let mut rows = Box::pin(BinaryCopyOutStream::new(
+        stream,
+        &[Type::INT4, Type::TEXT],
+    ));
+
+    let mut seen = 0i32;
+    while let Some(row) = rows
+        .try_next()
+        .await
+        .expect("real PostgreSQL framing was refused by the one-tuple-per-chunk check")
+    {
+        assert_eq!(row.get::<i32>(0), seen, "rows arrived out of order");
+        assert_eq!(
+            row.get::<&str>(1).len(),
+            (seen % 300) as usize,
+            "row {seen} came back the wrong width"
+        );
+        seen += 1;
+    }
+    assert_eq!(seen, ROWS, "binary COPY OUT delivered {seen} of {ROWS} rows");
+    drop(rows);
+
+    client
+        .execute("DROP TABLE cpg_copy_binary_widths", &[])
+        .await
+        .unwrap();
+}
+
 /// A successful COPY is still transactional: ROLLBACK must discard its rows
 /// and leave the same connection ready for later work.
 #[compio::test]

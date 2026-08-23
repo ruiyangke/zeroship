@@ -1114,3 +1114,161 @@ async fn a_copy_out_whose_copy_out_response_never_arrives_is_refused() {
     .await
     .expect("missing-CopyOutResponse test exceeded its outer watchdog");
 }
+
+// ---------------------------------------------------------------------------
+// Binary COPY OUT framing.
+//
+// `BinaryCopyOutStream` parses ONE tuple out of each chunk `CopyOutStream`
+// hands it and then throws the rest of that chunk away. That is sound only
+// because of a guarantee the PEER makes: the PostgreSQL protocol's COPY
+// Operations section says the backend sends "zero or more CopyData messages
+// (always one per row)" in copy-out mode. The reverse direction is explicitly
+// NOT bound that way -- "the message boundaries are not required to have
+// anything to do with row boundaries" -- so the assumption is one-directional
+// and rests entirely on the peer conforming.
+//
+// A peer that does not is the case below. It is the quiet member of this file:
+// nothing is malformed, no length lies, every tuple parses. The rows simply do
+// not arrive, and a short answer with no error is the one failure a caller has
+// no way to detect.
+// ---------------------------------------------------------------------------
+
+/// A 19-byte binary-COPY file header followed by `tuples`, as one `CopyData`
+/// body. PostgreSQL merges the header into the first row's message, so a
+/// single tuple here is exactly what a conforming backend sends first.
+fn binary_copy_chunk(tuples: &[&[u8]]) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"PGCOPY\n\xff\r\n\0");
+    body.extend_from_slice(&0i32.to_be_bytes()); // flags
+    body.extend_from_slice(&0u32.to_be_bytes()); // header extension length
+    for tuple in tuples {
+        body.extend_from_slice(tuple);
+    }
+    backend_frame(b'd', &body)
+}
+
+/// One tuple carrying a single non-NULL `int4`.
+fn binary_int4_tuple(value: i32) -> Vec<u8> {
+    let mut tuple = Vec::new();
+    tuple.extend_from_slice(&1i16.to_be_bytes()); // field count
+    tuple.extend_from_slice(&4i32.to_be_bytes()); // field length
+    tuple.extend_from_slice(&value.to_be_bytes());
+    tuple
+}
+
+/// The frames around the data: BindComplete and a one-column binary
+/// `CopyOutResponse` before, the -1 trailer and the wrap-up after.
+fn binary_copy_out_frames(data: Vec<Vec<u8>>) -> Vec<u8> {
+    let mut response = backend_frame(b'2', b"");
+    // CopyOutResponse: overall format 1 (binary), one column, that column
+    // binary too.
+    response.extend_from_slice(&backend_frame(b'H', b"\x01\x00\x01\x00\x01"));
+    for chunk in data {
+        response.extend_from_slice(&chunk);
+    }
+    let mut trailer = Vec::new();
+    trailer.extend_from_slice(&(-1i16).to_be_bytes());
+    response.extend_from_slice(&backend_frame(b'd', &trailer));
+    response.extend_from_slice(&backend_frame(b'c', b""));
+    response.extend_from_slice(&backend_frame(b'C', b"COPY 2\0"));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    response
+}
+
+/// Drain a binary COPY OUT of `int4` against `response` and report what came
+/// back.
+async fn binary_copy_out_against(
+    process_id: i32,
+    response: Vec<u8>,
+) -> Result<Vec<i32>, compio_postgres::Error> {
+    use compio_postgres::binary_copy::BinaryCopyOutStream;
+    use compio_postgres::types::Type;
+    use futures_util::TryStreamExt;
+
+    let server = copy_stub_server(process_id, response);
+    let (client, connection) = stub_config(server.addr)
+        .connect(NoTls)
+        .await
+        .expect("connect to scripted PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let collected = compio::time::timeout(OPERATION_WATCHDOG, async {
+        let stream = client.copy_out("COPY t TO STDOUT BINARY").await?;
+        let mut rows = Box::pin(BinaryCopyOutStream::new(stream, &[Type::INT4]));
+        let mut values = Vec::new();
+        while let Some(row) = rows.try_next().await? {
+            values.push(row.try_get::<i32>(0)?);
+        }
+        Ok::<Vec<i32>, compio_postgres::Error>(values)
+    })
+    .await
+    .expect("binary COPY OUT hung");
+
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    drop(client);
+    server.finish();
+    collected
+}
+
+/// THE CONTROL, and it runs first for a reason: it is the same two tuples, the
+/// same values, the same everything, framed the way a conforming backend frames
+/// them -- one `CopyData` per row. It must yield BOTH.
+///
+/// Without it the test below could be satisfied by a driver that refused binary
+/// COPY OUT outright.
+#[compio::test]
+async fn two_binary_tuples_in_two_messages_are_both_delivered() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let response = binary_copy_out_frames(vec![
+            binary_copy_chunk(&[&binary_int4_tuple(7)]),
+            backend_frame(b'd', &binary_int4_tuple(9)),
+        ]);
+        let values = binary_copy_out_against(530, response)
+            .await
+            .expect("a conforming binary COPY OUT was rejected");
+        assert_eq!(
+            values,
+            vec![7, 9],
+            "the driver lost a tuple from a correctly framed binary COPY OUT"
+        );
+    })
+    .await
+    .expect("binary COPY OUT control exceeded its outer watchdog");
+}
+
+/// THE ONE VARIABLE: both tuples in ONE `CopyData`.
+///
+/// Every byte is identical to the control; only the message boundary moved.
+/// The driver parses the first tuple and the second is still sitting in the
+/// chunk when the row is returned -- the next poll reads the NEXT message, so
+/// those bytes are gone. The caller gets `[7]` and no error at all.
+///
+/// Refusing is the answer rather than parsing on, because a peer free to pack
+/// two tuples into a message is equally free to split one ACROSS messages, and
+/// no amount of parsing within a chunk recovers that. What the caller needs is
+/// to be told the framing is not what this parser requires.
+#[compio::test]
+async fn two_binary_tuples_in_one_message_are_refused_rather_than_silently_halved() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let response = binary_copy_out_frames(vec![binary_copy_chunk(&[
+            &binary_int4_tuple(7),
+            &binary_int4_tuple(9),
+        ])]);
+        let outcome = binary_copy_out_against(531, response).await;
+        let error = match outcome {
+            Ok(values) => panic!(
+                "the driver returned {values:?} for a chunk carrying TWO tuples, dropping the \
+                 rest of the message with no error"
+            ),
+            Err(error) => error,
+        };
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("trailing bytes"),
+            "a coalesced binary COPY chunk reported {chain:?} rather than naming the leftover \
+             bytes"
+        );
+    })
+    .await
+    .expect("coalesced binary COPY test exceeded its outer watchdog");
+}
