@@ -24,6 +24,12 @@
             # mismatched clippy fails with E0514 against crates already
             # built by this rustc).
             clippy
+            # rustfmt from the same nixpkgs as rustc/cargo, for the same reason
+            # clippy is pinned above. Without it `cargo fmt` is simply absent
+            # from the shell -- `cargo fmt --all -- --check` failed with "no
+            # such command" every time it was asked for, which reads like a
+            # passing check if the exit code is not inspected.
+            rustfmt
             cmake
             pkg-config
             openssl
