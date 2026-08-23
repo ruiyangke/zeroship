@@ -15,6 +15,9 @@
 
 use compio_postgres::Config;
 
+#[allow(dead_code)]
+mod common;
+
 /// What this driver is expected to do with a libpq parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verdict {
@@ -317,5 +320,56 @@ fn a_url_authority_appends_every_host() {
         overridden.get_hosts().len(),
         1,
         "a query-string host must replace the authority's list"
+    );
+}
+
+/// URL SHAPES libpq accepts, all of which parse here too -- and the one place
+/// the two then behave differently.
+///
+/// Every shape below was handed to psql first; all five connect or parse
+/// there. The interesting one is `postgres:///db`, which parses to NO host in
+/// both implementations. libpq then connects over a compiled-in default socket
+/// directory; this refuses with "both host and hostaddr are missing", because
+/// half of libpq's answer there is `PGHOST` and this crate reads no process
+/// configuration. That is now stated at the check in `connect.rs` rather than
+/// being incidental.
+#[compio::test]
+async fn url_shapes_parse_like_libpq_and_an_empty_host_is_refused_at_connect() {
+    use compio_postgres::NoTls;
+
+    // Accepted by libpq; must parse here.
+    for url in [
+        "postgresql://postgres@127.0.0.1:5432/postgres",
+        "postgres:///postgres?user=postgres",
+        "postgres://postgres@/postgres",
+        "postgres://",
+    ] {
+        url.parse::<Config>()
+            .unwrap_or_else(|error| panic!("libpq accepts {url}, we refused it: {error}"));
+    }
+
+    // A percent-encoded absolute path is a SOCKET DIRECTORY, not a hostname.
+    let socket = "postgres://%2Fvar%2Frun%2Fpostgresql/postgres?user=postgres"
+        .parse::<Config>()
+        .expect("an encoded socket path must parse");
+    assert!(
+        format!("{:?}", socket.get_hosts()).contains("Unix"),
+        "an encoded absolute path became a TCP host: {:?}",
+        socket.get_hosts()
+    );
+
+    // The divergence, pinned. No server is contacted: the refusal happens
+    // while enumerating endpoints, before any I/O.
+    let error = "postgres:///postgres?user=postgres"
+        .parse::<Config>()
+        .expect("a hostless URL parses")
+        .connect(NoTls)
+        .await
+        .err()
+        .expect("a hostless config must be refused rather than guessing a socket path");
+    let chain = common::error_chain(&error);
+    assert!(
+        chain.contains("host") && chain.contains("missing"),
+        "the refusal must name what is absent, got: {chain}"
     );
 }

@@ -116,6 +116,18 @@ impl Endpoint {
 pub(crate) fn endpoints(config: &Config) -> Result<Vec<Endpoint>, Error> {
     config.validate_tls_settings()?;
 
+    // A DIVERGENCE FROM libpq, and a deliberate one. `postgres:///db` parses
+    // here exactly as it does there, but libpq then connects over a
+    // compiled-in default socket directory (overridable by `PGHOST`), while
+    // this refuses. Measured: psql accepts `postgres:///postgres?user=postgres`
+    // and connects.
+    //
+    // The reason is this crate's own rule -- a published library takes
+    // resolved options from its caller and reads no process configuration
+    // (`tests/common/env.rs`, enforced by a workspace source gate). Half of
+    // libpq's behaviour here IS process configuration, and implementing the
+    // other half alone would mean silently dialling a platform-specific path
+    // the caller never named. Refusing says so instead.
     if config.get_hosts().is_empty() && config.get_hostaddrs().is_empty() {
         return Err(Error::config("both host and hostaddr are missing".into()));
     }

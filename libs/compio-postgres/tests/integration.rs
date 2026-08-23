@@ -50,10 +50,25 @@ fn test_schema() -> String {
 }
 
 const ADMIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const ADMIN_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
-const ADMIN_BATCH_TIMEOUT: Duration = Duration::from_secs(20);
-const ADMIN_DRIVER_TIMEOUT: Duration = Duration::from_secs(5);
-const ADMIN_CLEANUP_WAIT: Duration = Duration::from_secs(25);
+// THESE ARE HANG DETECTORS, NOT PERFORMANCE ASSERTIONS. Each one exists so a
+// fixture that never completes fails with a sentence instead of wedging the
+// run; none of them is a claim about how long the work should take. A budget
+// tight enough to be exceeded by machine load therefore buys nothing and costs
+// a false red.
+//
+// `ADMIN_STATEMENT_TIMEOUT` was 5s and a `CREATE SCHEMA` -- normally about a
+// millisecond -- blew through it on 2026-08-23 at load 16.4, with a peer
+// project's test suite as the top consumer. The same statement passed in 0.25s
+// in isolation moments later. See the load table on
+// `read_timeout::copy_input_time_is_not_charged_as_server_read_silence` for the
+// measured version of this effect; this is the same failure in a fixture.
+//
+// A genuine hang still fails, just later, and the per-test watchdogs bound the
+// run regardless.
+const ADMIN_STATEMENT_TIMEOUT: Duration = Duration::from_secs(30);
+const ADMIN_BATCH_TIMEOUT: Duration = Duration::from_secs(60);
+const ADMIN_DRIVER_TIMEOUT: Duration = Duration::from_secs(30);
+const ADMIN_CLEANUP_WAIT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 struct AdminSqlError {
