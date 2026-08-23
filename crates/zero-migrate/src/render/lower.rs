@@ -898,11 +898,11 @@ fn collect_table_foreign_key_sites<'a>(
 fn canonical_reference_catalog_type(
     dialect: &DialectId,
     data_type: &str,
-    sqlite_integer_width_is_logically_proven: bool,
+    integer_width_is_logically_proven: bool,
 ) -> String {
     crate::render::backends::vendor(dialect)
         .catalog_fold
-        .canonical_reference_catalog_type(data_type, sqlite_integer_width_is_logically_proven)
+        .canonical_reference_catalog_type(data_type, integer_width_is_logically_proven)
 }
 
 /// Recover an exact SQLite row identity from the authoritative live snapshot.
@@ -7290,20 +7290,21 @@ impl IrAuthor {
 
         match rename_strategy {
             zero_migrate_backend::schema::ColumnRenameStrategy::ExpandContract => {
-                // Neutral→PG type: the reconciled `information_schema` data_type,
-                // `ddl_type`-spelled — byte-equal to the declarative path's
-                // `ddl_type(&r.ty)`. Computed ONLY on the PG leg (the SQLite
-                // leg takes affinity from the live SDK Value, never a PG string).
-                let pg_ty = if matches!(ty, ColType::Enum { .. } | ColType::Domain { .. }) {
-                    ir_ddl_type.ok_or(IrLowerError::UnsupportedOp(
-                        "PostgreSQL named type metadata carried no DDL spelling",
-                    ))?
-                } else {
-                    let mut render_column = live_from_column.clone();
-                    render_column.data_type = ir_data_type;
-                    crate::render::backends::schema_renderer(&self.dialect)
-                        .column_type(&render_column, false)
-                };
+                // The reconciled `information_schema` data_type, `ddl_type`-spelled
+                // — byte-equal to the declarative path's `ddl_type(&r.ty)`. Computed
+                // ONLY on the expand-contract leg (the rebuild leg takes affinity from
+                // the live SDK Value, never a rendered type string).
+                let expand_contract_ty =
+                    if matches!(ty, ColType::Enum { .. } | ColType::Domain { .. }) {
+                        ir_ddl_type.ok_or(IrLowerError::UnsupportedOp(
+                            "PostgreSQL named type metadata carried no DDL spelling",
+                        ))?
+                    } else {
+                        let mut render_column = live_from_column.clone();
+                        render_column.data_type = ir_data_type;
+                        crate::render::backends::schema_renderer(&self.dialect)
+                            .column_type(&render_column, false)
+                    };
                 // The PG expand-contract author derives the dual-write from
                 // `{table, from, to, ty}` and needs no live table SHAPE; the type was
                 // already reconciled above, so pass empties for the unused snapshot/
@@ -7322,7 +7323,7 @@ impl IrAuthor {
                         table,
                         from,
                         to,
-                        &pg_ty,
+                        &expand_contract_ty,
                         &empty_snapshot,
                         &serde_json::Value::Null,
                         // The PG expand-contract author has no diff-ownership step
@@ -7337,7 +7338,7 @@ impl IrAuthor {
             }
             zero_migrate_backend::schema::ColumnRenameStrategy::TableRebuild => {
                 // The SQLite rebuild needs the WHOLE live table shape (every column +
-                // the live SDK schema Value). Absent ⇒ fail closed. `pg_ty` is unused
+                // the live SDK schema Value). Absent ⇒ fail closed. `expand_contract_ty` is unused
                 // on this leg (the rebuild's affinity comes from the SDK Value), so it
                 // is not computed here — only the live shape drives the rebuild.
                 let live_snapshot = live

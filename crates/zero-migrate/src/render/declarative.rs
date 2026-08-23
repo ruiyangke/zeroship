@@ -5143,9 +5143,9 @@ impl DeclarativeAuthor {
     /// [`RenameStep`](crate::render::step::RenameStep), REUSING the existing destination
     /// authors verbatim so the IR path inherits their version-stable ids:
     ///
-    /// - **Postgres** ⇒ build the [`OnlineIntent::RenameColumn`] with the PG type
-    ///   string `pg_ty` (the IR's dialect-neutral column type, already mapped to its
-    ///   PG `data_type` and `ddl_type`-spelled by the caller) and run it
+    /// - **Postgres** ⇒ build the [`OnlineIntent::RenameColumn`] with the type
+    ///   string `expand_contract_ty` (the IR's dialect-neutral column type, already
+    ///   mapped to its `data_type` and `ddl_type`-spelled by the caller) and run it
     ///   through [`ExpandContractAuthor::author`] — the SAME author the declarative
     ///   diff path calls, so the E1..C2 ids + intra-chain `depends_on` are authored
     ///   identically. The returned [`ExpandContractPlan`] is wrapped
@@ -5160,20 +5160,20 @@ impl DeclarativeAuthor {
     ///   field-key rename, and a [`RenameHint`] — and route them through
     ///   [`Self::diff`]. The diff yields exactly ONE [`TableRebuild`] (a rename
     ///   always needs a rebuild on SQLite), wrapped into
-    ///   [`crate::render::step::RenameStep::TableRebuild`]. NO PG type string is ever passed to this leg
+    ///   [`crate::render::step::RenameStep::TableRebuild`]. NO type string is ever passed to this leg
     ///   — the affinity comes from the SDK Value, which the caller built from the
     ///   dialect-neutral `ColType`.
     ///
     /// `live_snapshot` / `live_sqlite_schema` are this table's full introspected
     /// structure (the SQLite leg needs the whole shape, not just the column being
-    /// renamed). `pg_ty` is used only on the PG leg.
+    /// renamed). `expand_contract_ty` is used only on the expand-contract leg.
     ///
     /// # Errors
     /// [`DeclarativeError`] if the expand-contract author rejects the intent (empty/
     /// identical names) or the differ cannot resolve the rebuild (un-matchable hint,
     /// emitter shape mismatch).
     // This is a deliberate WIDE cross-subsystem bridge: it carries the rename's
-    // {table, from, to}, the per-dialect type/shape inputs (`pg_ty` for PG; the live
+    // {table, from, to}, the per-dialect type/shape inputs (`expand_contract_ty`; the live
     // snapshot + SDK Value for the SQLite rebuild), AND the real introspected owner
     // for the cross-app guard. Bundling them into a struct would only relocate the
     // same fields; the explicit signature documents exactly what each leg consumes.
@@ -5183,7 +5183,7 @@ impl DeclarativeAuthor {
         table: &str,
         from: &str,
         to: &str,
-        pg_ty: &str,
+        expand_contract_ty: &str,
         live_snapshot: &TableSnapshot,
         live_sqlite_schema: &serde_json::Value,
         live_owner: &str,
@@ -5206,7 +5206,7 @@ impl DeclarativeAuthor {
                         table: table.to_string(),
                         from: from.to_string(),
                         to: to.to_string(),
-                        ty: pg_ty.to_string(),
+                        ty: expand_contract_ty.to_string(),
                     })
                     .map_err(|e| {
                         DeclarativeError::Invalid(format!(
