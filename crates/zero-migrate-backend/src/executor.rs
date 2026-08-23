@@ -925,3 +925,38 @@ impl From<crate::driver::DbError> for RollbackError {
         Self::Db(error.into())
     }
 }
+
+/// Authorize an existence-guard catalog read against the effective policy scope.
+///
+/// The guard names the schema; this decides whether the running policy lets the
+/// probe READ it. It sits with the vocabulary rather than with the orchestration
+/// because each backend's own session path is what calls it — the probe read happens
+/// under that backend's held lock, inside its own transaction, in its own catalog
+/// spelling — and a vendor crate cannot reach into the engine to ask.
+///
+/// It takes the migration's `version` as a `&str` rather than the whole
+/// [`Migration`](zero_migrate_ir::migration::Migration): the version is the only
+/// field it reads, and it reads it to name the refusal.
+///
+/// # Errors
+/// [`ApplyError::ExistenceGuardSchemaOutOfScope`] when the composed policy's schema
+/// scope does not permit `probe_schema`. Fails CLOSED: a policy with no resolvable
+/// schema scope authorizes nothing.
+pub fn authorize_existence_guard_schema(
+    cfg: &crate::conn::ExecutorConfig,
+    version: &str,
+    probe_schema: &str,
+    dialect: &zero_migrate_ir::dialect::DialectId,
+) -> Result<(), ApplyError> {
+    if cfg
+        .guard_config_for(dialect)
+        .schema_scope()
+        .is_some_and(|scope| scope.permits(probe_schema))
+    {
+        return Ok(());
+    }
+    Err(ApplyError::ExistenceGuardSchemaOutOfScope {
+        version: version.to_string(),
+        probe_schema: probe_schema.to_string(),
+    })
+}

@@ -641,7 +641,12 @@ impl MigrationBackend for SqliteBackend {
         // - FailDrift → typed `ExistenceGuardDrift` (parity with the PG arm) —
         // never a silent skip over a divergence.
         if let Some(probe) = &m.existence_guard {
-            authorize_existence_guard_schema(cfg, m, probe.schema(), &SQLITE_DIALECT)?;
+            authorize_existence_guard_schema(
+                cfg,
+                m.version.as_str(),
+                probe.schema(),
+                &SQLITE_DIALECT,
+            )?;
             // The probe's schema is authorized above but is NOT what SQLite snapshots.
             // SQLite's schema argument names an ATTACHED DATABASE - it reaches the
             // catalog as `PRAGMA <db>.table_info(...)` and `<db>.sqlite_master` - while

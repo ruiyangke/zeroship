@@ -884,7 +884,7 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
     };
 
     if let Some(probe) = &m.existence_guard {
-        authorize_existence_guard_schema(cfg, m, probe.schema(), &super::DIALECT)?;
+        authorize_existence_guard_schema(cfg, m.version.as_str(), probe.schema(), &super::DIALECT)?;
         let probe_started = Instant::now();
         let live = super::drift_sql::snapshot_schema_for(conn, probe.schema())
             .await

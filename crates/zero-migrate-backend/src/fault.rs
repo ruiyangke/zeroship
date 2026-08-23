@@ -5,7 +5,7 @@
 //! that at *sub-step* granularity — mid-step, after a DDL/data statement but
 //! before/after its journal row, between an online rename's E1/E2/E3 phases,
 //! mid-backfill-batch — the executor consults this seam at named boundaries and
-//! aborts the in-flight step (returning [`crate::apply::executor::ApplyError`]) when a fault is armed for
+//! aborts the in-flight step (returning [`crate::executor::ApplyError`]) when a fault is armed for
 //! that boundary. Aborting mid-transaction is behaviorally identical to a process
 //! crash there: the open transaction rolls back, exactly as it would on a real
 //! crash, and the resume runs the same recovery path.
@@ -117,14 +117,14 @@ pub fn armed_thread_count() -> usize {
     ARMED_THREADS.load(Ordering::SeqCst)
 }
 
-/// The executor's boundary check: returns an injected [`crate::apply::executor::ApplyError`] (a simulated
+/// The executor's boundary check: returns an injected [`crate::executor::ApplyError`] (a simulated
 /// crash) iff a fault is armed for `point` and its countdown has reached zero;
 /// otherwise `Ok(())`. The common (unarmed) case is a single relaxed load.
 ///
 /// # Errors
-/// [`crate::apply::executor::ApplyError::Backend`] tagged `fault-injection: <point>` when
+/// [`crate::executor::ApplyError::Backend`] tagged `fault-injection: <point>` when
 /// the armed fault fires.
-pub fn trip(point: &str) -> Result<(), crate::apply::executor::ApplyError> {
+pub fn trip(point: &str) -> Result<(), crate::executor::ApplyError> {
     if ARMED_THREADS.load(Ordering::Relaxed) == 0 {
         return Ok(());
     }
@@ -147,7 +147,7 @@ pub fn trip(point: &str) -> Result<(), crate::apply::executor::ApplyError> {
         fire
     });
     if fire {
-        return Err(crate::apply::executor::ApplyError::Backend(format!(
+        return Err(crate::executor::ApplyError::Backend(format!(
             "fault-injection: simulated crash at boundary '{point}'"
         )));
     }
@@ -187,6 +187,6 @@ pub mod points {
     // Two deploy-scoped points were declared here and never wired: nothing tripped
     // them and no test ever armed them, while their docs claimed a crash-fuzz test
     // did. They described a deploy-recovery loop this crate does not drive - see
-    // the marker-log design in `crate::apply::journal`, which now says so and keeps
+    // the marker-log design in `crate::journal`, which now says so and keeps
     // the state-machine rationale a driver would need.
 }

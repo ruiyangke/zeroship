@@ -661,7 +661,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
     let session_sql = set_local_session_sql(cfg, m)?;
     let role_sql = set_local_role_sql(cfg)?;
     if let Some(probe) = &m.existence_guard {
-        authorize_existence_guard_schema(cfg, m, probe.schema(), &super::DIALECT)?;
+        authorize_existence_guard_schema(cfg, m.version.as_str(), probe.schema(), &super::DIALECT)?;
     }
 
     // `transaction()` needs `&mut Client`; the apply flow owns the connection,
@@ -1053,7 +1053,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // apply path, so the two-phase path honors the same probe before it writes an
     // inflight marker or runs the bare `up`.
     if let Some(probe) = &m.existence_guard {
-        authorize_existence_guard_schema(cfg, m, probe.schema(), &super::DIALECT)?;
+        authorize_existence_guard_schema(cfg, m.version.as_str(), probe.schema(), &super::DIALECT)?;
         let probe_started = Instant::now();
         let live = match super::drift_sql::snapshot_schema_for(
             conn,

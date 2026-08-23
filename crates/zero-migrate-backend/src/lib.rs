@@ -157,6 +157,14 @@ pub mod drift;
 // over it. The engine re-exports it at `zero_migrate::driver`.
 pub mod driver;
 pub mod error;
+// The crash-simulation seam. It sits here for the same reason the trait does: all
+// three `MigrationBackend` implementations trip it at their OWN sub-step boundaries
+// (after a DML statement, before a journal row, mid-backfill-batch), so a home above
+// the vendors is a home they cannot reach once they are separately linkable. It
+// names only `executor::ApplyError` and `std`, and it spells no SQL. The engine
+// re-exports it at `zero_migrate::fault`.
+#[doc(hidden)]
+pub mod fault;
 // The apply/rollback VOCABULARY (not an executor): `LockMode`, `ApplyOutcome`,
 // `BackendError`, `ApplyError`, `PreconditionVerdict` and the `Rollback*` set. The
 // generic orchestration stays in the engine; these are the types every

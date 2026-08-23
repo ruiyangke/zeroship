@@ -94,8 +94,12 @@ pub use zero_migrate_backend::approval;
 pub use zero_migrate_backend::conn;
 pub mod db_url;
 pub mod engine;
+// The crash-simulation seam moved down to the backend contract: all three
+// `MigrationBackend` implementations trip it on their own apply paths, so it has to
+// sit below the vendors rather than above them. Re-exported so every
+// `zero_migrate::fault::…` path resolves unchanged.
 #[doc(hidden)]
-pub mod fault;
+pub use zero_migrate_backend::fault;
 // The typed-id (base62/UUIDv7) machinery lives in the `zero-migrate-ir` leaf crate;
 // re-export it under its historical `crate::id` path.
 pub use zero_migrate_ir::id;

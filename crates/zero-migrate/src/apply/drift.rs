@@ -46,11 +46,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::apply::journal::{AppliedEntry, Phase};
 use crate::model::ir::{
     IndexSortOrder, IndexStorageParams, SafeI64, SequenceOwnedBy, SequenceRef, TriggerEvent,
 };
-use crate::model::migration::Migration;
 use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot,
@@ -64,106 +62,16 @@ use crate::render::value_format::{
 };
 
 // ── The drift REPORT shapes moved down to the backend contract, whose drift
-// queries return them. The COMPARISONS that build them — `compare_applied_to_set`,
-// `diff_snapshots`, every per-vendor catalog normalization below — stay here.
+// queries return them, and `compare_applied_to_set` has now followed them: it is the
+// checksum/tamper/orphan comparison EVERY backend runs over its own journal read, so
+// it belongs below the vendors with the shapes it produces. The STRUCTURAL
+// comparisons — `diff_snapshots` and every per-vendor catalog normalization below —
+// stay here, because they read the engine's dialect-resolving value-format helpers.
 // Re-exported so each `crate::apply::drift::…` path resolves unchanged.
 pub use zero_migrate_backend::drift::{
-    AlteredObject, ChecksumDrift, ChecksumDriftReport, DriftError, DriftReport, OrphanJournal,
-    StructuralDrift,
+    compare_applied_to_set, AlteredObject, ChecksumDrift, ChecksumDriftReport, DriftError,
+    DriftReport, OrphanJournal, StructuralDrift,
 };
-
-// ---------------------------------------------------------------------------
-// B1 — checksum / tamper / orphan drift
-// ---------------------------------------------------------------------------
-
-/// The **dialect-agnostic** core of [`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift): compare a set of
-/// net-applied journal entries (already read by the dialect-coupled `applied`)
-/// against the supplied migration set, producing the [`ChecksumDriftReport`].
-///
-/// Extracted so EVERY [`MigrationBackend`](crate::apply::backend::MigrationBackend) impl
-/// shares ONE comparison — the Postgres path and the SQLite path both call this
-/// with their own `applied` read, so the repeatable-exemption / kind-mismatch /
-/// tamper / orphan rules can never diverge across dialects (design: the
-/// comparison is dialect-agnostic; only the journal read underneath differs).
-///
-/// Pure: no I/O. See [`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift) for the per-rule rationale.
-#[must_use]
-pub fn compare_applied_to_set(
-    applied: &[AppliedEntry],
-    migrations: &[Migration],
-) -> ChecksumDriftReport {
-    let by_version: BTreeMap<&str, &Migration> =
-        migrations.iter().map(|m| (m.version.as_str(), m)).collect();
-
-    let mut report = ChecksumDriftReport::default();
-    for entry in applied {
-        // Only NET-applied (completed) versions can drift / be orphaned; a lone
-        // `started` inflight marker is a crash-recovery key, not a settled state.
-        if entry.phase != Phase::Completed {
-            continue;
-        }
-        match by_version.get(entry.version.as_str()) {
-            Some(m) => {
-                // DRIFT EXEMPTION anchored on the JOURNALED
-                // kind, NEVER on the attacker-suppliable `m.flags.repeatable`.
-                //
-                // A repeatable migration's checksum changes by DESIGN (a changed
-                // `CREATE OR REPLACE …` re-runs each deploy), so a checksum mismatch
-                // on a GENUINE repeatable is the re-run signal, not tamper. But the
-                // ONLY trustworthy evidence that a version IS a repeatable is what the
-                // journal recorded when it last applied (`kind='repeatable'`) — the
-                // supplied flag is forgeable. So the exemption requires BOTH the
-                // journaled kind AND the supplied flag to agree on "repeatable":
-                //
-                // - journaled `repeatable` AND supplied `repeatable=true` ⇒ EXEMPT
-                // (the repeatable phase handles its re-apply);
-                // - journaled once-only (apply/baseline/squash) but supplied
-                // `repeatable=true` ⇒ KIND MISMATCH = TAMPER (the flip-flag attack:
-                // turning an applied once-only into a repeatable to slip a mutated
-                // `up` past the once-only abort) ⇒ ChecksumDrift / abort;
-                // - journaled `repeatable` but supplied `repeatable=false` ⇒ reverse
-                // re-classification (also a kind mismatch) ⇒ ChecksumDrift / abort;
-                // - journaled once-only AND supplied once-only ⇒ the ordinary
-                // once-only tamper guard (changed checksum still aborts).
-                let journaled_repeatable = entry
-                    .kind
-                    .is_some_and(crate::apply::journal::JournaledKind::is_repeatable);
-                let supplied_repeatable = m.flags.repeatable;
-                if journaled_repeatable && supplied_repeatable {
-                    // Legit repeatable re-run signal — exempt from the tamper abort.
-                    continue;
-                }
-                if journaled_repeatable != supplied_repeatable {
-                    // Kind mismatch: the supplied repeatability disagrees with the
-                    // journaled identity-class. This is tamper (the flip-flag bypass
-                    // or its reverse) — abort with ChecksumDrift regardless of whether
-                    // the checksums happen to match, because the RE-CLASSIFICATION
-                    // itself is the attack. Reuse ChecksumDrift so `apply` aborts on
-                    // the shared gate; recorded vs expected carry the two checksums.
-                    report.checksum_drift.push(ChecksumDrift {
-                        version: entry.version.clone(),
-                        recorded: entry.checksum.clone(),
-                        expected: m.checksum.as_str().to_string(),
-                    });
-                    continue;
-                }
-                // Both once-only: the ordinary tamper guard.
-                if entry.checksum != m.checksum.as_str() {
-                    report.checksum_drift.push(ChecksumDrift {
-                        version: entry.version.clone(),
-                        recorded: entry.checksum.clone(),
-                        expected: m.checksum.as_str().to_string(),
-                    });
-                }
-            }
-            None => report.orphan_journal.push(OrphanJournal {
-                version: entry.version.clone(),
-                recorded: entry.checksum.clone(),
-            }),
-        }
-    }
-    report
-}
 
 // ---------------------------------------------------------------------------
 // B2 — structural introspection + pure diff

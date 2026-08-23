@@ -87,15 +87,11 @@ pub use zero_migrate_backend::backend::{
     PlanPreconditionVerdict, ProjectLockAcquisition, ProjectLockHolder,
 };
 
-/// How many non-blocking project-lock attempts an acquisition makes before it
-/// reports the lock busy.
-///
-/// FIXED and small on purpose: retrying until the lock is free is the unbounded
-/// wait the non-blocking acquisition exists to avoid, only spelled with more round
-/// trips.
-pub(crate) const PROJECT_LOCK_TRY_ATTEMPTS: u32 = 3;
-
-/// How long a non-blocking acquisition pauses between those attempts. Sized to
-/// cover the gap between two of a deploy's statements, not the deploy.
-pub(crate) const PROJECT_LOCK_TRY_BACKOFF: std::time::Duration =
-    std::time::Duration::from_millis(200);
+// The non-blocking project-lock retry budget moved down beside
+// `ProjectLockAcquisition`, the type it budgets. All three backends read the same
+// two values so their busy verdicts cannot drift apart, and a backend that has left
+// this crate still has to read them. Re-exported so every
+// `apply::backend::PROJECT_LOCK_TRY_*` path resolves unchanged.
+pub(crate) use zero_migrate_backend::backend::{
+    PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
+};

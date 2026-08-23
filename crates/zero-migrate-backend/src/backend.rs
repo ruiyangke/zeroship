@@ -101,6 +101,22 @@ pub enum ProjectLockAcquisition {
     Busy(Vec<ProjectLockHolder>),
 }
 
+/// How many non-blocking project-lock attempts an acquisition makes before it
+/// reports the lock busy.
+///
+/// FIXED and small on purpose: retrying until the lock is free is the unbounded
+/// wait the non-blocking acquisition exists to avoid, only spelled with more round
+/// trips.
+///
+/// Shared by every backend rather than chosen per vendor, so two dialects cannot
+/// report the same contended lock differently. That is also why it sits here and not
+/// beside the implementations: a backend in its own crate still has to read it.
+pub const PROJECT_LOCK_TRY_ATTEMPTS: u32 = 3;
+
+/// How long a non-blocking acquisition pauses between those attempts. Sized to
+/// cover the gap between two of a deploy's statements, not the deploy.
+pub const PROJECT_LOCK_TRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// One backend's answer about a single precondition asked of the PRE-PLAN
 /// database, before any of the plan's steps has run.
 ///

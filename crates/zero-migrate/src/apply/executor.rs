@@ -63,26 +63,11 @@ pub use zero_migrate_backend::executor::{
     ApplyError, ApplyOutcome, BackendError, LockMode, PreconditionVerdict, RollbackError,
     RollbackOptions, RollbackOutcome, RollbackRequest, RollbackTarget,
 };
-
-/// Authorize an existence-guard catalog read against the effective policy scope.
-pub(crate) fn authorize_existence_guard_schema(
-    cfg: &ExecutorConfig,
-    migration: &Migration,
-    probe_schema: &str,
-    dialect: &zero_migrate_ir::dialect::DialectId,
-) -> Result<(), ApplyError> {
-    if cfg
-        .guard_config_for(dialect)
-        .schema_scope()
-        .is_some_and(|scope| scope.permits(probe_schema))
-    {
-        return Ok(());
-    }
-    Err(ApplyError::ExistenceGuardSchemaOutOfScope {
-        version: migration.version.as_str().to_string(),
-        probe_schema: probe_schema.to_string(),
-    })
-}
+// `authorize_existence_guard_schema` followed the vocabulary down. It is the gate
+// each backend's own session path runs before reading a schema a guard NAMED, so it
+// has to be reachable from a vendor crate; it reads the `ExecutorConfig`'s composed
+// policy and nothing of the orchestration's.
+pub use zero_migrate_backend::executor::authorize_existence_guard_schema;
 
 /// The refusal an unmet
 /// [`OnUnmet::Halt`](crate::model::precondition::OnUnmet::Halt) check produces.
