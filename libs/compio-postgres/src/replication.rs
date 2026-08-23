@@ -2453,12 +2453,34 @@ mod tests {
             "a field length exceeding the remaining bytes must be Err, not panic"
         );
 
-        // A row with no fields at all yields the empty identity rather than an
-        // error: there is nothing malformed about it, and `identify_system`
-        // reports the absence through its own values.
+        // A row with no fields is REFUSED. This assertion used to say the
+        // opposite -- that an empty row "yields the empty identity rather than
+        // an error: there is nothing malformed about it, and `identify_system`
+        // reports the absence through its own values". That reasoning was
+        // wrong on its own terms, which is why it is reversed here rather than
+        // merely adjusted.
+        //
+        // An empty string does not report an absence; it is a VALUE, and two
+        // of them compare equal. `systemid` is the cluster identity a caller
+        // compares to notice it has been failed over onto a different cluster,
+        // so an identity that defaults to `""` makes that comparison succeed
+        // in precisely the case it exists to catch. `IDENTIFY_SYSTEM` is
+        // specified to return four columns, so a row with none is malformed
+        // for this command whatever it might mean for some other one.
+        //
+        // Nothing depended on the old shape: the sole caller in the workspace
+        // (`crates/plugin-db/src/wal_consumer.rs`) uses `identify_system` as a
+        // health check and discards the value, so this change only makes that
+        // check harder to pass with a broken peer.
         let row = identify_row(&[]);
-        let got = parse_identify_system_row(&row).expect("an empty row is not malformed");
-        assert_eq!(got.systemid, "");
+        let error = parse_identify_system_row(&row)
+            .expect_err("a row with no fields cannot be an IDENTIFY_SYSTEM identity");
+        assert!(
+            error
+                .to_string()
+                .contains("error parsing response from server"),
+            "unexpected error: {error}"
+        );
     }
 
     /// Build a full `ErrorResponse` wire message: `E` tag + 4-byte
