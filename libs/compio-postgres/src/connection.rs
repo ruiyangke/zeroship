@@ -1082,6 +1082,34 @@ fn route_async(
                 }
             }
 
+            // UNBOUNDED ON PURPOSE. Both the name and the value come off the
+            // wire, and nothing caps how many distinct keys a session may
+            // accumulate; the only limit is the 64 MiB per-frame ceiling
+            // `buf_stream::MAX_MESSAGE_SIZE` enforces. That is deliberate, and
+            // the reasoning is recorded here because "the pool should bound
+            // server-controlled growth" reads as obviously correct and is not.
+            //
+            // Reaching unbounded growth requires a peer that chooses arbitrary
+            // bytes: a conforming PostgreSQL sends ParameterStatus only for its
+            // fixed set of GUC_REPORT variables. That same peer can forge ROWS,
+            // a `ReadyForQuery`, or a CommandComplete tag, so memory growth is
+            // the least of what it can do -- a cap here defends against an
+            // adversary who has already won by every measure that matters. The
+            // actual defence is `sslmode=verify-full`, which this driver now
+            // holds every connector to (see `connect_raw`'s attestation check).
+            //
+            // A cap would also add a failure mode to a path that currently has
+            // none, and both available behaviours are bad: dropping silently
+            // makes `Client::parameter` start returning stale or absent values
+            // with no signal, and retiring the connection turns a legitimate
+            // server that reports many GUCs into a hard failure. libpq (a
+            // `pgParameterStatus` list) and tokio-postgres (a `HashMap`) are
+            // both unbounded too, so capping would be a divergence, not parity.
+            //
+            // REOPEN THIS if the driver is ever pointed at something that
+            // terminates connections from untrusted peers -- a pooler or proxy
+            // speaking the frontend protocol to us. The threat model changes
+            // completely there and a bound becomes the right answer.
             parameters.lock().insert(name, value);
         }
         _ => return Err(Error::unexpected_message()),
