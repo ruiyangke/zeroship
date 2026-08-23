@@ -2325,7 +2325,21 @@ impl<'a> UrlParser<'a> {
             };
 
             if key == "host" {
-                self.host_param(value)?;
+                // A query-string `host=` REPLACES the authority's hosts, as
+                // every other key in this loop does through `param`. Measured
+                // against psql: `postgres://127.0.0.1/db?host=nonexistent`
+                // fails to resolve the query host and never falls back to the
+                // authority, which it could only do by having discarded it.
+                //
+                // This one key is routed through `host_param` rather than
+                // `param` so a `/`-prefixed value is still recognised as a
+                // socket directory, and `host_param` appends because the
+                // AUTHORITY needs it to -- so the clear belongs here, once,
+                // before the comma-separated value is applied.
+                self.config.host.clear();
+                for host in value.split(',') {
+                    self.host_param(host)?;
+                }
             } else {
                 let value = self.decode(value)?;
                 self.config.param(&key, &value)?;
@@ -2335,23 +2349,31 @@ impl<'a> UrlParser<'a> {
         Ok(())
     }
 
-    #[cfg(unix)]
+    /// One host from a URL authority, APPENDED to the list.
+    ///
+    /// ONE function, with only the Unix-socket branch behind a `cfg`. It was
+    /// two, and they drifted: the non-Unix one went through
+    /// `param("host", ..)`, which clears so a repeated keyword can override.
+    /// This loop runs once per host in the authority, so on Windows
+    /// `postgres://a,b/db` kept only `b` -- the same defect the port arm had,
+    /// on the one platform the tests here cannot execute.
+    ///
+    /// Collapsing them puts the append on a line every platform compiles and
+    /// the Linux tests exercise, so the property cannot hold on one target and
+    /// not the other. Only the `/`-prefixed socket path is genuinely
+    /// Unix-only.
     fn host_param(&mut self, s: &str) -> Result<(), Error> {
         let decoded = Cow::from(percent_encoding::percent_decode(s.as_bytes()));
+
+        #[cfg(unix)]
         if decoded.first() == Some(&b'/') {
             self.config.host_path(OsStr::from_bytes(&decoded));
-        } else {
-            let decoded = str::from_utf8(&decoded).map_err(|e| Error::config_parse(Box::new(e)))?;
-            self.config.host(decoded);
+            return Ok(());
         }
 
+        let decoded = str::from_utf8(&decoded).map_err(|e| Error::config_parse(Box::new(e)))?;
+        self.config.host(decoded);
         Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn host_param(&mut self, s: &str) -> Result<(), Error> {
-        let s = self.decode(s)?;
-        self.config.param("host", &s)
     }
 
     fn decode(&self, s: &'a str) -> Result<Cow<'a, str>, Error> {

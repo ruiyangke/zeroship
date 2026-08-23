@@ -283,3 +283,39 @@ fn a_url_authority_keeps_a_port_per_host() {
         "a query-string port must replace the authority's list, not extend it"
     );
 }
+
+/// A URL authority APPENDS its hosts, and that holds on every target.
+///
+/// The port half of this was a live regression; the host half was the same
+/// defect confined to `#[cfg(not(unix))]`, where `host_param` routed through
+/// the clearing `param("host", ..)` and a multi-host URL kept only the last.
+/// It could not fail here, which is exactly why it survived: the two
+/// definitions had drifted and only the untestable one was wrong.
+///
+/// The fix collapsed them into one function whose append is compiled
+/// everywhere, so this test now covers the Windows path by construction rather
+/// than by inspection. That is the only claim it can honestly make -- no test
+/// in this suite EXECUTES a non-Unix target.
+#[test]
+fn a_url_authority_appends_every_host() {
+    let listed = "postgres://a,b,c/db"
+        .parse::<Config>()
+        .expect("a multi-host URL must parse");
+    assert_eq!(
+        listed.get_hosts().len(),
+        3,
+        "the authority dropped hosts: {:?}",
+        listed.get_hosts()
+    );
+
+    // Still an override when the key is repeated, which is the rule the
+    // clearing exists for.
+    let overridden = "postgres://a,b/db?host=c"
+        .parse::<Config>()
+        .expect("a query host must parse");
+    assert_eq!(
+        overridden.get_hosts().len(),
+        1,
+        "a query-string host must replace the authority's list"
+    );
+}
