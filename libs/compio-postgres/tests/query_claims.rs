@@ -118,10 +118,7 @@ async fn execute_text_params_coerces_nulls_and_returns_the_affected_count() {
         assert_eq!(affected, 1);
 
         let row = client
-            .query_one(
-                "SELECT n, optional_n FROM query_claims_text_execute",
-                &[],
-            )
+            .query_one("SELECT n, optional_n FROM query_claims_text_execute", &[])
             .await
             .expect("read execute_text_params result");
         assert_eq!(row.get::<_, i32>("n"), 42);
@@ -336,8 +333,16 @@ async fn raw_size_bytes_counts_field_data_and_not_the_frame() {
         for (sql, expected, why) in [
             ("SELECT 'x'::text", 5usize, "4-byte length + 1-byte payload"),
             ("SELECT 'xyz'::text", 7, "4 + 3"),
-            ("SELECT NULL::text", 4, "the length field alone; NULL has no payload"),
-            ("SELECT 'x'::text, 'yz'::text", 11, "(4 + 1) + (4 + 2), summed"),
+            (
+                "SELECT NULL::text",
+                4,
+                "the length field alone; NULL has no payload",
+            ),
+            (
+                "SELECT 'x'::text, 'yz'::text",
+                11,
+                "(4 + 1) + (4 + 2), summed",
+            ),
         ] {
             let row = client.query_one(sql, &[]).await.expect("query the fixture");
             assert_eq!(row.raw_size_bytes(), expected, "{sql}: {why}");
@@ -398,4 +403,80 @@ async fn binary_copy_write_refuses_a_short_value_list() {
         .write(&[&1_i32])
         .await
         .expect("unreachable: the arity assert fires first");
+}
+
+/// `RowStream::columns` is available BEFORE any row is consumed.
+///
+/// That is the property `Client::query_scalar` depends on: it reads the arity
+/// from the STATEMENT rather than from `rows.first()`, so a two-column query
+/// returning no rows is still refused. If `columns()` ever came to depend on
+/// having polled a row, the scalar helpers would silently return to deciding
+/// by the data -- and their own tests would not catch it, because those use
+/// queries that DO return rows.
+///
+/// So this asserts the empty case explicitly, and pins that the answer is the
+/// same before and after the stream is drained.
+#[compio::test]
+async fn row_stream_columns_are_known_before_any_row_is_read() {
+    compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+
+        // A query that yields NOTHING. Nothing can be learned from its rows.
+        let stream = client
+            .query_raw(
+                "SELECT 1::int4 AS a, 'x'::text AS b WHERE false",
+                std::iter::empty::<i32>(),
+            )
+            .await
+            .expect("start an empty row stream");
+        let mut stream = std::pin::pin!(stream);
+
+        let before: Vec<String> = stream
+            .columns()
+            .iter()
+            .map(|column| format!("{}:{}", column.name(), column.type_()))
+            .collect();
+        assert_eq!(
+            before,
+            vec!["a:int4".to_string(), "b:text".to_string()],
+            "the RowDescription was not available before the first poll"
+        );
+
+        // Drain it -- there is nothing to drain -- and the answer must not move.
+        while stream
+            .try_next()
+            .await
+            .expect("empty stream drains")
+            .is_some()
+        {}
+        let after: Vec<String> = stream
+            .columns()
+            .iter()
+            .map(|column| format!("{}:{}", column.name(), column.type_()))
+            .collect();
+        assert_eq!(
+            before, after,
+            "the column list changed as the stream drained"
+        );
+
+        // ONE-VARIABLE PARTNER: a query that does return rows must report the
+        // same shape, or "columns are known early" could be satisfied by
+        // reporting something constant.
+        let populated = client
+            .query_raw(
+                "SELECT 1::int4 AS a, 'x'::text AS b",
+                std::iter::empty::<i32>(),
+            )
+            .await
+            .expect("start a populated row stream");
+        let populated = std::pin::pin!(populated);
+        let names: Vec<String> = populated
+            .columns()
+            .iter()
+            .map(|column| format!("{}:{}", column.name(), column.type_()))
+            .collect();
+        assert_eq!(names, before);
+    })
+    .await
+    .expect("row-stream columns test exceeded its watchdog");
 }
