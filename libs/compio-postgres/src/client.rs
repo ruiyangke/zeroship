@@ -1844,17 +1844,22 @@ impl Client {
     where
         T: ?Sized + ToStatement + fmt::Debug,
     {
-        let rows: Vec<Row> = self
-            .query_raw(statement, slice_iter(params))
-            .await?
-            .try_collect()
-            .await?;
+        // The arity comes from the STATEMENT, not from `rows.first()`. Reading
+        // it off the first row made the verdict depend on the data: `SELECT
+        // 1, 2` errored while `SELECT 1, 2 WHERE false` returned an empty Vec,
+        // so a caller whose fixture happened to be empty got a green and met
+        // the error once real rows existed.
+        //
+        // The stream is drained before the error is returned rather than
+        // dropped early. This is a caller mistake and so a cold path; draining
+        // keeps it off the abandoned-response machinery entirely.
+        let stream = self.query_raw(statement, slice_iter(params)).await?;
+        let column_count = stream.columns().len();
+        let rows: Vec<Row> = stream.try_collect().await?;
 
-        if let Some(row) = rows.first() {
-            if row.len() != 1 {
-                return Err(Error::column_count());
-            }
-        };
+        if column_count != 1 {
+            return Err(Error::column_count());
+        }
 
         rows.into_iter().map(|r| r.try_get(0)).collect()
     }
@@ -1927,15 +1932,21 @@ impl Client {
     where
         T: ?Sized + ToStatement + fmt::Debug,
     {
-        let row = self.query_opt(statement, params).await?;
+        // Same data-dependence as `query_scalar` had, for the same reason: with
+        // no row there was nothing to read an arity off, so a two-column query
+        // returning nothing was accepted.
+        let stream = self.query_raw(statement, slice_iter(params)).await?;
+        let column_count = stream.columns().len();
+        let rows: Vec<Row> = stream.try_collect().await?;
 
-        if let Some(row) = &row {
-            if row.len() != 1 {
-                return Err(Error::column_count());
-            }
+        if column_count != 1 {
+            return Err(Error::column_count());
+        }
+        if rows.len() > 1 {
+            return Err(Error::row_count());
         }
 
-        row.map(|x| x.try_get::<_, R>(0)).transpose()
+        rows.into_iter().next().map(|x| x.try_get::<_, R>(0)).transpose()
     }
 
     /// The maximally flexible version of [`query`].
