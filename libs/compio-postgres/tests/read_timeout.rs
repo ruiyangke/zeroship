@@ -741,15 +741,59 @@ async fn a_normal_live_query_inside_the_deadline_is_untouched() {
     .expect("normal live query exceeded its outer watchdog");
 }
 
+/// COPY producer silence is exempt from the socket-read deadline.
+///
+/// THE TWO CONSTANTS BELOW ARE A RATIO, NOT A TIMING PREFERENCE, and the
+/// invariant is `COPY_PRODUCER_DELAY > COPY_READ_DEADLINE`. If the exemption
+/// regressed, the deadline would fire during the sleep and this test would go
+/// red -- that is the whole mechanism, and it survives both constants being
+/// scaled together. Scale them if this is slow; never close the gap.
+///
+/// The absolute values are large because THIS TEST MEASURES THE MACHINE AS
+/// MUCH AS THE DRIVER. Every live round trip it makes runs under the deadline,
+/// including the fixture statement, which is not its subject. Measured
+/// 2026-08-23 on a 16-core box while an unrelated build campaign was running:
+///
+/// | 1-min load | 100ms deadline | 500ms deadline |
+/// |------------|----------------|----------------|
+/// | ~18        | 17/30 failed   | 8/30 failed    |
+/// | ~6-9       | 0/25           | 0/25           |
+///
+/// Every one of those failures was the FIRST round trip after connect, never
+/// the COPY. So the old 100ms budget was not measuring the exemption at all;
+/// it was measuring whether the compio task got scheduled, and it made the
+/// whole suite intermittently red -- 1 failure in 8 full serial runs, which is
+/// how this arrived as an unattributed flake. A 5x budget only halved the rate
+/// at load 18, so the fix is a budget with real headroom, not a nudge.
+///
+/// WHAT THIS STILL DOES NOT SURVIVE: a machine loaded hard enough to stall a
+/// task for two seconds. A red here is evidence about the machine first and
+/// the driver second; check the load average before reading it as a
+/// regression. The deterministic half of this behaviour is pinned against a
+/// scripted peer by `copy_done_starts_a_deadline_for_the_final_server_response`,
+/// which needs no live server and no wall-clock margin.
 #[compio::test]
 async fn copy_input_time_is_not_charged_as_server_read_silence() {
     use bytes::Bytes;
     use futures_util::SinkExt;
 
-    compio::time::timeout(ASYNC_WATCHDOG, async {
+    /// Budget for one real round trip against a live server under load.
+    const COPY_READ_DEADLINE: Duration = Duration::from_secs(2);
+    /// Producer silence, which must exceed the deadline for the test to mean
+    /// anything.
+    const COPY_PRODUCER_DELAY: Duration = Duration::from_secs(3);
+    /// This test deliberately sleeps for longer than `ASYNC_WATCHDOG`.
+    const COPY_WATCHDOG: Duration = Duration::from_secs(15);
+
+    const _: () = assert!(
+        COPY_PRODUCER_DELAY.as_millis() > COPY_READ_DEADLINE.as_millis(),
+        "the producer delay must exceed the deadline or the exemption is untested"
+    );
+
+    compio::time::timeout(COPY_WATCHDOG, async {
         let url = live_url();
         let mut config: Config = url.parse().expect("parse PG_TEST_URL");
-        config.read_timeout(Duration::from_millis(100));
+        config.read_timeout(COPY_READ_DEADLINE);
         let (client, connection) = config
             .connect(NoTls)
             .await
@@ -769,9 +813,9 @@ async fn copy_input_time_is_not_charged_as_server_read_silence() {
         // PostgreSQL is healthy but deliberately silent here because it is
         // waiting for caller input. This is not a stalled server read.
         let producer_started = Instant::now();
-        compio::time::sleep(Duration::from_millis(350)).await;
+        compio::time::sleep(COPY_PRODUCER_DELAY).await;
         assert!(
-            producer_started.elapsed() >= Duration::from_millis(350),
+            producer_started.elapsed() >= COPY_PRODUCER_DELAY,
             "COPY exemption was not exposed for the scripted producer delay"
         );
         assert!(!client.is_closed(), "COPY producer time spent the read budget");
