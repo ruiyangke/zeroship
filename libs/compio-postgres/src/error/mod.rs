@@ -390,6 +390,16 @@ enum Kind {
     /// A post-startup socket read made no progress before the connection's
     /// configured inactivity deadline. The protocol session is unrecoverable.
     ReadTimeout,
+    /// `COMMIT` reached the server inside an aborted transaction block, so
+    /// PostgreSQL discarded every change and answered with the `ROLLBACK`
+    /// command tag instead of `COMMIT`.
+    ///
+    /// This is NOT an `ErrorResponse`: the server considers the statement to
+    /// have succeeded, and libpq reports it only through `PQcmdStatus`. The
+    /// driver's `commit()` returns `Result<(), Error>` and has nowhere to put a
+    /// command tag, so without this kind the one signal that a write was thrown
+    /// away has no way to reach the caller.
+    TransactionRolledBack,
 }
 
 struct ErrorInner {
@@ -439,6 +449,10 @@ impl fmt::Display for Error {
             Kind::TargetSessionAttrs => fmt.write_str("error checking target session attributes"),
             Kind::CommandTimeout => fmt.write_str("client command timeout expired"),
             Kind::ReadTimeout => fmt.write_str("socket read timeout expired"),
+            Kind::TransactionRolledBack => fmt.write_str(
+                "the server rolled the transaction back instead of committing it: a statement \
+                 in it had already failed",
+            ),
         }
     }
 }
@@ -498,6 +512,19 @@ impl Error {
         self.0.kind == Kind::ReadTimeout
     }
 
+    /// Whether `commit` failed because the server rolled the transaction back.
+    ///
+    /// True only for the outcome PostgreSQL reports as a SUCCESSFUL statement:
+    /// a `COMMIT` inside an aborted transaction block, answered with the
+    /// `ROLLBACK` command tag. There is no `ErrorResponse` and no SQLSTATE, so
+    /// [`Error::code`] returns `None` here - the failure a retry loop wants to
+    /// key on is the one that came earlier, from the statement that aborted the
+    /// block.
+    #[must_use]
+    pub fn is_transaction_rolled_back(&self) -> bool {
+        self.0.kind == Kind::TransactionRolledBack
+    }
+
     /// Whether this is a failure of the TLS handshake itself.
     ///
     /// `sslmode=prefer` keys its plaintext retry on exactly this, and on
@@ -530,6 +557,10 @@ impl Error {
 
     pub(crate) fn cancelled() -> Error {
         Error::new(Kind::Cancelled, None)
+    }
+
+    pub(crate) fn transaction_rolled_back() -> Error {
+        Error::new(Kind::TransactionRolledBack, None)
     }
 
     pub(crate) fn unexpected_message() -> Error {

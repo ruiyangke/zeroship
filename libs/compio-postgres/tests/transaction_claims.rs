@@ -591,3 +591,178 @@ async fn a_suspended_portal_resumes_and_then_empties() {
     .await
     .expect("portal resume test exceeded its watchdog");
 }
+
+/// Count this test's rows from a SESSION THAT IS NOT THE ONE UNDER TEST.
+///
+/// Asking the committing session whether its own rows survived is the question
+/// that lies consistently: it would read its own snapshot either way. A second
+/// connection can only see rows a real COMMIT made durable.
+async fn rows_visible_to_another_session(url: &str, table: &str) -> i64 {
+    let observer = connect(url)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+    observer
+        .query_one(&format!("SELECT count(*)::int8 FROM \"{table}\""), &[])
+        .await
+        .expect("the observer session could not count the rows")
+        .get(0)
+}
+
+/// `Transaction::commit` must not answer `Ok` for a transaction PostgreSQL
+/// threw away.
+///
+/// A `COMMIT` sent inside an aborted transaction block is not an error:
+/// PostgreSQL runs it, discards every change, and answers `CommandComplete`
+/// with the tag `ROLLBACK` (measured with psql - `COMMIT;` after `SELECT 1/0`
+/// prints `ROLLBACK`). `finish_batch_execute` drops command tags on the floor,
+/// so the only signal that the write was lost never reached the caller and
+/// `commit()` returned `Ok(())` over discarded data.
+///
+/// The nested form of the same mistake already reported an error - the
+/// savepoint arm of `commit` inspects `transaction_status()` and cleans up - so
+/// a caller's outcome depended on whether the transaction happened to be a
+/// savepoint.
+#[compio::test]
+async fn commit_after_a_failed_statement_reports_that_the_server_rolled_back() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let table = common::test_object_name("cpg_commit_after_failure");
+        client
+            .batch_execute(&format!("CREATE TABLE \"{table}\" (id int4 PRIMARY KEY)"))
+            .await
+            .unwrap();
+
+        let transaction = client.transaction().await.unwrap();
+        transaction
+            .batch_execute(&format!("INSERT INTO \"{table}\" VALUES (1)"))
+            .await
+            .unwrap();
+        let failure = transaction
+            .batch_execute("SELECT 1 / 0")
+            .await
+            .expect_err("the transaction did not enter its aborted state");
+        assert_eq!(
+            failure.code(),
+            Some(&compio_postgres::error::SqlState::DIVISION_BY_ZERO)
+        );
+
+        let outcome = transaction.commit().await;
+
+        let surviving = rows_visible_to_another_session(&url, &table).await;
+        client
+            .batch_execute(&format!("DROP TABLE \"{table}\""))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            surviving, 0,
+            "the fixture is wrong: PostgreSQL kept the row, so there is no lost \
+             write for commit() to under-report"
+        );
+        let error = outcome.expect_err(
+            "commit() reported success for a transaction PostgreSQL rolled back, \
+             and the row it claimed to commit is gone",
+        );
+        assert!(
+            error.is_transaction_rolled_back(),
+            "commit() failed for some other reason, so this test is not about \
+             the discarded transaction: {}",
+            common::error_chain(&error)
+        );
+    })
+    .await
+    .expect("commit-after-failure claim exceeded its watchdog");
+}
+
+/// The control for the claim above, differing in ONE variable: nothing in this
+/// transaction failed.
+///
+/// A `commit` that reports an error for every transaction, or that reads the
+/// command tag inverted, turns this red.
+#[compio::test]
+async fn commit_without_a_failed_statement_still_commits() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let table = common::test_object_name("cpg_commit_clean");
+        client
+            .batch_execute(&format!("CREATE TABLE \"{table}\" (id int4 PRIMARY KEY)"))
+            .await
+            .unwrap();
+
+        let transaction = client.transaction().await.unwrap();
+        transaction
+            .batch_execute(&format!("INSERT INTO \"{table}\" VALUES (1)"))
+            .await
+            .unwrap();
+        let outcome = transaction.commit().await;
+
+        let surviving = rows_visible_to_another_session(&url, &table).await;
+        client
+            .batch_execute(&format!("DROP TABLE \"{table}\""))
+            .await
+            .unwrap();
+
+        outcome.expect("a transaction with no failed statement must commit");
+        assert_eq!(
+            surviving, 1,
+            "the committed row is not visible to another session"
+        );
+    })
+    .await
+    .expect("clean-commit control exceeded its watchdog");
+}
+
+/// The second control, differing from the claim in ONE variable: the commit is
+/// a savepoint's, so the server answers `RELEASE` rather than `COMMIT`.
+///
+/// It pins the SHAPE of the fix as much as the outcome. A nested `commit`
+/// sends `RELEASE`, whose tag is `RELEASE` (measured with psql), so the
+/// inverted spelling of the check - "the tag was not COMMIT" - rejects this
+/// healthy nested commit while leaving the claim above green.
+#[compio::test]
+async fn a_healthy_nested_commit_is_not_mistaken_for_a_rollback() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let table = common::test_object_name("cpg_nested_commit_tag");
+        client
+            .batch_execute(&format!("CREATE TABLE \"{table}\" (id int4 PRIMARY KEY)"))
+            .await
+            .unwrap();
+
+        let mut transaction = client.transaction().await.unwrap();
+        // Both outcomes are carried past the DROP rather than asserted where
+        // they are produced: this test creates a real table in a database other
+        // suites share, and an assertion that fires between CREATE and DROP
+        // leaves it behind.
+        let nested_outcome = {
+            let nested = transaction.transaction().await.unwrap();
+            nested
+                .batch_execute(&format!("INSERT INTO \"{table}\" VALUES (1)"))
+                .await
+                .unwrap();
+            nested.commit().await
+        };
+        let outcome = transaction.commit().await;
+
+        let surviving = rows_visible_to_another_session(&url, &table).await;
+        client
+            .batch_execute(&format!("DROP TABLE \"{table}\""))
+            .await
+            .unwrap();
+
+        nested_outcome.expect("a nested commit over a healthy savepoint must succeed");
+        outcome.expect("the outer commit must succeed");
+        assert_eq!(surviving, 1, "the nested-then-outer commit lost its row");
+    })
+    .await
+    .expect("nested-commit control exceeded its watchdog");
+}
