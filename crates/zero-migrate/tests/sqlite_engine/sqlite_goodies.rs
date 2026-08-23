@@ -25,8 +25,9 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, FieldDescriptor,
-    SchemaSnapshot, SqliteBackend,
+    SchemaSnapshot,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -71,7 +72,7 @@ fn ownership_of(d: &zero_migrate::DesiredSchema) -> HashMap<String, String> {
 /// (engine mode lets the test issue the PRAGMA on `main`).
 async fn column_type(be: &SqliteBackend, table: &str, column: &str) -> String {
     be.actor()
-        .set_mode(zero_migrate::apply::backend::sqlite::Mode::EngineJournal)
+        .set_mode(zero_migrate_sqlite::backend::Mode::EngineJournal)
         .await
         .expect("engine mode");
     let info = be
@@ -264,7 +265,7 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
     // spatial index object to assert here. We DO assert there is no *unexpected*
     // spatial vtable.)
     be.actor()
-        .set_mode(zero_migrate::apply::backend::sqlite::Mode::EngineJournal)
+        .set_mode(zero_migrate_sqlite::backend::Mode::EngineJournal)
         .await
         .expect("engine mode");
     let vtables = be

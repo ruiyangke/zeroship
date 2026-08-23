@@ -60,7 +60,7 @@
 //! - A **batched** `backfill` targets the `BackfillSpec` executor, PORTABLE on
 //!   BOTH backends: PG via the
 //!   writable-CTE windowed `UPDATE` (`backfill.rs`), SQLite via the batched
-//!   per-batch-txn executor (`apply::backend::sqlite::backfill_sql`). The inline
+//!   per-batch-txn executor (`zero_migrate_sqlite::backend::backfill_sql`). The inline
 //!   `set`/`filter` differ per dialect (the `c.fn.splitPart` lowering,
 //!   NULL-skipping `concatWs`); the `BackfillSpec` shape is uniform.
 //!
@@ -103,7 +103,7 @@
 //! was counted as one.
 //!
 //! The transport-safe bind mirror
-//! (`crate::apply::backend::sqlite::actor::SqliteBind`) is the single
+//! (`zero_migrate_sqlite::backend::actor::SqliteBind`) is the single
 //! value-binding path the SQLite executor uses.
 
 use std::collections::BTreeMap;
@@ -1848,7 +1848,7 @@ pub struct BackfillClauses {
 /// `BackfillSpec` executor consumes. Renders for
 /// EITHER dialect: the inline transform is dialect-rendered (the
 /// `c.fn.splitPart` lowering, NULL-skipping `concatWs`), and the PG (`backfill.rs`)
-/// or SQLite (`apply::backend::sqlite::backfill_sql`) executor consumes the result.
+/// or SQLite (`zero_migrate_sqlite::backend::backfill_sql`) executor consumes the result.
 ///
 /// # Errors
 /// [`DmlError`] on a malformed identifier / empty `set` / an unrenderable node.

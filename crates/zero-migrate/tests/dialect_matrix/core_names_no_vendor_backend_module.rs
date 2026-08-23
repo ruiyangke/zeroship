@@ -54,11 +54,13 @@ const VENDOR_MODULES: &[&str] = &["postgres::", "mysql::", "sqlite::"];
 /// The vendors' own subtrees, relative to `crates/zero-migrate/src`. A vendor
 /// naming itself inside its own module is not core resolving a vendor.
 ///
-/// TWO now, not three: `apply/backend/mysql/` left the engine entirely for
-/// `zero-migrate-mysql`, so an exemption for it would be an exemption for nothing —
-/// and a stale exemption is the shape that quietly stops covering a directory
-/// somebody later recreates under that path.
-const VENDOR_SUBTREES: &[&str] = &["apply/backend/postgres/", "apply/backend/sqlite/"];
+/// ONE now, not three. `apply/backend/mysql/` and then `apply/backend/sqlite/` left
+/// the engine entirely, for `zero-migrate-mysql/src/backend/` and
+/// `zero-migrate-sqlite/src/backend/`, so an exemption for either would be an
+/// exemption for nothing — and a stale exemption is the shape that quietly stops
+/// covering a directory somebody later recreates under that path. `postgres` is the
+/// last vendor subtree in core.
+const VENDOR_SUBTREES: &[&str] = &["apply/backend/postgres/"];
 
 /// The ratchet: which core files may name a vendor backend module, and how often.
 ///
@@ -69,17 +71,18 @@ const ALLOWED: &[(&str, usize)] = &[
     // crate and re-exports their backend TYPES, which is how a host names the engine
     // it wants. Nothing here reaches a vendor's SQL.
     //
-    // TWO, down from three, and the third did not move — it went away. MySQL's
-    // execution half is `zero-migrate-mysql` now, and this file does NOT re-export
-    // it: a `pub use zero_migrate_mysql::MysqlBackend` here would be core naming a
-    // vendor CRATE outside the registry, which is what the sibling census
-    // `core_names_no_vendor_crate` forbids. Closing one coupling by opening the
-    // other would have been a wash. A host that wants `MysqlBackend` names the
-    // vendor crate; `zero-migrate-node`'s bridge does exactly that.
+    // ONE, down from three, and neither of the two that went is at another path —
+    // they went away. MySQL's execution half is `zero-migrate-mysql` and SQLite's is
+    // `zero-migrate-sqlite`, and this file re-exports NEITHER: a
+    // `pub use zero_migrate_sqlite::SqliteBackend` here would be core naming a vendor
+    // CRATE outside the registry, which is what the sibling census
+    // `core_names_no_vendor_crate` forbids. Closing one coupling by opening the other
+    // would have been a wash. A host that wants `SqliteBackend` names the vendor
+    // crate; `zero-migrate-node`'s bridge does exactly that for both.
     //
-    // The remaining two go the same way when `postgres` and `sqlite` follow, which
-    // is why this entry is no longer marked PERMANENT.
-    ("apply/backend/mod.rs", 2),
+    // The last one goes the same way when `postgres` follows, which is why this entry
+    // is no longer marked PERMANENT.
+    ("apply/backend/mod.rs", 1),
     // The cross-seam identifier-quoting test. `all_engine_seams_render_uniformly`
     // asserts that the author seam and the PostgreSQL journal seam quote and
     // fail-closed BYTE-IDENTICALLY, which it cannot do without naming both. A
@@ -89,8 +92,13 @@ const ALLOWED: &[(&str, usize)] = &[
 ];
 
 /// The walk's floor. `crates/zero-migrate/src` holds 48 `.rs` files outside the
-/// remaining vendor subtrees; the floor sits under that with room for ordinary churn
+/// remaining vendor subtree; the floor sits under that with room for ordinary churn
 /// but nowhere near zero, so a walk that lost its root cannot pass.
+///
+/// Unchanged by the SQLite extraction, and that is the point of measuring OUTSIDE the
+/// vendor subtrees: the eleven files that left `apply/backend/sqlite/` were already
+/// excluded from this count, so 48 before and 48 after. The sibling censuses that
+/// walk ALL of `src` had to be lowered; this one did not.
 ///
 /// Raise it deliberately if the crate grows. NEVER lower it to get green — a drop
 /// means the walk stopped seeing files, which is the failure this defends.

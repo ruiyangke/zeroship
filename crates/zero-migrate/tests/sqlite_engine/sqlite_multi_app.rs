@@ -32,8 +32,8 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, DeclarativeError, FieldDescriptor, SchemaSnapshot,
-    SqliteBackend,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 

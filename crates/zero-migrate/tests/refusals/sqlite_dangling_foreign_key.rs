@@ -35,11 +35,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::{
     apply::executor::LockMode, Approval, DialectId, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, MigrationEngine, SqliteBackend,
+    LiveSchema, MigrationEngine,
 };
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_ir";
 const APP: &str = "app_ir";

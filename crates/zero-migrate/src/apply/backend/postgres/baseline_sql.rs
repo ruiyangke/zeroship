@@ -5,8 +5,10 @@
 //! [`BaselineOutcome`]/[`BaselineError`] vocabulary it returns — and from there it
 //! called `apply::backend::postgres::journal_sql` by name. That made core's baseline
 //! verb PostgreSQL's baseline verb: SQLite has its own body in
-//! [`sqlite::journal_sql::baseline`](crate::apply::backend::sqlite), MySQL refuses,
-//! and neither could ever have been reached through the module that named this one.
+//! `zero_migrate_sqlite::backend::journal_sql` (named in prose, not linked — that
+//! crate is below this one in the graph, so this crate's docs cannot resolve into
+//! it), MySQL refuses, and neither could ever have been reached through the module
+//! that named this one.
 //!
 //! The neutral half stayed where it was. `BaselineOutcome` and `BaselineError` are
 //! the [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)

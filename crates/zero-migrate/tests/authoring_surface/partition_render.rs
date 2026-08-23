@@ -6,8 +6,9 @@ use zero_migrate::model::ir::{
 };
 use zero_migrate::{
     fold_ops, Approval, ExecutorConfig, IrAuthor, IrFlagsOverride, LiveSchema, LockMode,
-    MigrationEngine, SqliteBackend, CURRENT_IR_VERSION,
+    MigrationEngine, CURRENT_IR_VERSION,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 fn col(name: &str, ty: ColType) -> IrColumn {
     col_with_nullability(name, ty, None)
@@ -321,8 +322,8 @@ fn render_partitioned_parent_create_table_pg() {
 
 #[compio::test]
 async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
-    use zero_migrate::apply::backend::sqlite::Mode;
     use zero_migrate::model::validate::validate_ir_scoped;
+    use zero_migrate_sqlite::backend::Mode;
 
     let ops = collapse_events_ops();
     let migration_ir = ir_ops(ops);

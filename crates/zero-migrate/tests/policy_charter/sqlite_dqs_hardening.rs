@@ -44,11 +44,11 @@ use std::path::PathBuf;
 
 use rusqlite::config::DbConfig;
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::actor::SqliteActorError;
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::SqliteBackend;
+use zero_migrate_sqlite::backend::actor::SqliteActorError;
+use zero_migrate_sqlite::SqliteBackend;
 
 /// A tenant's two file paths inside a fresh temp dir.
 struct Paths {

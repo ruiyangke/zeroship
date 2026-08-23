@@ -9,7 +9,7 @@
 //!
 //! - PostgreSQL — `apply::backend::postgres::journal_sql`
 //! - MySQL — `zero_migrate_mysql::backend::journal_sql`
-//! - SQLite — `apply::backend::sqlite::journal_sql`
+//! - SQLite — `zero_migrate_sqlite::backend::journal_sql`
 //!
 //! The wire strings the enums below carry are the CONTRACT between those three
 //! implementations: every backend's `CHECK` constraints, INSERTs and net-state

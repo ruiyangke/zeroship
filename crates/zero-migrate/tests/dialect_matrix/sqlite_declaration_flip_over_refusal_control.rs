@@ -35,13 +35,14 @@ use std::path::PathBuf;
 
 use serde_json::json;
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
+use zero_migrate_sqlite::backend::Mode;
 
 use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, GuardConfig, IrAuthor, LiveSchema,
-    MigrationIr, PlanStep, RenameStep, SchemaSnapshot, SqliteBackend,
+    MigrationIr, PlanStep, RenameStep, SchemaSnapshot,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_control";
 const APP: &str = "app_control";

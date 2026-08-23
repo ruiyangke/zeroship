@@ -24,7 +24,6 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::model::ir::{ColType, IrFlagsOverride, MigrationIr, Op};
 use zero_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, FieldDescriptor,
@@ -32,9 +31,11 @@ use zero_migrate::render::declarative::{
 use zero_migrate::render::lower::{IrAuthor, IrLowerError, LiveSchema};
 use zero_migrate::{
     apply::executor::LockMode, resolve_create_table_policy, Approval, ExecutorConfig,
-    MigrationBackend, MigrationEngine, SqliteBackend,
+    MigrationBackend, MigrationEngine,
 };
 use zero_migrate::{PlanStep, RenameStep};
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_rename";
 const APP: &str = "app_rename";

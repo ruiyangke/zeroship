@@ -2,12 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::ir::AlterPrimaryKeyAction;
-use crate::render::plan::SequenceHighWaterPolicy;
-use crate::render::plan::TableRebuildSpec;
+use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
+use zero_migrate_backend::table_rebuild::TableRebuildSpec;
+use zero_migrate_ir::ir::AlterPrimaryKeyAction;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
+use zero_migrate_backend::stored_ddl::StoredDdl;
 
 #[derive(Debug, Clone)]
 struct Column {
@@ -29,7 +30,7 @@ fn lit(value: &str) -> String {
 }
 
 fn ident(value: &str) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(value, &super::SQLITE_DIALECT)
+    zero_migrate_backend::dml::escape_quote_ident_for_backend(value, &crate::dml::RENDERER)
 }
 
 fn cell(row: &[Option<String>], index: usize, field: &str) -> Result<String, SqliteActorError> {
@@ -255,7 +256,7 @@ pub(crate) async fn resolve(
         .ok_or_else(|| fail(format!("table {table:?} has no stored CREATE TABLE")))?;
     let columns = table_columns(actor, table).await?;
     let current = primary_key(&columns);
-    let without_rowid = super::stored_ddl().create_is_without_rowid(&stored_create);
+    let without_rowid = crate::stored_ddl::PARSER.create_is_without_rowid(&stored_create);
 
     match action {
         AlterPrimaryKeyAction::Add { .. } if !current.is_empty() => {
@@ -360,14 +361,14 @@ pub(crate) async fn resolve(
         verify_inbound_foreign_keys(actor, table, &current, &stored_create).await?;
     }
 
-    let stored_ddl = super::stored_ddl();
+    let stored_ddl = &crate::stored_ddl::PARSER;
     let rewritten = stored_ddl
         .rewrite_stored_primary_key(
             table,
             &stored_create,
             target_columns(action),
             generated_rowid.map(|column| column.name.as_str()),
-            crate::render::backends::schema_renderer(&super::SQLITE_DIALECT),
+            &crate::schema::RENDERER,
         )
         .map_err(|error| fail(error.to_string()))?;
     let (open, _) = stored_ddl

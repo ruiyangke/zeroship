@@ -27,8 +27,8 @@ use tempfile::TempDir;
 use zero_migrate::{
     apply::executor::LockMode, fold_ops, model::ir::Op, resolve_create_table_policy, Approval,
     ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, SchemaSnapshot,
-    SqliteBackend,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_fold";
 const APP: &str = "app_fold";

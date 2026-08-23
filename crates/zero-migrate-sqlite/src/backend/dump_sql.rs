@@ -153,7 +153,7 @@ mod tests {
     /// connection to EngineJournal; this exercises the tightened path.)
     #[test]
     fn dump_read_succeeds_under_creator_up() {
-        use crate::apply::backend::sqlite::Mode;
+        use crate::backend::Mode;
         let dir = std::env::temp_dir().join(format!(
             "zsmig_dump_creatorup_{}_{}",
             std::process::id(),

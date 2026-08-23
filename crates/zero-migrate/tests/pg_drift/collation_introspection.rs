@@ -13,8 +13,8 @@ use zero_migrate::model::migration::{
 };
 use zero_migrate::{
     apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, IrAuthor, LiveSchema,
-    SqliteBackend,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_collation_introspection";
 

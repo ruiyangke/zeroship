@@ -21,9 +21,9 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
-use zero_migrate::SqliteBackend;
 use zero_migrate::{apply::backend::BackfillError, BackfillSpec, CursorStability};
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 /// A lock serializing every backfill test in this file.
 ///

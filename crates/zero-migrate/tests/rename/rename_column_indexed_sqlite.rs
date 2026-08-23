@@ -49,16 +49,17 @@
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::model::ir::IrFlagsOverride;
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ColType, ExecutorConfig, Migration,
-    MigrationEngine, MigrationIr, Op, PlanStep, RenameStep, SqliteBackend, TableRebuildSpec,
+    MigrationEngine, MigrationIr, Op, PlanStep, RenameStep, TableRebuildSpec,
 };
 use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_indexed_rename";
 const APP: &str = "app_indexed_rename";

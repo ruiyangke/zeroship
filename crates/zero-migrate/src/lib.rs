@@ -188,7 +188,16 @@ pub use apply::backend::PostgresBackend;
 // invited exactly one reading — that a `DdlKind` describes any backend's statement.
 // They live at `zero_migrate_postgres::analysis::classify`, which says whose they
 // are.
-pub use apply::backend::{RebuildError, SqliteActorError, SqliteBackend};
+//
+// ── `SqliteBackend`, `SqliteActorError` and `RebuildError` are NOT re-exported here
+// any more, and they did not move to another path in core — they left the crate.
+// The SQLite execution half is `zero_migrate_sqlite::backend` now, and a
+// `pub use zero_migrate_sqlite::SqliteBackend` here would be core naming a vendor
+// CRATE outside the registry, which is exactly what
+// `tests/dialect_matrix/core_names_no_vendor_crate.rs` forbids: closing one coupling
+// by opening the other would have been a wash. MySQL went the same way one commit
+// earlier. A host that wants the SQLite backend names the vendor crate, as
+// `zero-migrate-node`'s bridge does.
 pub use apply::baseline::{BaselineError, BaselineOutcome};
 pub use apply::drift::{
     diff_snapshots, diff_snapshots_with_index_aliases, AlteredObject, ChecksumDrift,

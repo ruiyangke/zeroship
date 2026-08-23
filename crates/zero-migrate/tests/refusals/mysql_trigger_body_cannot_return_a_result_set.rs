@@ -45,9 +45,10 @@ use zero_migrate::apply::executor::LockMode;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     resolve_create_table_policy, Approval, DialectId, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, MigrationEngine, MigrationIr, SqliteBackend,
+    LiveSchema, MigrationEngine, MigrationIr,
 };
 use zero_migrate_mysql::MysqlBackend;
+use zero_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_mysql_trigger_result_set";
 

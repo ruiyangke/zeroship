@@ -49,8 +49,8 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::Op;
 use zero_migrate::{
     fold_ops, Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, PostgresBackend,
-    SqliteBackend,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_instead_of_trigger_needs_a_view";
 

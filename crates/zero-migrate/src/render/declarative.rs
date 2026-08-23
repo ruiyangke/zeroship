@@ -3054,7 +3054,9 @@ pub struct DeclarativePlan {
     /// flattened into `migrations`: a rebuild is not a single `up` statement — it is
     /// a structured engine-mode operation with `foreign_keys` toggles straddling the
     /// transaction (the SQLite in-txn no-op rule), driven by
-    /// [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one). The
+    /// `zero_migrate_sqlite::SqliteBackend::rebuild_one` (named in prose, not
+    /// linked: the SQLite backend is its own crate and this one depends on it, so
+    /// core cannot name it in a path). The
     /// destructive/approval gate keys on the paired migration's flags
     /// (`destructive + requires_approval`). Always empty on the PG path.
     pub rebuilds: Vec<TableRebuild>,

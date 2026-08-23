@@ -19,9 +19,8 @@ use std::collections::BTreeMap;
 
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::apply::executor::LockMode;
-use zero_migrate::{
-    Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, SqliteBackend,
-};
+use zero_migrate::{Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine};
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_ir";
 const APP: &str = "app_ir";

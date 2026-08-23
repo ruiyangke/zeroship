@@ -476,7 +476,7 @@ mod tests {
     ///
     /// The `"` → `""` escape logic must NOT recur inline across sites such as
     /// `executor` / `precondition` / `baseline` / `expand_contract` / `shadow` /
-    /// `declarative` / `db` / `render::lower` / `apply::backend::sqlite`.
+    /// `declarative` / `db` / `render::lower` / `zero_migrate_sqlite::backend`.
     ///
     /// WHAT IT DOES NOT CATCH, MEASURED: the scan is a byte-pattern, so a
     /// re-implementation that spells the quote differently — `char::from(34)`,

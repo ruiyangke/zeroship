@@ -14,7 +14,8 @@ use zero_migrate::model::migration::{
 };
 use zero_migrate::model::precondition::{Precondition, PreconditionCheck};
 use zero_migrate::PreconditionVerdict;
-use zero_migrate::{AppliedPlan, PlanStatusManifest, ReconciledPlanState, SqliteBackend};
+use zero_migrate::{AppliedPlan, PlanStatusManifest, ReconciledPlanState};
+use zero_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,
@@ -598,7 +599,7 @@ async fn is_autocommit_detects_open_transaction() {
     // Open a transaction under engine mode (which the authorizer allows) — now the
     // connection is the WEDGED state the fix detects.
     be.actor()
-        .set_mode(zero_migrate::apply::backend::sqlite::Mode::EngineJournal)
+        .set_mode(zero_migrate_sqlite::backend::Mode::EngineJournal)
         .await
         .expect("engine mode");
     be.actor().exec("BEGIN IMMEDIATE").await.expect("begin");

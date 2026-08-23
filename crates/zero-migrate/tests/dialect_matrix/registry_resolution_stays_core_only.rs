@@ -32,12 +32,21 @@
 //! forgotten.
 //!
 //! Today, that same extracted code calls the resolvers directly. Measured at the
-//! commit this file was written against, `apply/backend/` holds
+//! commit this file was written against, `apply/backend/` held
 //! `crate::render::backends::guard_for` (4 sites, PostgreSQL),
 //! `::schema_renderer` (3 sites, MySQL and SQLite), `::stored_ddl` (1 site, SQLite's
 //! `mod.rs` forwarder that 6 more call sites read through), `::vendor` (2 sites,
 //! PostgreSQL's `catalog_fold`) and `SqliteSequencePolicy` (2 imports, 9 uses). Every
 //! one of them becomes a vendor resolving a vendor the instant the file moves.
+//!
+//! Two of the three vendors have since moved, and this file is what made them answer
+//! the question rather than carry it. MySQL's `::schema_renderer` sites became
+//! `crate::schema::RENDERER`; SQLite's became the same, and its `::stored_ddl`
+//! forwarder — plus all six call sites reading through it — became
+//! `crate::stored_ddl::PARSER`, the spelling prescribed further down this header.
+//! `SqliteSequencePolicy` is now named only by the crate that owns it, which the
+//! owner exemption below already permitted. What is left to move is
+//! `apply/backend/postgres/`, and with it `guard_for` and `::vendor`.
 //!
 //! # Why the compiler will NOT catch this for you
 //!
@@ -215,16 +224,18 @@ const WALK_ANCHORS: &[&str] = &[
 /// levels down and is the registry composition that census calls PERMANENT.
 const ENGINE_WALK_ANCHORS: &[&str] = &["lib.rs", "render/backends/mod.rs"];
 
-/// The walk's floor across all three vendor crates. They hold 55 `.rs` files under
-/// `src` (19 + 14 + 22), up from 45 when this was written: the MySQL execution half
-/// landed in `zero-migrate-mysql/src/backend/`, which is what the extraction does.
+/// The walk's floor across all three vendor crates. They hold 67 `.rs` files under
+/// `src` (19 + 26 + 22), up from 55: the SQLite execution half landed in
+/// `zero-migrate-sqlite/src/backend/` — eleven files, plus that crate's own
+/// `test_fixtures.rs` — the same way the MySQL half landed in
+/// `zero-migrate-mysql/src/backend/` before it. That is what the extraction does.
 ///
-/// Raise it deliberately as the vendors grow, and this is one of those times — 34 was
-/// set against 45 and would no longer notice losing an entire eight-file directory.
+/// Raise it deliberately as the vendors grow, and this is one of those times: 45 was
+/// set against 55 and would no longer notice losing an entire eleven-file directory.
 /// NEVER lower it to get green: unlike the engine, these crates are the destination of
 /// the extraction, so a falling vendor file count is not the project working — it is
 /// the walk losing a root. Check [`WALK_ANCHORS`] first and trust it over this number.
-const VENDOR_FILE_FLOOR: usize = 45;
+const VENDOR_FILE_FLOOR: usize = 55;
 
 /// The needle's floor, PER RESOLVER: how many free-call sites the identical matcher
 /// must still find in the engine.
@@ -239,10 +250,18 @@ const VENDOR_FILE_FLOOR: usize = 45;
 ///
 /// A resolver whose engine count reaches zero has genuinely left core — retire its
 /// entry deliberately in that commit, rather than dropping the floor to get green.
+///
+/// `stored_ddl` was retired exactly that way, at 4. Its only engine caller was
+/// SQLite's execution half, asking this registry which parser handles SQLite from
+/// inside the SQLite backend; that half is `zero-migrate-sqlite` now and names
+/// `crate::stored_ddl::PARSER` directly, so `render::backends::stored_ddl` had zero
+/// callers and was DELETED. The name stays in [`REGISTRY_RESOLVERS`] above — the rule
+/// it states is still the rule, and it now also guards against the resolver being
+/// reintroduced — but there is no engine site left for it to control, and the ten
+/// remaining controls are what vouch for the matcher.
 const RESOLVER_CONTROL_FLOOR: &[(&str, usize)] = &[
     ("vendor", 20),
     ("schema_renderer", 15),
-    ("stored_ddl", 4),
     ("guard_for", 5),
     ("renderer", 40),
     ("value_format_renderer", 8),

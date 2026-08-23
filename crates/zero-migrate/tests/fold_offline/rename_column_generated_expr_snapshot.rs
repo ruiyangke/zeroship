@@ -35,15 +35,16 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::model::ir::IrFlagsOverride;
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, BinaryOp, ColType, ExecutorConfig, Expr,
-    GeneratedCol, IrColumn, IrScalar, MigrationEngine, MigrationIr, Op, SqliteBackend,
+    GeneratedCol, IrColumn, IrScalar, MigrationEngine, MigrationIr, Op,
 };
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_gen_rename";
 const APP: &str = "app_gen_rename";

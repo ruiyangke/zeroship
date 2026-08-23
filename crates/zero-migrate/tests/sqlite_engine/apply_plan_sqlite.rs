@@ -16,12 +16,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::{
     Approval, CollectionDescriptor, DeclarativeAuthor, ExecutorConfig, FieldDescriptor,
-    MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, SqliteBackend,
+    MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot,
 };
 use zero_migrate::{PlanStep, RenameStep};
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";

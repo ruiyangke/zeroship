@@ -5,14 +5,14 @@
 //! been reached by. It is declared in the contract crate rather than here for the
 //! reason every other item there is: a vendor crate cannot implement a trait that
 //! lives in the engine, because the engine already depends on every vendor. What
-//! remains in THIS module is the vendor side — `postgres` and `sqlite`, their
-//! public re-exports, and the project-lock constants all three backends read. MySQL
-//! is no longer among them: its execution half lives in `zero-migrate-mysql`, and
-//! core does not re-export it, because a `pub use zero_migrate_mysql::…` here would
-//! be core NAMING a vendor outside the registry — the thing
-//! `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. A caller
-//! that wants `MysqlBackend` names the vendor crate, exactly as the registry
-//! composition does.
+//! remains in THIS module is the vendor side — `postgres`, its public re-export,
+//! and the project-lock constants all three backends read. MySQL and SQLite are no
+//! longer among them: their execution halves live in `zero-migrate-mysql` and
+//! `zero-migrate-sqlite`, and core re-exports neither, because a
+//! `pub use zero_migrate_sqlite::…` here would be core NAMING a vendor outside the
+//! registry — the thing `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists
+//! to forbid. A caller that wants `SqliteBackend` names the vendor crate, exactly as
+//! the registry composition does. `postgres` is the last one left.
 //!
 //! The executor's apply/rollback **orchestration** — partition versioned vs
 //! repeatable, the drift/tamper gate, squash/expand gates, `order_pending`, the
@@ -41,10 +41,11 @@
 //!   the checksum/tamper comparison itself is dialect-agnostic and stays generic
 //!   ([`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)).
 //!
-//! [`PostgresBackend`], [`sqlite::SqliteBackend`], and `zero_migrate_mysql::MysqlBackend`
-//! are the live implementations. Postgres remains the richest regression bar; SQLite and MySQL
-//! provide dialect-specific session, journal, drift, and DML behavior behind the
-//! same orchestration trait, without forking the generic executor.
+//! [`PostgresBackend`], `zero_migrate_sqlite::SqliteBackend` and
+//! `zero_migrate_mysql::MysqlBackend` are the live implementations. Postgres remains
+//! the richest regression bar; SQLite and MySQL provide dialect-specific session,
+//! journal, drift, and DML behavior behind the same orchestration trait, without
+//! forking the generic executor.
 //!
 //! The trait is used through **static dispatch** (`<B: MigrationBackend>`), so
 //! native `async fn` in trait (Rust ≥ 1.75) is used directly — no boxing, no
@@ -55,20 +56,16 @@ pub mod capability;
 // the neutral seam types) names no driver-concrete type — a host driver (the napi
 // `pg` shell) supplies the `SqlSession` impl.
 pub mod postgres;
-// SQLite is in-process (`rusqlite`) and rides no network seam at all. MySQL rides
-// the SAME `driver::SqlSession` seam as Postgres and used to sit here beside them;
-// it is `zero_migrate_mysql::backend` now.
-pub mod sqlite;
+// SQLite and MySQL used to sit here beside it. SQLite is in-process (`rusqlite`) and
+// rides no network seam at all; MySQL rides the SAME `driver::SqlSession` seam as
+// Postgres. They are `zero_migrate_sqlite::backend` and `zero_migrate_mysql::backend`
+// now, and neither is re-exported from here.
 
 pub use capability::{
     BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
     OnlineSchemaChange, ShadowConfig, ShadowDryRun,
 };
 pub use postgres::PostgresBackend;
-// The SQLite backend's public entry points, re-exported HERE rather than reached
-// through `apply::backend::sqlite::…` from the crate root, so the root names no
-// vendor module — the same shape `PostgresBackend` above already had.
-pub use sqlite::{RebuildError, SqliteActorError, SqliteBackend};
 // The progress row a resumable backfill reads back. It moved down beside the
 // `BackfillSpec` it describes progress THROUGH; re-exported so
 // `apply::backend::BackfillProgressEntry` resolves unchanged.

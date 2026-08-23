@@ -21,9 +21,8 @@ use zero_migrate::apply::executor::{
 use zero_migrate::model::ir::Op;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
-use zero_migrate::{
-    Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine, SqliteBackend,
-};
+use zero_migrate::{Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationEngine};
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "drop_view_rollback";
 const APP: &str = "app_drop_view_rollback";

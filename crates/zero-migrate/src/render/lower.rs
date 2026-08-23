@@ -5653,7 +5653,7 @@ impl IrAuthor {
     ///    remain the backstop.
     ///
     /// A **batched** `backfill` is PORTABLE on BOTH backends
-    /// (PG `backfill.rs`, SQLite `apply::backend::sqlite::backfill_sql`) — it is
+    /// (PG `backfill.rs`, SQLite `zero_migrate_sqlite::backend::backfill_sql`) — it is
     /// no longer a SQLite hard error.
     ///
     /// # Errors
@@ -5875,7 +5875,7 @@ impl IrAuthor {
     ///
     /// **PORTABLE on BOTH backends**: PG via the writable-CTE windowed
     /// `UPDATE` executor (`backfill.rs`), SQLite via the batched per-batch-txn
-    /// executor (`apply::backend::sqlite::backfill_sql`). The inline `set`/`filter`
+    /// executor (`zero_migrate_sqlite::backend::backfill_sql`). The inline `set`/`filter`
     /// are dialect-rendered (the `c.fn.splitPart` lowering, NULL-skipping
     /// `concatWs`, etc. differ per dialect) — but both legs consume the same
     /// `BackfillSpec` shape, so the plan step is uniform.

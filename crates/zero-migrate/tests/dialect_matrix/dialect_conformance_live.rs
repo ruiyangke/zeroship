@@ -170,9 +170,10 @@ use zero_migrate::render::lower::{
 use zero_migrate::{
     resolve_create_table_policy, Approval, DeclarativeApplyError, EffectivePolicy, EngineError,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
-    PostgresBackend, SqliteBackend,
+    PostgresBackend,
 };
 use zero_migrate_mysql::MysqlBackend;
+use zero_migrate_sqlite::SqliteBackend;
 
 /// What the MySQL leg needed, and where each piece of it now lives. Recorded as a
 /// constant so it is in the file a MySQL author opens, not only in a doc.
@@ -398,9 +399,7 @@ fn server_words(error: &DeclarativeApplyError) -> Option<String> {
             None => db.message.clone(),
         });
     }
-    if let Some(sqlite) =
-        source.downcast_ref::<zero_migrate::apply::backend::sqlite::SqliteActorError>()
-    {
+    if let Some(sqlite) = source.downcast_ref::<zero_migrate_sqlite::backend::SqliteActorError>() {
         return Some(sqlite.to_string());
     }
     Some(source.to_string())

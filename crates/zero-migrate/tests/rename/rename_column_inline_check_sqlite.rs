@@ -22,7 +22,7 @@
 //! The live schema used here is the one `engine::refresh_historical_live` builds for
 //! SQLite - table snapshots from `fold_ops`, SDK schemas from the `FieldDef` projection -
 //! which is the shape whose `inline_checks` are populated at all. A SQLite CATALOG
-//! read leaves the field EMPTY (`apply::backend::sqlite::drift_sql`), so the
+//! read leaves the field EMPTY (`zero_migrate_sqlite::backend::drift_sql`), so the
 //! catalog-sourced rebuild renders from the SDK descriptor or replays the stored
 //! body; the last test here pins that leg so the fix cannot start rewriting a body
 //! it is meant to leave alone.
@@ -37,15 +37,16 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::model::ir::IrFlagsOverride;
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::render::lower::{IrAuthor, LiveSchema};
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ColType, ExecutorConfig, MigrationEngine,
-    MigrationIr, Op, PlanStep, RenameStep, SqliteBackend,
+    MigrationIr, Op, PlanStep, RenameStep,
 };
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_inline_check";
 const APP: &str = "app_inline_check";

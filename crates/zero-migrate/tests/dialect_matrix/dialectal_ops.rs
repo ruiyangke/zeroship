@@ -9,8 +9,9 @@ use zero_migrate::model::validate::{validate_ir, CODE_OP_INVALID};
 use zero_migrate::{
     effective_policy_from_charter_toml, resolve_create_table_policy, Approval, EffectivePolicy,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr, PlanStep,
-    SqliteBackend, CURRENT_IR_VERSION, POSTGRES,
+    CURRENT_IR_VERSION, POSTGRES,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_dialectal";
 const APP: &str = "app_dialectal";

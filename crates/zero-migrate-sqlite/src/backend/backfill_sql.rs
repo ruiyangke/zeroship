@@ -4,14 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
-use crate::apply::backend::{BackfillError, BackfillOutcome, BackfillProgressEntry};
-use crate::model::backfill::{
+use zero_migrate_backend::backfill::{
     generate_per_row_value, BackfillSpec, CursorColumnContract, CursorComparison, CursorContract,
     CursorScalarType, CursorTuple,
 };
-use crate::model::ir::{CursorStability, IrScalar, PerRowGenerator};
-use crate::model::migration::{Checksum, MigrationId};
-use crate::render::dml::sqlite_placeholder;
+use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillProgressEntry};
+use zero_migrate_backend::dml::sqlite_placeholder;
+use zero_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
+use zero_migrate_ir::migration::{Checksum, MigrationId};
 
 use super::actor::{MigrationActor, SqliteActorError, SqliteBind};
 use super::authorizer::Mode;
@@ -127,7 +127,7 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), BackfillError> 
 }
 
 fn quote_ident(identifier: &str) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(identifier, &super::SQLITE_DIALECT)
+    zero_migrate_backend::dml::escape_quote_ident_for_backend(identifier, &crate::dml::RENDERER)
 }
 
 fn cursor_unavailable(spec: &BackfillSpec, reason: impl Into<String>) -> BackfillError {
@@ -192,7 +192,7 @@ fn validate_spec(spec: &BackfillSpec, set_clause: &str) -> Result<(), BackfillEr
             )));
         }
         if let PerRowGenerator::TypeId { prefix } = assignment.generator() {
-            crate::model::ir::validate_type_id_prefix(prefix).map_err(|error| {
+            zero_migrate_ir::ir::validate_type_id_prefix(prefix).map_err(|error| {
                 BackfillError::InvalidSpec(format!(
                     "invalid TypeID prefix for per-row destination {column:?}: {error}"
                 ))
@@ -967,7 +967,7 @@ fn decode_progress_bool(
 }
 
 fn sqlite_journal_err(error: SqliteActorError) -> BackfillError {
-    BackfillError::Journal(crate::apply::journal::JournalError::Backend(
+    BackfillError::Journal(zero_migrate_backend::journal::JournalError::Backend(
         error.to_string(),
     ))
 }
@@ -1752,7 +1752,9 @@ pub(crate) async fn run_backfill_bounded(
             batches += 1;
             rows_updated += count;
             last = next;
-            if let Err(error) = crate::fault::trip(crate::fault::points::BACKFILL_MID_BATCHES) {
+            if let Err(error) = zero_migrate_backend::fault::trip(
+                zero_migrate_backend::fault::points::BACKFILL_MID_BATCHES,
+            ) {
                 return Err(BackfillError::Fault(error.to_string()));
             }
             if count < u64::from(spec.batch_size) {
@@ -1883,7 +1885,7 @@ mod tests {
         let mut spec = external_spec("items", &["cursor_value"], 1);
         spec.per_row.insert(
             "generated".to_string(),
-            crate::model::backfill::PerRowAssignment::validated(
+            zero_migrate_backend::backfill::PerRowAssignment::validated(
                 "main",
                 "items",
                 "generated",

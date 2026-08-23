@@ -16,7 +16,8 @@ use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
 use zero_migrate::model::snapshot::IdDefaultSnapshot;
-use zero_migrate::{fold_ops, fold_ops_onto, IrAuthor, LiveSchema, SchemaSnapshot, SqliteBackend};
+use zero_migrate::{fold_ops, fold_ops_onto, IrAuthor, LiveSchema, SchemaSnapshot};
+use zero_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,

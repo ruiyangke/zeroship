@@ -14,12 +14,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::{
     apply::executor::LockMode, resolve_create_table_policy, Approval, DeclarativeApplyError,
     EngineError, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LoadAndLowerError,
-    MigrationEngine, MigrationIr, SqliteBackend,
+    MigrationEngine, MigrationIr,
 };
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_ir";
 const APP: &str = "app_ir";

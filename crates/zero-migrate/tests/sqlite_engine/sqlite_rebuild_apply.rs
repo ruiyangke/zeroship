@@ -23,14 +23,15 @@ use std::path::PathBuf;
 
 use serde_json::json;
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
 use zero_migrate::{
     CollectionDescriptor, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, IrAuthor,
-    LiveSchema, Migration, MigrationIr, PlanStep, RebuildError, RenameStep, SchemaSnapshot,
-    SqliteBackend, TableRebuild, TableRebuildSpec,
+    LiveSchema, Migration, MigrationIr, PlanStep, RenameStep, SchemaSnapshot, TableRebuild,
+    TableRebuildSpec,
 };
 use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::{RebuildError, SqliteBackend};
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";

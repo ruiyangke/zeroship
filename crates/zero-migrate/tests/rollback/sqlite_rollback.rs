@@ -13,7 +13,7 @@ use zero_migrate::apply::journal::Phase;
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::SqliteBackend;
+use zero_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,

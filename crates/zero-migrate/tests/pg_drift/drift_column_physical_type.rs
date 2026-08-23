@@ -64,9 +64,10 @@ use zero_migrate::model::snapshot::MysqlPhysicalType;
 use zero_migrate::{
     apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops, model::ir::Op,
     resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    LockMode, MigrationEngine, SchemaSnapshot, SqliteBackend, StructuralDrift,
+    LockMode, MigrationEngine, SchemaSnapshot, StructuralDrift,
 };
 use zero_migrate_mysql::MysqlBackend;
+use zero_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_drift_column_physical_type";
 

@@ -4,11 +4,12 @@ use std::path::PathBuf;
 
 use serde_json::json;
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
-use zero_migrate::{IrAuthor, LiveSchema, PlanStep, SqliteBackend, SynchronizeIdentityStep};
+use zero_migrate::{IrAuthor, LiveSchema, PlanStep, SynchronizeIdentityStep};
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 struct Paths {
     _dir: TempDir,

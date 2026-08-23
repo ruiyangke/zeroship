@@ -21,14 +21,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::journal::Phase;
 use zero_migrate::{
     Approval, ApprovalScope, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor,
     DeclarativeDeployOutcome, DeclarativeDeployPlan, EffectivePolicy, EngineError, ExecutorConfig,
     FieldDescriptor, GuardConfig, MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot,
-    SqliteBackend,
 };
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_golden";
 const APP: &str = "app_golden";

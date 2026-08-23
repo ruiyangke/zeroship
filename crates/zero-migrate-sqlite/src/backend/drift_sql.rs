@@ -1,9 +1,10 @@
 //! SQLite live-schema introspection for drift.
 //!
 //! Produces the SAME dialect-agnostic [`SchemaSnapshot`]
-//! the Postgres path returns, so [`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)
-//! and [`diff_snapshots`](crate::apply::drift::diff_snapshots) work unchanged across both
-//! dialects. The PG path reads `information_schema` + `pg_catalog`; this reads
+//! the Postgres path returns, so [`check_checksum_drift`](zero_migrate_backend::backend::MigrationBackend::check_checksum_drift)
+//! and the engine's `diff_snapshots` (named in prose, not linked: it is
+//! `zero_migrate::apply::drift`'s, and the engine depends on this crate) work
+//! unchanged across both dialects. The PG path reads `information_schema` + `pg_catalog`; this reads
 //! `sqlite_master` + `PRAGMA table_info` / `PRAGMA index_list` / `PRAGMA index_info`
 //! / `PRAGMA foreign_key_list` of the connection's `main` database (the app file).
 //!
@@ -32,7 +33,7 @@
 //! keeps comments in the stored schema text, unlike PG which discards them at
 //! parse). [`recover_inline_sentinel`] pulls the `zero-migrate:mask:` / `zero-migrate:enc:` body for a
 //! given column out of that stored text into the snapshot's
-//! [`comment_sentinel`](crate::model::snapshot::ColumnSnapshot::comment_sentinel), so a
+//! [`comment_sentinel`](zero_migrate_backend::snapshot::ColumnSnapshot::comment_sentinel), so a
 //! masked/encrypted column round-trips faithfully rather than being silently
 //! dropped to a plain column.
 
@@ -40,14 +41,19 @@ use std::collections::BTreeMap;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
-use super::SQLITE_DIALECT;
-use crate::apply::drift::DriftError;
-use crate::model::ir::{IdentityCol, IndexSortOrder};
-use crate::model::snapshot::{
+use zero_migrate_backend::drift::DriftError;
+use zero_migrate_backend::snapshot::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot,
     IndexSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
 };
-use crate::render::value_format::{
+use zero_migrate_backend::stored_ddl::StoredDdl;
+use zero_migrate_ir::ir::{IdentityCol, IndexSortOrder};
+// The catalog-side value-format comparison, called at the NEUTRAL seam with this
+// vendor's own renderers. The engine's `render::value_format` doors are a
+// `pub(crate)` module whose whole body is `seam::…(value_format_renderer(dialect),
+// renderer(dialect))`; a backend that already knows which vendor it is passes them
+// itself and the registry round trip disappears.
+use zero_migrate_backend::value_format::{
     catalog_id_default, catalog_uuid_id_default, recover_format_check, RecoveredFormatCheck,
 };
 
@@ -128,8 +134,9 @@ pub(crate) async fn snapshot_schema_for(
         .set_mode(Mode::EngineJournal)
         .await
         .map_err(drift_err)?;
-    let schema_ident = crate::render::dml::quote_ident_checked_for_dialect(schema, &SQLITE_DIALECT)
-        .map_err(|error| DriftError::Snapshot(error.to_string()))?;
+    let schema_ident =
+        zero_migrate_backend::dml::quote_ident_checked_for_backend(schema, &crate::dml::RENDERER)
+            .map_err(|error| DriftError::Snapshot(error.to_string()))?;
 
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut views: BTreeMap<String, ViewSnapshot> = BTreeMap::new();
@@ -281,7 +288,7 @@ async fn introspect_columns(
             (ordinal > 0).then_some(ordinal)
         })
         .count();
-    let without_rowid = super::stored_ddl().create_is_without_rowid(stored_create_sql);
+    let without_rowid = crate::stored_ddl::PARSER.create_is_without_rowid(stored_create_sql);
     let Some(t) = tables.get_mut(table) else {
         return Ok(());
     };
@@ -331,13 +338,23 @@ async fn introspect_columns(
         let value_format = recovered_checks.value_format;
         let has_uuid_format_check = recovered_checks.uuid;
         let catalog_default = if has_uuid_format_check {
-            catalog_uuid_id_default(raw_default.as_deref(), &SQLITE_DIALECT, None)
+            catalog_uuid_id_default(
+                raw_default.as_deref(),
+                &crate::value_format::RENDERER,
+                &crate::dml::RENDERER,
+                None,
+            )
         } else {
-            catalog_id_default(raw_default.as_deref(), &SQLITE_DIALECT, None)
+            catalog_id_default(
+                raw_default.as_deref(),
+                &crate::value_format::RENDERER,
+                &crate::dml::RENDERER,
+                None,
+            )
         };
         let is_uuid_v4_default = matches!(
             catalog_default,
-            crate::model::snapshot::IdDefaultSnapshot::UuidV4
+            zero_migrate_backend::snapshot::IdDefaultSnapshot::UuidV4
         );
         // Defaults remain emission-only in `default`, but ID-bearing defaults
         // have a narrow semantic drift key. Recognize the exact engine UUIDv4
@@ -912,10 +929,10 @@ fn identifier_lists_equal(left: &[String], right: &[String]) -> bool {
 }
 
 fn fk_actions_equal(parsed: Option<&str>, pragma: &str) -> bool {
-    use crate::schema::query::normalize_fk_action_for_dialect;
+    use zero_migrate_backend::constraint_definition::normalize_fk_action_for_vendor;
 
-    normalize_fk_action_for_dialect(parsed, &SQLITE_DIALECT)
-        == normalize_fk_action_for_dialect(Some(pragma), &SQLITE_DIALECT)
+    normalize_fk_action_for_vendor(parsed, &crate::VENDOR)
+        == normalize_fk_action_for_vendor(Some(pragma), &crate::VENDOR)
 }
 
 fn canonical_foreign_key_definition(
@@ -926,8 +943,9 @@ fn canonical_foreign_key_definition(
 ) -> String {
     use std::fmt::Write as _;
 
-    use crate::render::declarative::{constraintdef_cols, quote_ident_if_needed};
-    use crate::schema::query::normalize_fk_action_for_dialect;
+    use zero_migrate_backend::constraint_definition::{
+        constraintdef_cols, normalize_fk_action_for_vendor, quote_ident_if_needed,
+    };
 
     let mut definition = format!(
         "FOREIGN KEY ({}) REFERENCES {}({})",
@@ -955,8 +973,8 @@ fn canonical_foreign_key_definition(
         );
     }
 
-    let on_update = normalize_fk_action_for_dialect(Some(&pragma_fk.on_update), &SQLITE_DIALECT);
-    let on_delete = normalize_fk_action_for_dialect(Some(&pragma_fk.on_delete), &SQLITE_DIALECT);
+    let on_update = normalize_fk_action_for_vendor(Some(&pragma_fk.on_update), &crate::VENDOR);
+    let on_delete = normalize_fk_action_for_vendor(Some(&pragma_fk.on_delete), &crate::VENDOR);
     if on_update != "NO ACTION" {
         let _ = write!(definition, " ON UPDATE {on_update}");
     }
@@ -1314,7 +1332,7 @@ fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str
     // Parse only the outer CREATE body, then compare each clause's decoded first
     // identifier. A global substring search can confuse the table name with a
     // same-named column and cannot correctly skip backtick/bracket quoting.
-    let stored_ddl = super::stored_ddl();
+    let stored_ddl = &crate::stored_ddl::PARSER;
     let (open, close) = stored_ddl.create_body_bounds(create_sql)?;
     let clauses = stored_ddl.table_clauses(&create_sql[open + 1..close])?;
     for clause in clauses {
@@ -1339,7 +1357,7 @@ fn sqlite_column_clause<'a>(create_sql: &'a str, column: &str) -> Option<&'a str
 #[derive(Default)]
 struct RecoveredColumnFormatChecks {
     uuid: bool,
-    value_format: Option<crate::model::ir::ValueFormat>,
+    value_format: Option<zero_migrate_ir::ir::ValueFormat>,
     mixed_uuid_and_value_format: bool,
 }
 
@@ -1360,7 +1378,12 @@ fn recover_column_format_checks(create_sql: &str, column: &str) -> RecoveredColu
         let Some(close) = find_matching_paren(create_sql, open) else {
             continue;
         };
-        match recover_format_check(column, &create_sql[start..=close], &SQLITE_DIALECT) {
+        match recover_format_check(
+            column,
+            &create_sql[start..=close],
+            &crate::value_format::RENDERER,
+            &crate::dml::RENDERER,
+        ) {
             Some(RecoveredFormatCheck::Uuid) => uuid_count += 1,
             Some(RecoveredFormatCheck::Value(format)) => value_formats.push(format),
             None => {}
@@ -1675,7 +1698,12 @@ mod tests {
 
     #[test]
     fn sqlite_fk_definition_is_ordered_and_match_simple_is_implicit() {
-        use crate::render::declarative::ir_fk_constraint_snapshot_for_columns;
+        // The engine's `ir_fk_constraint_snapshot_for_columns` is `pub(crate)` and
+        // cannot cross a crate boundary. Its only extra job is DERIVING
+        // `<table>_<cols>_fkey` when the author wrote none, and this case names the
+        // constraint, so the two are the same call: the wrapper's body is
+        // `fk_constraint_snapshot(name, .., vendor(dialect))`.
+        use zero_migrate_backend::constraint_definition::fk_constraint_snapshot;
         let pragma = PragmaForeignKey {
             referenced_table: "Parent".to_string(),
             columns: Vec::new(),
@@ -1701,10 +1729,9 @@ mod tests {
             &["tenant".to_string(), "parent_id".to_string()],
             Some(&parsed),
         );
-        let desired = ir_fk_constraint_snapshot_for_columns(
+        let desired = fk_constraint_snapshot(
+            "fk_child_parent".to_string(),
             "ignored_by_sqlite",
-            "child",
-            Some("fk_child_parent"),
             &["tenant".to_string(), "order".to_string()],
             "Parent",
             &["tenant".to_string(), "parent_id".to_string()],
@@ -1713,7 +1740,7 @@ mod tests {
             true,
             true,
             false,
-            &SQLITE_DIALECT,
+            &crate::VENDOR,
         );
         assert_eq!(
             actual, desired.definition,
@@ -1728,12 +1755,13 @@ mod tests {
 
     #[test]
     fn recovers_an_exact_table_level_value_format_check() {
-        let check = crate::render::value_format::column_metadata(
+        let check = zero_migrate_backend::value_format::column_metadata(
             "id",
-            &crate::model::ir::ValueFormat::TypeId {
+            &zero_migrate_ir::ir::ValueFormat::TypeId {
                 prefix: "account".to_string(),
             },
-            &SQLITE_DIALECT,
+            &crate::value_format::RENDERER,
+            &crate::dml::RENDERER,
         )
         .expect("TypeID metadata")
         .inline_check;
@@ -1741,7 +1769,7 @@ mod tests {
         let recovered = recover_column_format_checks(&create_sql, "id");
         assert_eq!(
             recovered.value_format,
-            Some(crate::model::ir::ValueFormat::TypeId {
+            Some(zero_migrate_ir::ir::ValueFormat::TypeId {
                 prefix: "account".to_string()
             })
         );

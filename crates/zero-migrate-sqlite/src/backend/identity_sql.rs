@@ -18,11 +18,12 @@
 
 use std::time::Instant;
 
-use crate::model::migration::Migration;
+use zero_migrate_ir::migration::Migration;
 
 use super::actor::{MigrationActor, SqliteActorError};
 use super::authorizer::Mode;
 use super::journal_sql;
+use zero_migrate_backend::stored_ddl::StoredDdl;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RowidAllocation {
@@ -49,7 +50,7 @@ fn lit(value: &str) -> String {
 }
 
 fn ident(value: &str) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(value, &super::SQLITE_DIALECT)
+    zero_migrate_backend::dml::escape_quote_ident_for_backend(value, &crate::dml::RENDERER)
 }
 
 fn integer_cell(row: &[Option<String>], index: usize) -> i64 {
@@ -139,7 +140,7 @@ async fn resolve_rowid_allocation(
         .iter()
         .filter(|candidate| candidate.pk_ordinal > 0)
         .collect::<Vec<_>>();
-    let without_rowid = super::stored_ddl().create_is_without_rowid(&stored_create);
+    let without_rowid = crate::stored_ddl::PARSER.create_is_without_rowid(&stored_create);
     let primary_has_index = primary_key_has_separate_index(actor, table).await?;
     let aliases_rowid = primary.len() == 1
         && target.pk_ordinal == 1
@@ -347,7 +348,7 @@ fn top_level_words(sql: &str) -> Option<Vec<String>> {
 }
 
 fn column_declares_autoincrement(create_sql: &str, column: &str) -> Result<bool, SqliteActorError> {
-    let stored_ddl = super::stored_ddl();
+    let stored_ddl = &crate::stored_ddl::PARSER;
     let (open, close) = stored_ddl
         .create_body_bounds(create_sql)
         .ok_or_else(|| fail("stored CREATE TABLE body could not be parsed"))?;
@@ -471,7 +472,7 @@ async fn journal_completed(
              (event_kind, version, name, checksum, \"by\", exec_ms, phase, outcome, kind) \
              VALUES ('{applied}', {version}, {name}, {checksum}, {by}, {exec_ms}, \
                      'completed', 'success', 'apply')",
-            applied = crate::apply::journal::EventKind::Applied.as_str()
+            applied = zero_migrate_backend::journal::EventKind::Applied.as_str()
         ))
         .await
 }

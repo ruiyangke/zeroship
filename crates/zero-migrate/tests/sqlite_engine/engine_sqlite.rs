@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::journal::{JournaledKind, Phase};
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
@@ -32,8 +31,10 @@ use zero_migrate::model::migration::{
 use zero_migrate::{
     Approval, CollectionDescriptor, DeclarativeApplyError, DeclarativeAuthor, DryRunError,
     EffectivePolicy, EngineError, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
-    MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, ShadowConfig, SqliteBackend,
+    MigrationBackend, MigrationEngine, RenameHint, SchemaSnapshot, ShadowConfig,
 };
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";

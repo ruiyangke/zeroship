@@ -33,9 +33,8 @@ use zero_migrate::apply::executor::LockMode;
 use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
 use zero_migrate::model::precondition::{OnUnmet, Precondition, PreconditionCheck};
 use zero_migrate::render::step::PlanStep;
-use zero_migrate::{
-    model::migration::Migration, Approval, ExecutorConfig, MigrationEngine, SqliteBackend,
-};
+use zero_migrate::{model::migration::Migration, Approval, ExecutorConfig, MigrationEngine};
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_pc";
 const OWNER: &str = "app_test";

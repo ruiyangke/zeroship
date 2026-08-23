@@ -102,17 +102,13 @@ use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_ir::dialect::DialectId;
 
-// This vendor-owned policy is NO LONGER part of the engine's neutral plan carrier —
-// that line used to read "remains", and it was the whole reason the lowered-plan
-// vocabulary could not leave the engine. `TableRebuildSpec::sequence_policy` carries
-// the neutral `SequenceHighWaterPolicy` now, and SQLite's rebuild executor converts
-// into this type at its own boundary through the vendor's own `From`.
-//
-// It is still re-exported here, and only here, because that executor
-// (`apply/backend/sqlite/rebuild_sql.rs`) has not moved into the vendor crate yet, and
-// core reaches a vendor crate through this one composition module or not at all. The
-// import goes away with the executor, not before.
-pub(crate) use zero_migrate_sqlite::{SqliteSequencePolicy, VENDOR};
+// `SqliteSequencePolicy` used to be re-exported on this line beside `VENDOR`, for one
+// consumer: SQLite's rebuild executor, which converts the plan's neutral
+// `SequenceHighWaterPolicy` into it at its own boundary. That executor is
+// `zero_migrate_sqlite::backend::rebuild_sql` now and reads the type from its own
+// crate, so the import went away with the executor, exactly as this comment said it
+// would. Core names no SQLite type at all.
+pub(crate) use zero_migrate_sqlite::VENDOR;
 
 #[cfg(test)]
 use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
@@ -193,13 +189,15 @@ pub(crate) fn value_format_renderers(
     VENDORS.as_slice().iter().map(|vendor| vendor.value_format)
 }
 
-/// The vendor-owned parser for catalog-stored table DDL, when this backend
-/// explicitly provides one.
-pub(crate) fn stored_ddl(
-    dialect: &DialectId,
-) -> Option<&'static dyn zero_migrate_backend::stored_ddl::StoredDdl> {
-    vendor(dialect).schema.stored_ddl()
-}
+/* `pub(crate) fn stored_ddl(dialect)` USED TO LIVE HERE. Its only caller was
+ * SQLite's execution half, which asked this registry which parser handles SQLite
+ * from inside the SQLite backend. That half is `zero-migrate-sqlite` now and names
+ * `crate::stored_ddl::PARSER` directly, leaving this resolver with zero callers.
+ *
+ * Nothing was lost: the parser is still reached, by everything that has a resolved
+ * renderer, through the `SchemaRenderer::stored_ddl()` method this body forwarded to
+ * — see `render/declarative.rs`, which calls it on the renderer it already holds.
+ */
 
 /// The schema-bound DDL emitter registered by a dialect's vendor crate.
 pub(crate) fn ddl_emitter(dialect: &DialectId, project_schema: &str) -> Box<dyn DdlEmitter> {

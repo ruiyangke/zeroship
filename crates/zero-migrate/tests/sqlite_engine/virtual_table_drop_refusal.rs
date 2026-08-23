@@ -27,8 +27,9 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zero_migrate::{
     desired_snapshot_for_dialect, CollectionDescriptor, DeclarativeAuthor, DeclarativeError,
-    FieldDescriptor, SqliteBackend,
+    FieldDescriptor,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";

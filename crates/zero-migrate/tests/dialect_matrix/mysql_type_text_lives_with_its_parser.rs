@@ -94,13 +94,21 @@ const ENGINE_FILE_THAT_MAY_SPELL: &str = "apply/drift.rs";
 /// that broke — check [`ENGINE_FILE_THAT_MAY_SPELL`] first, because that is what tells
 /// the two cases apart, and trust it over this number.
 ///
-/// It fired exactly that way once, on the extraction it was written in anticipation
-/// of: `apply/backend/mysql/` — eight files, the whole MySQL execution half — became
-/// `zero-migrate-mysql/src/backend/`, taking core from 77 `.rs` files to 69. The
-/// anchor passed, which is what said the walk was intact and the shrink was the move.
-/// Lowered to 60, still far from a walk that collapsed toward nothing, and the two
-/// remaining backend subtrees will take it lower again.
-const ENGINE_FILE_FLOOR: usize = 60;
+/// It fired exactly that way twice, on the extractions it was written in anticipation
+/// of.
+///
+/// - `apply/backend/mysql/` — eight files, the whole MySQL execution half — became
+///   `zero-migrate-mysql/src/backend/`, taking core from 77 `.rs` files to 69.
+///   Lowered to 60.
+/// - `apply/backend/sqlite/` — ELEVEN files, the whole SQLite execution half —
+///   became `zero-migrate-sqlite/src/backend/`, taking core from 69 to 58.
+///   Lowered to 50.
+///
+/// Both times the anchor passed, which is what said the walk was intact and the
+/// shrink was the move. 50 is still far from a walk that collapsed toward nothing,
+/// and the one remaining backend subtree — `apply/backend/postgres/` — will take it
+/// lower again.
+const ENGINE_FILE_FLOOR: usize = 50;
 
 /// The needle's positive control: call sites the allowed file is known to make.
 ///

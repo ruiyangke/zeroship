@@ -1,10 +1,11 @@
-//! The SQLite [`MigrationBackend`] impl
-//! (confinement folded in).
+//! The SQLite [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend)
+//! impl (confinement folded in).
 //!
 //! `SqliteBackend` is the security core for SQLite migrations. It owns a
-//! dedicated, hardened, CDC-free connection ([`actor::MigrationActor`])
+//! dedicated, hardened, CDC-free connection
+//! ([`MigrationActor`](crate::backend::actor::MigrationActor))
 //! and enforces second-line confinement through a two-mode `prepare`-time authorizer
-//! ([`authorizer`]) - the runtime analog of Postgres's least-privilege
+//! ([`authorizer`](crate::backend::authorizer)) - the runtime analog of Postgres's least-privilege
 //! `migrator` role. The journal lives in an attached `_mig` database, immutable by
 //! authorizer construction + DEFENSIVE + append-only triggers, with the
 //! native `event_seq` AUTOINCREMENT PK as the total order. One migration's DDL and
@@ -12,19 +13,22 @@
 //! `up` confined from `_mig` and the journal write done under engine mode, the
 //! mode flip landing between separate prepares.
 //!
-//! See the module-level docs of [`authorizer`] and [`actor`] for the mechanism.
+//! See the module-level docs of [`authorizer`](crate::backend::authorizer) and
+//! [`actor`](crate::backend::actor) for the mechanism.
 //! Every claim above is proven against a real temp-file SQLite, split across two
 //! files rather than the three this comment used to name - there is no
 //! `tests/sqlite_journal.rs` and there never was, though the coverage it stood for
 //! does exist:
 //!
-//! - `tests/sqlite_confinement.rs` covers the authorizer line. A creator `up` may
+//! - `zero-migrate/tests/policy_charter/sqlite_confinement.rs` covers the
+//!   authorizer line. A creator `up` may
 //!   not drop the `_mig` table (`confine_d_drop_mig_table_denied`) or its triggers
 //!   (`confine_e_drop_mig_trigger_denied`), may not insert a journal row directly
 //!   (`confine_f_direct_journal_insert_denied`), may not reach `_mig` through a
 //!   trigger it defines (`confine_g_creator_trigger_writing_mig_denied`), and may
 //!   not even read the journal (`confine_i_creator_read_of_mig_journal_denied`).
-//! - `tests/sqlite_apply.rs` covers the journal's own properties. `event_seq` is a
+//! - `zero-migrate/tests/sqlite_engine/sqlite_apply.rs` covers the journal's own
+//!   properties. `event_seq` is a
 //!   total order (`native_event_seq_is_monotonic`), rows resist UPDATE and DELETE
 //!   under confinement (`journal_update_delete_denied_confined`) and again at the
 //!   trigger when confinement is off (`journal_immutability_trigger_backstop` -
@@ -33,7 +37,7 @@
 //!   (`failed_up_rolls_back_atomically`).
 //!
 //! Does NOT cover the mode flip as an interleaving. What is covered is each side
-//! of it: `is_autocommit_detects_open_transaction` (sqlite_apply.rs) drives the
+//! of it: `is_autocommit_detects_open_transaction` (`sqlite_apply.rs`) drives the
 //! actor through `set_mode(EngineJournal)` and proves the transaction state it
 //! produces is detectable, and `confine_g_creator_trigger_writing_mig_denied`
 //! proves creator-defined SQL cannot reach `_mig` by deferring itself to a trigger.
@@ -59,25 +63,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::apply::backend::MigrationBackend;
-use crate::apply::baseline::{BaselineError, BaselineOutcome};
-use crate::apply::drift::{ChecksumDriftReport, DriftError};
-use crate::apply::executor::{
+use zero_migrate_backend::backend::MigrationBackend;
+use zero_migrate_backend::baseline::{BaselineError, BaselineOutcome};
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::drift::{ChecksumDriftReport, DriftError};
+use zero_migrate_backend::executor::{
     authorize_existence_guard_schema, ApplyError, PreconditionVerdict, RollbackError,
 };
-use crate::apply::journal::{AppliedEntry, JournalError};
-use crate::conn::ExecutorConfig;
-use crate::model::migration::Migration;
-use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::TableRebuildSpec;
+use zero_migrate_backend::journal::{AppliedEntry, JournalError};
+use zero_migrate_backend::snapshot::SchemaSnapshot;
+use zero_migrate_backend::table_rebuild::TableRebuildSpec;
 use zero_migrate_ir::dialect::{DialectId, SQLITE};
+use zero_migrate_ir::migration::Migration;
 
 pub use actor::{MigrationActor, SqliteActorError};
 pub use authorizer::Mode;
 pub use journal_sql::LoadedVersion;
 pub use rebuild_sql::RebuildError;
 
-/// This backend's vendor identity, named ONCE for the whole `sqlite/` subtree.
+/// This backend's vendor identity, named ONCE for the whole `backend/` subtree.
 ///
 /// The four apply-time SQL builders under this module (`backfill_sql`,
 /// `identity_sql`, `primary_key_sql`, `rebuild_sql`) each spell identifiers into
@@ -87,15 +91,20 @@ pub use rebuild_sql::RebuildError;
 /// them as clean: it looks for a FOREIGN literal, and "no literal" passes.
 ///
 /// One const, read by all four, is the shape that makes their vendor greppable
-/// without putting four literals in the tree. It mirrors
-/// `render::backends::sqlite`'s own `DIALECT`.
+/// without putting four literals in the tree. It mirrors this crate's other
+/// modules, each of which names its own dialect exactly once.
 const SQLITE_DIALECT: DialectId = SQLITE;
 
-/// The parser registered by this backend for its catalog-stored table DDL.
-fn stored_ddl() -> &'static dyn zero_migrate_backend::stored_ddl::StoredDdl {
-    crate::render::backends::stored_ddl(&SQLITE_DIALECT)
-        .expect("the registered SQLite backend must provide stored-DDL analysis")
-}
+/* `fn stored_ddl()` USED TO LIVE HERE. It asked the ENGINE's registry which parser
+ * handles `SQLITE_DIALECT` and unwrapped the `Option` the registry returns, which
+ * is this vendor asking a lookup to hand this vendor back to itself. The answer it
+ * received was always `crate::schema::RENDERER.stored_ddl()`, i.e.
+ * `Some(&crate::stored_ddl::PARSER)`.
+ *
+ * The six call sites name `crate::stored_ddl::PARSER` directly now — the spelling
+ * `fold.rs` in this crate already used — so the round trip, the `Option`, and the
+ * `expect` that could never fire are all gone with it.
+ */
 
 /// The SQLite [`MigrationBackend`]. Holds the dedicated hardened migration actor
 /// for ONE tenant. Construct via [`SqliteBackend::open`].
@@ -186,23 +195,28 @@ impl SqliteBackend {
     /// Run (or resume) a SQLite **batched backfill** directly (the SQLite analog of
     /// the PG bounded backfill runner) — the checkpointed /
     /// crash-fuzz seam tests drive. `set_clause` / `filter` are the inline SQL the
-    /// shared assembler ([`crate::render::dml::assemble_backfill_clauses`]) renders; the
+    /// shared assembler
+    /// ([`assemble_backfill_clauses_for_backend`](zero_migrate_backend::dml::assemble_backfill_clauses_for_backend))
+    /// renders; the
     /// executor-internal direct seam has NO approval gate (the generic executor
     /// gates approval before reaching the backend's `run_backfill_step`). Stops after
     /// at most `max_batches` committed batches (`None` = run to completion).
     ///
     /// # Errors
-    /// [`crate::apply::backend::BackfillError`] on a malformed spec, an unsafe cursor
+    /// [`zero_migrate_backend::backfill::BackfillError`] on a malformed spec, an unsafe cursor
     /// column, a cursor-column mutation, a resumable batch failure, or a poisoned
     /// connection.
     pub async fn run_backfill_bounded_sqlite(
         &self,
-        spec: &crate::model::backfill::BackfillSpec,
+        spec: &zero_migrate_backend::backfill::BackfillSpec,
         set_clause: &str,
         filter: Option<&str>,
         applied_by: &str,
         max_batches: Option<u64>,
-    ) -> Result<crate::apply::backend::BackfillOutcome, crate::apply::backend::BackfillError> {
+    ) -> Result<
+        zero_migrate_backend::backfill::BackfillOutcome,
+        zero_migrate_backend::backfill::BackfillError,
+    > {
         backfill_sql::run_backfill_bounded(
             &self.actor,
             spec,
@@ -246,7 +260,8 @@ impl SqliteBackend {
     ///
     /// This inherent method runs the rebuild WITHOUT an approval gate — it is the raw
     /// dialect-coupled drive. The GATED production path is the engine's
-    /// generic [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative),
+    /// generic `zero_migrate::MigrationEngine::apply_declarative` (named in prose,
+    /// not linked: the engine depends on this crate, so this crate cannot name it),
     /// which classifies the rebuild's `destructive + requires_approval` journal
     /// migration and refuses an un-approved rebuild BEFORE calling down into
     /// [`MigrationBackend::rebuild_one`]
@@ -332,7 +347,7 @@ impl SqliteBackend {
              SELECT version, name, checksum FROM ranked \
               WHERE rn = 1 AND event_kind = '{applied}' \
               ORDER BY version",
-            applied = crate::apply::journal::EventKind::Applied.as_str()
+            applied = zero_migrate_backend::journal::EventKind::Applied.as_str()
         );
         let rows = self.actor.query(&sql).await?;
         let mut out = Vec::with_capacity(rows.len());
@@ -384,7 +399,7 @@ impl SqliteBackend {
         let net = journal_sql::applied(&self.actor)
             .await?
             .into_iter()
-            .filter(|e| e.phase == crate::apply::journal::Phase::Completed)
+            .filter(|e| e.phase == zero_migrate_backend::journal::Phase::Completed)
             .count();
         if net > 0 {
             return Err(SqliteActorError::Exec(format!(
@@ -658,24 +673,24 @@ impl MigrationBackend for SqliteBackend {
                 .map_err(|e| {
                     ApplyError::Backend(format!("sqlite existence-guard snapshot failed: {e}"))
                 })?;
-            match crate::render::existence_probe::decide(
-                probe,
-                &live,
-                &zero_migrate_ir::dialect::SQLITE,
-            ) {
-                crate::render::existence_probe::GuardVerdict::RunBare => {
+            // The contract's decider takes a `&BackendVendor`. The engine's
+            // dialect-taking `render::existence_probe::decide` is a shim whose body
+            // resolves the dialect through the registry and calls exactly this; a
+            // backend that already knows which vendor it is passes its own.
+            match zero_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
+                zero_migrate_backend::existence_probe::GuardVerdict::RunBare => {
                     return journal_sql::apply_one_additive(&self.actor, m, applied_by)
                         .await
                         .map(|_| false)
                         .map_err(apply_err);
                 }
-                crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {
+                zero_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop => {
                     return journal_sql::journal_satisfied_noop(&self.actor, m, applied_by)
                         .await
                         .map(|_| false)
                         .map_err(apply_err);
                 }
-                crate::render::existence_probe::GuardVerdict::FailDrift(d) => {
+                zero_migrate_backend::existence_probe::GuardVerdict::FailDrift(d) => {
                     return Err(ApplyError::ExistenceGuardDrift {
                         version: m.version.as_str().to_string(),
                         object: d.object,
@@ -708,7 +723,7 @@ impl MigrationBackend for SqliteBackend {
         &self,
         _cfg: &ExecutorConfig,
         forward: &Migration,
-        inverse_steps: &[crate::render::step::PlanStep],
+        inverse_steps: &[zero_migrate_backend::step::PlanStep],
         applied_by: &str,
     ) -> Result<(), RollbackError> {
         rollback_sql::rollback_dml_plan_transactional(
@@ -796,7 +811,7 @@ impl MigrationBackend for SqliteBackend {
     async fn history(
         &self,
         _cfg: &ExecutorConfig,
-    ) -> Result<Vec<crate::apply::journal::HistoryEvent>, JournalError> {
+    ) -> Result<Vec<zero_migrate_backend::journal::HistoryEvent>, JournalError> {
         // The SQLite journal keeps the same append-only events; what it has never
         // had is the READER that projects them into `HistoryEvent`. Refusing by
         // name is the honest posture: an empty Vec would be indistinguishable from
@@ -822,7 +837,7 @@ impl MigrationBackend for SqliteBackend {
     async fn backfill_progress(
         &self,
         _cfg: &ExecutorConfig,
-    ) -> Result<Vec<crate::apply::backend::BackfillProgressEntry>, JournalError> {
+    ) -> Result<Vec<zero_migrate_backend::backfill::BackfillProgressEntry>, JournalError> {
         backfill_sql::read_progress_entries(&self.actor)
             .await
             .map_err(journal_err)
@@ -860,7 +875,7 @@ impl MigrationBackend for SqliteBackend {
         let applied = journal_sql::applied(&self.actor)
             .await
             .map_err(|e| DriftError::Backend(e.to_string()))?;
-        Ok(crate::apply::drift::compare_applied_to_set(
+        Ok(zero_migrate_backend::drift::compare_applied_to_set(
             &applied, migrations,
         ))
     }
@@ -925,7 +940,7 @@ impl MigrationBackend for SqliteBackend {
         &self,
         spec: &TableRebuildSpec,
         m: &Migration,
-        scope: &crate::approval::ApprovalScope,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<(), ApplyError> {
         // **Per-version scope (executor-layer defense in depth).** A rebuild on a
@@ -955,9 +970,9 @@ impl MigrationBackend for SqliteBackend {
     async fn alter_primary_key(
         &self,
         cfg: &ExecutorConfig,
-        step: &crate::render::step::AlterPrimaryKeyStep,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        step: &zero_migrate_backend::step::AlterPrimaryKeyStep,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         journal_sql::ensure_journal(&self.actor)
@@ -969,7 +984,7 @@ impl MigrationBackend for SqliteBackend {
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .filter(|entry| matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed))
             .find(|entry| entry.version == step.migration.version.as_str())
         {
             if entry.checksum != step.migration.checksum.as_str() {
@@ -982,7 +997,7 @@ impl MigrationBackend for SqliteBackend {
             return Ok(false);
         }
         if step.migration.flags.destructive || step.migration.flags.requires_approval {
-            if approval != crate::approval::Approval::Approved {
+            if approval != zero_migrate_backend::approval::Approval::Approved {
                 return Err(ApplyError::ApprovalRequired);
             }
             if !scope.admits(step.migration.version.as_str()) {
@@ -1015,7 +1030,7 @@ impl MigrationBackend for SqliteBackend {
     async fn synchronize_identity(
         &self,
         cfg: &ExecutorConfig,
-        step: &crate::render::step::SynchronizeIdentityStep,
+        step: &zero_migrate_backend::step::SynchronizeIdentityStep,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         if step.writes_quiesced.trim().is_empty() {
@@ -1033,7 +1048,7 @@ impl MigrationBackend for SqliteBackend {
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .filter(|entry| matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed))
             .find(|entry| entry.version == step.migration.version.as_str())
         {
             if entry.checksum != step.migration.checksum.as_str() {
@@ -1068,14 +1083,14 @@ impl MigrationBackend for SqliteBackend {
     async fn run_backfill_step(
         &self,
         _cfg: &ExecutorConfig,
-        version: &crate::model::migration::MigrationId,
-        checksum: &crate::model::migration::Checksum,
-        spec: &crate::model::backfill::BackfillSpec,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        version: &zero_migrate_ir::migration::MigrationId,
+        checksum: &zero_migrate_ir::migration::Checksum,
+        spec: &zero_migrate_backend::backfill::BackfillSpec,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: crate::apply::executor::LockMode,
-    ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
+        _lock_mode: zero_migrate_backend::executor::LockMode,
+    ) -> Result<zero_migrate_backend::executor::ApplyOutcome, ApplyError> {
         // The SQLite batched/resumable backfill executor, the SQLite
         // analog of the PG writable-CTE windowed UPDATE. Completes the "one
         // script, both backends, DDL+DML" headline: a batched backfill is now
@@ -1088,7 +1103,7 @@ impl MigrationBackend for SqliteBackend {
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .filter(|entry| matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed))
             .find(|entry| entry.version == version.as_str())
         {
             if entry.checksum != checksum.as_str() {
@@ -1098,7 +1113,7 @@ impl MigrationBackend for SqliteBackend {
                     expected: checksum.as_str().to_string(),
                 });
             }
-            return Ok(crate::apply::executor::ApplyOutcome {
+            return Ok(zero_migrate_backend::executor::ApplyOutcome {
                 applied: Vec::new(),
                 skipped: vec![version.as_str().to_string()],
                 recovered: Vec::new(),
@@ -1107,7 +1122,7 @@ impl MigrationBackend for SqliteBackend {
         // A pending backfill mutates table data and requires explicit approval.
         // A completed matching step above is an idempotent skip and does not need
         // renewed approval.
-        if approval != crate::approval::Approval::Approved {
+        if approval != zero_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if !scope.admits(version.as_str()) {
@@ -1126,7 +1141,7 @@ impl MigrationBackend for SqliteBackend {
         )
         .await
         .map_err(|error| match error {
-            crate::apply::backend::BackfillError::ChecksumDrift {
+            zero_migrate_backend::backfill::BackfillError::ChecksumDrift {
                 version,
                 recorded,
                 expected,
@@ -1144,7 +1159,7 @@ impl MigrationBackend for SqliteBackend {
         } else {
             Vec::new()
         };
-        Ok(crate::apply::executor::ApplyOutcome {
+        Ok(zero_migrate_backend::executor::ApplyOutcome {
             applied,
             skipped: Vec::new(),
             recovered: Vec::new(),
@@ -1154,21 +1169,21 @@ impl MigrationBackend for SqliteBackend {
     async fn run_dml_step(
         &self,
         _cfg: &ExecutorConfig,
-        version: &crate::model::migration::MigrationId,
-        checksum: &crate::model::migration::Checksum,
+        version: &zero_migrate_ir::migration::MigrationId,
+        checksum: &zero_migrate_ir::migration::Checksum,
         name: &str,
         template: &str,
-        binds: &[crate::render::step::BindValue],
+        binds: &[zero_migrate_backend::step::BindValue],
         _target_schema: &str,
         _target_table: &str,
         _conflict_target: Option<&[String]>,
         _mutates_data: bool,
         destructive: bool,
         _owner_app: &str,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: crate::apply::executor::LockMode,
+        _lock_mode: zero_migrate_backend::executor::LockMode,
     ) -> Result<bool, ApplyError> {
         // The SQLite one-shot DML executor. The `template` carries `?n`
         // placeholders; the binds are bound NATIVELY (never interpolated).
@@ -1180,7 +1195,7 @@ impl MigrationBackend for SqliteBackend {
             .map_err(journal_err)
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|e| matches!(e.phase, crate::apply::journal::Phase::Completed))
+            .filter(|e| matches!(e.phase, zero_migrate_backend::journal::Phase::Completed))
             .find(|e| e.version == version.as_str());
         if let Some(entry) = completed {
             if entry.checksum != checksum.as_str() {
@@ -1192,7 +1207,7 @@ impl MigrationBackend for SqliteBackend {
             }
             return Ok(false);
         }
-        if destructive && approval != crate::approval::Approval::Approved {
+        if destructive && approval != zero_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         // Per-version scope defense in depth. A pending destructive DML runs only
@@ -1204,9 +1219,9 @@ impl MigrationBackend for SqliteBackend {
         }
         // Map the plan binds to the transport-safe SQLite bind mirror (the shared
         // `?n`-binding seam — `SqliteBind::from_bind`).
-        let sqlite_binds: Vec<crate::apply::backend::sqlite::actor::SqliteBind> = binds
+        let sqlite_binds: Vec<crate::backend::actor::SqliteBind> = binds
             .iter()
-            .map(crate::apply::backend::sqlite::actor::SqliteBind::from_bind)
+            .map(crate::backend::actor::SqliteBind::from_bind)
             .collect();
         journal_sql::run_dml(
             &self.actor,
@@ -1222,7 +1237,7 @@ impl MigrationBackend for SqliteBackend {
         Ok(true)
     }
 
-    fn online(&self) -> Option<&dyn crate::apply::backend::OnlineSchemaChange> {
+    fn online(&self) -> Option<&dyn zero_migrate_backend::capability::OnlineSchemaChange> {
         // SQLite has NO online schema-change capability: a SQLite declarative rename
         // is routed to a `rebuild_one` (the 12-step offline rebuild), never
         // expand-contract, so `plan.renames` is structurally EMPTY on the SQLite leg
@@ -1232,7 +1247,9 @@ impl MigrationBackend for SqliteBackend {
         None
     }
 
-    fn pending_contracts(&self) -> Option<&dyn crate::apply::backend::CrossDeployObligations> {
+    fn pending_contracts(
+        &self,
+    ) -> Option<&dyn zero_migrate_backend::backend::CrossDeployObligations> {
         // SQLite has no cross-deploy pending-contract partition: a rebuild rename
         // is one atomic offline step, so there is no obligation to open or
         // recover. Generic callers treat `None` as empty/no-op.

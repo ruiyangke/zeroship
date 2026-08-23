@@ -76,7 +76,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::apply::backend::sqlite::Mode;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::model::ir::Op;
@@ -84,8 +83,10 @@ use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
     desired_snapshot_for_dialect, fold_ops, resolve_create_table_policy, Approval,
     CollectionDescriptor, DeclarativeAuthor, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, MigrationIr, SqliteBackend, SQLITE,
+    MigrationEngine, MigrationIr, SQLITE,
 };
+use zero_migrate_sqlite::backend::Mode;
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_decimal_rebuild";
 const APP: &str = "app_decimal_rebuild";

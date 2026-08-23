@@ -47,8 +47,8 @@ selected by your application.
 | `ReconciledPlanState` | Plan state: applied, aborted, pending, partial, drifted, blocked, or unknown dependency |
 | `PlanStatusStepState` | Step state: pending, inflight, applied, aborted, or drifted |
 | `PostgresBackend<S>` | PostgreSQL execution over a host-provided `SqlSession` |
-| `apply::backend::MysqlBackend<S>` | MySQL execution over a host-provided `SqlSession` |
-| `SqliteBackend` | SQLite execution from a Rust host |
+| `zero_migrate_mysql::MysqlBackend<S>` | MySQL execution over a host-provided `SqlSession` |
+| `zero_migrate_sqlite::SqliteBackend` | SQLite execution from a Rust host |
 | `SchemaSnapshot` | Captured schema used for explicit structural drift |
 
 ## Plan and apply PostgreSQL
@@ -198,7 +198,7 @@ SQLite does not use `SqlSession`:
 
 ```rust
 use std::path::Path;
-use zero_migrate::SqliteBackend;
+use zero_migrate_sqlite::SqliteBackend;
 
 fn open_backend() -> Result<SqliteBackend, Box<dyn std::error::Error>> {
     let backend = SqliteBackend::open(

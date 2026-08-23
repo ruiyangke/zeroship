@@ -117,12 +117,20 @@ const ALLOWED: &[(&str, usize)] = &[
 /// a walk that broke — [`WALK_ANCHORS`] is what tells those two apart, so check it
 /// first and trust it over this number.
 ///
-/// It has now fired exactly that way once. The MySQL execution half —
-/// `apply/backend/mysql/`, eight files — moved into `zero-migrate-mysql`, taking core
-/// from 77 `.rs` files to 69 and under the 70 this said. The anchors passed, which is
-/// what said the walk was intact and the shrink was the extraction. Lowered to 60,
-/// which is under 69 with room to churn and still far from a walk that found nothing.
-const SRC_FILE_FLOOR: usize = 60;
+/// It has now fired exactly that way twice, on consecutive extractions.
+///
+/// - The MySQL execution half — `apply/backend/mysql/`, eight files — moved into
+///   `zero-migrate-mysql`, taking core from 77 `.rs` files to 69 and under the 70
+///   this said. Lowered to 60.
+/// - The SQLite execution half — `apply/backend/sqlite/`, ELEVEN files — moved into
+///   `zero-migrate-sqlite/src/backend/`, taking core from 69 to 58 and under that 60.
+///   Lowered to 50.
+///
+/// Both times [`WALK_ANCHORS`] passed, which is what said the walk was intact and the
+/// shrink was the extraction. 50 is under 58 with room to churn and still far from a
+/// walk that found nothing. `apply/backend/postgres/` is the last vendor subtree in
+/// core, so expect this to fire a third time.
+const SRC_FILE_FLOOR: usize = 50;
 
 /// Files the walk MUST reach, which is the real defence against a census that fails
 /// open.

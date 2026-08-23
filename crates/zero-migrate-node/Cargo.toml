@@ -41,6 +41,10 @@ zero-migrate = { path = "../zero-migrate" }
 # engine no longer re-exports it: core naming a vendor crate outside its registry is
 # what `core_names_no_vendor_crate` forbids, so the host names the vendor it wants.
 zero-migrate-mysql = { path = "../zero-migrate-mysql" }
+# The SQLite backend, named the same way and for the same reason. `apply_sqlite` and
+# its siblings below build `SqliteBackend` on the in-process rusqlite actor; the
+# engine stopped re-exporting it when the execution half moved into this crate.
+zero-migrate-sqlite = { path = "../zero-migrate-sqlite" }
 
 # N-API 3, TOKIO-FREE by construction: default-features = false drops the
 # ergonomic tokio-backed async (`async`/`tokio_rt`). `napi4` supplies the

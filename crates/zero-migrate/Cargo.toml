@@ -123,21 +123,11 @@ uuid = { workspace = true }
 # SQLite backend is a sync rusqlite actor. `compio` remains only a `dev-dependency`
 # below — the async-apply test harness (`#[compio::test]`) drives the seam-generic
 # apply path over the recording driver. The shipped library links no async runtime.
-# SQLite migration backend. The migration connection
-# is a DEDICATED, hardened, CDC-free rusqlite Connection — it does NOT reuse
-# plugin-db's data-plane SqliteSession. `bundled` pins SQLite 3.51.3 (the
-# version floor for DEFENSIVE/TRUSTED_SCHEMA/RETURNING/window-functions and the
-# authorizer `zDb`-on-DROP_TABLE semantics the journal-immutability proof needs).
-# No `preupdate_hook`/vec0: the migration conn is CDC-free + extension-free to
-# creator SQL.
-# `load_extension` is needed for `Connection::load_extension_disable()` — the
-# real API (NOT a DbConfig variant) that disables extension loading at open.
-# Enabling the feature does NOT load any extension; it just exposes the
-# enable/disable toggle, and we use it only to DISABLE.
-rusqlite = { workspace = true, features = ["bundled", "load_extension"] }
-# The migration actor's single-writer queue (zero-tokio: same spawn-thread +
-# flume shape as plugin-db's SqliteSession, but a second security-scoped actor).
-flume = { workspace = true }
+# `rusqlite` and `flume` USED TO BE DEPENDENCIES HERE, for the SQLite migration
+# actor. That actor is `zero-migrate-sqlite/src/backend/` now and declares both
+# itself. `flume` had no other caller in this crate and is gone outright; `rusqlite`
+# moved to `[dev-dependencies]` below, where its remaining callers are. No shipped
+# engine code opens a SQLite connection.
 # `FutureExt::catch_unwind` for panic-safe shadow-DB teardown — mirrors the
 # runtime crate's panic_util seam. Zero tokio: `futures` is the executor-agnostic
 # combinator crate, not a runtime.
@@ -172,6 +162,14 @@ compio = { workspace = true }
 # (every confinement claim proven on a REAL temp-file SQLite, never a shim).
 # Auto-cleaning; workspace-pinned.
 tempfile = { workspace = true }
+# TEST-ONLY, and it used to be a `[dependencies]` entry: the SQLite migration actor
+# it was added for is `zero-migrate-sqlite`'s now. What is left here is a CONTROL —
+# three `#[cfg(test)]` blocks in `render/dml.rs` that run an assembled backfill
+# statement on a real in-memory SQLite, and the SQLite integration suites, which open
+# the app file raw to check what the hardened backend actually wrote. `bundled` pins
+# the SQLite build; `load_extension` matches the vendor crate's feature set so the
+# workspace resolves one rusqlite rather than two.
+rusqlite = { workspace = true, features = ["bundled", "load_extension"] }
 # TEST-ONLY live-Postgres driver. The blocking `postgres` crate
 # backs `PgDevSession`, a `driver::SqlSession` impl that drives the SHIPPED generic
 # PostgresBackend/executor/journal/drift path against a live PG (:5440) in-crate, so

@@ -2,7 +2,7 @@
 //! that reads or writes `<meta>.schema_migrations`.
 //!
 //! This is the PostgreSQL analogue of the MySQL `zero_migrate_mysql::backend::journal_sql`
-//! and SQLite `apply::backend::sqlite::journal_sql` modules. The three backends
+//! and SQLite `zero_migrate_sqlite::backend::journal_sql` modules. The three backends
 //! share the journal's *vocabulary* — [`Phase`], [`EventKind`], [`AppliedEntry`],
 //! [`JournalError`], … all live in the dialect-neutral [`crate::apply::journal`] —
 //! and nothing else. Every byte of SQL below is PostgreSQL's alone: `DO $do$`

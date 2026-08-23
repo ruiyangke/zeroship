@@ -18,6 +18,43 @@ zero-migrate-ir = { workspace = true }
 serde_json = { workspace = true }
 # MySQL and SQLite both spell a binary/string literal as a hex form.
 hex = { workspace = true }
+# The migration connection is a DEDICATED, hardened, CDC-free rusqlite Connection —
+# it does NOT reuse plugin-db's data-plane SqliteSession. `bundled` pins the SQLite
+# version floor the journal-immutability proof needs (DEFENSIVE / TRUSTED_SCHEMA /
+# RETURNING / window functions, and the authorizer's `zDb`-on-DROP_TABLE semantics).
+# `load_extension` is needed for `Connection::load_extension_disable()` — the real
+# API (NOT a DbConfig variant) that disables extension loading at open. Enabling the
+# feature does NOT load any extension; it exposes the toggle, and this crate uses it
+# only to DISABLE. (`backend/actor.rs`, `backend/authorizer.rs`.)
+rusqlite = { workspace = true, features = ["bundled", "load_extension"] }
+# The migration actor's single-writer queue (zero-tokio: a spawned thread draining a
+# `flume` channel, callers `await` a `flume` reply). `backend/actor.rs`.
+flume = { workspace = true }
+# The backfill id is `bf_<32 hex chars>` of a SHA-256, and each batch's progress row
+# is checksummed the same way — both in `backend/backfill_sql.rs`.
+sha2 = { workspace = true }
+# The execution half's own error enums (`SqliteActorError`, `RebuildError`) derive
+# their `Display`/`Error` impls here, as every other crate in the tree does.
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# TEST-ONLY: the `MigrationBackend` surface is `async`, so the unit tests that drive
+# it spin a throwaway compio run loop per test (zero tokio), exactly as the engine's
+# own async-apply harness does. NO shipped code in this crate links it — the actor
+# itself is a sync rusqlite thread.
+compio = { workspace = true }
+# TEST-ONLY: every confinement / journal / atomic-apply claim in `backend/` is proven
+# against a REAL temp-file SQLite, never a shim.
+tempfile = { workspace = true }
+# TEST-ONLY: `src/test_fixtures.rs` builds its charter TOML with the same
+# `toml::Value` string escaping the engine's `test_fixtures` uses, so a vendor's test
+# charter and the engine's are the same bytes rather than nearly the same.
+toml = { workspace = true }
+# TEST-ONLY: `ExecutorConfig::new` takes an `EffectivePolicy`, which is the PDP's
+# type. Only `src/test_fixtures.rs` names it — the execution half itself reads
+# `cfg.project_schema` and the lock budgets and never the policy — so this is a
+# dev-dependency, not a dependency, and a shipping `zero-migrate-sqlite` links no PDP.
+zero-migrate-policy = { workspace = true }
 
 [lints]
 workspace = true

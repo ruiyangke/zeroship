@@ -39,8 +39,8 @@ use zero_migrate::apply::executor::LockMode;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     Approval, DialectId, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
-    SqliteBackend,
 };
+use zero_migrate_sqlite::SqliteBackend;
 
 const PROJECT: &str = "prj_ir";
 const APP: &str = "app_ir";
