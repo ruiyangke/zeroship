@@ -4,7 +4,7 @@
 //!
 //! A `PlanStep::OnlineRename(RenameStep::TableRebuild(_))` driven
 //! THROUGH `apply_plan` executes via `MigrationBackend::rebuild_one` (the 12-step
-//! offline rebuild), NOT `run_online` (`SQLite` has no online capability). A seeded
+//! offline rebuild), NOT `run_online_backfill` (`SQLite` has no online capability). A seeded
 //! row survives the rename, the old column is gone, and the journal records the
 //! rebuild migration's version — proving `apply_plan` routes the `SQLite` variant to
 //! `rebuild_one`, with no `pending_contract` partition (a `SQLite` rebuild is one
@@ -215,7 +215,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
         "the old column name is gone after the rebuild rename"
     );
 
-    // The journal records the rebuild's version (via rebuild_one, not run_online).
+    // The journal records the rebuild's version (via rebuild_one, not run_online_backfill).
     let applied = be.applied(&exec_cfg()).await.expect("read journal");
     assert!(
         applied.iter().any(|e| e.version == rebuild_version

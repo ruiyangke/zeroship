@@ -49,7 +49,7 @@
 //! - **E3 backfills on the table's PRIMARY KEY**, never on `<to>` (the column
 //!   being populated): the backfill engine requires a UNIQUE/NOT-NULL cursor and
 //!   forbids paging on the column it mutates (see
-//!   [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online)). E3
+//!   [`OnlineSchemaChange::run_online_backfill`](crate::apply::backend::OnlineSchemaChange::run_online_backfill)). E3
 //!   depends on E2 so the trigger is live before the backfill runs — otherwise a
 //!   concurrent write between backfill batches could land in `<from>` only and
 //!   be lost.
@@ -71,7 +71,7 @@ use zero_migrate_ir::dialect::DialectId;
 /// [`Migration`] sequence.
 ///
 /// MOVED to `zero-migrate-backend` and re-exported here. It is what
-/// `OnlineSchemaChange::run_online` is handed — the rename's MEANING rather than
+/// `OnlineSchemaChange::run_online_backfill` is handed — the rename's MEANING rather than
 /// this module's PostgreSQL spelling of it — so a vendor crate cannot implement
 /// the capability without naming it. It carries four `String`s, so it travelled
 /// alone; the [`ExpandContractPlan`] that holds it stayed, because it also holds

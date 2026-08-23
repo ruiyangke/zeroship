@@ -735,7 +735,7 @@ impl MigrationEngine {
     /// [`ExpandContractPlan`](crate::render::expand_contract::ExpandContractPlan) carries a
     /// [`BackfillSpec`](crate::model::backfill::BackfillSpec) that must run the REAL
     /// pre-existing-row mirror (see
-    /// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online)).
+    /// [`OnlineSchemaChange::run_online_backfill`](crate::apply::backend::OnlineSchemaChange::run_online_backfill)).
     /// Flattening it through the plain `plan` -> `apply` path would discard the backfill and
     /// the contract `DROP COLUMN <from>` would then destroy un-mirrored rows. So
     /// the result keeps the plain migrations and the renames SEPARATE; drive the
@@ -828,12 +828,13 @@ impl MigrationEngine {
     /// 1. applies the **plain** migrations through the existing gated
     ///    [`apply`](Self::apply) (denial / approval gate + the executor's own
     ///    guard + least-privilege role); then
-    /// 2. for each rename, drives the **expand** through
-    ///    [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online),
-    ///    which applies E1 (ADD COLUMN) + E2 (dual-write trigger), then runs the
-    ///    real Postgres backfill to mirror every
-    ///    pre-existing `<from>` value into `<to>`, and journals E3 **only after**
-    ///    the backfill succeeds (data-integrity ordering); and
+    /// 2. for each rename, drives the **expand** itself: it applies E1 (ADD
+    ///    COLUMN) + E2 (dual-write trigger) through the ordinary apply path, then
+    ///    asks the backend's
+    ///    [`OnlineSchemaChange::run_online_backfill`](crate::apply::backend::OnlineSchemaChange::run_online_backfill)
+    ///    to run the real vendor backfill mirroring every pre-existing `<from>`
+    ///    value into `<to>`, which journals E3 **only after** the backfill
+    ///    succeeds (data-integrity ordering); and
     /// 3. collects every rename's **contract** (DROP TRIGGER C1 + DROP COLUMN
     ///    `<from>` C2) into [`DeclarativeDeployOutcome::pending_contract`] —
     ///    the DEFERRED set to apply in a SUBSEQUENT deploy, AFTER the app's code
@@ -1090,8 +1091,9 @@ impl MigrationEngine {
         // rebuild-only or rename-only declarative deploy (empty plain set) skips that
         // *initial* hygiene cycle. This is a deliberate simplification, NOT a leak:
         // every step kind that can run with an empty plain set manages its OWN session
-        // hygiene — a PG online rename's `run_online` snapshots+restores the session
-        // around its dual-write trigger / `SET ROLE` DDL, and a SQLite `rebuild_one`
+        // hygiene — an online rename's expand steps go through their own
+        // `apply_with_lock_backend` batch, which snapshots+restores the session
+        // around the dual-write trigger / `SET ROLE` DDL, and a SQLite `rebuild_one`
         // owns its single actor — so the connection is left with the admin role and an
         // un-pinned `search_path` regardless. The redundant empty up-front cycle bought
         // nothing but an extra round-trip; dropping it is state-neutral. The invariant
@@ -1120,8 +1122,9 @@ impl MigrationEngine {
     /// IR `op.*` path. It is plan-shape-neutral: it dispatches by step kind,
     /// reusing the existing downstream primitives unchanged as execution
     /// destinations — `apply_with_lock_backend` for
-    /// DDL, [`run_online`](crate::apply::backend::OnlineSchemaChange::run_online)
-    /// for a PG online rename (with the `pending_contract` partition),
+    /// DDL (including an online rename's E1/E2, driven from here) plus
+    /// [`run_online_backfill`](crate::apply::backend::OnlineSchemaChange::run_online_backfill)
+    /// for that rename's row mirror (with the `pending_contract` partition),
     /// [`rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one) for a SQLite
     /// rebuild rename, and the data-step seams
     /// ([`run_backfill_step`](crate::apply::backend::MigrationBackend::run_backfill_step) /
@@ -1143,7 +1146,8 @@ impl MigrationEngine {
     ///
     /// # `OnlineRename` dual-execution dispatch
     /// A [`RenameStep::ExpandContract`] runs E1+E2→backfill→E3 atomically under
-    /// the held lock via `run_online` and surfaces C1/C2 as `pending_contract`
+    /// the held lock — this loop applies E1/E2 and calls `run_online_backfill` for
+    /// the mirror — and surfaces C1/C2 as `pending_contract`
     /// (the cross-deploy partition). A [`RenameStep::TableRebuild`] is one
     /// atomic offline `rebuild_one` (approval-gated + net-applied-skipped); it has
     /// NO `pending_contract`.
@@ -2552,23 +2556,111 @@ impl MigrationEngine {
                     } else {
                         scope
                     };
-                    let outcome = online
-                        .run_online(
-                            &rename.intent,
-                            &rename.expand,
-                            &rename.backfill,
-                            step_approval,
-                            step_scope,
-                            // Thread the E2 `trigger_version` so the
-                            // executor-layer scope gate resolves its key UNCONDITIONALLY
-                            // (E1 else `trigger_version`) — an empty expand chain no
-                            // longer falls open.
-                            &rename.trigger_version,
-                            exec_cfg,
-                            applied_by,
-                            LockMode::AlreadyHeld,
-                        )
-                        .await?;
+                    // **Drive the expand's phases HERE.** This used to be one call
+                    // to the backend's `run_online`, which drove the whole
+                    // sequence — and applied E1/E2 by calling
+                    // `apply_with_lock_backend`, this crate's orchestrator, back
+                    // across the backend boundary. That is mutual recursion across
+                    // the layer boundary the crate split exists to create: a vendor
+                    // crate cannot depend on the engine, so a vendor that re-enters
+                    // the orchestrator can never move out of it, and widening the
+                    // backend contract cannot help because the thing being called
+                    // IS the orchestrator. Every phase below is neutral — approval,
+                    // scope, splitting the marker off the chain, applying the
+                    // structural steps, the journal read that decides resume vs
+                    // skip — so the engine drives them and asks the backend only
+                    // for the one phase it alone can answer: mirroring the rows.
+                    //
+                    // The key the two approval gates share. E1's version is the
+                    // rename's PLAN-GROUP version (the id the operator reviews and
+                    // the obligation records); `trigger_version` is the fallback so
+                    // the gate resolves its key UNCONDITIONALLY — an empty expand
+                    // chain does not fall open.
+                    let approval_key = rename
+                        .expand
+                        .first()
+                        .map_or(&rename.trigger_version, |e1| &e1.version);
+                    if step_approval != Approval::Approved {
+                        return Err(DeclarativeApplyError::Expand(OnlineError::Approval));
+                    }
+                    if !step_scope.admits(approval_key.as_str()) {
+                        return Err(DeclarativeApplyError::Expand(
+                            OnlineError::ApprovalNotScoped {
+                                version: approval_key.as_str().to_string(),
+                            },
+                        ));
+                    }
+                    // E1 (add column), E2 (dual-write trigger), E3 (backfill
+                    // marker). The marker is not applied like the others: it is
+                    // journaled by the backfill runner only once the whole cohort
+                    // is mirrored, which is what keeps the contract blocked on a
+                    // half-finished mirror.
+                    let Some((marker, structural)) = rename
+                        .expand
+                        .split_last()
+                        .filter(|_| rename.expand.len() >= 3)
+                    else {
+                        return Err(DeclarativeApplyError::Expand(OnlineError::Apply(
+                            ApplyError::Backend(
+                                "online rename requires the complete expand sequence".to_string(),
+                            ),
+                        )));
+                    };
+                    let mut outcome = crate::apply::executor::apply_with_lock_backend(
+                        backend,
+                        exec_cfg,
+                        structural,
+                        step_approval,
+                        step_scope,
+                        applied_by,
+                        LockMode::AlreadyHeld,
+                    )
+                    .await
+                    .map_err(OnlineError::Apply)?;
+                    crate::fault::trip(crate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL)
+                        .map_err(OnlineError::Apply)?;
+
+                    // E3 is the durable backfill marker. Its journal state decides
+                    // whether the mirror still has work: a completed, checksum-matching
+                    // marker is an idempotent re-run and skips, and anything else
+                    // goes to the backend, which resumes its own cursor.
+                    let completed_marker = backend
+                        .applied(exec_cfg)
+                        .await
+                        .map_err(|error| OnlineError::Apply(ApplyError::Journal(error)))?
+                        .into_iter()
+                        .filter(|entry| {
+                            matches!(entry.phase, crate::apply::journal::Phase::Completed)
+                        })
+                        .find(|entry| entry.version == marker.version.as_str());
+                    if let Some(entry) = completed_marker {
+                        if entry.checksum != marker.checksum.as_str() {
+                            return Err(DeclarativeApplyError::Expand(OnlineError::Apply(
+                                ApplyError::ChecksumDrift {
+                                    version: marker.version.as_str().to_string(),
+                                    recorded: entry.checksum,
+                                    expected: marker.checksum.as_str().to_string(),
+                                },
+                            )));
+                        }
+                        outcome.skipped.push(marker.version.as_str().to_string());
+                    } else {
+                        let mirrored = online
+                            .run_online_backfill(
+                                &rename.intent,
+                                marker,
+                                &rename.backfill,
+                                step_approval,
+                                step_scope,
+                                approval_key,
+                                exec_cfg,
+                                applied_by,
+                            )
+                            .await?;
+                        if mirrored.complete {
+                            outcome.applied.push(marker.version.as_str().to_string());
+                        }
+                    }
                     applied.applied.extend(outcome.applied);
                     applied.skipped.extend(outcome.skipped);
                     applied.recovered.extend(outcome.recovered);
@@ -3811,7 +3903,7 @@ pub struct DeclarativeDeployPlan {
     /// ALWAYS empty on the SQLite dialect: a SQLite declarative rename is routed to a
     /// [`rebuilds`](Self::rebuilds) entry (an offline rebuild copying `to <- from`),
     /// never expand-contract, so
-    /// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online)
+    /// [`OnlineSchemaChange::run_online_backfill`](crate::apply::backend::OnlineSchemaChange::run_online_backfill)
     /// is never reached on a SQLite backend.
     pub renames: Vec<crate::render::expand_contract::ExpandContractPlan>,
     /// **SQLite only** — the existing-table changes SQLite has no native
@@ -3970,8 +4062,8 @@ pub enum DeclarativeApplyError {
 }
 
 /// The failure an online expand refuses with. It moved down to the backend
-/// contract, beside the `OnlineSchemaChange::run_online` signature that is its
-/// only producer, and it travelled alone: every arm it carries
+/// contract, beside the `OnlineSchemaChange` signature it names, and it travelled
+/// alone: every arm it carries
 /// (`ApplyError`, `BackfillError`) was already there. Re-exported so
 /// `crate::engine::OnlineError` and `zero_migrate::engine::OnlineError` resolve
 /// unchanged.

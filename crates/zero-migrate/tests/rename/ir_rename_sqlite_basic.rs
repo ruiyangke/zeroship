@@ -3,13 +3,13 @@
 //!
 //! The `SQLite` leg lowers ONE `op.renameColumn` to ONE
 //! `PlanStep::OnlineRename(RenameStep::TableRebuild(_))` (the 12-step OFFLINE
-//! table rebuild), executed via `MigrationBackend::rebuild_one` — NOT `run_online`
+//! table rebuild), executed via `MigrationBackend::rebuild_one` — NOT `run_online_backfill`
 //! (`SQLite` has no online schema-change capability). These tests drive the REAL
 //! lowering (`IrAuthor::lower_steps`) and APPLY through the engine's single shared
 //! `apply_plan` on a real temp-file `SQLite` backend:
 //!
 //! - a seeded row SURVIVES the rename, the OLD column is gone, the journal records
-//!   the rebuild migration (proving the `rebuild_one` path, NOT `run_online`);
+//!   the rebuild migration (proving the `rebuild_one` path, NOT `run_online_backfill`);
 //! - the lowered step is a `TableRebuild`, never an `ExpandContract` (the leg
 //!   dispatch, asserted structurally before apply);
 //! - a neutral `ColType` renders the correct `SQLite` affinity in the rebuilt CREATE;
@@ -222,7 +222,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
 // `RenameStep::TableRebuild` and applies via `rebuild_one` THROUGH the single
 // shared `apply_plan`. The seeded row survives, the old column is gone, the
 // journal records the rebuild — and the lowered step is a TableRebuild, NOT a
-// ExpandContract (so NO run_online path is taken).
+// ExpandContract (so NO run_online_backfill path is taken).
 #[compio::test]
 async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() {
     let p = paths("sqlite_rebuild");
@@ -362,7 +362,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     );
 
     // The journal records the REBUILD migration as Completed — the proof it ran via
-    // `rebuild_one` and NOT `run_online` (run_online journals the PG E1..C2
+    // `rebuild_one` and NOT `run_online_backfill` (run_online_backfill journals the PG E1..C2
     // expand sub-steps, a wholly different version set; here the only journaled
     // online-rename version is the single rebuild migration's).
     let applied = be.applied(&exec_cfg()).await.expect("journal");
@@ -371,11 +371,11 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
             && matches!(e.phase, zero_migrate::apply::journal::Phase::Completed)),
         "the rebuild migration is journaled completed (rebuild_one path)"
     );
-    // And NO PG expand-contract sub-step ever journaled (the run_online path was
+    // And NO PG expand-contract sub-step ever journaled (the run_online_backfill path was
     // never taken). `version` is a UUIDv7 (MigrationId::generate), NOT the human
     // "expand_*"/"contract_*" name — so a name-prefix check is vacuous. Instead
     // prove it by VERSION-SET DIFFERENCE: the rename added EXACTLY the one rebuild
-    // version to the journal. run_online would journal the E1..C2 expand sub-steps
+    // version to the journal. run_online_backfill would journal the E1..C2 expand sub-steps
     // as *additional, distinct* versions; their absence is the load-bearing proof.
     let after: std::collections::BTreeSet<String> = applied
         .iter()
@@ -387,7 +387,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
         added,
         std::collections::BTreeSet::from([rebuild_version.clone()]),
         "the SQLite rename adds EXACTLY the one rebuild version to the journal — \
-         no extra expand/contract sub-step versions (run_online was never taken)"
+         no extra expand/contract sub-step versions (run_online_backfill was never taken)"
     );
 }
 

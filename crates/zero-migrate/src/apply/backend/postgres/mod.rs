@@ -726,39 +726,53 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
 }
 
 impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
-    fn run_online<'a>(
+    /// Mirror the pre-existing rows of one online rename into the new column.
+    ///
+    /// This is the whole of PostgreSQL's online capability now. It used to be the
+    /// whole online DRIVE: it applied E1/E2 by calling `apply_with_lock_backend`
+    /// — the engine's orchestrator — back across the backend boundary, tripped an
+    /// engine fault point, and read the journal to decide whether the marker still
+    /// needed running. Those phases were neutral in every line and the engine owns
+    /// them now; what is left here is the one phase that is irreducibly Postgres:
+    /// naming the managed dual-write trigger this backfill is allowed to run
+    /// beneath, and running the paged `UPDATE`.
+    ///
+    /// The trigger identity is derived from the `intent`, not accepted from the
+    /// caller. `run_backfill` refuses to mirror rows under any trigger it was not
+    /// told to expect, so deriving it here — from the same intent the trigger was
+    /// authored from — is what keeps a caller from pointing the mirror at a
+    /// trigger the engine never wrote.
+    fn run_online_backfill<'a>(
         &'a self,
         intent: &'a crate::render::expand_contract::OnlineIntent,
-        expand: &'a [Migration],
+        marker: &'a Migration,
         backfill: &'a BackfillSpec,
         approval: crate::approval::Approval,
         scope: &'a crate::approval::ApprovalScope,
-        trigger_version: &'a MigrationId,
+        approval_key: &'a MigrationId,
         cfg: &'a ExecutorConfig,
         applied_by: &'a str,
-        lock_mode: crate::apply::executor::LockMode,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
                     Output = Result<
-                        crate::apply::executor::ApplyOutcome,
+                        zero_migrate_backend::backfill::BackfillOutcome,
                         crate::engine::OnlineError,
                     >,
                 > + 'a,
         >,
     > {
         Box::pin(async move {
-            use crate::apply::executor::LockMode;
-
+            // Executor-layer defense in depth. The engine ran both of these on the
+            // same `approval_key` before it applied E1/E2; these are the
+            // independent checks that stop a DIRECT seam caller from mirroring data
+            // for a rename that was never approved, or never individually reviewed.
             if approval != crate::approval::Approval::Approved {
                 return Err(crate::engine::OnlineError::Approval);
             }
-            let scope_version = expand
-                .first()
-                .map_or_else(|| trigger_version.as_str(), |e1| e1.version.as_str());
-            if !scope.admits(scope_version) {
+            if !scope.admits(approval_key.as_str()) {
                 return Err(crate::engine::OnlineError::ApprovalNotScoped {
-                    version: scope_version.to_string(),
+                    version: approval_key.as_str().to_string(),
                 });
             }
             let crate::render::expand_contract::OnlineIntent::RenameColumn {
@@ -770,96 +784,17 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
                 from.clone(),
                 to.clone(),
             );
-
-            let own_lock = lock_mode == LockMode::Acquire;
-            if own_lock {
-                self.acquire_project_lock(cfg).await?;
-            }
-            let result = async {
-                if expand.len() < 3 {
-                    return Err(crate::engine::OnlineError::Apply(ApplyError::Backend(
-                        "postgres online rename requires the complete expand sequence".to_string(),
-                    )));
-                }
-                let (backfill_marker, head) = expand
-                    .split_last()
-                    .expect("the complete expand sequence has a backfill marker");
-
-                let mut outcome = crate::apply::executor::apply_with_lock_backend(
-                    self,
-                    cfg,
-                    head,
-                    approval,
-                    scope,
-                    applied_by,
-                    LockMode::AlreadyHeld,
-                )
-                .await?;
-                crate::fault::trip(crate::fault::points::EXPAND_BETWEEN_E2_AND_BACKFILL)?;
-
-                // E3 is the durable backfill marker. The data-step seam checks its
-                // journal state first, resumes its cursor when needed, and records
-                // completion only after the full cohort is mirrored.
-                let completed = self
-                    .applied(cfg)
-                    .await
-                    .map_err(ApplyError::Journal)?
-                    .into_iter()
-                    .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
-                    .find(|entry| entry.version == backfill_marker.version.as_str());
-                if let Some(entry) = completed {
-                    if entry.checksum != backfill_marker.checksum.as_str() {
-                        return Err(crate::engine::OnlineError::Apply(
-                            ApplyError::ChecksumDrift {
-                                version: backfill_marker.version.as_str().to_string(),
-                                recorded: entry.checksum,
-                                expected: backfill_marker.checksum.as_str().to_string(),
-                            },
-                        ));
-                    }
-                    outcome
-                        .skipped
-                        .push(backfill_marker.version.as_str().to_string());
-                } else {
-                    let backfill_outcome = backfill_sql::run_backfill(
-                        self.conn,
-                        cfg,
-                        &backfill_marker.version,
-                        &backfill_marker.checksum,
-                        backfill,
-                        approval,
-                        Some(&allowed_engine_trigger),
-                        applied_by,
-                    )
-                    .await?;
-                    if backfill_outcome.complete {
-                        outcome
-                            .applied
-                            .push(backfill_marker.version.as_str().to_string());
-                    }
-                }
-                Ok::<_, crate::engine::OnlineError>(outcome)
-            }
-            .await;
-
-            if !own_lock {
-                return result;
-            }
-            let unlock = self.release_project_lock(cfg).await;
-            match result {
-                Ok(outcome) => unlock
-                    .map(|()| outcome)
-                    .map_err(crate::engine::OnlineError::Apply),
-                Err(error) => {
-                    if let Err(unlock_error) = unlock {
-                        tracing::warn!(
-                            error = %unlock_error,
-                            "zero-migrate: failed to release project lock after online rename error"
-                        );
-                    }
-                    Err(error)
-                }
-            }
+            Ok(backfill_sql::run_backfill(
+                self.conn,
+                cfg,
+                &marker.version,
+                &marker.checksum,
+                backfill,
+                approval,
+                Some(&allowed_engine_trigger),
+                applied_by,
+            )
+            .await?)
         })
     }
 }

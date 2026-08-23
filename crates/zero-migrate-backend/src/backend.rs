@@ -816,7 +816,7 @@ pub trait MigrationBackend {
     /// standalone batched backfill rewrites existing data, so it requires explicit
     /// approval and `scope` must admit its stable `version`. The data-mutating
     /// EXPAND backfill rides
-    /// [`OnlineSchemaChange::run_online`](crate::capability::OnlineSchemaChange::run_online),
+    /// [`OnlineSchemaChange::run_online_backfill`](crate::capability::OnlineSchemaChange::run_online_backfill),
     /// NOT this method.
     async fn run_backfill_step(
         &self,

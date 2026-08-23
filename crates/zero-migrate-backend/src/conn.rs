@@ -8,7 +8,7 @@
 //! It sits with the backend contract because [`ExecutorConfig`] is the most-named
 //! type in that contract: every one of `MigrationBackend`'s I/O methods takes a
 //! `&ExecutorConfig`, and so does every `CrossDeployObligations` method and
-//! `OnlineSchemaChange::run_online`. A config the traits cannot be written without
+//! `OnlineSchemaChange::run_online_backfill`. A config the traits cannot be written without
 //! cannot live above the traits.
 //!
 //! The two private fields survived the crate boundary that would normally dissolve
