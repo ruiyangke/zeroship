@@ -86,7 +86,12 @@ pub mod apply;
 // `OnlineSchemaChange::run_online` names it. Re-exported here so every
 // `crate::approval::{Approval, ApprovalScope}` reference resolves unchanged.
 pub use zero_migrate_backend::approval;
-pub mod conn;
+// The per-run executor configuration. `ExecutorConfig` is the single most-named
+// type in the backend contract — every one of `MigrationBackend`'s I/O methods
+// takes a `&ExecutorConfig` — so it moved down to sit with the trait it is an
+// argument of. Re-exported so every `crate::conn::…` and `zero_migrate::conn::…`
+// reference resolves unchanged.
+pub use zero_migrate_backend::conn;
 pub mod db_url;
 pub mod engine;
 #[doc(hidden)]

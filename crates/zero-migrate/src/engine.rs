@@ -877,8 +877,11 @@ impl MigrationEngine {
         applied_by: &str,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
         plan.verify_effective_policy(effective)?;
-        let mut policy_exec_cfg = exec_cfg.clone();
-        policy_exec_cfg.effective = effective.clone();
+        // Through the public setter rather than the field: `ExecutorConfig` lives in
+        // `zero-migrate-backend` now, and `effective` is private there. The setter
+        // is the same assignment, and it is what every other policy-carrying host
+        // path already uses.
+        let policy_exec_cfg = exec_cfg.clone().with_effective_policy(effective.clone());
         let exec_cfg = &policy_exec_cfg;
         // Hold the project advisory lock for the WHOLE declarative deploy.
         //

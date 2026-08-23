@@ -374,7 +374,7 @@ pub(super) fn set_local_session_sql(
         "SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
-        cfg.search_path_clause(&super::DIALECT)?,
+        search_path_clause(cfg, &super::DIALECT)?,
         effective_timeout_ms(cfg, m)?,
         effective_lock_timeout_ms(cfg, m)?,
     ))
@@ -415,7 +415,7 @@ fn dml_set_local_session_sql(cfg: &ExecutorConfig, version: &str) -> Result<Stri
          SET LOCAL search_path TO {}; \
          SET LOCAL statement_timeout = {}; \
          SET LOCAL lock_timeout = {};",
-        cfg.search_path_clause(&super::DIALECT)?,
+        search_path_clause(cfg, &super::DIALECT)?,
         resolve_timeout_ms(
             version,
             "statement_timeout",
@@ -454,7 +454,7 @@ pub(crate) async fn configure_session_non_txn<D: SqlSession>(
 ) -> Result<(), ApplyError> {
     let stmt = format!(
         "SET search_path TO {}; SET statement_timeout = {}; SET lock_timeout = {};",
-        cfg.search_path_clause(&super::DIALECT)?,
+        search_path_clause(cfg, &super::DIALECT)?,
         effective_timeout_ms(cfg, m)?,
         effective_lock_timeout_ms(cfg, m)?,
     );
@@ -2069,4 +2069,112 @@ mod non_txn_idempotency_tests {
             "recovery must refuse to re-run a CREATE TABLE that may already have committed"
         );
     }
+}
+
+/// The `search_path` clause value pinned for every apply (a comma-joined,
+/// double-quoted schema list).
+///
+/// - **Confined** ⇒ the project schema **only** (byte-identical to the old
+///   hardcoded single-schema pin; the meta schema stays OFF the path so an
+///   unqualified `up` name can never resolve to the journal).
+/// - **Platform** ⇒ the full configured schema allowlist (e.g.
+///   `"zero_migrate", "public"`). A multi-schema changelog relies on
+///   this: a first migration's `CREATE EXTENSION citext` is deliberately unqualified and
+///   must resolve a creation target (`public`) — and at that point the
+///   project schema does not yet exist, so a project-schema-only path would
+///   error `3F000 no schema has been selected to create in`. Cross-schema
+///   resolution between the project schema and `public` also needs them all
+///   on the path, matching a deployment where the `postgres`
+///   principal runs with `search_path = <project>, public`.
+/// - **Trusted** ⇒ the project schema (the `_` fallback). Trusted has no
+///   confinement — pinning the project schema is merely the default
+///   resolution target; an explicitly-qualified reference to any other schema
+///   still resolves (and is no longer guard-blocked), preserving dbmate
+///   parity. The operator owns the DB, so this pin is convenience, not a
+///   boundary.
+///
+/// Every element is an **engine-supplied** identifier (project schema, platform
+/// schemas, extension schemas), so each is rendered through the ONE shared
+/// explicit backend seam
+/// ([`quote_ident_checked_for_dialect`](crate::render::dml::quote_ident_checked_for_dialect))
+/// — fail-closed on an empty / NUL name, byte-identical to the prior
+/// `escape_quote_ident` for every real schema. So the whole quoting surface (not
+/// just the DDL/journal seams) is uniformly self-defending.
+///
+/// # Why it is HERE and not a method on `ExecutorConfig`
+///
+/// It was `ExecutorConfig::search_path_clause`, and `conn.rs`'s own header named it
+/// as the reason the neutral config still carried a PostgreSQL-typed confinement
+/// block: "Relocating the field without first relocating `search_path_clause` would
+/// only move the coupling." This is that relocation. A `search_path` is
+/// PostgreSQL's concept, all three callers are in this file, and all three passed
+/// `POSTGRES` as the dialect — so the function belongs to the vendor, not to the
+/// per-run config every dialect shares.
+///
+/// Keeping it a method would have cost the invariant instead. `ExecutorConfig` now
+/// lives in `zero-migrate-backend`, and `pub(crate)` does not survive a crate
+/// boundary: the method would have had to become `pub`, exposing a PostgreSQL
+/// `search_path` builder to every vendor crate and to the host. As a `pub(crate)`
+/// free function here it keeps exactly the visibility it had.
+///
+/// # Errors
+///
+/// [`IdentQuoteError`](crate::render::dml::IdentQuoteError) if any configured
+/// schema is empty or carries a NUL byte (an engine-internal misconfiguration;
+/// never reachable from a well-formed `ExecutorConfig`).
+pub(crate) fn search_path_clause(
+    cfg: &ExecutorConfig,
+    dialect: &crate::DialectId,
+) -> Result<String, crate::render::dml::IdentQuoteError> {
+    let quote = |s: &str| crate::render::dml::quote_ident_checked_for_dialect(s, dialect);
+    if policy_grants_bool(
+        cfg.effective(),
+        zero_migrate_ir::policy_registry::KEY_ACCESS_ROLE,
+    ) {
+        if let Some(schemas) = policy_literal_schema_includes(
+            cfg.effective(),
+            zero_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_TABLE,
+        ) {
+            if !schemas.is_empty() {
+                return schemas
+                    .iter()
+                    .map(|s| quote(s))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|parts| parts.join(", "));
+            }
+        }
+    }
+    // Confined / Trusted: the project schema is first (the sole writable
+    // resolution target — `CREATE TABLE foo` lands here, not in an extension
+    // schema), followed by the extension schema(s) so an UNQUALIFIED extension
+    // type (`vector(N)`, `geography(...)`) resolves.
+    let mut parts = vec![quote(&cfg.project_schema)?];
+    for ext in &cfg.confinement.postgres.extension_schemas {
+        // Avoid duplicating the project schema if it (oddly) appears.
+        if ext != &cfg.project_schema {
+            parts.push(quote(ext)?);
+        }
+    }
+    Ok(parts.join(", "))
+}
+
+fn policy_grants_bool(effective: &zero_migrate_policy::EffectivePolicy, key: &str) -> bool {
+    let Some(key) = zero_migrate_policy::KnobKey::parse(key).ok() else {
+        return false;
+    };
+    matches!(
+        effective.grants(
+            &key,
+            &zero_migrate_policy::ObjectName::schema(b"zsg".to_vec())
+        ),
+        Some(zero_migrate_policy::KnobValue::Bool(true))
+    )
+}
+
+fn policy_literal_schema_includes(
+    effective: &zero_migrate_policy::EffectivePolicy,
+    key: &str,
+) -> Option<Vec<String>> {
+    let key = zero_migrate_policy::KnobKey::parse(key).ok()?;
+    effective.grant_literal_schema_includes(&key)
 }

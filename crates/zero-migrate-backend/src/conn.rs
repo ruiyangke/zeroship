@@ -4,6 +4,22 @@
 //! the injected `SqlSession` driver seam. This module owns the connection helper
 //! and the per-run [`ExecutorConfig`] (which project, which schema, which meta
 //! schema, and the mandatory `statement_timeout` / `lock_timeout` budgets).
+//!
+//! It sits with the backend contract because [`ExecutorConfig`] is the most-named
+//! type in that contract: every one of `MigrationBackend`'s I/O methods takes a
+//! `&ExecutorConfig`, and so does every `CrossDeployObligations` method and
+//! `OnlineSchemaChange::run_online`. A config the traits cannot be written without
+//! cannot live above the traits.
+//!
+//! The two private fields survived the crate boundary that would normally dissolve
+//! a `pub(crate)`. `effective` and `guard_mode` are still unnameable from outside
+//! this module: their only in-crate readers ([`ExecutorConfig::guard_config_for`],
+//! [`ExecutorConfig::effective`], the builders) came with them, and the engine's
+//! one write site went through the public
+//! [`with_effective_policy`](ExecutorConfig::with_effective_policy) setter that
+//! already existed. The one member that WOULD have had to widen —
+//! `search_path_clause`, a PostgreSQL-only `search_path` builder — was relocated
+//! to the PostgreSQL backend instead of being made `pub`.
 
 use std::time::Duration;
 use zero_migrate_ir::dialect::DialectId;
@@ -85,7 +101,7 @@ pub struct ConfinementConfig {
     /// This field is the executor-WIDE default. For a planned maintenance
     /// window, a single migration raises ITS OWN lock-acquisition budget via the
     /// per-migration override
-    /// [`crate::model::migration::MigrationFlags::lock_timeout_ms`] (mirrors
+    /// [`zero_migrate_ir::migration::MigrationFlags::lock_timeout_ms`] (mirrors
     /// `timeout_ms`), so the conservative fail-fast default stays in force for
     /// every other migration in the same deploy.
     pub lock_timeout: Duration,
@@ -134,19 +150,20 @@ pub struct ConfinementConfig {
 /// (`session`, `backfill_sql`, `primary_key_sql`, `precondition`) and written by
 /// [`ExecutorConfig::with_migrator_role`], the host's provisioning seam.
 ///
-/// `extension_schemas` is read from exactly ONE place and it is NOT the PostgreSQL
-/// backend: `ExecutorConfig::search_path_clause`, in this file. That method is
-/// itself PostgreSQL-only — a `search_path` is PostgreSQL's concept, its three
-/// callers are all in `apply/backend/postgres/session.rs`, and all three pass
-/// `POSTGRES` as the dialect it takes.
+/// `extension_schemas` is read from exactly ONE place, and that place is now the
+/// PostgreSQL backend too: `search_path_clause`, in
+/// `apply/backend/postgres/session.rs`. It used to be a method on the neutral
+/// [`ExecutorConfig`] in this file, and this doc named that as the real reason the
+/// neutral [`ConfinementConfig`] still carried a vendor-typed field — "relocating
+/// the field without first relocating `search_path_clause` would only move the
+/// coupling". That relocation has happened: a `search_path` is PostgreSQL's
+/// concept, all three callers were already in that file, and all three passed
+/// `POSTGRES` as the dialect.
 ///
-/// That is the real reason the neutral [`ConfinementConfig`] still carries a
-/// vendor-typed field. The block is genuinely one vendor's and is named for it
-/// correctly; what keeps it here is that a PostgreSQL-only METHOD hangs off the
-/// neutral [`ExecutorConfig`] and reads it. Relocating the field without first
-/// relocating `search_path_clause` would only move the coupling, and a per-dialect
-/// carrier for run-time config does not exist: `BackendVendor` holds `&'static dyn`
-/// policy objects, and these are per-project host input.
+/// So what is left here is only DATA, and only the vendor that reads it reads it.
+/// The block stays because a per-dialect carrier for run-time config does not
+/// exist: `BackendVendor` holds `&'static dyn` policy objects, and these are
+/// per-project host input.
 #[derive(Debug, Clone)]
 pub struct PostgresConfinement {
     /// The least-privilege `migrator` role the apply flow runs each migration's
@@ -311,7 +328,7 @@ impl ExecutorConfig {
     /// The caller-authored policy is preserved exactly. Trusted test configs differ
     /// only by their explicit host-selected [`GuardMode`](crate::guard::GuardMode).
     ///
-    /// Public because [`rollback_with_lock`](crate::rollback_with_lock) takes its
+    /// Public because the engine's `rollback_with_lock` takes its
     /// guard as an argument, so an out-of-crate driver has to be able to build the
     /// one this config implies. Composing a `GuardConfig` by hand from the same
     /// policy would drop the host-selected mode, and the resulting guard would
@@ -329,7 +346,7 @@ impl ExecutorConfig {
     }
 
     /// Build a **Platform** executor config. REQUIRES a
-    /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, mintable
+    /// [`OperatorCapability`](zero_migrate_ir::capability::OperatorCapability) token, mintable
     /// only through named in-crate seams, so neither the control plane
     /// (external; cannot name `Platform` nor mint the token) nor any in-crate
     /// module (`submit`/`engine`; cannot mint the token) can flip the executor
@@ -339,10 +356,10 @@ impl ExecutorConfig {
     ///
     /// This is the public, token-gated seam an operator-side host uses to build a
     /// Platform-trust executor from an explicitly composed policy. An external
-    /// crate can name [`TrustProfile::Platform`](crate::model::policy::TrustProfile::Platform)
+    /// crate can name [`TrustProfile::Platform`](zero_migrate_ir::policy::TrustProfile::Platform)
     /// (it is not fielded), but it can only reach this executor seam by holding
     /// the token minted through the engine's named production seam
-    /// [`OperatorCapability::new`](crate::model::capability::OperatorCapability::new).
+    /// [`OperatorCapability::new`](zero_migrate_ir::capability::OperatorCapability::new).
     ///
     /// The napi host path is NOT the only legitimate Platform-apply producer: an
     /// operator-side native host (e.g. the platform's own migrate binary) applies
@@ -350,7 +367,7 @@ impl ExecutorConfig {
     /// [`SqlSession`](crate::driver::SqlSession).
     #[must_use]
     pub fn platform(
-        _cap: &crate::model::capability::OperatorCapability,
+        _cap: &zero_migrate_ir::capability::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
         effective: zero_migrate_policy::EffectivePolicy,
@@ -360,7 +377,7 @@ impl ExecutorConfig {
 
     /// Build a **Trusted** executor config — the public dbmate-like posture.
     /// REQUIRES an
-    /// [`OperatorCapability`](crate::model::capability::OperatorCapability) token, EXACTLY
+    /// [`OperatorCapability`](zero_migrate_ir::capability::OperatorCapability) token, EXACTLY
     /// like [`ExecutorConfig::platform`], mintable only through named in-crate
     /// seams. So neither the control plane (external; cannot
     /// name `Trusted` nor mint the token) nor any in-crate creator-path module
@@ -390,7 +407,7 @@ impl ExecutorConfig {
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn trusted(
-        _cap: &crate::model::capability::OperatorCapability,
+        _cap: &zero_migrate_ir::capability::OperatorCapability,
         project_id: impl Into<String>,
         project_schema: impl Into<String>,
         effective: zero_migrate_policy::EffectivePolicy,
@@ -413,75 +430,20 @@ impl ExecutorConfig {
         self
     }
 
-    /// The `search_path` clause value pinned for every apply (a comma-joined,
-    /// double-quoted schema list).
+    /// The caller-authored composed policy this config was built with.
     ///
-    /// - **Confined** ⇒ the project schema **only** (byte-identical to the old
-    ///   hardcoded single-schema pin; the meta schema stays OFF the path so an
-    ///   unqualified `up` name can never resolve to the journal).
-    /// - **Platform** ⇒ the full configured schema allowlist (e.g.
-    ///   `"zero_migrate", "public"`). A multi-schema changelog relies on
-    ///   this: a first migration's `CREATE EXTENSION citext` is deliberately unqualified and
-    ///   must resolve a creation target (`public`) — and at that point the
-    ///   project schema does not yet exist, so a project-schema-only path would
-    ///   error `3F000 no schema has been selected to create in`. Cross-schema
-    ///   resolution between the project schema and `public` also needs them all
-    ///   on the path, matching a deployment where the `postgres`
-    ///   principal runs with `search_path = <project>, public`.
-    /// - **Trusted** ⇒ the project schema (the `_` fallback). Trusted has no
-    ///   confinement — pinning the project schema is merely the default
-    ///   resolution target; an explicitly-qualified reference to any other schema
-    ///   still resolves (and is no longer guard-blocked), preserving dbmate
-    ///   parity. The operator owns the DB, so this pin is convenience, not a
-    ///   boundary.
-    ///
-    /// Every element is an **engine-supplied** identifier (project schema, platform
-    /// schemas, extension schemas), so each is rendered through the ONE shared
-    /// explicit backend seam
-    /// ([`crate::render::dml::quote_ident_checked_for_dialect`]) — fail-closed on an empty
-    /// / NUL name, byte-identical to the prior `escape_quote_ident` for every real
-    /// schema. So the whole quoting surface (not just the DDL/journal seams) is
-    /// uniformly self-defending.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::render::dml::IdentQuoteError`] if any configured schema is empty or carries
-    /// a NUL byte (an engine-internal misconfiguration; never reachable from a
-    /// well-formed `ExecutorConfig`).
-    pub(crate) fn search_path_clause(
-        &self,
-        dialect: &DialectId,
-    ) -> Result<String, crate::render::dml::IdentQuoteError> {
-        let quote = |s: &str| crate::render::dml::quote_ident_checked_for_dialect(s, dialect);
-        if policy_grants_bool(
-            &self.effective,
-            zero_migrate_ir::policy_registry::KEY_ACCESS_ROLE,
-        ) {
-            if let Some(schemas) = policy_literal_schema_includes(
-                &self.effective,
-                zero_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_TABLE,
-            ) {
-                if !schemas.is_empty() {
-                    return schemas
-                        .iter()
-                        .map(|s| quote(s))
-                        .collect::<Result<Vec<_>, _>>()
-                        .map(|parts| parts.join(", "));
-                }
-            }
-        }
-        // Confined / Trusted: the project schema is first (the sole writable
-        // resolution target — `CREATE TABLE foo` lands here, not in an extension
-        // schema), followed by the extension schema(s) so an UNQUALIFIED extension
-        // type (`vector(N)`, `geography(...)`) resolves.
-        let mut parts = vec![quote(&self.project_schema)?];
-        for ext in &self.confinement.postgres.extension_schemas {
-            // Avoid duplicating the project schema if it (oddly) appears.
-            if ext != &self.project_schema {
-                parts.push(quote(ext)?);
-            }
-        }
-        Ok(parts.join(", "))
+    /// This exists so the `effective` FIELD can stay private now that the engine
+    /// paths that read a policy off a config live one crate above it — the same
+    /// reason [`GuardConfig::effective`](crate::guard::GuardConfig::effective)
+    /// exists, and it grants exactly as little. It is a read-only borrow of a
+    /// policy the caller already holds: [`ExecutorConfig::new`] TOOK it,
+    /// [`with_effective_policy`](Self::with_effective_policy) replaces it, and
+    /// `self.guard_config_for(d).effective()` already returns it by a longer route.
+    /// The struct-literal boundary is unaffected — an external crate still cannot
+    /// NAME `effective` or `guard_mode`.
+    #[must_use]
+    pub const fn effective(&self) -> &zero_migrate_policy::EffectivePolicy {
+        &self.effective
     }
 
     /// `statement_timeout` in whole milliseconds (the unit `SET` takes).
@@ -506,25 +468,4 @@ impl ExecutorConfig {
     pub fn project_lock_timeout_ms(&self) -> u64 {
         u64::try_from(self.confinement.project_lock_timeout.as_millis()).unwrap_or(u64::MAX)
     }
-}
-
-fn policy_grants_bool(effective: &zero_migrate_policy::EffectivePolicy, key: &str) -> bool {
-    let Some(key) = zero_migrate_policy::KnobKey::parse(key).ok() else {
-        return false;
-    };
-    matches!(
-        effective.grants(
-            &key,
-            &zero_migrate_policy::ObjectName::schema(b"zsg".to_vec())
-        ),
-        Some(zero_migrate_policy::KnobValue::Bool(true))
-    )
-}
-
-fn policy_literal_schema_includes(
-    effective: &zero_migrate_policy::EffectivePolicy,
-    key: &str,
-) -> Option<Vec<String>> {
-    let key = zero_migrate_policy::KnobKey::parse(key).ok()?;
-    effective.grant_literal_schema_includes(&key)
 }

@@ -3,49 +3,25 @@
 use crate::apply::drift::DriftError;
 use crate::conn::{ConnectError, ExecutorConfig};
 use crate::engine::{DeclarativeDeployPlan, EngineError};
-use crate::model::migration::{Migration, MigrationId};
+use crate::model::migration::Migration;
 use crate::render::declarative::{DeclarativeError, DesiredSchema};
-use crate::render::expand_contract::OnlineIntent;
 
 // ── What a backfill IS, what running one produces, and how one refuses: all four
 // now live with the backend contract, beside the `BackfillSpec` a vendor executor
 // is handed. Re-exported so `capability::{BackfillSpec, BackfillOutcome,
 // BackfillError}` still resolve.
 pub use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillSpec};
-// ── The two capability signatures' neutral halves: what an online expand is
-// handed and refuses with, and the shadow dry-run's config + report. All five
-// reached nothing above the backend contract, so they went down ahead of the
-// traits. Re-exported so `capability::{OnlineError, ShadowConfig, DryRunReport,
-// MigrationResult}` still resolve.
+// ── The online capability, whole: the trait, the `OnlineIntent` it is handed and
+// the `OnlineError` it refuses with. Nothing in `run_online`'s signature reaches
+// the engine any more, so the vendor that implements it no longer has to.
+// ── The shadow dry-run's neutral half travelled too: `ShadowConfig` in,
+// `DryRunReport`/`MigrationResult` out. The `ShadowDryRun` TRAIT stayed, because
+// `dry_run_declarative` takes a `DeclarativeDeployPlan` and a `DesiredSchema` and
+// `SeedError` carries an `EngineError` — three engine orchestration results.
+// Re-exported so every historical `capability::…` path still resolves.
 pub use zero_migrate_backend::capability::{
-    DryRunReport, MigrationResult, OnlineError, ShadowConfig,
+    DryRunReport, MigrationResult, OnlineError, OnlineSchemaChange, ShadowConfig,
 };
-
-/// The online schema-change capability — the dialect-neutral seam the generic
-/// declarative apply path uses to drive a zero-downtime online operation.
-#[allow(clippy::module_name_repetitions)]
-pub trait OnlineSchemaChange {
-    /// Drive one online intent's expand sequence.
-    #[allow(clippy::too_many_arguments)]
-    fn run_online<'a>(
-        &'a self,
-        intent: &'a OnlineIntent,
-        expand: &'a [Migration],
-        backfill: &'a BackfillSpec,
-        approval: crate::approval::Approval,
-        scope: &'a crate::approval::ApprovalScope,
-        trigger_version: &'a MigrationId,
-        cfg: &'a ExecutorConfig,
-        applied_by: &'a str,
-        lock_mode: crate::apply::executor::LockMode,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<crate::apply::executor::ApplyOutcome, OnlineError>,
-                > + 'a,
-        >,
-    >;
-}
 
 /// A failure of the dry-run harness itself.
 #[derive(Debug, thiserror::Error)]

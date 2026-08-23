@@ -64,19 +64,21 @@ pub use sqlite::{RebuildError, SqliteActorError, SqliteBackend};
 // `BackfillSpec` it describes progress THROUGH; re-exported so
 // `apply::backend::BackfillProgressEntry` resolves unchanged.
 pub use zero_migrate_backend::backfill::BackfillProgressEntry;
-// The neutral VALUES this trait's signatures name. They reach nothing above the
-// backend contract, so they moved down ahead of the trait itself; re-exported so
-// `apply::backend::{PlaceholderStyle, JournalFuture, ProjectLockHolder,
-// ProjectLockAcquisition, PlanPreconditionVerdict}` resolve unchanged.
+// The neutral VALUES this trait's signatures name, and the whole
+// `CrossDeployObligations` capability — every type in its seven signatures
+// (`ExecutorConfig`, the `journal` row shapes, `JournalFuture`) now sits at or
+// below the backend contract, so it went down entire. `MigrationBackend` itself
+// stays until `PlanStep`, `TableRebuildSpec` and `ShadowDryRun` can follow.
+// Re-exported so every historical `apply::backend::…` path resolves unchanged.
 pub use zero_migrate_backend::backend::{
-    JournalFuture, PlaceholderStyle, PlanPreconditionVerdict, ProjectLockAcquisition,
-    ProjectLockHolder,
+    CrossDeployObligations, JournalFuture, PlaceholderStyle, PlanPreconditionVerdict,
+    ProjectLockAcquisition, ProjectLockHolder,
 };
 
 use crate::apply::baseline::{BaselineError, BaselineOutcome};
 use crate::apply::drift::DriftError;
 use crate::apply::executor::{ApplyError, RollbackError};
-use crate::apply::journal::{self, AppliedEntry, HistoryEvent, JournalError};
+use crate::apply::journal::{AppliedEntry, HistoryEvent, JournalError};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::model::snapshot::SchemaSnapshot;
@@ -100,89 +102,6 @@ fn legacy_debug_dialect_label(dialect: &DialectId) -> String {
 // GUCs, so it is a vendor type, and MySQL's equivalent already lived in its own
 // module; this contract sees a snapshot only through the associated type
 // [`MigrationBackend::SessionSnapshot`] and never inspects it (SQLite's is `()`).
-
-/// Cross-deploy pending-contract obligations capability.
-///
-/// Backends return `Some(&dyn CrossDeployObligations)` only when they can open
-/// and discharge cross-deploy obligations. If
-/// [`MigrationBackend::pending_contracts`] returns `None`, this capability is
-/// structurally absent: reads are empty and writes are no-ops/unreachable routing
-/// for that backend.
-pub trait CrossDeployObligations {
-    /// Read the OUTSTANDING cross-deploy pending-contract obligations —
-    /// the apply-time interlock read-back + the `status` orphan/blocked source.
-    /// No-op iff [`MigrationBackend::pending_contracts`] is `None`.
-    fn outstanding_pending_contracts<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-    ) -> JournalFuture<'a, Vec<journal::PendingContract>>;
-
-    /// Read terminal pending-contract tombstones for status and dependency
-    /// enforcement.
-    fn resolved_pending_contracts<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-    ) -> JournalFuture<'a, Vec<journal::ResolvedPendingContract>>;
-
-    /// Inspect the live table shape before destructive resolution SQL runs.
-    fn pending_contract_shape<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-        contract: &'a journal::PendingContract,
-    ) -> JournalFuture<'a, journal::PendingContractShape>;
-
-    /// Open a `pending` cross-deploy obligation AND, when a
-    /// [`journal::DeployRecoveryScope`] is supplied, its `in_progress`
-    /// deploy-scoped recovery marker — in ONE transaction. No-op iff
-    /// [`MigrationBackend::pending_contracts`] is `None`.
-    fn record_pending_contract_with_recovery<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-        rec: journal::PendingContractRecord<'a>,
-        scope: Option<journal::DeployRecoveryScope<'a>>,
-    ) -> JournalFuture<'a, bool>;
-
-    /// Discharge an obligation by APPENDING a `resolved` row (never a delete —
-    /// history is append-only). No-op iff [`MigrationBackend::pending_contracts`]
-    /// is `None`.
-    fn resolve_pending_contract<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-        pc: &'a journal::PendingContract,
-        resolution: journal::Resolution,
-        by: &'a str,
-    ) -> JournalFuture<'a, ()>;
-
-    /// Promote a WHOLE deploy's recovery markers to `committed` in ONE atomic
-    /// transaction. No-op iff [`MigrationBackend::pending_contracts`] is
-    /// `None`.
-    fn mark_deploy_recovery_committed_batch<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-        deploy_id: &'a str,
-        pending_versions: &'a [String],
-        by: &'a str,
-    ) -> JournalFuture<'a, ()>;
-
-    /// Mark a deploy-scoped recovery obligation `reconciled` (APPEND a
-    /// `reconciled` row). No-op iff [`MigrationBackend::pending_contracts`] is
-    /// `None`.
-    fn mark_deploy_recovery_reconciled<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-        deploy_id: &'a str,
-        pending_version: &'a str,
-        by: &'a str,
-    ) -> JournalFuture<'a, ()>;
-
-    /// Read the net-`in_progress` deploy-recovery markers whose obligation is
-    /// still outstanding. Empty iff [`MigrationBackend::pending_contracts`] is
-    /// `None`.
-    fn outstanding_deploy_recoveries<'a>(
-        &'a self,
-        cfg: &'a ExecutorConfig,
-    ) -> JournalFuture<'a, Vec<journal::DeployRecovery>>;
-}
 
 /// How many non-blocking project-lock attempts an acquisition makes before it
 /// reports the lock busy.

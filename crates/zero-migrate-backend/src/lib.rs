@@ -99,6 +99,12 @@ pub mod baseline;
 // their remaining arguments (`ExecutorConfig`, `DeclarativeDeployPlan`,
 // `DesiredSchema`) and `SeedError`'s `EngineError` have not come down.
 pub mod capability;
+// The per-run executor configuration: which project, which schema, which meta
+// schema, which timeout budgets, and the composed policy every executor-path
+// guard is built from. `ExecutorConfig` is the single most-named type in the
+// contract — every `MigrationBackend` I/O method takes a `&ExecutorConfig` — so
+// it sits with the traits. The engine re-exports it at `zero_migrate::conn`.
+pub mod conn;
 pub mod ddl;
 pub mod descriptors;
 pub mod dml;

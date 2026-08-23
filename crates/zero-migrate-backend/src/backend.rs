@@ -15,7 +15,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::journal::JournalError;
+use crate::conn::ExecutorConfig;
+use crate::journal::{self, JournalError};
 
 /// How a backend renders a positional bind placeholder in the SQL it issues.
 ///
@@ -110,4 +111,87 @@ pub enum PlanPreconditionVerdict {
         /// What the catalog says blocks the operation, when the assertion can say.
         blockers: Vec<String>,
     },
+}
+
+/// Cross-deploy pending-contract obligations capability.
+///
+/// Backends return `Some(&dyn CrossDeployObligations)` only when they can open
+/// and discharge cross-deploy obligations. If
+/// `MigrationBackend::pending_contracts` returns `None`, this capability is
+/// structurally absent: reads are empty and writes are no-ops/unreachable routing
+/// for that backend.
+pub trait CrossDeployObligations {
+    /// Read the OUTSTANDING cross-deploy pending-contract obligations —
+    /// the apply-time interlock read-back + the `status` orphan/blocked source.
+    /// No-op iff `MigrationBackend::pending_contracts` is `None`.
+    fn outstanding_pending_contracts<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+    ) -> JournalFuture<'a, Vec<journal::PendingContract>>;
+
+    /// Read terminal pending-contract tombstones for status and dependency
+    /// enforcement.
+    fn resolved_pending_contracts<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+    ) -> JournalFuture<'a, Vec<journal::ResolvedPendingContract>>;
+
+    /// Inspect the live table shape before destructive resolution SQL runs.
+    fn pending_contract_shape<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        contract: &'a journal::PendingContract,
+    ) -> JournalFuture<'a, journal::PendingContractShape>;
+
+    /// Open a `pending` cross-deploy obligation AND, when a
+    /// [`journal::DeployRecoveryScope`] is supplied, its `in_progress`
+    /// deploy-scoped recovery marker — in ONE transaction. No-op iff
+    /// `MigrationBackend::pending_contracts` is `None`.
+    fn record_pending_contract_with_recovery<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        rec: journal::PendingContractRecord<'a>,
+        scope: Option<journal::DeployRecoveryScope<'a>>,
+    ) -> JournalFuture<'a, bool>;
+
+    /// Discharge an obligation by APPENDING a `resolved` row (never a delete —
+    /// history is append-only). No-op iff `MigrationBackend::pending_contracts`
+    /// is `None`.
+    fn resolve_pending_contract<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        pc: &'a journal::PendingContract,
+        resolution: journal::Resolution,
+        by: &'a str,
+    ) -> JournalFuture<'a, ()>;
+
+    /// Promote a WHOLE deploy's recovery markers to `committed` in ONE atomic
+    /// transaction. No-op iff `MigrationBackend::pending_contracts` is
+    /// `None`.
+    fn mark_deploy_recovery_committed_batch<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        deploy_id: &'a str,
+        pending_versions: &'a [String],
+        by: &'a str,
+    ) -> JournalFuture<'a, ()>;
+
+    /// Mark a deploy-scoped recovery obligation `reconciled` (APPEND a
+    /// `reconciled` row). No-op iff `MigrationBackend::pending_contracts` is
+    /// `None`.
+    fn mark_deploy_recovery_reconciled<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+        deploy_id: &'a str,
+        pending_version: &'a str,
+        by: &'a str,
+    ) -> JournalFuture<'a, ()>;
+
+    /// Read the net-`in_progress` deploy-recovery markers whose obligation is
+    /// still outstanding. Empty iff `MigrationBackend::pending_contracts` is
+    /// `None`.
+    fn outstanding_deploy_recoveries<'a>(
+        &'a self,
+        cfg: &'a ExecutorConfig,
+    ) -> JournalFuture<'a, Vec<journal::DeployRecovery>>;
 }
