@@ -568,6 +568,11 @@ async fn read_cursor_from_audit_id(pool: &Pool, app_id: &str, id: i64) -> Option
 }
 
 /// Read the `details.processed` count from a backfill audit row by id.
+///
+/// `None` is "could not read it" and the caller resumes the count from 0.
+/// The SELECT above names `details`, so the decode failing means the audit
+/// table no longer has that column - drift worth a line in the log rather
+/// than a resumed zero nobody can attribute.
 async fn read_processed_from_audit_id(pool: &Pool, app_id: &str, id: i64) -> Option<i64> {
     let sql = format!(
         r#"SELECT details FROM "{app_id}"."__zeroship_migrations"
@@ -576,7 +581,18 @@ async fn read_processed_from_audit_id(pool: &Pool, app_id: &str, id: i64) -> Opt
     let id_s = id.to_string();
     let rows = pool.query_text_params(&sql, &[id_s.as_str()]).await.ok()?;
     let row = rows.first()?;
-    Some(crate::audit::read_processed_from_audit_row(row))
+    match crate::audit::read_processed_from_audit_row(row) {
+        Ok(processed) => Some(processed),
+        Err(error) => {
+            tracing::warn!(
+                app_id = app_id,
+                audit_id = id,
+                %error,
+                "db: backfill audit row carries no `details` column; resuming the processed count from 0"
+            );
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------

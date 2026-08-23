@@ -516,29 +516,52 @@ impl AuditExecutor for Client {
 /// Decode `details.processed` from a backfill audit row. The audit
 /// table's `details` column is `jsonb`; `Row::raw_value` returns the
 /// binary jsonb wire format (1-byte version prefix + JSON text).
-pub fn read_processed_from_audit_row(row: &Row) -> i64 {
-    let bytes = row.raw_value("details");
-    let Some(bytes) = bytes else { return 0 };
+///
+/// # Errors
+///
+/// Returns [`DbError`] when the row carries no `details` COLUMN - a query
+/// that did not select it, or a schema whose column has been renamed. A
+/// `details` column holding SQL NULL is not that, and still reads as `0`.
+///
+/// This used to return a bare `i64` and could not tell the two apart,
+/// because `Row::raw_value` folded both into `None`: a caller that mistyped
+/// the name got a backfill reported as having processed zero rows rather
+/// than a refusal. Silent zeroes are least acceptable here of anywhere -
+/// this is the audit trail.
+pub fn read_processed_from_audit_row(row: &Row) -> Result<i64, DbError> {
+    let bytes = row
+        .raw_value("details")
+        .map_err(|e| coded_sql("read_processed_from_audit_row", e))?;
+    let Some(bytes) = bytes else { return Ok(0) };
     if bytes.len() < 2 {
-        return 0;
+        return Ok(0);
     }
     let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
     let parsed: Value = serde_json::from_str(json_str).unwrap_or(Value::Null);
-    parsed
+    Ok(parsed
         .get("processed")
         .and_then(Value::as_i64)
-        .unwrap_or(0)
+        .unwrap_or(0))
 }
 
 /// Decode `dead_letter_pks` from a backfill audit row.
-pub fn read_dead_letter_pks_from_audit_row(row: &Row) -> Value {
-    let bytes = row.raw_value("dead_letter_pks");
-    let Some(bytes) = bytes else { return Value::Array(vec![]) };
+///
+/// # Errors
+///
+/// As [`read_processed_from_audit_row`]: a missing COLUMN is an error, a
+/// column holding SQL NULL is an empty list.
+pub fn read_dead_letter_pks_from_audit_row(row: &Row) -> Result<Value, DbError> {
+    let bytes = row
+        .raw_value("dead_letter_pks")
+        .map_err(|e| coded_sql("read_dead_letter_pks_from_audit_row", e))?;
+    let Some(bytes) = bytes else {
+        return Ok(Value::Array(vec![]));
+    };
     if bytes.len() < 2 {
-        return Value::Array(vec![]);
+        return Ok(Value::Array(vec![]));
     }
     let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
-    serde_json::from_str(json_str).unwrap_or(Value::Array(vec![]))
+    Ok(serde_json::from_str(json_str).unwrap_or(Value::Array(vec![])))
 }
 
 /// SELECT the latest backfill row for `(collection, change_kind=name)`.
@@ -563,8 +586,8 @@ pub(crate) async fn find_latest_backfill_row<E: AuditExecutor>(
     let id: i64 = row.get("id");
     let status: String = row.get("status");
     let cursor: i64 = row.try_get::<_, i64>("validate_cursor").unwrap_or(0);
-    let processed = read_processed_from_audit_row(row);
-    let dead_letter_pks = read_dead_letter_pks_from_audit_row(row);
+    let processed = read_processed_from_audit_row(row)?;
+    let dead_letter_pks = read_dead_letter_pks_from_audit_row(row)?;
     let audit_generation: i64 = row.try_get::<_, i64>("audit_generation").unwrap_or(0);
     // SQL NULL and empty-string both mean "no error". The migrations
     // SDK's parseNative treats any string in `error` as a thrown
@@ -629,6 +652,102 @@ fn validate_app_id(name: &str) -> Result<(), DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compio_postgres::test_utils::{column_for_test, row_for_test};
+    use compio_postgres::types::Type;
+
+    /// A `jsonb` value as PostgreSQL sends it: version byte `0x01`, then the
+    /// JSON text.
+    fn jsonb(text: &str) -> Vec<u8> {
+        let mut wire = vec![1u8];
+        wire.extend_from_slice(text.as_bytes());
+        wire
+    }
+
+    fn audit_row(columns: &[(&str, Option<Vec<u8>>)]) -> Row {
+        let (names, values): (Vec<_>, Vec<_>) = columns
+            .iter()
+            .map(|(name, value)| {
+                (column_for_test(*name, Type::JSONB), value.clone())
+            })
+            .unzip();
+        row_for_test(names, values).expect("the synthetic audit row is well formed")
+    }
+
+    /// Regression: a row that does not carry the `details` COLUMN must be
+    /// refused, not decoded into `0`.
+    ///
+    /// `Row::raw_value` answered the same `None` for "the column is missing"
+    /// and "the column is SQL NULL", so this reader - which resolves the
+    /// column BY NAME - turned a renamed or mistyped column into a backfill
+    /// that had processed zero rows. In an audit trail a silent zero is the
+    /// worst available answer: it is indistinguishable from a real reading,
+    /// so nothing downstream can tell that the question was never asked.
+    #[test]
+    fn a_missing_details_column_is_refused_not_read_as_zero() {
+        let row = audit_row(&[("dead_letter_pks", Some(jsonb("[]")))]);
+
+        let error = read_processed_from_audit_row(&row)
+            .expect_err("a row with no `details` column must not decode to a count");
+        assert!(
+            format!("{error:?}").contains("details"),
+            "the refusal must name the column that was not found, got: {error:?}"
+        );
+    }
+
+    /// The same for the dead-letter reader, which shares the shape.
+    #[test]
+    fn a_missing_dead_letter_pks_column_is_refused_not_read_as_empty() {
+        let row = audit_row(&[("details", Some(jsonb(r#"{"processed":1}"#)))]);
+
+        let error = read_dead_letter_pks_from_audit_row(&row)
+            .expect_err("a row with no `dead_letter_pks` column must not decode to a list");
+        assert!(
+            format!("{error:?}").contains("dead_letter_pks"),
+            "the refusal must name the column that was not found, got: {error:?}"
+        );
+    }
+
+    /// The control, differing in ONE variable: the columns ARE there and hold
+    /// SQL NULL. That is a real reading of a real row and must stay a value.
+    ///
+    /// Without this, "a missing column errors" could be satisfied by erroring
+    /// on every absent value, which would turn every freshly-inserted audit
+    /// row - `details` is NULL until the first cursor update - into a failure.
+    #[test]
+    fn a_null_details_column_still_reads_as_zero() {
+        let row = audit_row(&[("details", None), ("dead_letter_pks", None)]);
+
+        assert_eq!(
+            read_processed_from_audit_row(&row).expect("a NULL `details` is not an error"),
+            0
+        );
+        assert_eq!(
+            read_dead_letter_pks_from_audit_row(&row)
+                .expect("a NULL `dead_letter_pks` is not an error"),
+            Value::Array(vec![])
+        );
+    }
+
+    /// The second control: present, non-null, and carrying a value. Pins the
+    /// decode itself, so a fix that reached the error arm for everything -
+    /// or that stopped stripping the jsonb version byte - cannot pass.
+    #[test]
+    fn a_populated_details_column_reads_its_value() {
+        let row = audit_row(&[
+            ("details", Some(jsonb(r#"{"processed":4211}"#))),
+            ("dead_letter_pks", Some(jsonb(r#"[7,9]"#))),
+        ]);
+
+        assert_eq!(
+            read_processed_from_audit_row(&row).expect("a populated `details` decodes"),
+            4211
+        );
+        assert_eq!(
+            read_dead_letter_pks_from_audit_row(&row)
+                .expect("a populated `dead_letter_pks` decodes"),
+            serde_json::json!([7, 9])
+        );
+    }
 
     #[test]
     fn validate_app_id_accepts_valid_names() {

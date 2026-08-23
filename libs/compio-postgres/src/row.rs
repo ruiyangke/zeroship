@@ -269,17 +269,34 @@ impl Row {
 
     /// Raw wire bytes for the column identified by `idx` (name or index).
     ///
-    /// Returns `None` if the value is SQL NULL or the column doesn't exist.
+    /// `Ok(None)` is a column that IS there and holds SQL NULL. `Err` is a
+    /// name or index this row does not carry - [`Error::column`], naming it,
+    /// the same refusal [`Row::try_get`] gives.
+    ///
     /// Values are in PostgreSQL's binary wire format — the shape depends on
     /// the column's OID. Intended for callers that want to bypass the
     /// `FromSql` trait and do custom decoding (for example, re-encoding
     /// `TIMESTAMPTZ` as JS Unix milliseconds).
-    pub fn raw_value<I>(&self, idx: I) -> Option<&[u8]>
+    ///
+    /// # Errors
+    ///
+    /// [`Error::column`] when `idx` names no column of this row, or is an
+    /// index past its last one. A SQL NULL is never an error.
+    ///
+    /// This returned a bare `Option`, folding both answers into `None`. They
+    /// are different facts and only one is the caller's mistake: a caller
+    /// reading BY NAME saw a renamed or mistyped column as a legitimate SQL
+    /// NULL and decoded a default from it. `plugin-db`'s audit reader did
+    /// exactly that, reporting a backfill whose `details` column it had failed
+    /// to find as one that had processed zero rows.
+    pub fn raw_value<I>(&self, idx: I) -> Result<Option<&[u8]>, Error>
     where
         I: RowIndex + fmt::Display,
     {
-        let idx = idx.__idx(self.columns())?;
-        self.col_buffer(idx)
+        match idx.__idx(self.columns()) {
+            Some(resolved) => Ok(self.col_buffer(resolved)),
+            None => Err(Error::column(idx.to_string())),
+        }
     }
 }
 
@@ -461,8 +478,8 @@ mod tests {
                     "try_get on a column the row does not carry must be an error"
                 );
                 assert!(
-                    row.raw_value(2).is_none(),
-                    "raw_value on a column the row does not carry must be None"
+                    row.raw_value(2).is_err(),
+                    "raw_value on a column the row does not carry must be an error"
                 );
             }
         }
@@ -506,9 +523,41 @@ mod tests {
         assert_eq!(row.try_get::<_, i32>(0).unwrap(), 7);
         assert_eq!(row.try_get::<_, Option<i32>>(1).unwrap(), None);
         assert_eq!(row.try_get::<_, i32>("c").unwrap(), 9);
-        assert_eq!(row.raw_value(0), Some(&7i32.to_be_bytes()[..]));
+        assert_eq!(row.raw_value(0).unwrap(), Some(&7i32.to_be_bytes()[..]));
         assert!(row.try_get::<_, i32>("nope").is_err());
         assert!(row.try_get::<_, i32>(3).is_err());
+    }
+
+    /// `raw_value` must answer a column that is NOT THERE differently from one
+    /// that is there and holds SQL NULL.
+    ///
+    /// It answered `None` to both, so a caller reading by NAME - `plugin-db`'s
+    /// audit reader, among others - decoded a renamed or mistyped column into
+    /// whatever default it had chosen for NULL, and no layer above could see
+    /// that it had asked for a column the query never returned.
+    ///
+    /// The DB-free twin of `tests/raw_value_column_identity.rs`: this pins the
+    /// accessor, that one pins it against what a real `RowDescription` and
+    /// `DataRow` produce.
+    #[test]
+    fn raw_value_separates_a_missing_column_from_a_sql_null() {
+        let statement = Statement::unnamed(Vec::new(), int4_columns(&["a", "b"]));
+        let body = data_row(&[Some(&7i32.to_be_bytes()), None]);
+        let row = Row::new(statement, body).expect("a row matching its columns is well formed");
+
+        // The column is there and holds SQL NULL: not an error.
+        assert_eq!(row.raw_value("b").unwrap(), None);
+        assert_eq!(row.raw_value(1).unwrap(), None);
+
+        // The column is not there: an error that names it.
+        let by_name = row.raw_value("nope").expect_err("`nope` is not a column");
+        assert_eq!(by_name.to_string(), "invalid column `nope`");
+        let by_index = row.raw_value(2).expect_err("index 2 is out of range");
+        assert_eq!(by_index.to_string(), "invalid column `2`");
+
+        // The control: a present, non-null column still yields its bytes, so
+        // "missing columns error" cannot be met by erroring on everything.
+        assert_eq!(row.raw_value("a").unwrap(), Some(&7i32.to_be_bytes()[..]));
     }
 
     /// Run `f`, and return the message of the panic it raised.
