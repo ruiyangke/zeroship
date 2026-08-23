@@ -1996,8 +1996,24 @@ impl<'a> Parser<'a> {
         Ok(config)
     }
 
+    /// What libpq counts as whitespace between keyword=value pairs: C's
+    /// `isspace()` in the C locale, applied to BYTES.
+    ///
+    /// NOT `char::is_whitespace`, which is the Unicode definition and includes
+    /// U+00A0, U+2007, the U+2000 block and more. Splitting on those made a
+    /// value containing a non-breaking space end early and the rest of it parse
+    /// as further keywords -- so `application_name=x\u{a0}user=alice` connected
+    /// as `alice` here, while libpq keeps the whole thing as one application
+    /// name and connects as the configured user. Measured against psql 16.14.
+    ///
+    /// NOT `char::is_ascii_whitespace` either: that omits the vertical tab
+    /// (0x0B), which C's `isspace()` includes and libpq therefore splits on.
+    const fn is_conninfo_space(c: char) -> bool {
+        matches!(c, ' ' | '\t' | '\n' | '\u{b}' | '\u{c}' | '\r')
+    }
+
     fn skip_ws(&mut self) {
-        self.take_while(char::is_whitespace);
+        self.take_while(Self::is_conninfo_space);
     }
 
     fn take_while<F>(&mut self, f: F) -> &'a str
@@ -2044,7 +2060,7 @@ impl<'a> Parser<'a> {
 
     fn keyword(&mut self) -> Option<&'a str> {
         let s = self.take_while(|c| match c {
-            c if c.is_whitespace() => false,
+            c if Self::is_conninfo_space(c) => false,
             '=' => false,
             _ => true,
         });
@@ -2068,7 +2084,7 @@ impl<'a> Parser<'a> {
         let mut value = String::new();
 
         while let Some(&(_, c)) = self.it.peek() {
-            if c.is_whitespace() {
+            if Self::is_conninfo_space(c) {
                 break;
             }
 
