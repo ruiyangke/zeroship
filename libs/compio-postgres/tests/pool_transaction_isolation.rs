@@ -202,6 +202,147 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
     }
 }
 
+/// A raw `BEGIN` must not leak just because the session is already DIRTY.
+///
+/// This is `a_raw_begin_does_not_leak_to_the_next_borrower` with exactly one
+/// variable changed: before the raw `BEGIN`, the borrower opens and abandons a
+/// `Transaction`. That sets the client's `dirty` flag and queues a
+/// fire-and-forget `ROLLBACK`. The subsequent AWAITED `batch_execute` proves
+/// that `ROLLBACK` has already been consumed by the server -- but nothing
+/// clears `dirty`, so the flag survives the command it described.
+///
+/// The release path reads the stale flag as "a `ROLLBACK` is already queued,
+/// a second one would be noise" and skips it, and the next checkout's dirty
+/// barrier then launders the state: the empty `simple_query` succeeds inside
+/// the open transaction and clears `dirty` without ever ending it.
+///
+/// The control is the sibling above: same shape, no abandoned `Transaction`,
+/// and it passes. If both go red together the cause is the release rollback in
+/// general, not the stale flag.
+#[compio::test]
+async fn a_stale_dirty_flag_does_not_suppress_the_release_rollback() {
+    let url = test_url();
+    let schema = common::test_object_name("cpg_pool_stale_dirty");
+    let table = common::test_object_name("cpg_pool_stale_dirty_table");
+    let relation = format!("{schema}.{table}");
+    // One connection, so the release and the next acquisition are the same
+    // backend -- and asserted below, because `max_size(1)` does not guarantee
+    // it on its own.
+    let mut config = PoolConfig::new();
+    config.max_size(1).min_idle(1);
+    let pool = connect_pool(&url, config).await;
+
+    let outcome = match compio::time::timeout(
+        TEST_TIMEOUT,
+        std::panic::AssertUnwindSafe(async {
+            {
+                let client = pool.get().await.expect("first checkout");
+                client
+                    .batch_execute(&format!(
+                        "DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};
+                         CREATE TABLE {relation} (id int);"
+                    ))
+                    .await
+                    .expect("seed schema");
+            }
+
+            let leaked_pid: i32 = {
+                let mut client = pool.get().await.expect("second checkout");
+
+                // (1) Dirty the session and let its ROLLBACK settle. Abandoning
+                // a `Transaction` is the ordinary way a session becomes dirty.
+                {
+                    let transaction = client
+                        .transaction()
+                        .await
+                        .expect("open a guarded transaction");
+                    drop(transaction);
+                }
+
+                // (2) A raw transaction the guard has no say over. This awaits,
+                // so the ROLLBACK from (1) has reached the server and the
+                // cached transaction status is fresh; only `dirty` is stale.
+                client
+                    .batch_execute(&format!("BEGIN; INSERT INTO {relation} VALUES (1);"))
+                    .await
+                    .expect("open a raw transaction and write in it");
+                assert!(
+                    client.is_dirty(),
+                    "fixture no longer reproduces a stale dirty flag, so it cannot show \
+                     that the flag suppresses the release rollback"
+                );
+
+                let rows = client
+                    .query("SELECT pg_backend_pid() AS pid", &[])
+                    .await
+                    .expect("read the backend pid inside the leaked transaction");
+                rows[0].get("pid")
+            };
+
+            let client = pool.get().await.expect("third checkout");
+            let reused_pid: i32 = client
+                .query("SELECT pg_backend_pid() AS pid", &[])
+                .await
+                .expect("read the next borrower's backend pid")[0]
+                .get("pid");
+            assert_eq!(
+                reused_pid, leaked_pid,
+                "the pool replaced the dirty connection instead of cleaning it, so nothing \
+                 below is evidence that the raw BEGIN got rolled back"
+            );
+
+            let visible: i64 = client
+                .query(&format!("SELECT count(*)::int8 AS n FROM {relation}"), &[])
+                .await
+                .expect("count rows")[0]
+                .get("n");
+            let in_transaction: bool = client
+                .query(
+                    "SELECT (pg_current_xact_id_if_assigned() IS NOT NULL) AS b",
+                    &[],
+                )
+                .await
+                .expect("the transaction-state probe must run, not report false by failing")[0]
+                .get("b");
+
+            assert_eq!(
+                visible, 0,
+                "the next borrower inherited an uncommitted row: a stale dirty flag \
+                 suppressed the release rollback"
+            );
+            assert!(
+                !in_transaction,
+                "the next borrower is inside a transaction it never opened"
+            );
+        })
+        .catch_unwind(),
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => Err(Box::new(format!(
+            "stale-dirty isolation test exceeded its {TEST_TIMEOUT:?} timeout"
+        )) as Box<dyn std::any::Any + Send>),
+    };
+
+    let cleanup = match std::panic::AssertUnwindSafe(drop_test_schema(&pool, &schema))
+        .catch_unwind()
+        .await
+    {
+        Ok(cleanup) => cleanup,
+        Err(_) => Err(format!("cleanup for {schema} panicked")),
+    };
+    match outcome {
+        Ok(()) => cleanup.unwrap_or_else(|error| panic!("failed to clean up {schema}: {error}")),
+        Err(panic) => {
+            if let Err(error) = cleanup {
+                eprintln!("failed to clean up {schema} after test failure: {error}");
+            }
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
 /// An ABORTED transaction must not leak either.
 ///
 /// Distinct from the raw `BEGIN` above, and not covered by it: after a
