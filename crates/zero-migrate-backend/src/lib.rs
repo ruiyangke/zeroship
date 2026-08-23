@@ -19,8 +19,10 @@
 //! | [`guard::MigrationGuard`] | what does this vendor REFUSE to run |
 //! | [`stored_ddl::StoredDdl`] | how does this vendor parse catalog-stored table DDL |
 //! | [`value_format::ValueFormatRenderer`] | how does this vendor render and normalize ID formats |
+//! | [`backend::CrossDeployObligations`] | can this vendor open and discharge a cross-deploy obligation |
+//! | [`capability::OnlineSchemaChange`] | can this vendor run a zero-downtime online expand |
 //!
-//! The same dependency rule governs all eight: a trait declared in the engine would
+//! The same dependency rule governs all ten: a trait declared in the engine would
 //! force every vendor to depend on the engine, which already depends on every vendor.
 //!
 //! ```text
@@ -68,6 +70,30 @@
 //! of `schema::query`. The engine still composes comparisons and decisions; the
 //! backend contract supplies every vendor-specific spelling and catalog-normalization
 //! fact those algorithms consume.
+//!
+//! # `MigrationBackend` is not here YET, and the three blockers are measured
+//!
+//! The apply/rollback seam itself is still
+//! `zero_migrate::apply::backend::MigrationBackend`. Its vocabulary has come down —
+//! [`conn::ExecutorConfig`], [`backend`], [`baseline`], [`requirements`], the three
+//! structured [`step`] operations — but three of its signatures still name the
+//! engine, and each is a DIFFERENT kind of obstacle:
+//!
+//! * `rebuild_one` and `rollback_plan_transactional` take
+//!   `render::plan::TableRebuildSpec` and `render::step::PlanStep`. `PlanStep`
+//!   reaches `TableRebuildSpec` through `RenameStep::TableRebuild`, and that spec's
+//!   `sequence_policy` field is typed `zero_migrate_sqlite::SqliteSequencePolicy`.
+//!   A VENDOR type cannot come down into the crate the vendors sit above, so this
+//!   one is not a size problem at all — it is a direction problem, and it needs a
+//!   decision about that field rather than a bigger move.
+//! * `shadow()` returns `Option<&dyn ShadowDryRun>`, whose
+//!   `dry_run_declarative` takes `engine::DeclarativeDeployPlan` and
+//!   `render::declarative::DesiredSchema`, and whose `SeedError` carries
+//!   `engine::EngineError`. These are ORCHESTRATION RESULTS — the engine's
+//!   `MigrationPlan`, its `ResolvedInject`, its whole error enum over
+//!   `plan::pending` and `ManifestError`. Moving them would move the engine.
+//! * Nothing else. Every other type named anywhere in the trait is already at or
+//!   below this crate.
 
 pub mod advisory;
 // The caller's approval decision. Named by `OnlineSchemaChange::run_online` and by
