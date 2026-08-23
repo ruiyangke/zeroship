@@ -160,3 +160,54 @@ async fn the_count_is_rows_affected_not_parameters_supplied() {
         "the count must be rows affected (3), not parameters supplied (2)"
     );
 }
+
+/// After exhaustion, `rows_affected` must not still read `None`.
+///
+/// `RowStream::rows_affected` documents itself as returning "`None` until the
+/// stream has been exhausted", which tells a caller that once the stream ends
+/// the value is available. An empty query breaks that: the server answers
+/// `EmptyQueryResponse` and then `ReadyForQuery` with no `CommandComplete` in
+/// between, nothing ever sets the field, and it stays `None` on a stream that
+/// IS exhausted. `None` then means two different things and the caller cannot
+/// tell them apart -- the same conflation `Row::raw_value` was fixed for.
+///
+/// `execute("")` already answers 0 for the same query, so 0 is the consistent
+/// answer here too.
+#[compio::test]
+async fn rows_affected_is_available_once_an_empty_query_stream_is_exhausted() {
+    use futures_util::TryStreamExt;
+
+    let Some(url) = test_url() else {
+        eprintln!("PG_TEST_URL unset; skipping");
+        return;
+    };
+    let client = connect_client(&url).await;
+
+    let stream = client
+        .query_raw("", std::iter::empty::<&i32>())
+        .await
+        .expect("an empty query is accepted");
+    let mut stream = Box::pin(stream);
+    while stream.as_mut().try_next().await.expect("drain").is_some() {}
+
+    assert_eq!(
+        stream.as_ref().get_ref().rows_affected(),
+        Some(0),
+        "an exhausted empty-query stream still reported None, so None means \
+         both `not finished` and `no count was sent`"
+    );
+
+    // Control, one variable away: a stream that DID carry a CommandComplete
+    // reports its real count, so the assertion above cannot be satisfied by
+    // hardcoding Some(0).
+    let stream = client
+        .query_raw(
+            "SELECT * FROM generate_series(1, 3)",
+            std::iter::empty::<&i32>(),
+        )
+        .await
+        .expect("non-empty query");
+    let mut stream = Box::pin(stream);
+    while stream.as_mut().try_next().await.expect("drain").is_some() {}
+    assert_eq!(stream.as_ref().get_ref().rows_affected(), Some(3));
+}
