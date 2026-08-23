@@ -132,3 +132,54 @@ fn the_parity_table_covers_every_parameter_libpq_18_accepts() {
         "the libpq parameter table changed size without its floor being re-ruled"
     );
 }
+
+/// A repeated key REPLACES, as libpq does; only a comma builds a host list.
+///
+/// This crate accepted `host=a host=b` as a two-host FAILOVER list, so a
+/// connection string assembled by concatenation -- a default followed by an
+/// override, which is how DSNs are usually built from layered config -- kept
+/// the default and tried it FIRST. libpq resolves the same string to `b`
+/// alone, so the two drivers connect to different servers and neither reports
+/// anything.
+///
+/// MEASURED AGAINST THE REAL libpq, not against the documentation, by handing
+/// psql `host=127.0.0.1 host=nonexistent.invalid`. It fails to resolve the
+/// second name, which it could only do by having discarded the first. The
+/// comma form is genuinely multi-host in both, and stays that way here.
+///
+/// This is the exact failure the header of this file exists to prevent, one
+/// level down: not a parameter accepted and ignored, but a parameter accepted
+/// and given different meaning.
+#[test]
+fn a_repeated_key_replaces_rather_than_appending() {
+    let replaced = "host=first.invalid host=127.0.0.1 user=u"
+        .parse::<Config>()
+        .expect("a repeated host key must parse");
+    assert_eq!(
+        replaced.get_hosts().len(),
+        1,
+        "a repeated host key built a failover list instead of overriding: {:?}",
+        replaced.get_hosts()
+    );
+
+    let ports = "host=h user=u port=1 port=2"
+        .parse::<Config>()
+        .expect("a repeated port key must parse");
+    assert_eq!(
+        ports.get_ports(),
+        [2],
+        "a repeated port key accumulated instead of overriding"
+    );
+
+    // The one-variable partner: a comma is still a list, in both drivers.
+    let listed = "host=a,b user=u".parse::<Config>().expect("comma form");
+    assert_eq!(listed.get_hosts().len(), 2, "the comma form must stay multi-host");
+
+    // And a repeated key after a comma list replaces the whole list.
+    let overridden = "host=a,b host=c user=u".parse::<Config>().expect("override");
+    assert_eq!(
+        overridden.get_hosts().len(),
+        1,
+        "an override after a list must replace it, not extend it"
+    );
+}
