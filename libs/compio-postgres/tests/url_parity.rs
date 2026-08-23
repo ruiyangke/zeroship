@@ -373,7 +373,6 @@ fn query_host_is_comma_split() {
 // stray `%` in a password or dbname is a typo, and libpq is right to say so
 // rather than authenticate with the wrong string.
 #[test]
-#[ignore = "known divergence: malformed percent escapes pass through verbatim"]
 fn malformed_percent_escapes_are_rejected() {
     for url in [
         "postgres://h/db?application_name=%zz",
@@ -392,7 +391,6 @@ fn malformed_percent_escapes_are_rejected() {
 // libpq: postgres://postgres@127.0.0.1:0/postgres -> invalid port number: "0"
 // We accept it and produce `ports=[0]`.
 #[test]
-#[ignore = "known divergence: port 0 accepted"]
 fn port_zero_is_rejected() {
     assert!(err("postgres://h:0/db").contains("port"));
 }
