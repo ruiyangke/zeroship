@@ -63,9 +63,7 @@ async fn a_server_error_carries_the_fields_postgresql_sent() {
     compio::time::timeout(WATCHDOG, async {
         let client = connect().await;
         client
-            .batch_execute(
-                "CREATE TEMP TABLE ef (a int PRIMARY KEY, b int NOT NULL CHECK (b > 0))",
-            )
+            .batch_execute("CREATE TEMP TABLE ef (a int PRIMARY KEY, b int NOT NULL CHECK (b > 0))")
             .await
             .expect("create the error fixture");
         client
@@ -112,7 +110,11 @@ async fn a_server_error_carries_the_fields_postgresql_sent() {
             .as_db_error()
             .expect("a server-sent error must survive as a DbError");
 
-        assert_eq!(not_null.code().code(), "23502", "not_null_violation SQLSTATE");
+        assert_eq!(
+            not_null.code().code(),
+            "23502",
+            "not_null_violation SQLSTATE"
+        );
         assert_eq!(not_null.table(), Some("ef"));
         assert_eq!(not_null.column(), Some("b"));
         // The mirror of the assertion above: the fields swap between the two
