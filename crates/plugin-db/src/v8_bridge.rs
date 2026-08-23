@@ -381,16 +381,24 @@ pub(crate) fn row_to_json(row: &compio_postgres::Row) -> Value {
 /// numeric column index (not the name) so `Row::try_get` /
 /// `Row::raw_value` skip the linear name lookup — see the rationale
 /// on `row_to_json` above.
+///
+/// `raw_value` refuses an index the row does not carry, and the arms below
+/// fold that refusal into `Value::Null` alongside SQL NULL. That is safe
+/// HERE and nowhere else: the only caller is `row_to_json`, which obtains
+/// `idx` by enumerating `row.columns()`, so every index is in range by
+/// construction and the refusal is unreachable. A caller resolving a column
+/// BY NAME has no such guarantee and must propagate the error instead — see
+/// `audit::read_processed_from_audit_row`.
 fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
     // Try to get the value — if it's NULL, return null
     // OIDs from postgres_types::Type constants
     match oid {
         // BYTEA = 17 — canonical wire shape is base64 text.
         17 => match row.raw_value(idx) {
-            Some(bytes) => Value::String(
+            Ok(Some(bytes)) => Value::String(
                 base64::engine::general_purpose::STANDARD.encode(bytes),
             ),
-            None => Value::Null,
+            Ok(None) | Err(_) => Value::Null,
         },
         // BOOL = 16
         16 => match row.try_get::<_, bool>(idx) {
@@ -437,7 +445,7 @@ fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
         // `null` (the conceptual `DbError::Internal`) instead of panicking
         // the worker thread.
         1114 | 1184 => match row.raw_value(idx) {
-            Some(bytes) if bytes.len() == 8 => {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
                 let pg_usec = i64::from_be_bytes(bytes.try_into().unwrap());
                 // 2000-01-01 = 946684800 seconds since Unix epoch
                 match (pg_usec / 1_000).checked_add(946_684_800_000) {
@@ -460,7 +468,7 @@ fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
         // `i32::MAX`, which multiplies past `i64::MAX`. Checked math
         // turns the overflow into `null` rather than a panic.
         1082 => match row.raw_value(idx) {
-            Some(bytes) if bytes.len() == 4 => {
+            Ok(Some(bytes)) if bytes.len() == 4 => {
                 let pg_days = i32::from_be_bytes(bytes.try_into().unwrap());
                 let unix_ms = i64::from(pg_days)
                     .checked_add(10957)
@@ -481,7 +489,7 @@ fn column_to_json(row: &compio_postgres::Row, idx: usize, oid: u32) -> Value {
         },
         // JSONB = 3802 — binary format has 1-byte version prefix, strip it
         3802 => match row.raw_value(idx) {
-            Some(bytes) if bytes.len() > 1 => {
+            Ok(Some(bytes)) if bytes.len() > 1 => {
                 let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
                 serde_json::from_str(json_str).unwrap_or(Value::Null)
             }
