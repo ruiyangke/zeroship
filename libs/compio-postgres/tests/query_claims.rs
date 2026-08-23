@@ -191,18 +191,33 @@ async fn query_scalar_rejects_extra_columns_even_with_no_rows() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
 
-        let populated = client
-            .query_scalar::<i32, _>("SELECT 1, 2", &[])
-            .await
-            .expect_err("two columns cannot be one scalar");
-
-        let empty = client
-            .query_scalar::<i32, _>("SELECT 1, 2 WHERE false", &[])
-            .await;
+        // The populated error was captured only to be INTERPOLATED INTO the
+        // empty case's failure message until 2026-08-23 - never inspected - so
+        // the test proved both calls erred, not that they erred for the same
+        // reason. Both must name the column count, which is the claim.
+        let populated = common::error_chain(
+            &client
+                .query_scalar::<i32, _>("SELECT 1, 2", &[])
+                .await
+                .expect_err("two columns cannot be one scalar"),
+        );
         assert!(
-            empty.is_err(),
-            "an empty result set hid the arity error the populated one reports \
-             ({populated}); the column count does not depend on the rows"
+            populated.contains("unexpected number of columns"),
+            "a two-column scalar query must fail on the column count: {populated:?}"
+        );
+
+        let empty = common::error_chain(
+            &client
+                .query_scalar::<i32, _>("SELECT 1, 2 WHERE false", &[])
+                .await
+                .expect_err(
+                    "an empty result set hid the arity error the populated one reports; \
+                     the column count does not depend on the rows",
+                ),
+        );
+        assert_eq!(
+            empty, populated,
+            "the same arity violation must read the same with and without rows"
         );
 
         // The one-variable partner: a genuine single-column query must still
@@ -234,20 +249,34 @@ async fn query_opt_scalar_rejects_extra_columns_even_with_no_rows() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
 
-        assert!(
-            client
-                .query_opt_scalar::<i32, _>("SELECT 1, 2", &[])
-                .await
-                .is_err(),
-            "two columns cannot be one scalar"
-        );
-        assert!(
-            client
-                .query_opt_scalar::<i32, _>("SELECT 1, 2 WHERE false", &[])
-                .await
-                .is_err(),
-            "an empty result set hid the arity error the populated one reports"
-        );
+        // THREE BARE `is_err()` HERE UNTIL 2026-08-23, for three DIFFERENT
+        // rules: two about columns and, below, one about rows. "An error
+        // occurred" cannot tell them apart, so a helper that collapsed the two
+        // verdicts into one satisfied all three. The driver does distinguish
+        // them -- `unexpected number of columns` and `unexpected number of
+        // rows` -- so each assertion now names its own and denies the other.
+        for (sql, why) in [
+            ("SELECT 1, 2", "two columns cannot be one scalar"),
+            (
+                "SELECT 1, 2 WHERE false",
+                "an empty result set hid the arity error the populated one reports",
+            ),
+        ] {
+            let cause = common::error_chain(
+                &client
+                    .query_opt_scalar::<i32, _>(sql, &[])
+                    .await
+                    .expect_err(why),
+            );
+            assert!(
+                cause.contains("unexpected number of columns"),
+                "{sql}: {why}, but the refusal said {cause:?}"
+            );
+            assert!(
+                !cause.contains("unexpected number of rows"),
+                "{sql}: an arity failure was reported as a row-count failure: {cause:?}"
+            );
+        }
 
         // One-variable partners: the shapes this API exists to serve.
         assert_eq!(
@@ -264,13 +293,23 @@ async fn query_opt_scalar_rejects_extra_columns_even_with_no_rows() {
                 .expect("no row is None, not an error"),
             None
         );
-        // And the row-count rule it inherits from query_opt is still enforced.
-        assert!(
-            client
+        // And the row-count rule it inherits from query_opt is still enforced -
+        // as a ROW-count rule. The column here is single, so a helper reporting
+        // an arity failure would be wrong about which rule it applied, and the
+        // denial below is what separates this case from the two above.
+        let cause = common::error_chain(
+            &client
                 .query_opt_scalar::<i32, _>("SELECT g FROM generate_series(1, 2) g", &[])
                 .await
-                .is_err(),
-            "query_opt_scalar must still refuse more than one row"
+                .expect_err("query_opt_scalar must still refuse more than one row"),
+        );
+        assert!(
+            cause.contains("unexpected number of rows"),
+            "two rows of one column must fail on the row count, not on {cause:?}"
+        );
+        assert!(
+            !cause.contains("unexpected number of columns"),
+            "a row-count failure was reported as an arity failure: {cause:?}"
         );
     })
     .await
@@ -304,18 +343,19 @@ async fn raw_size_bytes_counts_field_data_and_not_the_frame() {
             assert_eq!(row.raw_size_bytes(), expected, "{sql}: {why}");
         }
 
-        // The 7 bytes it does NOT count, pinned as a relationship rather than
-        // a second literal: one column of one byte is 5 here and 12 on the
-        // wire (tag 1 + length 4 + field count 2 + 4 + 1).
-        let row = client
-            .query_one("SELECT 'x'::text", &[])
-            .await
-            .expect("query the fixture");
-        assert_eq!(
-            row.raw_size_bytes() + 7,
-            12,
-            "the frame overhead this excludes is 7 bytes per row"
-        );
+        // WHAT THIS TEST DOES NOT PIN: the 7 bytes of frame overhead
+        // (`DataRow` tag 1 + length 4 + field count 2) that `raw_size_bytes`
+        // excludes. A block here used to claim it did, asserting
+        // `row.raw_size_bytes() + 7 == 12` for `SELECT 'x'::text` and calling
+        // that "a relationship rather than a second literal". It is not one:
+        // the assertion reduces to `raw_size_bytes() == 5`, which the table's
+        // first case already checks on the identical query, and both 7 and 12
+        // were hand-written. Nothing measured a frame, so a change to the
+        // overhead could not have moved it. Pinning it needs a scripted peer
+        // whose bytes are known -- `tests/hostile_peer.rs` has that machinery
+        // and this file does not -- so the honest statement is that the four
+        // cases above pin the FIELD accounting and nothing here pins the
+        // frame's.
     })
     .await
     .expect("raw_size_bytes test exceeded its watchdog");

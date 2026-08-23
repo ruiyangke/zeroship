@@ -12,25 +12,45 @@
 //!
 //! The peer is on a network. A mangling proxy, a transaction pooler that
 //! rewrites framing, or an outright hostile server can put bytes on the wire
-//! that PostgreSQL never would. Each test below asserts THREE things, and the
-//! middle one is the point:
+//! that PostgreSQL never would. Each test below asserts THREE things:
 //!
-//!   1. the operation returns an `Err` rather than a wrong-but-plausible `Ok`,
-//!   2. the session is RETIRED rather than handed to the next caller,
+//!   1. the operation returns an `Err` naming THE VIOLATION rather than a
+//!      wrong-but-plausible `Ok`,
+//!   2. the poisoned session does not go on to serve the next caller,
 //!   3. it happened inside a watchdog, because several of these shapes are
 //!      built to hang an implementation that waits for bytes that never come.
 //!
-//! Assertion 2 is what a careless version of this file would omit. A driver
-//! that reports an error and then leaves the poisoned session usable has the
-//! defect this crate has had SIX separate confirmed times.
+//! ASSERTION 1 SAID ONLY `!chain.is_empty()` UNTIL 2026-08-23 - "an error
+//! occurred". Every wrong answer in this file satisfies that, including an
+//! error the HARNESS caused, which is how the COPY family below passed with
+//! their violations removed. Each test now names the diagnosis it expects, and
+//! [`HostileOutcome::names`] looks in both places one can land.
+//!
+//! ASSERTION 2 IS WEAKER THAN "THE SESSION IS RETIRED", and the difference is
+//! measured, not hedged. This header used to claim retirement outright and call
+//! it the point. It is not what happens: instrumenting the helper with
+//! `client.is_closed()` on 2026-08-23 reported FALSE half a second after the
+//! error for the unknown-tag case and both DataRow cases - the driver treats
+//! those as belonging to one response, not to the session. What makes the
+//! follow-up query fail there is the scripted peer hanging up 300ms later.
+//! Raise that sleep past `OPERATION_WATCHDOG` and all three fail on the
+//! "reusing the poisoned session hung" arm. Only
+//! `a_length_below_its_own_header_is_refused` retires by the driver's own doing
+//! (`is_closed` true, `Connection::run` returning the length error), and only
+//! `a_truncated_frame_followed_by_silence_does_not_hang` asserts retirement
+//! directly - it can, because `read_timeout` retires on expiry by contract.
+//! Whether the other three SHOULD retire a stream the driver has lost sync with
+//! is a driver question, not a test one; it is open.
 //!
 //! WHAT THESE ACTUALLY REACH, measured rather than assumed. The unknown-tag
 //! case reports `error parsing response from server: unknown message tag
 //! \`127\``, so it is rejected by the CODEC while decoding the frame - it never
-//! reaches an `unexpected_message` site at all. Read this file as coverage of
-//! the framing and decode defences, NOT of those 44 state-machine branches;
-//! driving those needs a peer that sends well-formed messages in a forbidden
-//! ORDER, which only `a_data_row_without_a_row_description_is_refused` does.
+//! reaches an `unexpected_message` site at all. The lying-length cases are the
+//! same story one layer down. But the prepare and COPY families below DO reach
+//! the state-machine cluster: all seven report `unexpected message from server`
+//! (measured 2026-08-23), as does
+//! `a_data_row_without_a_row_description_is_refused`. Eight tests on those 43
+//! sites, five on the framing and decode defences.
 //!
 //! These tests discriminate, and that was checked rather than hoped: feeding a
 //! WELL-FORMED `CommandComplete` + `ReadyForQuery` through the same helper
@@ -61,6 +81,17 @@
 //! `NoData` + `ReadyForQuery` and all three duly failed. The prepare helper
 //! needed no change: a correct prepare reply ends in `ReadyForQuery`, so it
 //! never had the truncation problem the COPY helper did.
+//!
+//! AND THE COPY HALF OF IT IS NOW A TEST, not a procedure. Re-running the
+//! substitution on 2026-08-23 found `well_formed_copy_out` was DEAD CODE - it
+//! had never had a caller, so the check it documents had to be performed by
+//! hand by someone who had read the paragraph, which is how the note below it
+//! came to say the control "could not be built" and was "INCONCLUSIVE" while
+//! the function's own doc said substituting it must fail each test. Both were
+//! written on the same day and they cannot both be right; the measurement says
+//! the function's doc is. [`a_well_formed_copy_out_is_accepted`] now runs it on
+//! every `cargo test`, and the four COPY tests were re-checked by substitution:
+//! all four fail, each at its own `expect_err`.
 //!
 //! NOT covered here: TLS, authentication, replication framing, or a peer that
 //! trickles bytes slowly rather than sending wrong ones.
@@ -216,13 +247,50 @@ fn stub_config(addr: SocketAddr) -> Config {
     config
 }
 
+/// What one hostile exchange reported, from BOTH places an error can land.
+///
+/// Two fields rather than one because a framing violation does not always reach
+/// the caller. Measured on 2026-08-23: the sub-header-length case hands the
+/// query the generic `connection closed` while the real diagnosis - `invalid
+/// message length: header length < 4` - is what the connection task returns. A
+/// test that asserted only on `query` there would be asserting on a PROXY, and
+/// `connection closed` is exactly the string a peer that simply hung up
+/// produces, so it distinguishes nothing.
+struct HostileOutcome {
+    /// What the caller's own operation reported.
+    query: String,
+    /// What `Connection::run` returned, when it returned an error at all. It is
+    /// `None` when the connection task is still running - which is itself worth
+    /// knowing, and is the case for every violation the driver treats as
+    /// belonging to one response rather than to the session.
+    connection: Option<String>,
+}
+
+impl HostileOutcome {
+    /// Require `needle` to appear in one of the two places an error can land.
+    ///
+    /// The assertion these tests carried until 2026-08-23 was
+    /// `!chain.is_empty()` - "an error occurred", which every wrong answer in
+    /// this file also satisfies, including an error the HARNESS caused. Naming
+    /// the diagnosis is what makes the test about the violation it substitutes.
+    fn names(&self, needle: &str) {
+        let connection = self.connection.as_deref().unwrap_or("<still running>");
+        assert!(
+            self.query.contains(needle) || connection.contains(needle),
+            "expected the driver to report {needle:?}; the query said {:?} and the connection \
+             task said {connection:?}",
+            self.query
+        );
+    }
+}
+
 /// Run one simple query against a peer that answers it with `response`, and
 /// report the error plus whether the session was retired.
 ///
 /// Every caller goes through here so the three assertions cannot drift apart
 /// between tests, and so "the query failed" and "the session was retired" are
 /// always measured on the same connection.
-async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) -> String {
+async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) -> HostileOutcome {
     let server = StubServer::spawn(move |listener| {
         let mut stream = accept_bounded(&listener);
         complete_startup(&mut stream, process_id);
@@ -248,9 +316,18 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
         .expect("the query hung instead of rejecting a malformed frame")
         .expect_err("the driver accepted a malformed frame as a valid response");
 
-    // (2) The session must be retired, not returned to service. A follow-up on
-    // the same client has to fail; if it succeeds the driver kept a connection
-    // whose framing it has already lost track of.
+    // (2) The session must not be handed to the next caller. READ THE LIMIT OF
+    // THIS, measured 2026-08-23: for the unknown-tag case and both DataRow
+    // cases the driver does NOT retire the session -- `client.is_closed()` is
+    // still false half a second after the error -- and what makes the follow-up
+    // fail is the peer above hanging up at 300ms. Raise that sleep past
+    // `OPERATION_WATCHDOG` and those three fail here instead, on the `Err` arm.
+    // So this arm says "the poisoned session does not serve a second query",
+    // which is true, and NOT "the driver retired it", which is the stronger
+    // claim the file header used to make on its behalf. Only
+    // `a_length_below_its_own_header_is_refused` retires by the driver's own
+    // doing, and only `a_truncated_frame_followed_by_silence_does_not_hang`
+    // (which scripts its own peer) asserts retirement directly.
     let reuse = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
     match reuse {
         Err(_) => panic!("reusing the poisoned session hung instead of failing"),
@@ -258,10 +335,16 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
         Ok(Err(_)) => {}
     }
 
-    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    let connection = match compio::time::timeout(OPERATION_WATCHDOG, driver).await {
+        Ok(Ok(Err(error))) => Some(common::error_chain(&error)),
+        _ => None,
+    };
     drop(client);
     server.finish();
-    common::error_chain(&error)
+    HostileOutcome {
+        query: common::error_chain(&error),
+        connection,
+    }
 }
 
 /// A byte that is not any backend message type must be refused, not skipped.
@@ -271,11 +354,8 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
 #[compio::test]
 async fn an_unknown_message_tag_is_refused_and_retires_the_session() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let chain = hostile_response_retires_session(201, backend_frame(b'\x7f', b"nonsense")).await;
-        assert!(
-            !chain.is_empty(),
-            "an unknown backend tag produced an error with no description"
-        );
+        let outcome = hostile_response_retires_session(201, backend_frame(b'\x7f', b"nonsense")).await;
+        outcome.names("unknown message tag `127`");
     })
     .await
     .expect("unknown-tag test exceeded its outer watchdog");
@@ -290,11 +370,8 @@ async fn a_data_row_without_a_row_description_is_refused() {
         body.extend_from_slice(&1u16.to_be_bytes());
         body.extend_from_slice(&1u32.to_be_bytes());
         body.push(b'x');
-        let chain = hostile_response_retires_session(202, backend_frame(b'D', &body)).await;
-        assert!(
-            !chain.is_empty(),
-            "an out-of-place DataRow produced an error with no description"
-        );
+        let outcome = hostile_response_retires_session(202, backend_frame(b'D', &body)).await;
+        outcome.names("unexpected message from server");
     })
     .await
     .expect("out-of-place DataRow test exceeded its outer watchdog");
@@ -349,11 +426,8 @@ async fn a_data_row_with_fewer_fields_than_its_description_is_refused() {
         response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
         response.extend_from_slice(&backend_frame(b'Z', b"I"));
 
-        let chain = hostile_response_retires_session(210, response).await;
-        assert!(
-            !chain.is_empty(),
-            "a short DataRow produced an error with no description"
-        );
+        let outcome = hostile_response_retires_session(210, response).await;
+        outcome.names("DataRow carries 1 fields but its RowDescription declared 2 columns");
     })
     .await
     .expect("short-DataRow test exceeded its outer watchdog");
@@ -364,12 +438,9 @@ async fn a_data_row_with_fewer_fields_than_its_description_is_refused() {
 #[compio::test]
 async fn a_length_shorter_than_its_payload_is_refused() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let chain =
+        let outcome =
             hostile_response_retires_session(203, lying_frame(b'C', b"SELECT 1\0", 6)).await;
-        assert!(
-            !chain.is_empty(),
-            "an under-declared frame produced an error with no description"
-        );
+        outcome.names("unexpected EOF");
     })
     .await
     .expect("short-length test exceeded its outer watchdog");
@@ -380,28 +451,99 @@ async fn a_length_shorter_than_its_payload_is_refused() {
 #[compio::test]
 async fn a_length_below_its_own_header_is_refused() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        let chain = hostile_response_retires_session(204, lying_frame(b'C', b"", 3)).await;
-        assert!(
-            !chain.is_empty(),
-            "a sub-header frame length produced an error with no description"
-        );
+        let outcome = hostile_response_retires_session(204, lying_frame(b'C', b"", 3)).await;
+        outcome.names("invalid message length: header length < 4");
     })
     .await
     .expect("sub-header-length test exceeded its outer watchdog");
 }
 
-/// Half a frame followed by silence. The driver must give up on its own clock
-/// rather than waiting for the rest forever - the failure here is a HANG, which
-/// `OPERATION_WATCHDOG` converts into a test failure.
+/// Half a frame followed by silence, from a peer that KEEPS THE SOCKET OPEN.
+/// The driver must give up on its own clock rather than waiting for the rest
+/// forever.
+///
+/// THIS TEST COULD NOT MEASURE ITS OWN NAME UNTIL 2026-08-23, and the reason is
+/// the one this file exists to catch. It went through
+/// `hostile_response_retires_session`, whose peer sleeps 300ms and then drops
+/// the socket - so the error was the EOF, arriving well inside the 2s
+/// `OPERATION_WATCHDOG`, and the test passed exactly as well for a driver with
+/// no clock of its own at all. Measured, by raising that sleep to 3000ms: the
+/// query then hung and the test failed at "the query hung instead of rejecting
+/// a malformed frame". `stub_config` sets no `read_timeout`, so the FIXTURE
+/// could not represent the difference the name asserts.
+///
+/// So this one configures clock (3) - `Config::read_timeout`, the post-startup
+/// socket-read inactivity deadline - and holds the socket open far past it. The
+/// peer never closes and never sends another byte, so an EOF cannot be what
+/// ends the wait: the only thing that can is the driver's own deadline. The
+/// error is required to BE that deadline (`is_read_timeout`), not merely to
+/// exist, and it must arrive before the peer would have hung up anyway.
 #[compio::test]
 async fn a_truncated_frame_followed_by_silence_does_not_hang() {
+    /// The driver's own deadline. Short so the test is quick; the point is that
+    /// it fires long before `PEER_HOLD`.
+    const READ_TIMEOUT: Duration = Duration::from_millis(400);
+    /// How long the peer stays connected and silent. Must exceed `READ_TIMEOUT`
+    /// by enough that an error arriving on the peer's clock is unmistakable.
+    const PEER_HOLD: Duration = Duration::from_millis(2500);
+
     compio::time::timeout(ASYNC_WATCHDOG, async {
-        // Declares 64 bytes of body and sends four.
-        let chain = hostile_response_retires_session(205, lying_frame(b'D', b"abcd", 68)).await;
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 205);
+            let query = expect_simple_query(&mut stream);
+            assert_eq!(query, b"SELECT 1\0");
+            // Declares 64 bytes of body and sends four.
+            let _ = stream.write_all(&lying_frame(b'D', b"abcd", 68));
+            let _ = stream.flush();
+            thread::sleep(PEER_HOLD);
+        });
+
+        let mut config = stub_config(server.addr);
+        config.read_timeout(READ_TIMEOUT);
+        let (client, connection) = config
+            .connect(NoTls)
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let started = Instant::now();
+        let error = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the query hung instead of giving up on the driver's own clock")
+            .expect_err("the driver accepted a truncated frame as a valid response");
+        let elapsed = started.elapsed();
+
+        // (1) THE DRIVER'S CLOCK, not the peer's. Both halves matter: the right
+        // error kind, and an arrival time that rules the peer out as its cause.
         assert!(
-            !chain.is_empty(),
-            "a truncated frame produced an error with no description"
+            error.is_read_timeout(),
+            "a truncated frame followed by silence ended with {} rather than the read deadline",
+            common::error_chain(&error)
         );
+        assert!(
+            elapsed < PEER_HOLD,
+            "the query took {elapsed:?}, which is not distinguishable from the peer hanging up \
+             at {PEER_HOLD:?}"
+        );
+
+        // (2) Retired, not returned to service. `read_timeout` retires the
+        // connection on expiry because a cancelled, possibly partial read
+        // cannot be resumed, so this is the driver's doing and not an EOF.
+        assert!(
+            client.is_closed(),
+            "the driver kept the session usable after its read deadline expired"
+        );
+        let reuse = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 2")).await;
+        match reuse {
+            Err(_) => panic!("reusing the timed-out session hung instead of failing"),
+            Ok(Ok(_)) => panic!("the driver reused a session after its read deadline expired"),
+            Ok(Err(_)) => {}
+        }
+
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        drop(client);
+        server.finish();
     })
     .await
     .expect("truncated-frame test exceeded its outer watchdog");
@@ -543,8 +685,10 @@ async fn an_extended_query_data_row_shorter_than_its_description_is_refused() {
             .expect("the query hung instead of rejecting a short DataRow")
             .expect_err("the driver built a row with fewer fields than columns");
         assert!(
-            !common::error_chain(&error).is_empty(),
-            "a short DataRow produced an error with no description"
+            common::error_chain(&error)
+                .contains("DataRow carries 1 fields but its RowDescription declared 2 columns"),
+            "an extended-protocol short DataRow reported {:?} rather than the arity check",
+            common::error_chain(&error)
         );
 
         let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
@@ -563,8 +707,8 @@ async fn a_bind_complete_where_parse_complete_is_owed_is_refused() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
         let chain = hostile_prepare_retires_session(301, backend_frame(b'2', b"")).await;
         assert!(
-            !chain.is_empty(),
-            "a misplaced BindComplete produced an error with no description"
+            chain.contains("unexpected message from server"),
+            "a misplaced BindComplete reported {chain:?} rather than an out-of-order message"
         );
     })
     .await
@@ -581,8 +725,8 @@ async fn a_missing_parameter_description_is_refused() {
         response.extend_from_slice(&backend_frame(b'n', b""));
         let chain = hostile_prepare_retires_session(302, response).await;
         assert!(
-            !chain.is_empty(),
-            "a missing ParameterDescription produced an error with no description"
+            chain.contains("unexpected message from server"),
+            "a missing ParameterDescription reported {chain:?} rather than an out-of-order message"
         );
     })
     .await
@@ -602,8 +746,9 @@ async fn a_misplaced_message_after_the_parameter_description_is_refused() {
         response.extend_from_slice(&backend_frame(b'2', b""));
         let chain = hostile_prepare_retires_session(303, response).await;
         assert!(
-            !chain.is_empty(),
-            "a misplaced message after ParameterDescription produced an error with no description"
+            chain.contains("unexpected message from server"),
+            "a misplaced post-ParameterDescription message reported {chain:?} rather than an \
+             out-of-order message"
         );
     })
     .await
@@ -633,21 +778,27 @@ async fn a_misplaced_message_after_the_parameter_description_is_refused() {
 // prepare correctly and applies the violation to the SECOND batch, which logs as
 // "BES" - Bind, Execute, Sync. That is the copy batch.
 //
-// STILL NOT ESTABLISHED: the one-variable control used elsewhere in this file -
-// feed the same helper a VALID stream and require the test to FAIL - could not be
-// built. A scripted CopyOutResponse plus CopyData, CopyDone, CommandComplete and
-// ReadyForQuery still errors, so the fixture is not a valid COPY and the control
-// is INCONCLUSIVE rather than negative. The happy path is covered against a real
-// server by the copy family in integration.rs. Read these three as "the COPY
-// refusal path is reached", not as "the refusal is proven necessary".
+// ESTABLISHED, and this paragraph used to say the opposite. It recorded that the
+// one-variable control "could not be built", that a scripted CopyOutResponse plus
+// CopyData, CopyDone, CommandComplete and ReadyForQuery "still errors", and that
+// the control was therefore "INCONCLUSIVE rather than negative" - so read as
+// written it told the next person not to bother trying. Re-run on 2026-08-23
+// against that exact sequence ([`well_formed_copy_out`], through the same
+// [`copy_stub_server`]) it SUCCEEDS and yields `row-one\n`. All four COPY tests
+// fail when it is substituted, each at its own `expect_err`. The refusals are
+// proven necessary; the happy path is also covered against a real server by the
+// copy family in integration.rs.
 // ---------------------------------------------------------------------------
 
-/// Drive `copy_out` against a peer answering with `response`, requiring the same
-/// three properties as the other helpers: an error, a retired session, bounded.
-async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) -> String {
-    use futures_util::TryStreamExt;
-
-    let server = StubServer::spawn(move |listener| {
+/// The peer every COPY OUT test talks to: it answers the prepare batch
+/// correctly and applies `response` to the copy batch.
+///
+/// Shared by the hostile helper and by [`a_well_formed_copy_out_is_accepted`],
+/// so the positive control cannot drift into scripting a DIFFERENT peer from
+/// the one the negative tests use. A control against a different fixture proves
+/// nothing about them.
+fn copy_stub_server(process_id: i32, response: Vec<u8>) -> StubServer {
+    StubServer::spawn(move |listener| {
         let mut stream = accept_bounded(&listener);
         complete_startup(&mut stream, process_id);
 
@@ -672,7 +823,15 @@ async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) ->
         let _ = stream.write_all(&response);
         let _ = stream.flush();
         thread::sleep(Duration::from_millis(300));
-    });
+    })
+}
+
+/// Drive `copy_out` against a peer answering with `response`, requiring the same
+/// three properties as the other helpers: an error, a retired session, bounded.
+async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) -> String {
+    use futures_util::TryStreamExt;
+
+    let server = copy_stub_server(process_id, response);
 
     let (client, connection) = stub_config(server.addr)
         .connect(NoTls)
@@ -798,8 +957,9 @@ async fn a_copy_out_response_to_a_copy_in_request_is_refused() {
         response.extend_from_slice(&backend_frame(b'H', b"\x00\x00\x00"));
         let chain = hostile_copy_in_retires_session(511, response).await;
         assert!(
-            !chain.is_empty(),
-            "a wrong-direction COPY IN response produced an error with no description"
+            chain.contains("unexpected message from server"),
+            "a wrong-direction COPY IN response reported {chain:?} rather than an out-of-order \
+             message"
         );
     })
     .await
@@ -830,6 +990,60 @@ fn well_formed_copy_out() -> Vec<u8> {
     response
 }
 
+/// THE CONTROL, RUN RATHER THAN REMEMBERED.
+///
+/// Until 2026-08-23 [`well_formed_copy_out`] was dead code: the substitution it
+/// documents was a procedure someone was supposed to perform by hand, and the
+/// only trace of it was a paragraph. A procedure nobody runs is a claim, not a
+/// check - and the paragraph immediately above these tests said the control
+/// "could not be built" and was "INCONCLUSIVE", which was already false by the
+/// time it was written. Both failure modes have the same cure: run it.
+///
+/// This is the same peer, the same call, the same frames as the three tests
+/// below, with nothing wrong. It must SUCCEED, and it must yield the bytes the
+/// peer sent - not merely return `Ok`, because a driver that silently dropped
+/// the payload would satisfy that. Every one of those three ends in an `Err`
+/// only because of its single substituted violation.
+#[compio::test]
+async fn a_well_formed_copy_out_is_accepted() {
+    use futures_util::TryStreamExt;
+
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = copy_stub_server(520, well_formed_copy_out());
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(NoTls)
+            .await
+            .expect("connect to scripted PostgreSQL peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let collected = compio::time::timeout(OPERATION_WATCHDOG, async {
+            let stream = client.copy_out("COPY t TO STDOUT").await?;
+            let mut stream = Box::pin(stream);
+            let mut collected: Vec<u8> = Vec::new();
+            while let Some(chunk) = stream.try_next().await? {
+                collected.extend_from_slice(&chunk);
+            }
+            Ok::<Vec<u8>, compio_postgres::Error>(collected)
+        })
+        .await
+        .expect("a well-formed COPY OUT hung")
+        .expect("the driver rejected a well-formed COPY OUT, so the hostile COPY tests below \
+                 cannot be attributing their errors to the violation they substitute");
+
+        assert_eq!(
+            collected, b"row-one\n",
+            "the driver accepted the COPY but did not deliver what the peer sent"
+        );
+
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        drop(client);
+        server.finish();
+    })
+    .await
+    .expect("well-formed COPY OUT control exceeded its outer watchdog");
+}
+
 /// `CopyInResponse` where the OUT direction was requested. Both are real
 /// messages; only the direction is wrong, and a driver that ignored the
 /// distinction would wait for input on a stream the caller means to read.
@@ -844,8 +1058,8 @@ async fn a_copy_in_response_to_a_copy_out_request_is_refused() {
         response.extend_from_slice(&backend_frame(b'Z', b"I"));
         let chain = hostile_copy_out_retires_session(501, response).await;
         assert!(
-            !chain.is_empty(),
-            "a wrong-direction COPY response produced an error with no description"
+            chain.contains("unexpected message from server"),
+            "a wrong-direction COPY response reported {chain:?} rather than an out-of-order message"
         );
     })
     .await
@@ -873,8 +1087,9 @@ async fn a_non_copy_data_message_mid_stream_is_refused() {
         response.extend_from_slice(&backend_frame(b'Z', b"I"));
         let chain = hostile_copy_out_retires_session(502, response).await;
         assert!(
-            !chain.is_empty(),
-            "a mid-stream non-CopyData message produced an error with no description"
+            chain.contains("unexpected message from server"),
+            "a mid-stream non-CopyData message reported {chain:?} rather than an out-of-order \
+             message"
         );
     })
     .await
@@ -891,8 +1106,9 @@ async fn a_copy_out_whose_copy_out_response_never_arrives_is_refused() {
         response.extend_from_slice(&backend_frame(b'Z', b"I"));
         let chain = hostile_copy_out_retires_session(503, response).await;
         assert!(
-            !chain.is_empty(),
-            "a COPY OUT without its CopyOutResponse produced an error with no description"
+            chain.contains("unexpected message from server"),
+            "a COPY OUT without its CopyOutResponse reported {chain:?} rather than an \
+             out-of-order message"
         );
     })
     .await
