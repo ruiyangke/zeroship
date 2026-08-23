@@ -34,6 +34,7 @@ mod neutral_apply_layer_names_no_vendor;
 mod op_support_matrix;
 mod partition_recording_dialect_legs;
 mod plan_vocabulary_names_strategies_not_vendors;
+mod registry_resolution_stays_core_only;
 mod row_order_observation;
 mod schema_emitters_do_not_relookup_a_backend;
 mod sqlite_declaration_flip_over_refusal_control;
