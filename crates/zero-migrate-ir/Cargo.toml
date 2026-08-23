@@ -31,6 +31,13 @@ uuid = { workspace = true }
 # PDP mechanism enforces. `zero-migrate-policy` is itself a pure-data leaf with no
 # dep on this crate, so `ir → policy` introduces no cycle and keeps ir a leaf.
 zero-migrate-policy = { workspace = true }
+# `effective_policy_from_charter_toml` composes a TOML RootCharter against the
+# builtin registry above, and extracts its grant-only draft by re-serializing the
+# parsed document rather than scraping lines. `zero-migrate-policy` already parses
+# charter TOML, so this is a direct declaration of a dep the graph already had, not
+# a new third-party crate — and it stays pure data, so the leaf keeps its zero-I/O
+# property.
+toml = { workspace = true }
 
 [lints]
 workspace = true

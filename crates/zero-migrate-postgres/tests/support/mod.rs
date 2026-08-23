@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
-use zero_migrate_ir::policy_registry::builtin_registry;
-use zero_migrate_policy::{admit, EffectivePolicy, LoadContext, PolicyDoc, RootCharter};
+use zero_migrate_policy::EffectivePolicy;
 
 pub const CONFINED_CHARTER_TOML: &str = r#"policy_version = 1
 
@@ -79,35 +78,12 @@ scope = "all"
     effective_policy_from_charter_toml(&charter)
 }
 
+// This used to be a SECOND implementation of charter composition, kept here only
+// because the real one lived in the engine and this crate sits below the engine.
+// The real one moved down to `zero_migrate_ir::policy_registry`, so this delegates
+// to it: one composition, one grant-only-draft extractor, no drift between what a
+// vendor's tests compose and what production composes.
 pub fn effective_policy_from_charter_toml(charter_toml: &str) -> EffectivePolicy {
-    let registry = builtin_registry();
-    let charter = RootCharter::parse_toml(charter_toml, &registry).expect("test charter parses");
-    let draft = PolicyDoc::parse_toml(
-        &grant_only_draft_toml(charter_toml),
-        &registry,
-        LoadContext::NonRootLayer,
-    )
-    .expect("test grant-only draft parses");
-    admit(&charter, &draft, &registry).expect("test policy composes")
-}
-
-fn grant_only_draft_toml(charter_toml: &str) -> String {
-    let mut out = String::from("policy_version = 1\n");
-    let mut in_grant = false;
-    for line in charter_toml.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("[[") {
-            in_grant = trimmed.starts_with("[[grant]]");
-            if in_grant {
-                out.push_str(line);
-                out.push('\n');
-            }
-            continue;
-        }
-        if in_grant {
-            out.push_str(line);
-            out.push('\n');
-        }
-    }
-    out
+    zero_migrate_ir::policy_registry::effective_policy_from_charter_toml(charter_toml)
+        .expect("test policy composes")
 }

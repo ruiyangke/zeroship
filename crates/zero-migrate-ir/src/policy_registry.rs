@@ -84,6 +84,67 @@ use zero_migrate_policy::{
 
 use crate::capability::VendorCapability;
 
+/// Build an [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy) from a
+/// `RootCharter` document (TOML). The charter
+/// is parsed against [`builtin_registry`], then composes against a grant-only
+/// draft extracted from the same charter. Inject/require/validate rules survive
+/// from the root charter; grants become effective through the draft side of
+/// `admit` after proving they do not exceed the root charter. Inject-only
+/// charters still compose because the extracted draft is empty.
+///
+/// This is the constructor the production authoring verb
+/// (`lower_envelope_to_migrations`) and tests both go through. Nothing fabricates
+/// an `EffectivePolicy` by hand.
+///
+/// It lives HERE, beside the registry it composes against, rather than in the
+/// engine, because it needs only that registry plus the PDP mechanism — and a
+/// BACKEND crate sits below the engine and so could never call it there. A vendor
+/// crate that needs a real composed policy for its tests would otherwise have to
+/// hand-roll a second implementation of a security-critical composition, which is
+/// exactly the drift this placement removes.
+///
+/// # Errors
+/// A human-readable message on: a malformed charter document, a malformed empty
+/// draft (unreachable), or a composition failure.
+pub fn effective_policy_from_charter_toml(
+    charter_toml: &str,
+) -> Result<zero_migrate_policy::EffectivePolicy, String> {
+    let registry = builtin_registry();
+    let charter = zero_migrate_policy::RootCharter::parse_toml(charter_toml, &registry)
+        .map_err(|e| format!("policy charter failed to load: {e:?}"))?;
+    let draft_toml = grant_only_draft_toml(charter_toml)?;
+    let draft = zero_migrate_policy::PolicyDoc::parse_toml(
+        &draft_toml,
+        &registry,
+        zero_migrate_policy::LoadContext::NonRootLayer,
+    )
+    .map_err(|e| format!("empty policy draft failed to load: {e:?}"))?;
+    zero_migrate_policy::admit(&charter, &draft, &registry)
+        .map_err(|e| format!("policy composition failed: {e:?}"))
+}
+
+fn grant_only_draft_toml(charter_toml: &str) -> Result<String, String> {
+    let parsed: toml::Value = toml::from_str(charter_toml)
+        .map_err(|e| format!("policy charter failed to parse as TOML: {e}"))?;
+    let Some(table) = parsed.as_table() else {
+        return Err("policy charter root must be a TOML table".to_string());
+    };
+
+    let mut draft = toml::map::Map::new();
+    let Some(version) = table.get("policy_version").cloned() else {
+        return Err("policy charter is missing policy_version".to_string());
+    };
+    draft.insert("policy_version".to_string(), version);
+    if let Some(default_scope) = table.get("default_scope").cloned() {
+        draft.insert("default_scope".to_string(), default_scope);
+    }
+    if let Some(grants) = table.get("grant").cloned() {
+        draft.insert("grant".to_string(), grants);
+    }
+    toml::to_string(&toml::Value::Table(draft))
+        .map_err(|e| format!("grant-only policy draft failed to serialize: {e}"))
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // Knob-key constants — the stable identifiers the guard/validator query by.
 // ══════════════════════════════════════════════════════════════════════════════
