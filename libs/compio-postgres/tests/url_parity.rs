@@ -12,6 +12,17 @@
 //! where we currently diverge. They are red on purpose -- each one is the
 //! regression test for a fix that has not landed. Drop the `#[ignore]` when
 //! the corresponding arm of `UrlParser` is corrected.
+//!
+//! THREE OF THE ORIGINAL SIX WERE DROPPED ON ARRIVAL, and the reason is worth
+//! knowing before trusting the rest. This file was written against an older
+//! base than the branch it landed on, so the userinfo `@` bound and the
+//! query-string `host=`/`port=` rules had already been fixed on `main` by the
+//! time it merged; `--ignored` showed those three passing. Re-run
+//! `cargo test --test url_parity -- --ignored` after any parser change: a
+//! divergence test that has started PASSING is a fix to record, not a fluke.
+//!
+//! The three that remain were re-confirmed as genuinely failing here, not
+//! carried over on trust.
 
 use std::fmt::Write as _;
 
@@ -286,7 +297,6 @@ fn empty_enum_values_and_unknown_keys_are_rejected_like_libpq() {
 //     -> FATAL: password authentication failed for user "postgres"
 //        (right host, right user, sent "zero@ship")
 #[test]
-#[ignore = "known divergence: userinfo @ scan is not bounded by /"]
 fn at_sign_after_the_path_is_not_userinfo() {
     let c = cfg("postgres://127.0.0.1:5432/postgres?user=postgres&application_name=c@d");
     assert_eq!(tcp(&c), ["127.0.0.1"]);
@@ -323,7 +333,6 @@ fn at_sign_after_the_path_is_not_userinfo() {
 // `placeholder`), and `?port=` yields 2 ports for 1 host, which `connect`
 // then refuses outright with "invalid number of ports".
 #[test]
-#[ignore = "known divergence: query host=/port= append instead of replacing"]
 fn query_host_and_port_replace_the_authority() {
     let c = cfg("postgres://127.0.0.1:5432/db?host=nonexistent.invalid");
     assert_eq!(tcp(&c), ["nonexistent.invalid"]);
@@ -345,7 +354,6 @@ fn query_host_and_port_replace_the_authority() {
 // `Config::param("host", ..)` -- the keyword=value path -- does split, so we
 // are inconsistent with ourselves as well as with libpq.
 #[test]
-#[ignore = "known divergence: query host= is not comma-split"]
 fn query_host_is_comma_split() {
     let c = cfg("postgres:///db?host=nonexistent.invalid,127.0.0.1");
     assert_eq!(tcp(&c), ["nonexistent.invalid", "127.0.0.1"]);
