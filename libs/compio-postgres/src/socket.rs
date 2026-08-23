@@ -37,6 +37,19 @@ impl Socket {
         Socket(Inner::Unix(stream))
     }
 
+    /// Borrow the connected descriptor so socket-option assertions can read
+    /// back what `connect_socket` applied. Test-only: nothing in the driver
+    /// needs the raw fd, and exposing one would invite a second owner of a
+    /// descriptor whose lifetime [`ConnectionRelease`] deliberately controls.
+    #[cfg(all(test, unix))]
+    pub(crate) fn borrowed_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd;
+        match &self.0 {
+            Inner::Tcp(s) => s.as_fd(),
+            Inner::Unix(s) => s.as_fd(),
+        }
+    }
+
     /// A handle that shuts this socket down when it is dropped.
     ///
     /// Taken before the socket is handed to the connection task and stored on

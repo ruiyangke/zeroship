@@ -135,3 +135,178 @@ async fn check_require_peer(_stream: &UnixStream, _required: &str) -> io::Result
         "requirepeer is not supported on this platform",
     ))
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use compio::net::TcpListener;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    /// Dial a listener this test owns, so the assertions are about the socket
+    /// options and nothing else. The listener is returned so the connection
+    /// stays open for the duration of the `getsockopt` calls.
+    async fn dial(
+        keepalive: Option<&KeepaliveConfig>,
+        tcp_user_timeout: Option<Duration>,
+    ) -> (Socket, TcpListener) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback listener");
+        let addr = listener.local_addr().expect("listener address");
+        let socket = connect_socket(
+            &Addr::Tcp(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            addr.port(),
+            tcp_user_timeout,
+            keepalive,
+            None,
+        )
+        .await
+        .expect("connect to the loopback listener");
+        (socket, listener)
+    }
+
+    /// The keepalive values a caller configures must reach the kernel, not just
+    /// the `TcpKeepalive` builder. `set_tcp_keepalive` reports `Ok` for a
+    /// config it applied partially or not at all, so reading the options back
+    /// off the connected descriptor is the only check that distinguishes
+    /// "configured" from "in effect".
+    #[compio::test]
+    async fn configured_keepalive_values_reach_the_kernel() {
+        let config = KeepaliveConfig {
+            idle: Duration::from_secs(11),
+            interval: Some(Duration::from_secs(3)),
+            retries: Some(5),
+        };
+        let (socket, _listener) = dial(Some(&config), Some(Duration::from_secs(7))).await;
+
+        let fd = socket.borrowed_fd();
+        let sock_ref = SockRef::from(&fd);
+        assert!(
+            sock_ref.keepalive().expect("read SO_KEEPALIVE"),
+            "a configured keepalive left SO_KEEPALIVE off"
+        );
+        assert_eq!(
+            sock_ref.keepalive_time().expect("read TCP_KEEPIDLE"),
+            Duration::from_secs(11),
+            "keepalive idle did not reach the kernel"
+        );
+        assert_eq!(
+            sock_ref.keepalive_interval().expect("read TCP_KEEPINTVL"),
+            Duration::from_secs(3),
+            "keepalive interval did not reach the kernel"
+        );
+        assert_eq!(
+            sock_ref.keepalive_retries().expect("read TCP_KEEPCNT"),
+            5,
+            "keepalive retry count did not reach the kernel"
+        );
+        assert_eq!(
+            sock_ref.tcp_user_timeout().expect("read TCP_USER_TIMEOUT"),
+            Some(Duration::from_secs(7)),
+            "TCP_USER_TIMEOUT did not reach the kernel"
+        );
+    }
+
+    /// The one-variable control: the SAME dial with no keepalive config must
+    /// leave SO_KEEPALIVE off. Without it, the assertions above would still
+    /// pass on a kernel whose defaults happened to match, and would pass on a
+    /// `connect_socket` that enabled keepalives unconditionally.
+    #[compio::test]
+    async fn no_keepalive_config_leaves_the_socket_default() {
+        let (socket, _listener) = dial(None, None).await;
+
+        let fd = socket.borrowed_fd();
+        let sock_ref = SockRef::from(&fd);
+        assert!(
+            !sock_ref.keepalive().expect("read SO_KEEPALIVE"),
+            "an unconfigured socket had SO_KEEPALIVE on"
+        );
+        assert_eq!(
+            sock_ref.tcp_user_timeout().expect("read TCP_USER_TIMEOUT"),
+            None,
+            "an unconfigured socket had TCP_USER_TIMEOUT set"
+        );
+    }
+
+    /// "A value of zero uses the system default" is what PostgreSQL documents
+    /// for `keepalives_idle`, `keepalives_interval` AND `keepalives_count`.
+    /// Linux rejects a zero in any of the three matching socket options with
+    /// EINVAL, so passing one through turns "use the default" into a connection
+    /// that cannot be opened at all. `keepalives_count=0` reaches this straight
+    /// from a DSN; the other two reach it through `Config`'s setters.
+    ///
+    /// The assertion is deliberately about SO_KEEPALIVE still being ON rather
+    /// than only about the connect succeeding: skipping a zero must leave the
+    /// system's own timings in force, not silently disable keepalives.
+    #[compio::test]
+    async fn a_zero_value_leaves_that_socket_option_at_the_system_default() {
+        let cases = [
+            (
+                "count",
+                KeepaliveConfig {
+                    idle: Duration::from_secs(11),
+                    interval: Some(Duration::from_secs(3)),
+                    retries: Some(0),
+                },
+            ),
+            (
+                "idle",
+                KeepaliveConfig {
+                    idle: Duration::ZERO,
+                    interval: Some(Duration::from_secs(3)),
+                    retries: Some(5),
+                },
+            ),
+            (
+                "interval",
+                KeepaliveConfig {
+                    idle: Duration::from_secs(11),
+                    interval: Some(Duration::ZERO),
+                    retries: Some(5),
+                },
+            ),
+        ];
+
+        for (zeroed, config) in cases {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind a loopback listener");
+            let addr = listener.local_addr().expect("listener address");
+            let socket = connect_socket(
+                &Addr::Tcp(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                addr.port(),
+                None,
+                Some(&config),
+                None,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("a zero keepalives_{zeroed} failed the connection: {error:?}")
+            });
+
+            let fd = socket.borrowed_fd();
+            let sock_ref = SockRef::from(&fd);
+            assert!(
+                sock_ref.keepalive().expect("read SO_KEEPALIVE"),
+                "a zero keepalives_{zeroed} switched keepalives off entirely"
+            );
+            // The two values that were NOT zeroed must still reach the kernel:
+            // "skip the zero" must not degrade into "skip the whole config".
+            if zeroed != "idle" {
+                assert_eq!(
+                    sock_ref.keepalive_time().expect("read TCP_KEEPIDLE"),
+                    Duration::from_secs(11),
+                    "a zero keepalives_{zeroed} discarded the idle value beside it"
+                );
+            }
+            if zeroed != "count" {
+                assert_eq!(
+                    sock_ref.keepalive_retries().expect("read TCP_KEEPCNT"),
+                    5,
+                    "a zero keepalives_{zeroed} discarded the retry count beside it"
+                );
+            }
+            drop(listener);
+        }
+    }
+}
