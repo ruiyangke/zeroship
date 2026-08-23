@@ -276,3 +276,47 @@ async fn query_opt_scalar_rejects_extra_columns_even_with_no_rows() {
     .await
     .expect("query_opt_scalar arity test exceeded its watchdog");
 }
+
+/// What `Row::raw_size_bytes` counts, stated in numbers rather than prose.
+///
+/// It had no caller anywhere in this repository and no test, and its doc said
+/// only "the raw size of the row in bytes". That reading is wrong in the
+/// direction that matters: it is the length-prefixed FIELD DATA, and the
+/// `DataRow` tag, message length and field count -- 7 bytes per row -- are not
+/// in it. A caller metering ingress from it undercounts every row, and small
+/// rows by more than half.
+///
+/// Each case below is a different composition of the same formula, so a change
+/// that broke one part of it cannot hide: a payload, a longer payload, a NULL
+/// whose length field is counted with no payload, and two columns summed.
+#[compio::test]
+async fn raw_size_bytes_counts_field_data_and_not_the_frame() {
+    compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+
+        for (sql, expected, why) in [
+            ("SELECT 'x'::text", 5usize, "4-byte length + 1-byte payload"),
+            ("SELECT 'xyz'::text", 7, "4 + 3"),
+            ("SELECT NULL::text", 4, "the length field alone; NULL has no payload"),
+            ("SELECT 'x'::text, 'yz'::text", 11, "(4 + 1) + (4 + 2), summed"),
+        ] {
+            let row = client.query_one(sql, &[]).await.expect("query the fixture");
+            assert_eq!(row.raw_size_bytes(), expected, "{sql}: {why}");
+        }
+
+        // The 7 bytes it does NOT count, pinned as a relationship rather than
+        // a second literal: one column of one byte is 5 here and 12 on the
+        // wire (tag 1 + length 4 + field count 2 + 4 + 1).
+        let row = client
+            .query_one("SELECT 'x'::text", &[])
+            .await
+            .expect("query the fixture");
+        assert_eq!(
+            row.raw_size_bytes() + 7,
+            12,
+            "the frame overhead this excludes is 7 bytes per row"
+        );
+    })
+    .await
+    .expect("raw_size_bytes test exceeded its watchdog");
+}

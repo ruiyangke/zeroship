@@ -207,7 +207,20 @@ impl Row {
         FromSql::from_sql_nullable(ty, self.col_buffer(idx)).map_err(|e| Error::from_sql(e, idx))
     }
 
-    /// Returns the raw size of the row in bytes.
+    /// The row's length-prefixed FIELD DATA, in bytes: `sum(4 + field_len)`
+    /// over the columns, counting 4 bytes for a SQL NULL (its length field,
+    /// which carries -1, with no payload).
+    ///
+    /// IT IS NOT THE ROW'S SIZE ON THE WIRE, and the difference is a fixed
+    /// 7 bytes per row that this does not count: the `DataRow` tag (1), the
+    /// message length (4) and the field count (2). Measured -- `SELECT
+    /// 'x'::text` reports 5 against a 12-byte frame, so a caller metering
+    /// ingress bandwidth from this alone undercounts a small row by more than
+    /// half. Add 7 per row for wire bytes.
+    ///
+    /// The old doc said "the raw size of the row in bytes", which invites
+    /// exactly that reading. The number was always this one; only the
+    /// description was ambiguous.
     pub fn raw_size_bytes(&self) -> usize {
         self.body.buffer_bytes().len()
     }
