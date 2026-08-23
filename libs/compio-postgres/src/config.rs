@@ -2211,9 +2211,37 @@ impl<'a> UrlParser<'a> {
     }
 
     fn parse_credentials(&mut self) -> Result<(), Error> {
-        let creds = match self.take_until(&['@']) {
-            Some(creds) => creds,
-            None => return Ok(()),
+        // THE `@` SCAN IS BOUNDED BY `/`, because userinfo cannot appear after
+        // the path begins. Scanning the whole remainder let ANY later `@` --
+        // in a query value, most easily an application_name or a password --
+        // be read as the userinfo separator. The result was not a parse error
+        // but a redirected connection:
+        //
+        //   postgres://127.0.0.1:5432/postgres?user=postgres&application_name=c@d
+        //     libpq: connects to 127.0.0.1, application_name is "c@d"
+        //     was:   host "d", user "127.0.0.1", password
+        //            "5432/postgres?user=postgres&application_name=c"
+        //
+        // So a string carrying `password=` in its query sent that password to a
+        // host named by whatever followed the `@`.
+        //
+        // BOUNDED BY `/` ONLY, NOT BY `?`, and that is measured rather than
+        // assumed. With no path at all libpq really does scan past the query:
+        // `postgres://127.0.0.1:5432?...&application_name=a@b` fails there with
+        // `could not translate host name "b"`. Stopping at `?` as well would be
+        // unfaithful in the other direction.
+        // Decided by LOOKING before consuming: `take_until` advances, and
+        // there is no way to put the input back if the delimiter turns out to
+        // be the `/`.
+        let creds = match self.s.find(['@', '/']) {
+            Some(at) if self.s.as_bytes()[at] == b'@' => {
+                let (head, tail) = self.s.split_at(at);
+                self.s = tail;
+                head
+            }
+            // A `/` first means the authority ended with no userinfo in it;
+            // none at all means the same.
+            _ => return Ok(()),
         };
         self.eat_byte();
 
