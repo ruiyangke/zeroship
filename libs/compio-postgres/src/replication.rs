@@ -2981,6 +2981,9 @@ mod tests {
             out
         }
 
+        let mut total_decoded = 0usize;
+        let mut total_refused = 0usize;
+        let mut cases_with_a_decode = 0usize;
         for case in 0..CASES {
             let seed = ROOT_SEED ^ u64::from(case).wrapping_mul(0x9e37_79b9_7f4a_7c15);
             let mut rng = Rng::new(seed);
@@ -2988,6 +2991,7 @@ mod tests {
 
             let mut stream = stream_over(wire.clone());
             let mut refused = false;
+            let mut counted_this_case = false;
             for step in 0..MAX_FRAMES_READ {
                 let outcome =
                     compio::time::timeout(std::time::Duration::from_secs(5), stream.next())
@@ -3008,15 +3012,48 @@ mod tests {
                         if message.is_none() {
                             break;
                         }
+                        total_decoded += 1;
+                        if !std::mem::replace(&mut counted_this_case, true) {
+                            cases_with_a_decode += 1;
+                        }
                     }
                     Err(error) => {
                         if error.is_cancelled() {
+                            if !refused { total_refused += 1; }
                             refused = true;
                         }
                     }
                 }
             }
         }
+        // WHAT THE CORPUS RULED ON. The only assertion inside the loop is "no
+        // message decodes after a refusal", which is vacuous unless BOTH a
+        // decode and a refusal actually happen - and until 2026-08-23 there was
+        // nothing after the loop, so 192 cases that all failed to produce
+        // either printed exactly what a working corpus prints. That is the
+        // failure the repo's own gate convention exists for (every arm declares
+        // what it ruled on and a floor it must clear); this is that convention
+        // applied to a fuzz loop in Rust.
+        //
+        // Measured 2026-08-23 over these 192 cases: 10 decoded messages across
+        // 10 distinct cases, and 150 refusals. The floors sit well under those
+        // so ordinary generator drift does not trip them, and far enough above
+        // zero that a generator which stopped producing decodable frames -- the
+        // realistic decay, since most random bytes are refused -- fails here
+        // instead of going quiet.
+        assert!(
+            total_decoded >= 5,
+            "the corpus decoded {total_decoded} messages, so the after-refusal invariant \
+             ruled on almost nothing"
+        );
+        assert!(
+            cases_with_a_decode >= 5,
+            "only {cases_with_a_decode} of {CASES} cases decoded anything"
+        );
+        assert!(
+            total_refused >= 50,
+            "the corpus refused {total_refused} streams, so the poison path is barely exercised"
+        );
     }
 
     /// A `ReplicationStream` reading the given bytes as if the walsender had
