@@ -1455,44 +1455,75 @@ mod tests {
         )
     }
 
-    async fn scripted_scram_server_sending_early_ok() -> crate::Socket {
+    /// A peer that opens SCRAM, waits for the client's first message, and then
+    /// answers `AuthenticationOk` instead of continuing the exchange.
+    ///
+    /// RETURNS THE CLIENT-FIRST MESSAGE, and that is not a convenience. This
+    /// helper used to `.detach()` its task and return only the socket, so the
+    /// one thing separating this scenario from
+    /// `require_scram_refuses_authentication_ok_without_an_exchange` -- that a
+    /// SCRAM exchange was demonstrably STARTED -- lived in `unwrap()`s inside a
+    /// detached task, where a failure cannot fail a test. Both tests then
+    /// asserted the same two substrings on the same error, and measured
+    /// 2026-08-23 the driver produces a BYTE-IDENTICAL chain for the two:
+    /// `authentication method requirement "scram-sha-256" failed: server did
+    /// not complete authentication`. So if this peer had quietly stopped
+    /// reaching client-first, the test would have become a duplicate of its
+    /// sibling and stayed green. The caller now asserts the exchange began.
+    async fn scripted_scram_server_sending_early_ok()
+    -> (crate::Socket, oneshot::Receiver<Result<Vec<u8>, String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (client_first_tx, client_first_rx) = oneshot::channel();
 
         compio::runtime::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
+            let outcome: Result<Vec<u8>, String> = async {
+                let (mut socket, _) = listener.accept().await.map_err(|e| e.to_string())?;
 
-            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
-            result.unwrap();
-            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
-            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
-            result.unwrap();
+                let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+                result.map_err(|e| e.to_string())?;
+                let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+                let compio::BufResult(result, _) =
+                    socket.read_exact(vec![0u8; length - 4]).await;
+                result.map_err(|e| e.to_string())?;
 
-            let mut auth_sasl = 10i32.to_be_bytes().to_vec();
-            auth_sasl.extend_from_slice(b"SCRAM-SHA-256\0\0");
-            let compio::BufResult(result, _) = socket.write_all(frame(b'R', &auth_sasl)).await;
-            result.unwrap();
-            socket.flush().await.unwrap();
+                let mut auth_sasl = 10i32.to_be_bytes().to_vec();
+                auth_sasl.extend_from_slice(b"SCRAM-SHA-256\0\0");
+                let compio::BufResult(result, _) =
+                    socket.write_all(frame(b'R', &auth_sasl)).await;
+                result.map_err(|e| e.to_string())?;
+                socket.flush().await.map_err(|e| e.to_string())?;
 
-            // Wait for the client-first message so AuthenticationOk is
-            // demonstrably ending a started, incomplete SCRAM exchange.
-            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; 1]).await;
-            result.unwrap();
-            let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
-            result.unwrap();
-            let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
-            let compio::BufResult(result, _) = socket.read_exact(vec![0u8; length - 4]).await;
-            result.unwrap();
+                // Wait for the client-first message so AuthenticationOk is
+                // demonstrably ending a started, incomplete SCRAM exchange.
+                let compio::BufResult(result, tag) = socket.read_exact(vec![0u8; 1]).await;
+                result.map_err(|e| e.to_string())?;
+                if tag[0] != b'p' {
+                    return Err(format!("expected a SASL response, got tag {:?}", tag[0]));
+                }
+                let compio::BufResult(result, length) = socket.read_exact(vec![0u8; 4]).await;
+                result.map_err(|e| e.to_string())?;
+                let length = u32::from_be_bytes(length.try_into().unwrap()) as usize;
+                let compio::BufResult(result, body) =
+                    socket.read_exact(vec![0u8; length - 4]).await;
+                result.map_err(|e| e.to_string())?;
 
-            let compio::BufResult(result, _) = socket
-                .write_all(successful_handshake(std::iter::empty()))
-                .await;
-            result.unwrap();
-            socket.flush().await.unwrap();
+                let compio::BufResult(result, _) = socket
+                    .write_all(successful_handshake(std::iter::empty()))
+                    .await;
+                result.map_err(|e| e.to_string())?;
+                socket.flush().await.map_err(|e| e.to_string())?;
+                Ok(body)
+            }
+            .await;
+            let _ = client_first_tx.send(outcome);
         })
         .detach();
 
-        crate::Socket::new_tcp(TcpStream::connect(addr).await.unwrap())
+        (
+            crate::Socket::new_tcp(TcpStream::connect(addr).await.unwrap()),
+            client_first_rx,
+        )
     }
 
     #[compio::test]
@@ -1549,7 +1580,7 @@ mod tests {
 
     #[compio::test]
     async fn require_scram_names_an_authentication_ok_that_ends_scram_early() {
-        let stream = scripted_scram_server_sending_early_ok().await;
+        let (stream, client_first) = scripted_scram_server_sending_early_ok().await;
         let mut config = scram_config();
         config.require_auth(RequireAuth::Require(AuthMethods::new(
             AuthMethod::ScramSha256,
@@ -1564,6 +1595,27 @@ mod tests {
             chain.contains("scram-sha-256")
                 && chain.contains("did not complete authentication"),
             "the refusal must name the requirement and incomplete exchange: {chain}"
+        );
+
+        // WHAT MAKES THIS TEST DIFFERENT FROM ITS SIBLING, asserted rather than
+        // scripted. The error above is byte-identical to the one
+        // `require_scram_refuses_authentication_ok_without_an_exchange` gets,
+        // so it cannot distinguish "SCRAM never started" from "SCRAM started
+        // and was cut short" -- only this can. `n,,n=` is the SASL initial
+        // response's channel-binding and username prefix, so its presence
+        // means the client really did send client-first before the peer
+        // answered `AuthenticationOk`.
+        let client_first = compio::time::timeout(Duration::from_secs(5), client_first)
+            .await
+            .expect("scripted early-ok SCRAM server did not finish")
+            .expect("scripted early-ok SCRAM server dropped its signal")
+            .expect("scripted early-ok SCRAM server failed");
+        let mechanism_and_response = String::from_utf8_lossy(&client_first).into_owned();
+        assert!(
+            mechanism_and_response.contains("SCRAM-SHA-256")
+                && mechanism_and_response.contains("n,,n="),
+            "the client never sent a SCRAM client-first message, so this test is a duplicate \
+             of the no-exchange one: {mechanism_and_response:?}"
         );
     }
 
