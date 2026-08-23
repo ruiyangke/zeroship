@@ -23,7 +23,7 @@ use crate::{
     CancelToken, Error, Row, SimpleQueryMessage, Socket, Statement, ToStatement, Transaction,
     TransactionBuilder, copy_in, copy_out, prepare, query, simple_query, slice_iter,
 };
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
 use futures_channel::mpsc;
@@ -1673,24 +1673,67 @@ impl Client {
         &self.inner
     }
 
+    /// Whether a stale-cache replay may be ATTEMPTED for an operation starting
+    /// now.
+    ///
+    /// This rules out only what it can PROVE: a session PostgreSQL has already
+    /// reported to be inside a transaction block, where `0A000` aborts the
+    /// block and no reprepare can heal it. It deliberately does NOT reject the
+    /// `None` that [`InnerClient::transaction_status`] returns while a request
+    /// is in flight. `None` means "ask again after the next round trip", and
+    /// reading it as "unsafe" here disabled the recovery for every pipelined or
+    /// concurrently used connection -- the gate is evaluated BEFORE this
+    /// operation is even sent, so an unrelated outstanding request said nothing
+    /// about whether THIS one would run inside a transaction. What resolves it
+    /// is `reprepare_cached_statement_once`, which owns an authoritative answer
+    /// before anything is replayed.
+    fn stale_cache_replay_permitted(&self) -> bool {
+        !matches!(
+            self.inner.transaction_status(),
+            Some(TransactionStatus::InTransaction | TransactionStatus::Failed)
+        )
+    }
+
+    /// Send a bare `Sync` and report the transaction status carried by ITS OWN
+    /// `ReadyForQuery`.
+    ///
+    /// [`InnerClient::transaction_status`] reads a byte the connection task
+    /// shares across every request, and answers `None` whenever any of them is
+    /// still in flight. That is the right answer for "where is this session
+    /// now", and the wrong instrument for this barrier, which needs the status
+    /// at a point after THIS operation's failure. The status byte below rides
+    /// the `ReadyForQuery` terminating this very `Sync`, so concurrent work on
+    /// the connection cannot mask it.
+    async fn sync_transaction_status(&self) -> Result<TransactionStatus, Error> {
+        let mut responses = self
+            .inner
+            .send(RequestMessages::Single(FrontendMessage::Raw(
+                Bytes::from_static(b"S\0\0\0\x04"),
+            )))?;
+        match responses.next().await? {
+            Message::ReadyForQuery(body) => Ok(TransactionStatus::from_byte(body.status())),
+            _ => Err(Error::unexpected_message()),
+        }
+    }
+
     /// Return one freshly resolved replacement when an implicit cache entry
     /// failed before producing caller-visible output.
     ///
     /// The Sync is a FIFO barrier for the failed request's trailing
-    /// ReadyForQuery. Without it, `transaction_status()` may still be `None`
-    /// and its last byte may still describe the state before PostgreSQL
-    /// aborted an open transaction.
+    /// ReadyForQuery. Without it, the status could still describe the state
+    /// before PostgreSQL aborted an open transaction.
     async fn reprepare_cached_statement_once(
         &self,
         cache_sql: Option<&str>,
-        started_idle: bool,
+        replay_permitted: bool,
         error: &Error,
     ) -> Option<Result<Statement, Error>> {
-        let sql = cache_sql
-            .filter(|_| started_idle && cached_statement_error_can_retry(error))?;
-        if query::sync(self.inner()).await.is_err()
-            || self.inner.transaction_status() != Some(TransactionStatus::Idle)
-        {
+        let sql =
+            cache_sql.filter(|_| replay_permitted && cached_statement_error_can_retry(error))?;
+        if !matches!(
+            self.sync_transaction_status().await,
+            Ok(TransactionStatus::Idle)
+        ) {
             // No retry attempt began. Keep the original server diagnostic
             // when the barrier cannot prove that replay is safe.
             return None;
@@ -1992,9 +2035,8 @@ impl Client {
             let Some(cache_sql) = execution.cache_sql else {
                 return query::query(&self.inner, execution.statement, params).await;
             };
-            let retry_started_idle =
-                self.inner.transaction_status() == Some(TransactionStatus::Idle);
-            if !retry_started_idle {
+            let replay_permitted = self.stale_cache_replay_permitted();
+            if !replay_permitted {
                 return query::query(&self.inner, execution.statement, params).await;
             }
 
@@ -2010,7 +2052,7 @@ impl Client {
                     let Some(replacement) = self
                         .reprepare_cached_statement_once(
                             Some(cache_sql),
-                            retry_started_idle,
+                            replay_permitted,
                             &error,
                         )
                         .await
@@ -2029,9 +2071,8 @@ impl Client {
         let Some(cache_sql) = execution.cache_sql else {
             return query::query(&self.inner, execution.statement, params).await;
         };
-        let retry_started_idle =
-            self.inner.transaction_status() == Some(TransactionStatus::Idle);
-        if !retry_started_idle {
+        let replay_permitted = self.stale_cache_replay_permitted();
+        if !replay_permitted {
             return query::query(&self.inner, execution.statement, params).await;
         }
 
@@ -2048,7 +2089,7 @@ impl Client {
                 let Some(replacement) = self
                     .reprepare_cached_statement_once(
                         Some(cache_sql),
-                        retry_started_idle,
+                        replay_permitted,
                         &error,
                     )
                     .await
@@ -2224,9 +2265,8 @@ impl Client {
             let Some(cache_sql) = execution.cache_sql else {
                 return query::execute(self.inner(), execution.statement, params).await;
             };
-            let retry_started_idle =
-                self.inner.transaction_status() == Some(TransactionStatus::Idle);
-            if !retry_started_idle {
+            let replay_permitted = self.stale_cache_replay_permitted();
+            if !replay_permitted {
                 return query::execute(self.inner(), execution.statement, params).await;
             }
 
@@ -2242,7 +2282,7 @@ impl Client {
                     let Some(replacement) = self
                         .reprepare_cached_statement_once(
                             Some(cache_sql),
-                            retry_started_idle,
+                            replay_permitted,
                             &error,
                         )
                         .await
@@ -2261,9 +2301,8 @@ impl Client {
         let Some(cache_sql) = execution.cache_sql else {
             return query::execute(self.inner(), execution.statement, params).await;
         };
-        let retry_started_idle =
-            self.inner.transaction_status() == Some(TransactionStatus::Idle);
-        if !retry_started_idle {
+        let replay_permitted = self.stale_cache_replay_permitted();
+        if !replay_permitted {
             return query::execute(self.inner(), execution.statement, params).await;
         }
 
@@ -2280,7 +2319,7 @@ impl Client {
                 let Some(replacement) = self
                     .reprepare_cached_statement_once(
                         Some(cache_sql),
-                        retry_started_idle,
+                        replay_permitted,
                         &error,
                     )
                     .await
@@ -2312,8 +2351,7 @@ impl Client {
             .await?
             .finalize_probationary(&self.inner, 0)
             .await?;
-        let retry_started_idle = execution.cache_sql.is_some()
-            && self.inner.transaction_status() == Some(TransactionStatus::Idle);
+        let replay_permitted = execution.cache_sql.is_some() && self.stale_cache_replay_permitted();
         match copy_in::copy_in(
             self.inner(),
             execution.statement,
@@ -2326,7 +2364,7 @@ impl Client {
                 let Some(replacement) = self
                     .reprepare_cached_statement_once(
                         execution.cache_sql,
-                        retry_started_idle,
+                        replay_permitted,
                         &error,
                     )
                     .await
@@ -2349,8 +2387,7 @@ impl Client {
             .await?
             .finalize_probationary(&self.inner, 0)
             .await?;
-        let retry_started_idle = execution.cache_sql.is_some()
-            && self.inner.transaction_status() == Some(TransactionStatus::Idle);
+        let replay_permitted = execution.cache_sql.is_some() && self.stale_cache_replay_permitted();
         match copy_out::copy_out(
             self.inner(),
             execution.statement,
@@ -2363,7 +2400,7 @@ impl Client {
                 let Some(replacement) = self
                     .reprepare_cached_statement_once(
                         execution.cache_sql,
-                        retry_started_idle,
+                        replay_permitted,
                         &error,
                     )
                     .await
