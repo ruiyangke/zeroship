@@ -1,12 +1,17 @@
 // Ported from tokio-postgres (MIT/Apache-2.0). Copyright (c) 2016 Steven Fackler.
 //
-// Verbatim translation. The simple query protocol is a single `Query`
+// Near-verbatim translation. The simple query protocol is a single `Query`
 // frontend message producing a mixed stream of RowDescription / DataRow /
 // CommandComplete terminated by ReadyForQuery.
+//
+// ONE DELIBERATE DIVERGENCE from upstream: a `CopyInResponse` is answered with
+// `CopyFail` rather than reported as an unexpected message and abandoned.
+// Upstream abandons it, and abandoning it leaves the SESSION in copy mode,
+// which costs the connection. See `abort_copy_in`.
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
-use crate::connection::RequestMessages;
+use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
 use crate::query::extract_row_affected;
 use crate::{Error, SimpleQueryMessage, SimpleQueryRow};
 use bytes::Bytes;
@@ -17,7 +22,7 @@ use pin_project_lite::pin_project;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, ready};
 
 /// Information about a column of a single query row.
@@ -37,13 +42,17 @@ impl SimpleColumn {
     }
 }
 
-pub async fn simple_query(client: &InnerClient, query: &str) -> Result<SimpleQueryStream, Error> {
+pub async fn simple_query(
+    client: &Arc<InnerClient>,
+    query: &str,
+) -> Result<SimpleQueryStream, Error> {
     debug!("executing simple query: {query}");
 
     let buf = encode(client, query)?;
     let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
 
     Ok(SimpleQueryStream {
+        client: Arc::downgrade(client),
         responses,
         columns: None,
     })
@@ -51,7 +60,60 @@ pub async fn simple_query(client: &InnerClient, query: &str) -> Result<SimpleQue
 
 pub async fn batch_execute(client: &InnerClient, query: &str) -> Result<(), Error> {
     let responses = start_batch_execute(client, query)?;
-    finish_batch_execute(responses).await
+    finish_batch_execute(client, responses).await
+}
+
+/// The reason this driver gives PostgreSQL for aborting a copy it cannot feed.
+///
+/// It travels to the caller inside the server's own `COPY from stdin failed:`
+/// error, which is what makes the failure attributable: an abandoned
+/// [`crate::CopyInSink`] aborts the identical statement with an EMPTY reason,
+/// so the server prefix alone cannot tell the two apart.
+const COPY_IN_UNSUPPORTED: &str = "simple query execution cannot supply COPY data; use copy_in";
+
+/// Take the session back out of COPY-IN mode.
+///
+/// A `COPY ... FROM STDIN` sent as a simple query is answered with
+/// `CopyInResponse` and then PostgreSQL WAITS for copy data. The request was
+/// encoded as one pre-built buffer, so this path has no channel to push
+/// `CopyData` through and cannot finish the copy. Reporting
+/// `Error::unexpected_message` and walking away is not enough: the session
+/// stays in copy mode, the next frontend message is read as copy data, and
+/// PostgreSQL answers `unexpected message type 0x50 during COPY from stdin`
+/// followed by `FATAL: terminating connection because protocol synchronization
+/// was lost`. The failure then lands on whatever ran NEXT - in a pool, the next
+/// borrower, because nothing about the failing call marks the connection closed
+/// or dirty.
+///
+/// `CopyFail` is the message that ends copy mode. It costs one extra request
+/// slot and that is deliberate, not an oversight: in SIMPLE query mode
+/// PostgreSQL answers the `CopyFail` with `ErrorResponse` AND its own
+/// `ReadyForQuery` - it does not suppress the terminator the way it does for an
+/// extended-protocol copy, where the error sets `ignore_till_sync` and only the
+/// `Sync` releases a `ReadyForQuery`. That first group belongs to the request
+/// still at the head of the queue - the caller's, which is what turns its drain
+/// into the server's real diagnostic. The trailing `Sync` then produces a
+/// SECOND, bare `ReadyForQuery` for the slot this send registers, so the
+/// connection task's response accounting balances. MEASURED: delete that one
+/// line and every assertion in `tests/simple_query_copy_resync.rs` still holds,
+/// because the caller's error is unchanged - the follow-up query simply never
+/// returns. The orphaned slot stays at the head of the queue and is handed the
+/// NEXT request's reply, so a regression here is a HANG, not a wrong answer.
+fn abort_copy_in(client: &InnerClient) -> Result<(), Error> {
+    let buf = client.with_buf(|buf| {
+        frontend::copy_fail(COPY_IN_UNSUPPORTED, buf).map_err(Error::encode)?;
+        frontend::sync(buf);
+        Ok(buf.split().freeze())
+    })?;
+    // Housekeeping: the bare `ReadyForQuery` this earns is bookkeeping, not an
+    // answer anybody reads, and the caller's own response is still awaited so a
+    // failed write is still reported rather than swallowed.
+    drop(client.send_with(
+        RequestMessages::Single(FrontendMessage::Raw(buf)),
+        RequestDisposition::Housekeeping,
+        TransactionEffect::MayChange,
+    )?);
+    Ok(())
 }
 
 /// Enqueue the batch and hand back its response stream, without awaiting it.
@@ -85,7 +147,10 @@ pub(crate) fn start_batch_execute_with_error_cleanup(
 }
 
 /// Drain the response stream `start_batch_execute` returned.
-pub(crate) async fn finish_batch_execute(mut responses: Responses) -> Result<(), Error> {
+pub(crate) async fn finish_batch_execute(
+    client: &InnerClient,
+    mut responses: Responses,
+) -> Result<(), Error> {
     loop {
         match responses.next().await? {
             Message::ReadyForQuery(_) => return Ok(()),
@@ -93,6 +158,11 @@ pub(crate) async fn finish_batch_execute(mut responses: Responses) -> Result<(),
             | Message::EmptyQueryResponse
             | Message::RowDescription(_)
             | Message::DataRow(_) => {}
+            // Not `unexpected_message`: walking away here leaves the session in
+            // copy mode. See `abort_copy_in`. The abort makes PostgreSQL answer
+            // this very stream with the copy's own error, so the loop keeps
+            // draining and the caller gets that instead.
+            Message::CopyInResponse(_) => abort_copy_in(client)?,
             _ => return Err(Error::unexpected_message()),
         }
     }
@@ -112,6 +182,7 @@ pub(crate) async fn finish_batch_execute(mut responses: Responses) -> Result<(),
 /// `None` means the batch completed without any `CommandComplete` - an empty
 /// query.
 pub(crate) async fn finish_batch_execute_reporting_tag(
+    client: &InnerClient,
     mut responses: Responses,
 ) -> Result<Option<String>, Error> {
     let mut tag = None;
@@ -122,6 +193,7 @@ pub(crate) async fn finish_batch_execute_reporting_tag(
                 tag = Some(body.tag().map_err(Error::parse)?.to_string());
             }
             Message::EmptyQueryResponse | Message::RowDescription(_) | Message::DataRow(_) => {}
+            Message::CopyInResponse(_) => abort_copy_in(client)?,
             _ => return Err(Error::unexpected_message()),
         }
     }
@@ -138,6 +210,15 @@ pin_project! {
     /// A stream of simple query results.
     #[project(!Unpin)]
     pub struct SimpleQueryStream {
+        // Held so the stream can end a copy this path cannot feed
+        // (`abort_copy_in`). WEAK, and that is load-bearing: `InnerClient` owns
+        // the request channel, and `Connection::run` finishes only once every
+        // sender is gone. A strong handle here would keep a connection alive for
+        // as long as the caller held the stream - measured, it hangs
+        // `integration::an_awaited_query_queued_before_client_drop_still_reports_its_write_error`
+        // outright. If the client has already gone there is no session left to
+        // rescue, so failing to upgrade is not an error.
+        client: Weak<InnerClient>,
         responses: Responses,
         columns: Option<Arc<[SimpleColumn]>>,
     }
@@ -148,34 +229,47 @@ impl Stream for SimpleQueryStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
-        match ready!(this.responses.poll_next(cx)?) {
-            Message::CommandComplete(body) => {
-                let rows = extract_row_affected(&body)?;
-                Poll::Ready(Some(Ok(SimpleQueryMessage::CommandComplete(rows))))
-            }
-            Message::EmptyQueryResponse => {
-                Poll::Ready(Some(Ok(SimpleQueryMessage::CommandComplete(0))))
-            }
-            Message::RowDescription(body) => {
-                let columns: Arc<[SimpleColumn]> = body
-                    .fields()
-                    .map(|f| Ok(SimpleColumn::new(f.name().to_string())))
-                    .collect::<Vec<_>>()
-                    .map_err(Error::parse)?
-                    .into();
+        // A loop, not a single match: the copy-mode arm produces no item of its
+        // own, and returning `Pending` after it would park a stream nobody will
+        // wake.
+        loop {
+            match ready!(this.responses.poll_next(cx)?) {
+                Message::CommandComplete(body) => {
+                    let rows = extract_row_affected(&body)?;
+                    return Poll::Ready(Some(Ok(SimpleQueryMessage::CommandComplete(rows))));
+                }
+                Message::EmptyQueryResponse => {
+                    return Poll::Ready(Some(Ok(SimpleQueryMessage::CommandComplete(0))));
+                }
+                Message::RowDescription(body) => {
+                    let columns: Arc<[SimpleColumn]> = body
+                        .fields()
+                        .map(|f| Ok(SimpleColumn::new(f.name().to_string())))
+                        .collect::<Vec<_>>()
+                        .map_err(Error::parse)?
+                        .into();
 
-                *this.columns = Some(columns.clone());
-                Poll::Ready(Some(Ok(SimpleQueryMessage::RowDescription(columns))))
+                    *this.columns = Some(columns.clone());
+                    return Poll::Ready(Some(Ok(SimpleQueryMessage::RowDescription(columns))));
+                }
+                Message::DataRow(body) => {
+                    let row = match &this.columns {
+                        Some(columns) => SimpleQueryRow::new(columns.clone(), body)?,
+                        None => return Poll::Ready(Some(Err(Error::unexpected_message()))),
+                    };
+                    return Poll::Ready(Some(Ok(SimpleQueryMessage::Row(row))));
+                }
+                Message::ReadyForQuery(_) => return Poll::Ready(None),
+                Message::CopyInResponse(_) => match this.client.upgrade() {
+                    Some(client) => {
+                        if let Err(error) = abort_copy_in(&client) {
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                    }
+                    None => return Poll::Ready(Some(Err(Error::closed()))),
+                },
+                _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }
-            Message::DataRow(body) => {
-                let row = match &this.columns {
-                    Some(columns) => SimpleQueryRow::new(columns.clone(), body)?,
-                    None => return Poll::Ready(Some(Err(Error::unexpected_message()))),
-                };
-                Poll::Ready(Some(Ok(SimpleQueryMessage::Row(row))))
-            }
-            Message::ReadyForQuery(_) => Poll::Ready(None),
-            _ => Poll::Ready(Some(Err(Error::unexpected_message()))),
         }
     }
 }
