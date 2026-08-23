@@ -359,3 +359,78 @@ async fn the_session_attrs_probe_runs_before_after_connect() {
     );
     drop(client);
 }
+
+/// MEASUREMENT: how many physical connections does ONE `get()` open when
+/// `before_acquire` always rejects?
+///
+/// The acquisition loop `continue`s on `Ok(false)`, and for a RECYCLED entry
+/// that is right -- the next candidate may differ. But a FRESHLY connected
+/// client has just been accepted by `after_connect` microseconds earlier, so
+/// the hook cannot return a different answer for it, and the retry is pure
+/// load on the server. The only bound is `acquire_timeout`.
+///
+/// This test does not assert a policy. It exists to put a NUMBER on the
+/// behaviour, because "unbounded connect storm" and "retries a couple of
+/// times" call for different fixes and nobody had measured which one this is.
+/// `sqlx` and `deadpool` scope their equivalent hook to recycled connections
+/// only; this driver's contract does not, and changing that is a decision
+/// rather than a bug fix.
+///
+/// MEASURED 2026-08-23 against the live review server: **3 hook calls and 3
+/// physical connections in 300ms**, i.e. about 10 per second, which
+/// extrapolates to roughly 300 connections for a single `get()` at the default
+/// 30s `acquire_timeout`. So this is NOT a tight spin loop -- every iteration
+/// pays a full TCP connect plus startup handshake -- but it is sustained load
+/// a misconfigured hook can put on a server indefinitely.
+///
+/// That number is a LOWER BOUND: the box was at load average ~25 from other
+/// work, which slows each connect and therefore reduces the count in a fixed
+/// window. An idle machine would reach a higher number, not a lower one.
+///
+/// The bound asserted below is deliberately loose: it pins that the loop
+/// retries at all, so a change that stops retrying (or one that turns this
+/// into a real spin loop, caught by the hook-calls-equals-connections
+/// assertion) is visible, while ordinary timing jitter is not.
+#[compio::test]
+async fn before_acquire_that_always_rejects_reopens_until_the_acquire_timeout() {
+    let url = test_url();
+    let calls = Rc::new(Cell::new(0));
+    let hook_calls = Rc::clone(&calls);
+
+    let mut config = config(1, 0);
+    // Short, so the storm is bounded and the test terminates quickly.
+    config.acquire_timeout(Duration::from_millis(300));
+    config.before_acquire(move |_client| {
+        let hook_calls = Rc::clone(&hook_calls);
+        Box::pin(async move {
+            hook_calls.set(hook_calls.get() + 1);
+            Ok(false)
+        })
+    });
+    let pool = connect_pool(&url, config).await;
+
+    let outcome = pool.get().await;
+    assert!(
+        outcome.is_err(),
+        "a hook that never accepts must eventually time out, not hand out a \
+         client it rejected"
+    );
+
+    let created = pool.metrics.connections_created.get();
+    let rejections = calls.get();
+    println!(
+        "MEASURED: one get() with an always-rejecting before_acquire made \
+         {rejections} hook calls and opened {created} physical connections in 300ms"
+    );
+
+    assert_eq!(
+        rejections, created,
+        "every connection opened must have been offered to the hook exactly \
+         once; a mismatch means connections are being opened without being \
+         inspected"
+    );
+    assert!(
+        created >= 2,
+        "the loop must actually retry, or this measures nothing: {created}"
+    );
+}
