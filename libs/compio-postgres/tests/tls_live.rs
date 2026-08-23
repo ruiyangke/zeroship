@@ -805,6 +805,83 @@ async fn sslcertmode_require_cannot_finish_on_plaintext() {
     );
 }
 
+/// A connector that verifies nothing cannot be used to serve a verifying
+/// `sslmode`, and the proof is that the very same connector DOES complete the
+/// same connection under `sslmode=require`.
+///
+/// The mismatch server is what makes this a real hole rather than bookkeeping.
+/// Its certificate is signed by the CA but carries the wrong name, so the
+/// second half below is a session that a `verify-full` verifier would have
+/// rejected and this connector accepts. Handing that connector a `verify-full`
+/// `Config` therefore used to produce a live, queryable session whose
+/// certificate nothing had checked - `pg_stat_ssl` said `ssl=true` and the
+/// connection string said `verify-full`, and neither was a claim about
+/// identity. `connect_raw` now refuses it by name.
+#[compio::test]
+async fn a_connector_that_verifies_nothing_cannot_serve_a_verifying_sslmode() {
+    let s = servers();
+
+    let unverified = format!("{} sslmode=require", s.mismatch_url);
+    let unverified_config = unverified.parse::<Config>().expect("parse the require DSN");
+    let make =
+        MakeRustlsConnect::from_config(&unverified_config).expect("build the require connector");
+
+    // The refusal. Same connector, a Config that asks for verification.
+    let verifying_config = format!(
+        "{} sslmode=verify-full sslrootcert={}",
+        s.mismatch_url, s.ca
+    )
+    .parse::<Config>()
+    .expect("parse the verify-full DSN");
+    let error = match verifying_config.connect(make.clone()).await {
+        Ok(_) => panic!("a connector that verifies nothing served sslmode=verify-full"),
+        Err(error) => error,
+    };
+    assert!(
+        describe(&error).contains("sslmode=verify-full"),
+        "the unverifying connector was not refused by key: {}",
+        describe(&error)
+    );
+
+    // The partner, differing in one variable: the Config the connector was
+    // built from. It must connect, or the assertion above would be satisfied
+    // by a connector that simply cannot reach this server.
+    let (client, connection) = unverified_config
+        .connect(make.clone())
+        .await
+        .expect("sslmode=require accepts the mismatched name it makes no promise about");
+    let task = compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    });
+    let (ssl, version) = server_reports_ssl(&client).await;
+    assert!(ssl, "the require session was not encrypted");
+    println!(
+        "  [pg_stat_ssl] ssl={ssl:<5} version={version:<8} {} (unattested connector)",
+        unverified.replace(PASSWORD_MARKER, "***")
+    );
+    drop(client);
+    let _ = task.await;
+
+    // And the control that keeps `verify-full` meaningful: the connector this
+    // crate builds FOR verify-full reaches the same server and rejects it on
+    // the host name rather than on the attestation.
+    let verifying_make =
+        MakeRustlsConnect::from_config(&verifying_config).expect("build the verify-full connector");
+    let error = match verifying_config.connect(verifying_make).await {
+        Ok(_) => panic!("verify-full accepted a certificate issued for another name"),
+        Err(error) => error,
+    };
+    let text = describe(&error);
+    assert!(
+        !text.contains("does not attest"),
+        "verify-full must fail on the certificate, not on the attestation: {text}"
+    );
+    assert!(
+        text.contains("NotValidForName") || text.contains("not valid for name"),
+        "verify-full must name the host-name failure: {text}"
+    );
+}
+
 /// A connector built from a different configuration must fail by parameter
 /// name before its stale policy can reach a ClientHello.
 #[compio::test]
