@@ -244,3 +244,42 @@ fn the_value_lexer_matches_libpq() {
         );
     }
 }
+/// A URL authority keeps one port PER HOST, and the query string still
+/// overrides the whole list.
+///
+/// REGRESSION. Making a repeated `port=` keyword override rather than
+/// accumulate -- correct for `port=1 port=2`, which libpq resolves to 2 --
+/// also reached the URL authority, which calls the same parameter setter once
+/// per host. `postgres://a:1,b:2/db` therefore kept only `[2]`, and host `a`
+/// would have been dialled on host `b`'s port. The whole suite passed: nothing
+/// covered a URL carrying several hosts with explicit ports.
+///
+/// The two rules are different because the inputs are: several hosts in one
+/// authority are a LIST, and a key written twice is an OVERRIDE.
+#[test]
+fn a_url_authority_keeps_a_port_per_host() {
+    let listed = "postgres://a:1,b:2/db"
+        .parse::<Config>()
+        .expect("a multi-host URL must parse");
+    assert_eq!(
+        listed.get_ports(),
+        [1, 2],
+        "the authority lost a port; every host but the last would be dialled wrong"
+    );
+    assert_eq!(listed.get_hosts().len(), 2);
+
+    // Default port per host, mixed with an explicit one.
+    let mixed = "postgres://a,b:2/db".parse::<Config>().expect("mixed ports");
+    assert_eq!(mixed.get_ports(), [5432, 2]);
+
+    // The query string overrides the whole list, as libpq does: it is parsed
+    // after the authority and arrives through the repeated-key path.
+    let overridden = "postgres://a:1,b:2/db?port=9"
+        .parse::<Config>()
+        .expect("a query port must parse");
+    assert_eq!(
+        overridden.get_ports(),
+        [9],
+        "a query-string port must replace the authority's list, not extend it"
+    );
+}
