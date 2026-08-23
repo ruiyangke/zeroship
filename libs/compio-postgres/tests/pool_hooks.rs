@@ -311,13 +311,53 @@ async fn the_session_attrs_probe_runs_before_after_connect() {
     // The live server is writable, so every candidate fails the read-only
     // requirement and no connection is ever produced.
     let outcome = Pool::connect_with_config(connection_config, pool_config).await;
+    // NAME THE REFUSAL. `is_err()` plus `calls == 0` was the whole assertion
+    // until 2026-08-23, and total failure satisfies both at once: an
+    // unreachable server, a URL that does not parse, a pool-construction error
+    // all produce an error AND a hook that never ran. The test would then have
+    // asserted an ordering while its evidence was "nothing happened".
+    let cause = common::error_chain(
+        &outcome
+            .err()
+            .expect("a writable server satisfied target_session_attrs=read-only"),
+    );
     assert!(
-        outcome.is_err(),
-        "a writable server satisfied target_session_attrs=read-only"
+        cause.contains("target session attributes"),
+        "the pool failed for a reason other than the probe, so nothing here is about \
+         ordering: {cause}"
     );
     assert_eq!(
         calls.get(),
         0,
         "after_connect ran on a connection the probe had already rejected"
     );
+
+    // THE MIRROR, which is what turns "nothing happened" into evidence. One
+    // variable changes -- the enum -- and against the same server the probe
+    // must now pass, the connection must be produced, and the hook must run
+    // exactly once. Without this arm a driver that could not connect at all
+    // would satisfy everything above.
+    let mut permissive: Config = url.parse().expect("parse the live PostgreSQL URL");
+    permissive.target_session_attrs(TargetSessionAttrs::Any);
+    let calls = Rc::new(Cell::new(0));
+    let hook_calls = Rc::clone(&calls);
+    let mut pool_config = config(1, 1);
+    pool_config.after_connect(move |_client| {
+        let hook_calls = Rc::clone(&hook_calls);
+        Box::pin(async move {
+            hook_calls.set(hook_calls.get() + 1);
+            Ok(())
+        })
+    });
+    let pool = Pool::connect_with_config(permissive, pool_config)
+        .await
+        .expect("target_session_attrs=any must accept the same writable server");
+    let client = pool.get().await.expect("check out the accepted session");
+    assert_eq!(
+        calls.get(),
+        1,
+        "after_connect did not run for a connection the probe accepted, so the zero above \
+         says nothing about ordering"
+    );
+    drop(client);
 }
