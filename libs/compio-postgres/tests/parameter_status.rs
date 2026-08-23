@@ -8,12 +8,19 @@
 //!
 //! These tests are built around SNAPSHOT vs LIVE, because a startup snapshot
 //! is the easy half and the useless one: the values worth reading are the ones
-//! that change during the session. So the first test reads a value fixed at
-//! startup, the second proves a LATER server report reaches the same accessor,
-//! and the third is the one-variable control -- a `SET` of a parameter
-//! PostgreSQL does not report must leave the accessor empty. Without that
-//! control, an implementation that secretly ran `SHOW` would pass the first two
-//! and be wrong in the way that matters.
+//! that change during the session. Four tests, each answering something the
+//! others cannot:
+//!
+//!   1. a value fixed at startup is readable at all,
+//!   2. the WHOLE startup run is folded, not just one frame of it,
+//!   3. a LATER server report reaches the same accessor,
+//!   4. the one-variable control -- a `SET` of a parameter PostgreSQL does not
+//!      report must leave the accessor empty.
+//!
+//! Without (4), an implementation that secretly ran `SHOW` would pass the rest
+//! and be wrong in the way that matters. Without (2), one that kept only the
+//! last `ParameterStatus` of the startup batch would pass (1) and (3); that
+//! mutation was run, and it leaves ten of the eleven names missing.
 
 use compio_postgres::{Client, Error, NoTls};
 
@@ -61,6 +68,55 @@ async fn a_startup_reported_parameter_is_readable_through_the_client() {
         .expect("SHOW server_version")
         .get(0);
     assert_eq!(version, queried);
+}
+
+/// EVERY long-stable reported parameter survives startup, not just one.
+///
+/// The startup sequence delivers these as a run of `ParameterStatus` frames,
+/// usually inside a single batch alongside `AuthenticationOk` and
+/// `BackendKeyData`. A driver that folded only the first or only the last of
+/// that run would still pass
+/// [`a_startup_reported_parameter_is_readable_through_the_client`], because
+/// `server_version` alone proves nothing about the rest. This is the arity
+/// check for that fold.
+///
+/// The names below are deliberately the ones PostgreSQL has reported for many
+/// major versions. The reported set GROWS -- `search_path` arrives only in
+/// PostgreSQL 18, `in_hot_standby` and `default_transaction_read_only` in 14,
+/// `scram_iterations` in 16 -- so pinning the full 15 would make this a test of
+/// which server happens to be running. These eleven are stable, which is what
+/// makes a missing one a driver defect rather than a version difference.
+#[compio::test]
+async fn every_long_stable_reported_parameter_survives_startup() {
+    const ALWAYS_REPORTED: &[&str] = &[
+        "application_name",
+        "client_encoding",
+        "DateStyle",
+        "integer_datetimes",
+        "IntervalStyle",
+        "is_superuser",
+        "server_encoding",
+        "server_version",
+        "session_authorization",
+        "standard_conforming_strings",
+        "TimeZone",
+    ];
+
+    let url = test_url();
+    let client = match connect(&url).await {
+        Ok(client) => client,
+        Err(error) => common::postgres_unreachable(&url, &error),
+    };
+
+    let missing: Vec<&str> = ALWAYS_REPORTED
+        .iter()
+        .copied()
+        .filter(|name| client.parameter(name).is_none())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the startup ParameterStatus run was not folded whole; missing: {missing:?}"
+    );
 }
 
 /// A parameter the server re-reports mid-session updates the client's view.
