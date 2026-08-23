@@ -545,3 +545,137 @@ async fn sqlite_applies_a_zero_lock_budget_the_server_dialects_refuse() {
         .await
         .expect("SQLite never resolves a server timeout budget, so a zero is not a refusal");
 }
+
+/// A plan that ends in an online rename the target cannot perform commits NONE of
+/// the steps that precede it.
+///
+/// The capability question is answerable before the plan starts - it is a property
+/// of the plan and of the deploy target, never of live state - but it used to be
+/// asked at the rename's OWN step, inside the authored-order loop. Every earlier
+/// step commits in its own transaction, so `[addColumn, addColumn, rename]` against
+/// a backend with no online capability left both columns committed and refused the
+/// rename: a schema that is neither the old shape nor the new one, and one no retry
+/// can repair, because the same plan meets the same refusal every time.
+///
+/// The columns are named in full rather than asserted by count, for the reason a
+/// declarative MySQL rename's refusal is: a half-apply has to FAIL this test, not
+/// change a number it agrees with.
+#[compio::test]
+async fn a_plan_ending_in_an_unsupported_online_rename_commits_none_of_its_earlier_ddl() {
+    use zero_migrate::{ExpandContractAuthor, OnlineIntent};
+
+    let v1 = vec![CollectionDescriptor {
+        name: "people".into(),
+        owner_app: APP.into(),
+        fields: vec![FieldDescriptor {
+            name: "nickname".into(),
+            ty: "string".into(),
+            required: true,
+            ..Default::default()
+        }],
+        indexes: vec![],
+        runtime_options: Default::default(),
+    }];
+
+    let p = paths("online_rename_preflight");
+    let be = backend(&p);
+    apply_first_deploy(&be, &v1).await;
+    be.actor()
+        .set_mode(Mode::EngineJournal)
+        .await
+        .expect("mode");
+
+    // Two ordinary additive DDL steps, each of which SQLite applies happily on its
+    // own. They are the steps that must not commit.
+    fn add_column(name: &str) -> zero_migrate::model::migration::Migration {
+        let up = format!("ALTER TABLE people ADD COLUMN {name} text");
+        let flags = zero_migrate::model::migration::MigrationFlags::default();
+        zero_migrate::model::migration::Migration {
+            version: zero_migrate::model::migration::MigrationId::derive(
+                "sqlite_online_preflight",
+                name.as_bytes(),
+            ),
+            name: format!("add_people_{name}"),
+            checksum: zero_migrate::model::migration::Checksum::of(
+                &zero_migrate::model::migration::ChecksumInput {
+                    up: &up,
+                    down: None,
+                    flags: &flags,
+                    owner_app: APP,
+                    depends_on: &[],
+                    supersedes: &[],
+                    preconditions: &[],
+                },
+            ),
+            up,
+            down: None,
+            flags,
+            owner_app: APP.into(),
+            depends_on: vec![],
+            supersedes: vec![],
+            preconditions: vec![],
+            existence_guard: None,
+            effect: None,
+        }
+    }
+    let city = add_column("city");
+    let country = add_column("country");
+    let city_version = city.version.as_str().to_string();
+    let country_version = country.version.as_str().to_string();
+
+    // A PostgreSQL expand-contract rename, routed at a backend whose `online()` is
+    // `None`. The SQLite differ never authors this shape; it is constructed
+    // directly because the defect is that nothing REFUSES such a plan up front.
+    let rename = ExpandContractAuthor::new(PROJECT, APP, zero_migrate::POSTGRES)
+        .author(&OnlineIntent::RenameColumn {
+            table: "people".into(),
+            from: "nickname".into(),
+            to: "handle".into(),
+            ty: "text".into(),
+        })
+        .expect("author the PG rename");
+
+    let steps = vec![
+        PlanStep::Ddl(city),
+        PlanStep::Ddl(country),
+        PlanStep::OnlineRename(RenameStep::ExpandContract(rename)),
+    ];
+
+    let err = MigrationEngine::new()
+        .apply_plan(
+            &steps,
+            Approval::Approved,
+            &be,
+            &exec_cfg(),
+            "deployer",
+            zero_migrate::apply::executor::LockMode::Acquire,
+        )
+        .await
+        .expect_err("a rename the target cannot perform must refuse the whole plan");
+
+    // The live shape is untouched: `people` is exactly what the first deploy left.
+    let info = be
+        .actor()
+        .query("PRAGMA main.table_info(people)")
+        .await
+        .expect("table_info");
+    let columns: Vec<String> = info.iter().filter_map(|r| r[1].clone()).collect();
+    assert!(
+        !columns.iter().any(|c| c == "city" || c == "country"),
+        "the plan was refused, so NEITHER earlier DDL step may have committed; \
+         people is {columns:?} (refusal was {err:?})"
+    );
+    assert!(
+        columns.iter().any(|c| c == "nickname"),
+        "the pre-plan column is still there; people is {columns:?}"
+    );
+
+    // And neither earlier step was journaled.
+    let applied = be.applied(&exec_cfg()).await.expect("read journal");
+    assert!(
+        !applied
+            .iter()
+            .any(|e| e.version == city_version || e.version == country_version),
+        "a refused plan journals none of its steps"
+    );
+}

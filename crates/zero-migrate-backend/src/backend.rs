@@ -901,10 +901,34 @@ pub trait MigrationBackend {
     ///
     /// This REPLACES the old `expand_conn()` connection escape hatch:
     /// the generic declarative apply path branches on
-    /// `online().is_some()`, never holding a concrete connection, and a backend
-    /// with no online capability MUST receive an empty `renames` (asserted at the
-    /// call site — a non-empty rename set with `online() == None` is a routing bug).
+    /// `online().is_some()`, never holding a concrete connection.
+    ///
+    /// Ask it through [`provides`](Self::provides) rather than directly when the
+    /// question is "can this target run this plan". That is what the engine's
+    /// plan-wide capability preflight does, for every step, before the first one
+    /// commits. Asking it here, at the step that needs the capability, is what used
+    /// to leave a database half-migrated: the answer is the same, but by the time it
+    /// arrives every earlier step of the plan has already committed.
     fn online(&self) -> Option<&dyn crate::capability::OnlineSchemaChange>;
+
+    /// Whether this backend provides `capability`.
+    ///
+    /// The half of the capability question a BACKEND answers; the plan answers the
+    /// other half ([`PlanStep::required_capability`]). Keeping both as one-line
+    /// total functions is what lets the engine ask them for a whole plan up front,
+    /// rather than discovering the gap at the step that needs it — by which time
+    /// every earlier step has committed and the database is half-migrated.
+    ///
+    /// The default answers every capability from the accessor that already exists
+    /// for it, so a backend states its capabilities in exactly one place and cannot
+    /// claim one it does not implement.
+    ///
+    /// [`PlanStep::required_capability`]: crate::step::PlanStep::required_capability
+    fn provides(&self, capability: crate::capability::BackendCapability) -> bool {
+        match capability {
+            crate::capability::BackendCapability::OnlineSchemaChange => self.online().is_some(),
+        }
+    }
 
     // -- baseline / adoption ------------------------------------------------
 

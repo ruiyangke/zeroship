@@ -367,6 +367,7 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
             ty: "text".into(),
         })
         .expect("author rename");
+    let rename_version = rename.group_version().as_str().to_string();
     let steps = vec![PlanStep::OnlineRename(RenameStep::ExpandContract(rename))];
     let res = engine
         .apply_plan(
@@ -378,15 +379,31 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
             zero_migrate::apply::executor::LockMode::Acquire,
         )
         .await;
-    assert!(
-        matches!(
-            res,
-            Err(DeclarativeApplyError::Plain(EngineError::Apply(
-                zero_migrate::apply::executor::ApplyError::Backend(_)
-            )))
+    // The refusal NAMES the gap: which step, which capability, which target. It
+    // used to be an untyped `Backend(String)` whose text called the state "a
+    // routing bug" - an assertion about something unreachable, which it is not:
+    // nothing stops a caller handing `apply_plan` this plan, and when the rename is
+    // not the plan's FIRST step the earlier steps used to commit before this fired.
+    match &res {
+        Err(DeclarativeApplyError::Plain(EngineError::Apply(
+            zero_migrate::apply::executor::ApplyError::UnsupportedCapability {
+                version,
+                capability,
+                dialect,
+            },
+        ))) => {
+            assert_eq!(version, &rename_version, "the refusal names the rename");
+            assert_eq!(
+                *capability,
+                zero_migrate::BackendCapability::OnlineSchemaChange
+            );
+            assert_eq!(dialect, "sqlite", "the refusal names the deploy target");
+        }
+        other => panic!(
+            "a PG expand-contract rename on a SQLite backend must FAIL CLOSED naming the \
+             missing capability, got {other:?}"
         ),
-        "a PG expand-contract rename on a SQLite backend must FAIL CLOSED (routing bug), got {res:?}"
-    );
+    }
     // Nothing was journaled for the rename.
     let entries = be.applied_sqlite().await.expect("read journal");
     let people_only_create = entries.iter().all(|e| e.phase == Phase::Completed);

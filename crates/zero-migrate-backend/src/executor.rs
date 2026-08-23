@@ -167,6 +167,25 @@ pub enum ApplyError {
         /// The dialect that lacks a non-txn path (`"sqlite"`).
         dialect: &'static str,
     },
+    /// A plan step needs an optional backend capability
+    /// ([`BackendCapability`](crate::capability::BackendCapability)) the deploy
+    /// target does not provide. Raised by the plan-wide capability preflight, so
+    /// the whole plan is refused as a unit and NOTHING was applied — the step that
+    /// needs the capability is typically not the first, and every step before it
+    /// would otherwise have committed already.
+    #[error(
+        "the plan's step {version} needs the {capability} capability but the {dialect} backend \
+         does not provide it; nothing was applied. Lower this operation to a shape {dialect} can \
+         execute, or deploy the plan against a target that provides the capability"
+    )]
+    UnsupportedCapability {
+        /// The version naming the step that needs the capability.
+        version: String,
+        /// The capability the deploy target does not provide.
+        capability: crate::capability::BackendCapability,
+        /// The deploy target's dialect.
+        dialect: String,
+    },
     /// The pending batch contains a destructive migration (`flags.destructive`)
     /// but the caller passed [`Approval::None`](crate::approval::Approval::None). This is the executor's OWN
     /// defense-in-depth approval gate — independent of (and additional to) the

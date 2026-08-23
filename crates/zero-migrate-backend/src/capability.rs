@@ -235,6 +235,59 @@ impl ExpandContractPlan {
     pub fn all(&self) -> Vec<Migration> {
         self.expand.iter().chain(&self.contract).cloned().collect()
     }
+
+    /// The version that NAMES this rename to an operator: E1's deterministic id,
+    /// the same anchor the pending-contract obligation records and the reviewer
+    /// approves, falling back to [`trigger_version`](Self::trigger_version) so the
+    /// answer resolves UNCONDITIONALLY even for an empty expand chain (an internal
+    /// invariant violation, which must not make a gate fall open).
+    ///
+    /// Every gate that has to say WHICH rename it is talking about reads it here,
+    /// so the approval scope, the capability refusal, and the reviewer-facing list
+    /// cannot come to name different things.
+    #[must_use]
+    pub fn group_version(&self) -> &MigrationId {
+        self.expand
+            .first()
+            .map_or(&self.trigger_version, |e1| &e1.version)
+    }
+}
+
+/// An OPTIONAL backend capability — something a plan step may need that a deploy
+/// target is not obliged to provide.
+///
+/// A plan says what it requires ([`PlanStep::required_capability`]) and a backend
+/// says what it provides ([`MigrationBackend::provides`]), so the engine can refuse
+/// a plan the target cannot run as a UNIT, before its first step commits. Those two
+/// answers are what makes this an enum rather than a per-case `is_some()` test at
+/// the step that needs it: asked at the step, the question arrives after every
+/// earlier step has already committed.
+///
+/// [`PlanStep::required_capability`]: crate::step::PlanStep::required_capability
+/// [`MigrationBackend::provides`]: crate::backend::MigrationBackend::provides
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendCapability {
+    /// [`OnlineSchemaChange`] — driving a zero-downtime online schema operation.
+    /// A target without it has no expand-contract path at all; the equivalent
+    /// change is lowered to some offline shape (a table rebuild) or refused at
+    /// plan time.
+    OnlineSchemaChange,
+}
+
+impl BackendCapability {
+    /// The operator-facing name of this capability.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OnlineSchemaChange => "online schema change",
+        }
+    }
+}
+
+impl std::fmt::Display for BackendCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 // ── The dual-write trigger's derived identities and its function body ─────────

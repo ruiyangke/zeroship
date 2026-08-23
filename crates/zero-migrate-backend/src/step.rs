@@ -27,7 +27,7 @@
 //! every existing caller uses.
 
 use crate::backfill::BackfillSpec;
-use crate::capability::{ExpandContractPlan, OnlineIntent};
+use crate::capability::{BackendCapability, ExpandContractPlan, OnlineIntent};
 use crate::table_rebuild::TableRebuild;
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::AlterPrimaryKeyAction;
@@ -315,12 +315,36 @@ impl PlanStep {
             {
                 Some(rb.migration.version.as_str())
             }
-            PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => Some(
-                ec.expand
-                    .first()
-                    .map_or_else(|| ec.trigger_version.as_str(), |e1| e1.version.as_str()),
-            ),
+            PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => {
+                Some(ec.group_version().as_str())
+            }
             _ => None,
+        }
+    }
+
+    /// The OPTIONAL backend capability this step needs, and the version that names
+    /// it, or `None` when the step needs nothing beyond applying a migration.
+    ///
+    /// The SINGLE source of truth for what a plan REQUIRES, so the plan-wide
+    /// capability preflight and the seam that would otherwise discover the gap
+    /// mid-apply cannot disagree about which steps are at issue. It answers by
+    /// STRATEGY, never by vendor: an [`ExpandContract`](RenameStep::ExpandContract)
+    /// needs an online path because that is what an expand-contract IS, not because
+    /// PostgreSQL is its usual producer.
+    #[must_use]
+    pub fn required_capability(&self) -> Option<(BackendCapability, &str)> {
+        match self {
+            PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => Some((
+                BackendCapability::OnlineSchemaChange,
+                ec.group_version().as_str(),
+            )),
+            PlanStep::Ddl(_)
+            | PlanStep::Dml { .. }
+            | PlanStep::Backfill { .. }
+            | PlanStep::AlterPrimaryKey(_)
+            | PlanStep::AlterColumnType(_)
+            | PlanStep::SynchronizeIdentity(_)
+            | PlanStep::OnlineRename(RenameStep::TableRebuild(_)) => None,
         }
     }
 

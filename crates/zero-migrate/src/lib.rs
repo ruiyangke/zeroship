@@ -165,8 +165,9 @@ pub use zero_migrate_backend::advisory::{
 // V8-free, driver-neutral re-exports. Name no host-driver type and back the
 // SQLite path too — ungated.
 pub use apply::backend::{
-    BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
-    MigrationBackend, MigrationResult, OnlineSchemaChange, ShadowConfig, ShadowDryRun,
+    BackendCapability, BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError,
+    DryRunReport, MigrationBackend, MigrationResult, OnlineSchemaChange, ShadowConfig,
+    ShadowDryRun,
 };
 // `PostgresBackend` IS NOT RE-EXPORTED HERE, and neither is any other vendor's.
 // It lives in `zero-migrate-postgres` with the rest of the PostgreSQL execution

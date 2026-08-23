@@ -1852,6 +1852,12 @@ impl MigrationEngine {
         applied_by: &str,
         recovery_scope: Option<&crate::apply::journal::DeployRecoveryScope<'_>>,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        // A step that needs a capability the target does not have cannot run, and
+        // that is knowable before anything does. Ask it FIRST, ahead of even the
+        // journal bootstrap, because it needs nothing from the database: a plan this
+        // target cannot execute is declined without touching it at all.
+        Self::preflight_plan_capabilities(steps, backend)?;
+
         // **Bootstrap the journal up front.** The journal is the
         // net-applied ledger every sub-step reads (idempotency/net-applied-skip)
         // before it writes. The earlier declarative path always ran a DDL batch
@@ -2505,17 +2511,24 @@ impl MigrationEngine {
                     // Re-expresses the declarative online drive
                     // (`engine.rs:533-552`): run EXPAND+backfill atomically under
                     // the held lock, defer C1/C2 as `pending_contract`.
-                    let Some(online) = backend.online() else {
-                        return Err(DeclarativeApplyError::Plain(EngineError::Apply(
-                            ApplyError::Backend(
-                                "plan carries a PG online rename but the backend has no \
-                                 online schema-change capability (a SQLite rename must be a \
-                                 RenameStep::TableRebuild; an ExpandContract here is a \
-                                 routing bug)"
-                                    .to_string(),
-                            ),
-                        )));
-                    };
+                    // **Capability (defense in depth).** The plan-wide preflight
+                    // already refused a plan whose target cannot expand, and it did
+                    // so before the FIRST step committed - which is the whole point,
+                    // because an `ExpandContract` is rarely a plan's first step and
+                    // everything ahead of it commits in its own transaction. This
+                    // used to be the only place the question was asked, phrased as
+                    // an assertion about an unreachable state ("a routing bug").
+                    // Nothing makes it unreachable: `apply_plan` is public API and
+                    // takes the steps it is handed. So it stays, as a GATE and for
+                    // the same reason the rebuild's scope gate re-checks itself -
+                    // it holds the line for a caller that reaches this loop by some
+                    // other route - and it re-runs the preflight over this one step
+                    // rather than restating the refusal, so the two can never word
+                    // it differently.
+                    Self::preflight_plan_capabilities(std::slice::from_ref(&steps[i]), backend)?;
+                    let online = backend
+                        .online()
+                        .expect("the capability gate above refuses when there is no online path");
                     let scope_version = steps[i]
                         .approval_scope_version()
                         .expect("ExpandContract is always approval-gated");
@@ -3062,6 +3075,60 @@ impl MigrationEngine {
                 ),
             };
             return Err(DeclarativeApplyError::from(EngineError::Apply(error)));
+        }
+        Ok(())
+    }
+
+    /// Refuse the whole plan when any step needs an optional backend capability the
+    /// deploy target does not provide, before the authored loop can commit
+    /// anything.
+    ///
+    /// This is the capability peer of the precondition and timeout preflights, and
+    /// it exists for the same reason: the answer is a property of the PLAN and of
+    /// the TARGET, never of live state, so discovering it at the step that needs the
+    /// capability buys nothing and costs a half-migrated database. A plan shaped
+    /// `[addColumn, addColumn, rename]` against a backend with no online path used
+    /// to commit both columns and then refuse the rename - a schema that is neither
+    /// the old shape nor the new one, and one no retry repairs, because the same
+    /// plan meets the same refusal every time.
+    ///
+    /// Neither half of the question is answered here. The plan states what it
+    /// requires ([`PlanStep::required_capability`]) and the backend states what it
+    /// provides ([`MigrationBackend::provides`]), so this phase cannot come to a
+    /// different conclusion than the seam that would otherwise have discovered the
+    /// gap, and a target that gains a capability needs no change here.
+    ///
+    /// Completed steps are NOT exempt, and that is deliberate: a capability gap is
+    /// not a question about whether THIS run would reach the step. A journal saying
+    /// an expand completed against a backend that cannot expand is evidence of a
+    /// different target, not a licence to proceed - and skipping the check would
+    /// need a journal read, which would make the cheapest refusal in the engine
+    /// depend on the database.
+    ///
+    /// The seam that needs the capability still re-checks it, as defense in depth
+    /// for a direct backend caller that never passes through the engine.
+    ///
+    /// # Errors
+    /// [`ApplyError::UnsupportedCapability`] naming the step, the capability, and
+    /// the dialect that does not provide it. Nothing was applied.
+    fn preflight_plan_capabilities<B: MigrationBackend>(
+        steps: &[PlanStep],
+        backend: &B,
+    ) -> Result<(), DeclarativeApplyError> {
+        for step in steps {
+            let Some((capability, version)) = step.required_capability() else {
+                continue;
+            };
+            if backend.provides(capability) {
+                continue;
+            }
+            return Err(DeclarativeApplyError::from(EngineError::Apply(
+                ApplyError::UnsupportedCapability {
+                    version: version.to_string(),
+                    capability,
+                    dialect: backend.dialect().to_string(),
+                },
+            )));
         }
         Ok(())
     }

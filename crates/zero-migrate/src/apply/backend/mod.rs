@@ -59,8 +59,8 @@ pub mod capability;
 // `zero_migrate_mysql::backend` now, and none is re-exported from here.
 
 pub use capability::{
-    BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
-    OnlineSchemaChange, ShadowConfig, ShadowDryRun,
+    BackendCapability, BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport,
+    MigrationResult, OnlineSchemaChange, ShadowConfig, ShadowDryRun,
 };
 // The progress row a resumable backfill reads back. It moved down beside the
 // `BackfillSpec` it describes progress THROUGH; re-exported so

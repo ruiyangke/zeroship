@@ -22,7 +22,7 @@ pub use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, Backfil
 // `SeedError` carries an `EngineError` — three engine orchestration results.
 // Re-exported so every historical `capability::…` path still resolves.
 pub use zero_migrate_backend::capability::{
-    DryRunReport, MigrationResult, OnlineError, OnlineSchemaChange, ShadowConfig,
+    BackendCapability, DryRunReport, MigrationResult, OnlineError, OnlineSchemaChange, ShadowConfig,
 };
 
 /// A failure of the dry-run harness itself.
