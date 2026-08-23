@@ -325,6 +325,37 @@ impl ReadObligation {
     }
 }
 
+/// Whether a caller asked for work the driver has not finished.
+///
+/// IT DELIBERATELY IGNORES WHETHER THE CONSUMER CHANNEL IS STILL CONNECTED,
+/// and the alternative was measured on 2026-08-23 rather than argued. Making a
+/// response with a hung-up consumer count as NOT awaited is attractive: a
+/// caller that abandons a `RowStream` and then drops the last `Client` makes
+/// `crate::release` shut the socket down under the driver's parked read, and
+/// the resulting EOF is reported as `UnexpectedEof`, "connection closed by
+/// server", for a close this side caused
+/// (`a_client_released_eof_is_reported_as_a_server_close` pins that, wrong
+/// message and all). Two findings say the reachability rule is not the fix:
+///
+/// * It does not fix what prompted it. The intermittent
+///   `serialized_copy_reads_startup_then_excludes_producer_idle_time` failure
+///   happens with `CopyInSink` still holding its `Responses`, so the response
+///   is reachable and stays awaited either way - 9 of 200 runs still failed
+///   with the rule in place.
+/// * It breaks a live invariant.
+///   `integration.rs::losing_the_backend_under_a_live_client_is_still_an_error`
+///   terminates its own backend, reads the FATAL, drops that one stream and
+///   keeps the `Client`. Every outstanding response is then unreachable, so the
+///   rule calls losing a backend under a live client a clean close. Measured
+///   deterministic, 5 of 5.
+///
+/// The wrong message is an ATTRIBUTION defect - who closed the socket - and
+/// reachability cannot answer it. Nor can "the client half is gone":
+/// `backend_error_determined_before_the_last_client_drops_is_still_reported`
+/// pins the interleaving where the server closes FIRST and the client drops
+/// afterwards, which that proxy would also call clean. Answering it needs the
+/// reader to record whether our own release had fired when it saw EOF, and the
+/// serialized loop has no independent reader to record it with.
 fn has_awaited_response(
     responses: &VecDeque<Response>,
     pending_responses: &VecDeque<PendingResponse>,
@@ -1452,6 +1483,14 @@ where
 {
     /// Drive the connection until the client is dropped and all awaited
     /// requests have completed, or a fatal I/O error occurs.
+    ///
+    /// An end-of-stream is "fatal" whenever it interrupted work a caller asked
+    /// for, whether or not that caller is still listening and WHETHER OR NOT
+    /// THIS SIDE CAUSED THE CLOSE. Dropping the last `Client` under an
+    /// outstanding response therefore resolves to `UnexpectedEof`, "connection
+    /// closed by server", even though `crate::release` closed the socket - see
+    /// [`has_awaited_response`] for the two measurements behind keeping it that
+    /// way.
     ///
     /// Splits the socket into owned read/write halves and runs the
     /// [multiplexed loop](Self::run_multiplexed) when possible (always when the
@@ -3613,6 +3652,14 @@ mod tests {
             // read reports `ReadTimeout`, not EOF, and the peer thread passes
             // every one of its own assertions on a failing run.
             //
+            // NOT FIXABLE BY EXCUSING RESPONSES NOBODY IS LISTENING TO. `sink`
+            // still owns the `Responses` here, so this response is reachable
+            // and stays awaited under that rule too. Measured 2026-08-23 by
+            // deleting the loop below with the rule in place: 9 of 200 runs
+            // failed at load 24, every one of them this same `UnexpectedEof`
+            // and no other failure mode. `has_awaited_response` carries why the
+            // rule was rejected outright.
+            //
             // MEASURED 2026-08-23, 200 runs of this test alone at load 15.2
             // against a concurrent workspace build: 14 failures, EVERY one with
             // `transaction_status()` reading `None` at this point, and 0 of the
@@ -3955,5 +4002,160 @@ mod tests {
             vec!["OVERTAKING".to_string()],
             "an unstashed response was not delivered during COPY startup"
         );
+    }
+
+    /// A peer that completes startup, reads one simple query, and then parks
+    /// on its own read until the socket reports EOF. It NEVER answers and
+    /// NEVER closes, so every EOF the driver sees under this fixture was
+    /// caused by `crate::release` shutting the socket down on the client's
+    /// behalf - which is what makes "connection closed by server" a checkable
+    /// misdiagnosis rather than a matter of taste.
+    fn parked_after_query_peer() -> (
+        SocketAddr,
+        oneshot::Receiver<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind parked peer");
+        let address = listener.local_addr().expect("read parked peer address");
+        let (query_read_tx, query_read_rx) = oneshot::channel();
+        let handle = std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("accept driver connection");
+            peer.set_nodelay(true)
+                .expect("disable Nagle on parked peer");
+
+            let mut length = [0; 4];
+            peer.read_exact(&mut length).expect("read startup length");
+            let length = u32::from_be_bytes(length) as usize;
+            let mut startup = vec![0; length - 4];
+            peer.read_exact(&mut startup).expect("read startup body");
+
+            peer.write_all(b"R\0\0\0\x08\0\0\0\0")
+                .expect("write AuthenticationOk");
+            peer.write_all(b"K\0\0\0\x0c\0\0\0\0\0\0\0\0")
+                .expect("write BackendKeyData");
+            peer.write_all(b"Z\0\0\0\x05I")
+                .expect("write startup ReadyForQuery");
+            peer.flush().expect("flush startup response");
+
+            let (tag, _) = read_frontend_message(&mut peer);
+            assert_eq!(tag, b'Q', "expected a simple-query request");
+            let _ = query_read_tx.send(());
+
+            peer.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("bound the parked peer drain");
+            let mut drain = [0; 64];
+            loop {
+                match peer.read(&mut drain) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error) => panic!("parked peer read failed: {error}"),
+                }
+            }
+        });
+        (address, query_read_rx, handle)
+    }
+
+    /// PINS A KNOWN-WRONG MESSAGE, on purpose.
+    ///
+    /// Nobody is listening to this response and no server closed anything: the
+    /// peer parks on its own read and only ever sees the FIN this side sends.
+    /// The close comes from `crate::release`, which shuts the socket down when
+    /// the last `Client` drops. `run` still reports `UnexpectedEof`,
+    /// "connection closed by server".
+    ///
+    /// Excusing responses whose consumer has hung up is the obvious repair and
+    /// it is the wrong one; [`has_awaited_response`] carries the two
+    /// measurements that rejected it, including the live invariant it breaks. A
+    /// real fix has to attribute the close, so this test is what should go red
+    /// when somebody builds that - not something to relax quietly.
+    #[compio::test]
+    async fn a_client_released_eof_is_reported_as_a_server_close() {
+        let (address, query_read, peer) = parked_after_query_peer();
+        let tcp = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect to parked peer");
+        let socket = Socket::new_tcp(tcp);
+        let release = socket
+            .release_handle()
+            .expect("duplicate the client release handle");
+        let config: Config = "user=test dbname=test sslmode=disable"
+            .parse()
+            .expect("parse release-verdict config");
+        let (client, connection) = connect_raw(
+            socket,
+            NoTls,
+            Encryption::Plaintext,
+            true,
+            &config,
+            Some(release),
+        )
+        .await
+        .expect("complete parked startup");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let observer = client
+            .simple_query_raw("SELECT 1")
+            .await
+            .expect("queue the release-verdict request");
+        // The peer has read the query and will never answer it, so the response
+        // is unambiguously outstanding when the client releases the socket.
+        compio::time::timeout(Duration::from_secs(5), query_read)
+            .await
+            .expect("the parked peer did not read the query within 5 seconds")
+            .expect("the query-read observer was dropped");
+
+        drop(observer);
+        drop(client);
+
+        let verdict = compio::time::timeout(Duration::from_secs(5), driver)
+            .await
+            .expect("the connection driver did not finish within 5 seconds")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        peer.join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+        let error = verdict.expect_err(
+            "a client release under an outstanding response became a clean close; \
+             if that was deliberate, read has_awaited_response first",
+        );
+        assert!(
+            is_eof(&error),
+            "the client release failed for some reason other than EOF: {error:?}"
+        );
+    }
+
+    /// The classifier's blindness stated directly, without a socket.
+    ///
+    /// Its control is
+    /// `reader_channel_close_is_an_error_while_an_awaited_response_exists`,
+    /// which is this same shape with the receiver KEPT ALIVE and asserts the
+    /// same verdict. Two tests reaching one answer across the one variable is
+    /// the point: reachability is not consulted.
+    #[test]
+    fn an_unreachable_response_still_counts_as_awaited() {
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        assert!(
+            sender.is_closed(),
+            "the fixture did not disconnect a sender"
+        );
+        let mut responses = VecDeque::from([Response {
+            sender,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            read_obligation: ReadObligation::new(None, false),
+        }]);
+        let pending_responses = VecDeque::new();
+
+        assert!(
+            has_awaited_response(&responses, &pending_responses),
+            "a hung-up consumer stopped its response counting as awaited"
+        );
+        let error = classify_read_terminal(None, &mut responses, &pending_responses)
+            .expect_err("a reader close under an unreachable response was called clean");
+        assert!(error.is_closed());
     }
 }
