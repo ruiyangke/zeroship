@@ -71,13 +71,28 @@ const FORMER_SPELLER: &str = "format_mysql_physical_type";
 /// a vendor to answer a question. The report is prose for an operator, never DDL.
 const ENGINE_FILE_THAT_MAY_SPELL: &str = "apply/drift.rs";
 
-/// The walk's floor over `crates/zero-migrate/src`. Set under the engine's file count
-/// with room for churn but nowhere near zero; raise it deliberately as the engine
-/// grows, and never lower it to get green.
+/// The walk's floor over `crates/zero-migrate/src` — the WEAKER of this file's two
+/// anti-blindness checks, and the one to distrust first.
 ///
 /// A floor ALONE is not enough and this one is not trusted alone: a narrowed walk in
-/// this tree has already come in above its floor. [`ENGINE_FILE_THAT_MAY_SPELL`] is
+/// this tree has already come in ABOVE its floor. [`ENGINE_FILE_THAT_MAY_SPELL`] is
 /// asserted to be IN the walked set, by path, which is the check a count cannot make.
+/// That anchor is what actually holds; this number only catches a walk that collapsed
+/// toward nothing.
+///
+/// **The instruction this comment used to carry was backwards, and the sibling census
+/// `core_names_no_vendor_crate.rs` already says why.** It read "raise it deliberately as
+/// the engine grows" — but the engine is deliberately SHRINKING. Vendor code is being
+/// moved out of it on purpose: `crates/zero-migrate/src` fell 79 -> 77 files in the two
+/// commits that landed underneath this one, and `apply/backend/**` is ~30 more files
+/// scheduled to leave. A count that falls is the project WORKING, so a floor written to
+/// catch growth will fire on a correct tree, and "never lower it to get green" would
+/// then forbid the only correct response.
+///
+/// The rule is narrower than it looks. LOWER it when an extraction legitimately moved
+/// files OUT, and name that extraction in the commit. NEVER lower it to silence a walk
+/// that broke — check [`ENGINE_FILE_THAT_MAY_SPELL`] first, because that is what tells
+/// the two cases apart, and trust it over this number.
 const ENGINE_FILE_FLOOR: usize = 70;
 
 /// The needle's positive control: call sites the allowed file is known to make.
