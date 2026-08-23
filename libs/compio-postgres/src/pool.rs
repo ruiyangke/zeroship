@@ -2463,6 +2463,65 @@ mod tests {
         (address, finish_tx, server)
     }
 
+    /// A fake server that answers every startup handshake it receives until the
+    /// returned sender fires, then reports how many it answered.
+    ///
+    /// The two fixtures around it accept a FIXED number of sessions and block in
+    /// `accept` for the rest, so neither can be asked "how many connections did
+    /// the pool open?": one more attempt than the fixture expects hangs the
+    /// test, and one fewer hangs the server thread. Both outcomes read as an
+    /// unrelated failure. This one polls, so the count is a measurement and an
+    /// over-eager pool is a wrong number rather than a stall.
+    ///
+    /// Each session gets its own `BackendKeyData` process id starting at 45, so
+    /// "the pool reused a connection" and "the pool opened another one" are
+    /// distinguishable at the borrower.
+    fn accepting_postgres_server() -> (
+        std::net::SocketAddr,
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<usize>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel::<()>();
+        let (count_tx, count_rx) = std::sync::mpsc::channel::<usize>();
+        let server = std::thread::spawn(move || {
+            let mut streams: Vec<std::net::TcpStream> = Vec::new();
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let mut length = [0u8; 4];
+                        stream.read_exact(&mut length).unwrap();
+                        let remaining = u32::from_be_bytes(length) as usize - length.len();
+                        let mut startup = vec![0u8; remaining];
+                        stream.read_exact(&mut startup).unwrap();
+
+                        let pid = (45_u32 + streams.len() as u32).to_be_bytes();
+                        stream
+                            .write_all(&[
+                                b'R', 0, 0, 0, 8, 0, 0, 0, 0, b'K', 0, 0, 0, 12, pid[0], pid[1],
+                                pid[2], pid[3], 0, 0, 0, 46, b'Z', 0, 0, 0, 5, b'I',
+                            ])
+                            .unwrap();
+                        streams.push(stream);
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if finish_rx.try_recv().is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = count_tx.send(streams.len());
+        });
+        (address, finish_tx, count_rx, server)
+    }
+
     fn two_session_postgres_server() -> (
         std::net::SocketAddr,
         futures_channel::oneshot::Receiver<[bool; 2]>,
@@ -3442,6 +3501,197 @@ mod tests {
         drop(pool);
         let _ = finish_tx.send(());
         server.join().expect("fake PostgreSQL server panicked");
+    }
+
+    /// Drive one housekeeping refill whose FIRST `after_connect` parks, move the
+    /// pool's `total` to `contended_total` while it is parked, then let it
+    /// finish. Reports how many physical sessions that refill opened, counted
+    /// twice: at the hook, and at the server that answered the handshakes.
+    ///
+    /// `contended_total` models the acquisitions that claimed capacity while the
+    /// refill was inside its hook - the exact state the loop's reservation
+    /// budget was computed BEFORE. `min_idle` 2 against `max_size` 3 makes that
+    /// budget 2 in both directions, so the budget is not what varies here.
+    async fn refill_sessions_opened_when_total_reaches(
+        contended_total: usize,
+    ) -> (usize, usize, usize) {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let mut config = PoolConfig {
+            max_size: 3,
+            min_idle: 2,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let entered = Rc::new(Cell::new(0_usize));
+        let (release_tx, release_rx) = futures_channel::oneshot::channel();
+        let gate = Rc::new(RefCell::new(Some(release_rx)));
+        let hook_entered = Rc::clone(&entered);
+        let hook_gate = Rc::clone(&gate);
+        config.after_connect(move |_client| {
+            hook_entered.set(hook_entered.get() + 1);
+            // Only the first refill connection parks; a second one must be free
+            // to run to completion so that "it opened one" and "it opened two"
+            // differ in the count, not in whether the test finishes.
+            let gate = hook_gate.borrow_mut().take();
+            Box::pin(async move {
+                if let Some(gate) = gate {
+                    let _ = gate.await;
+                }
+                Ok(())
+            })
+        });
+
+        let mut pool = test_pool(config, Vec::new(), 0, 0);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+        let pool = Rc::new(pool);
+        let weak = Rc::downgrade(&pool);
+        let housekeeping = compio::runtime::spawn(async move { Pool::housekeep(&weak).await });
+
+        compio::time::timeout(Duration::from_secs(5), async {
+            while entered.get() == 0 {
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("housekeeping refill never reached after_connect");
+
+        // Concurrent acquisitions take capacity while the refill is parked. The
+        // parked candidate holds one slot itself, so the rest are active.
+        pool.total.set(contended_total);
+        pool.active.set(contended_total - 1);
+        release_tx.send(()).expect("after_connect gate was dropped");
+        assert!(
+            compio::time::timeout(Duration::from_secs(5), housekeeping)
+                .await
+                .expect("housekeeping refill did not finish")
+                .expect("housekeeping task panicked"),
+            "housekeeping reported the pool gone or closed"
+        );
+
+        let final_total = pool.total_count();
+        drop(pool);
+        let _ = finish_tx.send(());
+        let answered = count_rx
+            .recv()
+            .expect("fake PostgreSQL server never reported its session count");
+        server.join().expect("fake PostgreSQL server panicked");
+        (entered.get(), answered, final_total)
+    }
+
+    /// The refill loop must RE-CHECK capacity after each await, not trust the
+    /// budget it computed before the first one.
+    ///
+    /// The budget is read once, before `connect_one`, and stops being true at
+    /// that await: acquisitions reserve slots while this task is parked. Without
+    /// the re-check the second iteration reserves a slot the pool no longer has
+    /// and opens a physical connection past `max_size` - which is the whole
+    /// point of `max_size`, and which nothing in this suite ruled on until now.
+    #[compio::test]
+    async fn housekeeping_refill_rechecks_capacity_after_its_hook_await() {
+        let (hook_calls, sessions, total) = refill_sessions_opened_when_total_reaches(3).await;
+        assert_eq!(
+            (hook_calls, sessions),
+            (1, 1),
+            "refill opened a second connection after acquisitions took the last slot"
+        );
+        assert_eq!(total, 3, "refill reserved capacity past max_size");
+    }
+
+    /// One-variable control for the test above: the same interleaving, with the
+    /// concurrent acquisitions taking only PART of the capacity.
+    ///
+    /// It must reach the OPPOSITE conclusion - the second connection is opened -
+    /// or the test above would also pass on a refill loop that gave up after one
+    /// connection for any reason at all, which is not the claim.
+    #[compio::test]
+    async fn housekeeping_refill_uses_capacity_still_free_after_its_hook_await() {
+        let (hook_calls, sessions, total) = refill_sessions_opened_when_total_reaches(2).await;
+        assert_eq!(
+            (hook_calls, sessions),
+            (2, 2),
+            "refill abandoned capacity that was still free"
+        );
+        assert_eq!(total, 3);
+    }
+
+    /// Check out one connection from a pool holding a single idle entry aged
+    /// `remaining_lifetime`, and report which backend the borrower got plus how
+    /// many evictions the checkout recorded.
+    ///
+    /// The seeded entry announces process id 99; every connection the fake
+    /// server answers announces 45 upward. "The pool reused the pooled session"
+    /// and "the pool opened a replacement" are therefore distinguishable at the
+    /// borrower rather than inferred from a counter.
+    async fn checkout_backend_for_idle_entry_with_lifetime(
+        remaining_lifetime: Duration,
+    ) -> (i32, u64) {
+        let (address, finish_tx, count_rx, server) = accepting_postgres_server();
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            // No round trip on the seeded entry: it is neither dirty nor stale,
+            // so the expiry check is the only thing that can reject it.
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (seeded, _seeded_receiver) = fake_client(99);
+        let entry = PoolEntry::new(seeded, remaining_lifetime);
+        let mut pool = test_pool(config, vec![entry], 0, 1);
+        pool.transport = Transport::resolve(
+            format!("postgres://postgres@{address}/fake?sslmode=disable")
+                .parse()
+                .unwrap(),
+        )
+        .unwrap();
+
+        let client = compio::time::timeout(Duration::from_secs(5), pool.get())
+            .await
+            .expect("checkout did not finish")
+            .expect("checkout failed");
+        let process_id = client.process_id();
+        let evictions = pool.metrics.evictions.get();
+
+        drop(client);
+        drop(pool);
+        let _ = finish_tx.send(());
+        let _ = count_rx.recv();
+        server.join().expect("fake PostgreSQL server panicked");
+        (process_id, evictions)
+    }
+
+    /// Checkout enforces `max_lifetime` itself, not only through housekeeping.
+    ///
+    /// The housekeeper is optional - [`Pool::start_housekeeper`] is a separate
+    /// call and its documented absence means "connections are never proactively
+    /// evicted", not "connections are handed out forever". So on a pool that
+    /// never started one, this arm is the ONLY thing enforcing `max_lifetime`,
+    /// and nothing in this suite ruled on it: deleting the check left every
+    /// other test printing exactly what an enforcing pool prints.
+    #[compio::test]
+    async fn checkout_evicts_an_idle_entry_past_its_max_lifetime() {
+        assert_eq!(
+            checkout_backend_for_idle_entry_with_lifetime(Duration::ZERO).await,
+            (45, 1),
+            "checkout handed out an entry past max_lifetime"
+        );
+    }
+
+    /// One-variable control: the same fixture with lifetime left on the entry.
+    /// The borrower must get the POOLED backend, and nothing may be evicted, or
+    /// the test above would also pass on a checkout that discarded every idle
+    /// entry it touched.
+    #[compio::test]
+    async fn checkout_reuses_an_idle_entry_inside_its_max_lifetime() {
+        assert_eq!(
+            checkout_backend_for_idle_entry_with_lifetime(Duration::from_secs(600)).await,
+            (99, 0),
+            "checkout discarded an entry that was still inside its max_lifetime"
+        );
     }
 
     #[compio::test]
