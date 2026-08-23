@@ -101,8 +101,21 @@
 //! do. [`probe_owner`] sorts the prefix match three ways: this process's own pid is
 //! always this run's leak; a foreign pid that is still running is a sibling
 //! mid-flight and is ignored; a foreign pid that has exited leaked its schema and
-//! still fails the run. Two limits are known and measured, both narrow:
+//! still fails the run. The limits are known and measured, and each is narrow:
 //!
+//!   - A KILLED RUN. The per-row `SchemaGuard` reclaims on a normal return AND on an
+//!     unwind, so a panicking row leaks nothing - measured, by panicking between the
+//!     CREATE and the end of the guard's scope, against a `pg_namespace` that came
+//!     back empty. A SIGNAL is the case `Drop` cannot reach: SIGINT, SIGTERM and
+//!     SIGKILL all end the process without unwinding, so a run killed mid-row leaves
+//!     that row's schema pair on the server - measured, by SIGTERM mid-sweep. The
+//!     next run then reports that pair under "a process that has since exited", and
+//!     that report is this guard WORKING. The leak is real and the run that made it
+//!     is already gone, so the run that finds it is the only one left to report it.
+//!     Drop the named schemas and re-run. Reading that report as a flake - or
+//!     relaxing this assertion to silence it - is how a real leak gets waved through.
+//!     A run cannot leak SILENTLY: its own leftovers carry its own live pid, which
+//!     the sweep's closing assertion fails on before it reports any ledger.
 //!   - PID REUSE. A leak from a dead run whose pid has since been recycled by some
 //!     unrelated live process reads as in-flight and is not reported until that
 //!     process exits. Detection is delayed, never dropped - the schema keeps
