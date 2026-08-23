@@ -780,7 +780,7 @@ fn format_generated_kind(kind: GeneratedKindSnapshot) -> &'static str {
 fn comparable_column_default(
     raw: Option<&str>,
     vendor: Option<&zero_migrate_backend::registry::BackendVendor>,
-    mysql_expression_default: Option<bool>,
+    expression_default: Option<bool>,
 ) -> Option<IdDefaultSnapshot> {
     let Some(raw) = raw else {
         return Some(IdDefaultSnapshot::Absent);
@@ -792,14 +792,15 @@ fn comparable_column_default(
     let dialect = &vendor.descriptor.id;
     // MySQL reports `COLUMN_DEFAULT` in its COERCED character form, without SQL
     // quotes, so the two sides only meet once the authored key is projected into
-    // that same storage spelling. `mysql_expression_default` is the authoritative
-    // literal-vs-expression bit; the authored side has none and does not need one,
-    // because its text still carries its quotes.
+    // that same storage spelling. `expression_default` is the authoritative
+    // literal-vs-expression bit, carried by whichever backend declares its catalog
+    // marker authoritative rather than by a named dialect; the authored side has
+    // none and does not need one, because its text still carries its quotes.
     let key = if vendor
         .value_format
         .catalog_default_marker_is_authoritative()
     {
-        catalog_text_id_default(Some(raw), dialect, mysql_expression_default)
+        catalog_text_id_default(Some(raw), dialect, expression_default)
     } else {
         catalog_id_default(Some(raw), dialect, None)
     };
