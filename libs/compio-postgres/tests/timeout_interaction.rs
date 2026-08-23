@@ -666,6 +666,24 @@ async fn acquire_timeout_cannot_steal_a_connection_in_command_recovery() {
             release_cancel_tx
                 .send(())
                 .expect("scripted recovery dropped its release receiver");
+            // THIS FAILURE IS OVER-DETERMINED, and the count assertions around
+            // it are what carry the test's name. `pool_config` sets
+            // `max_size(1)` and `client` holds a live lease across the whole
+            // join, so a competing `get()` must time out whether or not
+            // "recovery" is a distinguished state at all -- a plain saturated
+            // pool produces this same `connection timeout after`. Read it as
+            // "the waiter was refused cleanly and classified as a pool acquire
+            // timeout", not as evidence about recovery.
+            //
+            // What IS about recovery: `active_count() == 1` and
+            // `idle_count() == 0` here and above, taken after the CancelRequest
+            // has been observed. A pool that released the entry when the
+            // command future entered recovery would show it idle and would hand
+            // it over. Proving the stronger claim needs the slot to be
+            // available in principle -- `max_size(2)`, a listener that accepts
+            // the second dial, and `assert_ne!(second.process_id(), 404)` --
+            // which is a larger change to a delicately scripted peer than this
+            // is worth; the counts already fail on the bug this guards.
             let error = acquire.expect_err("competing caller stole the recovering entry");
             assert!(
                 common::error_chain(&error).contains("connection timeout after"),
