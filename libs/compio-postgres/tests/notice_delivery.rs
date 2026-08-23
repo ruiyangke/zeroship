@@ -22,13 +22,13 @@
 //! green, so the severity assertions discriminate and the second test is a
 //! real control rather than a duplicate.
 //!
-//! The DELIVERY half was NOT mutation-proven. Breaking it means editing the
-//! `NoticeResponse` routing in `connection.rs`, which another agent was
-//! actively changing when these were written, and mutating a file underneath
-//! someone else's work produces a result neither of us can trust. So read the
-//! delivery assertions as unproven-by-mutation: they pass today, and nobody
-//! has watched them fail. Worth closing with a one-line mutation
-//! (`AsyncMessage::Notice` send removed) the next time that file is quiet.
+//! The DELIVERY half is mutation-proven too, closed later the same day once
+//! `connection.rs` was no longer being edited by another agent (mutating a
+//! file underneath someone else's work gives a result neither of us can
+//! trust). Replacing the `AsyncMessage::Notice` send with the `log::info!`
+//! arm -- so a notice is logged and dropped rather than routed -- turns ALL
+//! THREE tests below red on the delivery timeout, and restoring it makes them
+//! green. So a notice that stops reaching the caller now fails here.
 
 use compio_postgres::error::Severity;
 use compio_postgres::{AsyncMessage, NoTls};
