@@ -317,9 +317,7 @@ async fn the_session_attrs_probe_runs_before_after_connect() {
     // all produce an error AND a hook that never ran. The test would then have
     // asserted an ordering while its evidence was "nothing happened".
     let cause = common::error_chain(
-        &outcome
-            .err()
-            .expect("a writable server satisfied target_session_attrs=read-only"),
+        &outcome.expect_err("a writable server satisfied target_session_attrs=read-only"),
     );
     assert!(
         cause.contains("target session attributes"),

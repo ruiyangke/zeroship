@@ -313,8 +313,7 @@ fn read_timeout_is_opt_in_connection_policy() {
         .expect("the control DSN must parse, or the rejection below proves nothing");
     let rejected = "host=localhost read_timeout=1"
         .parse::<Config>()
-        .err()
-        .expect("programmatic read policy became a libpq-looking DSN parameter");
+        .expect_err("programmatic read policy became a libpq-looking DSN parameter");
     let cause = common::error_chain(&rejected);
     assert!(
         cause.contains("unknown option") && cause.contains("read_timeout"),
