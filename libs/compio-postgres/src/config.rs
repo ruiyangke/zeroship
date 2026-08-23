@@ -2263,8 +2263,23 @@ impl<'a> UrlParser<'a> {
             };
 
             self.host_param(host)?;
+            // APPEND, and do not route through `param("port", ..)`, which
+            // clears so that a repeated keyword overrides. This loop runs once
+            // per host in the authority, so clearing here would leave only the
+            // LAST host's port and dial every earlier host on the wrong one.
+            // `host_param` above appends for the same reason.
+            //
+            // A `?port=` in the query string still overrides the whole list,
+            // because that arrives through `param` and the query is parsed
+            // after the authority -- which is libpq's precedence.
             let port = self.decode(port.unwrap_or("5432"))?;
-            self.config.param("port", &port)?;
+            let port: u16 = if port.is_empty() {
+                5432
+            } else {
+                port.parse()
+                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("port"))))?
+            };
+            self.config.port(port);
         }
 
         Ok(())
