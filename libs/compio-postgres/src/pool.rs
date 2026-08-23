@@ -1115,15 +1115,34 @@ impl Pool {
                     continue;
                 }
 
-                // Dirty barrier: if a Transaction::drop left a fire-and-forget
-                // ROLLBACK on the wire, we must drain it before handing the
-                // client out — otherwise the next caller could inherit a
-                // broken-transaction state (if the ROLLBACK failed) or race
-                // against in-flight messages. `simple_query("")` serializes
-                // behind the pending ROLLBACK because the Connection
-                // processes requests FIFO, so once it returns Ok the queued
-                // ROLLBACK has completed. On error, the connection is
-                // genuinely broken: evict it.
+                // Dirty barrier: if a `Transaction::drop` or a release left a
+                // fire-and-forget ROLLBACK on the wire, drain it before handing
+                // the client out, so the next caller cannot race against
+                // in-flight messages. `simple_query("")` serializes behind the
+                // pending command because the Connection processes requests
+                // FIFO, so an `Ok` here means every earlier request has reached
+                // its own `ReadyForQuery`. An `Err` means this round trip itself
+                // did not complete: evict.
+                //
+                // THAT IS ALL AN `Ok` MEANS, and this comment used to claim
+                // more - that the barrier keeps the next caller from inheriting
+                // a broken transaction "if the ROLLBACK failed". It cannot see
+                // that. The queued command's outcome went to its own dropped
+                // response channel, and an empty simple query returns `Ok`
+                // inside an open OR an aborted transaction, so the barrier
+                // clears `dirty` on a session it never proved idle.
+                // `__private_api_rollback` carries the same wrong claim about
+                // this code for its encode-failure arm ("the pool's next-get
+                // barrier will still detect + evict it").
+                //
+                // What actually keeps a transaction off the next borrower is
+                // `return_client`, which queues a ROLLBACK unconditionally
+                // unless the session is provably `Idle` - never this barrier.
+                // Making the claim true costs one line (require
+                // `transaction_status() == Some(Idle)` after the `Ok` and evict
+                // otherwise) but is not here, because with release rolling back
+                // unconditionally there is no interleaving that reaches it, and
+                // an unreachable guard is a claim in its own right.
                 //
                 // Runs regardless of `validation_bypass` — a dirty
                 // connection must be validated even if last_used is
