@@ -136,6 +136,92 @@ fn the_parity_table_covers_every_parameter_libpq_18_accepts() {
     );
 }
 
+/// The count above cannot see a SUBSTITUTION: add one parameter and drop
+/// another and it still reads 50, so the table can drift to a different set of
+/// keys while its floor stays green. This pins the set itself.
+///
+/// The list was not copied from the documentation. It was derived on
+/// 2026-08-23 by probing the libpq the test server actually ships
+/// (`libpq.so.5.18`, PostgreSQL 18) with a URL whose host does not resolve:
+/// libpq validates parameter NAMES before it does any network I/O, so an
+/// unknown key answers `invalid URI query parameter` while a known key gets as
+/// far as `could not translate host name`. Two different messages, therefore a
+/// probe that discriminates. Candidates came from the strings in that binary,
+/// plus every underscore-delimited tail of each -- without the tails the sweep
+/// missed `application_name`, `host` and `password`, because a C compiler
+/// stores a literal that is a suffix of another as a pointer into it, so
+/// `application_name` never appears standalone inside
+/// `fallback_application_name`.
+///
+/// To re-derive after a libpq upgrade, repeat that sweep rather than reading a
+/// release note; `host` is the one accepted key deliberately absent here, for
+/// the reason given above.
+#[test]
+fn the_parity_table_names_exactly_the_parameters_libpq_18_accepts() {
+    const EXPECTED: &[&str] = &[
+        "application_name",
+        "channel_binding",
+        "client_encoding",
+        "connect_timeout",
+        "dbname",
+        "fallback_application_name",
+        "gssdelegation",
+        "gssencmode",
+        "gsslib",
+        "hostaddr",
+        "keepalives",
+        "keepalives_count",
+        "keepalives_idle",
+        "keepalives_interval",
+        "krbsrvname",
+        "load_balance_hosts",
+        "max_protocol_version",
+        "min_protocol_version",
+        "oauth_client_id",
+        "oauth_client_secret",
+        "oauth_issuer",
+        "oauth_scope",
+        "options",
+        "passfile",
+        "password",
+        "port",
+        "replication",
+        "require_auth",
+        "requirepeer",
+        "requiressl",
+        "scram_client_key",
+        "scram_server_key",
+        "service",
+        "ssl_max_protocol_version",
+        "ssl_min_protocol_version",
+        "sslcert",
+        "sslcertmode",
+        "sslcompression",
+        "sslcrl",
+        "sslcrldir",
+        "sslkey",
+        "sslkeylogfile",
+        "sslmode",
+        "sslnegotiation",
+        "sslpassword",
+        "sslrootcert",
+        "sslsni",
+        "target_session_attrs",
+        "tcp_user_timeout",
+        "user",
+    ];
+
+    let mut actual: Vec<&str> = LIBPQ_PARAMETERS.iter().map(|(key, _, _)| *key).collect();
+    actual.sort_unstable();
+
+    // Sorting also makes a duplicated row visible: a table that names one key
+    // twice and another not at all still has 50 entries.
+    assert_eq!(
+        actual, EXPECTED,
+        "the parity table no longer names libpq 18's parameter set"
+    );
+}
+
 /// A repeated key REPLACES, as libpq does; only a comma builds a host list.
 ///
 /// This crate accepted `host=a host=b` as a two-host FAILOVER list, so a
