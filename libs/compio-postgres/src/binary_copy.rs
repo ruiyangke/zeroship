@@ -76,21 +76,20 @@ impl BinaryCopyInWriter {
             values.len(),
         );
 
-        this.buf.put_i16(this.types.len() as i16);
-
-        for (i, (value, type_)) in values.zip(this.types).enumerate() {
-            let idx = this.buf.len();
-            this.buf.put_i32(0);
-            let len = match value
-                .borrow_to_sql()
-                .to_sql_checked(type_, this.buf)
-                .map_err(|e| Error::to_sql(e, i))?
-            {
-                IsNull::Yes => -1,
-                IsNull::No => i32::try_from(this.buf.len() - idx - 4)
-                    .map_err(|e| Error::encode(io::Error::new(io::ErrorKind::InvalidInput, e)))?,
-            };
-            BigEndian::write_i32(&mut this.buf[idx..], len);
+        // A row is ATOMIC in this buffer. `encode_row` writes the tuple header
+        // and then hands the same buffer to each value's `to_sql`, so a value
+        // that is refused -- on `accepts`, or partway through its own encoding
+        // -- leaves the field count, a length placeholder still reading zero,
+        // and whatever it managed to append. Nothing downstream can tell that
+        // stub from a row: `[count][len=0]` is a legal empty value PostgreSQL
+        // INSERTS, and stray value bytes are read as the next tuple's field
+        // count. Rewinding to the row boundary is what makes a `write_raw`
+        // that returned `Err` mean "this row did not happen", which is the
+        // only thing a caller holding a per-row error can act on.
+        let checkpoint = this.buf.len();
+        if let Err(error) = encode_row(this.buf, this.types.as_slice(), values) {
+            this.buf.truncate(checkpoint);
+            return Err(error);
         }
 
         if this.buf.len() > 4096 {
@@ -110,6 +109,37 @@ impl BinaryCopyInWriter {
         this.sink.send(this.buf.split().freeze()).await?;
         this.sink.finish().await
     }
+}
+
+/// Append one tuple -- field count, then a four-byte length and its payload per
+/// value -- to `buf`.
+///
+/// Separated from `write_raw` so every early return is a single `?` inside one
+/// function whose failures the caller undoes wholesale. Inline, each `?` was a
+/// separate exit leaving a different amount of the row behind.
+fn encode_row<P, I>(buf: &mut BytesMut, types: &[Type], values: I) -> Result<(), Error>
+where
+    P: BorrowToSql,
+    I: Iterator<Item = P>,
+{
+    buf.put_i16(types.len() as i16);
+
+    for (i, (value, type_)) in values.zip(types).enumerate() {
+        let idx = buf.len();
+        buf.put_i32(0);
+        let len = match value
+            .borrow_to_sql()
+            .to_sql_checked(type_, buf)
+            .map_err(|e| Error::to_sql(e, i))?
+        {
+            IsNull::Yes => -1,
+            IsNull::No => i32::try_from(buf.len() - idx - 4)
+                .map_err(|e| Error::encode(io::Error::new(io::ErrorKind::InvalidInput, e)))?,
+        };
+        BigEndian::write_i32(&mut buf[idx..], len);
+    }
+
+    Ok(())
 }
 
 struct Header {
@@ -187,6 +217,27 @@ impl Stream for BinaryCopyOutStream {
                 ranges.push(Some(start..start + len));
                 chunk.advance(len);
             }
+        }
+
+        // Every byte of a binary tuple is accounted for above, so a conforming
+        // peer leaves NOTHING here: the PostgreSQL protocol's COPY Operations
+        // section binds the backend to "zero or more CopyData messages (always
+        // one per row)" in copy-out mode -- the frontend direction is
+        // explicitly free to frame arbitrarily, this one is not. Whatever is
+        // still in the chunk therefore belongs to tuples that will never be
+        // returned, because the next poll reads the NEXT message. Dropping
+        // them silently hands the caller a SHORT result with no error, which
+        // is the one failure a caller cannot detect. Parsing on instead would
+        // not close it: a peer free to pack two tuples into a message is
+        // equally free to split one across two.
+        if chunk.has_remaining() {
+            return Poll::Ready(Some(Err(Error::parse(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} trailing bytes after a binary COPY tuple",
+                    chunk.remaining()
+                ),
+            )))));
         }
 
         Poll::Ready(Some(Ok(BinaryCopyOutRow {
