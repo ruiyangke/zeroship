@@ -53,7 +53,7 @@ use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot,
     FunctionIdentity, FunctionKey, GeneratedKindSnapshot, IdDefaultSnapshot, IndexElementSnapshot,
-    IndexSnapshot, MysqlPhysicalType, PartitionSnapshot, PolicyIdentity, PolicyKey, RoleSnapshot,
+    IndexSnapshot, MysqlPhysicalType, PolicyIdentity, PolicyKey, RoleSnapshot,
     SchemaObjectSnapshot, SchemaSnapshot, SequenceSnapshot, TableSnapshot, TriggerIdentity,
     TriggerKey, VendorObjectIdentities,
 };
@@ -72,44 +72,16 @@ pub use zero_migrate_backend::drift::{
     compare_applied_to_set, AlteredObject, ChecksumDrift, ChecksumDriftReport, DriftError,
     DriftReport, OrphanJournal, StructuralDrift,
 };
+// The one-partition declared-vs-live comparison followed the existence-guard decider
+// down. Both this module's structural differ and that decider read it, and they must
+// read the SAME one — a second, drifting copy in the probe is exactly how a guard and
+// a drift report come to disagree about the same catalog — so it now sits beside the
+// decider rather than one crate above it.
+pub(crate) use zero_migrate_backend::drift::partition_divergences;
 
 // ---------------------------------------------------------------------------
 // B2 — structural introspection + pure diff
 // ---------------------------------------------------------------------------
-
-/// Compare ONE same-name child partition declared-vs-live, as `(field, expected,
-/// actual)` triples in declaration order (`of` before `bounds`).
-///
-/// Hoisted out of [`diff_snapshots`] so the structural differ and the
-/// existence-guard partition probe ([`crate::render::existence_probe::decide`])
-/// share ONE definition of "the same partition": a second, drifting copy in the
-/// probe is exactly how a guard and a drift report come to disagree about the same
-/// catalog.
-///
-/// `bounds` equality is the derived `PartitionBounds` `PartialEq`, which is already
-/// the canonical comparison: `snapshot_schema` parses `pg_get_expr` back into the
-/// same enum, so an integer bound round-trips (PostgreSQL prints it unquoted). It
-/// does NOT canonicalize literal SPELLING across types: a timestamptz bound
-/// authored as `2026-05-01T00:00:00Z` and printed by the catalog as
-/// `2026-05-01 00:00:00+00` compares unequal, which the probe reports as drift
-/// rather than resolving.
-pub(crate) fn partition_divergences(
-    expected: &PartitionSnapshot,
-    actual: &PartitionSnapshot,
-) -> Vec<(&'static str, String, String)> {
-    let mut out = Vec::new();
-    if expected.of != actual.of {
-        out.push(("of", expected.of.clone(), actual.of.clone()));
-    }
-    if expected.bounds != actual.bounds {
-        out.push((
-            "bounds",
-            format!("{:?}", expected.bounds),
-            format!("{:?}", actual.bounds),
-        ));
-    }
-    out
-}
 
 /// Diff an **expected** snapshot against the **actual** (live) snapshot — a PURE
 /// function, no I/O, no DDL.

@@ -27,6 +27,7 @@ use std::collections::BTreeMap;
 
 use crate::executor::BackendError;
 use crate::journal::{AppliedEntry, JournalError, Phase};
+use crate::snapshot::PartitionSnapshot;
 use zero_migrate_ir::migration::Migration;
 
 /// A net-applied version whose journal checksum no longer matches the supplied
@@ -294,4 +295,38 @@ pub fn compare_applied_to_set(
         }
     }
     report
+}
+
+/// Compare ONE same-name child partition declared-vs-live, as `(field, expected,
+/// actual)` triples in declaration order (`of` before `bounds`).
+///
+/// Hoisted out of the engine's `diff_snapshots` so the structural differ and the
+/// existence-guard partition probe ([`crate::existence_probe::decide`])
+/// share ONE definition of "the same partition": a second, drifting copy in the
+/// probe is exactly how a guard and a drift report come to disagree about the same
+/// catalog.
+///
+/// `bounds` equality is the derived `PartitionBounds` `PartialEq`, which is already
+/// the canonical comparison: `snapshot_schema` parses `pg_get_expr` back into the
+/// same enum, so an integer bound round-trips (PostgreSQL prints it unquoted). It
+/// does NOT canonicalize literal SPELLING across types: a timestamptz bound
+/// authored as `2026-05-01T00:00:00Z` and printed by the catalog as
+/// `2026-05-01 00:00:00+00` compares unequal, which the probe reports as drift
+/// rather than resolving.
+pub fn partition_divergences(
+    expected: &PartitionSnapshot,
+    actual: &PartitionSnapshot,
+) -> Vec<(&'static str, String, String)> {
+    let mut out = Vec::new();
+    if expected.of != actual.of {
+        out.push(("of", expected.of.clone(), actual.of.clone()));
+    }
+    if expected.bounds != actual.bounds {
+        out.push((
+            "bounds",
+            format!("{:?}", expected.bounds),
+            format!("{:?}", actual.bounds),
+        ));
+    }
+    out
 }

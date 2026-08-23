@@ -27,6 +27,7 @@ mod dialectal_containers_are_expanded;
 mod dialectal_ops;
 mod dml_emitters_do_not_relookup_a_backend;
 mod every_backend_states_its_advisory_posture;
+mod existence_probe_decides_per_dialect_leg;
 mod gen_types_dialectal_runtime_metadata;
 mod gen_types_dialectal_table_shape;
 mod gen_types_drop_column_dialect_legs;

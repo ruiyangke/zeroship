@@ -1,7 +1,44 @@
 pub(crate) mod backends;
 pub mod declarative;
 pub mod dml;
-pub mod existence_probe;
+// ── The existence-guard DECIDER moved into `zero-migrate-backend`. It had to: the
+// only production callers are the three backends' session paths, and a backend in
+// its own crate cannot reach an engine module. Nothing about it was engine-shaped —
+// every private helper below `decide` was already parameterized by
+// `&BackendVendor`, and `decide` itself resolved one from a `DialectId`, which was
+// the single line that had to change.
+//
+// What stays HERE is that resolution, and only that. The engine looks the vendor up
+// and hands it down; a vendor hands its OWN `VENDOR` down and never asks. That is
+// the same split `render::backends` draws everywhere else, and it is why this is a
+// shim rather than a `pub use` of the whole module: a bare re-export would put the
+// vendor-taking `decide` on the engine's surface under the name its dialect-taking
+// callers use.
+pub mod existence_probe {
+    pub use zero_migrate_backend::existence_probe::{
+        Divergence, ExistenceProbePolicy, GuardVerdict,
+    };
+
+    use zero_migrate_backend::snapshot::SchemaSnapshot;
+    use zero_migrate_ir::dialect::DialectId;
+    use zero_migrate_ir::probe::GuardProbe;
+
+    /// Decide the verdict for `probe` against the LIVE catalog `live`, resolving
+    /// `dialect`'s registered backend through the build's vendor registry.
+    ///
+    /// The engine's entry point. A backend that already knows which vendor it is
+    /// calls [`zero_migrate_backend::existence_probe::decide`] with its own
+    /// `BackendVendor` instead — see that function for the per-variant fail-closed
+    /// rules, which is where all of them now live.
+    #[must_use]
+    pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: &DialectId) -> GuardVerdict {
+        zero_migrate_backend::existence_probe::decide(
+            probe,
+            live,
+            crate::render::backends::vendor(dialect),
+        )
+    }
+}
 pub mod expand_contract;
 pub mod fold;
 pub mod gen_types;

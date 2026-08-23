@@ -53,8 +53,6 @@
 //! * `zero_migrate::render::value_format` — `catalog_id_default`,
 //!   `catalog_text_id_default`, `catalog_uuid_id_default`, `recover_format_check`
 //!   and `RecoveredFormatCheck`, read by `drift_sql.rs`.
-//! * `zero_migrate::render::existence_probe` — `decide` and `GuardVerdict`, read by
-//!   `session.rs`.
 //! * `zero_migrate::render::declarative` — `constraintdef_cols` and
 //!   `ir_fk_constraint_snapshot_for_columns`, read by `drift_sql.rs`.
 //!
@@ -66,10 +64,13 @@ use zero_migrate_backend::backend::{PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_
 use zero_migrate_backend::conn::ExecutorConfig;
 use zero_migrate_backend::drift::{compare_applied_to_set, ChecksumDriftReport};
 use zero_migrate_backend::executor::{authorize_existence_guard_schema, ApplyError};
+use zero_migrate_backend::existence_probe::{decide, GuardVerdict};
 use zero_migrate_backend::fault;
 use zero_migrate_backend::journal::AppliedEntry;
+use zero_migrate_backend::snapshot::SchemaSnapshot;
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::migration::Migration;
+use zero_migrate_ir::probe::{GuardDir, GuardProbe};
 
 /// The crash-simulation seam the two-phase MySQL apply trips at.
 ///
@@ -152,4 +153,33 @@ fn the_checksum_drift_comparison_is_reachable() {
 fn the_existence_guard_authorization_is_reachable() {
     let _: fn(&ExecutorConfig, &str, &str, &DialectId) -> Result<(), ApplyError> =
         authorize_existence_guard_schema;
+}
+
+/// The existence-guard DECIDER, reached with MySQL's own vendor rather than by
+/// asking the registry which backend handles MySQL.
+///
+/// That distinction is the whole reason `decide` takes a `&BackendVendor` now: this
+/// crate knows which vendor it is, and `registry_resolution_stays_core_only` reads
+/// this crate. The case exercised is the one that must never depend on a vendor at
+/// all — an `IfNotExists` table probe against an EMPTY live catalog runs bare — so a
+/// `decide` wired to nothing would still have to answer it correctly.
+#[test]
+fn the_existence_guard_decider_answers_for_this_vendor() {
+    let probe = GuardProbe::Table {
+        schema: "app".to_string(),
+        table: "orders".to_string(),
+        direction: GuardDir::IfNotExists,
+        expect_columns: Vec::new(),
+    };
+    assert_eq!(
+        decide(
+            &probe,
+            &SchemaSnapshot::default(),
+            &zero_migrate_mysql::VENDOR
+        ),
+        GuardVerdict::RunBare,
+        "an ifNotExists probe for a table absent from the live catalog did not run \
+         bare, so a guarded MySQL createTable would be skipped or fail closed on an \
+         empty database"
+    );
 }
