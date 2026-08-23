@@ -1,4 +1,7 @@
-//! The STRUCTURAL expression-AST validator + the structured-error envelope.
+//! The POLICY-BOUND validator, over the closed expression AST. The structural
+//! walk and the structured-error envelope now live in [`zero_migrate_ir::validate`]
+//! and are re-exported below so callers name them unchanged; see
+//! "Structural vs. policy split".
 //!
 //! The closed expression AST ([`crate::model::expr::Expr`]) is **constructed in JS and
 //! serialized to IR — never parsed from text**. So validation is a
@@ -35,11 +38,10 @@
 //! resolved column set. A self-contained `createTable` DOES resolve (c) against
 //! its own declared columns at load.
 //!
-//! LAYERING EXCEPTION: raw view-body validation calls the guard's read-only
-//! body scanner after the structural `SELECT` checks. That scanner is real
-//! deny-list security logic, so moving it down into `model` would put guard policy
-//! in the data layer. Until a separate analysis pass above `model` + `guard`
-//! walks raw view bodies, this is the one deliberate `model -> guard` edge.
+//! There is no layering exception left here: raw view-body validation is handed
+//! to the TARGET BACKEND's `ValidationPolicy::raw_view_body_refusal`, so the
+//! deny-list scanning that used to force a `model -> guard` edge now sits behind
+//! the backend descriptor with every other vendor grammar.
 //!
 //! # Structural vs. policy split
 //!
@@ -6343,13 +6345,7 @@ pub fn validate_op_authorized(
             Ok(())
         }
         Op::SetColumnType { table, to_type, using, .. } => {
-            validate_col_type_position(
-                to_type,
-                "setColumnType.toType",
-                false,
-                target_dialect,
-                op_index
-            )?;
+            validate_col_type_position(to_type, "setColumnType.toType", target_dialect, op_index)?;
             if let Some(cast) = using {
                 let scope = TargetScope::structural_only(table);
                 validate_expr(cast, target_dialect, &scope, op_index)?;
@@ -6361,13 +6357,7 @@ pub fn validate_op_authorized(
             check_constraint(&constraint.kind, &scope)
         }
         Op::CreateDomain { as_type, check, default, .. } => {
-            validate_col_type_position(
-                as_type,
-                "createDomain.as",
-                true,
-                target_dialect,
-                op_index
-            )?;
+            validate_col_type_position(as_type, "createDomain.as", target_dialect, op_index)?;
             if let Some(default) = default {
                 validate_default_for_type(
                     "createDomain.default",
@@ -6755,13 +6745,9 @@ pub fn validate_op_authorized(
                     .to_string(),
             ),
         }),
-        Op::RenameColumn { ty, .. } => validate_col_type_position(
-            ty,
-            "renameColumn.type",
-            false,
-            target_dialect,
-            op_index
-        ),
+        Op::RenameColumn { ty, .. } => {
+            validate_col_type_position(ty, "renameColumn.type", target_dialect, op_index)
+        }
         Op::AlterPrimaryKey { action, .. } => {
             validate_alter_primary_key_action(action).map_err(|reason| AuthoringError {
                 code: CODE_PRIMARY_KEY_INVALID.to_string(),
@@ -8448,7 +8434,7 @@ fn validate_column_facets(
     target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
-    validate_col_type_position(&col.ty, "column.type", false, target_dialect, op_index)?;
+    validate_col_type_position(&col.ty, "column.type", target_dialect, op_index)?;
 
     let mk = |code: &str, reason: String, fix: String| AuthoringError {
         code: code.to_string(),
@@ -8776,7 +8762,6 @@ fn validate_vendor_literal_default_storage(
 fn validate_col_type_position(
     ty: &crate::model::ir::ColType,
     position: &'static str,
-    _allow_pg_domain_date_base: bool,
     target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
@@ -9009,13 +8994,7 @@ pub fn validate_op_resolved(
             using,
             ..
         } => {
-            validate_col_type_position(
-                to_type,
-                "setColumnType.toType",
-                false,
-                target_dialect,
-                op_index,
-            )?;
+            validate_col_type_position(to_type, "setColumnType.toType", target_dialect, op_index)?;
             if let (Some(cols), Some(cast)) = (resolved_scope(table), using) {
                 let scope = TargetScope::new(table, &cols);
                 validate_expr(cast, target_dialect, &scope, op_index)?;
