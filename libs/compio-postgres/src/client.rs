@@ -1706,14 +1706,27 @@ impl Client {
     /// The server's current value for a runtime parameter, or `None` if the
     /// server has never reported one.
     ///
-    /// This is libpq's `PQparameterStatus`. PostgreSQL reports only the
-    /// parameters flagged `GUC_REPORT` -- `server_version`, `client_encoding`,
-    /// `application_name`, `DateStyle`, `TimeZone`, `standard_conforming_strings`
-    /// and a handful of others -- once at startup and again whenever the value
-    /// changes, so this tracks the session rather than snapshotting it. A
-    /// parameter the server does not report reads `None` however it was set;
-    /// `SHOW` is the way to ask about those, and it costs a round trip, which
-    /// is the whole reason this exists.
+    /// This is libpq's `PQparameterStatus`. PostgreSQL sends `ParameterStatus`
+    /// for a hard-wired set of parameters -- 15 of them as of PostgreSQL 18,
+    /// listed under "Asynchronous Operations" in the protocol-flow chapter --
+    /// once at startup and again whenever the value changes, so this tracks the
+    /// session rather than snapshotting it.
+    ///
+    /// The set is the server's to choose and is NOT the same as "settings that
+    /// exist": `application_name`, `client_encoding`, `DateStyle`,
+    /// `IntervalStyle`, `TimeZone`, `server_encoding`, `server_version`,
+    /// `integer_datetimes`, `standard_conforming_strings`, `is_superuser`,
+    /// `session_authorization`, `in_hot_standby`, `default_transaction_read_only`,
+    /// `scram_iterations` and `search_path` are reported; `work_mem` and the
+    /// several hundred other GUCs are not. A parameter the server does not
+    /// report reads `None` however it was set, and `SHOW` is the way to ask
+    /// about those -- at the cost of a round trip, which is the whole reason
+    /// this exists.
+    ///
+    /// The set grows across releases, so treat a `None` as "this server does
+    /// not report it" rather than "unset". `search_path` is the current
+    /// example: PostgreSQL 18 added it (release notes, Libpq section), so on 16
+    /// and 17 it reads `None` while very much having a value.
     ///
     /// Returns an owned `String` because the map is shared with the connection
     /// task and the lock cannot outlive the call.
