@@ -163,6 +163,115 @@ async fn cancel_raw_and_wait_for_server_close(token: &CancelToken, endpoint: &(S
     );
 }
 
+/// Hand-build the 16-byte `CancelRequest` so the secret key can be varied
+/// independently of the backend PID. `CancelToken` deliberately offers no way
+/// to do that; the point here is what the SERVER does with a key that does not
+/// match, which is what bounds the hazard of holding a token whose backend has
+/// gone away.
+fn cancel_request_packet(process_id: i32, secret_key: i32) -> Vec<u8> {
+    const CANCEL_REQUEST_CODE: i32 = 80_877_102;
+
+    let mut packet = Vec::with_capacity(16);
+    packet.extend_from_slice(&16u32.to_be_bytes());
+    packet.extend_from_slice(&CANCEL_REQUEST_CODE.to_be_bytes());
+    packet.extend_from_slice(&process_id.to_be_bytes());
+    packet.extend_from_slice(&secret_key.to_be_bytes());
+    packet
+}
+
+async fn send_packet_and_wait_for_server_close(endpoint: &(String, u16), packet: Vec<u8>) {
+    use compio::io::{AsyncWrite, AsyncWriteExt};
+
+    let mut socket = TcpStream::connect((endpoint.0.as_str(), endpoint.1))
+        .await
+        .expect("open a CancelRequest connection");
+    let compio::BufResult(result, _) = socket.write_all(packet).await;
+    result.expect("write the hand-built CancelRequest");
+    socket.flush().await.expect("flush the CancelRequest");
+
+    // Same barrier the driver's confirmed cancel uses: the postmaster closes
+    // this connection only after consuming the packet, so EOF means the server
+    // has already decided what to do with it.
+    let compio::BufResult(result, _) =
+        compio::time::timeout(OPERATION_TIMEOUT, socket.read(vec![0; 1]))
+            .await
+            .expect("server did not close the CancelRequest connection");
+    assert_eq!(
+        result.expect("read CancelRequest connection EOF"),
+        0,
+        "PostgreSQL sent bytes in response to a CancelRequest"
+    );
+}
+
+async fn pg_sleep_is_running(observer: &Client, pid: i32, marker: &str) -> bool {
+    observer
+        .query_one_scalar(
+            "SELECT EXISTS (\
+                 SELECT 1 \
+                 FROM pg_stat_activity \
+                 WHERE pid = $1 \
+                   AND state = 'active' \
+                   AND wait_event_type = 'Timeout' \
+                   AND wait_event = 'PgSleep' \
+                   AND query LIKE '%' || $2 || '%'\
+             )",
+            &[&pid, &marker],
+        )
+        .await
+        .expect("inspect pg_stat_activity")
+}
+
+/// Bounds the hazard behind a long-lived [`CancelToken`]: the token names a
+/// backend PID, PIDs are recycled, and nothing in the protocol reports that a
+/// token has gone stale. What keeps a stale token from cancelling a stranger's
+/// query is the secret key, so this measures whether the key is really checked
+/// rather than assuming it.
+///
+/// One variable: the same connection, the same running statement, the same
+/// delivery barrier, and only the key differs between the two arms. `pg_sleep`
+/// still running after the wrong-key packet has been consumed is the negative;
+/// 57014 after the token's own packet is the positive control that proves the
+/// wrong-key arm was not simply a cancel that failed to arrive.
+#[compio::test]
+async fn a_cancel_request_with_the_wrong_secret_key_is_inert() {
+    const MARKER: &str = "cpg_cancel_wrong_secret_key";
+    const QUERY: &str = "SELECT pg_sleep(30) /* cpg_cancel_wrong_secret_key */";
+
+    let url = plaintext_url();
+    let endpoint = tcp_endpoint(&url);
+    let client = connect(&url).await.unwrap();
+    let observer = connect(&url).await.unwrap();
+    let pid = client.process_id();
+    let token = client.cancel_token();
+
+    let cancel_task = compio::runtime::spawn(async move {
+        wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
+
+        // Arm one: the right PID, a key that is not this backend's. A
+        // collision would need the server's 32-bit key to equal this constant.
+        send_packet_and_wait_for_server_close(&endpoint, cancel_request_packet(pid, 0)).await;
+        assert!(
+            pg_sleep_is_running(&observer, pid, MARKER).await,
+            "PostgreSQL honoured a CancelRequest whose secret key did not match the backend; a \
+             stale CancelToken landing on a recycled PID would cancel a stranger's query"
+        );
+
+        // Arm two: the same PID with the session's own key.
+        token.cancel_query(NoTls).await.expect("send CancelRequest");
+    });
+
+    let (query_result, cancel_result) = compio::time::timeout(
+        OPERATION_TIMEOUT,
+        futures_util::future::join(client.batch_execute(QUERY), cancel_task),
+    )
+    .await
+    .expect("CancelRequest did not interrupt pg_sleep before the test deadline");
+
+    cancel_result.expect("CancelRequest task panicked or was cancelled");
+    assert_query_canceled(query_result);
+    assert_client_still_works(&client).await;
+}
+
 #[compio::test]
 async fn running_query_cancel_returns_57014_and_preserves_session() {
     const MARKER: &str = "cpg_cancel_running_query";
