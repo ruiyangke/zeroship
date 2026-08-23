@@ -7,8 +7,10 @@
 //!
 //! # Two evaluation paths, by trust
 //!
-//! - **Structured checks** ([`Precondition::TableExists`],
-//! [`Precondition::ColumnExists`], [`Precondition::RowCount`], …) are
+//! - **Structured checks**
+//! ([`Precondition::TableExists`](zero_migrate_ir::precondition::Precondition::TableExists),
+//! [`Precondition::ColumnExists`](zero_migrate_ir::precondition::Precondition::ColumnExists),
+//! [`Precondition::RowCount`](zero_migrate_ir::precondition::Precondition::RowCount), …) are
 //! ENGINE-BUILT, fully parameterized catalog queries
 //! (`information_schema` / `pg_catalog`). The project schema is bound as `$1`;
 //! the table/column identifiers are validated with `validate_ident` (bare
@@ -16,7 +18,8 @@
 //! punctuation) and then bound as parameters too. There is **no string
 //! interpolation of user input into SQL**, so these are injection-safe by
 //! construction.
-//! - **[`Precondition::SqlBoolean`]** is UNTRUSTED creator/AI SQL. It is the
+//! - **[`Precondition::SqlBoolean`](zero_migrate_ir::precondition::Precondition::SqlBoolean)**
+//! is UNTRUSTED creator/AI SQL. It is the
 //! escape hatch for assertions the structured checks cannot express, and it is
 //! confined three ways before it is allowed to run:
 //! 1. it MUST pass the registered line-1 guard (read-only SELECT;
@@ -50,7 +53,9 @@
 //!
 //! **This module is the POSTGRES precondition impl.** Both the SQL VALIDATION
 //! (`validate_single_select`, `pg_query::parse` — "is this a safe single
-//! SELECT?") and the EVALUATION ([`evaluate`], `information_schema` catalog reads +
+//! SELECT?") and the EVALUATION
+//! ([`evaluate`](crate::apply::backend::postgres::precondition::evaluate),
+//! `information_schema` catalog reads +
 //! the `&Client`-bound `SqlBoolean` run) are PG-dialect-specific, so they live
 //! BEHIND the [`MigrationBackend`] seam: the
 //! generic apply path calls

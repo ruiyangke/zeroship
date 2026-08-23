@@ -77,7 +77,8 @@ pub fn support_for_target(
 /// WROTE THE OPERATOR-FACING REASON. It is not a legitimate diagnosis and must
 /// never reach a user.
 ///
-/// It is `pub` on purpose. `dialect-support.toml` and [`unsupported_reason`] are
+/// It is `pub` on purpose. `dialect-support.toml` and `unsupported_reason` (private,
+/// below) are
 /// two files that must be edited together - flipping a cell to `unsupported`
 /// without adding the matching arm hands the operator this string for an
 /// ordinary dialect limit - and that has happened: four rows shipped it on
@@ -89,7 +90,8 @@ pub fn support_for_target(
 ///
 /// The arms below are exhaustive over every `unsupported` cell the sidecar
 /// declares, so nothing reaches the `_` fallbacks today; the `debug_assert!` in
-/// [`support_cell`] fails a debug build the moment that stops being true.
+/// `support_cell` (private, above) fails a debug build the moment that stops being
+/// true.
 pub const INTERNAL_NO_REFUSAL_REASON: &str = "internal: supported cell has no refusal reason";
 
 /// Short alias for the arms below, which are dense enough already.

@@ -6,10 +6,10 @@
 //!
 //! This was one 814-line module in the engine, `render::vendor`, and the crate split
 //! could not keep it whole. Its two types are contract vocabulary:
-//! [`VendorStatement`](zero_migrate_backend::vendor::VendorStatement) is the return
+//! [`VendorStatement`] is the return
 //! type of `DmlRenderer::render_trigger_op`, which ALL THREE vendors implement and
 //! which SQLite and MySQL each construct, and
-//! [`VendorError`](zero_migrate_backend::vendor::VendorError) is a `#[from]` variant
+//! [`VendorError`] is a `#[from]` variant
 //! of `IrLowerError`. Moving the whole file into this crate would have made
 //! `zero-migrate-sqlite` and `zero-migrate-mysql` depend on `zero-migrate-postgres`
 //! to name their own return type — precisely the vendor-to-vendor edge the split

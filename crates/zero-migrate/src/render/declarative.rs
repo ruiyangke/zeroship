@@ -1873,9 +1873,10 @@ pub fn desired_snapshot_for_dialect(
 ///
 /// FK definition spelling is dialect-divergent: SQLite FK targets are
 /// unqualified. (Full-text search was named here too, until it was removed from
-/// the engine entirely.) Column `data_type` remains in the PG `information_schema`
-/// spelling; the selected backend canonicalises it for comparison (see
-/// [`ddl_to_information_schema`] and
+/// the engine entirely.) Column `data_type` is the SELECTED backend's own snapshot
+/// spelling — core carries the neutral descriptor token and the vendor answers
+/// [`SchemaRenderer::snapshot_data_type`] — and that same backend canonicalises a
+/// live catalog spelling back for comparison (see
 /// [`SchemaRenderer::canonical_type`]).
 ///
 /// # Errors

@@ -18,7 +18,7 @@
 //! # Which is why the empty list is not what this returns
 //!
 //! [`MysqlAdvisor::advise`] returns
-//! [`AdvisoryVerdict::NotAnalyzed`](zero_migrate_backend::advisory::AdvisoryVerdict::NotAnalyzed),
+//! [`AdvisoryVerdict::NotAnalyzed`],
 //! carrying this vendor's id and the sentence above. A caller cannot read that as
 //! "looked and found nothing", because it is not a list at all until the caller has
 //! handled the absence. The distinction is not theoretical: the engine's advisory

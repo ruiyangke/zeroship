@@ -1222,7 +1222,7 @@ pub(crate) fn canonical_set_order(migrations: &[Migration]) -> Vec<&Migration> {
 /// A version `v_i` is satisfied-by-supersession when a squash `S` (with `v_i ∈
 /// S.supersedes`) is either:
 /// - **net-applied in the journal** (`journal_superseded`, read via
-///   [`crate::apply::journal::superseded_versions`]); or
+///   [`MigrationBackend::superseded_versions`]); or
 /// - **present in the supplied set** — whether already net-applied OR pending. A
 ///   pending `S` will run its `up` THIS batch, so its superseded versions must not
 ///   also run (`order_pending` excludes them); an already-applied `S` is also

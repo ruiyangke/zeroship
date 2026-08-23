@@ -1960,7 +1960,8 @@ fn pg_foreign_key_definition(
 
 /// Whether to store a live constraint's catalog text on the introspected snapshot.
 ///
-/// Wider than [`constraint_definition_is_comparable`]: a `CHECK` body is retained
+/// Wider than `constraint_definition_is_comparable` (private to `apply::drift`, so
+/// it is named here rather than linked): a `CHECK` body is retained
 /// even though it is never compared, because it is read for diagnostics rather than
 /// for equality. `EXCLUDE` stays empty, matching what the offline renderer emits for
 /// it, so the two sides agree on the field being absent rather than unread.

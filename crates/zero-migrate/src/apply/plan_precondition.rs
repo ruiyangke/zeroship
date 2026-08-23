@@ -100,7 +100,8 @@
 //!
 //! A step with NO op provenance - a `.sql` migration, a declarative plan, the
 //! empty-plan journal anchor, a hand-built [`PlanStep`] - carries no [`Effect`], and
-//! [`clears_no_obstruction`] reads that absence as "may remove". So does
+//! `clears_no_obstruction` (crate-private, below) reads that absence as "may
+//! remove". So does
 //! `Op::PgRaw`, whose SQL this engine did not generate. Every unknown therefore
 //! falls toward TODAY'S BEHAVIOUR - the precondition lands back on the
 //! per-migration seam - rather than toward a new refusal.

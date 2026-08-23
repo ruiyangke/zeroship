@@ -21,7 +21,7 @@
 //! # Which is why the empty list is not what this returns
 //!
 //! [`SqliteAdvisor::advise`] returns
-//! [`AdvisoryVerdict::NotAnalyzed`](zero_migrate_backend::advisory::AdvisoryVerdict::NotAnalyzed),
+//! [`AdvisoryVerdict::NotAnalyzed`],
 //! carrying this vendor's id and the sentence above, so a caller cannot read the
 //! absence as a clean bill of health.
 //!

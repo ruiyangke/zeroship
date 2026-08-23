@@ -653,7 +653,7 @@ fn visit_expr_values_mut(
 const DIALECT_NODE: &str = "dialect";
 
 /// The leg a serialized `dialect({ postgres?, sqlite?, mysql? })` node renders
-/// for `dialect`: the target's exact [`DialectId`](zero_migrate_ir::dialect::DialectId)
+/// for `dialect`: the target's exact [`DialectId`]
 /// key. The same rule `render::dml::select_dialect_leg` applies, which is what
 /// actually reaches the database. A node without the target key is refused by
 /// `crate::model::validate` long before here; it renders nothing on this target, so

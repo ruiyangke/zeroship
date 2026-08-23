@@ -623,7 +623,8 @@ fn comparable_nextval_default(expr: Option<&str>) -> Option<String> {
 /// keeps `attgenerated = 's'`, so both sides agree here and the rewrite is not
 /// reported. That refusal is measured rather than assumed, and the measurement is
 /// NOT the injected cast the sibling predicates cite - it is the column RENAME.
-/// [`GeneratedColumnSnapshot::expr`] is RENDERED TEXT, and `fold_ops`'s
+/// [`GeneratedColumnSnapshot::expr`](zero_migrate_backend::snapshot::GeneratedColumnSnapshot::expr)
+/// is RENDERED TEXT, and `fold_ops`'s
 /// `Op::RenameColumn` arm cannot replay a rename over it: substituting the name
 /// inside rendered SQL would rewrite the string literal in a real generated column
 /// such as `(note || 'qty_on_hand'::text)`, which is exactly the false positive
@@ -1516,8 +1517,8 @@ fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
 /// foreign keys already get: parse the catalog text back to the closed AST and
 /// compare structurally, rather than comparing spellings.
 ///
-/// Kept separate from
-/// [`constraint_definition_is_retained`](crate::apply::backend::postgres::drift_sql::constraint_definition_is_retained)
+/// Kept separate from `constraint_definition_is_retained` (private to
+/// `apply::backend::postgres::drift_sql`, so it is named here rather than linked)
 /// on purpose — it is the PostgreSQL introspector's own rule about what to STORE and
 /// now lives with the reader that applies it. Not
 /// comparing a body is not a reason to stop recording it: the guard's fail-closed

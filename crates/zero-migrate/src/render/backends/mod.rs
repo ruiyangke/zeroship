@@ -157,7 +157,7 @@ pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
 
 /// The vendor for a dialect.
 ///
-/// Resolved by the open [`DialectId`](zero_migrate_ir::dialect::DialectId) filed in
+/// Resolved by the open [`DialectId`] filed in
 /// each [`BackendVendor`], never by an enum match in core. The shipping list above is
 /// the one composition point that names backend crates.
 pub(crate) fn vendor(dialect: &DialectId) -> &'static BackendVendor {
@@ -242,7 +242,7 @@ pub(crate) fn advisor(dialect: &DialectId) -> &'static dyn OperationalAdvisor {
 /// The operational advisories the backend registered for `dialect` finds in `sql`.
 ///
 /// The verdict, not a list: see
-/// [`AdvisoryVerdict`](zero_migrate_backend::advisory::AdvisoryVerdict) for why a
+/// [`AdvisoryVerdict`] for why a
 /// backend with no analyzer must not answer with an empty vector.
 #[must_use]
 pub fn advisories_for_sql(dialect: &DialectId, sql: &str) -> AdvisoryVerdict {

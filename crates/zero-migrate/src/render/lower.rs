@@ -390,7 +390,8 @@ pub struct LiveSchema {
     /// happens to know.
     ///
     /// It carries only what an op DECLARED, never what one inferred, and it is
-    /// advanced by [`Self::advance_declared_column_generation`] as each op lowers —
+    /// advanced by `advance_declared_column_generation` (crate-private) as each op
+    /// lowers —
     /// so a column dropped and re-added in the same envelope reads as the shape the
     /// LAST declaration gave it, not the first.
     pub declared_column_generation: std::collections::BTreeMap<(String, String), ColumnGeneration>,
@@ -9134,11 +9135,14 @@ pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescripto
 /// token `"number"` unchanged, so a stale `precision` left behind here is the whole
 /// difference between a float column and a decimal one.
 ///
-/// Extracted so the two callers cannot drift: [`retype_field_descriptor`] (a
-/// `setColumnType` replacing the type outright) and the fold's named-domain lift
-/// (a column whose declared type NAMES a domain whose base type is `T`). The
-/// difference between them is what they additionally CLEAR, not what they derive,
-/// so only the retype clears.
+/// Extracted so the sites that re-derive a column's shape from a new type cannot
+/// drift. Its one caller today is the fold's named-domain lift
+/// (`render::fold::lift_named_domain_base_type` — a column whose declared type NAMES
+/// a domain whose base type is `T`). The `setColumnType` side was the second, through
+/// `render::lower::retype_field_descriptor`; that function is gone and the fold
+/// traversal's `Op::SetColumnType` arm states the same rule in snapshot terms
+/// instead. The difference between them is what they additionally CLEAR, not what
+/// they derive, so only the retype clears.
 pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty: &ColType) {
     // Build the target column's descriptor through the SAME translation a
     // `createTable` column goes through, so a retype to `T`, a domain over `T`

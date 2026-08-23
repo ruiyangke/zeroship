@@ -939,7 +939,7 @@ fn decide_constraint(
 ///   under the truncated name while the engine carries the authored one.
 ///
 /// Whether truncation occurs, and the catalog spelling it produces, are required
-/// answers on the selected backend's [`ExistenceProbePolicy`](zero_migrate_backend::existence_probe::ExistenceProbePolicy).
+/// answers on the selected backend's [`ExistenceProbePolicy`].
 fn truncated_identifier_backstop(
     kind: &str,
     name: &str,

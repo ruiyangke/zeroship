@@ -1242,7 +1242,8 @@ impl Ctx<'_> {
     /// with the wrong arity). This is NOT a portability boundary: there is no
     /// dialect on which it renders, so it is an unconditional
     /// [`CODE_UNSUPPORTED`] (`kind:"expr"`), independent of `target_dialect`.
-    /// Distinct from [`Self::split_part_envelope_err`], which is the
+    /// Distinct from the out-of-envelope rejection a backend returns for
+    /// [`ExprDialectFeature::SplitPart`], which is the
     /// PG-renderable-but-SQLite-unsupported portability reject.
     fn malformed_synth_err(&self, reason: String) -> AuthoringError {
         self.err(
@@ -1260,7 +1261,8 @@ impl Ctx<'_> {
 
     /// A splitPart **grammar** reject: the call's argument SHAPE is broken on EVERY
     /// dialect — the delimiter is not a string literal, or the part index is not a
-    /// positive integer literal. Unlike [`Self::split_part_envelope_err`] (the
+    /// positive integer literal. Unlike the out-of-envelope rejection a backend
+    /// returns for [`ExprDialectFeature::SplitPart`] (the
     /// PG-renderable-but-SQLite-out-of-envelope verdict, SQLite-only), the renderer
     /// enforces this same grammar fail-closed on BOTH dialects, so the validator
     /// rejects it regardless of `target_dialect` — and stamps the *current* target so

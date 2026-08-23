@@ -1,7 +1,8 @@
 //! The MySQL journal: schema (database), immutability, native `event_seq`, and
 //! the net-state reads/writes for [`MysqlBackend`](super::MysqlBackend).
 //!
-//! This is the MySQL analogue of the Postgres [`zero_migrate_backend::journal`] module:
+//! This is the MySQL analogue of the engine's PostgreSQL journal, spelled over the
+//! same neutral [`zero_migrate_backend::journal`] vocabulary:
 //! it carries the SAME logical journal shape — a SINGLE consolidated
 //! `schema_migrations` events table (one row per `applied`/`rolled_back` event,
 //! discriminated by `event_kind`), a `_supersedes` edge table, an inflight
@@ -83,8 +84,8 @@ pub(crate) fn quote_ident_mysql(ident: &str) -> Result<String, JournalError> {
 }
 
 /// Bootstrap (idempotently) the meta database + journal table + supersedes edge
-/// table + inflight side-table + immutability triggers (the MySQL analogue of
-/// [`zero_migrate_backend::journal::ensure_journal`]).
+/// table + inflight side-table + immutability triggers (the MySQL implementation
+/// behind [`zero_migrate_backend::backend::MigrationBackend::ensure_journal`]).
 ///
 /// Safe to call on every apply: `CREATE {DATABASE,TABLE} IF NOT EXISTS` and
 /// `information_schema.triggers`-guarded `CREATE TRIGGER`s make a re-bootstrap a
@@ -433,8 +434,8 @@ fn is_exact_supersession_edge_index(
     Ok(true)
 }
 
-/// Read the **net applied state** of the journal (the MySQL analogue of
-/// [`zero_migrate_backend::journal::applied`]): the LATEST event per version (by the native
+/// Read the **net applied state** of the journal (the MySQL implementation behind
+/// [`zero_migrate_backend::backend::MigrationBackend::applied`]): the LATEST event per version (by the native
 /// `event_seq` order) kept only where that latest event is `applied`, UNIONed with
 /// the lone `started` inflight markers for versions that are not net-applied.
 ///
@@ -558,8 +559,8 @@ pub(crate) async fn unresolved_rollback_markers<D: SqlSession>(
         .collect()
 }
 
-/// The versions covered by a net-applied squash (the MySQL analogue of
-/// [`zero_migrate_backend::journal::superseded_versions`]). Only a GENUINE recorded squash
+/// The versions covered by a net-applied squash (the MySQL implementation behind
+/// [`zero_migrate_backend::backend::MigrationBackend::superseded_versions`]). Only a GENUINE recorded squash
 /// (latest event `applied` AND `kind='squash'`) can supersede.
 ///
 /// # Errors
@@ -595,8 +596,9 @@ pub(crate) async fn superseded_versions<D: SqlSession>(
         .collect()
 }
 
-/// The latest `completed` checksum per **repeatable** version (the MySQL analogue
-/// of [`zero_migrate_backend::journal::latest_completed_checksums`]) — the repeatable
+/// The latest `completed` checksum per **repeatable** version (the MySQL
+/// implementation behind
+/// [`zero_migrate_backend::backend::MigrationBackend::latest_completed_checksums`]) — the repeatable
 /// re-run oracle. Only `event_kind='applied' AND kind='repeatable'` rows count.
 ///
 /// # Errors
@@ -728,8 +730,10 @@ pub(crate) async fn record_completed_in_transaction<D: SqlSession>(
     Ok(())
 }
 
-/// Append an immutable `rolled_back` event — the MySQL analogue of the PG rollback
-/// journal INSERT (see [`zero_migrate_backend::journal::record_rolled_back`]). `?`
+/// Append an immutable `rolled_back` event — the MySQL analogue of the PostgreSQL
+/// rollback journal INSERT. That peer is `record_rolled_back` in the engine's
+/// `apply::backend::postgres::journal_sql`, which this crate does not depend on and
+/// so cannot link; the contract has no method of its own for it. `?`
 /// placeholders. The applied-only columns stay NULL (the CHECK enforces the
 /// `rolled_back` shape).
 ///
@@ -764,8 +768,9 @@ pub(crate) async fn record_rolled_back<D: SqlSession>(
     Ok(())
 }
 
-/// Clear the inflight `started` marker for a version (the MySQL analogue of
-/// [`zero_migrate_backend::journal::clear_inflight`]). `?` placeholder.
+/// Clear the inflight `started` marker for a version — the MySQL analogue of
+/// `clear_inflight` in the engine's `apply::backend::postgres::journal_sql`, which
+/// this crate does not depend on and so cannot link. `?` placeholder.
 ///
 /// # Errors
 /// [`JournalError::Db`] on failure.

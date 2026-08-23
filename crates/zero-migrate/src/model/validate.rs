@@ -2751,7 +2751,8 @@ fn column_named_object_dependencies(
 /// column.
 ///
 /// `addColumn` and `setColumnType` carry their type as loose fields instead of an
-/// [`IrColumn`], which is why they went unchecked while `createTable` did not:
+/// [`IrColumn`](zero_migrate_ir::ir::IrColumn), which is why they went unchecked
+/// while `createTable` did not:
 /// the walk collected `IrColumn`s, and an op that has a type without having a
 /// column was invisible to it. Both emit that type into the SQL, so both can name
 /// a dropped enum or domain.
@@ -4284,7 +4285,8 @@ fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'
 /// The ops a migration EFFECTIVELY runs on one dialect, each paired with the
 /// top-level index to report it under.
 ///
-/// A [`Op::Dialectal`] is a CONTAINER: it names nothing itself and holds ops that
+/// A [`Op::Dialectal`](zero_migrate_ir::ir::Op::Dialectal) is a CONTAINER: it names
+/// nothing itself and holds ops that
 /// do. F765 taught the two column accessors to look inside one, which fixed
 /// reading references out of a leg - and left every walk's STATE blind, because a
 /// `dropTable` or `dropColumn` nested in a leg still arrived as an opaque
@@ -4327,7 +4329,8 @@ fn effective_ops<'a>(
     Ok(out)
 }
 
-/// The nested op sequence a [`Op::Dialectal`] container emits for one target.
+/// The nested op sequence a [`Op::Dialectal`](zero_migrate_ir::ir::Op::Dialectal)
+/// container emits for one target.
 ///
 /// Descending into a leg that will NOT run would refuse a migration on a
 /// reference the server never sees, so the choice is made here once and shared.
