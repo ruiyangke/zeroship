@@ -38,10 +38,19 @@ fn cause(s: &str) -> String {
 fn a_backslash_escapes_the_next_character() {
     // Outside quotes, a backslash is dropped and the next character is kept
     // verbatim -- including a space, which would otherwise separate pairs.
-    assert_eq!(ok("user=u application_name=a\\b").get_application_name(), Some("ab"));
-    assert_eq!(ok("user=u application_name=a\\ b").get_application_name(), Some("a b"));
+    assert_eq!(
+        ok("user=u application_name=a\\b").get_application_name(),
+        Some("ab")
+    );
+    assert_eq!(
+        ok("user=u application_name=a\\ b").get_application_name(),
+        Some("a b")
+    );
     // A trailing backslash has nothing to escape and is simply dropped.
-    assert_eq!(ok("user=u application_name=P6\\").get_application_name(), Some("P6"));
+    assert_eq!(
+        ok("user=u application_name=P6\\").get_application_name(),
+        Some("P6")
+    );
 
     // We consume the next CHARACTER; libpq consumes the next BYTE. They agree,
     // because the trailing bytes of a multi-byte UTF-8 character are never a
@@ -54,8 +63,14 @@ fn a_backslash_escapes_the_next_character() {
 
 #[test]
 fn an_equals_sign_is_ordinary_inside_a_value() {
-    assert_eq!(ok("user=u application_name==P7").get_application_name(), Some("=P7"));
-    assert_eq!(ok("user=u application_name=a=b").get_application_name(), Some("a=b"));
+    assert_eq!(
+        ok("user=u application_name==P7").get_application_name(),
+        Some("=P7")
+    );
+    assert_eq!(
+        ok("user=u application_name=a=b").get_application_name(),
+        Some("a=b")
+    );
 }
 
 #[test]
@@ -67,7 +82,10 @@ fn a_quote_mid_value_is_not_special() {
     );
     // A backslash before the opening quote makes it a value byte, so the value
     // is unquoted and the quote survives into it.
-    assert_eq!(ok("user=u application_name=\\'a").get_application_name(), Some("'a"));
+    assert_eq!(
+        ok("user=u application_name=\\'a").get_application_name(),
+        Some("'a")
+    );
     // CONTROL for that one: without the backslash the quote opens a value that
     // never closes, and the string is refused.
     Config::from_str("user=u application_name='a")
@@ -76,7 +94,10 @@ fn a_quote_mid_value_is_not_special() {
 
 #[test]
 fn a_quoted_value_may_hold_a_newline_and_needs_no_separator_after_it() {
-    assert_eq!(ok("user=u application_name='a\nb'").get_application_name(), Some("a\nb"));
+    assert_eq!(
+        ok("user=u application_name='a\nb'").get_application_name(),
+        Some("a\nb")
+    );
 
     // A quoted value ends AT its closing quote, so the next keyword may follow
     // with no whitespace between them.
@@ -98,7 +119,10 @@ fn an_unterminated_quote_names_what_was_wrong() {
         "unterminated quoted connection parameter value"
     );
     // CONTROL: closing the quote parses the same string.
-    assert_eq!(ok("user=u application_name='P5'").get_application_name(), Some("P5"));
+    assert_eq!(
+        ok("user=u application_name='P5'").get_application_name(),
+        Some("P5")
+    );
 }
 
 #[test]
@@ -118,5 +142,8 @@ fn an_empty_keyword_is_refused_rather_than_ending_the_string() {
     // CONTROL: the same strings without the empty keyword parse, and the later
     // pair really does take effect -- so the refusals above are about the empty
     // keyword and not about the rest of the string.
-    assert_eq!(ok("host=h user=postgres user=alice").get_user(), Some("alice"));
+    assert_eq!(
+        ok("host=h user=postgres user=alice").get_user(),
+        Some("alice")
+    );
 }

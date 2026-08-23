@@ -26,8 +26,8 @@
 
 use std::fmt::Write as _;
 
-use compio_postgres::config::Host;
 use compio_postgres::Config;
+use compio_postgres::config::Host;
 
 fn cfg(s: &str) -> Config {
     s.parse::<Config>()
