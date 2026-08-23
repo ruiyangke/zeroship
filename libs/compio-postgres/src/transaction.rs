@@ -51,6 +51,13 @@ impl Drop for SavepointCreationGuard<'_> {
     }
 }
 
+/// The command tag PostgreSQL answers with when it rolled a transaction back.
+///
+/// A `COMMIT` inside an aborted transaction block completes with THIS tag
+/// rather than `COMMIT`, and with no `ErrorResponse`: the statement succeeded,
+/// and every change it was asked to make is gone.
+const ROLLBACK_TAG: &str = "ROLLBACK";
+
 fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
@@ -105,6 +112,15 @@ impl<'a> Transaction<'a> {
     }
 
     /// Consumes the transaction, committing all changes made within it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for which [`Error::is_transaction_rolled_back`] is true
+    /// when the server answered the `COMMIT` with the `ROLLBACK` command tag.
+    /// That is not a failed statement - PostgreSQL runs a `COMMIT` sent inside
+    /// an aborted transaction block, throws every change away, and reports
+    /// success. Without the tag, this method returned `Ok(())` over discarded
+    /// writes.
     pub async fn commit(mut self) -> Result<(), Error> {
         if self.savepoint.is_some() && self.client.transaction_status().is_none() {
             self.client.simple_query("").await?;
@@ -130,14 +146,27 @@ impl<'a> Transaction<'a> {
         // still being built leaves the transaction open on the server with
         // nothing left to undo it.
         self.done = true;
-        let r = crate::simple_query::finish_batch_execute(responses).await;
-        if r.is_ok() {
-            // batch_execute awaited the command to completion — the
-            // connection is in a known-clean state. Clear any dirty flag
-            // that a previous savepoint rollback or retry may have set.
-            self.client.inner().clear_dirty();
+        let tag = crate::simple_query::finish_batch_execute_reporting_tag(responses).await?;
+        // batch_execute awaited the command to completion - the
+        // connection is in a known-clean state. Clear any dirty flag
+        // that a previous savepoint rollback or retry may have set.
+        //
+        // This happens before the tag is judged, not after: a `COMMIT` the
+        // server turned into a rollback still ENDED the transaction, so the
+        // session is exactly as clean as one that committed. The flag tracks
+        // the connection, not the caller's outcome.
+        self.client.inner().clear_dirty();
+        // The test is "the server says it rolled back", NOT "the server did
+        // not say COMMIT". The savepoint arm of this method sends `RELEASE`,
+        // which answers with the tag `RELEASE` (measured), so the inverted
+        // spelling would reject every healthy nested commit. Nothing narrows
+        // this to the top-level arm, because nothing needs to: the cleanup
+        // armed on a failed subtransaction sends its `ROLLBACK TO` as a
+        // separate request whose responses never reach this stream.
+        if tag.as_deref() == Some(ROLLBACK_TAG) {
+            return Err(Error::transaction_rolled_back());
         }
-        r
+        Ok(())
     }
 
     /// Rolls the transaction back, discarding all changes made within it.
