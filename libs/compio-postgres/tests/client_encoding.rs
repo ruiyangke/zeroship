@@ -117,3 +117,41 @@ async fn setting_the_encoding_to_utf8_changes_nothing() {
     .await
     .expect("encoding-control test exceeded its watchdog");
 }
+
+/// The driver ANNOUNCES UTF8 in its startup packet, rather than inheriting it.
+///
+/// `connect_raw` puts `client_encoding=UTF8` in the startup parameters
+/// unconditionally, which is what makes the rest of this file's reasoning hold:
+/// the driver decodes text as UTF-8, so it must not accept whatever the server
+/// happens to default to.
+///
+/// Dropping that parameter would be INVISIBLE on any server whose own default
+/// is already UTF8 -- every test in this file would still pass, because the
+/// session would still be UTF8, just by luck of the server's configuration
+/// rather than by the driver's insistence. `pg_settings.source` is what tells
+/// the two apart: a value the CLIENT sent in its startup packet reports
+/// `client`, while an inherited default reports `default`. Measured on this
+/// server, a `psql` session does not report `client` for `client_encoding` at
+/// all, which is exactly the state this driver must not be in.
+#[compio::test]
+async fn the_startup_packet_announces_utf8_rather_than_inheriting_it() {
+    let (client, _driver) = connect_keeping_driver().await;
+
+    let row = client
+        .query_one(
+            "SELECT setting, source FROM pg_settings WHERE name = 'client_encoding'",
+            &[],
+        )
+        .await
+        .expect("read client_encoding's provenance");
+    let setting: String = row.get(0);
+    let source: String = row.get(1);
+
+    assert_eq!(setting, "UTF8", "the session must be UTF8");
+    assert_eq!(
+        source, "client",
+        "client_encoding must come from the driver's STARTUP PACKET, not from \
+         the server's default -- if this reads `default`, the driver stopped \
+         announcing it and is merely lucky that this server agrees"
+    );
+}
