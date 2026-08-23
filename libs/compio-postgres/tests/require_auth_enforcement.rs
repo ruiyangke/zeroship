@@ -239,11 +239,14 @@ async fn a_server_that_never_authenticates_is_refused_under_require_password() {
         let mut config = base_config(server.addr);
         config.require_auth(require_password());
 
-        let error = compio::time::timeout(CONNECT_WATCHDOG, config.connect(NoTls))
+        // `let ... else` rather than `expect_err`: the Ok half carries a
+        // `Connection`, which is not `Debug`, so `expect_err` does not apply.
+        let Err(error) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(NoTls))
             .await
             .expect("connect hung instead of refusing an unauthenticated server")
-            .err()
-            .expect("the driver accepted a server that never authenticated it");
+        else {
+            panic!("the driver accepted a server that never authenticated it")
+        };
 
         let chain = common::error_chain(&error);
         assert!(
@@ -289,11 +292,12 @@ async fn a_rejected_method_is_refused_even_though_the_server_offers_it() {
         let mut config = base_config(server.addr);
         config.require_auth(RequireAuth::Reject(AuthMethods::new(AuthMethod::Password)));
 
-        let error = compio::time::timeout(CONNECT_WATCHDOG, config.connect(NoTls))
+        let Err(error) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(NoTls))
             .await
             .expect("connect hung instead of refusing a rejected method")
-            .err()
-            .expect("the driver used an authentication method its policy rejects");
+        else {
+            panic!("the driver used an authentication method its policy rejects")
+        };
 
         let chain = common::error_chain(&error);
         assert!(
