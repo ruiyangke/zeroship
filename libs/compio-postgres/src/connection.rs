@@ -918,6 +918,23 @@ impl Dispatch<'_> {
                 // queued and the whole loop re-enters `poll_read` on
                 // the next wake.
                 let messages = e.into_inner();
+                // THE `clone` IS LOAD-BEARING AND DELIBERATE. Measured
+                // 2026-08-23: `futures_channel::mpsc` tracks fullness per
+                // HANDLE, so a clone is born unparked and its `poll_ready`
+                // reports READY on a channel the consumer has drained nothing
+                // from. The stash gate below is therefore a one-iteration
+                // ORDERING delay, not sustained back-pressure: a consumer that
+                // stops reading accumulates batches instead of stopping the
+                // reader.
+                //
+                // Do not "fix" that by stashing the parked handle. This driver
+                // is sometimes its own stalled consumer: resolving an uncached
+                // custom type runs a NESTED query on this same connection while
+                // the outer query's response channel is full, and real
+                // back-pressure deadlocks it. Swapping the parked handle in
+                // here turns `query_backpressure.rs`'s two
+                // `..._without_response_backpressure_deadlock` tests red at
+                // once, which is how this note came to be written.
                 self.pending_responses.push_back(PendingResponse {
                     sender: response.sender.clone(),
                     messages,
@@ -1509,8 +1526,15 @@ where
     /// This is the exact ordering guarantee of tokio-postgres's
     /// `poll_response` (pending replayed before the socket is read again),
     /// so a later batch for the same request can never overtake an earlier
-    /// one. The bounded read channel propagates that back-pressure to the
-    /// socket (the task blocks on send → stops reading).
+    /// one.
+    ///
+    /// ORDERING IS ALL IT BUYS. The stash carries a CLONE of the consumer's
+    /// sender, and `futures_channel` tracks fullness per handle, so that clone
+    /// is ready on the next poll however far behind the consumer is: the gate
+    /// costs one iteration and then lets go. A consumer that stops reading
+    /// accumulates batches rather than stopping the reader. That is deliberate
+    /// - see `deliver_batch`, where making the gate bind deadlocks the driver's
+    /// own nested type-info lookups.
     async fn run_multiplexed(
         read_half: BufReadHalf<<S as SplitStream>::ReadHalf>,
         mut write_half: BufWriteHalf<<S as SplitStream>::WriteHalf>,
