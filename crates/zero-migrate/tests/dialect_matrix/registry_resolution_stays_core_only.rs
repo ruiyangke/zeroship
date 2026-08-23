@@ -108,10 +108,21 @@
 //! mid-line and does not try. It over-counts prose into code, never the reverse,
 //! which is the safe direction for a census asserting a ZERO.
 //!
-//! `GENERATED_IDENT_MAX_BYTES` is `pub(crate)` in the same module and is NOT here. It
-//! is a byte budget, not a resolution — a vendor reading it would be leaking one
-//! backend's declared limit into another, which is a real but DIFFERENT rule, and a
-//! census whose subject is two rules is a census nobody can read.
+//! `render::backends` holds thirteen `pub(crate)` items. This file covers eleven of
+//! them. The two it does not are named here rather than left to be discovered:
+//!
+//! * `GENERATED_IDENT_MAX_BYTES` is a byte budget, not a resolution. A vendor reading
+//!   it would be leaking one backend's declared identifier limit into another, which
+//!   is a real rule but a DIFFERENT one, and a census whose subject is two rules is a
+//!   census nobody can read.
+//! * `VENDOR` — the re-export of SQLite's own `BackendVendor` — is unmatchable, and
+//!   that is a property of the name rather than a gap that can be closed. Every
+//!   vendor crate declares its own `pub static VENDOR`, so the needle would fire on
+//!   all three on day one for the one thing each of them is REQUIRED to do. It is the
+//!   same call this file's template made about `ColumnSnapshot::new`: a needle nobody
+//!   can keep green is worse than an absence that is written down. `VENDORS` — the
+//!   registry SET, which no vendor crate has any business naming — is covered and is
+//!   the part of that pair with teeth.
 //!
 //! # The floors, because a scan over a DISCOVERED set fails OPEN
 //!
