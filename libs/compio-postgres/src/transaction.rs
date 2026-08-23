@@ -122,6 +122,28 @@ impl<'a> Transaction<'a> {
     /// success. Without the tag, this method returned `Ok(())` over discarded
     /// writes.
     pub async fn commit(mut self) -> Result<(), Error> {
+        // A savepoint release has to be spelled differently depending on whether
+        // the subtransaction is aborted, and the answer must be known BEFORE the
+        // request is sent so the recovery can ride with it - see the `Failed`
+        // arm below, which is what survives a cancellation after the send. When
+        // the status is unsettled this barrier is what settles it: the
+        // connection task decrements the in-flight count before it forwards the
+        // batch carrying a `ReadyForQuery`, and requests are FIFO, so ONE empty
+        // simple query settles every request enqueued before it. Measured
+        // 2026-08-23, 40 of 40 rounds with one to four requests abandoned
+        // mid-flight: `transaction_status()` was `Some` immediately afterwards
+        // every time.
+        //
+        // THIS AWAIT MOVES WHERE CANCELLATION LANDS, and only on this branch.
+        // With the status already settled the first poll of `commit()` enqueues
+        // the `RELEASE` and sets `done`, so dropping the future keeps the
+        // savepoint's writes; with it unsettled the first poll parks here with
+        // `done` still false, so dropping the future rolls them back. Measured
+        // the same day, one variable apart: 1 row kept versus 0. Rolling back is
+        // the outcome `Transaction`'s drop contract documents, so the divergence
+        // is recorded rather than removed - unconditionally awaiting the barrier
+        // would make it uniform at the cost of a round trip on every nested
+        // commit.
         if self.savepoint.is_some() && self.client.transaction_status().is_none() {
             self.client.simple_query("").await?;
         }
@@ -146,7 +168,9 @@ impl<'a> Transaction<'a> {
         // still being built leaves the transaction open on the server with
         // nothing left to undo it.
         self.done = true;
-        let tag = crate::simple_query::finish_batch_execute_reporting_tag(responses).await?;
+        let tag =
+            crate::simple_query::finish_batch_execute_reporting_tag(self.client.inner(), responses)
+                .await?;
         // batch_execute awaited the command to completion - the
         // connection is in a known-clean state. Clear any dirty flag
         // that a previous savepoint rollback or retry may have set.
@@ -181,7 +205,7 @@ impl<'a> Transaction<'a> {
         };
         let responses = crate::simple_query::start_batch_execute(self.client.inner(), &query)?;
         self.done = true;
-        let r = crate::simple_query::finish_batch_execute(responses).await;
+        let r = crate::simple_query::finish_batch_execute(self.client.inner(), responses).await;
         if r.is_ok() {
             // Explicit rollback awaited to completion — the connection is
             // clean regardless of what came before.
@@ -498,7 +522,8 @@ impl<'a> Transaction<'a> {
                 name: &name,
                 done: false,
             };
-            let result = crate::simple_query::finish_batch_execute(responses).await;
+            let result =
+                crate::simple_query::finish_batch_execute(cleanup.client.inner(), responses).await;
             cleanup.done = true;
             result?;
         }
