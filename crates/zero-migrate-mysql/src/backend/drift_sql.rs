@@ -2,18 +2,30 @@
 
 use std::collections::BTreeMap;
 
-use super::DIALECT;
-use crate::apply::drift::DriftError;
-use crate::driver::SqlSession;
-use crate::model::ir::{IdentityCol, IndexSortOrder};
-use crate::model::snapshot::{
+use zero_migrate_backend::drift::DriftError;
+use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::schema::SchemaRenderer;
+use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,
     MysqlPhysicalType, MysqlTextStorageSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
 };
-use crate::render::value_format::{
+use zero_migrate_backend::value_format::{
     catalog_id_default, catalog_text_id_default, catalog_uuid_id_default, recover_format_check,
     RecoveredFormatCheck,
 };
+use zero_migrate_ir::ir::{IdentityCol, IndexSortOrder};
+
+/// This vendor's own catalog-normalization renderer, and the DML renderer whose
+/// generator spellings it compares against.
+///
+/// Named directly rather than resolved out of the engine's registry from `DIALECT`:
+/// this crate knows which vendor it is, and asking a registry which backend handles
+/// MySQL is the round trip `registry_resolution_stays_core_only` reads this crate
+/// for. They are the same `&'static` objects `VENDOR` registers, so the comparison
+/// is byte-for-byte the one the engine's own door performs.
+const VALUE_FORMAT: &dyn zero_migrate_backend::value_format::ValueFormatRenderer =
+    crate::VENDOR.value_format;
+const DML: &dyn zero_migrate_backend::renderer::DmlRenderer = crate::VENDOR.dml;
 
 #[derive(Debug)]
 struct IndexParts {
@@ -64,9 +76,9 @@ fn recover_mysql_id_default(
     uuid_surface: bool,
 ) -> IdDefaultSnapshot {
     if uuid_surface {
-        catalog_uuid_id_default(default, &DIALECT, Some(expression_default))
+        catalog_uuid_id_default(default, VALUE_FORMAT, DML, Some(expression_default))
     } else {
-        catalog_id_default(default, &DIALECT, Some(expression_default))
+        catalog_id_default(default, VALUE_FORMAT, DML, Some(expression_default))
     }
 }
 
@@ -221,7 +233,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             // while no live-MySQL fixture has measured the pairing; the cost is that a
             // MySQL `DROP EXPRESSION` equivalent stays invisible.
             generated_kind: None,
-            data_type: crate::render::backends::schema_renderer(&DIALECT).canonical_type(&raw_type),
+            data_type: crate::schema::RENDERER.canonical_type(&raw_type),
             mysql_physical_type: Some(MysqlPhysicalType::parse(&raw_type)),
             nullable: nullable.eq_ignore_ascii_case("YES"),
             default: default.clone(),
@@ -287,7 +299,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 .iter()
                 .enumerate()
                 .filter_map(|(index, column)| {
-                    recover_format_check(&column.name, &check_clause, &DIALECT)
+                    recover_format_check(&column.name, &check_clause, VALUE_FORMAT, DML)
                         .map(|format| (index, format))
                 })
                 .collect::<Vec<_>>();
@@ -316,7 +328,8 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 }
                 RecoveredFormatCheck::Value(_) => catalog_text_id_default(
                     column.default.as_deref(),
-                    &DIALECT,
+                    VALUE_FORMAT,
+                    DML,
                     Some(expression_default),
                 ),
             });
@@ -436,7 +449,9 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                     kind: "PRIMARY KEY".to_string(),
                     definition: format!(
                         "PRIMARY KEY ({})",
-                        crate::render::declarative::constraintdef_cols(&parts.columns)
+                        zero_migrate_backend::constraint_definition::constraintdef_cols(
+                            &parts.columns
+                        )
                     ),
                     comment: None,
                     cascade_columns: None,
@@ -576,10 +591,14 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             }
         }
 
-        let constraint = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+        // The engine's `ir_fk_constraint_snapshot_for_columns` wraps this same
+        // function with ONE extra half: deriving `<table>_<cols>_fkey` when the
+        // author wrote no constraint name. A key read out of `information_schema`
+        // always arrives named, so that half has nothing to do here and the name
+        // below is the one the catalog gave.
+        let constraint = zero_migrate_backend::constraint_definition::fk_constraint_snapshot(
+            constraint_name.clone(),
             &parts.referenced_schema,
-            &table_name,
-            Some(&constraint_name),
             &parts.columns,
             &parts.referenced_table,
             &parts.referenced_columns,
@@ -588,7 +607,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             false,
             false,
             false,
-            &DIALECT,
+            &crate::VENDOR,
         );
         let table = tables
             .get_mut(&table_name)
@@ -613,7 +632,8 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 column.id_default = Some(if column.mysql_text_storage.is_some() {
                     catalog_text_id_default(
                         column.default.as_deref(),
-                        &DIALECT,
+                        VALUE_FORMAT,
+                        DML,
                         Some(expression_default),
                     )
                 } else {
@@ -724,7 +744,7 @@ mod tests {
         case_sensitive_from_collation, has_auto_increment, mysql_text_storage,
         recover_mysql_id_default,
     };
-    use crate::model::snapshot::MysqlPhysicalType;
+    use zero_migrate_backend::snapshot::MysqlPhysicalType;
 
     // Every expectation below is a spelling read back from a live MySQL 8.4.11
     // catalog after creating the column, not a guess at how MySQL renders a type.
@@ -820,7 +840,7 @@ mod tests {
             "spatial carries an SRID that COLUMN_TYPE does not, so it is not modelled here yet"
         );
     }
-    use crate::model::snapshot::IdDefaultSnapshot;
+    use zero_migrate_backend::snapshot::IdDefaultSnapshot;
 
     #[test]
     fn mysql_collations_normalize_to_portable_case_sensitive_intent() {
@@ -864,11 +884,19 @@ mod tests {
             recover_mysql_id_default(Some(catalog), true, true),
             IdDefaultSnapshot::UuidV4
         );
+        // `uuid()` is a MySQL generator, but NOT the one this vendor renders for a
+        // UUIDv4 default (that is the `random_bytes` form above), so it stays an
+        // ordinary expression key.
+        //
+        // Stated as the literal key rather than as
+        // `catalog_expression_fingerprint("uuid()")`. That call used to compose the
+        // UNATTRIBUTED rules — every registered vendor's, because it took no dialect
+        // — which this crate cannot build and should not: it holds one renderer.
+        // Recomputing the key with MySQL's own rules would compare the function to
+        // itself and assert nothing.
         assert_eq!(
             recover_mysql_id_default(Some("uuid()"), true, true),
-            IdDefaultSnapshot::Expression(
-                crate::render::value_format::catalog_expression_fingerprint("uuid()"),
-            )
+            IdDefaultSnapshot::Expression("call:uuid()".to_string())
         );
         assert_eq!(
             recover_mysql_id_default(Some("uuid()"), false, true),

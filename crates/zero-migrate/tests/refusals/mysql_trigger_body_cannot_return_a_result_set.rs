@@ -40,13 +40,14 @@ use std::collections::BTreeMap;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use serde_json::{json, Value};
-use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
+use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     resolve_create_table_policy, Approval, DialectId, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, MigrationEngine, MigrationIr, SqliteBackend,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_mysql_trigger_result_set";
 

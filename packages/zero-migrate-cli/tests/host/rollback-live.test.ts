@@ -576,7 +576,7 @@ test("MySQL: a rollback whose project lock is held fails with the holder named",
   const mysql = (await import("mysql2/promise")).default;
   const schema = uniqueSchema("rb_lock_my");
   const metaSchema = `${schema}_migrations`;
-  // Mirrors `project_lock_name` (crates/zero-migrate/src/apply/backend/mysql/session.rs:109):
+  // Mirrors `project_lock_name` (crates/zero-migrate-mysql/src/backend/session.rs:109):
   // `zero_migrate:<project_id>` while that fits in 64 chars, and the CLI passes the project
   // SCHEMA as the project id (packages/zero-migrate-cli/src/index.ts:544).
   //

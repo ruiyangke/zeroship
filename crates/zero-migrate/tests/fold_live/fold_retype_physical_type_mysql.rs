@@ -46,12 +46,13 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
+use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     diff_snapshots, fold_ops, fold_ops_onto, model::ir::Op, resolve_create_table_policy, Approval,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_fold_retype_physical_type_mysql";
 

@@ -309,7 +309,7 @@ mod tests {
     /// core-to-backend cycle the whole backend split exists to break.
     ///
     /// A second home also existed where nobody was looking for one:
-    /// `apply::backend::mysql::journal_sql::quote_ident_mysql` carried its own copy
+    /// `zero_migrate_mysql::backend::journal_sql::quote_ident_mysql` carried its own copy
     /// of the same escape. The ANSI needle has zero offenders crate-wide, so the
     /// backtick needle having two was the asymmetry, not a difference of kind.
     ///
@@ -329,7 +329,7 @@ mod tests {
     /// WHAT NEITHER NEEDLE CATCHES, and the limitation is the same shape as the ANSI
     /// scan's. Both are byte-patterns, so a bare wrap with no doubling at all —
     /// ``format!("`{ident}`")`` after a strict bare-identifier gate, which is what
-    /// `apply::backend::mysql::backfill_sql::quote_bare` used to be — passes both
+    /// `zero_migrate_mysql::backend::backfill_sql::quote_bare` used to be — passes both
     /// while being an unrouted spelling. That site was routed by hand; only the
     /// compile-time half (the primitive being unnameable outside its backend module)
     /// generalises. The in-crate test expectations that build a backtick literal to

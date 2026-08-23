@@ -5,8 +5,14 @@
 //! been reached by. It is declared in the contract crate rather than here for the
 //! reason every other item there is: a vendor crate cannot implement a trait that
 //! lives in the engine, because the engine already depends on every vendor. What
-//! remains in THIS module is the vendor side — `postgres`, `mysql`, `sqlite`, their
-//! public re-exports, and the project-lock constants those three read.
+//! remains in THIS module is the vendor side — `postgres` and `sqlite`, their
+//! public re-exports, and the project-lock constants all three backends read. MySQL
+//! is no longer among them: its execution half lives in `zero-migrate-mysql`, and
+//! core does not re-export it, because a `pub use zero_migrate_mysql::…` here would
+//! be core NAMING a vendor outside the registry — the thing
+//! `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. A caller
+//! that wants `MysqlBackend` names the vendor crate, exactly as the registry
+//! composition does.
 //!
 //! The executor's apply/rollback **orchestration** — partition versioned vs
 //! repeatable, the drift/tamper gate, squash/expand gates, `order_pending`, the
@@ -35,8 +41,8 @@
 //!   the checksum/tamper comparison itself is dialect-agnostic and stays generic
 //!   ([`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)).
 //!
-//! [`PostgresBackend`], [`sqlite::SqliteBackend`], and [`MysqlBackend`] are the live
-//! implementations. Postgres remains the richest regression bar; SQLite and MySQL
+//! [`PostgresBackend`], [`sqlite::SqliteBackend`], and `zero_migrate_mysql::MysqlBackend`
+//! are the live implementations. Postgres remains the richest regression bar; SQLite and MySQL
 //! provide dialect-specific session, journal, drift, and DML behavior behind the
 //! same orchestration trait, without forking the generic executor.
 //!
@@ -49,19 +55,14 @@ pub mod capability;
 // the neutral seam types) names no driver-concrete type — a host driver (the napi
 // `pg` shell) supplies the `SqlSession` impl.
 pub mod postgres;
-// The MySQL backend rides the SAME `driver::SqlSession` seam as Postgres; only its
-// dialect SQL differs. SQLite, by contrast, is in-process (`rusqlite`) and rides no
-// network seam at all.
-pub mod mysql;
+// SQLite is in-process (`rusqlite`) and rides no network seam at all. MySQL rides
+// the SAME `driver::SqlSession` seam as Postgres and used to sit here beside them;
+// it is `zero_migrate_mysql::backend` now.
 pub mod sqlite;
 
 pub use capability::{
     BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
     OnlineSchemaChange, ShadowConfig, ShadowDryRun,
-};
-pub use mysql::{
-    MysqlBackend, MysqlInflightDdlMarker, MysqlInflightRecoveryError, MysqlInflightRecoveryOutcome,
-    MysqlInflightResolution,
 };
 pub use postgres::PostgresBackend;
 // The SQLite backend's public entry points, re-exported HERE rather than reached

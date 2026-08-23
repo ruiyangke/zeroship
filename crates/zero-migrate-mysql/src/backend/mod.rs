@@ -1,10 +1,10 @@
-//! MySQL [`MigrationBackend`]
+//! MySQL [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend)
 //! implementation.
 //!
-//! Generic over the dialect-neutral [`SqlSession`] seam
-//! (engine root `crate::driver`) — a host driver (the napi `mysql2` shell) supplies
+//! Generic over the dialect-neutral [`SqlSession`](zero_migrate_backend::driver::SqlSession) seam
+//! (engine root `zero_migrate_backend::driver`) — a host driver (the napi `mysql2` shell) supplies
 //! the `SqlSession` impl, exactly as the `pg` shell does for
-//! [`PostgresBackend`](crate::apply::backend::PostgresBackend). MySQL rides the
+//! `zero_migrate::apply::backend::PostgresBackend`. MySQL rides the
 //! SAME seam as Postgres; only the dialect SQL (lock, session, journal DDL,
 //! placeholders) differs, and all of it lives here + in `session` / `journal_sql`
 //! — never in the shared executor (the structural fix that lets MySQL ride the
@@ -43,28 +43,36 @@ pub(crate) mod journal_sql;
 /// host mocking this journal answers the collation probe from the same list the
 /// bootstrap checks. Two hand-copied mirrors of it already drifted the moment a
 /// table was added.
+/// The canned `SqlSession` this backend's tests drive, shared with the engine's
+/// integration tests through the `testing` feature. See its own header for why it
+/// is not simply `#[cfg(test)]`.
+#[cfg(any(test, feature = "testing"))]
+pub mod recording;
+
 pub use journal_sql::BINARY_IDENTITY_COLUMNS;
 pub(crate) mod primary_key_sql;
 pub(crate) mod session;
 
-use super::capability::{BackfillSpec, OnlineSchemaChange};
-use super::{
+use zero_migrate_backend::backend::{
     CrossDeployObligations, MigrationBackend, PlaceholderStyle, ProjectLockAcquisition,
     PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
 };
-use crate::apply::baseline::{BaselineError, BaselineOutcome};
-use crate::apply::drift::DriftError;
-use crate::apply::executor::{ApplyError, RollbackError};
-use crate::apply::journal::{AppliedEntry, JournalError};
-use crate::conn::ExecutorConfig;
-use crate::driver::{Row, SqlSession};
-use crate::model::migration::{Checksum, Migration, MigrationId};
-use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::{DatabaseFeature, DatabaseRequirements, TableRebuildSpec};
-use crate::render::step::{
+use zero_migrate_backend::backfill::BackfillSpec;
+use zero_migrate_backend::baseline::{BaselineError, BaselineOutcome};
+use zero_migrate_backend::capability::OnlineSchemaChange;
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::drift::DriftError;
+use zero_migrate_backend::driver::{Row, SqlSession};
+use zero_migrate_backend::executor::{ApplyError, RollbackError};
+use zero_migrate_backend::journal::{AppliedEntry, JournalError};
+use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
+use zero_migrate_backend::snapshot::SchemaSnapshot;
+use zero_migrate_backend::step::{
     AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep,
 };
+use zero_migrate_backend::table_rebuild::TableRebuildSpec;
 use zero_migrate_ir::dialect::{DialectId, MYSQL};
+use zero_migrate_ir::migration::{Checksum, Migration, MigrationId};
 
 const DIALECT: DialectId = MYSQL;
 
@@ -187,7 +195,7 @@ fn completed_step_matches(
 ) -> Result<bool, ApplyError> {
     let completed = entries.into_iter().find(|entry| {
         entry.version == version.as_str()
-            && matches!(entry.phase, crate::apply::journal::Phase::Completed)
+            && matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed)
     });
     let Some(entry) = completed else {
         return Ok(false);
@@ -413,7 +421,7 @@ impl<'a, D: SqlSession> MysqlBackend<'a, D> {
     }
 }
 
-fn recovery_db(error: crate::driver::DbError) -> MysqlInflightRecoveryError {
+fn recovery_db(error: zero_migrate_backend::driver::DbError) -> MysqlInflightRecoveryError {
     MysqlInflightRecoveryError::Journal(JournalError::Db(error.into()))
 }
 
@@ -479,7 +487,7 @@ async fn recover_inflight_locked<D: SqlSession>(
                 journal_sql::append_completed(
                     conn,
                     cfg,
-                    crate::apply::journal::CompletedRecord {
+                    zero_migrate_backend::journal::CompletedRecord {
                         version,
                         name: &migration.name,
                         checksum: migration.checksum.as_str(),
@@ -778,7 +786,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         forward: &Migration,
-        inverse_steps: &[crate::render::step::PlanStep],
+        inverse_steps: &[zero_migrate_backend::step::PlanStep],
         applied_by: &str,
     ) -> Result<(), RollbackError> {
         session::rollback_dml_plan_transactional(self.conn, cfg, forward, inverse_steps, applied_by)
@@ -850,7 +858,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     async fn history(
         &self,
         _cfg: &ExecutorConfig,
-    ) -> Result<Vec<crate::apply::journal::HistoryEvent>, JournalError> {
+    ) -> Result<Vec<zero_migrate_backend::journal::HistoryEvent>, JournalError> {
         // MySQL's journal table records the events; what it has never had is the
         // READER that projects them into `HistoryEvent`. Refusing by name is the
         // honest posture: an empty Vec would be indistinguishable from a project
@@ -873,7 +881,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
     async fn backfill_progress(
         &self,
         cfg: &ExecutorConfig,
-    ) -> Result<Vec<crate::apply::backend::BackfillProgressEntry>, JournalError> {
+    ) -> Result<Vec<zero_migrate_backend::backfill::BackfillProgressEntry>, JournalError> {
         backfill_sql::read_progress_entries(self.conn, cfg).await
     }
 
@@ -892,7 +900,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         migrations: &[Migration],
-    ) -> Result<crate::apply::drift::ChecksumDriftReport, DriftError> {
+    ) -> Result<zero_migrate_backend::drift::ChecksumDriftReport, DriftError> {
         // The drift/tamper comparison is dialect-agnostic
         // (`compare_applied_to_set`); only the journal read underneath is
         // dialect-coupled. Read the net-applied state through the MySQL journal and
@@ -900,7 +908,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // repeatable-exemption / kind-mismatch / tamper rules never diverge across
         // dialects.
         let applied = journal_sql::applied(self.conn, cfg).await?;
-        Ok(crate::apply::drift::compare_applied_to_set(
+        Ok(zero_migrate_backend::drift::compare_applied_to_set(
             &applied, migrations,
         ))
     }
@@ -913,14 +921,14 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         _cfg: &ExecutorConfig,
         m: &Migration,
-    ) -> Result<crate::apply::executor::PreconditionVerdict, ApplyError> {
+    ) -> Result<zero_migrate_backend::executor::PreconditionVerdict, ApplyError> {
         // The executor calls this for EVERY migration, precondition-bearing or not.
         // A migration with NO preconditions needs no evaluator at all — evaluating an
         // empty list is `AllMet` by construction (exactly what the PG evaluator's
         // `evaluate_all` returns for an empty `m.preconditions`), so it must apply
         // normally on MySQL rather than trip the v1 capability gap.
         if m.preconditions.is_empty() {
-            return Ok(crate::apply::executor::PreconditionVerdict::AllMet);
+            return Ok(zero_migrate_backend::executor::PreconditionVerdict::AllMet);
         }
         // A GENUINE precondition (boolean-SELECT probes gated by the `pg_query`
         // parser + PG-flavoured catalog reads) has no MySQL-native evaluator yet, so
@@ -956,7 +964,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         spec: &TableRebuildSpec,
         _m: &Migration,
-        _scope: &crate::approval::ApprovalScope,
+        _scope: &zero_migrate_backend::approval::ApprovalScope,
         _applied_by: &str,
     ) -> Result<(), ApplyError> {
         // A SQLite 12-step table rebuild reaching the MySQL backend is a routing bug
@@ -972,8 +980,8 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         step: &AlterPrimaryKeyStep,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         primary_key_sql::alter_primary_key(self.conn, cfg, step, approval, scope, applied_by).await
@@ -983,8 +991,8 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         step: &AlterColumnTypeStep,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         alter_column_type_sql::alter_column_type(self.conn, cfg, step, approval, scope, applied_by)
@@ -1006,13 +1014,13 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         version: &MigrationId,
         checksum: &Checksum,
         spec: &BackfillSpec,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: crate::apply::executor::LockMode,
-    ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
+        _lock_mode: zero_migrate_backend::executor::LockMode,
+    ) -> Result<zero_migrate_backend::executor::ApplyOutcome, ApplyError> {
         if completed_step_matches(self.applied(cfg).await?, version, checksum)? {
-            return Ok(crate::apply::executor::ApplyOutcome {
+            return Ok(zero_migrate_backend::executor::ApplyOutcome {
                 applied: Vec::new(),
                 skipped: vec![version.as_str().to_string()],
                 recovered: Vec::new(),
@@ -1022,7 +1030,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // A pending backfill mutates table data. Refuse before progress
         // bootstrap or a target-table read. A completed matching step above is
         // an idempotent skip and does not need renewed approval.
-        if approval != crate::approval::Approval::Approved {
+        if approval != zero_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if !scope.admits(version.as_str()) {
@@ -1035,7 +1043,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         let result =
             backfill_sql::run_backfill(self.conn, cfg, version, checksum, spec, applied_by).await;
         let outcome = restore_after_data_step(self.conn, &snapshot, result).await?;
-        Ok(crate::apply::executor::ApplyOutcome {
+        Ok(zero_migrate_backend::executor::ApplyOutcome {
             applied: if outcome.complete {
                 vec![version.as_str().to_string()]
             } else {
@@ -1061,16 +1069,16 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         mutates_data: bool,
         destructive: bool,
         _owner_app: &str,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: crate::apply::executor::LockMode,
+        _lock_mode: zero_migrate_backend::executor::LockMode,
     ) -> Result<bool, ApplyError> {
         if completed_step_matches(self.applied(cfg).await?, version, checksum)? {
             return Ok(false);
         }
 
-        if destructive && approval != crate::approval::Approval::Approved {
+        if destructive && approval != zero_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if destructive && !scope.admits(version.as_str()) {
@@ -1153,7 +1161,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 /// beside the live-PostgreSQL scenarios is a dependency fact, not an oversight, and
 /// the asymmetry is worth stating so it is not read as a hole. [`MysqlBackend`] has
 /// exactly one constructor - [`MysqlBackend::new_generic`], over the
-/// [`SqlSession`](crate::driver::SqlSession) trait - and this crate depends on no
+/// [`SqlSession`](zero_migrate_backend::driver::SqlSession) trait - and this crate depends on no
 /// MySQL client; `postgres` is a dev-dependency carried solely so `tests/support`'s
 /// `PgDevSession` can drive the PG scenarios. A Rust-side MySQL harness would have
 /// to add a client and a second `SqlSession` over it in order to re-prove what the
@@ -1164,887 +1172,11 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
 /// it is indistinguishable from a bug here.
 #[cfg(test)]
 mod render_tests {
+    use super::recording::*;
     use super::*;
-    use crate::apply::backend::ProjectLockHolder;
-    use crate::apply::drift::diff_snapshots;
-    use crate::driver::{Bind, DbError, Row, Value};
-    use crate::model::expr::Expr;
-    use crate::model::ir::{
-        ColType, IdentityCol, IrColumn, IrConstraint, IrConstraintKind, IrDefault, MigrationIr, Op,
-        ValueFormat, CURRENT_IR_VERSION,
-    };
-    use crate::model::migration::{Checksum, MigrationFlags};
-    use crate::model::probe::{GuardDir, GuardProbe};
-    use crate::model::snapshot::IdDefaultSnapshot;
-    use serde_json::json;
-    use std::cell::RefCell;
-
-    /// The MySQL connection id the canned holder probe reports. Distinct from the
-    /// `performance_schema` thread id the lock rows carry, because the reply must
-    /// name the id `KILL` accepts.
-    const HOLDER_CONNECTION_ID: i64 = 113_110;
-
-    /// A non-compio, host-shaped [`SqlSession`] that records the SQL + binds of
-    /// every verb and returns canned rows for the reads the MySQL apply path issues:
-    /// `GET_LOCK(...)` → a single `got=1` row (lock acquired); the
-    /// `information_schema.triggers` existence probe → empty (so `ensure_journal`
-    /// creates every trigger); the journal net-state reads → empty. This is the
-    /// MySQL analogue of the PG backend's in-crate `RecordingSession` genericity
-    /// proof.
-    struct RecordingSession {
-        log: RefCell<Vec<String>>,
-        binds: RefCell<Vec<Vec<Bind>>>,
-        applied: RefCell<Option<(String, String)>>,
-        inflight_marker: RefCell<Option<MysqlInflightDdlMarker>>,
-        table_engine: RefCell<String>,
-        server_version: String,
-        default_storage_engine: String,
-        innodb_support: Option<String>,
-        global_binlog_format: String,
-        session_binlog_format: String,
-        trigger_name: RefCell<Option<String>>,
-        unique_index_rows: RefCell<Vec<Row>>,
-        edge_index_rows: RefCell<Vec<Row>>,
-        binary_journal_collations: bool,
-        catalog_tables: RefCell<Vec<Row>>,
-        catalog_columns: RefCell<Vec<Row>>,
-        catalog_checks: RefCell<Vec<Row>>,
-        catalog_indexes: RefCell<Vec<Row>>,
-        catalog_foreign_keys: RefCell<Vec<Row>>,
-        progress: RefCell<Vec<Row>>,
-        progress_table_exists: bool,
-        progress_checksum_exists: bool,
-        session_in_transaction: i64,
-        zero_affected_contains: RefCell<Option<String>>,
-        fail_once_contains: RefCell<Option<String>>,
-        /// When false the NON-WAITING `GET_LOCK(?, 0)` answers 0, standing in for a
-        /// peer's deploy holding the project lock for the length of its run. The
-        /// blocking `GET_LOCK(?, ?)` still answers 1, because that is the one the
-        /// journal bootstrap takes and it is a different lock name.
-        grants_project_lock: bool,
-    }
-
-    impl RecordingSession {
-        fn new() -> Self {
-            Self {
-                log: RefCell::new(Vec::new()),
-                binds: RefCell::new(Vec::new()),
-                applied: RefCell::new(None),
-                inflight_marker: RefCell::new(None),
-                table_engine: RefCell::new("InnoDB".to_string()),
-                server_version: "8.0.13".to_string(),
-                default_storage_engine: "InnoDB".to_string(),
-                innodb_support: Some("DEFAULT".to_string()),
-                global_binlog_format: "ROW".to_string(),
-                session_binlog_format: "ROW".to_string(),
-                trigger_name: RefCell::new(None),
-                unique_index_rows: RefCell::new(Vec::new()),
-                edge_index_rows: RefCell::new(Vec::new()),
-                binary_journal_collations: true,
-                catalog_tables: RefCell::new(Vec::new()),
-                catalog_columns: RefCell::new(Vec::new()),
-                catalog_checks: RefCell::new(Vec::new()),
-                catalog_indexes: RefCell::new(Vec::new()),
-                catalog_foreign_keys: RefCell::new(Vec::new()),
-                progress: RefCell::new(Vec::new()),
-                progress_table_exists: false,
-                progress_checksum_exists: false,
-                session_in_transaction: 0,
-                zero_affected_contains: RefCell::new(None),
-                fail_once_contains: RefCell::new(None),
-                grants_project_lock: true,
-            }
-        }
-
-        /// A session whose non-waiting project-lock acquisition always finds the
-        /// lock taken.
-        fn with_contended_project_lock() -> Self {
-            let mut session = Self::new();
-            session.grants_project_lock = false;
-            session
-        }
-
-        fn with_table_engine(engine: &str) -> Self {
-            let session = Self::new();
-            *session.table_engine.borrow_mut() = engine.to_string();
-            session
-        }
-
-        fn with_uuid_capabilities(
-            version: &str,
-            default_engine: &str,
-            innodb_support: Option<&str>,
-            global_binlog_format: &str,
-            session_binlog_format: &str,
-        ) -> Self {
-            let mut session = Self::new();
-            session.server_version = version.to_string();
-            session.default_storage_engine = default_engine.to_string();
-            session.innodb_support = innodb_support.map(str::to_string);
-            session.global_binlog_format = global_binlog_format.to_string();
-            session.session_binlog_format = session_binlog_format.to_string();
-            session
-        }
-
-        fn with_trigger(name: &str) -> Self {
-            let session = Self::new();
-            *session.trigger_name.borrow_mut() = Some(name.to_string());
-            session
-        }
-
-        fn with_unique_indexes(rows: Vec<Row>) -> Self {
-            let session = Self::new();
-            *session.unique_index_rows.borrow_mut() = rows;
-            session
-        }
-
-        fn with_edge_index(rows: Vec<Row>) -> Self {
-            let session = Self::new();
-            *session.edge_index_rows.borrow_mut() = rows;
-            session
-        }
-
-        fn with_legacy_journal_collations() -> Self {
-            let mut session = Self::new();
-            session.binary_journal_collations = false;
-            session
-        }
-
-        fn with_catalog(
-            tables: Vec<Row>,
-            columns: Vec<Row>,
-            indexes: Vec<Row>,
-            foreign_keys: Vec<Row>,
-        ) -> Self {
-            let session = Self::new();
-            *session.catalog_tables.borrow_mut() = tables;
-            *session.catalog_columns.borrow_mut() = columns;
-            *session.catalog_indexes.borrow_mut() = indexes;
-            *session.catalog_foreign_keys.borrow_mut() = foreign_keys;
-            session
-        }
-
-        fn with_catalog_checks(
-            tables: Vec<Row>,
-            columns: Vec<Row>,
-            indexes: Vec<Row>,
-            foreign_keys: Vec<Row>,
-            checks: Vec<Row>,
-        ) -> Self {
-            let mut session = Self::with_catalog(tables, columns, indexes, foreign_keys);
-            session.server_version = "8.0.16".to_string();
-            *session.catalog_checks.borrow_mut() = checks;
-            session
-        }
-
-        fn with_progress(rows: Vec<Row>, checksum_exists: bool) -> Self {
-            let mut session = Self::new();
-            *session.progress.borrow_mut() = rows;
-            session.progress_table_exists = true;
-            session.progress_checksum_exists = checksum_exists;
-            session
-        }
-
-        fn with_applied(version: &str, checksum: &Checksum) -> Self {
-            let session = Self::new();
-            *session.applied.borrow_mut() =
-                Some((version.to_string(), checksum.as_str().to_string()));
-            session
-        }
-
-        fn with_inflight(migration: &Migration, applied_by: &str) -> Self {
-            let session = Self::new();
-            *session.inflight_marker.borrow_mut() = Some(MysqlInflightDdlMarker {
-                version: migration.version.as_str().to_string(),
-                name: migration.name.clone(),
-                checksum: migration.checksum.as_str().to_string(),
-                applied_by: applied_by.to_string(),
-                started_at: "2026-07-15 12:00:00.000000".to_string(),
-            });
-            session
-        }
-
-        fn with_failure(fragment: &str) -> Self {
-            let session = Self::new();
-            *session.fail_once_contains.borrow_mut() = Some(fragment.to_string());
-            session
-        }
-
-        fn with_in_transaction(in_transaction: i64) -> Self {
-            let mut session = Self::new();
-            session.session_in_transaction = in_transaction;
-            session
-        }
-
-        fn with_zero_affected(fragment: &str) -> Self {
-            let session = Self::new();
-            *session.zero_affected_contains.borrow_mut() = Some(fragment.to_string());
-            session
-        }
-
-        fn fail_if_requested(&self, sql: &str) -> Result<(), DbError> {
-            let should_fail = self
-                .fail_once_contains
-                .borrow()
-                .as_deref()
-                .is_some_and(|fragment| sql.contains(fragment));
-            if should_fail {
-                self.fail_once_contains.borrow_mut().take();
-                return Err(DbError::message("injected RecordingSession failure"));
-            }
-            Ok(())
-        }
-
-        /// Route a read to its canned rows by SQL shape. `GET_LOCK` returns a
-        /// single `got=1` row; everything else (trigger-existence probe, journal
-        /// net-state reads) returns empty — enough to drive the whole apply/journal
-        /// sweep end-to-end without a live server.
-        fn rows_for(&self, sql: &str) -> Vec<Row> {
-            if sql.contains("GET_LOCK(?, 0)") {
-                vec![Row::new(
-                    vec!["got".to_string()],
-                    vec![Value::Int(i64::from(self.grants_project_lock))],
-                )]
-            } else if sql.contains("GET_LOCK") {
-                vec![Row::new(vec!["got".to_string()], vec![Value::Int(1)])]
-            } else if sql.contains("performance_schema.metadata_locks") {
-                vec![Row::new(
-                    vec![
-                        "pid".into(),
-                        "account".into(),
-                        "state".into(),
-                        "stmt".into(),
-                    ],
-                    vec![
-                        Value::Int(HOLDER_CONNECTION_ID),
-                        Value::Text("deployer@10.0.0.7".to_string()),
-                        Value::Text("Query: altering table".to_string()),
-                        Value::Text("ALTER TABLE widgets ADD COLUMN name VARCHAR(64)".to_string()),
-                    ],
-                )]
-            } else if sql.contains("VERSION() AS server_version") {
-                vec![Row::new(
-                    vec![
-                        "server_version".into(),
-                        "default_storage_engine".into(),
-                        "innodb_support".into(),
-                        "global_binlog_format".into(),
-                        "session_binlog_format".into(),
-                    ],
-                    vec![
-                        Value::Text(self.server_version.clone()),
-                        Value::Text(self.default_storage_engine.clone()),
-                        self.innodb_support
-                            .as_ref()
-                            .map_or(Value::Null, |value| Value::Text(value.clone())),
-                        Value::Text(self.global_binlog_format.clone()),
-                        Value::Text(self.session_binlog_format.clone()),
-                    ],
-                )]
-            } else if sql.contains("@@SESSION.sql_mode") {
-                vec![Row::new(
-                    vec![
-                        "sql_mode".into(),
-                        "time_zone".into(),
-                        "max_execution_time".into(),
-                        "innodb_lock_wait_timeout".into(),
-                        "information_schema_stats_expiry".into(),
-                        "autocommit".into(),
-                        "foreign_key_checks".into(),
-                        "unique_checks".into(),
-                        "transaction_tracking_enabled".into(),
-                        "in_transaction".into(),
-                    ],
-                    vec![
-                        Value::Text("STRICT_TRANS_TABLES".into()),
-                        Value::Text("SYSTEM".into()),
-                        Value::Int(0),
-                        Value::Int(50),
-                        Value::Int(86_400),
-                        Value::Int(0),
-                        Value::Int(0),
-                        Value::Int(0),
-                        Value::Int(1),
-                        Value::Int(self.session_in_transaction),
-                    ],
-                )]
-            } else if sql.contains("performance_schema.events_transactions_current") {
-                vec![Row::new(
-                    vec![
-                        "transaction_tracking_enabled".into(),
-                        "in_transaction".into(),
-                    ],
-                    vec![Value::Int(1), Value::Int(self.session_in_transaction)],
-                )]
-            } else if sql.contains("schema_migrations_inflight") && sql.contains("FOR UPDATE") {
-                self.inflight_marker
-                    .borrow()
-                    .as_ref()
-                    .map_or_else(Vec::new, |marker| {
-                        vec![Row::new(
-                            vec![
-                                "version".into(),
-                                "name".into(),
-                                "checksum".into(),
-                                "applied_by".into(),
-                                "started_at".into(),
-                            ],
-                            vec![
-                                Value::Text(marker.version.clone()),
-                                Value::Text(marker.name.clone()),
-                                Value::Text(marker.checksum.clone()),
-                                Value::Text(marker.applied_by.clone()),
-                                Value::Text(marker.started_at.clone()),
-                            ],
-                        )]
-                    })
-            } else if sql.contains("WITH ranked AS") {
-                self.applied
-                    .borrow()
-                    .as_ref()
-                    .map_or_else(Vec::new, |(version, checksum)| {
-                        vec![Row::new(
-                            vec![
-                                "version".into(),
-                                "checksum".into(),
-                                "mig_kind".into(),
-                                "event_seq".into(),
-                                "phase".into(),
-                                // The applied read selects the stored reverse now,
-                                // so a canned row without it cannot be parsed.
-                                "down".into(),
-                            ],
-                            vec![
-                                Value::Text(version.clone()),
-                                Value::Text(checksum.clone()),
-                                Value::Text("apply".into()),
-                                Value::Int(1),
-                                Value::Text("completed".into()),
-                                Value::Null,
-                            ],
-                        )]
-                    })
-            } else if sql.contains("AS table_exists") && sql.contains("schema_backfills") {
-                vec![Row::new(
-                    vec!["table_exists".into(), "checksum_exists".into()],
-                    vec![
-                        Value::Int(i64::from(self.progress_table_exists)),
-                        Value::Int(i64::from(self.progress_checksum_exists)),
-                    ],
-                )]
-            } else if sql.contains("schema_backfills") && sql.contains("AS checksum") {
-                self.progress.borrow().clone()
-            } else if sql.contains("information_schema.TRIGGERS") {
-                self.trigger_name
-                    .borrow()
-                    .as_ref()
-                    .map_or_else(Vec::new, |name| {
-                        vec![Row::new(
-                            vec!["trigger_name".into()],
-                            vec![Value::Text(name.clone())],
-                        )]
-                    })
-            } else if sql.contains("TABLE_TYPE = 'BASE TABLE'") {
-                self.catalog_tables.borrow().clone()
-            } else if sql.contains("COLUMN_TYPE AS column_type")
-                && sql.contains("ORDINAL_POSITION AS ordinal_position")
-            {
-                self.catalog_columns.borrow().clone()
-            } else if sql.contains("information_schema.CHECK_CONSTRAINTS")
-                && sql.contains("tc.ENFORCED AS enforced")
-            {
-                self.catalog_checks.borrow().clone()
-            } else if sql.contains("EXPRESSION AS expression")
-                && sql.contains("ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX")
-            {
-                self.catalog_indexes.borrow().clone()
-            } else if sql.contains("information_schema.REFERENTIAL_CONSTRAINTS")
-                && sql.contains("POSITION_IN_UNIQUE_CONSTRAINT")
-            {
-                self.catalog_foreign_keys.borrow().clone()
-            } else if sql.contains("COLLATION_NAME AS collation_name")
-                && sql.contains("schema_migrations_inflight")
-            {
-                let collation = if self.binary_journal_collations {
-                    "utf8mb4_bin"
-                } else {
-                    "utf8mb4_0900_ai_ci"
-                };
-                [
-                    ("schema_migrations", "version"),
-                    ("schema_migrations", "checksum"),
-                    ("schema_migrations_supersedes", "squash_version"),
-                    ("schema_migrations_supersedes", "superseded_version"),
-                    ("schema_migrations_inflight", "version"),
-                    ("schema_migrations_inflight", "checksum"),
-                    ("schema_migrations_rollback_inflight", "version"),
-                    ("schema_migrations_rollback_inflight", "checksum"),
-                    ("schema_migrations_recovery", "version"),
-                    ("schema_migrations_recovery", "checksum"),
-                ]
-                .into_iter()
-                .map(|(table, column)| {
-                    Row::new(
-                        vec![
-                            "table_name".into(),
-                            "column_name".into(),
-                            "character_set_name".into(),
-                            "collation_name".into(),
-                        ],
-                        vec![
-                            Value::Text(table.into()),
-                            Value::Text(column.into()),
-                            Value::Text("utf8mb4".into()),
-                            Value::Text(collation.into()),
-                        ],
-                    )
-                })
-                .collect()
-            } else if sql.contains("information_schema.STATISTICS")
-                && sql.contains("schema_migrations_supersedes_edge_uq")
-            {
-                self.edge_index_rows.borrow().clone()
-            } else if sql.contains("information_schema.STATISTICS") {
-                self.unique_index_rows.borrow().clone()
-            } else if sql.contains("information_schema.TABLES") {
-                vec![Row::new(
-                    vec!["table_engine".into()],
-                    vec![Value::Text(self.table_engine.borrow().clone())],
-                )]
-            } else {
-                Vec::new()
-            }
-        }
-    }
-
-    impl SqlSession for RecordingSession {
-        async fn batch(&self, sql: &str) -> Result<(), DbError> {
-            self.log.borrow_mut().push(format!("batch: {sql}"));
-            self.fail_if_requested(sql)?;
-            Ok(())
-        }
-        async fn exec(&self, sql: &str, params: &[Bind]) -> Result<u64, DbError> {
-            self.log.borrow_mut().push(format!("exec: {sql}"));
-            self.binds.borrow_mut().push(params.to_vec());
-            self.fail_if_requested(sql)?;
-            Ok(u64::from(
-                !self
-                    .zero_affected_contains
-                    .borrow()
-                    .as_deref()
-                    .is_some_and(|fragment| sql.contains(fragment)),
-            ))
-        }
-        async fn exec_text(&self, sql: &str, _params: &[Option<String>]) -> Result<u64, DbError> {
-            self.log.borrow_mut().push(format!("exec_text: {sql}"));
-            Ok(1)
-        }
-        async fn query(&self, sql: &str, params: &[Bind]) -> Result<Vec<Row>, DbError> {
-            self.log.borrow_mut().push(format!("query: {sql}"));
-            self.binds.borrow_mut().push(params.to_vec());
-            self.fail_if_requested(sql)?;
-            Ok(self.rows_for(sql))
-        }
-        async fn query_one(&self, sql: &str, params: &[Bind]) -> Result<Row, DbError> {
-            self.log.borrow_mut().push(format!("query_one: {sql}"));
-            self.binds.borrow_mut().push(params.to_vec());
-            self.fail_if_requested(sql)?;
-            self.rows_for(sql)
-                .into_iter()
-                .next()
-                .ok_or_else(|| DbError::message("query_one: no canned row"))
-        }
-    }
-
-    fn trivial_migration() -> Migration {
-        let flags = MigrationFlags::default();
-        let version = MigrationId::generate();
-        let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
-            up: "CREATE TABLE t (id INT)",
-            down: Some("DROP TABLE t"),
-            flags: &flags,
-            owner_app: "app_test",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        });
-        Migration {
-            version,
-            name: "create_t".into(),
-            up: "CREATE TABLE t (id INT)".into(),
-            down: Some("DROP TABLE t".into()),
-            checksum,
-            flags,
-            owner_app: "app_test".into(),
-            depends_on: Vec::new(),
-            supersedes: Vec::new(),
-            preconditions: Vec::new(),
-            existence_guard: None,
-            effect: None,
-        }
-    }
-
-    fn guarded_migration(up: &str, probe: GuardProbe) -> Migration {
-        let mut migration = trivial_migration();
-        migration.name = "guarded object".into();
-        migration.up = up.into();
-        migration.down = None;
-        migration.checksum = Checksum::of(&crate::model::migration::ChecksumInput {
-            up: &migration.up,
-            down: migration.down.as_deref(),
-            flags: &migration.flags,
-            owner_app: &migration.owner_app,
-            depends_on: &migration.depends_on,
-            supersedes: &migration.supersedes,
-            preconditions: &migration.preconditions,
-        });
-        migration.existence_guard = Some(probe);
-        migration
-    }
-
-    fn catalog_table(table: &str) -> Row {
-        Row::new(vec!["table_name".into()], vec![Value::Text(table.into())])
-    }
-
-    fn step_checksum(label: &str) -> Checksum {
-        Checksum::of(&crate::model::migration::ChecksumInput {
-            up: label,
-            down: None,
-            flags: &MigrationFlags::default(),
-            owner_app: "app_test",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        })
-    }
-
-    fn unique_index_part(index: &str, column: Option<&str>, sub_part: Option<i64>) -> Row {
-        Row::new(
-            vec!["index_name".into(), "column_name".into(), "sub_part".into()],
-            vec![
-                Value::Text(index.into()),
-                column.map_or(Value::Null, |value| Value::Text(value.into())),
-                sub_part.map_or(Value::Null, Value::Int),
-            ],
-        )
-    }
-
-    fn edge_index_part(
-        non_unique: i64,
-        sequence: i64,
-        column: Option<&str>,
-        sub_part: Option<i64>,
-    ) -> Row {
-        Row::new(
-            vec![
-                "non_unique".into(),
-                "seq_in_index".into(),
-                "column_name".into(),
-                "sub_part".into(),
-            ],
-            vec![
-                Value::Int(non_unique),
-                Value::Int(sequence),
-                column.map_or(Value::Null, |value| Value::Text(value.into())),
-                sub_part.map_or(Value::Null, Value::Int),
-            ],
-        )
-    }
-
-    fn catalog_column(
-        table: &str,
-        column: &str,
-        column_type: &str,
-        character_set: Option<&str>,
-        collation: Option<&str>,
-        nullable: bool,
-        ordinal: i64,
-    ) -> Row {
-        catalog_column_with_generation(
-            table,
-            column,
-            column_type,
-            character_set,
-            collation,
-            nullable,
-            ordinal,
-            None,
-            "",
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn catalog_column_with_generation(
-        table: &str,
-        column: &str,
-        column_type: &str,
-        character_set: Option<&str>,
-        collation: Option<&str>,
-        nullable: bool,
-        ordinal: i64,
-        default: Option<&str>,
-        extra: &str,
-    ) -> Row {
-        Row::new(
-            vec![
-                "table_name".into(),
-                "column_name".into(),
-                "column_type".into(),
-                "character_set_name".into(),
-                "collation_name".into(),
-                "is_nullable".into(),
-                "column_default".into(),
-                "extra".into(),
-                "ordinal_position".into(),
-            ],
-            vec![
-                Value::Text(table.into()),
-                Value::Text(column.into()),
-                Value::Text(column_type.into()),
-                character_set.map_or(Value::Null, |value| Value::Text(value.into())),
-                collation.map_or(Value::Null, |value| Value::Text(value.into())),
-                Value::Text(if nullable { "YES" } else { "NO" }.into()),
-                default.map_or(Value::Null, |value| Value::Text(value.into())),
-                Value::Text(extra.into()),
-                Value::Int(ordinal),
-            ],
-        )
-    }
-
-    fn catalog_check(table: &str, constraint: &str, enforced: bool, check_clause: &str) -> Row {
-        Row::new(
-            vec![
-                "table_name".into(),
-                "constraint_name".into(),
-                "enforced".into(),
-                "check_clause".into(),
-            ],
-            vec![
-                Value::Text(table.into()),
-                Value::Text(constraint.into()),
-                Value::Text(if enforced { "YES" } else { "NO" }.into()),
-                Value::Text(check_clause.into()),
-            ],
-        )
-    }
-
-    const MYSQL_CATALOG_UUID_V4_DEFAULT: &str = "lower(concat(hex(random_bytes(4)),_latin1'-',hex(random_bytes(2)),_latin1'-',hex(((ord(random_bytes(1)) & 15) | 64)),hex(random_bytes(1)),_latin1'-',hex(((ord(random_bytes(1)) & 63) | 128)),hex(random_bytes(1)),_latin1'-',hex(random_bytes(6))))";
-
-    fn id_catalog_columns(
-        generated_uuid_default: Option<&str>,
-        supplied_uuid_default: Option<&str>,
-        type_id_default: Option<&str>,
-        ulid_default: Option<&str>,
-    ) -> Vec<Row> {
-        id_catalog_columns_with_generated_uuid_extra(
-            generated_uuid_default,
-            supplied_uuid_default,
-            type_id_default,
-            ulid_default,
-            "DEFAULT_GENERATED",
-        )
-    }
-
-    fn id_catalog_columns_with_generated_uuid_extra(
-        generated_uuid_default: Option<&str>,
-        supplied_uuid_default: Option<&str>,
-        type_id_default: Option<&str>,
-        ulid_default: Option<&str>,
-        generated_uuid_extra: &str,
-    ) -> Vec<Row> {
-        vec![
-            catalog_column_with_generation(
-                "ids",
-                "auto_id",
-                "bigint",
-                None,
-                None,
-                false,
-                1,
-                None,
-                "auto_increment",
-            ),
-            catalog_column_with_generation(
-                "ids",
-                "generated_uuid",
-                "varchar(36)",
-                Some("ascii"),
-                Some("ascii_bin"),
-                false,
-                2,
-                generated_uuid_default,
-                generated_uuid_extra,
-            ),
-            catalog_column_with_generation(
-                "ids",
-                "supplied_uuid",
-                "varchar(36)",
-                Some("ascii"),
-                Some("ascii_bin"),
-                false,
-                3,
-                supplied_uuid_default,
-                supplied_uuid_default.map_or("", |_| "DEFAULT_GENERATED"),
-            ),
-            catalog_column_with_generation(
-                "ids",
-                "type_id",
-                "varchar(191)",
-                Some("ascii"),
-                Some("ascii_bin"),
-                false,
-                4,
-                type_id_default,
-                type_id_default.map_or("", |_| "DEFAULT_GENERATED"),
-            ),
-            catalog_column_with_generation(
-                "ids",
-                "ulid",
-                "varchar(191)",
-                Some("ascii"),
-                Some("ascii_bin"),
-                false,
-                5,
-                ulid_default,
-                ulid_default.map_or("", |_| "DEFAULT_GENERATED"),
-            ),
-            // An ordinary text default that happens to call uuid() must remain
-            // outside the narrow ID-default comparison surface without an
-            // engine-owned UUID format CHECK.
-            //
-            // `text`, NOT `varchar(191)`, because that is what the engine deploys for
-            // a plain `ColType::Text` column - measured against a live MySQL server by
-            // `tests/drift_column_physical_type.rs`, whose `body` column authors `text`
-            // and introspects back as `Lob { tier: "text" }`. The `varchar(191)`
-            // spelling belongs to the two columns ABOVE, which carry a `value_format`
-            // and so need an indexable width. This row read `varchar(191)` until the
-            // drift report learned to print the physical contract: the comparator had
-            // always answered "different" here, and the report dropped the answer
-            // because `mysql_canonical_type` folds `varchar(191)` to the same literal
-            // `text` the fold emits.
-            catalog_column_with_generation(
-                "ids",
-                "ordinary",
-                "text",
-                Some("utf8mb4"),
-                Some("utf8mb4_bin"),
-                false,
-                6,
-                Some("uuid()"),
-                "DEFAULT_GENERATED",
-            ),
-        ]
-    }
-
-    fn catalog_index_part(
-        table: &str,
-        index: &str,
-        non_unique: i64,
-        sequence: i64,
-        column: Option<&str>,
-        prefix: Option<i64>,
-        collation: Option<&str>,
-        expression: Option<&str>,
-    ) -> Row {
-        Row::new(
-            vec![
-                "table_name".into(),
-                "index_name".into(),
-                "non_unique".into(),
-                "seq_in_index".into(),
-                "column_name".into(),
-                "sub_part".into(),
-                "index_collation".into(),
-                "index_type".into(),
-                "expression".into(),
-            ],
-            vec![
-                Value::Text(table.into()),
-                Value::Text(index.into()),
-                Value::Int(non_unique),
-                Value::Int(sequence),
-                column.map_or(Value::Null, |value| Value::Text(value.into())),
-                prefix.map_or(Value::Null, Value::Int),
-                collation.map_or(Value::Null, |value| Value::Text(value.into())),
-                Value::Text("BTREE".into()),
-                expression.map_or(Value::Null, |value| Value::Text(value.into())),
-            ],
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn catalog_foreign_key_part(
-        table: &str,
-        constraint: &str,
-        ordinal: i64,
-        unique_position: i64,
-        column: &str,
-        referenced_schema: &str,
-        referenced_table: &str,
-        referenced_column: &str,
-        update_rule: &str,
-        delete_rule: &str,
-    ) -> Row {
-        Row::new(
-            vec![
-                "table_name".into(),
-                "constraint_name".into(),
-                "ordinal_position".into(),
-                "position_in_unique_constraint".into(),
-                "column_name".into(),
-                "referenced_table_schema".into(),
-                "referenced_table_name".into(),
-                "referenced_column_name".into(),
-                "update_rule".into(),
-                "delete_rule".into(),
-            ],
-            vec![
-                Value::Text(table.into()),
-                Value::Text(constraint.into()),
-                Value::Int(ordinal),
-                Value::Int(unique_position),
-                Value::Text(column.into()),
-                Value::Text(referenced_schema.into()),
-                Value::Text(referenced_table.into()),
-                Value::Text(referenced_column.into()),
-                Value::Text(update_rule.into()),
-                Value::Text(delete_rule.into()),
-            ],
-        )
-    }
-
-    fn plan_dml_step(label: &str, destructive: bool) -> (crate::PlanStep, MigrationId) {
-        let version = MigrationId::generate();
-        let template = if destructive {
-            "DELETE FROM `proj_x`.`users` WHERE `id` = ?"
-        } else {
-            "INSERT INTO `proj_x`.`users` (`id`) VALUES (?)"
-        };
-        (
-            crate::PlanStep::Dml {
-                version: version.clone(),
-                checksum: step_checksum(label),
-                name: label.into(),
-                template: template.into(),
-                binds: vec![BindValue::Int(7)],
-                target_schema: "proj_x".into(),
-                target_table: "users".into(),
-                conflict_target: None,
-                mutates_data: true,
-                transactional: true,
-                destructive,
-                requires_approval: destructive,
-                owner_app: "app_test".into(),
-            },
-            version,
-        )
-    }
-
-    fn requirements(feature: DatabaseFeature) -> DatabaseRequirements {
-        let mut requirements = DatabaseRequirements::default();
-        requirements.require(feature);
-        requirements
-    }
+    use zero_migrate_backend::backend::ProjectLockHolder;
+    use zero_migrate_backend::driver::{Bind, Row, Value};
+    use zero_migrate_ir::probe::{GuardDir, GuardProbe};
 
     /// The backend reports the MySQL dialect, the `?` placeholder style, and
     /// non-transactional DDL (auto-commit ⇒ two-phase path for every migration).
@@ -2282,49 +1414,6 @@ mod render_tests {
     }
 
     #[compio::test]
-    async fn uuid_v4_capability_failure_precedes_authored_sql() {
-        let rec = RecordingSession::with_uuid_capabilities(
-            "8.0.12",
-            "InnoDB",
-            Some("DEFAULT"),
-            "ROW",
-            "ROW",
-        );
-        let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
-        let migration = trivial_migration();
-        let authored_sql = migration.up.clone();
-        let mut plan = crate::AppliedPlan::single_step(migration);
-        plan.database_requirements
-            .require(DatabaseFeature::UuidV4Generation);
-
-        let error = crate::MigrationEngine::new()
-            .apply_applied_plan_with_touched_and_depends(
-                &plan,
-                &[],
-                &[],
-                crate::approval::Approval::None,
-                &backend,
-                &cfg,
-                "tester",
-                crate::apply::executor::LockMode::Acquire,
-            )
-            .await
-            .expect_err("the unsupported server must stop the complete plan");
-        assert!(error.to_string().contains("MySQL 8.0.13"), "got: {error}");
-        let log = rec.log.borrow();
-        assert!(
-            log.iter()
-                .any(|entry| entry.contains("VERSION() AS server_version")),
-            "the capability probe must run: {log:?}"
-        );
-        assert!(
-            !log.iter().any(|entry| entry.contains(&authored_sql)),
-            "authored SQL must not run after capability failure: {log:?}"
-        );
-    }
-
-    #[compio::test]
     async fn uuid_v7_requirement_fails_without_querying_mysql() {
         let rec = RecordingSession::new();
         let error = MysqlBackend::new_generic(&rec)
@@ -2333,1520 +1422,6 @@ mod render_tests {
             .expect_err("MySQL never provides UUIDv7 database generation");
         assert!(error.to_string().contains("unsupported on MySQL"));
         assert!(rec.log.borrow().is_empty());
-    }
-
-    #[compio::test]
-    async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
-        let rec = RecordingSession::with_catalog(
-            vec![Row::new(
-                vec!["table_name".into()],
-                vec![Value::Text("users".into())],
-            )],
-            vec![
-                catalog_column("users", "id", "bigint(20)", None, None, false, 1),
-                catalog_column("users", "tenant_id", "bigint", None, None, false, 2),
-                catalog_column(
-                    "users",
-                    "email",
-                    "varchar(191)",
-                    Some("utf8mb4"),
-                    Some("utf8mb4_0900_ai_ci"),
-                    false,
-                    3,
-                ),
-                catalog_column(
-                    "users",
-                    "nickname",
-                    "varchar(40)",
-                    Some("utf8mb4"),
-                    Some("utf8mb4_bin"),
-                    true,
-                    4,
-                ),
-            ],
-            vec![
-                catalog_index_part("users", "PRIMARY", 0, 1, Some("id"), None, Some("A"), None),
-                catalog_index_part(
-                    "users",
-                    "idx_nickname_prefix",
-                    1,
-                    1,
-                    Some("nickname"),
-                    Some(8),
-                    Some("A"),
-                    None,
-                ),
-                catalog_index_part(
-                    "users",
-                    "uq_users_tenant_email",
-                    0,
-                    1,
-                    Some("tenant_id"),
-                    None,
-                    Some("A"),
-                    None,
-                ),
-                catalog_index_part(
-                    "users",
-                    "uq_users_tenant_email",
-                    0,
-                    2,
-                    Some("email"),
-                    None,
-                    Some("D"),
-                    None,
-                ),
-            ],
-            vec![
-                catalog_foreign_key_part(
-                    "users",
-                    "users_id_fkey",
-                    1,
-                    1,
-                    "id",
-                    "proj_x",
-                    "users",
-                    "id",
-                    "RESTRICT",
-                    "CASCADE",
-                ),
-                catalog_foreign_key_part(
-                    "users",
-                    "users_tenant_email_fkey",
-                    1,
-                    1,
-                    "tenant_id",
-                    "proj_x",
-                    "users",
-                    "tenant_id",
-                    "CASCADE",
-                    "SET NULL",
-                ),
-                catalog_foreign_key_part(
-                    "users",
-                    "users_tenant_email_fkey",
-                    2,
-                    2,
-                    "email",
-                    "proj_x",
-                    "users",
-                    "email",
-                    "CASCADE",
-                    "SET NULL",
-                ),
-            ],
-        );
-        let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
-
-        let snapshot = backend
-            .snapshot_schema(&cfg)
-            .await
-            .expect("MySQL catalog snapshot");
-
-        let users = snapshot.tables.get("users").expect("users table");
-        assert_eq!(
-            users
-                .columns
-                .iter()
-                .map(|column| (
-                    column.name.as_str(),
-                    column.data_type.as_str(),
-                    column.nullable,
-                    column.case_sensitive,
-                    column.mysql_text_storage.as_ref().map(|storage| (
-                        storage.character_set.as_str(),
-                        storage.collation.as_str(),
-                    )),
-                ))
-                .collect::<Vec<_>>(),
-            vec![
-                (
-                    "email",
-                    "text",
-                    false,
-                    Some(false),
-                    Some(("utf8mb4", "utf8mb4_0900_ai_ci")),
-                ),
-                ("id", "bigint", false, None, None),
-                (
-                    "nickname",
-                    "text",
-                    true,
-                    None,
-                    Some(("utf8mb4", "utf8mb4_bin")),
-                ),
-                ("tenant_id", "bigint", false, None, None),
-            ]
-        );
-        assert_eq!(
-            users
-                .indexes
-                .iter()
-                .map(|index| index.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["idx_nickname_prefix", "uq_users_tenant_email", "users_pkey"]
-        );
-        assert!(users.indexes[0].columns.is_empty());
-        assert!(users.indexes[1].unique);
-        assert_eq!(users.indexes[1].columns, ["tenant_id", "email"]);
-        assert!(users.indexes[2].unique);
-        assert_eq!(users.indexes[2].columns, ["id"]);
-        assert_eq!(users.constraints.len(), 3);
-        let primary = users
-            .constraints
-            .iter()
-            .find(|constraint| constraint.name == "users_pkey")
-            .expect("primary key");
-        assert_eq!(primary.kind, "PRIMARY KEY");
-        assert_eq!(primary.definition, "PRIMARY KEY (id)");
-        let single_fk = users
-            .constraints
-            .iter()
-            .find(|constraint| constraint.name == "users_id_fkey")
-            .expect("single-column FK");
-        assert_eq!(single_fk.kind, "FOREIGN KEY");
-        assert_eq!(
-            single_fk.definition,
-            "FOREIGN KEY (id) REFERENCES proj_x.users(id) ON DELETE CASCADE"
-        );
-        let composite_fk = users
-            .constraints
-            .iter()
-            .find(|constraint| constraint.name == "users_tenant_email_fkey")
-            .expect("composite FK");
-        assert_eq!(composite_fk.kind, "FOREIGN KEY");
-        assert_eq!(
-            composite_fk.definition,
-            "FOREIGN KEY (tenant_id, email) REFERENCES proj_x.users(tenant_id, email) ON UPDATE CASCADE ON DELETE SET NULL"
-        );
-        assert!(
-            diff_snapshots(&snapshot, &snapshot).is_clean(),
-            "the exact single/composite FK catalog must stay clean"
-        );
-        let assert_fk_drop = |constraint_name: &str, scenario: &str| {
-            let mut changed = snapshot.clone();
-            changed
-                .tables
-                .get_mut("users")
-                .expect("users table")
-                .constraints
-                .retain(|constraint| constraint.name != constraint_name);
-            let drift = diff_snapshots(&snapshot, &changed);
-            assert!(
-                drift
-                    .missing_objects
-                    .iter()
-                    .any(|missing| missing.contains(constraint_name)),
-                "{scenario} must drift: {drift:?}"
-            );
-        };
-        let assert_fk_definition_drift =
-            |constraint_name: &str, definition: &str, scenario: &str| {
-                let mut changed = snapshot.clone();
-                changed
-                    .tables
-                    .get_mut("users")
-                    .expect("users table")
-                    .constraints
-                    .iter_mut()
-                    .find(|constraint| constraint.name == constraint_name)
-                    .expect("foreign key")
-                    .definition = definition.to_string();
-                let drift = diff_snapshots(&snapshot, &changed);
-                assert!(
-                    drift.altered_objects.iter().any(|altered| {
-                        altered.object == format!("constraint {constraint_name}")
-                            && altered.field == "definition"
-                    }),
-                    "{scenario} must drift: {drift:?}"
-                );
-            };
-
-        assert_fk_drop("users_id_fkey", "a dropped single-column FK");
-        assert_fk_definition_drift(
-            "users_id_fkey",
-            "FOREIGN KEY (id) REFERENCES proj_x.accounts(id) ON DELETE CASCADE",
-            "a repointed single-column FK",
-        );
-        assert_fk_definition_drift(
-            "users_id_fkey",
-            "FOREIGN KEY (id) REFERENCES proj_x.users(id) ON UPDATE CASCADE ON DELETE SET NULL",
-            "a single-column FK action change",
-        );
-
-        assert_fk_drop("users_tenant_email_fkey", "a dropped composite foreign key");
-        assert_fk_definition_drift(
-            "users_tenant_email_fkey",
-            "FOREIGN KEY (tenant_id, email) REFERENCES proj_x.accounts(tenant_id, email) ON UPDATE CASCADE ON DELETE SET NULL",
-            "a repointed composite foreign key",
-        );
-        assert_fk_definition_drift(
-            "users_tenant_email_fkey",
-            "FOREIGN KEY (email, tenant_id) REFERENCES proj_x.users(email, tenant_id) ON UPDATE CASCADE ON DELETE SET NULL",
-            "a reordered composite foreign key",
-        );
-        assert_fk_definition_drift(
-            "users_tenant_email_fkey",
-            "FOREIGN KEY (tenant_id, email) REFERENCES proj_x.users(tenant_id, email) ON UPDATE NO ACTION ON DELETE CASCADE",
-            "a composite foreign-key action change",
-        );
-        let all = rec.log.borrow().join("\n");
-        assert!(
-            all.contains("TABLE_TYPE = 'BASE TABLE'")
-                && all.contains("COLUMN_TYPE AS column_type")
-                && all.contains("CHARACTER_SET_NAME AS character_set_name")
-                && all.contains("COLLATION_NAME AS collation_name")
-                && all.contains("ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX")
-                && all.contains("information_schema.REFERENTIAL_CONSTRAINTS")
-                && all.contains("POSITION_IN_UNIQUE_CONSTRAINT")
-                && all
-                    .contains("ORDER BY kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION")
-                && all.contains("information_schema.VIEWS")
-                && all.contains("VIEW_DEFINITION AS view_definition")
-                && !all.contains("information_schema.CHECK_CONSTRAINTS")
-                && !all.contains("INDEX_NAME <> 'PRIMARY'"),
-            "snapshot must use schema-scoped authoritative catalog reads and gate CHECK_CONSTRAINTS below MySQL 8.0.16: {all}"
-        );
-        assert_eq!(
-            rec.binds
-                .borrow()
-                .iter()
-                .filter(|binds| binds.as_slice() == [Bind::Text("proj_x".to_string())])
-                .count(),
-            5,
-            "every catalog query scopes itself with the project database bind"
-        );
-    }
-
-    #[compio::test]
-    async fn mysql_single_and_composite_fk_mutations_drift_through_catalog_rows() {
-        let single = |target: &str, update: &str, delete: &str| {
-            catalog_foreign_key_part(
-                "child",
-                "child_single_fkey",
-                1,
-                1,
-                "single_parent_id",
-                "proj_x",
-                target,
-                "id",
-                update,
-                delete,
-            )
-        };
-        let composite = |target: &str, reversed: bool, update: &str, delete: &str| -> Vec<Row> {
-            let (first_local, first_target, second_local, second_target) = if reversed {
-                ("parent_right", "right_id", "parent_left", "left_id")
-            } else {
-                ("parent_left", "left_id", "parent_right", "right_id")
-            };
-            vec![
-                catalog_foreign_key_part(
-                    "child",
-                    "child_composite_fkey",
-                    1,
-                    1,
-                    first_local,
-                    "proj_x",
-                    target,
-                    first_target,
-                    update,
-                    delete,
-                ),
-                catalog_foreign_key_part(
-                    "child",
-                    "child_composite_fkey",
-                    2,
-                    2,
-                    second_local,
-                    "proj_x",
-                    target,
-                    second_target,
-                    update,
-                    delete,
-                ),
-            ]
-        };
-        let baseline_rows = || {
-            let mut rows = vec![single("parent", "RESTRICT", "CASCADE")];
-            rows.extend(composite("parent", false, "CASCADE", "SET NULL"));
-            rows
-        };
-        let snapshot = |foreign_keys: Vec<Row>| async move {
-            let session = RecordingSession::with_catalog(
-                ["alternate_parent", "child", "parent"]
-                    .into_iter()
-                    .map(|table| {
-                        Row::new(
-                            vec!["table_name".into()],
-                            vec![Value::Text(table.to_string())],
-                        )
-                    })
-                    .collect(),
-                vec![
-                    catalog_column("alternate_parent", "id", "bigint", None, None, false, 1),
-                    catalog_column(
-                        "alternate_parent",
-                        "left_id",
-                        "bigint",
-                        None,
-                        None,
-                        false,
-                        2,
-                    ),
-                    catalog_column(
-                        "alternate_parent",
-                        "right_id",
-                        "bigint",
-                        None,
-                        None,
-                        false,
-                        3,
-                    ),
-                    catalog_column("child", "single_parent_id", "bigint", None, None, true, 1),
-                    catalog_column("child", "parent_left", "bigint", None, None, true, 2),
-                    catalog_column("child", "parent_right", "bigint", None, None, true, 3),
-                    catalog_column("parent", "id", "bigint", None, None, false, 1),
-                    catalog_column("parent", "left_id", "bigint", None, None, false, 2),
-                    catalog_column("parent", "right_id", "bigint", None, None, false, 3),
-                ],
-                Vec::new(),
-                foreign_keys,
-            );
-            MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new(
-                    "prj_x",
-                    "proj_x",
-                    crate::test_fixtures::no_inject("proj_x"),
-                ))
-                .await
-                .expect("MySQL FK catalog snapshot")
-        };
-
-        let expected = snapshot(baseline_rows()).await;
-        let clean = snapshot(baseline_rows()).await;
-        assert!(
-            diff_snapshots(&expected, &clean).is_clean(),
-            "unchanged catalog FK rows must stay clean"
-        );
-        let assert_missing = |actual: &SchemaSnapshot, constraint: &str, label: &str| {
-            let drift = diff_snapshots(&expected, actual);
-            assert!(
-                drift
-                    .missing_objects
-                    .iter()
-                    .any(|missing| missing.contains(constraint)),
-                "{label} must be missing drift after catalog introspection: {drift:#?}"
-            );
-        };
-        let assert_altered = |actual: &SchemaSnapshot, constraint: &str, label: &str| {
-            let drift = diff_snapshots(&expected, actual);
-            assert!(
-                drift.altered_objects.iter().any(|altered| {
-                    altered.object == format!("constraint {constraint}")
-                        && altered.field == "definition"
-                }),
-                "{label} must be definition drift after catalog introspection: {drift:#?}"
-            );
-        };
-
-        let dropped_single = snapshot(composite("parent", false, "CASCADE", "SET NULL")).await;
-        assert_missing(
-            &dropped_single,
-            "child_single_fkey",
-            "dropped single-column FK",
-        );
-        let mut repointed_single_rows = vec![single("alternate_parent", "RESTRICT", "CASCADE")];
-        repointed_single_rows.extend(composite("parent", false, "CASCADE", "SET NULL"));
-        assert_altered(
-            &snapshot(repointed_single_rows).await,
-            "child_single_fkey",
-            "repointed single-column FK",
-        );
-        let mut changed_single_action = vec![single("parent", "CASCADE", "SET NULL")];
-        changed_single_action.extend(composite("parent", false, "CASCADE", "SET NULL"));
-        assert_altered(
-            &snapshot(changed_single_action).await,
-            "child_single_fkey",
-            "single-column FK action change",
-        );
-
-        let dropped_composite = snapshot(vec![single("parent", "RESTRICT", "CASCADE")]).await;
-        assert_missing(
-            &dropped_composite,
-            "child_composite_fkey",
-            "dropped composite FK",
-        );
-        for (label, rows) in [
-            (
-                "repointed composite FK",
-                composite("alternate_parent", false, "CASCADE", "SET NULL"),
-            ),
-            (
-                "reordered composite FK",
-                composite("parent", true, "CASCADE", "SET NULL"),
-            ),
-            (
-                "composite FK action change",
-                composite("parent", false, "RESTRICT", "CASCADE"),
-            ),
-        ] {
-            let mut variant = vec![single("parent", "RESTRICT", "CASCADE")];
-            variant.extend(rows);
-            assert_altered(&snapshot(variant).await, "child_composite_fkey", label);
-        }
-    }
-
-    #[compio::test]
-    async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks() {
-        let uuid_generated_check =
-            crate::render::value_format::uuid_column_metadata("generated_uuid", &DIALECT)
-                .expect("UUID metadata")
-                .expect("MySQL UUID CHECK")
-                .inline_check;
-        let uuid_supplied_check =
-            crate::render::value_format::uuid_column_metadata("supplied_uuid", &DIALECT)
-                .expect("UUID metadata")
-                .expect("MySQL UUID CHECK")
-                .inline_check;
-        let type_id_check = crate::render::value_format::column_metadata(
-            "type_id",
-            &ValueFormat::TypeId {
-                prefix: "user".to_string(),
-            },
-            &DIALECT,
-        )
-        .expect("TypeID metadata")
-        .inline_check;
-        let ulid_check =
-            crate::render::value_format::column_metadata("ulid", &ValueFormat::Ulid, &DIALECT)
-                .expect("ULID metadata")
-                .inline_check;
-        let table_rows = || {
-            vec![Row::new(
-                vec!["table_name".into()],
-                vec![Value::Text("ids".into())],
-            )]
-        };
-        let primary_index = || {
-            vec![catalog_index_part(
-                "ids",
-                "PRIMARY",
-                0,
-                1,
-                Some("auto_id"),
-                None,
-                Some("A"),
-                None,
-            )]
-        };
-        let checks = || {
-            vec![
-                catalog_check("ids", "ids_chk_1", true, &uuid_generated_check),
-                catalog_check("ids", "ids_chk_2", true, &uuid_supplied_check),
-                catalog_check("ids", "ids_chk_3", true, &type_id_check),
-                catalog_check("ids", "ids_chk_4", true, &ulid_check),
-            ]
-        };
-        let id_column = |name: &str, ty: ColType| IrColumn {
-            name: name.to_string(),
-            ty,
-            nullable: Some(false),
-            default: None,
-            unique: None,
-            value_format: None,
-            references: None,
-            id_prefix: None,
-            collation: None,
-            case_sensitive: None,
-            vector_metric: None,
-            mask: None,
-            generated: None,
-            identity: None,
-        };
-        let mut auto_id = id_column("auto_id", ColType::BigInt);
-        auto_id.identity = Some(IdentityCol { always: false });
-        let mut generated_uuid = id_column("generated_uuid", ColType::Uuid);
-        generated_uuid.default = Some(IrDefault::Expr { expr: Expr::UuidV4 });
-        let supplied_uuid = id_column("supplied_uuid", ColType::Uuid);
-        let mut type_id = id_column("type_id", ColType::Text);
-        type_id.value_format = Some(ValueFormat::TypeId {
-            prefix: "user".to_string(),
-        });
-        let mut ulid = id_column("ulid", ColType::Text);
-        ulid.value_format = Some(ValueFormat::Ulid);
-        let ordinary = id_column("ordinary", ColType::Text);
-        let expected = crate::render::fold::fold_ops(
-            &[Op::CreateTable {
-                name: "ids".to_string(),
-                columns: vec![
-                    auto_id,
-                    generated_uuid,
-                    supplied_uuid,
-                    type_id,
-                    ulid,
-                    ordinary,
-                ],
-                primary_key: Some(vec!["auto_id".to_string()]),
-                constraints: Vec::new(),
-                indexes: Vec::new(),
-                partition_by: None,
-                runtime_options: None,
-                schema: None,
-                existence_guard: None,
-            }],
-            &DIALECT,
-            "proj_x",
-            &crate::test_fixtures::no_inject("app"),
-        )
-        .expect("portable ID table fold");
-
-        let rec = RecordingSession::with_catalog_checks(
-            table_rows(),
-            id_catalog_columns(Some(MYSQL_CATALOG_UUID_V4_DEFAULT), None, None, None),
-            primary_index(),
-            Vec::new(),
-            checks(),
-        );
-        let snapshot = MysqlBackend::new_generic(&rec)
-            .snapshot_schema(&ExecutorConfig::new(
-                "prj_x",
-                "proj_x",
-                crate::test_fixtures::no_inject("proj_x"),
-            ))
-            .await
-            .expect("ID-aware MySQL catalog snapshot");
-        let ids = &snapshot.tables["ids"];
-        let column = |name: &str| {
-            ids.columns
-                .iter()
-                .find(|column| column.name == name)
-                .expect("catalog column")
-        };
-        assert_eq!(
-            column("auto_id").identity,
-            Some(IdentityCol { always: false })
-        );
-        assert_eq!(
-            column("auto_id").id_default,
-            Some(IdDefaultSnapshot::Absent)
-        );
-        assert_eq!(
-            column("generated_uuid").id_default,
-            Some(IdDefaultSnapshot::UuidV4),
-            "real MySQL catalog normalization must retain UUIDv4 semantics"
-        );
-        assert_eq!(
-            column("supplied_uuid").id_default,
-            Some(IdDefaultSnapshot::Absent)
-        );
-        assert_eq!(
-            column("type_id").value_format,
-            Some(ValueFormat::TypeId {
-                prefix: "user".to_string()
-            })
-        );
-        assert_eq!(
-            column("type_id").id_default,
-            Some(IdDefaultSnapshot::Absent)
-        );
-        assert_eq!(column("ulid").value_format, Some(ValueFormat::Ulid));
-        assert_eq!(column("ulid").id_default, Some(IdDefaultSnapshot::Absent));
-        assert_eq!(column("ordinary").id_default, None);
-        let clean_drift = diff_snapshots(&expected, &snapshot);
-        assert!(
-            clean_drift.is_clean(),
-            "the portable auto-increment and exact format/default catalog shape must stay clean: {clean_drift:?}"
-        );
-        assert!(
-            rec.log
-                .borrow()
-                .iter()
-                .any(|sql| sql.contains("information_schema.CHECK_CONSTRAINTS")
-                    && sql.contains("tc.ENFORCED AS enforced")),
-            "MySQL 8.0.16+ must introspect enforced CHECK clauses"
-        );
-
-        let account_type_id_check = crate::render::value_format::column_metadata(
-            "type_id",
-            &ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            },
-            &DIALECT,
-        )
-        .expect("altered TypeID metadata")
-        .inline_check;
-        let altered_formats = RecordingSession::with_catalog_checks(
-            table_rows(),
-            id_catalog_columns(Some(MYSQL_CATALOG_UUID_V4_DEFAULT), None, None, None),
-            primary_index(),
-            Vec::new(),
-            vec![
-                catalog_check("ids", "ids_chk_1", true, &uuid_generated_check),
-                catalog_check("ids", "ids_chk_2", true, &uuid_supplied_check),
-                catalog_check("ids", "ids_chk_3", true, &account_type_id_check),
-                // The ULID CHECK was dropped out of band. A disabled CHECK is
-                // likewise not an enforced format contract.
-                catalog_check("ids", "ids_chk_4", false, &ulid_check),
-            ],
-        );
-        let altered_formats = MysqlBackend::new_generic(&altered_formats)
-            .snapshot_schema(&ExecutorConfig::new(
-                "prj_x",
-                "proj_x",
-                crate::test_fixtures::no_inject("proj_x"),
-            ))
-            .await
-            .expect("altered format snapshot");
-        let format_drift = diff_snapshots(&snapshot, &altered_formats);
-        assert!(
-            format_drift.altered_objects.iter().any(|altered| {
-                altered.object == "column type_id"
-                    && altered.field == "format"
-                    && altered.actual == "typeId(account)"
-            }),
-            "a TypeID prefix mismatch must drift: {format_drift:?}"
-        );
-        assert!(
-            format_drift
-                .altered_objects
-                .iter()
-                .any(|altered| { altered.object == "column ulid" && altered.field == "format" }),
-            "a dropped or unenforced ULID CHECK must drift: {format_drift:?}"
-        );
-
-        let altered_defaults = RecordingSession::with_catalog_checks(
-            table_rows(),
-            id_catalog_columns(
-                None,
-                Some(MYSQL_CATALOG_UUID_V4_DEFAULT),
-                Some("make_typeid()"),
-                Some("make_ulid()"),
-            ),
-            primary_index(),
-            Vec::new(),
-            checks(),
-        );
-        let altered_defaults = MysqlBackend::new_generic(&altered_defaults)
-            .snapshot_schema(&ExecutorConfig::new(
-                "prj_x",
-                "proj_x",
-                crate::test_fixtures::no_inject("proj_x"),
-            ))
-            .await
-            .expect("altered default snapshot");
-        let default_drift = diff_snapshots(&snapshot, &altered_defaults);
-        for name in ["generated_uuid", "supplied_uuid", "type_id", "ulid"] {
-            assert!(
-                default_drift.altered_objects.iter().any(|altered| {
-                    altered.object == format!("column {name}") && altered.field == "default"
-                }),
-                "an ID-default add/remove/swap on {name} must drift: {default_drift:?}"
-            );
-        }
-        let swapped_default = RecordingSession::with_catalog_checks(
-            table_rows(),
-            id_catalog_columns(Some("uuid()"), None, None, None),
-            primary_index(),
-            Vec::new(),
-            checks(),
-        );
-        let swapped_default = MysqlBackend::new_generic(&swapped_default)
-            .snapshot_schema(&ExecutorConfig::new(
-                "prj_x",
-                "proj_x",
-                crate::test_fixtures::no_inject("proj_x"),
-            ))
-            .await
-            .expect("swapped default snapshot");
-        let swapped_default_drift = diff_snapshots(&snapshot, &swapped_default);
-        assert!(
-            swapped_default_drift.altered_objects.iter().any(|altered| {
-                altered.object == "column generated_uuid"
-                    && altered.field == "default"
-                    && altered.expected == "uuidV4"
-                    && altered.actual
-                        == crate::render::value_format::catalog_expression_fingerprint("uuid()")
-            }),
-            "swapping the exact UUIDv4 generator for MySQL UUIDv1 must drift: {swapped_default_drift:?}"
-        );
-
-        let literal_generator_without_check = RecordingSession::with_catalog_checks(
-            table_rows(),
-            id_catalog_columns_with_generated_uuid_extra(
-                Some(MYSQL_CATALOG_UUID_V4_DEFAULT),
-                None,
-                None,
-                None,
-                "",
-            ),
-            primary_index(),
-            Vec::new(),
-            vec![
-                catalog_check("ids", "ids_chk_2", true, &uuid_supplied_check),
-                catalog_check("ids", "ids_chk_3", true, &type_id_check),
-                catalog_check("ids", "ids_chk_4", true, &ulid_check),
-            ],
-        );
-        let literal_generator_without_check =
-            MysqlBackend::new_generic(&literal_generator_without_check)
-                .snapshot_schema(&ExecutorConfig::new(
-                    "prj_x",
-                    "proj_x",
-                    crate::test_fixtures::no_inject("proj_x"),
-                ))
-                .await
-                .expect("same-text literal UUID default without format CHECK");
-        let marker_drift = diff_snapshots(&snapshot, &literal_generator_without_check);
-        assert!(
-            marker_drift.altered_objects.iter().any(|altered| {
-                altered.object == "column generated_uuid"
-                    && altered.field == "default"
-                    && altered.expected == "uuidV4"
-                    && altered.actual.contains(MYSQL_CATALOG_UUID_V4_DEFAULT)
-            }),
-            "dropping the UUID CHECK and changing its same-text generator into a literal must drift: {marker_drift:#?}"
-        );
-
-        let literal_uuid_snapshot = |value: &'static str| async move {
-            let session = RecordingSession::with_catalog_checks(
-                table_rows(),
-                id_catalog_columns_with_generated_uuid_extra(Some(value), None, None, None, ""),
-                primary_index(),
-                Vec::new(),
-                checks(),
-            );
-            MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new(
-                    "prj_x",
-                    "proj_x",
-                    crate::test_fixtures::no_inject("proj_x"),
-                ))
-                .await
-                .expect("literal UUID catalog snapshot")
-        };
-        let lowercase_literal = literal_uuid_snapshot("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").await;
-        let uppercase_literal = literal_uuid_snapshot("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA").await;
-        let case_drift = diff_snapshots(&lowercase_literal, &uppercase_literal);
-        assert!(
-            case_drift.altered_objects.iter().any(|altered| {
-                altered.object == "column generated_uuid" && altered.field == "default"
-            }),
-            "MySQL UUID VARCHAR literal case changes must drift: {case_drift:#?}"
-        );
-
-        let mut altered_identity = snapshot.clone();
-        let altered_ids = altered_identity.tables.get_mut("ids").expect("ids table");
-        altered_ids
-            .columns
-            .iter_mut()
-            .find(|column| column.name == "auto_id")
-            .expect("auto_id")
-            .identity = None;
-        altered_ids
-            .columns
-            .iter_mut()
-            .find(|column| column.name == "ordinary")
-            .expect("ordinary")
-            .identity = Some(IdentityCol { always: false });
-        let identity_drift = diff_snapshots(&snapshot, &altered_identity);
-        for name in ["auto_id", "ordinary"] {
-            assert!(
-                identity_drift.altered_objects.iter().any(|altered| {
-                    altered.object == format!("column {name}") && altered.field == "identity"
-                }),
-                "an AUTO_INCREMENT drop/add on {name} must drift: {identity_drift:?}"
-            );
-        }
-        altered_identity
-            .tables
-            .get_mut("ids")
-            .expect("ids table")
-            .columns
-            .iter_mut()
-            .find(|column| column.name == "auto_id")
-            .expect("auto_id")
-            .identity = Some(IdentityCol { always: true });
-        assert!(
-            diff_snapshots(&snapshot, &altered_identity)
-                .altered_objects
-                .iter()
-                .any(|altered| {
-                    altered.object == "column auto_id" && altered.field == "identity"
-                }),
-            "an always/by-default identity flip must drift"
-        );
-    }
-
-    #[compio::test]
-    async fn mysql_auto_increment_add_and_drop_are_recovered_from_catalog_extra() {
-        let column = |identity: Option<IdentityCol>| IrColumn {
-            name: "id".to_string(),
-            ty: ColType::BigInt,
-            nullable: Some(false),
-            default: None,
-            unique: None,
-            value_format: None,
-            references: None,
-            id_prefix: None,
-            collation: None,
-            case_sensitive: None,
-            vector_metric: None,
-            mask: None,
-            generated: None,
-            identity,
-        };
-        let expected = |identity| {
-            crate::render::fold::fold_ops(
-                &[Op::CreateTable {
-                    name: "identity_probe".to_string(),
-                    columns: vec![column(identity)],
-                    primary_key: Some(vec!["id".to_string()]),
-                    constraints: Vec::new(),
-                    indexes: Vec::new(),
-                    partition_by: None,
-                    runtime_options: None,
-                    schema: None,
-                    existence_guard: None,
-                }],
-                &DIALECT,
-                "proj_x",
-                &crate::test_fixtures::no_inject("app"),
-            )
-            .expect("identity probe must fold")
-        };
-        let snapshot = |extra: &'static str| async move {
-            let session = RecordingSession::with_catalog(
-                vec![Row::new(
-                    vec!["table_name".into()],
-                    vec![Value::Text("identity_probe".into())],
-                )],
-                vec![catalog_column_with_generation(
-                    "identity_probe",
-                    "id",
-                    "bigint",
-                    None,
-                    None,
-                    false,
-                    1,
-                    None,
-                    extra,
-                )],
-                vec![catalog_index_part(
-                    "identity_probe",
-                    "PRIMARY",
-                    0,
-                    1,
-                    Some("id"),
-                    None,
-                    Some("A"),
-                    None,
-                )],
-                Vec::new(),
-            );
-            MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new(
-                    "prj_x",
-                    "proj_x",
-                    crate::test_fixtures::no_inject("proj_x"),
-                ))
-                .await
-                .expect("identity catalog snapshot")
-        };
-
-        let auto = snapshot("auto_increment").await;
-        let plain = snapshot("").await;
-        let expected_auto = expected(Some(IdentityCol { always: false }));
-        let expected_plain = expected(None);
-        assert!(
-            diff_snapshots(&expected_auto, &auto).is_clean(),
-            "portable AUTO_INCREMENT must match catalog EXTRA"
-        );
-        assert!(
-            diff_snapshots(&expected_plain, &plain).is_clean(),
-            "portable non-identity key must remain clean"
-        );
-        for (expected_snapshot, actual_snapshot, label) in
-            [(&auto, &plain, "drop"), (&plain, &auto, "add")]
-        {
-            let drift = diff_snapshots(expected_snapshot, actual_snapshot);
-            assert!(
-                drift.altered_objects.iter().any(|altered| {
-                    altered.object == "column id" && altered.field == "identity"
-                }),
-                "an out-of-band AUTO_INCREMENT {label} must drift: {drift:#?}"
-            );
-        }
-    }
-
-    #[compio::test]
-    async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_references() {
-        const LITERAL: &str = "account_00000000000000000000000000";
-        const CHANGED_LITERAL: &str = "account_00000000000000000000000001";
-        let ir: MigrationIr = serde_json::from_value(json!({
-            "ir_version": CURRENT_IR_VERSION,
-            "name": "mysql_typed_reference_literal_default",
-            "owner_app": "app_mysql_drift",
-            "ops": [
-                {
-                    "op": "createTable",
-                    "name": "parents",
-                    "columns": [{
-                        "name": "id",
-                        "type": "text",
-                        "nullable": false,
-                        "valueFormat": { "typeId": { "prefix": "account" } },
-                        "default": { "literal": { "value": LITERAL } }
-                    }],
-                    "primaryKey": null,
-                    "constraints": [],
-                    "indexes": []
-                },
-                {
-                    "op": "createTable",
-                    "name": "children",
-                    "columns": [{
-                        "name": "parent_id",
-                        "type": "text",
-                        "nullable": true,
-                        "valueFormat": { "typeId": { "prefix": "account" } },
-                        "default": { "literal": { "value": LITERAL } },
-                        "references": {
-                            "table": "parents",
-                            "column": "id",
-                            "onDelete": "cascade",
-                            "onUpdate": "cascade"
-                        }
-                    }],
-                    "primaryKey": null,
-                    "constraints": [],
-                    "indexes": []
-                }
-            ]
-        }))
-        .expect("typed-reference literal fixture must deserialize");
-        let expected = crate::render::fold::fold_ops(
-            &ir.ops,
-            &DIALECT,
-            "proj_x",
-            &crate::test_fixtures::no_inject("app"),
-        )
-        .expect("typed-reference literal fixture must fold");
-        let fk_name = expected.tables["children"]
-            .constraints
-            .iter()
-            .find(|constraint| constraint.kind == "FOREIGN KEY")
-            .expect("typed reference folds to a foreign key")
-            .name
-            .clone();
-        let type_id_check = crate::render::value_format::column_metadata(
-            "id",
-            &ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            },
-            &DIALECT,
-        )
-        .expect("TypeID metadata")
-        .inline_check;
-        let table_rows = || {
-            ["children", "parents"]
-                .into_iter()
-                .map(|table| {
-                    Row::new(
-                        vec!["table_name".into()],
-                        vec![Value::Text(table.to_string())],
-                    )
-                })
-                .collect()
-        };
-        let column_rows = |child_default: Option<&str>| {
-            vec![
-                catalog_column_with_generation(
-                    "children",
-                    "parent_id",
-                    "varchar(191)",
-                    Some("ascii"),
-                    Some("ascii_bin"),
-                    true,
-                    1,
-                    child_default,
-                    "",
-                ),
-                catalog_column_with_generation(
-                    "parents",
-                    "id",
-                    "varchar(191)",
-                    Some("ascii"),
-                    Some("ascii_bin"),
-                    false,
-                    1,
-                    Some(LITERAL),
-                    "",
-                ),
-            ]
-        };
-        let foreign_keys = || {
-            vec![catalog_foreign_key_part(
-                "children",
-                &fk_name,
-                1,
-                1,
-                "parent_id",
-                "proj_x",
-                "parents",
-                "id",
-                "CASCADE",
-                "CASCADE",
-            )]
-        };
-        let checks = || {
-            vec![catalog_check(
-                "parents",
-                "parents_chk_1",
-                true,
-                &type_id_check,
-            )]
-        };
-
-        let clean_session = RecordingSession::with_catalog_checks(
-            table_rows(),
-            column_rows(Some(LITERAL)),
-            Vec::new(),
-            foreign_keys(),
-            checks(),
-        );
-        let clean = MysqlBackend::new_generic(&clean_session)
-            .snapshot_schema(&ExecutorConfig::new(
-                "prj_x",
-                "proj_x",
-                crate::test_fixtures::no_inject("proj_x"),
-            ))
-            .await
-            .expect("clean typed-reference literal snapshot");
-        let child = clean.tables["children"]
-            .columns
-            .iter()
-            .find(|column| column.name == "parent_id")
-            .expect("typed reference column");
-        assert_eq!(
-            child.id_default,
-            Some(IdDefaultSnapshot::Literal(
-                serde_json::to_string(LITERAL).expect("literal serializes")
-            )),
-            "the child inherits its ID-default comparison surface through the foreign key"
-        );
-        assert_eq!(child.default.as_deref(), Some(LITERAL));
-        assert_eq!(
-            clean.tables["parents"].columns[0].id_default,
-            Some(IdDefaultSnapshot::Literal(
-                serde_json::to_string(LITERAL).expect("literal serializes")
-            )),
-            "a non-expression MySQL COLUMN_DEFAULT must recover as a string literal"
-        );
-        let drift = diff_snapshots(&expected, &clean);
-        assert!(
-            drift.is_clean(),
-            "bare MySQL COLUMN_DEFAULT literals must match authored typed literals: {drift:#?}"
-        );
-
-        for (catalog_default, label) in [(Some(CHANGED_LITERAL), "changed"), (None, "removed")] {
-            let session = RecordingSession::with_catalog_checks(
-                table_rows(),
-                column_rows(catalog_default),
-                Vec::new(),
-                foreign_keys(),
-                checks(),
-            );
-            let actual = MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new(
-                    "prj_x",
-                    "proj_x",
-                    crate::test_fixtures::no_inject("proj_x"),
-                ))
-                .await
-                .unwrap_or_else(|error| panic!("{label} literal snapshot: {error}"));
-            let drift = diff_snapshots(&expected, &actual);
-            assert!(
-                drift.altered_objects.iter().any(|altered| {
-                    altered.object == "column parent_id" && altered.field == "default"
-                }),
-                "an out-of-band {label} typed-reference literal must drift: {drift:#?}"
-            );
-        }
-    }
-
-    #[compio::test]
-    async fn snapshot_schema_preserves_mysql_expression_markers_on_fk_columns() {
-        let table_rows = || {
-            ["children", "parents"]
-                .into_iter()
-                .map(|table| {
-                    Row::new(
-                        vec!["table_name".into()],
-                        vec![Value::Text(table.to_string())],
-                    )
-                })
-                .collect()
-        };
-        let column_rows = |extra: &str| {
-            vec![
-                catalog_column_with_generation(
-                    "children",
-                    "parent_id",
-                    "varchar(36)",
-                    Some("ascii"),
-                    Some("ascii_bin"),
-                    true,
-                    1,
-                    Some(MYSQL_CATALOG_UUID_V4_DEFAULT),
-                    extra,
-                ),
-                catalog_column_with_generation(
-                    "parents",
-                    "id",
-                    "varchar(36)",
-                    Some("ascii"),
-                    Some("ascii_bin"),
-                    false,
-                    1,
-                    None,
-                    "",
-                ),
-            ]
-        };
-        let foreign_keys = || {
-            vec![catalog_foreign_key_part(
-                "children",
-                "children_parent_id_fkey",
-                1,
-                1,
-                "parent_id",
-                "proj_x",
-                "parents",
-                "id",
-                "NO ACTION",
-                "NO ACTION",
-            )]
-        };
-        let snapshot = |extra: &'static str| async move {
-            let session = RecordingSession::with_catalog(
-                table_rows(),
-                column_rows(extra),
-                Vec::new(),
-                foreign_keys(),
-            );
-            MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new(
-                    "prj_x",
-                    "proj_x",
-                    crate::test_fixtures::no_inject("proj_x"),
-                ))
-                .await
-                .expect("typed-reference expression snapshot")
-        };
-
-        let expression = snapshot("DEFAULT_GENERATED").await;
-        let literal = snapshot("").await;
-        let child_default = |snapshot: &SchemaSnapshot| {
-            snapshot.tables["children"]
-                .columns
-                .iter()
-                .find(|column| column.name == "parent_id")
-                .and_then(|column| column.id_default.clone())
-        };
-        assert_eq!(child_default(&expression), Some(IdDefaultSnapshot::UuidV4));
-        assert_eq!(
-            child_default(&literal),
-            Some(IdDefaultSnapshot::Literal(
-                serde_json::to_string(MYSQL_CATALOG_UUID_V4_DEFAULT)
-                    .expect("literal generator spelling serializes")
-            ))
-        );
-        let drift = diff_snapshots(&expression, &literal);
-        assert!(
-            drift.altered_objects.iter().any(|altered| {
-                altered.object == "column parent_id" && altered.field == "default"
-            }),
-            "a same-text literal must not satisfy an expression default: {drift:#?}"
-        );
-    }
-
-    #[compio::test]
-    async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catalog() {
-        let ir: MigrationIr = serde_json::from_value(json!({
-            "ir_version": CURRENT_IR_VERSION,
-            "name": "mysql_key_formats",
-            "owner_app": "app_mysql_drift",
-            "ops": [
-                {
-                    "op": "createTable",
-                    "name": "type_keys",
-                    "columns": [{
-                        "name": "id",
-                        "type": "text",
-                        "nullable": false,
-                        "valueFormat": { "typeId": { "prefix": "account" } }
-                    }],
-                    "primaryKey": ["id"],
-                    "constraints": [],
-                    "indexes": []
-                },
-                {
-                    "op": "createTable",
-                    "name": "ulid_keys",
-                    "columns": [{
-                        "name": "id",
-                        "type": "text",
-                        "nullable": false,
-                        "valueFormat": "ulid"
-                    }],
-                    "primaryKey": ["id"],
-                    "constraints": [],
-                    "indexes": []
-                }
-            ]
-        }))
-        .expect("MySQL key-format fixture must deserialize");
-        let expected = crate::render::fold::fold_ops(
-            &ir.ops,
-            &DIALECT,
-            "proj_x",
-            &crate::test_fixtures::no_inject("app"),
-        )
-        .expect("MySQL key-format fixture must fold");
-        let type_check = crate::render::value_format::column_metadata(
-            "id",
-            &ValueFormat::TypeId {
-                prefix: "account".to_string(),
-            },
-            &DIALECT,
-        )
-        .expect("TypeID key metadata")
-        .inline_check;
-        let team_check = crate::render::value_format::column_metadata(
-            "id",
-            &ValueFormat::TypeId {
-                prefix: "team".to_string(),
-            },
-            &DIALECT,
-        )
-        .expect("altered TypeID key metadata")
-        .inline_check;
-        let ulid_check =
-            crate::render::value_format::column_metadata("id", &ValueFormat::Ulid, &DIALECT)
-                .expect("ULID key metadata")
-                .inline_check;
-        let altered_ulid_check =
-            ulid_check.replacen("CHAR_LENGTH(`id`) = 26", "CHAR_LENGTH(`id`) = 25", 1);
-        assert_ne!(
-            altered_ulid_check, ulid_check,
-            "ULID clause fixture must change"
-        );
-
-        let snapshot = |checks: Vec<Row>| async move {
-            let session = RecordingSession::with_catalog_checks(
-                ["type_keys", "ulid_keys"]
-                    .into_iter()
-                    .map(|table| {
-                        Row::new(
-                            vec!["table_name".into()],
-                            vec![Value::Text(table.to_string())],
-                        )
-                    })
-                    .collect(),
-                ["type_keys", "ulid_keys"]
-                    .into_iter()
-                    .map(|table| {
-                        catalog_column(
-                            table,
-                            "id",
-                            "varchar(191)",
-                            Some("ascii"),
-                            Some("ascii_bin"),
-                            false,
-                            1,
-                        )
-                    })
-                    .collect(),
-                ["type_keys", "ulid_keys"]
-                    .into_iter()
-                    .map(|table| {
-                        catalog_index_part(
-                            table,
-                            "PRIMARY",
-                            0,
-                            1,
-                            Some("id"),
-                            None,
-                            Some("A"),
-                            None,
-                        )
-                    })
-                    .collect(),
-                Vec::new(),
-                checks,
-            );
-            MysqlBackend::new_generic(&session)
-                .snapshot_schema(&ExecutorConfig::new(
-                    "prj_x",
-                    "proj_x",
-                    crate::test_fixtures::no_inject("proj_x"),
-                ))
-                .await
-                .expect("MySQL key-format catalog snapshot")
-        };
-        let check = |table: &str, clause: &str| {
-            catalog_check(table, &format!("{table}_chk_1"), true, clause)
-        };
-        let clean = snapshot(vec![
-            check("type_keys", &type_check),
-            check("ulid_keys", &ulid_check),
-        ])
-        .await;
-        let clean_drift = diff_snapshots(&expected, &clean);
-        assert!(
-            clean_drift.is_clean(),
-            "authored key formats must match MySQL catalog CHECKs: {clean_drift:#?}"
-        );
-
-        for (label, checks, table, actual) in [
-            (
-                "TypeID drop",
-                vec![check("ulid_keys", &ulid_check)],
-                "type_keys",
-                "",
-            ),
-            (
-                "TypeID prefix change",
-                vec![
-                    check("type_keys", &team_check),
-                    check("ulid_keys", &ulid_check),
-                ],
-                "type_keys",
-                "typeId(team)",
-            ),
-            (
-                "ULID drop",
-                vec![check("type_keys", &type_check)],
-                "ulid_keys",
-                "",
-            ),
-            (
-                "ULID clause change",
-                vec![
-                    check("type_keys", &type_check),
-                    check("ulid_keys", &altered_ulid_check),
-                ],
-                "ulid_keys",
-                "",
-            ),
-        ] {
-            let actual_snapshot = snapshot(checks).await;
-            let drift = diff_snapshots(&expected, &actual_snapshot);
-            assert!(
-                drift.altered_objects.iter().any(|altered| {
-                    altered.table == table
-                        && altered.object == "column id"
-                        && altered.field == "format"
-                        && altered.actual == actual
-                }),
-                "{label} must drift through catalog introspection: {drift:#?}"
-            );
-        }
-    }
-
-    #[compio::test]
-    async fn snapshot_schema_rejects_semantically_regrouped_mysql_format_check() {
-        let value_format = ValueFormat::TypeId {
-            prefix: "account".to_string(),
-        };
-        let ir: MigrationIr = serde_json::from_value(json!({
-            "ir_version": CURRENT_IR_VERSION,
-            "name": "mysql_regrouped_type_id_check",
-            "owner_app": "app_mysql_drift",
-            "ops": [{
-                "op": "createTable",
-                "name": "ids",
-                "columns": [{
-                    "name": "id",
-                    "type": "text",
-                    "nullable": false,
-                    "valueFormat": { "typeId": { "prefix": "account" } }
-                }],
-                "primaryKey": null,
-                "constraints": [],
-                "indexes": []
-            }]
-        }))
-        .expect("regrouped TypeID fixture must deserialize");
-        let expected = crate::render::fold::fold_ops(
-            &ir.ops,
-            &DIALECT,
-            "proj_x",
-            &crate::test_fixtures::no_inject("app"),
-        )
-        .expect("regrouped TypeID fixture must fold");
-        let canonical = crate::render::value_format::column_metadata("id", &value_format, &DIALECT)
-            .expect("TypeID metadata")
-            .inline_check;
-        let regrouped = canonical.replacen("CHECK (", "CHECK (((", 1).replacen(
-            "OR (CHAR_LENGTH(`id`) = 34 AND ",
-            "OR CHAR_LENGTH(`id`) = 34) AND ",
-            1,
-        );
-        assert_ne!(regrouped, canonical, "the CHECK mutation must take effect");
-        let erase_grouping = |sql: &str| {
-            sql.chars()
-                .filter(|character| !character.is_whitespace() && !matches!(character, '(' | ')'))
-                .collect::<String>()
-        };
-        assert_eq!(
-            erase_grouping(&regrouped),
-            erase_grouping(&canonical),
-            "the regression must keep token order and differ only in semantic grouping"
-        );
-
-        let session = RecordingSession::with_catalog_checks(
-            vec![Row::new(
-                vec!["table_name".into()],
-                vec![Value::Text("ids".into())],
-            )],
-            vec![catalog_column_with_generation(
-                "ids",
-                "id",
-                "varchar(191)",
-                Some("ascii"),
-                Some("ascii_bin"),
-                false,
-                1,
-                None,
-                "",
-            )],
-            Vec::new(),
-            Vec::new(),
-            vec![catalog_check("ids", "ids_chk_1", true, &regrouped)],
-        );
-        let actual = MysqlBackend::new_generic(&session)
-            .snapshot_schema(&ExecutorConfig::new(
-                "prj_x",
-                "proj_x",
-                crate::test_fixtures::no_inject("proj_x"),
-            ))
-            .await
-            .expect("regrouped TypeID snapshot");
-        assert_eq!(
-            actual.tables["ids"].columns[0].value_format, None,
-            "a regrouped nullable guard is not the canonical TypeID contract"
-        );
-        let drift = diff_snapshots(&expected, &actual);
-        assert!(
-            drift
-                .altered_objects
-                .iter()
-                .any(|altered| { altered.object == "column id" && altered.field == "format" }),
-            "semantic CHECK regrouping must surface as format drift: {drift:#?}"
-        );
     }
 
     #[compio::test]
@@ -3886,214 +1461,6 @@ mod render_tests {
                 .to_string()
                 .contains("inconsistent foreign-key metadata for nodes.nodes_parent_fkey"),
             "got: {error}"
-        );
-    }
-
-    #[compio::test]
-    async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() {
-        fn bigint_column(name: &str, nullable: bool) -> IrColumn {
-            IrColumn {
-                name: name.to_string(),
-                ty: ColType::BigInt,
-                nullable: Some(nullable),
-                default: None,
-                unique: None,
-                value_format: None,
-                references: None,
-                id_prefix: None,
-                collation: None,
-                case_sensitive: None,
-                vector_metric: None,
-                mask: None,
-                generated: None,
-                identity: None,
-            }
-        }
-
-        let parent_key_name = "parents_tenant_external_key";
-        let child_fk_name = "children_parent_fkey";
-        let ops = vec![
-            Op::CreateTable {
-                name: "parents".to_string(),
-                columns: vec![
-                    bigint_column("tenant_id", false),
-                    bigint_column("external_id", false),
-                ],
-                primary_key: None,
-                constraints: vec![IrConstraint {
-                    name: Some(parent_key_name.to_string()),
-                    kind: IrConstraintKind::Unique {
-                        columns: vec!["tenant_id".to_string(), "external_id".to_string()],
-                    },
-                }],
-                indexes: Vec::new(),
-                partition_by: None,
-                runtime_options: None,
-                schema: None,
-                existence_guard: None,
-            },
-            Op::CreateTable {
-                name: "children".to_string(),
-                columns: vec![
-                    bigint_column("parent_tenant", true),
-                    bigint_column("parent_external", true),
-                ],
-                primary_key: None,
-                constraints: vec![IrConstraint {
-                    name: Some(child_fk_name.to_string()),
-                    kind: IrConstraintKind::Fk {
-                        columns: vec!["parent_tenant".to_string(), "parent_external".to_string()],
-                        references_table: "parents".to_string(),
-                        references_columns: vec![
-                            "tenant_id".to_string(),
-                            "external_id".to_string(),
-                        ],
-                        on_delete: None,
-                        on_update: None,
-                        deferrable: None,
-                        initially_deferred: None,
-                        not_valid: None,
-                    },
-                }],
-                indexes: Vec::new(),
-                partition_by: None,
-                runtime_options: None,
-                schema: None,
-                existence_guard: None,
-            },
-        ];
-        let expected = crate::render::fold::fold_ops(
-            &ops,
-            &DIALECT,
-            "proj_x",
-            &crate::test_fixtures::no_inject("app"),
-        )
-        .expect("named table UNIQUE and composite FK fold for MySQL");
-
-        let parent_candidate = expected.tables["parents"]
-            .indexes
-            .iter()
-            .find(|index| index.name == parent_key_name)
-            .expect("table UNIQUE canonicalizes to its MySQL unique key");
-        assert!(parent_candidate.unique);
-        assert_eq!(parent_candidate.columns, ["tenant_id", "external_id"]);
-        assert!(
-            expected.tables["parents"]
-                .constraints
-                .iter()
-                .all(|constraint| constraint.name != parent_key_name),
-            "MySQL cannot recover whether a unique key was authored as CONSTRAINT or INDEX"
-        );
-
-        let rec = RecordingSession::with_catalog(
-            vec![
-                Row::new(
-                    vec!["table_name".into()],
-                    vec![Value::Text("children".into())],
-                ),
-                Row::new(
-                    vec!["table_name".into()],
-                    vec![Value::Text("parents".into())],
-                ),
-            ],
-            vec![
-                catalog_column("children", "parent_tenant", "bigint", None, None, true, 1),
-                catalog_column("children", "parent_external", "bigint", None, None, true, 2),
-                catalog_column("parents", "tenant_id", "bigint", None, None, false, 1),
-                catalog_column("parents", "external_id", "bigint", None, None, false, 2),
-            ],
-            vec![
-                catalog_index_part(
-                    "children",
-                    "children_parent_fkey_idx",
-                    1,
-                    1,
-                    Some("parent_tenant"),
-                    None,
-                    Some("A"),
-                    None,
-                ),
-                catalog_index_part(
-                    "children",
-                    "children_parent_fkey_idx",
-                    1,
-                    2,
-                    Some("parent_external"),
-                    None,
-                    Some("A"),
-                    None,
-                ),
-                catalog_index_part(
-                    "parents",
-                    parent_key_name,
-                    0,
-                    1,
-                    Some("tenant_id"),
-                    None,
-                    Some("A"),
-                    None,
-                ),
-                catalog_index_part(
-                    "parents",
-                    parent_key_name,
-                    0,
-                    2,
-                    Some("external_id"),
-                    None,
-                    Some("A"),
-                    None,
-                ),
-            ],
-            vec![
-                catalog_foreign_key_part(
-                    "children",
-                    child_fk_name,
-                    1,
-                    1,
-                    "parent_tenant",
-                    "proj_x",
-                    "parents",
-                    "tenant_id",
-                    "RESTRICT",
-                    "RESTRICT",
-                ),
-                catalog_foreign_key_part(
-                    "children",
-                    child_fk_name,
-                    2,
-                    2,
-                    "parent_external",
-                    "proj_x",
-                    "parents",
-                    "external_id",
-                    "RESTRICT",
-                    "RESTRICT",
-                ),
-            ],
-        );
-        let actual = MysqlBackend::new_generic(&rec)
-            .snapshot_schema(&ExecutorConfig::new(
-                "prj_x",
-                "proj_x",
-                crate::test_fixtures::no_inject("proj_x"),
-            ))
-            .await
-            .expect("equivalent MySQL catalog snapshot");
-
-        assert_eq!(
-            actual.tables["parents"]
-                .indexes
-                .iter()
-                .find(|index| index.name == parent_key_name)
-                .expect("introspected candidate key")
-                .columns,
-            ["tenant_id", "external_id"],
-            "candidate-key tuple order must survive MySQL introspection"
-        );
-        let drift = diff_snapshots(&expected, &actual);
-        assert!(
-            drift.is_clean(),
-            "named table UNIQUE + composite FK must round-trip without false MySQL drift: {drift:?}"
         );
     }
 
@@ -4308,111 +1675,6 @@ mod render_tests {
             ProjectLockAcquisition::Busy(Vec::new()),
             "an unidentified holder is reported as no holder, never as an error"
         );
-    }
-
-    #[compio::test]
-    async fn snapshot_failure_aborts_before_author_sql_and_releases_lock() {
-        let rec = RecordingSession::with_failure("@@SESSION.sql_mode");
-        let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
-        let migration = trivial_migration();
-
-        let result = crate::apply::executor::apply_with_lock_backend(
-            &backend,
-            &cfg,
-            &[migration],
-            crate::Approval::Approved,
-            &crate::ApprovalScope::All,
-            "tester",
-            crate::apply::executor::LockMode::Acquire,
-        )
-        .await;
-
-        assert!(
-            matches!(result, Err(ApplyError::Backend(ref message))
-                if message.contains("cannot verify the dedicated session is idle")),
-            "{result:?}"
-        );
-        let all = rec.log.borrow().join("\n");
-        assert!(all.contains("GET_LOCK(?, ?)") && all.contains("RELEASE_LOCK(?)"));
-        assert!(
-            !all.contains("CREATE TABLE t (id INT)")
-                && !all.contains("CREATE DATABASE IF NOT EXISTS"),
-            "snapshot failure must stop before journal bootstrap and author SQL: {all}"
-        );
-    }
-
-    #[compio::test]
-    async fn active_caller_transaction_is_rejected_before_autocommit_or_author_sql() {
-        let rec = RecordingSession::with_in_transaction(1);
-        let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
-        let migration = trivial_migration();
-
-        let result = crate::apply::executor::apply_with_lock_backend(
-            &backend,
-            &cfg,
-            &[migration],
-            crate::Approval::Approved,
-            &crate::ApprovalScope::All,
-            "tester",
-            crate::apply::executor::LockMode::Acquire,
-        )
-        .await;
-
-        assert!(
-            matches!(result, Err(ApplyError::Backend(ref message))
-                if message.contains("dedicated idle session")
-                    && message.contains("active transaction")),
-            "{result:?}"
-        );
-        let all = rec.log.borrow().join("\n");
-        assert!(
-            all.contains("performance_schema.events_transactions_current")
-                && all.contains("PS_CURRENT_THREAD_ID()")
-        );
-        assert!(all.contains("RELEASE_LOCK(?)"));
-        assert!(
-            !all.contains("SESSION autocommit = 1")
-                && !all.contains("CREATE TABLE t (id INT)")
-                && !all.contains("CREATE DATABASE IF NOT EXISTS"),
-            "an active caller transaction must remain untouched: {all}"
-        );
-    }
-
-    #[compio::test]
-    async fn successful_apply_surfaces_restore_failure_after_releasing_lock() {
-        let rec = RecordingSession::with_failure("SET SESSION sql_mode = ?");
-        let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
-        let migration = trivial_migration();
-
-        let result = crate::apply::executor::apply_with_lock_backend(
-            &backend,
-            &cfg,
-            &[migration],
-            crate::Approval::Approved,
-            &crate::ApprovalScope::All,
-            "tester",
-            crate::apply::executor::LockMode::Acquire,
-        )
-        .await;
-
-        assert!(matches!(result, Err(ApplyError::Db(_))), "{result:?}");
-        let log = rec.log.borrow();
-        let author = log
-            .iter()
-            .position(|entry| entry == "batch: CREATE TABLE t (id INT)")
-            .expect("author SQL ran");
-        let restore = log
-            .iter()
-            .position(|entry| entry.contains("SET SESSION sql_mode = ?"))
-            .expect("restore was attempted");
-        let release = log
-            .iter()
-            .rposition(|entry| entry.contains("RELEASE_LOCK(?)"))
-            .expect("project lock was released");
-        assert!(author < restore && restore < release, "{log:?}");
     }
 
     /// `ensure_journal` emits the MySQL journal DDL: `CREATE DATABASE IF NOT
@@ -4711,7 +1973,7 @@ mod render_tests {
             &["proj_x", "reporting"],
             &[],
             false,
-            crate::model::policy::DestructiveOps::Allow,
+            zero_migrate_ir::policy::DestructiveOps::Allow,
         );
         let cfg = ExecutorConfig::new("prj_x", "proj_x", effective);
         let up = "CREATE INDEX users_email_idx ON reporting.users (email)";
@@ -5008,7 +2270,7 @@ mod render_tests {
                 schema: "proj_x".into(),
                 table: "users".into(),
                 direction: GuardDir::IfNotExists,
-                expect_columns: vec![crate::model::probe::ExpectColumn {
+                expect_columns: vec![zero_migrate_ir::probe::ExpectColumn {
                     name: "email".into(),
                     data_type: "character varying(255)".into(),
                     nullable: false,
@@ -5761,7 +3023,7 @@ mod render_tests {
 
         assert_eq!(
             progress,
-            vec![crate::apply::backend::BackfillProgressEntry {
+            vec![zero_migrate_backend::backfill::BackfillProgressEntry {
                 version: "mig_progress".into(),
                 checksum: Some("checksum_a".into()),
                 complete: false,
@@ -5803,10 +3065,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await
             .expect("MySQL DML runs");
@@ -5905,10 +3167,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await
             .expect("legacy zero import runs under the pinned SQL mode");
@@ -5953,10 +3215,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(result.is_err(), "mode-pin failure must reject the import");
@@ -6005,10 +3267,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
 
@@ -6061,10 +3323,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
 
@@ -6112,10 +3374,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
 
@@ -6160,10 +3422,10 @@ mod render_tests {
                 true,
                 true,
                 "app_test",
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(no_approval, Err(ApplyError::ApprovalRequired)));
@@ -6197,10 +3459,10 @@ mod render_tests {
                 true,
                 true,
                 "app_test",
-                crate::approval::Approval::Approved,
-                &crate::approval::ApprovalScope::Versions(Default::default()),
+                zero_migrate_backend::approval::Approval::Approved,
+                &zero_migrate_backend::approval::ApprovalScope::Versions(Default::default()),
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(
@@ -6212,46 +3474,6 @@ mod render_tests {
                 || entry.contains("DELETE FROM `proj_x`.`users`")
                 || entry.contains("information_schema.TABLES")
         }));
-    }
-
-    #[compio::test]
-    async fn whole_plan_preflight_refuses_delete_before_earlier_insert() {
-        let rec = RecordingSession::new();
-        let backend = MysqlBackend::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
-        let (insert, _) = plan_dml_step("insert user", false);
-        let (delete, delete_version) = plan_dml_step("delete user", true);
-
-        let result = crate::MigrationEngine::new()
-            .apply_plan_with_touched_and_depends_scoped(
-                &[insert, delete],
-                &["users".into()],
-                &[],
-                crate::approval::Approval::Approved,
-                &crate::approval::ApprovalScope::Versions(Default::default()),
-                &backend,
-                &cfg,
-                "tester",
-                crate::apply::executor::LockMode::Acquire,
-                None,
-            )
-            .await;
-
-        assert!(matches!(
-            result,
-            Err(crate::engine::DeclarativeApplyError::Plain(
-                crate::engine::EngineError::ApprovalNotScoped { ref version }
-            )) if version == delete_version.as_str()
-        ));
-        let log = rec.log.borrow();
-        assert!(
-            !log.iter().any(|entry| {
-                entry.contains("INSERT INTO `proj_x`.`users`")
-                    || entry.contains("DELETE FROM `proj_x`.`users`")
-                    || entry.contains("information_schema.TABLES")
-            }),
-            "scope preflight must refuse before either target inspection or mutation: {log:?}"
-        );
     }
 
     /// Standalone backfills are data-mutating destructive checkpoints. Both
@@ -6268,15 +3490,15 @@ mod render_tests {
             schema: "proj_x".into(),
             table: "users".into(),
             cursor_columns: vec!["id".into()],
-            cursor_stability: crate::model::ir::CursorStability::ExternalInvariant {
+            cursor_stability: zero_migrate_ir::ir::CursorStability::ExternalInvariant {
                 name: "users_id_immutable_during_backfill".into(),
             },
-            cursor_contract: Some(crate::model::backfill::CursorContract {
-                columns: vec![crate::model::backfill::CursorColumnContract {
+            cursor_contract: Some(zero_migrate_backend::backfill::CursorContract {
+                columns: vec![zero_migrate_backend::backfill::CursorColumnContract {
                     name: "id".into(),
-                    scalar_type: crate::model::backfill::CursorScalarType::Int64,
+                    scalar_type: zero_migrate_backend::backfill::CursorScalarType::Int64,
                     database_type: "bigint".into(),
-                    comparison: crate::model::backfill::CursorComparison::Default,
+                    comparison: zero_migrate_backend::backfill::CursorComparison::Default,
                 }],
             }),
             batch_size: 100,
@@ -6292,10 +3514,10 @@ mod render_tests {
                 &version,
                 &checksum,
                 &spec,
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(no_approval, Err(ApplyError::ApprovalRequired)));
@@ -6320,10 +3542,10 @@ mod render_tests {
                 &version,
                 &checksum,
                 &spec,
-                crate::approval::Approval::Approved,
-                &crate::approval::ApprovalScope::Versions(Default::default()),
+                zero_migrate_backend::approval::Approval::Approved,
+                &zero_migrate_backend::approval::ApprovalScope::Versions(Default::default()),
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(
@@ -6363,10 +3585,10 @@ mod render_tests {
                 true,
                 true,
                 "app_test",
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await
             .expect("journal lookup succeeds");
@@ -6410,10 +3632,10 @@ mod render_tests {
                 true,
                 false,
                 "app_test",
-                crate::approval::Approval::None,
-                &crate::approval::ApprovalScope::All,
+                zero_migrate_backend::approval::Approval::None,
+                &zero_migrate_backend::approval::ApprovalScope::All,
                 "tester",
-                crate::apply::executor::LockMode::AlreadyHeld,
+                zero_migrate_backend::executor::LockMode::AlreadyHeld,
             )
             .await;
         assert!(matches!(
@@ -6458,13 +3680,13 @@ mod render_tests {
         // no evaluator needed — the executor calls this for every migration).
         assert_eq!(
             backend.evaluate_preconditions(&cfg, &m).await.unwrap(),
-            crate::apply::executor::PreconditionVerdict::AllMet,
+            zero_migrate_backend::executor::PreconditionVerdict::AllMet,
             "an empty precondition list is AllMet, not the v1 capability gap",
         );
         // A migration that DECLARES a precondition fails closed (no MySQL evaluator).
         let mut m_pc = trivial_migration();
-        m_pc.preconditions = vec![crate::model::precondition::PreconditionCheck::halt(
-            crate::model::precondition::Precondition::TableNotExists { table: "t".into() },
+        m_pc.preconditions = vec![zero_migrate_ir::precondition::PreconditionCheck::halt(
+            zero_migrate_ir::precondition::Precondition::TableNotExists { table: "t".into() },
         )];
         assert!(
             backend.evaluate_preconditions(&cfg, &m_pc).await.is_err(),
@@ -6480,14 +3702,14 @@ mod render_tests {
                 .evaluate_plan_precondition(
                     &cfg,
                     "v_any",
-                    &crate::model::precondition::Precondition::ColumnHasNoBlockingDependents {
+                    &zero_migrate_ir::precondition::Precondition::ColumnHasNoBlockingDependents {
                         table: "t".into(),
                         column: "c".into(),
                     },
                 )
                 .await
                 .expect("abstaining is not an error"),
-            crate::apply::backend::PlanPreconditionVerdict::Abstain,
+            zero_migrate_backend::backend::PlanPreconditionVerdict::Abstain,
             "a backend with no precondition evaluator says nothing at plan level",
         );
         assert!(backend.baseline_one(&cfg, &m, "t").await.is_err());

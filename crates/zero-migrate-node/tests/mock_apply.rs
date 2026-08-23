@@ -93,7 +93,7 @@ impl MockDispatch {
         {
             // The engine's own list, not a copy: a journal table added there must not
             // be able to go unanswered here.
-            return zero_migrate::apply::backend::mysql::BINARY_IDENTITY_COLUMNS
+            return zero_migrate_mysql::BINARY_IDENTITY_COLUMNS
                 .into_iter()
                 .map(|(table, column)| JsRow {
                     columns: vec![
@@ -293,7 +293,7 @@ fn mysql_journal_only_status_uses_only_mysql_sql() {
             "proj_mysql_status",
             support::no_inject("proj_mysql_status"),
         );
-        let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+        let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
 
         let status = zero_migrate::ops::status::status_via_backend(&backend, &cfg, &[])
             .await

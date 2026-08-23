@@ -93,7 +93,14 @@ const ENGINE_FILE_THAT_MAY_SPELL: &str = "apply/drift.rs";
 /// files OUT, and name that extraction in the commit. NEVER lower it to silence a walk
 /// that broke — check [`ENGINE_FILE_THAT_MAY_SPELL`] first, because that is what tells
 /// the two cases apart, and trust it over this number.
-const ENGINE_FILE_FLOOR: usize = 70;
+///
+/// It fired exactly that way once, on the extraction it was written in anticipation
+/// of: `apply/backend/mysql/` — eight files, the whole MySQL execution half — became
+/// `zero-migrate-mysql/src/backend/`, taking core from 77 `.rs` files to 69. The
+/// anchor passed, which is what said the walk was intact and the shrink was the move.
+/// Lowered to 60, still far from a walk that collapsed toward nothing, and the two
+/// remaining backend subtrees will take it lower again.
+const ENGINE_FILE_FLOOR: usize = 60;
 
 /// The needle's positive control: call sites the allowed file is known to make.
 ///

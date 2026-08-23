@@ -12,15 +12,16 @@
 //! # Why this is a compile-time assertion and not a behaviour test
 //!
 //! `crates/zero-migrate/src/apply/backend/mysql/` — eight files, 16,262 lines, of
-//! which 8,490 are production — is being extracted into this crate. The extraction
-//! is blocked by exactly one thing: the items its production half reaches through
-//! `crate::…` that live in the engine rather than in `zero-migrate-backend`.
+//! which 8,490 are production — HAS now been extracted into this crate, as
+//! `src/backend/`. The extraction was blocked by exactly one thing: the items its
+//! production half reached through `crate::…` that lived in the engine rather than
+//! in `zero-migrate-backend`.
 //!
-//! Naming them here makes those blockers a COMPILER question instead of a reading
-//! exercise. A name that does not compile is an item that has not come down yet; a
-//! name that STOPS compiling later is an item somebody pushed back up into the
-//! engine, which would strand the extracted backend. Neither failure is visible to
-//! any behaviour test, because behaviour tests run in a crate that CAN see the
+//! Naming them here made those blockers a COMPILER question instead of a reading
+//! exercise, and the file keeps that job now that the code has landed: a name that
+//! STOPS compiling is an item somebody pushed back up into the engine, which would
+//! strand the extracted backend. That failure is not visible to any behaviour test,
+//! because the behaviour tests that would notice run in a crate that CAN see the
 //! engine.
 //!
 //! It is a `tests/` file rather than a `src/` one on purpose: an integration test

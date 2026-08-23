@@ -5,7 +5,7 @@
 // own duplicate-object or missing-object error". Both halves are wrong, and this pins
 // what actually happens.
 //
-// MySQL DOES probe: `apply/backend/mysql/session.rs` calls
+// MySQL DOES probe: `zero-migrate-mysql/src/backend/session.rs` calls
 // `existence_probe::decide` and honours all three verdicts (RunBare / SatisfiedNoop /
 // FailDrift), the same call PostgreSQL and SQLite make. What MySQL does not do is
 // resolve the guard while the PENDING SCHEMA is projected, and the projection runs

@@ -44,8 +44,10 @@ mod shadow_dry_run_has_no_implementor;
 mod sqlite_declaration_flip_over_refusal_control;
 mod sqlite_trigger_quoting_reaches_postgres;
 mod sqlite_trigger_render_bytes;
+mod the_mysql_recorder_never_ships;
 mod touched_tables_dialect_legs;
 mod unsupported_reason_is_operator_facing;
+mod value_format_comparison_is_not_an_emission_route;
 mod vendor_ops_dispatch_per_vendor;
 mod vendor_registry_owns_shipping_descriptors;
 

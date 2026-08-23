@@ -5,7 +5,7 @@
 //! # Why it is here and not in the engine
 //!
 //! It was `pub(crate)` in `zero_migrate::render::declarative` until the vendor
-//! crates became separately linkable. `crates/zero-migrate/src/apply/backend/mysql/`
+//! crates became separately linkable. `crates/zero-migrate-mysql/src/backend/`
 //! is being extracted into `zero-migrate-mysql`, and its `drift_sql.rs` BUILDS this
 //! body: MySQL's `information_schema` stores no rendered constraint text — there is
 //! no `pg_get_constraintdef` there — so the drift path has to synthesize the

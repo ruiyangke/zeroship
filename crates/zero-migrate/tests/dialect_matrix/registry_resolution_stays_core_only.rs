@@ -215,15 +215,16 @@ const WALK_ANCHORS: &[&str] = &[
 /// levels down and is the registry composition that census calls PERMANENT.
 const ENGINE_WALK_ANCHORS: &[&str] = &["lib.rs", "render/backends/mod.rs"];
 
-/// The walk's floor across all three vendor crates. They hold 45 `.rs` files under
-/// `src` at the time of writing (19 + 14 + 12), and the extraction will only push
-/// that UP. The floor sits well under that but nowhere near zero.
+/// The walk's floor across all three vendor crates. They hold 55 `.rs` files under
+/// `src` (19 + 14 + 22), up from 45 when this was written: the MySQL execution half
+/// landed in `zero-migrate-mysql/src/backend/`, which is what the extraction does.
 ///
-/// Raise it deliberately as the vendors grow. NEVER lower it to get green: unlike the
-/// engine, these crates are the destination of the extraction, so a falling vendor
-/// file count is not the project working — it is the walk losing a root. Check
-/// [`WALK_ANCHORS`] first and trust it over this number.
-const VENDOR_FILE_FLOOR: usize = 34;
+/// Raise it deliberately as the vendors grow, and this is one of those times — 34 was
+/// set against 45 and would no longer notice losing an entire eight-file directory.
+/// NEVER lower it to get green: unlike the engine, these crates are the destination of
+/// the extraction, so a falling vendor file count is not the project working — it is
+/// the walk losing a root. Check [`WALK_ANCHORS`] first and trust it over this number.
+const VENDOR_FILE_FLOOR: usize = 45;
 
 /// The needle's floor, PER RESOLVER: how many free-call sites the identical matcher
 /// must still find in the engine.

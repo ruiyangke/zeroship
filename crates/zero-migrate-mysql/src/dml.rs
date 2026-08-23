@@ -530,10 +530,10 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// tests whose MySQL identifier bytes this backend had NO say in.
     ///
     /// AND THE 54 IS NOT A TYPO FOR THE 30 THAT WAS PREDICTED. Routing the two
-    /// SECOND homes found during the change — `apply::backend::mysql::journal_sql`
+    /// SECOND homes found during the change — `zero_migrate_mysql::backend::journal_sql`
     /// and `::backfill_sql`, each of which carried its own copy of the spelling and
     /// so could not be reached by the core neuter at all — added 24
-    /// `apply::backend::mysql` tests on top of the 30. Nothing was lost at any
+    /// `zero_migrate_mysql::backend` tests on top of the 30. Nothing was lost at any
     /// step: the 54 is a strict superset of the 30, and the binary held at 1232
     /// tests throughout. The prediction was wrong because it was formed from the
     /// two sets measured FIRST, before those homes were known to exist.

@@ -37,13 +37,13 @@ use crate::support;
 use std::collections::BTreeMap;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::MysqlBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::validate::validate_ir;
 use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
     MigrationIr,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_mysql_text_key";
 

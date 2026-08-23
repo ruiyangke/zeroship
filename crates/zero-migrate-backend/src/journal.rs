@@ -8,7 +8,7 @@
 //! writes its own journal in its own dialect:
 //!
 //! - PostgreSQL — `apply::backend::postgres::journal_sql`
-//! - MySQL — `apply::backend::mysql::journal_sql`
+//! - MySQL — `zero_migrate_mysql::backend::journal_sql`
 //! - SQLite — `apply::backend::sqlite::journal_sql`
 //!
 //! The wire strings the enums below carry are the CONTRACT between those three

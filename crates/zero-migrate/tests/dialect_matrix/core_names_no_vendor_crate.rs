@@ -116,7 +116,13 @@ const ALLOWED: &[(&str, usize)] = &[
 /// moved files OUT, and say which extraction in the commit. Never lower it to silence
 /// a walk that broke — [`WALK_ANCHORS`] is what tells those two apart, so check it
 /// first and trust it over this number.
-const SRC_FILE_FLOOR: usize = 70;
+///
+/// It has now fired exactly that way once. The MySQL execution half —
+/// `apply/backend/mysql/`, eight files — moved into `zero-migrate-mysql`, taking core
+/// from 77 `.rs` files to 69 and under the 70 this said. The anchors passed, which is
+/// what said the walk was intact and the shrink was the extraction. Lowered to 60,
+/// which is under 69 with room to churn and still far from a walk that found nothing.
+const SRC_FILE_FLOOR: usize = 60;
 
 /// Files the walk MUST reach, which is the real defence against a census that fails
 /// open.

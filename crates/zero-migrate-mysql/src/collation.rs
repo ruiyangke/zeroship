@@ -18,7 +18,7 @@
 /// ONE spelling of the engine's collation choice, so the `VARCHAR`/`CHAR`/`TEXT`
 /// family and `ENUM` cannot drift apart. `None` is the canonical
 /// snapshot spelling for the default case-SENSITIVE intent - see
-/// `apply::backend::mysql::drift_sql::case_sensitive_from_collation`, which is the
+/// `zero_migrate_mysql::backend::drift_sql::case_sensitive_from_collation`, which is the
 /// inverse of this function and never emits `Some(true)`.
 pub fn mysql_collation_clause(case_sensitive: Option<bool>) -> &'static str {
     if matches!(case_sensitive, Some(false)) {

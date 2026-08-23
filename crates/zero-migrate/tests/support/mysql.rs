@@ -3,8 +3,8 @@
 //!
 //! **Why this file exists.** Before it, MySQL had NO live Rust coverage at all.
 //! `ZERO_MIGRATE_MYSQL_URL` appeared in 52 files under `packages/` and in exactly
-//! one file under `crates/` - `apply/backend/mysql/mod.rs`, which is SOURCE, not a
-//! test. So the MySQL backend was exercised at RENDER level (unit tests over the
+//! one file under `crates/` - then `apply/backend/mysql/mod.rs`, since moved to
+//! `zero-migrate-mysql/src/backend/mod.rs`, which is SOURCE, not a test. So the MySQL backend was exercised at RENDER level (unit tests over the
 //! emitted SQL text) and at CLI/HOST level (TypeScript over `mysql2`), and nowhere
 //! in between. No Rust test had ever asked a live MySQL server what the engine
 //! actually did, and the CI `rust` job was given a PostgreSQL service only.
@@ -16,7 +16,7 @@
 //! [`MysqlDevSession`] is the exact sibling of [`PgDevSession`](super::PgDevSession):
 //! a TEST-ONLY [`SqlSession`] over the BLOCKING `mysql` crate, pinned to ONE
 //! connection, that drives the SHIPPED generic
-//! [`MysqlBackend`](zero_migrate::apply::backend::MysqlBackend) / executor / journal
+//! [`MysqlBackend`](zero_migrate_mysql::MysqlBackend) / executor / journal
 //! / drift path through the SAME seam the production `mysql2` host rides.
 //!
 //! **Never ships.** `mysql` is a `[dev-dependency]`; `cargo tree -p zero-migrate -e

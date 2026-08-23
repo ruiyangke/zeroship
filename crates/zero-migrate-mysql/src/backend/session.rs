@@ -2,9 +2,9 @@
 //!
 //! These are the MySQL-specific lock / session / apply / rollback operations the
 //! [`MysqlBackend`](super::MysqlBackend)
-//! [`MigrationBackend`](crate::apply::backend::MigrationBackend) impl drives — the
+//! [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend) impl drives — the
 //! MySQL analogue of the Postgres
-//! [`session`](crate::apply::backend::postgres::session) leaves. Every one of them
+//! `zero_migrate::apply::backend::postgres::session` leaves. Every one of them
 //! is MySQL-flavoured, so it lives in the MySQL backend, never the shared executor:
 //!
 //! - **project lock** — `GET_LOCK(name, timeout)` / `RELEASE_LOCK(name)`, MySQL's
@@ -38,21 +38,21 @@
 //! has verified.
 //!
 //! Placeholders are the anonymous positional `?`
-//! ([`PlaceholderStyle::Question`](crate::apply::backend::PlaceholderStyle::Question)),
+//! ([`PlaceholderStyle::Question`](zero_migrate_backend::backend::PlaceholderStyle::Question)),
 //! rendered here directly.
 
 use std::time::Instant;
 
-use crate::apply::backend::mysql::journal_sql;
-use crate::apply::backend::ProjectLockHolder;
-use crate::apply::executor::{authorize_existence_guard_schema, ApplyError, RollbackError};
-use crate::apply::journal::{self, CompletedRecord};
-use crate::apply::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
-use crate::conn::ExecutorConfig;
-use crate::driver::{Bind, SqlSession};
-use crate::model::migration::{Checksum, Migration};
-use crate::model::probe::{GuardDir, GuardProbe};
-use crate::render::step::BindValue;
+use crate::backend::journal_sql;
+use zero_migrate_backend::backend::ProjectLockHolder;
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::driver::{Bind, SqlSession};
+use zero_migrate_backend::executor::{authorize_existence_guard_schema, ApplyError, RollbackError};
+use zero_migrate_backend::journal::{self, CompletedRecord};
+use zero_migrate_backend::step::BindValue;
+use zero_migrate_backend::timeout::{resolve_timeout_ms, IndefiniteTimeoutError as TimeoutError};
+use zero_migrate_ir::migration::{Checksum, Migration};
+use zero_migrate_ir::probe::{GuardDir, GuardProbe};
 
 use super::MysqlSessionSnapshot;
 
@@ -401,7 +401,7 @@ pub(crate) async fn release_project_lock<D: SqlSession>(
 ///
 /// MySQL reads `max_execution_time = 0` as "no limit", exactly as PostgreSQL
 /// reads `statement_timeout = 0`, so a zero is refused here too. See
-/// [`crate::apply::timeout`].
+/// [`zero_migrate_backend::timeout`].
 fn effective_timeout_ms(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, TimeoutError> {
     resolve_timeout_ms(
         m.version.as_str(),
@@ -523,7 +523,7 @@ async fn read_session_snapshot<D: SqlSession>(
 async fn restore_session_snapshot<D: SqlSession>(
     conn: &D,
     snap: &MysqlSessionSnapshot,
-) -> Result<(), crate::driver::DbError> {
+) -> Result<(), zero_migrate_backend::driver::DbError> {
     // `sql_mode` is server-provided text and remains a native bind. MySQL does
     // not accept prepared parameters for the numeric system variables, so their
     // already-decoded i64 values are the only interpolated tokens.
@@ -661,7 +661,7 @@ async fn execute_dml_in_open_transaction<D: SqlSession>(
 ) -> Result<(), ApplyError> {
     let target_lock_sql = mutates_data
         .then(|| {
-            Ok::<_, crate::apply::journal::JournalError>(format!(
+            Ok::<_, zero_migrate_backend::journal::JournalError>(format!(
                 "SELECT 1 AS zero_migrate_metadata_lock FROM {}.{} LIMIT 0",
                 journal_sql::quote_ident_mysql(target_schema)?,
                 journal_sql::quote_ident_mysql(target_table)?,
@@ -741,7 +741,9 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
         return Err(error);
     }
 
-    if let Err(error) = crate::fault::trip(crate::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL) {
+    if let Err(error) = zero_migrate_backend::fault::trip(
+        zero_migrate_backend::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL,
+    ) {
         let _ = conn.batch("ROLLBACK").await;
         return Err(error);
     }
@@ -775,7 +777,9 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
         return Err(ApplyError::Journal(journal::JournalError::Db(error.into())));
     }
 
-    if let Err(error) = crate::fault::trip(crate::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT) {
+    if let Err(error) = zero_migrate_backend::fault::trip(
+        zero_migrate_backend::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT,
+    ) {
         let _ = conn.batch("ROLLBACK").await;
         return Err(error);
     }
@@ -889,10 +893,14 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
         let live = super::drift_sql::snapshot_schema_for(conn, probe.schema())
             .await
             .map_err(|error| match error {
-                crate::apply::drift::DriftError::Db(error) => ApplyError::Db(error),
-                crate::apply::drift::DriftError::Journal(error) => ApplyError::Journal(error),
-                crate::apply::drift::DriftError::Snapshot(error)
-                | crate::apply::drift::DriftError::Backend(error) => ApplyError::Backend(error),
+                zero_migrate_backend::drift::DriftError::Db(error) => ApplyError::Db(error),
+                zero_migrate_backend::drift::DriftError::Journal(error) => {
+                    ApplyError::Journal(error)
+                }
+                zero_migrate_backend::drift::DriftError::Snapshot(error)
+                | zero_migrate_backend::drift::DriftError::Backend(error) => {
+                    ApplyError::Backend(error)
+                }
             })?;
 
         // Refuse a present table or column create before `decide` can fold the
@@ -940,16 +948,18 @@ pub(crate) async fn apply_two_phase<D: SqlSession>(
             });
         }
 
-        match crate::render::existence_probe::decide(probe, &live, &zero_migrate_ir::dialect::MYSQL)
-        {
-            crate::render::existence_probe::GuardVerdict::RunBare => {}
-            crate::render::existence_probe::GuardVerdict::SatisfiedNoop => {
+        // This vendor's own registration, not a registry lookup keyed by a dialect
+        // literal. It used to be `&zero_migrate_ir::dialect::MYSQL` — the one place
+        // in this backend that named the dialect outside its `DIALECT` const.
+        match zero_migrate_backend::existence_probe::decide(probe, &live, &crate::VENDOR) {
+            zero_migrate_backend::existence_probe::GuardVerdict::RunBare => {}
+            zero_migrate_backend::existence_probe::GuardVerdict::SatisfiedNoop => {
                 let exec_ms =
                     i64::try_from(probe_started.elapsed().as_millis()).unwrap_or(i64::MAX);
                 finalize_two_phase(conn, cfg, m, applied_by, exec_ms, supersedes, kind).await?;
                 return Ok(false);
             }
-            crate::render::existence_probe::GuardVerdict::FailDrift(divergence) => {
+            zero_migrate_backend::existence_probe::GuardVerdict::FailDrift(divergence) => {
                 return Err(ApplyError::ExistenceGuardDrift {
                     version: version.to_string(),
                     object: divergence.object,
@@ -1098,7 +1108,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
     forward: &Migration,
-    inverse_steps: &[crate::render::step::PlanStep],
+    inverse_steps: &[zero_migrate_backend::step::PlanStep],
     applied_by: &str,
 ) -> Result<(), RollbackError> {
     let version = forward.version.as_str();
@@ -1124,7 +1134,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
         let started = Instant::now();
 
         for step in inverse_steps {
-            let crate::render::step::PlanStep::Dml {
+            let zero_migrate_backend::step::PlanStep::Dml {
                 template,
                 binds,
                 target_schema,
@@ -1159,7 +1169,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
             }
         }
 
-        if let Err(error) = crate::fault::trip(crate::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL)
+        if let Err(error) = zero_migrate_backend::fault::trip(zero_migrate_backend::fault::points::DML_AFTER_STMT_BEFORE_JOURNAL)
         {
             let _ = conn.batch("ROLLBACK").await;
             return Err(dml_apply_error_to_rollback(error, version));
@@ -1181,7 +1191,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
             return Err(RollbackError::Journal(error));
         }
 
-        if let Err(error) = crate::fault::trip(crate::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT)
+        if let Err(error) = zero_migrate_backend::fault::trip(zero_migrate_backend::fault::points::DML_AFTER_JOURNAL_BEFORE_COMMIT)
         {
             let _ = conn.batch("ROLLBACK").await;
             return Err(dml_apply_error_to_rollback(error, version));
@@ -1360,8 +1370,8 @@ pub(crate) async fn rollback_one<D: SqlSession>(
 #[cfg(test)]
 mod project_lock_timeout_tests {
     use super::project_lock_timeout_secs;
-    use crate::conn::ExecutorConfig;
     use std::time::Duration;
+    use zero_migrate_backend::conn::ExecutorConfig;
 
     fn cfg_with(ms: u64) -> ExecutorConfig {
         let mut cfg =

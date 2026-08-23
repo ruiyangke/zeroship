@@ -115,7 +115,7 @@ pub struct ConfinementConfig {
     /// Coupling them meant tightening the DDL budget to protect application
     /// traffic also shortened the deploy queue, and 3 seconds is shorter than
     /// many real migrations. The default matches the value MySQL already used for
-    /// this concept (`PROJECT_LOCK_TIMEOUT_SECS`, apply/backend/mysql/session.rs).
+    /// this concept (`PROJECT_LOCK_TIMEOUT_SECS`, zero-migrate-mysql/src/backend/session.rs).
     ///
     /// Read by the SQLite application-file lock directly, and by MySQL's
     /// `GET_LOCK` rounded UP to whole seconds (MySQL's unit) - so a value under a

@@ -91,7 +91,7 @@ use tempfile::TempDir;
 use crate::support::mysql::{DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
 use zero_migrate::apply::backend::sqlite::Mode;
-use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
+use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::apply::executor::LockMode;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::Op;
@@ -100,6 +100,7 @@ use zero_migrate::{
     resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, MigrationEngine, MigrationIr, PostgresBackend, SqliteBackend,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_row_order";
 

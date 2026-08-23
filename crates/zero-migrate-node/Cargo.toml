@@ -36,6 +36,11 @@ napi = ["dep:napi", "dep:napi-derive"]
 # is cross-platform), NO embedded V8. SQLite stays native (rusqlite bundled) inside
 # the core; the host supplies PG/MySQL over the seam.
 zero-migrate = { path = "../zero-migrate" }
+# The MySQL backend, named DIRECTLY rather than through a `zero-migrate` re-export.
+# `apply_with_lock_mysql` below builds `MysqlBackend` over the `mysql2` seam, and the
+# engine no longer re-exports it: core naming a vendor crate outside its registry is
+# what `core_names_no_vendor_crate` forbids, so the host names the vendor it wants.
+zero-migrate-mysql = { path = "../zero-migrate-mysql" }
 
 # N-API 3, TOKIO-FREE by construction: default-features = false drops the
 # ergonomic tokio-backed async (`async`/`tokio_rt`). `napi4` supplies the

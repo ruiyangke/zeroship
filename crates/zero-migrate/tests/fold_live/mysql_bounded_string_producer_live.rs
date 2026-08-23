@@ -43,7 +43,7 @@
 use crate::support;
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
+use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::Op;
 use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor};
@@ -52,6 +52,7 @@ use zero_migrate::{
     ExecutorConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
     TableRuntimeOptions,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_bounded_string_mysql";
 const TABLE: &str = "profiles";

@@ -31,12 +31,13 @@ use crate::support::model_equivalence::{
     assert_roundtrip_is_lossless,
 };
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
+use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor,
     LiveSchema, LockMode, MigrationEngine, MigrationIr, SchemaSnapshot,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_schema_model_equivalence_mysql";
 

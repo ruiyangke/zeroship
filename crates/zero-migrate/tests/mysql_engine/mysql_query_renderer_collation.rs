@@ -46,7 +46,7 @@
 //! whether `'Active' = 'active'` in that column, and whether a UNIQUE index over it
 //! accepts both spellings. The catalog is read too, from
 //! `information_schema.COLUMNS` - the relation the SHIPPED drift path reads
-//! (`apply::backend::mysql::drift_sql`) - with a missing row treated as an ERROR
+//! (`zero_migrate_mysql::backend::drift_sql`) - with a missing row treated as an ERROR
 //! rather than as "no collation", because that view is privilege-filtered and an
 //! absent row and an invisible one are the same thing. `SHOW CREATE TABLE` is the
 //! corroborating witness: only its text distinguishes a collation the engine PINNED
@@ -157,7 +157,7 @@ async fn database_collation(session: &MysqlDevSession, database: &str) -> Result
 }
 
 /// The collation the SERVER gave `column`, read from the relation the shipped drift
-/// path reads (`apply::backend::mysql::drift_sql` reads
+/// path reads (`zero_migrate_mysql::backend::drift_sql` reads
 /// `information_schema.COLUMNS`), so this measures the same surface the engine
 /// measures.
 ///

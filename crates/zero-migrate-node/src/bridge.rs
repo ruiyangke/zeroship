@@ -625,7 +625,7 @@ pub fn apply_ir(
                 .await
             }
             ApplyDialect::Mysql => {
-                let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+                let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
                 apply_ir_with_locked_backend(
                     &backend,
                     &cfg,
@@ -863,7 +863,7 @@ pub fn rollback(
                 .await
             }
             ApplyDialect::Mysql => {
-                let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+                let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
                 rollback_with_locked_backend(
                     &backend,
                     &cfg,
@@ -1076,7 +1076,7 @@ pub fn status_ir(
                 .await
             }
             ApplyDialect::Mysql => {
-                let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+                let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
                 status_ir_with_locked_backend(
                     &backend,
                     &cfg,
@@ -1197,7 +1197,7 @@ pub fn status(
                 legacy_status_with_locked_backend(&backend, &cfg, &migrations).await
             }
             ApplyDialect::Mysql => {
-                let backend = zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+                let backend = zero_migrate_mysql::MysqlBackend::new_generic(&session);
                 legacy_status_with_locked_backend(&backend, &cfg, &migrations).await
             }
         }

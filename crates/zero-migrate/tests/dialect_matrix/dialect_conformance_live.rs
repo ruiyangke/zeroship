@@ -159,7 +159,7 @@ use tempfile::TempDir;
 use crate::dialect_table::{Disposition, DIALECT_TABLE};
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
+use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::apply::executor::{ApplyError, LockMode};
 use zero_migrate::driver::{DbError, SqlSession};
 use zero_migrate::model::ir::Op;
@@ -172,6 +172,7 @@ use zero_migrate::{
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
     PostgresBackend, SqliteBackend,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 /// What the MySQL leg needed, and where each piece of it now lives. Recorded as a
 /// constant so it is in the file a MySQL author opens, not only in a doc.
@@ -179,7 +180,8 @@ use zero_migrate::{
 /// This list used to be a TODO, and by the time the leg was written three of its
 /// four items were already satisfied elsewhere in the tree. The stale version said
 /// `ZERO_MIGRATE_MYSQL_URL` "occurs in exactly one file in `crates/`, and it is
-/// `src/apply/backend/mysql/mod.rs`, not a test". MEASURED at 9f65095a: it occurs in
+/// `src/apply/backend/mysql/mod.rs` (now `zero-migrate-mysql/src/backend/mod.rs`),
+/// not a test". MEASURED at 9f65095a: it occurs in
 /// NINE files under `crates/`, SEVEN of them under `tests/` - six once this file's
 /// own stale sentence is discounted - and `tests/support/mysql.rs` had already
 /// shipped every piece item 1 asked for.

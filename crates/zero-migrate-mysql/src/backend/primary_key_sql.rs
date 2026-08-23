@@ -9,13 +9,13 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use crate::apply::executor::ApplyError;
-use crate::apply::journal::Phase;
-use crate::approval::{Approval, ApprovalScope};
-use crate::conn::ExecutorConfig;
-use crate::driver::SqlSession;
-use crate::model::ir::AlterPrimaryKeyAction;
-use crate::render::step::AlterPrimaryKeyStep;
+use zero_migrate_backend::approval::{Approval, ApprovalScope};
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::executor::ApplyError;
+use zero_migrate_backend::journal::Phase;
+use zero_migrate_backend::step::AlterPrimaryKeyStep;
+use zero_migrate_ir::ir::AlterPrimaryKeyAction;
 
 use super::{journal_sql, session};
 
@@ -922,14 +922,14 @@ fn strip_top_level_auto_increment(clause: &str) -> (String, bool) {
 mod tests {
     use std::cell::RefCell;
 
-    use crate::apply::backend::MigrationBackend;
-    use crate::driver::{Bind, DbError, Row, Value};
-    use crate::model::migration::{
+    use zero_migrate_backend::backend::MigrationBackend;
+    use zero_migrate_backend::driver::{Bind, DbError, Row, Value};
+    use zero_migrate_ir::migration::{
         Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
     };
 
     use super::*;
-    use crate::apply::backend::mysql::MysqlBackend;
+    use crate::backend::MysqlBackend;
 
     struct RecordingSession {
         log: RefCell<Vec<String>>,

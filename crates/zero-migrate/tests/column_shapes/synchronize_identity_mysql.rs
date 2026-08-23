@@ -57,7 +57,7 @@
 //!
 //! # What only a LIVE MySQL server can prove
 //!
-//! `apply/backend/mysql/identity_sql.rs` already has four unit tests over a
+//! `zero-migrate-mysql/src/backend/identity_sql.rs` already has four unit tests over a
 //! `RecordingSession` fake, and they DO pin the emitted DDL text
 //! (``ALTER TABLE `app`.`orders` AUTO_INCREMENT = 23``) and its ordering against the
 //! lock. Four things are out of a fake's reach, and each has a test here:
@@ -99,12 +99,13 @@
 use crate::support;
 
 use crate::support::mysql::{database_token, quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
+use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::CURRENT_IR_VERSION;
 use zero_migrate::{
     ApplyError, ExecutorConfig, IrAuthor, LiveSchema, PlanStep, SynchronizeIdentityStep,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_synchronize_identity_mysql";
 

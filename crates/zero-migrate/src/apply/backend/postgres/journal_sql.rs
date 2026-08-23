@@ -1,7 +1,7 @@
 //! The PostgreSQL journal: schema, immutability trigger, and every statement
 //! that reads or writes `<meta>.schema_migrations`.
 //!
-//! This is the PostgreSQL analogue of the MySQL `apply::backend::mysql::journal_sql`
+//! This is the PostgreSQL analogue of the MySQL `zero_migrate_mysql::backend::journal_sql`
 //! and SQLite `apply::backend::sqlite::journal_sql` modules. The three backends
 //! share the journal's *vocabulary* — [`Phase`], [`EventKind`], [`AppliedEntry`],
 //! [`JournalError`], … all live in the dialect-neutral [`crate::apply::journal`] —

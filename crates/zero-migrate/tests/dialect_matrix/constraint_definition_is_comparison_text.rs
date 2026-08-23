@@ -8,7 +8,7 @@
 //! `fk_definition_for_dialect` was private to that file. They are now `pub` in
 //! `zero_migrate_backend::constraint_definition`, because MySQL's drift path BUILDS
 //! the constraint body — its `information_schema` stores no rendered constraint text
-//! — and `crates/zero-migrate/src/apply/backend/mysql/` is being extracted into
+//! — and `crates/zero-migrate/src/apply/backend/mysql/` has been extracted into
 //! `zero-migrate-mysql`, which cannot depend on the engine.
 //!
 //! `pub(crate)` DOES NOT SURVIVE A CRATE BOUNDARY, and there is no modifier meaning

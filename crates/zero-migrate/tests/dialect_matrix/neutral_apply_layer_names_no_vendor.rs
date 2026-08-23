@@ -33,7 +33,7 @@
 //! [`the_backend_contract_declares_no_vendor_named_item`] caught
 //! `PgSessionSnapshot`, declared on the neutral contract in
 //! `apply/backend/mod.rs` while its own sibling `MysqlSessionSnapshot` was
-//! declared in `apply/backend/mysql/mod.rs` — the asymmetry being the tell. It
+//! declared in the MySQL backend's own `mod.rs` — the asymmetry being the tell. It
 //! is genuinely vendor (its three fields are PostgreSQL GUCs; `SqliteBackend`'s
 //! `SessionSnapshot` is `()`), so it kept a vendor name and moved to
 //! `apply/backend/postgres/mod.rs` beside the sibling, spelled the way the
@@ -227,7 +227,8 @@ fn the_backend_contract_declares_no_vendor_named_item() {
         "{CONTRACT} declares vendor-named item(s) {offenders:?}. It is the \
          DIALECT-NEUTRAL contract every backend implements; a type named after one \
          vendor belongs in that vendor's own module beside its impl, the way \
-         `MysqlSessionSnapshot` is declared in apply/backend/mysql/mod.rs. Moving it \
+         `MysqlSessionSnapshot` is declared beside `MysqlBackend` in \
+         zero-migrate-mysql/src/backend/mod.rs. Moving it \
          there is the fix — keeping the vendor name is correct once it lives in the \
          vendor's module, as long as the name is the one the dialect id uses."
     );

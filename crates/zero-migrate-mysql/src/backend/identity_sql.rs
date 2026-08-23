@@ -9,11 +9,11 @@
 
 use std::time::Instant;
 
-use crate::apply::executor::ApplyError;
-use crate::apply::journal::Phase;
-use crate::conn::ExecutorConfig;
-use crate::driver::SqlSession;
-use crate::render::step::SynchronizeIdentityStep;
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::executor::ApplyError;
+use zero_migrate_backend::journal::Phase;
+use zero_migrate_backend::step::SynchronizeIdentityStep;
 
 use super::{journal_sql, session};
 
@@ -318,14 +318,14 @@ pub(super) async fn synchronize_identity<D: SqlSession>(
 mod tests {
     use std::cell::RefCell;
 
-    use crate::apply::backend::MigrationBackend;
-    use crate::driver::{Bind, DbError, Row, Value};
-    use crate::model::migration::{
+    use zero_migrate_backend::backend::MigrationBackend;
+    use zero_migrate_backend::driver::{Bind, DbError, Row, Value};
+    use zero_migrate_ir::migration::{
         Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
     };
 
     use super::*;
-    use crate::apply::backend::mysql::MysqlBackend;
+    use crate::backend::MysqlBackend;
 
     struct RecordingSession {
         log: RefCell<Vec<String>>,

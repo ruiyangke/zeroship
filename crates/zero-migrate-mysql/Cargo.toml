@@ -18,6 +18,45 @@ zero-migrate-ir = { workspace = true }
 serde_json = { workspace = true }
 # MySQL and SQLite both spell a binary/string literal as a hex form.
 hex = { workspace = true }
+# The backfill id is `bf_<32 hex chars>` of a SHA-256, and the two-phase apply
+# checksums each DML step the same way — both in `backend/backfill_sql.rs`.
+sha2 = { workspace = true }
+# `uuid` for the per-row UUIDv4/v7 generators a backfill materializes in Rust when
+# the server has no generator of its own (`backend/backfill_sql.rs`).
+uuid = { workspace = true }
+# The backend's own error enums (`MysqlInflightRecoveryError`) derive their
+# `Display`/`Error` impls here, the same way every other crate in the tree does.
+thiserror = { workspace = true }
+# Structured apply-path events from `backend/session.rs`.
+tracing = { workspace = true }
+# `ExecutorConfig` carries an `EffectivePolicy`, so the execution half names the
+# PDP's types. A pure LEAF with no SQL dependencies.
+zero-migrate-policy = { workspace = true }
+
+[features]
+# TEST-ONLY. Publishes `backend::recording`, the canned `SqlSession` this crate's
+# own unit tests drive, so the ENGINE's integration tests can drive the SAME double.
+# Fourteen tests over that recorder also drive `apply_with_lock_backend` /
+# `MigrationEngine` / `diff_snapshots` / `fold_ops`, which a vendor crate cannot
+# reach (the engine depends on this crate, so the edge back is a cycle), and a
+# SECOND copy of the recorder is the hazard this avoids: its canned
+# `information_schema` rows are the shared premise of both suites and two copies
+# drift silently.
+#
+# `zero-migrate` names it under `[dev-dependencies]` only. Resolver 3 keeps
+# dev-dependency features out of the normal build, so a shipping
+# `zero-migrate-mysql` compiles none of it.
+testing = []
+
+[dev-dependencies]
+# TEST-ONLY: the async apply/backend surface is `async`, so the unit tests that
+# drive it spin a throwaway compio run loop per test (zero tokio), exactly as the
+# engine's own async-apply harness does.
+compio = { workspace = true }
+# TEST-ONLY: the charter fixtures build their TOML with the same `toml::Value`
+# string escaping the engine's `test_fixtures` uses, so a vendor's test charter and
+# the engine's are the same bytes rather than nearly the same.
+toml = { workspace = true }
 
 [lints]
 workspace = true

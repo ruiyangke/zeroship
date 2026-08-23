@@ -149,6 +149,18 @@ tracing = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+# TEST-ONLY, and it is the SAME crate the `[dependencies]` entry above names — this
+# line exists only for the `testing` feature. That feature publishes MySQL's canned
+# `SqlSession` recorder, which fourteen tests in `tests/mysql_engine/` drive while
+# ALSO driving `apply_with_lock_backend` / `MigrationEngine` / `diff_snapshots` /
+# `fold_ops`. Those four are the engine's, so those tests cannot live in the vendor
+# crate (the edge back is a cycle Cargo refuses) — and a second copy of the recorder
+# over here would be worse than the feature: its canned `information_schema` rows are
+# the shared premise of both suites, and two copies drift silently.
+#
+# Resolver 3 keeps dev-dependency features out of the normal build, so
+# `cargo build -p zero-migrate` links none of it.
+zero-migrate-mysql = { workspace = true, features = ["testing"] }
 # TEST-ONLY: the SEAM-generic async apply/backend surface is
 # `async`, so the test harness drives it on a runtime. `#[compio::test]` spins a
 # throwaway compio run loop per test (zero tokio) to `.await` the seam-generic

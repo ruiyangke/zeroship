@@ -1,7 +1,7 @@
 //! The MySQL journal: schema (database), immutability, native `event_seq`, and
 //! the net-state reads/writes for [`MysqlBackend`](super::MysqlBackend).
 //!
-//! This is the MySQL analogue of the Postgres [`crate::apply::journal`] module:
+//! This is the MySQL analogue of the Postgres [`zero_migrate_backend::journal`] module:
 //! it carries the SAME logical journal shape — a SINGLE consolidated
 //! `schema_migrations` events table (one row per `applied`/`rolled_back` event,
 //! discriminated by `event_kind`), a `_supersedes` edge table, an inflight
@@ -22,7 +22,7 @@
 //! the meta database is admin-owned — defense-in-depth still holds through the
 //! UPDATE/DELETE triggers + privilege model);
 //! - **placeholders** — every bind is the anonymous positional `?`
-//! ([`PlaceholderStyle::Question`](crate::apply::backend::PlaceholderStyle::Question)),
+//! ([`PlaceholderStyle::Question`](zero_migrate_backend::backend::PlaceholderStyle::Question)),
 //! never Postgres' `$N`;
 //! - **net state** — a MySQL-8 window-function (`ROW_NUMBER OVER (PARTITION BY
 //! version ORDER BY event_seq DESC)`) replaces Postgres' `DISTINCT ON`, and
@@ -33,11 +33,11 @@
 //! reach, exactly as on Postgres — the journal is unforgeable by a confined
 //! creator `up`.
 
-use crate::apply::journal::{
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::journal::{
     AppliedEntry, CompletedRecord, EventKind, JournalError, JournaledKind, Phase,
 };
-use crate::conn::ExecutorConfig;
-use crate::driver::SqlSession;
 
 use super::{MysqlInflightDdlMarker, MysqlInflightResolution};
 
@@ -76,15 +76,15 @@ pub(crate) fn quote_ident_mysql(ident: &str) -> Result<String, JournalError> {
             "mysql journal: refusing to quote a NUL-bearing identifier".to_string(),
         ));
     }
-    Ok(crate::render::dml::escape_quote_ident_for_dialect(
+    Ok(zero_migrate_backend::dml::escape_quote_ident_for_backend(
         ident,
-        &super::DIALECT,
+        &crate::dml::RENDERER,
     ))
 }
 
 /// Bootstrap (idempotently) the meta database + journal table + supersedes edge
 /// table + inflight side-table + immutability triggers (the MySQL analogue of
-/// [`crate::apply::journal::ensure_journal`]).
+/// [`zero_migrate_backend::journal::ensure_journal`]).
 ///
 /// Safe to call on every apply: `CREATE {DATABASE,TABLE} IF NOT EXISTS` and
 /// `information_schema.triggers`-guarded `CREATE TRIGGER`s make a re-bootstrap a
@@ -299,7 +299,7 @@ pub(crate) async fn ensure_journal<D: SqlSession>(
             // block is a single simple-query batch (no client-side statement
             // splitting of the trigger body needed — the guard + CREATE TRIGGER are
             // two batches).
-            let exists: Vec<crate::driver::Row> = conn
+            let exists: Vec<zero_migrate_backend::driver::Row> = conn
                 .query(
                     "SELECT trigger_name FROM information_schema.triggers \
                      WHERE trigger_schema = ? AND trigger_name = ?",
@@ -405,7 +405,9 @@ async fn ensure_binary_identity_columns<D: SqlSession>(
     Ok(())
 }
 
-fn is_exact_supersession_edge_index(rows: &[crate::driver::Row]) -> Result<bool, JournalError> {
+fn is_exact_supersession_edge_index(
+    rows: &[zero_migrate_backend::driver::Row],
+) -> Result<bool, JournalError> {
     if rows.len() != 2 {
         return Ok(false);
     }
@@ -432,7 +434,7 @@ fn is_exact_supersession_edge_index(rows: &[crate::driver::Row]) -> Result<bool,
 }
 
 /// Read the **net applied state** of the journal (the MySQL analogue of
-/// [`crate::apply::journal::applied`]): the LATEST event per version (by the native
+/// [`zero_migrate_backend::journal::applied`]): the LATEST event per version (by the native
 /// `event_seq` order) kept only where that latest event is `applied`, UNIONed with
 /// the lone `started` inflight markers for versions that are not net-applied.
 ///
@@ -557,7 +559,7 @@ pub(crate) async fn unresolved_rollback_markers<D: SqlSession>(
 }
 
 /// The versions covered by a net-applied squash (the MySQL analogue of
-/// [`crate::apply::journal::superseded_versions`]). Only a GENUINE recorded squash
+/// [`zero_migrate_backend::journal::superseded_versions`]). Only a GENUINE recorded squash
 /// (latest event `applied` AND `kind='squash'`) can supersede.
 ///
 /// # Errors
@@ -594,7 +596,7 @@ pub(crate) async fn superseded_versions<D: SqlSession>(
 }
 
 /// The latest `completed` checksum per **repeatable** version (the MySQL analogue
-/// of [`crate::apply::journal::latest_completed_checksums`]) — the repeatable
+/// of [`zero_migrate_backend::journal::latest_completed_checksums`]) — the repeatable
 /// re-run oracle. Only `event_kind='applied' AND kind='repeatable'` rows count.
 ///
 /// # Errors
@@ -727,7 +729,7 @@ pub(crate) async fn record_completed_in_transaction<D: SqlSession>(
 }
 
 /// Append an immutable `rolled_back` event — the MySQL analogue of the PG rollback
-/// journal INSERT (see [`crate::apply::journal::record_rolled_back`]). `?`
+/// journal INSERT (see [`zero_migrate_backend::journal::record_rolled_back`]). `?`
 /// placeholders. The applied-only columns stay NULL (the CHECK enforces the
 /// `rolled_back` shape).
 ///
@@ -763,7 +765,7 @@ pub(crate) async fn record_rolled_back<D: SqlSession>(
 }
 
 /// Clear the inflight `started` marker for a version (the MySQL analogue of
-/// [`crate::apply::journal::clear_inflight`]). `?` placeholder.
+/// [`zero_migrate_backend::journal::clear_inflight`]). `?` placeholder.
 ///
 /// # Errors
 /// [`JournalError::Db`] on failure.

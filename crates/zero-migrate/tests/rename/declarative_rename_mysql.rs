@@ -97,13 +97,14 @@ use std::collections::HashMap;
 
 use crate::support::mysql::{quote_ident as mysql_ident, DatabaseGuard, MysqlDevSession};
 use crate::support::PgDevSession;
-use zero_migrate::apply::backend::{MigrationBackend, MysqlBackend};
+use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     apply::backend::postgres::drift_sql::snapshot_schema, desired_snapshot_for_dialect, Approval,
     CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor,
     GuardConfig, IndexDescriptor, MigrationEngine, PostgresBackend, RenameHint,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_declarative_rename";
 const TABLE: &str = "people";

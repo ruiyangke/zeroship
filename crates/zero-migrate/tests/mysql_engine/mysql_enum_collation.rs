@@ -52,7 +52,6 @@ use crate::support;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::support::mysql::{quote_ident, DatabaseGuard, MysqlDevSession};
-use zero_migrate::apply::backend::MysqlBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::snapshot::SchemaSnapshot;
 use zero_migrate::render::declarative::{
@@ -62,6 +61,7 @@ use zero_migrate::{
     diff_snapshots, fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
     IrAuthor, LiveSchema, LockMode, MigrationBackend, MigrationEngine, MigrationIr,
 };
+use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_enum_collation";
 
@@ -173,7 +173,7 @@ async fn database_collation(session: &MysqlDevSession, database: &str) -> Result
 /// The collation the SERVER gave `column`, read from the catalog.
 ///
 /// `information_schema.COLUMNS` is the relation the SHIPPED drift path reads
-/// (`apply::backend::mysql::drift_sql`), so reading it here measures the same surface
+/// (`zero_migrate_mysql::backend::drift_sql`), so reading it here measures the same surface
 /// the engine measures. It is privilege-filtered - MySQL shows a row only for a column
 /// the connected user holds some privilege on - so an "absent" row would be
 /// indistinguishable from an invisible one. The caller therefore treats a missing row
