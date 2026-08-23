@@ -2,8 +2,8 @@
 //! type may name a vendor.
 //!
 //! `docs/proposals/pluggable-backends.md` wants the three vendors extracted into their
-//! own crates behind a registered facade. A `pub` type in `render/plan.rs` or a
-//! `RenameStep` variant in `render/step.rs` is the SHARED vocabulary every backend
+//! own crates behind a registered facade. A `pub` type in the plan vocabulary or a
+//! `RenameStep` variant is the SHARED vocabulary every backend
 //! speaks — it is the part of core that survives the extraction and that a
 //! fourth-vendor crate would have to implement against. A vendor name in that
 //! vocabulary is the coupling the whole refactor exists to remove: it tells a new
@@ -53,14 +53,26 @@
 //! nine fields on the rebuild spec, eight (`table`, `tmp_table`, `new_table_create`,
 //! `copy_columns`, `recreate_objects`, `column_renames`, `dropped_columns`, `reason`)
 //! are ordinary create-copy-swap vocabulary that any engine without a native `ALTER`
-//! would need; exactly one, `sequence_policy`, is SQLite's. The "12-step procedure"
-//! appears only in doc comments, never in the field structure. That measured 8-of-9
-//! split is why the shell is neutral and the one field keeps its vendor name.
+//! would need; exactly one, `sequence_policy`, was SQLite's.
+//!
+//! That last one is no longer an exemption, and the correction is worth recording
+//! because this file argued FOR it. `sequence_policy` was typed
+//! `SqliteSequencePolicy` — so the shared vocabulary did not merely NAME a vendor,
+//! it HELD a vendor type, one level below the names this scan reads. That inverted
+//! the dependency the extraction exists to establish: the backend CONTRACT, which
+//! every vendor sits above, would have had to depend on `zero-migrate-sqlite`, and
+//! it kept `TableRebuildSpec`, `TableRebuild`, `RenameStep` and `PlanStep` stranded
+//! in the engine. The field carries a neutral `SequenceHighWaterPolicy` now and the
+//! vendor converts at its own boundary. `SqliteSequencePolicy` still exists, still
+//! owns the behaviour, and is still correctly named — it is simply no longer in the
+//! shared vocabulary, which is what "outside the shared vocabulary scanned here"
+//! was always supposed to mean.
 //!
 //! # What this does NOT catch
 //!
-//! It reads `render/step.rs`, `render/plan.rs` and the contract crate's
-//! `requirements.rs` only, and within those, only `RenameStep`'s variants and
+//! It reads three files only — the contract crate's `step.rs`, `table_rebuild.rs`
+//! and `requirements.rs`, plus the engine's `render/plan.rs` — and within those, only
+//! `RenameStep`'s variants and
 //! column-zero `pub` type declarations. It follows the vocabulary as it moves
 //! down into `zero-migrate-backend` — the scan is over a NAMED file list, so a
 //! type that leaves one of them without being added to another silently stops
@@ -97,7 +109,11 @@
 /// broken scanner and a deleted concept both go red and have to be answered out loud.
 #[test]
 fn the_lowered_plan_vocabulary_names_no_vendor() {
-    const STEP_SRC: &str = include_str!("../../src/render/step.rs");
+    /// `RenameStep` moved too, with the rest of the lowered-plan step vocabulary.
+    /// `zero_migrate::render::step` is re-exports now, so reading it here scanned
+    /// ZERO arms — which the floor below caught, and which is the entire reason the
+    /// floor is written as a floor and not as a comment.
+    const STEP_SRC: &str = include_str!("../../../zero-migrate-backend/src/step.rs");
     const PLAN_SRC: &str = include_str!("../../src/render/plan.rs");
     /// `DatabaseFeature` and `DatabaseRequirements` moved OUT of `render/plan.rs`
     /// and into the backend contract crate, beside the
@@ -109,6 +125,16 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     /// left the vocabulary.
     const REQUIREMENTS_SRC: &str =
         include_str!("../../../zero-migrate-backend/src/requirements.rs");
+    /// `TableRebuildSpec` followed, and it is the one whose arrival this rule most
+    /// wanted. Its `sequence_policy` field was typed
+    /// `zero_migrate_sqlite::SqliteSequencePolicy` — the shared plan vocabulary
+    /// literally holding a vendor type — which is the coupling the header calls
+    /// "the coupling the whole refactor exists to remove", one level below the
+    /// names this scan reads. It carries the neutral `SequenceHighWaterPolicy`
+    /// now. Scanning the file it landed in keeps the spelling rule on it and picks
+    /// up the rebuild vocabulary beside it.
+    const TABLE_REBUILD_SRC: &str =
+        include_str!("../../../zero-migrate-backend/src/table_rebuild.rs");
 
     /// Vendor spellings as they appear inside a CamelCase identifier. `Pg` is listed
     /// separately from `Postgres` because both spellings are live in this crate.
@@ -159,6 +185,10 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     for (src, file) in [
         (PLAN_SRC, "render/plan.rs"),
         (REQUIREMENTS_SRC, "zero-migrate-backend/src/requirements.rs"),
+        (
+            TABLE_REBUILD_SRC,
+            "zero-migrate-backend/src/table_rebuild.rs",
+        ),
     ] {
         for line in src.lines() {
             let Some(rest) = line

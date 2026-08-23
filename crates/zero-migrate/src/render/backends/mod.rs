@@ -93,8 +93,16 @@ use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_ir::dialect::DialectId;
 
-// This vendor-owned policy remains part of the engine's neutral plan carrier. Re-export
-// it from the one composition module so core never reaches into a vendor crate directly.
+// This vendor-owned policy is NO LONGER part of the engine's neutral plan carrier —
+// that line used to read "remains", and it was the whole reason the lowered-plan
+// vocabulary could not leave the engine. `TableRebuildSpec::sequence_policy` carries
+// the neutral `SequenceHighWaterPolicy` now, and SQLite's rebuild executor converts
+// into this type at its own boundary through the vendor's own `From`.
+//
+// It is still re-exported here, and only here, because that executor
+// (`apply/backend/sqlite/rebuild_sql.rs`) has not moved into the vendor crate yet, and
+// core reaches a vendor crate through this one composition module or not at all. The
+// import goes away with the executor, not before.
 pub(crate) use zero_migrate_sqlite::{SqliteSequencePolicy, VENDOR};
 
 #[cfg(test)]

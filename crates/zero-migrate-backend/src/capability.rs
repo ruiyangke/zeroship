@@ -137,3 +137,47 @@ pub trait OnlineSchemaChange {
         lock_mode: LockMode,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ApplyOutcome, OnlineError>> + 'a>>;
 }
+
+/// The full ordered output of the engine's `ExpandContractAuthor::author` — the expand and
+/// contract migrations for one online intent, with the `depends_on` chain wired.
+///
+/// The expand migrations ([`expand`](Self::expand)) and contract migrations
+/// ([`contract`](Self::contract)) are exposed separately so a caller (the
+/// control plane) can bundle the expand into deploy N and the contract into a
+/// later deploy N+1 — the cross-deploy partition the engine gate enforces. The
+/// flat [`all`](Self::all) view is the input to `MigrationEngine::plan`.
+#[derive(Debug, Clone)]
+pub struct ExpandContractPlan {
+    /// The stable logical identity of the owning authored plan. IR lowering
+    /// stamps this after the ordered plan is assembled; declarative callers that
+    /// do not have an outer plan identity leave it `None` and retain the legacy
+    /// first-expand-step fallback.
+    pub plan_version: Option<MigrationId>,
+    /// E1, E2, E3 in order (add column, dual-write trigger, backfill marker).
+    pub expand: Vec<Migration>,
+    /// C1, C2 in order (drop trigger/function, drop old column).
+    pub contract: Vec<Migration>,
+    /// The structured backfill spec for E3, to be driven by
+    /// [`OnlineSchemaChange::run_online`]
+    /// during orchestration.
+    pub backfill: BackfillSpec,
+    /// The version of the E2 trigger migration — the dependency every contract
+    /// step and the gate keys on as "the expand". Carried out so the
+    /// orchestrator / gate need not re-derive it.
+    pub trigger_version: MigrationId,
+    /// The neutral [`OnlineIntent`] this plan was authored from. Carried so the
+    /// generic declarative apply path hands the **intent** (not the PG-DDL plan)
+    /// to the [`OnlineSchemaChange`] seam — the Postgres impl ignores it and
+    /// runs the pre-authored [`expand`](Self::expand) steps verbatim, while a
+    /// future engine lowers the intent to its own native online DDL.
+    pub intent: OnlineIntent,
+}
+
+impl ExpandContractPlan {
+    /// All migrations (expand then contract) in apply order — the input to
+    /// `MigrationEngine::plan`.
+    #[must_use]
+    pub fn all(&self) -> Vec<Migration> {
+        self.expand.iter().chain(&self.contract).cloned().collect()
+    }
+}

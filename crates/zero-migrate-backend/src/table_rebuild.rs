@@ -9,6 +9,7 @@ use crate::error::{DeclarativeError, IrLowerError};
 use crate::snapshot::TableSnapshot;
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::Op;
+use zero_migrate_ir::migration::Migration;
 
 /// A rename hint that has been **verified** against the desired/live snapshots
 /// (matched an actual drop+add pair with identical types). The diff routes each
@@ -107,4 +108,96 @@ pub trait TableRebuildPolicy: std::fmt::Debug + Sync {
         desired: &TableSnapshot,
         renames: &[&ResolvedRename],
     ) -> Option<String>;
+}
+
+/// How a table rebuild treats the table's AUTOINCREMENT-style high-water mark.
+///
+/// NEUTRAL on purpose, and it did not used to be. This field on
+/// [`TableRebuildSpec`] was typed `zero_migrate_sqlite::SqliteSequencePolicy` —
+/// a type from a crate that sits ABOVE this one — which is what kept the whole
+/// lowered-plan vocabulary (`TableRebuildSpec`, `TableRebuild`, `RenameStep`,
+/// `PlanStep`) stranded in the engine. One field inverted the dependency for all
+/// four.
+///
+/// The vendor still owns the BEHAVIOUR. This says only which of the two
+/// transitions a rebuild is performing; what a high-water mark IS, where it is
+/// stored, how it is captured and how it is restored are the backend's, and
+/// `zero-migrate-sqlite` converts this into its own `SqliteSequencePolicy` at its
+/// own boundary. A backend with no such counter ignores it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SequenceHighWaterPolicy {
+    /// Carry the pre-rebuild high-water mark across the rebuild, so generated
+    /// values continue from where they left off. The ordinary case.
+    #[default]
+    Preserve,
+    /// Do not carry it across. The explicit identity-removal transition, for a
+    /// rebuild whose validated target no longer has generated-identity.
+    Reset,
+}
+
+/// The fully-resolved specification for ONE table rebuild.
+#[derive(Debug, Clone)]
+pub struct TableRebuildSpec {
+    /// The existing table being rebuilt (the final name; the new table is renamed
+    /// INTO this).
+    pub table: String,
+    /// The temp name the new table is created under, then renamed FROM.
+    pub tmp_table: String,
+    /// The new table's `CREATE TABLE <tmp> (...)` DDL.
+    pub new_table_create: String,
+    /// The columns to copy from the old table into the new one, as `(dest, src)`
+    /// pairs of BARE identifiers.
+    pub copy_columns: Vec<(String, String)>,
+    /// EXTRA dependent DDL to replay AFTER the rename.
+    pub recreate_objects: Vec<String>,
+    /// Pure column renames to apply after the old table's captured indexes and
+    /// triggers have been replayed. The stored-DDL rebuild path creates and
+    /// copies the byte-faithful pre-rename shape first, then delegates the
+    /// identifier rewrite to SQLite's own `ALTER TABLE ... RENAME COLUMN`
+    /// parser so CHECKs, generated expressions, indexes, and triggers follow the
+    /// rename without a lossy engine-side SQL rewrite.
+    pub column_renames: Vec<(String, String)>,
+    /// BARE names of columns being DROPPED by this rebuild.
+    pub dropped_columns: Vec<String>,
+    /// Whether the old table's `AUTOINCREMENT` high-water mark survives the
+    /// rebuild. Ordinary rebuilds use
+    /// [`SequenceHighWaterPolicy::Preserve`].
+    pub sequence_policy: SequenceHighWaterPolicy,
+    /// A human-readable description of what change drove the rebuild.
+    pub reason: String,
+}
+
+impl TableRebuildSpec {
+    /// The engine-chosen temp-table name for `table`.
+    #[must_use]
+    pub fn tmp_name(table: &str) -> String {
+        format!("{table}__zero_migrate_rebuild")
+    }
+}
+
+/// one SQLite 12-step table rebuild: the execution [`TableRebuildSpec`]
+/// plus the [`Migration`] that carries its checksum / journal identity / approval
+/// flags. The differ produces these for the existing-table ops SQLite cannot ALTER
+/// natively.
+///
+/// NOTE: the engine DRIVES these rebuilds. `MigrationEngine::plan_declarative`
+/// CARRIES the rebuilds into its `DeclarativeDeployPlan`, and the now-generic
+/// `MigrationEngine::apply_declarative` drives each through
+/// `MigrationBackend::rebuild_one` under the destructive/approval gate (the journal
+/// migration is `destructive + requires_approval`, so an un-approved rebuild is
+/// refused before any DDL). The old `plan_declarative` fail-close
+/// (`SqliteRebuildRequired`) is gone. The direct, executor-internal
+/// `SqliteBackend::rebuild_one` seam remains for tests; the engine path is the gated
+/// production drive.
+#[derive(Debug, Clone)]
+pub struct TableRebuild {
+    /// The journal migration: its `version` is the rebuild's identity, its
+    /// `checksum` certifies the rebuild, and its flags (`destructive = true,
+    /// requires_approval = true`) route it through the gate. Its `up` carries the
+    /// new-table CREATE plus any newly planned schema-object DDL for
+    /// inspection/checksum; the actual apply is structured (the `spec`), NOT a
+    /// plain `up` execution.
+    pub migration: Migration,
+    /// The fully-resolved 12-step rebuild specification the backend executes.
+    pub spec: TableRebuildSpec,
 }

@@ -437,7 +437,14 @@ async fn run_rebuild_steps(
     // the old table and restores it after the swap in this same transaction. The
     // explicit Remove policy intentionally skips that capture because the validated
     // target contract no longer has AUTOINCREMENT generation.
-    let autoincrement_high_water = match spec.sequence_policy {
+    //
+    // The spec carries the NEUTRAL `SequenceHighWaterPolicy` — it says which of the
+    // two transitions the rebuild is performing and nothing more. This is the
+    // boundary where that becomes a `sqlite_sequence` decision, through this
+    // vendor's own `From`, so the plan carrier every dialect shares never names
+    // this dialect's type.
+    let sequence_policy = SqliteSequencePolicy::from(spec.sequence_policy);
+    let autoincrement_high_water = match sequence_policy {
         SqliteSequencePolicy::Preserve => {
             capture_autoincrement_high_water(actor, &spec.table).await?
         }
@@ -577,7 +584,7 @@ async fn run_rebuild_steps(
         .await
         .map_err(|e| step_err(table, e))?;
 
-    match spec.sequence_policy {
+    match sequence_policy {
         SqliteSequencePolicy::Preserve => {
             if let Some(high_water) = autoincrement_high_water.as_deref() {
                 restore_autoincrement_high_water(actor, &spec.table, high_water).await?;
@@ -934,6 +941,7 @@ fn step_err(table: &str, source: SqliteActorError) -> RebuildError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::plan::SequenceHighWaterPolicy;
 
     #[test]
     fn tmp_name_is_engine_chosen_suffix() {
@@ -948,6 +956,30 @@ mod tests {
         assert_eq!(
             SqliteSequencePolicy::default(),
             SqliteSequencePolicy::Preserve
+        );
+        // The default a rebuild spec actually carries is the NEUTRAL one, and the
+        // property this test is named for only holds if the translation preserves
+        // it. A neutral default that mapped to `Remove` would silently drop every
+        // AUTOINCREMENT high-water mark on every ordinary rebuild.
+        assert_eq!(
+            SqliteSequencePolicy::from(SequenceHighWaterPolicy::default()),
+            SqliteSequencePolicy::Preserve
+        );
+    }
+
+    #[test]
+    fn both_sequence_transitions_survive_the_neutral_spelling() {
+        // The two states are not interchangeable: `Preserve` captures and restores
+        // the high-water mark, `Reset` deletes it. A `From` that collapsed them
+        // would compile, pass the default test above, and silently reuse a ROWID
+        // SQLite has already handed out.
+        assert_eq!(
+            SqliteSequencePolicy::from(SequenceHighWaterPolicy::Preserve),
+            SqliteSequencePolicy::Preserve
+        );
+        assert_eq!(
+            SqliteSequencePolicy::from(SequenceHighWaterPolicy::Reset),
+            SqliteSequencePolicy::Remove
         );
     }
 
@@ -999,7 +1031,7 @@ mod tests {
             recreate_objects: Vec::new(),
             column_renames: Vec::new(),
             dropped_columns: Vec::new(),
-            sequence_policy: SqliteSequencePolicy::Preserve,
+            sequence_policy: SequenceHighWaterPolicy::Preserve,
             reason: String::new(),
         }
     }

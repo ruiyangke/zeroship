@@ -26,8 +26,13 @@
 //! Every item here is re-exported from `zero_migrate::render::step`, the path
 //! every existing caller uses.
 
+use crate::backfill::BackfillSpec;
+use crate::capability::{ExpandContractPlan, OnlineIntent};
+use crate::table_rebuild::TableRebuild;
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::AlterPrimaryKeyAction;
 use zero_migrate_ir::migration::Migration;
+use zero_migrate_ir::migration::{Checksum, MigrationId};
 
 /// A typed scalar bound into a parameterized `PlanStep::Dml` statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,4 +128,299 @@ pub struct SynchronizeIdentityStep {
     pub column: String,
     /// Named maintenance window or invariant asserted by the operator.
     pub writes_quiesced: String,
+}
+
+/// The dialect reach of an applied plan, derived from its ops. A separate,
+/// journaled facet — **not** folded into the identity checksum.
+///
+/// The pinned arm carries a [`DialectId`] rather than naming a vendor in its own
+/// variant. `PgOnly` could only ever say "Postgres", so a MySQL-only or
+/// DuckDB-only artifact had no way to describe itself; `Only(id)` does, and it
+/// does so without this enum growing a variant per backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialectScope {
+    /// Applies faithfully to every dialect the artifact's ops support.
+    Portable,
+    /// Pinned to ONE dialect (a vendor `op.raw` artifact); refused against any
+    /// other deploy target at load. Never produced by the `.sql` path.
+    Only(DialectId),
+}
+
+impl DialectScope {
+    /// Whether this plan may be applied against `target`.
+    #[must_use]
+    pub fn admits(&self, target: &DialectId) -> bool {
+        match self {
+            Self::Portable => true,
+            Self::Only(id) => id == target,
+        }
+    }
+}
+
+/// A rename lowered to ONE of two **executable STRATEGIES**, selected at lowering
+/// by what the deploy target can express.
+///
+/// The arms name the strategy, not a vendor, and that is load-bearing rather than
+/// stylistic: the spellings `PgExpandContract` / `SqliteRebuild` asserted a
+/// one-vendor guarantee the lowering does not enforce. The differ's only gate here
+/// is `is_sqlite`, so a MySQL rename fell through to the expand-contract author and
+/// was wrapped in a variant named for PostgreSQL. That is a MISSING PLAN-TIME
+/// REFUSAL, not MySQL support — `docs/dialects.md`, MySQL's registered validation
+/// policy, and `lower_ir_rename` all declare MySQL column rename unsupported, and the
+/// declarative differ is the lone dissenter. The strategy names are honest about
+/// what each arm IS without re-encoding a dialect claim the type cannot keep.
+/// `dialect_matrix::plan_vocabulary_names_strategies_not_vendors` holds the line.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum RenameStep {
+    /// An ONLINE expand-contract: add the new shape, dual-write, backfill, then
+    /// drop the old in a later deploy. PostgreSQL is its legitimate producer.
+    ExpandContract(ExpandContractPlan),
+    /// An OFFLINE create-copy-swap table rebuild, for a target with no native
+    /// `ALTER` for the change. SQLite's 12-step procedure is its one producer.
+    TableRebuild(TableRebuild),
+}
+
+/// What one step's rollback is known to achieve, as distinct from whether it
+/// has reversing SQL at all. See [`PlanStep::reversibility`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepReversibility {
+    /// No reversing SQL exists for this step.
+    Irreversible,
+    /// Reversing SQL exists, and the step destroys data it cannot bring back.
+    /// A dropped column is the ordinary case: the column returns, its values
+    /// do not.
+    StructurallyReversibleLossy,
+    /// Reversing SQL exists and nothing establishes what it restores. Raw
+    /// `.sql` migrations land here, because their text is opaque to the engine.
+    Unassessed,
+}
+
+/// One ordered step of the engine's `AppliedPlan`.
+#[derive(Debug, Clone)]
+pub enum PlanStep {
+    /// A transactional or non-txn DDL statement bundle — an existing
+    /// [`Migration`] (single `up: String`, no parameter slot).
+    Ddl(Migration),
+    /// A parameterized DML statement (insert/update/delete) — the net-new
+    /// variant.
+    Dml {
+        /// The journal version this DML step records under (its sub-version).
+        /// A `Migration`-less step still needs an identity to journal.
+        version: MigrationId,
+        /// The authoritative checksum of the complete owning IR artifact. It
+        /// includes the typed bind values, so changing data at the same stable
+        /// step identity is checksum drift rather than a new execution.
+        checksum: Checksum,
+        /// Human-readable label for status/diagnostics.
+        name: String,
+        /// The placeholder SQL. The journal persists the authoritative IR
+        /// checksum, which covers this template and its typed binds.
+        template: String,
+        /// The ordered typed values bound natively to the template.
+        binds: Vec<BindValue>,
+        /// Structurally known target schema. Backends use this instead of parsing
+        /// rendered SQL for safety checks.
+        target_schema: String,
+        /// Structurally known target table.
+        target_table: String,
+        /// Authored columns for a structured `onConflict.doUpdate`, when this
+        /// statement has one. MySQL carries these to its catalog preflight so it
+        /// can prove the target is one complete `UNIQUE`/`PRIMARY` key before
+        /// executing its native duplicate-key form. Other DML statements carry
+        /// `None`.
+        conflict_target: Option<Vec<String>>,
+        /// Whether the statement mutates application data. Ordinary insert,
+        /// update, and delete steps are true; read-only partition guards are false.
+        mutates_data: bool,
+        /// `true` ⇒ the step's DDL/journal runs inside a transaction.
+        transactional: bool,
+        /// `true` ⇒ data loss (a `delete`); the gate decides.
+        destructive: bool,
+        /// `true` ⇒ explicit operator approval is required even when the
+        /// operation is not classified as data loss.
+        requires_approval: bool,
+        /// The declaring app's `owner_app` — the journal-identity attribution.
+        owner_app: String,
+    },
+    /// A crash-safe batched data backfill.
+    Backfill {
+        /// Stable journal/progress identity derived from the owning plan and this
+        /// step's ordered position, never from the transform content.
+        version: MigrationId,
+        /// The authoritative checksum of the complete owning IR artifact.
+        checksum: Checksum,
+        /// The structured, resumable backfill operation.
+        spec: BackfillSpec,
+    },
+    /// A live-catalog-validated primary-key lifecycle mutation.
+    AlterPrimaryKey(AlterPrimaryKeyStep),
+    /// A column retype the backend restates from the live column definition.
+    AlterColumnType(AlterColumnTypeStep),
+    /// A live-catalog-validated, monotonic identity-generator reconciliation.
+    SynchronizeIdentity(SynchronizeIdentityStep),
+    /// A rename, lowered to ONE of two dialect-distinct executable shapes.
+    OnlineRename(RenameStep),
+}
+
+impl PlanStep {
+    /// Whether this step carries data loss for the destructive/approval gate.
+    #[must_use]
+    pub fn is_destructive(&self) -> bool {
+        match self {
+            PlanStep::Ddl(m) => m.flags.destructive,
+            PlanStep::Dml { destructive, .. } => *destructive,
+            PlanStep::Backfill { .. } => true,
+            PlanStep::AlterPrimaryKey(step) => step.migration.flags.destructive,
+            PlanStep::AlterColumnType(step) => step.migration.flags.destructive,
+            PlanStep::SynchronizeIdentity(step) => step.migration.flags.destructive,
+            PlanStep::OnlineRename(RenameStep::TableRebuild(rb)) => rb.migration.flags.destructive,
+            PlanStep::OnlineRename(RenameStep::ExpandContract(_)) => false,
+        }
+    }
+
+    /// The version-id the per-version
+    /// [`ApprovalScope`](crate::approval::ApprovalScope) gate consults for this step, when the
+    /// step is SCOPE-GATED, else `None`.
+    #[must_use]
+    pub fn approval_scope_version(&self) -> Option<&str> {
+        match self {
+            PlanStep::Ddl(m) if m.flags.destructive || m.flags.requires_approval => {
+                Some(m.version.as_str())
+            }
+            PlanStep::Dml {
+                version,
+                destructive,
+                requires_approval,
+                ..
+            } if *destructive || *requires_approval => Some(version.as_str()),
+            PlanStep::Backfill { version, .. } => Some(version.as_str()),
+            PlanStep::AlterPrimaryKey(step)
+                if step.migration.flags.destructive || step.migration.flags.requires_approval =>
+            {
+                Some(step.migration.version.as_str())
+            }
+            PlanStep::AlterColumnType(step)
+                if step.migration.flags.destructive || step.migration.flags.requires_approval =>
+            {
+                Some(step.migration.version.as_str())
+            }
+            PlanStep::SynchronizeIdentity(step)
+                if step.migration.flags.destructive || step.migration.flags.requires_approval =>
+            {
+                Some(step.migration.version.as_str())
+            }
+            PlanStep::OnlineRename(RenameStep::TableRebuild(rb))
+                if rb.migration.flags.destructive || rb.migration.flags.requires_approval =>
+            {
+                Some(rb.migration.version.as_str())
+            }
+            PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => Some(
+                ec.expand
+                    .first()
+                    .map_or_else(|| ec.trigger_version.as_str(), |e1| e1.version.as_str()),
+            ),
+            _ => None,
+        }
+    }
+
+    /// What rolling this step back can be relied on to do.
+    ///
+    /// [`has_down`](Self::has_down) answers only whether reversing SQL exists.
+    /// This separates the case where it exists and destroys data from the case
+    /// where nothing establishes what it restores.
+    ///
+    /// There is deliberately no "restores the prior state" answer. Proving that
+    /// needs positive evidence per operation, and a step carries rendered SQL
+    /// rather than the ops it came from, so the only signal left is the
+    /// `destructive` flag - whose `false` on a raw `.sql` migration means nobody
+    /// declared one, not that the engine established anything. Treating an
+    /// absent declaration as proof is the confusion this method exists to end.
+    #[must_use]
+    pub fn reversibility(&self) -> StepReversibility {
+        if !self.has_down() {
+            return StepReversibility::Irreversible;
+        }
+        if self.is_destructive() {
+            return StepReversibility::StructurallyReversibleLossy;
+        }
+        StepReversibility::Unassessed
+    }
+
+    /// Whether this step has a defined `down` for plan-level rollback.
+    #[must_use]
+    pub fn has_down(&self) -> bool {
+        match self {
+            PlanStep::Ddl(m) => m.down.is_some(),
+            PlanStep::Dml { .. }
+            | PlanStep::Backfill { .. }
+            | PlanStep::AlterPrimaryKey(_)
+            | PlanStep::AlterColumnType(_)
+            | PlanStep::SynchronizeIdentity(_)
+            | PlanStep::OnlineRename(_) => false,
+        }
+    }
+
+    /// The table this step STRUCTURALLY targets, when known (interlock
+    /// touched-set).
+    #[must_use]
+    pub fn touched_table(&self) -> Option<&str> {
+        match self {
+            PlanStep::OnlineRename(RenameStep::ExpandContract(ec)) => match &ec.intent {
+                OnlineIntent::RenameColumn { table, .. } => Some(table.as_str()),
+            },
+            PlanStep::OnlineRename(RenameStep::TableRebuild(rb)) => Some(rb.spec.table.as_str()),
+            PlanStep::Backfill { spec, .. } => Some(spec.table.as_str()),
+            PlanStep::AlterPrimaryKey(step) => Some(step.table.as_str()),
+            PlanStep::AlterColumnType(step) => Some(step.table.as_str()),
+            PlanStep::SynchronizeIdentity(step) => Some(step.table.as_str()),
+            PlanStep::Dml { target_table, .. } => Some(target_table.as_str()),
+            PlanStep::Ddl(_) => None,
+        }
+    }
+}
+
+/// The set of tables a plan's steps STRUCTURALLY touch (interlock).
+#[must_use]
+pub fn tables_touched_by(steps: &[PlanStep]) -> std::collections::BTreeSet<String> {
+    steps
+        .iter()
+        .filter_map(|s| s.touched_table().map(str::to_string))
+        .collect()
+}
+
+#[cfg(test)]
+mod touched_table_tests {
+    use super::*;
+
+    #[test]
+    fn backfill_step_contributes_its_table() {
+        let spec = BackfillSpec {
+            schema: "app".into(),
+            table: "members".into(),
+            cursor_columns: vec!["id".into()],
+            cursor_stability: zero_migrate_ir::ir::CursorStability::GuardUpdates,
+            cursor_contract: None,
+            batch_size: 100,
+            set_clause: "x = 1".into(),
+            per_row: Default::default(),
+            filter: None,
+            name: "bf".into(),
+        };
+        let step = PlanStep::Backfill {
+            version: MigrationId::derive("test_backfill", b"members"),
+            checksum: Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
+                up: "backfill members",
+                down: None,
+                flags: &zero_migrate_ir::migration::MigrationFlags::default(),
+                owner_app: "app",
+                depends_on: &[],
+                supersedes: &[],
+                preconditions: &[],
+            }),
+            spec,
+        };
+        assert_eq!(step.touched_table(), Some("members"));
+        assert!(tables_touched_by(std::slice::from_ref(&step)).contains("members"));
+    }
 }

@@ -3343,35 +3343,14 @@ pub struct DeclarativePlan {
     pub dialect: DialectId,
 }
 
-/// one SQLite 12-step table rebuild: the execution [`TableRebuildSpec`]
-/// plus the [`Migration`] that carries its checksum / journal identity / approval
-/// flags. The differ produces these for the existing-table ops SQLite cannot ALTER
-/// natively.
+/// One table rebuild: the execution `TableRebuildSpec` plus the `Migration` that
+/// carries its checksum, journal identity and approval flags.
 ///
-/// NOTE: the engine DRIVES these rebuilds.
-/// [`plan_declarative`](crate::engine::MigrationEngine::plan_declarative) CARRIES the
-/// rebuilds into the [`DeclarativeDeployPlan`](crate::engine::DeclarativeDeployPlan),
-/// and the now-generic
-/// [`apply_declarative`](crate::engine::MigrationEngine::apply_declarative) drives
-/// each through
-/// [`MigrationBackend::rebuild_one`](crate::apply::backend::MigrationBackend::rebuild_one)
-/// under the destructive/approval gate (the journal migration is `destructive +
-/// requires_approval`, so an un-approved rebuild is refused before any DDL). The old
-/// `plan_declarative` fail-close (`SqliteRebuildRequired`) is gone. The direct,
-/// executor-internal [`SqliteBackend::rebuild_one`](crate::SqliteBackend::rebuild_one)
-/// seam remains for tests; the engine path is the gated production drive.
-#[derive(Debug, Clone)]
-pub struct TableRebuild {
-    /// The journal migration: its `version` is the rebuild's identity, its
-    /// `checksum` certifies the rebuild, and its flags (`destructive = true,
-    /// requires_approval = true`) route it through the gate. Its `up` carries the
-    /// new-table CREATE plus any newly planned schema-object DDL for
-    /// inspection/checksum; the actual apply is structured (the `spec`), NOT a
-    /// plain `up` execution.
-    pub migration: Migration,
-    /// The fully-resolved 12-step rebuild specification the backend executes.
-    pub spec: TableRebuildSpec,
-}
+/// MOVED to `zero-migrate-backend` and re-exported here. `MigrationBackend::rebuild_one`
+/// is handed the spec and `RenameStep::TableRebuild` carries this, so neither the
+/// trait nor the lowered-plan vocabulary could be stated without it. The DIFFER that
+/// produces these — every line of the SQLite rebuild-selection logic below — stayed.
+pub use zero_migrate_backend::table_rebuild::TableRebuild;
 
 impl DeclarativePlan {
     /// True if the plan reconciles nothing — no plain migrations, no renames, AND
@@ -4941,7 +4920,7 @@ impl DeclarativeAuthor {
             recreate_objects,
             column_renames: Vec::new(),
             dropped_columns,
-            sequence_policy: crate::render::backends::SqliteSequencePolicy::Preserve,
+            sequence_policy: crate::render::plan::SequenceHighWaterPolicy::Preserve,
             reason,
         };
         let preview_up = std::iter::once(spec.new_table_create.as_str())
@@ -5104,7 +5083,7 @@ impl DeclarativeAuthor {
                 .map(|rename| vec![(rename.from.clone(), rename.to.clone())])
                 .unwrap_or_default(),
             dropped_columns,
-            sequence_policy: crate::render::backends::SqliteSequencePolicy::Preserve,
+            sequence_policy: crate::render::plan::SequenceHighWaterPolicy::Preserve,
             reason,
         };
 

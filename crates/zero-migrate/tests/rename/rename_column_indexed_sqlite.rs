@@ -58,7 +58,7 @@ use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ColType, ExecutorConfig, Migration,
     MigrationEngine, MigrationIr, Op, PlanStep, RenameStep, SqliteBackend, TableRebuildSpec,
 };
-use zero_migrate_sqlite::SqliteSequencePolicy;
+use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
 
 const PROJECT: &str = "prj_indexed_rename";
 const APP: &str = "app_indexed_rename";
@@ -1096,7 +1096,7 @@ async fn a_rename_onto_a_name_the_live_table_still_carries_is_declined_not_force
         recreate_objects: vec![],
         column_renames: vec![],
         dropped_columns: vec![],
-        sequence_policy: SqliteSequencePolicy::Preserve,
+        sequence_policy: SequenceHighWaterPolicy::Preserve,
         reason: "a rename onto a discarded column's name".into(),
     };
     backend
@@ -1157,7 +1157,7 @@ async fn a_rebuild_that_renames_one_column_and_drops_another_keeps_only_the_surv
         recreate_objects: vec![],
         column_renames: vec![],
         dropped_columns: vec!["doomed".into()],
-        sequence_policy: SqliteSequencePolicy::Preserve,
+        sequence_policy: SequenceHighWaterPolicy::Preserve,
         reason: "one rename and one drop".into(),
     };
     backend

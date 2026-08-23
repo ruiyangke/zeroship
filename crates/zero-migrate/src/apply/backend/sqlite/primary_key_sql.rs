@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::AlterPrimaryKeyAction;
-use crate::render::backends::SqliteSequencePolicy;
+use crate::render::plan::SequenceHighWaterPolicy;
 use crate::render::plan::TableRebuildSpec;
 
 use super::actor::{MigrationActor, SqliteActorError};
@@ -396,9 +396,9 @@ pub(crate) async fn resolve(
         dropped_columns: Vec::new(),
         reason: "explicit primary-key lifecycle operation".to_string(),
         sequence_policy: if drop_identity_from.is_empty() {
-            SqliteSequencePolicy::Preserve
+            SequenceHighWaterPolicy::Preserve
         } else {
-            SqliteSequencePolicy::Remove
+            SequenceHighWaterPolicy::Reset
         },
     })
 }

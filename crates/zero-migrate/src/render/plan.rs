@@ -30,7 +30,6 @@
 
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::model::precondition::PreconditionCheck;
-use crate::render::backends::SqliteSequencePolicy;
 use crate::render::step::{DialectScope, PlanStep, StepReversibility};
 
 // What a lowered plan needs the LIVE target to be able to do. Both types moved
@@ -42,45 +41,13 @@ use crate::render::step::{DialectScope, PlanStep, StepReversibility};
 // `BTreeSet` of it. Re-exported so `crate::render::plan::{DatabaseFeature,
 // DatabaseRequirements}` resolve unchanged.
 pub use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
-
-/// The fully-resolved specification for ONE table rebuild.
-#[derive(Debug, Clone)]
-pub struct TableRebuildSpec {
-    /// The existing table being rebuilt (the final name; the new table is renamed
-    /// INTO this).
-    pub table: String,
-    /// The temp name the new table is created under, then renamed FROM.
-    pub tmp_table: String,
-    /// The new table's `CREATE TABLE <tmp> (...)` DDL.
-    pub new_table_create: String,
-    /// The columns to copy from the old table into the new one, as `(dest, src)`
-    /// pairs of BARE identifiers.
-    pub copy_columns: Vec<(String, String)>,
-    /// EXTRA dependent DDL to replay AFTER the rename.
-    pub recreate_objects: Vec<String>,
-    /// Pure column renames to apply after the old table's captured indexes and
-    /// triggers have been replayed. The stored-DDL rebuild path creates and
-    /// copies the byte-faithful pre-rename shape first, then delegates the
-    /// identifier rewrite to SQLite's own `ALTER TABLE ... RENAME COLUMN`
-    /// parser so CHECKs, generated expressions, indexes, and triggers follow the
-    /// rename without a lossy engine-side SQL rewrite.
-    pub column_renames: Vec<(String, String)>,
-    /// BARE names of columns being DROPPED by this rebuild.
-    pub dropped_columns: Vec<String>,
-    /// Whether the old table's `AUTOINCREMENT` high-water mark survives the
-    /// rebuild. Ordinary rebuilds use [`SqliteSequencePolicy::Preserve`].
-    pub sequence_policy: SqliteSequencePolicy,
-    /// A human-readable description of what change drove the rebuild.
-    pub reason: String,
-}
-
-impl TableRebuildSpec {
-    /// The engine-chosen temp-table name for `table`.
-    #[must_use]
-    pub fn tmp_name(table: &str) -> String {
-        format!("{table}__zero_migrate_rebuild")
-    }
-}
+// The fully-resolved specification for ONE table rebuild, and the neutral
+// high-water policy that finally let it travel. Its `sequence_policy` used to be
+// typed `zero_migrate_sqlite::SqliteSequencePolicy` — a type from a crate ABOVE
+// the contract — which stranded this spec, `TableRebuild`, `RenameStep` and
+// `PlanStep` in the engine for want of one field. Re-exported so
+// `crate::render::plan::TableRebuildSpec` resolves unchanged.
+pub use zero_migrate_backend::table_rebuild::{SequenceHighWaterPolicy, TableRebuildSpec};
 
 /// The independent facts a caller needs before offering an operator a rollback.
 ///

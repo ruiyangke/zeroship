@@ -30,7 +30,7 @@ use zero_migrate::{
     LiveSchema, Migration, MigrationIr, PlanStep, RebuildError, RenameStep, SchemaSnapshot,
     SqliteBackend, TableRebuild, TableRebuildSpec,
 };
-use zero_migrate_sqlite::SqliteSequencePolicy;
+use zero_migrate_backend::table_rebuild::SequenceHighWaterPolicy;
 
 const PROJECT: &str = "prj_demo";
 const APP: &str = "app_demo";
@@ -318,7 +318,7 @@ async fn sequence_remove_policy_turns_identity_into_ordinary_integer() {
         recreate_objects: vec![],
         column_renames: vec![],
         dropped_columns: vec![],
-        sequence_policy: SqliteSequencePolicy::Remove,
+        sequence_policy: SequenceHighWaterPolicy::Reset,
         reason: "explicit AUTOINCREMENT removal".into(),
     };
     let m = rebuild_migration("t", &spec);
@@ -416,7 +416,7 @@ async fn sequence_remove_policy_rollback_restores_old_high_water() {
         recreate_objects: vec![],
         column_renames: vec![],
         dropped_columns: vec![],
-        sequence_policy: SqliteSequencePolicy::Remove,
+        sequence_policy: SequenceHighWaterPolicy::Reset,
         reason: "identity removal rollback".into(),
     };
     let m = rebuild_migration("child", &spec);
@@ -1249,7 +1249,7 @@ async fn fk_violation_aborts_rebuild_intact_and_fk_back_on() {
         recreate_objects: vec![],
         column_renames: vec![],
         dropped_columns: vec![],
-        sequence_policy: SqliteSequencePolicy::Preserve,
+        sequence_policy: SequenceHighWaterPolicy::Preserve,
         reason: "fk integrity test rebuild".into(),
     };
     let m = rebuild_migration("child", &spec);
@@ -1425,7 +1425,7 @@ async fn aborting_rebuild_leaves_no_wedge_and_fk_on() {
         recreate_objects: vec!["CREATE INDEX \"t_bogus_idx\" ON \"t\" (\"does_not_exist\")".into()],
         column_renames: vec![],
         dropped_columns: vec![],
-        sequence_policy: SqliteSequencePolicy::Preserve,
+        sequence_policy: SequenceHighWaterPolicy::Preserve,
         reason: "wedge test".into(),
     };
     let m = rebuild_migration("t", &spec);
@@ -1649,7 +1649,7 @@ async fn dependent_referencing_dropped_column_fails_closed() {
         // `dropped_columns` so the dependent is skipped — see the
         // `h1_drop_column_in_index_routes_to_rebuild` faithful test.
         dropped_columns: vec![],
-        sequence_policy: SqliteSequencePolicy::Preserve,
+        sequence_policy: SequenceHighWaterPolicy::Preserve,
         reason: "drop column drop_me".into(),
     };
     let m = rebuild_migration("t", &spec);
@@ -1759,7 +1759,7 @@ async fn cross_table_fk_orphan_caught_by_unscoped_check() {
         recreate_objects: vec![],
         column_renames: vec![],
         dropped_columns: vec![],
-        sequence_policy: SqliteSequencePolicy::Preserve,
+        sequence_policy: SequenceHighWaterPolicy::Preserve,
         reason: "parent rebuild dropping referenced row".into(),
     };
     // Drop the referenced parent row BEFORE the rebuild (engine mode, FK is ON so we
