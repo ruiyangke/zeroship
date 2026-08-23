@@ -215,3 +215,111 @@ async fn every_byte_value_survives_a_bytea_round_trip() {
         "an empty bytea did not come back empty"
     );
 }
+
+/// Arrays: NULL elements, empty, and NULL-vs-empty are three distinct things.
+///
+/// The element type is decoded per value, so a NULL element has to reach
+/// `Option::None` rather than collapsing into a default. An empty array and a
+/// NULL array are also different values with the same "nothing here" feel, and
+/// a driver that conflated them would look right in casual use.
+#[compio::test]
+async fn array_null_elements_and_emptiness_are_distinguished() {
+    let Some(url) = test_url() else {
+        eprintln!("PG_TEST_URL unset; skipping");
+        return;
+    };
+    let client = connect_client(&url).await;
+
+    // A NULL in the middle, so an off-by-one in element walking shows up as a
+    // shifted value rather than a length change.
+    let row = client
+        .query_one("SELECT ARRAY[1, NULL, 3]::int4[]", &[])
+        .await
+        .expect("array with a NULL element");
+    assert_eq!(
+        row.get::<_, Vec<Option<i32>>>(0),
+        vec![Some(1), None, Some(3)],
+        "a NULL array element did not decode as None in place"
+    );
+
+    // Empty array: present, zero elements.
+    let row = client
+        .query_one("SELECT ARRAY[]::int4[]", &[])
+        .await
+        .expect("empty array");
+    assert_eq!(
+        row.get::<_, Vec<i32>>(0),
+        Vec::<i32>::new(),
+        "an empty array did not decode as an empty Vec"
+    );
+
+    // NULL array: absent entirely. Distinct from the empty array above.
+    let row = client
+        .query_one("SELECT NULL::int4[]", &[])
+        .await
+        .expect("null array");
+    assert_eq!(
+        row.get::<_, Option<Vec<i32>>>(0),
+        None,
+        "a NULL array must be None, not an empty Vec"
+    );
+
+    // And the discriminating pair: the empty array must NOT read as None.
+    let row = client
+        .query_one("SELECT ARRAY[]::int4[]", &[])
+        .await
+        .expect("empty array again");
+    assert_eq!(
+        row.get::<_, Option<Vec<i32>>>(0),
+        Some(Vec::new()),
+        "an empty array collapsed into NULL"
+    );
+}
+
+/// A two-dimensional array is REFUSED, not silently flattened.
+///
+/// PostgreSQL arrays carry their dimension count on the wire and `Vec<T>` can
+/// only represent one dimension. Flattening `{{1,2},{3,4}}` to `[1,2,3,4]`
+/// would hand the caller four values where the database holds a 2x2 -- a wrong
+/// answer with no error, which is the failure mode this suite exists to catch.
+///
+/// This also pins that the refusal arrives as an `Err` through this driver's
+/// own error path. The decoder it delegates to `panic!`s outright on a
+/// mismatched type kind, so "returns an error" is a claim about our stack, not
+/// only about the decoder.
+#[compio::test]
+async fn a_multidimensional_array_is_refused_rather_than_flattened() {
+    let Some(url) = test_url() else {
+        eprintln!("PG_TEST_URL unset; skipping");
+        return;
+    };
+    let client = connect_client(&url).await;
+
+    let row = client
+        .query_one("SELECT ARRAY[[1, 2], [3, 4]]::int4[]", &[])
+        .await
+        .expect("the QUERY itself is valid; only the decode should object");
+
+    let error = row
+        .try_get::<_, Vec<i32>>(0)
+        .expect_err("a 2-D array must not decode into a 1-D Vec");
+    let rendered = format!("{error}");
+    let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+        std::error::Error::source(*error)
+    })
+    .map(|cause| cause.to_string())
+    .collect::<Vec<_>>()
+    .join("; ");
+    assert!(
+        chain.contains("dimensions") || rendered.contains("dimensions"),
+        "the refusal should say what was wrong: {rendered} / {chain}"
+    );
+
+    // Control, one variable away: the SAME query shape in one dimension must
+    // decode, so the test above cannot be satisfied by refusing every array.
+    let row = client
+        .query_one("SELECT ARRAY[1, 2, 3, 4]::int4[]", &[])
+        .await
+        .expect("one-dimensional array");
+    assert_eq!(row.get::<_, Vec<i32>>(0), vec![1, 2, 3, 4]);
+}
