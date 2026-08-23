@@ -31,6 +31,7 @@ mod existence_probe_decides_per_dialect_leg;
 mod gen_types_dialectal_runtime_metadata;
 mod gen_types_dialectal_table_shape;
 mod gen_types_drop_column_dialect_legs;
+mod mysql_type_text_lives_with_its_parser;
 mod neutral_apply_layer_names_no_vendor;
 mod op_support_matrix;
 mod partition_recording_dialect_legs;

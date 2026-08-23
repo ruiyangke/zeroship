@@ -706,6 +706,69 @@ impl MysqlPhysicalType {
             },
         }
     }
+
+    /// Spell this contract the way MySQL spells it, so a reader can take the text
+    /// straight to the server.
+    ///
+    /// The exact inverse of [`Self::parse`], and beside it on purpose: two halves of
+    /// one round trip, where changing either without the other is what silently
+    /// breaks it. `Self::parse(x.type_text()) == x` holds for every family `parse` can
+    /// produce, and that is what keeps two contracts that are NOT equal from rendering
+    /// to the same text - the property `zero_migrate::apply::drift`'s `data_type`
+    /// report rests on, because a collision there puts the difference straight back
+    /// into the equal-strings hole the report exists to get out of.
+    ///
+    /// [`Self::Spatial`] is the one variant `parse` never yields - the SRID comes from
+    /// its own catalog column, never from the type text - so it is spelled for a human
+    /// rather than for the parser.
+    #[must_use]
+    pub fn type_text(&self) -> String {
+        match self {
+            Self::Character { fixed, length } => {
+                format!("{}({length})", if *fixed { "char" } else { "varchar" })
+            }
+            Self::Lob { tier } => tier.clone(),
+            Self::Integer {
+                kind,
+                unsigned,
+                boolean,
+            } => {
+                let width = if *boolean { "(1)" } else { "" };
+                let sign = if *unsigned { " unsigned" } else { "" };
+                format!("{kind}{width}{sign}")
+            }
+            Self::Decimal {
+                precision,
+                scale,
+                unsigned,
+            } => {
+                let sign = if *unsigned { " unsigned" } else { "" };
+                format!("decimal({precision},{scale}){sign}")
+            }
+            Self::Temporal { kind, fsp } => {
+                // MySQL omits `(0)` entirely, and `parse` reads an absent precision as zero.
+                if *fsp == 0 {
+                    kind.clone()
+                } else {
+                    format!("{kind}({fsp})")
+                }
+            }
+            Self::Members { kind, members } => {
+                let members = members
+                    .iter()
+                    .map(|member| format!("'{}'", member.replace('\'', "''")))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{kind}({members})")
+            }
+            Self::Spatial { kind, srid } => match srid {
+                Some(srid) => format!("{kind} srid {srid}"),
+                None => kind.clone(),
+            },
+            Self::Plain { kind } => kind.clone(),
+            Self::Unknown { raw } => raw.clone(),
+        }
+    }
 }
 
 /// Split an `ENUM`/`SET` member list into decoded values.
@@ -2160,5 +2223,102 @@ pub fn canonical_pg_arg_type(raw: &str) -> String {
         "float8" | "double precision" => "float8".to_string(),
         "timestamptz" | "timestamp with time zone" => "timestamptz".to_string(),
         _ => collapsed,
+    }
+}
+
+#[cfg(test)]
+mod mysql_physical_type_round_trip {
+    //! `parse` and `type_text` are one contract read in two directions, so the tests
+    //! that hold them to each other sit with them rather than with either consumer.
+    //! They moved here from `zero_migrate::apply::drift`, where the speller used to
+    //! live: they were never about the differ, and leaving them behind would have left
+    //! the round trip asserted from a crate that no longer owns either half.
+
+    use super::MysqlPhysicalType;
+
+    /// Every family `MysqlPhysicalType::parse` can produce, spelled so it parses back
+    /// to itself.
+    ///
+    /// This is what makes a drift report FAITHFUL rather than merely non-empty: a
+    /// reader can take the printed string to the server, and two contracts that are not
+    /// equal cannot render to the same text without one of these round-trips failing.
+    const PARSEABLE_SPELLINGS: &[&str] = &[
+        "varchar(255)",
+        "varchar(64)",
+        "char(8)",
+        "char(36)",
+        "text",
+        "tinytext",
+        "mediumtext",
+        "longtext",
+        "blob",
+        "longblob",
+        "int",
+        "int unsigned",
+        "bigint",
+        "bigint unsigned",
+        "tinyint",
+        "tinyint(1)",
+        "smallint",
+        "mediumint",
+        "decimal(12,2)",
+        "decimal(30,10)",
+        "decimal(65,30)",
+        "decimal(10,0) unsigned",
+        "datetime",
+        "datetime(3)",
+        "datetime(6)",
+        "timestamp",
+        "timestamp(6)",
+        "time(3)",
+        "date",
+        "year",
+        "enum('a','b')",
+        "enum('a, b','c''d')",
+        "set('x','y')",
+        "json",
+        "double",
+        "float",
+        "bit",
+    ];
+
+    #[test]
+    fn a_reported_contract_parses_back_to_the_contract_it_came_from() {
+        for spelling in PARSEABLE_SPELLINGS {
+            let physical = MysqlPhysicalType::parse(spelling);
+            assert!(
+                !matches!(physical, MysqlPhysicalType::Unknown { .. }),
+                "{spelling} is meant to exercise a MODELLED family, but parsed as Unknown"
+            );
+            let printed = physical.type_text();
+            assert_eq!(
+                MysqlPhysicalType::parse(&printed),
+                physical,
+                "{spelling} printed as {printed:?}, which does not parse back to itself"
+            );
+        }
+    }
+
+    #[test]
+    fn two_different_contracts_never_print_the_same_text() {
+        // The whole point of the report change is to get past `push`, which drops an
+        // entry whose two sides are equal strings. A spelling collision would put the
+        // difference straight back in the hole it was just pulled out of.
+        for (i, left) in PARSEABLE_SPELLINGS.iter().enumerate() {
+            for right in &PARSEABLE_SPELLINGS[i + 1..] {
+                let (left_type, right_type) = (
+                    MysqlPhysicalType::parse(left),
+                    MysqlPhysicalType::parse(right),
+                );
+                if left_type == right_type {
+                    continue;
+                }
+                assert_ne!(
+                    left_type.type_text(),
+                    right_type.type_text(),
+                    "{left} and {right} are different contracts that print the same text"
+                );
+            }
+        }
     }
 }

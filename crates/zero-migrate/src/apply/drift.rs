@@ -1009,74 +1009,18 @@ fn column_data_type_report(expected: &ColumnSnapshot, actual: &ColumnSnapshot) -
     else {
         return (expected.data_type.clone(), actual.data_type.clone());
     };
-    let expected_text = format_mysql_physical_type(expected_type);
-    let actual_text = format_mysql_physical_type(actual_type);
+    let expected_text = expected_type.type_text();
+    let actual_text = actual_type.type_text();
     if expected_text != actual_text {
         return (expected_text, actual_text);
     }
     // Unreachable for every family `MysqlPhysicalType::parse` produces - each one
-    // renders its distinguishing values below - but a collision here would re-lose the
-    // difference through the very `push` guard this function exists to get past, which
-    // is too quiet a failure to leave to inspection. The derived `Debug` prints every
-    // field, so two values that are not equal cannot render the same.
+    // renders its distinguishing values, and `MysqlPhysicalType::type_text` carries the
+    // property test that says so - but a collision here would re-lose the difference
+    // through the very `push` guard this function exists to get past, which is too
+    // quiet a failure to leave to inspection. The derived `Debug` prints every field,
+    // so two values that are not equal cannot render the same.
     (format!("{expected_type:?}"), format!("{actual_type:?}"))
-}
-
-/// Spell one [`MysqlPhysicalType`] the way MySQL spells it, so a reader can take the
-/// reported string straight to the server.
-///
-/// Round-trips through [`MysqlPhysicalType::parse`] for every family that function can
-/// produce, which is what keeps the two sides of a report distinguishable: two
-/// contracts that are not equal cannot render to the same text without the parse of
-/// that text being wrong for one of them. `Spatial` is the one variant `parse` never
-/// yields - the SRID comes from its own catalog column - so it is spelled for a human
-/// rather than for the parser.
-fn format_mysql_physical_type(physical: &MysqlPhysicalType) -> String {
-    match physical {
-        MysqlPhysicalType::Character { fixed, length } => {
-            format!("{}({length})", if *fixed { "char" } else { "varchar" })
-        }
-        MysqlPhysicalType::Lob { tier } => tier.clone(),
-        MysqlPhysicalType::Integer {
-            kind,
-            unsigned,
-            boolean,
-        } => {
-            let width = if *boolean { "(1)" } else { "" };
-            let sign = if *unsigned { " unsigned" } else { "" };
-            format!("{kind}{width}{sign}")
-        }
-        MysqlPhysicalType::Decimal {
-            precision,
-            scale,
-            unsigned,
-        } => {
-            let sign = if *unsigned { " unsigned" } else { "" };
-            format!("decimal({precision},{scale}){sign}")
-        }
-        MysqlPhysicalType::Temporal { kind, fsp } => {
-            // MySQL omits `(0)` entirely, and `parse` reads an absent precision as zero.
-            if *fsp == 0 {
-                kind.clone()
-            } else {
-                format!("{kind}({fsp})")
-            }
-        }
-        MysqlPhysicalType::Members { kind, members } => {
-            let members = members
-                .iter()
-                .map(|member| format!("'{}'", member.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{kind}({members})")
-        }
-        MysqlPhysicalType::Spatial { kind, srid } => match srid {
-            Some(srid) => format!("{kind} srid {srid}"),
-            None => kind.clone(),
-        },
-        MysqlPhysicalType::Plain { kind } => kind.clone(),
-        MysqlPhysicalType::Unknown { raw } => raw.clone(),
-    }
 }
 
 /// Compare the attributes of same-name children (columns/indexes/constraints
@@ -1980,92 +1924,6 @@ mod mysql_physical_type_tests {
             column_data_types_eq(&expected, &actual),
             "the differ declines rather than reporting a difference from two Unknowns"
         );
-    }
-
-    /// Every family `MysqlPhysicalType::parse` can produce, spelled so it parses back
-    /// to itself.
-    ///
-    /// This is what makes the report FAITHFUL rather than merely non-empty: a reader
-    /// can take the printed string to the server, and two contracts that are not equal
-    /// cannot render to the same text without one of these round-trips failing.
-    const PARSEABLE_SPELLINGS: &[&str] = &[
-        "varchar(255)",
-        "varchar(64)",
-        "char(8)",
-        "char(36)",
-        "text",
-        "tinytext",
-        "mediumtext",
-        "longtext",
-        "blob",
-        "longblob",
-        "int",
-        "int unsigned",
-        "bigint",
-        "bigint unsigned",
-        "tinyint",
-        "tinyint(1)",
-        "smallint",
-        "mediumint",
-        "decimal(12,2)",
-        "decimal(30,10)",
-        "decimal(65,30)",
-        "decimal(10,0) unsigned",
-        "datetime",
-        "datetime(3)",
-        "datetime(6)",
-        "timestamp",
-        "timestamp(6)",
-        "time(3)",
-        "date",
-        "year",
-        "enum('a','b')",
-        "enum('a, b','c''d')",
-        "set('x','y')",
-        "json",
-        "double",
-        "float",
-        "bit",
-    ];
-
-    #[test]
-    fn a_reported_contract_parses_back_to_the_contract_it_came_from() {
-        for spelling in PARSEABLE_SPELLINGS {
-            let physical = MysqlPhysicalType::parse(spelling);
-            assert!(
-                !matches!(physical, MysqlPhysicalType::Unknown { .. }),
-                "{spelling} is meant to exercise a MODELLED family, but parsed as Unknown"
-            );
-            let printed = super::format_mysql_physical_type(&physical);
-            assert_eq!(
-                MysqlPhysicalType::parse(&printed),
-                physical,
-                "{spelling} printed as {printed:?}, which does not parse back to itself"
-            );
-        }
-    }
-
-    #[test]
-    fn two_different_contracts_never_print_the_same_text() {
-        // The whole point of the report change is to get past `push`, which drops an
-        // entry whose two sides are equal strings. A spelling collision would put the
-        // difference straight back in the hole it was just pulled out of.
-        for (i, left) in PARSEABLE_SPELLINGS.iter().enumerate() {
-            for right in &PARSEABLE_SPELLINGS[i + 1..] {
-                let (left_type, right_type) = (
-                    MysqlPhysicalType::parse(left),
-                    MysqlPhysicalType::parse(right),
-                );
-                if left_type == right_type {
-                    continue;
-                }
-                assert_ne!(
-                    super::format_mysql_physical_type(&left_type),
-                    super::format_mysql_physical_type(&right_type),
-                    "{left} and {right} are different contracts that print the same text"
-                );
-            }
-        }
     }
 
     #[test]
