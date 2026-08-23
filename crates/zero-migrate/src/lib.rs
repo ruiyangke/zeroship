@@ -162,7 +162,7 @@ pub use zero_migrate_backend::advisory::{
 // SQLite path too — ungated.
 pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
-    MigrationBackend, MigrationResult, OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
+    MigrationBackend, MigrationResult, OnlineSchemaChange, ShadowConfig, ShadowDryRun,
 };
 // `PostgresBackend` comes from the backend composition root, which is how a host
 // names the engine it wants. `PostgresSessionSnapshot` used to be re-exported beside

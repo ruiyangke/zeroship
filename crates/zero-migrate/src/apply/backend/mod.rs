@@ -49,7 +49,7 @@ pub mod sqlite;
 
 pub use capability::{
     BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
-    OnlineSchemaChange, SeedError, ShadowConfig, ShadowDryRun,
+    OnlineSchemaChange, ShadowConfig, ShadowDryRun,
 };
 pub use mysql::{
     MysqlBackend, MysqlInflightDdlMarker, MysqlInflightRecoveryError, MysqlInflightRecoveryOutcome,

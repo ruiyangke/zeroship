@@ -2,9 +2,9 @@
 
 use crate::apply::drift::DriftError;
 use crate::conn::{ConnectError, ExecutorConfig};
-use crate::engine::{DeclarativeDeployPlan, EngineError};
+use crate::engine::DeclarativeDeployPlan;
 use crate::model::migration::Migration;
-use crate::render::declarative::{DeclarativeError, DesiredSchema};
+use crate::render::declarative::DesiredSchema;
 
 // ── What a backfill IS, what running one produces, and how one refuses: all four
 // now live with the backend contract, beside the `BackfillSpec` a vendor executor
@@ -32,23 +32,9 @@ pub enum DryRunError {
     /// Introspecting the resulting shadow schema failed.
     #[error("snapshot shadow schema: {0}")]
     Drift(#[from] DriftError),
-    /// Seeding the shadow with the current live project schema failed.
-    #[error("seed shadow from live schema: {0}")]
-    Seed(#[source] SeedError),
     /// The active backend has no shadow dry-run capability.
     #[error("shadow dry-run unsupported on this backend (no ShadowDryRun capability)")]
     ShadowUnsupported,
-}
-
-/// A failure to reconstruct the live project structure inside the fresh shadow.
-#[derive(Debug, thiserror::Error)]
-pub enum SeedError {
-    /// The declarative author could not turn the live snapshot into migrations.
-    #[error("author seed migrations from live snapshot: {0}")]
-    Author(#[from] DeclarativeError),
-    /// Applying the reconstruction migrations on the shadow failed.
-    #[error("apply seed migrations on shadow: {0}")]
-    Apply(#[from] EngineError),
 }
 
 /// The per-engine shadow dry-run capability.
