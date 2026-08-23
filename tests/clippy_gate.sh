@@ -917,4 +917,23 @@ if [ "$cargo_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then
 fi
 
 [ "$arms_rc" -eq 0 ] || rc=1
+
+# --- a verdict the LAST LINE can carry -------------------------------------
+#
+# Printed only on failure, so a passing run's output is byte-identical to what
+# it always was and anything parsing the arm trailer keeps working.
+#
+# It exists because this gate's final lines are the SAME on pass and fail: the
+# feature count, the warning count and `zsgate-arms ... refusals=0` all print
+# either way, and the one line that distinguishes them -- `linted: N targets`
+# -- comes EARLIER and is not printed at all when a deny-level error aborts
+# cargo's queue. A reader tailing the output therefore sees `refusals=0` last
+# and reads it as a pass, which is what happened on 2026-08-23: a red gate was
+# reported green for roughly eight merges, with most of the workspace never
+# linted, because `refusals=0` is the ARM CENSUS and not the lint verdict.
+if [ "$rc" -ne 0 ]; then
+  echo "::error::clippy gate FAILED (rc=$rc)"
+  echo "::error::  The lines above print on a PASSING run too. 'refusals=0' is the arm"
+  echo "::error::  census, not the verdict. Trust this line, the exit code, or 'linted:'."
+fi
 exit $rc
