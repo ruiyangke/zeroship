@@ -69,222 +69,23 @@ impl InjectedPrimaryKey for ResolvedInject {
     }
 }
 
-/// The PG keywords whose category is NOT `UNRESERVED` (i.e. reserved,
-/// type/function-name, or column-name keywords). `quote_identifier` — and thus
-/// `pg_get_constraintdef` — wraps an identifier in double quotes iff it is not a
-/// "safe" bare identifier OR it collides with one of THESE keywords (an unreserved
-/// keyword is rendered bare). Sourced from `pg_get_keywords() WHERE catcode<>'U'`
-/// on PG 17. Used by [`quote_ident_if_needed`] so the FK referenced-table body we
-/// build matches the live catalog byte-for-byte: a table/schema named
-/// `order`/`user`/`select` (each passes `validate_collection`/`is_safe_schema_ident`
-/// but is reserved) renders QUOTED in the catalog — and now here too — so the
-/// desired-vs-live FK body re-diffs clean instead of phantom-dropping.
-///
-/// NOT A DEFECT WHEN A SQLITE PATH READS THIS CODEC. [`quote_ident_if_needed`] and
-/// [`constraintdef_cols`] build the `pg_get_constraintdef` comparison form on
-/// purpose. SQLite and MySQL drift normalization compare against that form; this is
-/// comparison text, never an emitted identifier route.
-const CONSTRAINT_DEFINITION_KEYWORDS_REQUIRING_QUOTES: &[&str] = &[
-    "all",
-    "analyse",
-    "analyze",
-    "and",
-    "any",
-    "array",
-    "as",
-    "asc",
-    "asymmetric",
-    "authorization",
-    "between",
-    "bigint",
-    "binary",
-    "bit",
-    "boolean",
-    "both",
-    "case",
-    "cast",
-    "char",
-    "character",
-    "check",
-    "coalesce",
-    "collate",
-    "collation",
-    "column",
-    "concurrently",
-    "constraint",
-    "create",
-    "cross",
-    "current_catalog",
-    "current_date",
-    "current_role",
-    "current_schema",
-    "current_time",
-    "current_timestamp",
-    "current_user",
-    "dec",
-    "decimal",
-    "default",
-    "deferrable",
-    "desc",
-    "distinct",
-    "do",
-    "else",
-    "end",
-    "except",
-    "exists",
-    "extract",
-    "false",
-    "fetch",
-    "float",
-    "for",
-    "foreign",
-    "freeze",
-    "from",
-    "full",
-    "grant",
-    "greatest",
-    "group",
-    "grouping",
-    "having",
-    "ilike",
-    "in",
-    "initially",
-    "inner",
-    "inout",
-    "int",
-    "integer",
-    "intersect",
-    "interval",
-    "into",
-    "is",
-    "isnull",
-    "join",
-    "json_array",
-    "json_arrayagg",
-    "json_object",
-    "json_objectagg",
-    "lateral",
-    "leading",
-    "least",
-    "left",
-    "like",
-    "limit",
-    "localtime",
-    "localtimestamp",
-    "national",
-    "natural",
-    "nchar",
-    "none",
-    "normalize",
-    "not",
-    "notnull",
-    "null",
-    "nullif",
-    "numeric",
-    "offset",
-    "on",
-    "only",
-    "or",
-    "order",
-    "out",
-    "outer",
-    "overlaps",
-    "overlay",
-    "placing",
-    "position",
-    "precision",
-    "primary",
-    "real",
-    "references",
-    "returning",
-    "right",
-    "row",
-    "select",
-    "session_user",
-    "setof",
-    "similar",
-    "smallint",
-    "some",
-    "substring",
-    "symmetric",
-    "system_user",
-    "table",
-    "tablesample",
-    "then",
-    "time",
-    "timestamp",
-    "to",
-    "trailing",
-    "treat",
-    "trim",
-    "true",
-    "union",
-    "unique",
-    "user",
-    "using",
-    "values",
-    "varchar",
-    "variadic",
-    "verbose",
-    "when",
-    "where",
-    "window",
-    "with",
-    "xmlattributes",
-    "xmlconcat",
-    "xmlelement",
-    "xmlexists",
-    "xmlforest",
-    "xmlnamespaces",
-    "xmlparse",
-    "xmlpi",
-    "xmlroot",
-    "xmlserialize",
-    "xmltable",
-];
-
-/// Quote an identifier ONLY when Postgres' own `quote_identifier` would — i.e.
-/// mirror what `pg_get_constraintdef` emits. An identifier is left BARE iff it is a
-/// "safe" lowercase identifier (starts with `[a-z_]`, all chars `[a-z0-9_]`) AND is
-/// not a keyword requiring quotes
-/// ([`CONSTRAINT_DEFINITION_KEYWORDS_REQUIRING_QUOTES`]); otherwise it is
-/// double-quoted (mixed-case, leading digit, reserved word, …).
-///
-/// This is the seam the FK referenced-table body uses so the desired snapshot
-/// round-trips byte-for-byte against the live `pg_get_constraintdef` output
-/// (unconditional [`quote_ident`] would over-quote a normal lowercase name like
-/// `parent` → `"parent"`, which the catalog renders bare → a phantom FK re-create on
-/// every diff). It also closes the latent injection/wrong-resolution seam: a
-/// reserved-word or mixed-case schema/target now renders quoted (correct
-/// resolution), not as a bare keyword.
-pub(crate) fn quote_ident_if_needed(ident: &str) -> String {
-    let safe_bare = !ident.is_empty()
-        && ident.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
-        && ident
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        && !CONSTRAINT_DEFINITION_KEYWORDS_REQUIRING_QUOTES.contains(&ident);
-    if safe_bare {
-        ident.to_string()
-    } else {
-        zero_migrate_backend::snapshot::quote_constraint_definition_ident(ident)
-    }
-}
-
-/// Spell a `pg_get_constraintdef`-matching column list for a UNIQUE / PRIMARY KEY
-/// constraint `definition` body — `<col>, <col>, …` with CONDITIONAL per-column
-/// quoting ([`quote_ident_if_needed`]: bare for a safe lowercase ident, double-
-/// quoted for reserved/mixed-case). This is the SINGLE source of the constraintdef
-/// body spelling: BOTH the offline fold ([`crate::render::fold`]) and the IR lower's
-/// snapshot half ([`crate::render::lower`]) consume it, so the folded and the
-/// lower-emitted UNIQUE/PK `definition` cannot drift (an unconditional quote would
-/// phantom-diff `UNIQUE ("handle")` against the catalog's `UNIQUE (handle)`).
-pub(crate) fn constraintdef_cols(cols: &[String]) -> String {
-    cols.iter()
-        .map(|c| quote_ident_if_needed(c))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+// ── The canonical constraint-`definition` codec MOVED to
+// `zero_migrate_backend::constraint_definition`. It had to: MySQL's drift path
+// BUILDS this body (its `information_schema` stores no rendered constraint text),
+// and a backend in its own crate cannot reach an engine module.
+//
+// Nothing about the three items below is engine-shaped — none of them names a
+// dialect or resolves a vendor — so they moved unchanged and are re-exported here
+// under the paths their thirty-odd in-engine callers already write. The keyword
+// table they read, and the reason the form is PostgreSQL's on every dialect, are
+// documented at the new home.
+//
+// COMPARISON text, never an emitted identifier route: `constraint_definition`'s
+// header states the rule and `constraint_definition_is_comparison_text` enforces it
+// now that `pub(crate)` cannot.
+pub(crate) use zero_migrate_backend::constraint_definition::{
+    constraintdef_cols, quote_ident_if_needed, NOT_VALID_DEFINITION_SUFFIX,
+};
 
 // `GENERATED_PREFIX`, `default_clause` and `generated_clause` MOVED to
 // `zero_migrate_backend::ddl` — all three `DdlEmitter` impls call them, so they had
@@ -2862,6 +2663,15 @@ fn fk_constraint_name(table: &str, field: &str, explicit_name: Option<&str>) -> 
     )
 }
 
+/// The FOREIGN KEY [`ConstraintSnapshot`] for a lowered/folded table-level FK.
+///
+/// Keeps the half a vendor crate has no use for: DERIVING the constraint name when
+/// the author did not write one. That is authoring policy — `<table>_<cols>_fkey`
+/// capped to the identifier budget by [`crate::plan::author::cap_ident_name`] — and
+/// it is why this takes a `table` the body never sees. A constraint read out of a
+/// live catalog always arrives named, so the backends call
+/// [`zero_migrate_backend::constraint_definition::fk_constraint_snapshot`] with the
+/// name they already hold, and this resolves `dialect` down to the same function.
 pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     project_schema: &str,
     table: &str,
@@ -2879,9 +2689,10 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     let name = explicit_name
         .map(ToString::to_string)
         .unwrap_or_else(|| crate::render::lower::derived_fk_constraint_name(table, local_columns));
-    let definition = fk_definition_for_dialect(
-        local_columns,
+    zero_migrate_backend::constraint_definition::fk_constraint_snapshot(
+        name,
         project_schema,
+        local_columns,
         references_table,
         references_columns,
         on_delete,
@@ -2889,15 +2700,8 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
         deferrable,
         initially_deferred,
         not_valid,
-        dialect,
-    );
-    ConstraintSnapshot {
-        name,
-        kind: "FOREIGN KEY".to_string(),
-        definition,
-        comment: None,
-        cascade_columns: None,
-    }
+        crate::render::backends::vendor(dialect),
+    )
 }
 
 /// Ensure a table-level foreign key has a child-side B-tree index whose leading
@@ -3098,31 +2902,14 @@ fn validate_id_prefix(prefix: &str) -> Result<(), DeclarativeError> {
         .map_err(|e| DeclarativeError::Invalid(e.to_string()))
 }
 
-fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: &DialectId) -> &'static str {
-    let action = crate::schema::query::normalize_fk_action(s);
-    crate::render::backends::schema_renderer(dialect).canonical_fk_action(action)
-}
-
-/// Build a FOREIGN KEY definition body in the dialect's canonical catalog
-/// spelling, so the desired snapshot round-trips to the live introspected
-/// constraint.
+/// Resolve `dialect`'s backend and build a FOREIGN KEY definition body in its
+/// canonical catalog spelling.
 ///
-/// Empirically (probed against PG 17), `pg_get_constraintdef` renders a FK as:
-///
-/// ```text
-/// FOREIGN KEY (<cols>) REFERENCES <schema>.<target>(<cols>)[ ON UPDATE <u>][ ON DELETE <d>][ DEFERRABLE [INITIALLY DEFERRED]]
-/// ```
-///
-/// with two normalisations the DDL spelling does NOT have:
-/// - **`ON UPDATE` precedes `ON DELETE`** (the reverse of plugin-db's emitted
-///   DDL, which writes `ON DELETE <d> ON UPDATE <u>`); and
-/// - a **`NO ACTION`** action clause is **OMITTED entirely** (it is the catalog
-///   default — `confdeltype`/`confupdtype` = `'a'`), so a FK with both actions
-///   `NO ACTION` renders with no action clauses at all.
-///
-/// On Postgres, `RESTRICT`, `CASCADE`, and `SET NULL` are rendered explicitly.
-/// On MySQL, `RESTRICT` and `NO ACTION` are semantically identical and both fold
-/// to the omitted default; `CASCADE`, `SET NULL`, and `SET DEFAULT` still render.
+/// The engine's entry point. The body itself, and every vendor fact in it, is
+/// [`zero_migrate_backend::constraint_definition::fk_definition`] — see there for
+/// the catalog normalisations the DDL spelling does not have. This is the single
+/// line that turns a `DialectId` into the vendor that answers them, which is why a
+/// backend that already knows which vendor it is calls that function directly.
 fn fk_definition_for_dialect(
     local_columns: &[String],
     project_schema: &str,
@@ -3135,69 +2922,19 @@ fn fk_definition_for_dialect(
     not_valid: bool,
     dialect: &DialectId,
 ) -> String {
-    use std::fmt::Write as _;
-    // quote the referenced schema + table the SAME way
-    // `pg_get_constraintdef` does (conditional: bare for safe lowercase names,
-    // double-quoted for reserved-word/mixed-case), so the desired FK body matches
-    // the live catalog byte-for-byte (over-quoting would phantom-diff a normal
-    // lowercase `parent`) AND a reserved-word/mixed-case schema or target resolves
-    // correctly instead of being emitted as a bare keyword.
-    //
-    // The LOCAL FK column is quoted the SAME conditional way as the schema/target
-    // (and as the UNIQUE/PK body via `constraintdef_cols`): `pg_get_constraintdef`
-    // renders `FOREIGN KEY ("order")` for a reserved-word/mixed-case column, so a
-    // raw `FOREIGN KEY (order)` would phantom-diff the FK `definition` (the fold
-    // reuses it, and `ConstraintSnapshot` has FULL Eq) AND mis-resolve `order` as
-    // the keyword. Over-quoting a safe lowercase column would equally phantom-diff
-    // the catalog's bare body — hence conditional (`quote_ident_if_needed`).
-    let ref_cols = if references_columns.is_empty() {
-        vec!["id".to_string()]
-    } else {
-        references_columns.to_vec()
-    };
-    let target_name = crate::render::backends::schema_renderer(dialect).canonical_fk_target(
-        &quote_ident_if_needed(project_schema),
-        &quote_ident_if_needed(target),
-    );
-    let mut def = format!(
-        "FOREIGN KEY ({}) REFERENCES {}({})",
-        constraintdef_cols(local_columns),
-        target_name,
-        constraintdef_cols(&ref_cols),
-    );
-    let on_update = normalize_fk_action_for_dialect(on_update, dialect);
-    let on_delete = normalize_fk_action_for_dialect(on_delete, dialect);
-    // Catalog definitions render ON UPDATE before ON DELETE and omit the
-    // dialect's canonical default action. On MySQL, RESTRICT and NO ACTION both
-    // canonicalize to NO ACTION because InnoDB has no deferred checks.
-    if on_update != "NO ACTION" {
-        let _ = write!(def, " ON UPDATE {on_update}");
-    }
-    if on_delete != "NO ACTION" {
-        let _ = write!(def, " ON DELETE {on_delete}");
-    }
-    if deferrable && dialect.supports(Capability::DeferrableConstraint) {
-        def.push_str(" DEFERRABLE");
-        if initially_deferred {
-            def.push_str(" INITIALLY DEFERRED");
-        }
-    }
-    // `pg_get_constraintdef` appends ` NOT VALID` for as long as `convalidated` is
-    // false, so a desired body that omits it phantom-diffs every unvalidated
-    // constraint against the catalog. PostgreSQL-only: `NOT VALID` is refused off
-    // that dialect at validate, so the flag can never arrive here on another leg,
-    // and gating on the dialect keeps a SQLite rebuild from splicing the token into
-    // a `CREATE TABLE` clause it would not parse.
-    if not_valid && dialect.supports(Capability::AlterTableValidateConstraint) {
-        def.push_str(NOT_VALID_DEFINITION_SUFFIX);
-    }
-    def
+    zero_migrate_backend::constraint_definition::fk_definition(
+        local_columns,
+        project_schema,
+        target,
+        references_columns,
+        on_delete,
+        on_update,
+        deferrable,
+        initially_deferred,
+        not_valid,
+        crate::render::backends::vendor(dialect),
+    )
 }
-
-/// The trailing token `pg_get_constraintdef` renders while a constraint's
-/// `convalidated` is false, and the exact substring a `VALIDATE CONSTRAINT` fold
-/// removes again.
-pub(crate) const NOT_VALID_DEFINITION_SUFFIX: &str = " NOT VALID";
 
 #[cfg(test)]
 fn fk_definition_pg(

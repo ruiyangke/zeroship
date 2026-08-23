@@ -1250,15 +1250,13 @@ fn build_fk_clause(
 }
 
 /// Normalise an FK action to the SQL keyword form Postgres accepts.
+///
+/// DELEGATES to [`zero_migrate_backend::constraint_definition::normalize_fk_action`],
+/// which is the single source of the mapping now that the FK `definition` body it
+/// feeds is built below the vendors. The engine's own copy is deleted; this stays as
+/// the import path the out-of-repo data plane already writes.
 fn normalize_fk_action_inner(s: Option<&str>) -> &'static str {
-    match s.unwrap_or("no action").to_ascii_lowercase().as_str() {
-        "cascade" => "CASCADE",
-        "set null" | "set_null" | "setnull" => "SET NULL",
-        "set default" | "set_default" | "setdefault" => "SET DEFAULT",
-        "no action" | "no_action" | "noaction" => "NO ACTION",
-        "restrict" => "RESTRICT",
-        _ => "RESTRICT",
-    }
+    zero_migrate_backend::constraint_definition::normalize_fk_action(s)
 }
 
 /// Normalise an FK action; used cross-module by the diff engine.
@@ -1272,9 +1270,17 @@ pub fn normalize_fk_action(s: Option<&str>) -> &'static str {
 /// `NO ACTION` are the same immediate-reject default. Keep them distinct on
 /// Postgres/SQLite, where the distinction is meaningful to their catalog/render
 /// forms.
+///
+/// The engine's entry point: it RESOLVES `dialect` and asks that vendor. A backend
+/// that already knows which vendor it is calls
+/// [`zero_migrate_backend::constraint_definition::normalize_fk_action_for_vendor`].
+/// `render::declarative` used to carry a byte-identical private duplicate of this;
+/// the move that took the FK body below the vendors deleted it.
 pub fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: &DialectId) -> &'static str {
-    let action = normalize_fk_action_inner(s);
-    renderer(dialect).canonical_fk_action(action)
+    zero_migrate_backend::constraint_definition::normalize_fk_action_for_vendor(
+        s,
+        crate::render::backends::vendor(dialect),
+    )
 }
 
 /// Build ALTER TABLE ADD COLUMN IF NOT EXISTS for a single field.

@@ -16,6 +16,7 @@ mod alter_column_dialect_support;
 mod backend_modules_name_one_dialect;
 mod backend_snapshot_privates_stay_core_only;
 mod checksum_corpus_stability;
+mod constraint_definition_is_comparison_text;
 mod core_does_not_spell_a_vendors_bytes;
 mod core_names_no_vendor_backend_module;
 mod core_names_no_vendor_crate;

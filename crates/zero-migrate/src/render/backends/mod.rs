@@ -78,11 +78,20 @@
 //! equal substitute.
 //!
 //! And a DELIBERATE non-defect that looks identical to a neuter: the
-//! `pg_get_constraintdef` normal form (`declarative::quote_ident_if_needed` /
-//! `constraintdef_cols`) is PostgreSQL-spelled ON PURPOSE and is read by the SQLite
-//! and MySQL drift comparators. It has a renderer-independent snapshot codec,
-//! precisely because a red count cannot tell it apart from an unrouted emission.
-//! Re-dialecting it would be a regression.
+//! `pg_get_constraintdef` normal form (`zero_migrate_backend::constraint_definition`
+//! — `quote_ident_if_needed` / `constraintdef_cols`, re-exported at their historical
+//! `render::declarative::…` paths) is PostgreSQL-spelled ON PURPOSE and is read by
+//! the SQLite and MySQL drift comparators. It has a renderer-independent snapshot
+//! codec, precisely because a red count cannot tell it apart from an unrouted
+//! emission. Re-dialecting it would be a regression.
+//!
+//! It sits BELOW the vendors rather than here because MySQL's drift path has to
+//! build that form itself, and it is now `pub` across a crate boundary rather than
+//! `pub(crate)`. That widening is what
+//! `tests/dialect_matrix/constraint_definition_is_comparison_text.rs` stands in for:
+//! a vendor may READ the codec to normalize what it introspected, but its `ddl.rs` /
+//! `dml.rs` may not spell an EMITTED identifier with it. On PostgreSQL and SQLite
+//! the wrong call emits correct bytes, so only a census can see it.
 
 use zero_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,

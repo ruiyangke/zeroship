@@ -143,6 +143,14 @@ pub mod capability;
 // contract — every `MigrationBackend` I/O method takes a `&ExecutorConfig` — so
 // it sits with the traits. The engine re-exports it at `zero_migrate::conn`.
 pub mod conn;
+// The canonical constraint-`definition` normal form: the conditional-quote codec,
+// the FK body, and the FK `ConstraintSnapshot` built on it. It sits here because
+// every backend's drift path BUILDS that body — MySQL's catalog stores no rendered
+// constraint text at all — so it has to be reachable from a vendor crate. The two
+// halves that need a vendor fact take a `&BackendVendor`; the rest names no dialect.
+// COMPARISON text, never an emitted identifier route. The engine re-exports the
+// neutral half and keeps dialect-taking shims at `zero_migrate::render::declarative`.
+pub mod constraint_definition;
 pub mod ddl;
 pub mod descriptors;
 pub mod dml;

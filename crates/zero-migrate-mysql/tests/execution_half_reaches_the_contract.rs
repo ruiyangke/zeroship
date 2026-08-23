@@ -53,8 +53,6 @@
 //! * `zero_migrate::render::value_format` — `catalog_id_default`,
 //!   `catalog_text_id_default`, `catalog_uuid_id_default`, `recover_format_check`
 //!   and `RecoveredFormatCheck`, read by `drift_sql.rs`.
-//! * `zero_migrate::render::declarative` — `constraintdef_cols` and
-//!   `ir_fk_constraint_snapshot_for_columns`, read by `drift_sql.rs`.
 //!
 //! Add each one's line here in the commit that moves it.
 
@@ -62,6 +60,7 @@ use std::time::Duration;
 
 use zero_migrate_backend::backend::{PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF};
 use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::constraint_definition::{constraintdef_cols, fk_constraint_snapshot};
 use zero_migrate_backend::drift::{compare_applied_to_set, ChecksumDriftReport};
 use zero_migrate_backend::executor::{authorize_existence_guard_schema, ApplyError};
 use zero_migrate_backend::existence_probe::{decide, GuardVerdict};
@@ -181,5 +180,63 @@ fn the_existence_guard_decider_answers_for_this_vendor() {
         "an ifNotExists probe for a table absent from the live catalog did not run \
          bare, so a guarded MySQL createTable would be skipped or fail closed on an \
          empty database"
+    );
+}
+
+/// The canonical constraint-`definition` codec, read by `drift_sql.rs` for every
+/// PRIMARY KEY and FOREIGN KEY it lifts out of `information_schema`.
+///
+/// MySQL's catalog stores no rendered constraint body — there is no
+/// `pg_get_constraintdef` there — so the drift path BUILDS the desired body itself
+/// and must build the byte-identical one the engine's lower and fold build, or every
+/// introspected key phantom-diffs against the snapshot it is compared to.
+///
+/// Reachability, plus the two bytes that would silently differ if either half were
+/// wired to nothing: the CONDITIONAL quote, and an FK action folded by THIS vendor.
+#[test]
+fn the_constraint_definition_codec_is_reachable_and_spells_the_comparison_form() {
+    let _: fn(&[String]) -> String = constraintdef_cols;
+
+    // Conditional, not unconditional. A safe lowercase column stays BARE because
+    // that is how a catalog renders it; a reserved word is quoted. Getting this
+    // uniformly wrong in either direction phantom-diffs every key on the table.
+    assert_eq!(
+        constraintdef_cols(&["handle".to_string(), "order".to_string()]),
+        r#"handle, "order""#,
+        "the constraint-definition column list is not spelling the conditional \
+         comparison form, so every MySQL key lifted from information_schema would \
+         re-diff against a body the engine's lower never produces"
+    );
+
+    // The FK body, built with MySQL's OWN vendor rather than by asking the registry
+    // which backend handles MySQL — the distinction `registry_resolution_stays_core_only`
+    // reads this crate for.
+    //
+    // `RESTRICT` is the discriminator: InnoDB has no deferred checks, so MySQL folds
+    // it into the omitted `NO ACTION` default, while PostgreSQL preserves it and
+    // would render ` ON DELETE RESTRICT` here. A `fk_constraint_snapshot` that
+    // ignored its vendor argument would emit the PostgreSQL body and still compile.
+    let fk = fk_constraint_snapshot(
+        "orders_author_id_fkey".to_string(),
+        "app",
+        &["author_id".to_string()],
+        "authors",
+        &["id".to_string()],
+        Some("restrict"),
+        None,
+        false,
+        false,
+        false,
+        &zero_migrate_mysql::VENDOR,
+    );
+    assert_eq!(
+        fk.kind, "FOREIGN KEY",
+        "the FK constraint snapshot did not come back as a FOREIGN KEY"
+    );
+    assert_eq!(
+        fk.definition, "FOREIGN KEY (author_id) REFERENCES app.authors(id)",
+        "the FK body is not MySQL's canonical form: InnoDB folds RESTRICT into the \
+         omitted NO ACTION default, so a rendered ` ON DELETE RESTRICT` here means \
+         the vendor argument was ignored and PostgreSQL's spelling was used"
     );
 }
