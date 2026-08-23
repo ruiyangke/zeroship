@@ -8,21 +8,21 @@
 //!
 //! These are parse-level assertions: no database is contacted.
 //!
-//! The `#[ignore]`d tests at the bottom assert LIBPQ's behaviour for cases
-//! where we currently diverge. They are red on purpose -- each one is the
-//! regression test for a fix that has not landed. Drop the `#[ignore]` when
-//! the corresponding arm of `UrlParser` is corrected.
+//! NOTHING HERE IS `#[ignore]`d ANY MORE. This file arrived with six tests
+//! asserting libpq's behaviour for cases where we diverged, red on purpose so
+//! each was a ready-made regression test. All six now pass:
 //!
-//! THREE OF THE ORIGINAL SIX WERE DROPPED ON ARRIVAL, and the reason is worth
-//! knowing before trusting the rest. This file was written against an older
-//! base than the branch it landed on, so the userinfo `@` bound and the
-//! query-string `host=`/`port=` rules had already been fixed on `main` by the
-//! time it merged; `--ignored` showed those three passing. Re-run
-//! `cargo test --test url_parity -- --ignored` after any parser change: a
-//! divergence test that has started PASSING is a fix to record, not a fluke.
+//!   * three were already fixed on `main` when the file merged -- it was
+//!     written against an older base -- namely the userinfo `@` bound and the
+//!     query-string `host=`/`port=` rules;
+//!   * three were fixed afterwards: malformed percent escapes, port zero, and
+//!     empty credentials meaning unset.
 //!
-//! The three that remain were re-confirmed as genuinely failing here, not
-//! carried over on trust.
+//! The habit that produced that is worth keeping: after any parser change, run
+//! `cargo test --test url_parity -- --ignored` if ignores are ever added again.
+//! A divergence test that has started PASSING is a fix to record, not a fluke,
+//! and one that has started FAILING is a regression with its evidence already
+//! written down.
 
 use std::fmt::Write as _;
 
@@ -412,7 +412,6 @@ fn port_zero_is_rejected() {
 // in `connect_raw` and makes us send an empty password where libpq would
 // report that none was supplied.
 #[test]
-#[ignore = "known divergence: empty user/password stored as Some(\"\")"]
 fn empty_user_and_password_are_unset() {
     assert_eq!(cfg("postgres://:p@h/db").get_user(), None);
     assert_eq!(cfg("postgres://h/db?user=").get_user(), None);
