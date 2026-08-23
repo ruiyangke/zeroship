@@ -57,6 +57,31 @@ impl Log for PanicOnTransactionLog {
     fn flush(&self) {}
 }
 
+/// Require the caught panic to be THE INJECTED ONE.
+///
+/// The three tests below asserted `panic.is_err()` until 2026-08-23 - "a panic
+/// occurred". Any panic from the operation satisfies that, including one the
+/// arming never caused: a failed `expect` inside the driver, or the arm never
+/// firing at all while something else went wrong. And when the arm does not
+/// fire it stays SET, because `replace(false)` only runs on the path that
+/// panics, so the next test to run on this thread inherits it. Naming the
+/// payload is what makes these tests about the injection they perform.
+#[track_caller]
+fn assert_injected_panic<T>(outcome: Result<T, Box<dyn std::any::Any + Send>>, expected: &str) {
+    let payload = outcome.err().unwrap_or_else(|| {
+        panic!("the {expected:?} injection did not panic, so nothing below is about it")
+    });
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&'static str>().copied())
+        .unwrap_or("<non-string panic payload>");
+    assert_eq!(
+        message, expected,
+        "a DIFFERENT panic was caught, so the injected one may never have fired"
+    );
+}
+
 static PANIC_TRANSACTION_LOGGER: PanicOnTransactionLog = PanicOnTransactionLog;
 static INSTALL_PANIC_TRANSACTION_LOGGER: Once = Once::new();
 
@@ -231,8 +256,9 @@ async fn panicking_transaction_start_setup_preserves_a_preexisting_transaction()
         let panic = AssertUnwindSafe(client.build_transaction().start())
             .catch_unwind()
             .await;
-        assert!(panic.is_err(), "the START setup logger did not panic");
-        drop(panic);
+        // `assert_injected_panic` consumes the outcome, which is what releases
+        // the borrow on `client` that the old `drop(panic)` here existed for.
+        assert_injected_panic(panic, "panic requested before START TRANSACTION was encoded");
 
         client.simple_query("").await.unwrap();
         assert_eq!(
@@ -272,7 +298,7 @@ async fn panicking_commit_setup_rolls_back_before_the_next_operation() {
 
         arm_commit_log_panic();
         let panic = AssertUnwindSafe(transaction.commit()).catch_unwind().await;
-        assert!(panic.is_err(), "the COMMIT setup logger did not panic");
+        assert_injected_panic(panic, "panic requested before COMMIT was encoded");
 
         client.simple_query("").await.unwrap();
         let count: i64 = client
@@ -313,7 +339,7 @@ async fn panicking_rollback_setup_rolls_back_before_the_next_operation() {
         let panic = AssertUnwindSafe(transaction.rollback())
             .catch_unwind()
             .await;
-        assert!(panic.is_err(), "the ROLLBACK setup logger did not panic");
+        assert_injected_panic(panic, "panic requested before ROLLBACK was encoded");
 
         client.simple_query("").await.unwrap();
         let count: i64 = client
@@ -447,6 +473,24 @@ async fn abandoned_failed_nested_commit_recovers_before_the_next_outer_operation
     .expect("failed nested commit abandonment test exceeded its watchdog");
 }
 
+/// How many of this test's portals the server currently reports.
+///
+/// One query text, used for both the control and the claim, so the two cannot
+/// drift into asking different questions - which is the failure that would make
+/// the control stop guarding anything.
+async fn portal_count(transaction: &compio_postgres::Transaction<'_>) -> i64 {
+    transaction
+        .query_one(
+            "SELECT count(*)::int8 FROM pg_cursors \
+             WHERE name LIKE 'p%' \
+             AND statement LIKE '%cpg_abandoned_bind_portal%'",
+            &[],
+        )
+        .await
+        .expect("could not inspect portals")
+        .get(0)
+}
+
 #[compio::test]
 async fn abandoning_bind_before_bind_complete_closes_the_server_portal() {
     const SQL: &str = "SELECT 83::int4 /* cpg_abandoned_bind_portal */";
@@ -460,6 +504,29 @@ async fn abandoning_bind_before_bind_complete_closes_the_server_portal() {
         let transaction = client.transaction().await.unwrap();
         let statement = transaction.prepare(SQL).await.unwrap();
 
+        // THE PROBE MUST BE ABLE TO SEE A PORTAL, checked before it is used to
+        // conclude that none exists. The assertion below is `count == 0` over
+        // `pg_cursors WHERE name LIKE 'p%' AND statement LIKE '%...%'` - two
+        // predicates about how the driver names portals and how PostgreSQL
+        // reports them, neither of which the test controls. If either stopped
+        // matching, the count would be 0 for a reason that has nothing to do
+        // with cleanup and the test would pass while measuring nothing. So
+        // bind one and require the probe to find it. Measured 2026-08-23: it
+        // does, and this now fails rather than going quiet if that changes.
+        {
+            let live = transaction
+                .bind(&statement, &[])
+                .await
+                .expect("bind a portal the probe is meant to find");
+            let visible: i64 = portal_count(&transaction).await;
+            assert_eq!(
+                visible, 1,
+                "the pg_cursors probe cannot see a portal that certainly exists, so a zero \
+                 below would say nothing about the abandoned one"
+            );
+            drop(live);
+        }
+
         let mut bind = Box::pin(transaction.bind(&statement, &[]));
         let mut context = Context::from_waker(Waker::noop());
         assert!(
@@ -469,16 +536,7 @@ async fn abandoning_bind_before_bind_complete_closes_the_server_portal() {
         drop(bind);
 
         transaction.simple_query(BARRIER).await.unwrap();
-        let leaked: i64 = transaction
-            .query_one(
-                "SELECT count(*)::int8 FROM pg_cursors \
-                 WHERE name LIKE 'p%' \
-                 AND statement LIKE '%cpg_abandoned_bind_portal%'",
-                &[],
-            )
-            .await
-            .expect("could not inspect portals after the abandoned bind")
-            .get(0);
+        let leaked: i64 = portal_count(&transaction).await;
         assert_eq!(leaked, 0, "an abandoned bind left its named portal alive");
 
         transaction.rollback().await.unwrap();
