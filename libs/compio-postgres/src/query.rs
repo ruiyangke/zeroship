@@ -622,7 +622,18 @@ impl Stream for RowStream {
                 Message::CommandComplete(body) => {
                     *this.rows_affected = Some(extract_row_affected(&body)?);
                 }
-                Message::EmptyQueryResponse | Message::PortalSuspended => {}
+                // An empty query completes with NO `CommandComplete`, so
+                // nothing else here would ever set the count and
+                // `rows_affected` stayed `None` on a stream that was fully
+                // exhausted. `None` then meant both "not finished yet" and "no
+                // count was sent", which the accessor's own documentation says
+                // it does not -- and a caller cannot tell those apart. Zero is
+                // also what `execute("")` already reports for the same query.
+                Message::EmptyQueryResponse => *this.rows_affected = Some(0),
+                // NOT the same case: a suspended portal has more rows to come,
+                // so the stream genuinely is not exhausted and `None` is the
+                // honest answer.
+                Message::PortalSuspended => {}
                 Message::ReadyForQuery(_) => return Poll::Ready(None),
                 _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }
