@@ -34,7 +34,11 @@ fn userinfo_ends_at_the_path() {
         "an @ in a query value redirected the connection"
     );
     assert_eq!(query_at.get_user(), Some("postgres"));
-    assert_eq!(query_at.get_password(), None, "no password was in this string");
+    assert_eq!(
+        query_at.get_password(),
+        None,
+        "no password was in this string"
+    );
     assert_eq!(query_at.get_application_name(), Some("c@d"));
 
     // THE OTHER HALF. No path, so libpq scans past the query and the last @
@@ -51,10 +55,13 @@ fn userinfo_ends_at_the_path() {
 
     // One-variable partners: ordinary userinfo must still work, or "stop
     // scanning" is satisfied by never finding userinfo at all.
-    let full = "postgres://u:p@h:5432/db".parse::<Config>().expect("userinfo");
+    let full = "postgres://u:p@h:5432/db"
+        .parse::<Config>()
+        .expect("userinfo");
     assert_eq!(full.get_user(), Some("u"));
     assert_eq!(
-        full.get_password().map(|p| String::from_utf8_lossy(p).into_owned()),
+        full.get_password()
+            .map(|p| String::from_utf8_lossy(p).into_owned()),
         Some("p".to_string())
     );
     assert_eq!(full.get_dbname(), Some("db"));

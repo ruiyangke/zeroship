@@ -29,9 +29,9 @@
 //! that the session died. Both halves are asserted below so the split is
 //! visible rather than discovered.
 
-use compio_postgres::{Client, Connection, Error, NoTls, Socket};
-use compio_postgres::tls::NoTlsStream;
 use compio::runtime::JoinHandle;
+use compio_postgres::tls::NoTlsStream;
+use compio_postgres::{Client, Connection, Error, NoTls, Socket};
 use std::time::Duration;
 
 #[allow(dead_code)]
