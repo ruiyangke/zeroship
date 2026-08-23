@@ -24,7 +24,7 @@ fn ok(s: &str) -> Config {
 /// The error's SOURCE, because the top-level `Display` is only "invalid
 /// connection string" and says nothing about which rule was broken.
 fn cause(s: &str) -> String {
-    let error = Config::from_str(s).err().expect("expected a parse failure");
+    let error = Config::from_str(s).expect_err("expected a parse failure");
     let mut link = std::error::Error::source(&error);
     let mut last = String::new();
     while let Some(current) = link {

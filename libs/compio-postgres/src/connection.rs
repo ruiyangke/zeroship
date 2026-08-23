@@ -198,6 +198,9 @@ struct ReadObligation {
 
 struct ReadObligationInner {
     deadline: Option<ReadDeadline>,
+    /// Whether this request owns a `CopyInReceiver`, i.e. whether the driver
+    /// has a producer that will eventually answer a `CopyInResponse`.
+    copy_producer: bool,
     state: Cell<ReadObligationState>,
 }
 
@@ -209,6 +212,7 @@ impl ReadObligation {
         let inner = (deadline.is_some() || track_copy_state).then(|| {
             Rc::new(ReadObligationInner {
                 deadline: deadline.cloned(),
+                copy_producer: track_copy_state,
                 state: Cell::new(ReadObligationState::PendingInitialFlush),
             })
         });
@@ -231,6 +235,16 @@ impl ReadObligation {
         let Some(inner) = &self.inner else {
             return;
         };
+        if !inner.copy_producer {
+            // Keyed to whether THIS DRIVER will feed the copy, not to what the
+            // server sent. `COPY ... FROM STDIN` issued as an ordinary query
+            // (`execute` / `batch_execute` / `simple_query`) also earns a
+            // `CopyInResponse`, and there is no `CopyInReceiver` behind it: no
+            // byte will ever be sent, so the session is deadlocked rather than
+            // waiting on a caller. Pausing the clock there hides precisely the
+            // stall the read deadline exists to retire.
+            return;
+        }
         match inner.state.get() {
             ReadObligationState::PendingInitialFlush => {
                 inner.state.set(ReadObligationState::PausedForCopyInput);
@@ -851,7 +865,19 @@ impl Dispatch<'_> {
         if let Some(status) = ready_status
             && response.transaction_effect == TransactionEffect::MayChange
         {
-            self.tx_status.store(status, Ordering::Relaxed);
+            // Never write over `READ_RETIRED_STATUS`. An ordinary reader
+            // failure is published as poison IMMEDIATELY but travels to this
+            // loop behind every frame the same reader decoded before it, so a
+            // `ReadyForQuery` dispatched here can arrive after retirement. That
+            // byte is the pool's only synchronous eviction signal until the
+            // connection task exits and closes the request channel
+            // (`pool.rs::is_read_retired`), and the borrower this batch is
+            // about to wake can release its entry inside that window.
+            let _ = self
+                .tx_status
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    (current != READ_RETIRED_STATUS).then_some(status)
+                });
             if self
                 .in_flight_requests
                 .fetch_update(Ordering::Release, Ordering::Relaxed, |count| {
@@ -892,6 +918,23 @@ impl Dispatch<'_> {
                 // queued and the whole loop re-enters `poll_read` on
                 // the next wake.
                 let messages = e.into_inner();
+                // THE `clone` IS LOAD-BEARING AND DELIBERATE. Measured
+                // 2026-08-23: `futures_channel::mpsc` tracks fullness per
+                // HANDLE, so a clone is born unparked and its `poll_ready`
+                // reports READY on a channel the consumer has drained nothing
+                // from. The stash gate below is therefore a one-iteration
+                // ORDERING delay, not sustained back-pressure: a consumer that
+                // stops reading accumulates batches instead of stopping the
+                // reader.
+                //
+                // Do not "fix" that by stashing the parked handle. This driver
+                // is sometimes its own stalled consumer: resolving an uncached
+                // custom type runs a NESTED query on this same connection while
+                // the outer query's response channel is full, and real
+                // back-pressure deadlocks it. Swapping the parked handle in
+                // here turns `query_backpressure.rs`'s two
+                // `..._without_response_backpressure_deadlock` tests red at
+                // once, which is how this note came to be written.
                 self.pending_responses.push_back(PendingResponse {
                     sender: response.sender.clone(),
                     messages,
@@ -1483,8 +1526,15 @@ where
     /// This is the exact ordering guarantee of tokio-postgres's
     /// `poll_response` (pending replayed before the socket is read again),
     /// so a later batch for the same request can never overtake an earlier
-    /// one. The bounded read channel propagates that back-pressure to the
-    /// socket (the task blocks on send → stops reading).
+    /// one.
+    ///
+    /// ORDERING IS ALL IT BUYS. The stash carries a CLONE of the consumer's
+    /// sender, and `futures_channel` tracks fullness per handle, so that clone
+    /// is ready on the next poll however far behind the consumer is: the gate
+    /// costs one iteration and then lets go. A consumer that stops reading
+    /// accumulates batches rather than stopping the reader. That is deliberate
+    /// - see `deliver_batch`, where making the gate bind deadlocks the driver's
+    /// own nested type-info lookups.
     async fn run_multiplexed(
         read_half: BufReadHalf<<S as SplitStream>::ReadHalf>,
         mut write_half: BufWriteHalf<<S as SplitStream>::WriteHalf>,
@@ -2051,6 +2101,160 @@ mod tests {
         fn wake_by_ref(self: &Arc<Self>) {
             self.observe();
         }
+    }
+
+    /// Samples the pool-visible transaction-status byte at the instant a
+    /// response batch wakes its consumer. That instant is the one that matters:
+    /// a woken pooled borrower can return its entry synchronously, and
+    /// `Pool::release` decides between eviction and reuse from exactly this
+    /// byte (`pool.rs::is_read_retired`).
+    struct StatusRecordingWake {
+        tx_status: Arc<AtomicU8>,
+        seen: AtomicU8,
+        observed: AtomicBool,
+    }
+
+    /// Placeholder for `seen` until a wake records something. Not a legal
+    /// `ReadyForQuery` byte and not `READ_RETIRED_STATUS`, so "never woken"
+    /// cannot be mistaken for either outcome under test.
+    const STATUS_NOT_RECORDED: u8 = b'?';
+
+    impl StatusRecordingWake {
+        fn new(tx_status: &Arc<AtomicU8>) -> Arc<Self> {
+            Arc::new(Self {
+                tx_status: Arc::clone(tx_status),
+                seen: AtomicU8::new(STATUS_NOT_RECORDED),
+                observed: AtomicBool::new(false),
+            })
+        }
+
+        fn observe(&self) {
+            if !self.observed.swap(true, Ordering::AcqRel) {
+                self.seen
+                    .store(self.tx_status.load(Ordering::Acquire), Ordering::Release);
+            }
+        }
+    }
+
+    impl Wake for StatusRecordingWake {
+        fn wake(self: Arc<Self>) {
+            self.observe();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.observe();
+        }
+    }
+
+    /// A splittable stream whose read half replays scripted wire bytes and then
+    /// reports EOF. Writes are accepted and discarded: every claim made with
+    /// this fixture is about what the reader publishes, never about what
+    /// reached a server.
+    struct ScriptedReadSplitStream {
+        chunks: VecDeque<Vec<u8>>,
+        /// When set, the read half spins yielding until this recorder has been
+        /// woken before it reports EOF. That is the ONE variable separating the
+        /// two tests below: whether the reader's terminal failure lands before
+        /// or after the main loop dispatches the frame the reader already
+        /// queued.
+        eof_after: Option<Arc<StatusRecordingWake>>,
+    }
+
+    struct ScriptedReadHalf {
+        chunks: VecDeque<Vec<u8>>,
+        eof_after: Option<Arc<StatusRecordingWake>>,
+    }
+
+    /// Bounds the control's spin so a harness that never delivers fails on its
+    /// assertion instead of hanging the suite.
+    const SCRIPTED_EOF_YIELD_LIMIT: usize = 64;
+
+    async fn yield_once() {
+        let mut yielded = false;
+        poll_fn(|cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    async fn read_scripted<B: IoBufMut>(
+        chunks: &mut VecDeque<Vec<u8>>,
+        eof_after: &mut Option<Arc<StatusRecordingWake>>,
+        buf: B,
+    ) -> BufResult<usize, B> {
+        if let Some(chunk) = chunks.pop_front() {
+            let mut src: &[u8] = &chunk;
+            let result = AsyncRead::read(&mut src, buf).await;
+            let consumed = chunk.len() - src.len();
+            if consumed < chunk.len() {
+                chunks.push_front(chunk[consumed..].to_vec());
+            }
+            return result;
+        }
+
+        if let Some(recorder) = eof_after.take() {
+            let mut spins = 0;
+            while !recorder.observed.load(Ordering::Acquire) && spins < SCRIPTED_EOF_YIELD_LIMIT {
+                spins += 1;
+                yield_once().await;
+            }
+        }
+
+        let mut empty: &[u8] = &[];
+        AsyncRead::read(&mut empty, buf).await
+    }
+
+    impl AsyncRead for ScriptedReadSplitStream {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.chunks, &mut self.eof_after, buf).await
+        }
+    }
+
+    impl AsyncWrite for ScriptedReadSplitStream {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncRead for ScriptedReadHalf {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.chunks, &mut self.eof_after, buf).await
+        }
+    }
+
+    impl SplitStream for ScriptedReadSplitStream {
+        type ReadHalf = ScriptedReadHalf;
+        type WriteHalf = SuccessfulWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            let Self { chunks, eof_after } = self;
+            Ok((ScriptedReadHalf { chunks, eof_after }, SuccessfulWriteHalf))
+        }
+    }
+
+    /// `CommandComplete` + `ReadyForQuery(status)`: one complete, request-
+    /// terminating response batch as the decoder groups it.
+    fn completed_response_batch(status: u8) -> Vec<u8> {
+        let mut batch = vec![b'C'];
+        batch.extend_from_slice(&13u32.to_be_bytes());
+        batch.extend_from_slice(b"SELECT 1\0");
+        batch.extend_from_slice(&[b'Z', 0, 0, 0, 5, status]);
+        batch
     }
 
     impl AsyncRead for ObservedSocket {
@@ -2909,6 +3113,112 @@ mod tests {
             read_terminal_rx.try_recv().is_err(),
             "ordinary EOF leaked onto the ReadTimeout priority channel"
         );
+    }
+
+    /// Drive `run_multiplexed` over one request whose complete response the
+    /// reader decodes and queues, then fails. Returns the status byte the
+    /// consumer's waker saw at delivery, plus the loop's own result.
+    ///
+    /// `eof_after_delivery` chooses WHEN the reader's terminal EOF lands:
+    /// `false` reports it the moment the script runs out (before the main loop
+    /// has dispatched the queued frame), `true` holds it until the frame has
+    /// been delivered. Nothing else differs between the two calls.
+    async fn status_seen_by_the_woken_consumer(eof_after_delivery: bool) -> (u8, Result<(), Error>) {
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+
+        let stream = BufStream::new(ScriptedReadSplitStream {
+            chunks: VecDeque::from([completed_response_batch(b'T')]),
+            eof_after: eof_after_delivery.then(|| Arc::clone(&recorder)),
+        });
+        let (read_half, write_half) = match stream.try_into_split() {
+            Ok(halves) => halves,
+            Err(_) => panic!("the scripted reader fixture did not split"),
+        };
+
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        assert!(
+            response_rx.poll_next_unpin(&mut context).is_pending(),
+            "the empty response channel was unexpectedly ready"
+        );
+
+        let (request_tx, request_rx) = mpsc::unbounded();
+        request_tx
+            .unbounded_send(Request {
+                messages: RequestMessages::Single(FrontendMessage::Raw(
+                    bytes::Bytes::from_static(b"scripted request"),
+                )),
+                sender: response_tx,
+                disposition: RequestDisposition::Awaited,
+                transaction_effect: TransactionEffect::MayChange,
+                prepare_cleanup: None,
+                statement: None,
+                observation: None,
+            })
+            .expect("queue the scripted request");
+
+        let result =
+            Connection::<ScriptedReadSplitStream, ScriptedReadSplitStream>::run_multiplexed(
+                read_half,
+                write_half,
+                Arc::default(),
+                request_rx,
+                None,
+                Arc::clone(&tx_status),
+                Arc::new(AtomicUsize::new(1)),
+                None,
+                None,
+                crate::live::LiveConnectionGuard::new(),
+            )
+            .await;
+
+        assert!(
+            recorder.observed.load(Ordering::Acquire),
+            "the response was never delivered to its consumer"
+        );
+        drop(request_tx);
+        (recorder.seen.load(Ordering::Acquire), result)
+    }
+
+    /// The reader publishes `READ_RETIRED_STATUS` the moment it fails, but its
+    /// failure travels behind the frames it decoded first. Dispatching one of
+    /// those frames must not overwrite the poison with the `ReadyForQuery` byte
+    /// it carries: until the connection task exits and closes the request
+    /// channel, that byte is the pool's ONLY synchronous eviction signal, and a
+    /// borrower woken by this very batch can release its entry before then.
+    #[compio::test]
+    async fn a_decoded_frame_does_not_un_poison_a_reader_that_already_failed() {
+        compio::time::timeout(Duration::from_secs(5), async {
+            let (seen, result) = status_seen_by_the_woken_consumer(false).await;
+            result.expect("the scripted EOF with no awaited response is a clean close");
+            assert_eq!(
+                seen, READ_RETIRED_STATUS,
+                "a ReadyForQuery decoded before the reader failed resurrected a retired session"
+            );
+        })
+        .await
+        .expect("reader un-poisoning test exceeded its watchdog");
+    }
+
+    /// One-variable control for the test above: the identical script, with the
+    /// reader's EOF held until after delivery. Nothing is retired at that
+    /// instant, so the consumer must see the real `ReadyForQuery` byte -- which
+    /// is also what proves the fix above pins the poison rather than freezing
+    /// the status byte outright.
+    #[compio::test]
+    async fn a_live_reader_still_publishes_the_transaction_status_it_read() {
+        compio::time::timeout(Duration::from_secs(5), async {
+            let (seen, result) = status_seen_by_the_woken_consumer(true).await;
+            result.expect("the scripted EOF with no awaited response is a clean close");
+            assert_eq!(
+                seen, b'T',
+                "the transaction status the server reported never reached the client"
+            );
+        })
+        .await
+        .expect("live-reader status control exceeded its watchdog");
     }
 
     #[compio::test]

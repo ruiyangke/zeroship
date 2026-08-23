@@ -410,6 +410,79 @@ async fn silence_mid_frame_trips_the_deadline_and_retires_the_session() {
     .expect("partial-frame timeout test exceeded its outer watchdog");
 }
 
+/// `COPY ... FROM STDIN` sent as an ordinary query, not through `copy_in`.
+///
+/// The server answers `CopyInResponse` and waits for copy data forever. No
+/// `CopyInReceiver` exists behind an ordinary query, so no byte will ever be
+/// sent: this is a permanent deadlock, and the read deadline is the only thing
+/// that can end it. The connection loop used to pause its read clock on any
+/// `CopyInResponse` -- keyed to what the server sent rather than to whether
+/// this driver had a producer -- and so hid exactly this stall.
+///
+/// ONE VARIABLE against `a_silent_server_trips_a_distinguishable_read_timeout`
+/// above: the peer sends `CopyInResponse` before falling silent instead of
+/// falling silent immediately. Same config, same query shape, same assertions.
+/// The pausing behaviour that this exercises stays correct for a real
+/// `copy_in`, which `copy_input_time_is_not_charged_as_server_read_silence` and
+/// `copy_done_starts_a_deadline_for_the_final_server_response` still pin.
+#[compio::test]
+async fn a_copy_in_response_to_a_producerless_query_still_spends_the_read_budget() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(|listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 118);
+            let query = expect_simple_query(&mut stream);
+            assert_eq!(query, b"COPY t FROM STDIN\0");
+
+            // CopyInResponse: textual overall format, zero columns. After this
+            // a real backend waits for CopyData that this request can never
+            // produce, so the silence below is the session's real state.
+            stream
+                .write_all(&backend_frame(b'G', &[0, 0, 0]))
+                .expect("write CopyInResponse");
+            stream.flush().expect("flush CopyInResponse");
+            expect_disconnect(&mut stream);
+        });
+
+        let (client, connection) = stub_config(server.addr)
+            .connect(NoTls)
+            .await
+            .expect("connect to producerless-COPY peer");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+        let started = Instant::now();
+
+        // The query itself fails fast on the unexpected frame; the subject is
+        // the CONNECTION it leaves behind, which owes a ReadyForQuery that is
+        // never coming.
+        let _ = compio::time::timeout(
+            Duration::from_secs(2),
+            client.simple_query("COPY t FROM STDIN"),
+        )
+        .await
+        .expect("producerless COPY query exceeded its outer watchdog")
+        .expect_err("the driver accepted a CopyInResponse for an ordinary query");
+
+        let driver_error = compio::time::timeout(Duration::from_secs(2), driver)
+            .await
+            .expect("producerless COPY driver exceeded its outer watchdog")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .expect_err("the deadlocked producerless COPY session ended cleanly");
+        assert!(
+            driver_error.is_read_timeout(),
+            "a CopyInResponse no producer will answer disarmed the read deadline: {driver_error:?}"
+        );
+        assert!(client.is_closed(), "deadlocked client remained usable");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the configured read deadline did not bound the producerless COPY stall"
+        );
+        drop(client);
+        server.finish();
+    })
+    .await
+    .expect("producerless COPY read-timeout test exceeded its outer watchdog");
+}
+
 #[compio::test]
 async fn an_idle_connection_does_not_spend_the_read_budget() {
     compio::time::timeout(ASYNC_WATCHDOG, async {
