@@ -2341,4 +2341,71 @@ mod tests {
         validate_tls_connector_parameters::<crate::Socket, _>(&connector, Encryption::Tls, &strong)
             .expect_err("a connector built for sslmode=require must not serve verify-full");
     }
+    /// `channel_binding=require` refuses a server that never offers
+    /// SCRAM-SHA-256-PLUS, and says SO.
+    ///
+    /// Two separate guards reject a channel-binding downgrade: the server not
+    /// advertising the PLUS mechanism, and the TLS backend being unable to
+    /// export `tls-server-end-point`. `tests/tls_live.rs`'s
+    /// `channel_binding_require_fails_without_tls` reaches this code, but its
+    /// assertion is `contains("channel binding")` -- which BOTH refusals
+    /// satisfy. Over plaintext the second guard fires too, so deleting the
+    /// first one leaves that test green and the server-side downgrade
+    /// unguarded.
+    ///
+    /// This peer advertises ONLY `SCRAM-SHA-256`, which is what a server
+    /// performing the downgrade looks like, and the assertion names the
+    /// mechanism so the two arms cannot be confused.
+    #[compio::test]
+    async fn channel_binding_require_refuses_a_server_that_omits_scram_plus() {
+        // AuthenticationSASL: int32(10) then NUL-terminated mechanism names,
+        // the list itself terminated by a final NUL. Only the non-PLUS
+        // mechanism is offered.
+        let mut body = Vec::new();
+        body.extend_from_slice(&10i32.to_be_bytes());
+        body.extend_from_slice(b"SCRAM-SHA-256\0");
+        body.push(0);
+
+        let (stream, _) = scripted_server_after_startup(Some(frame(b'R', &body))).await;
+        let mut config = scram_config();
+        config.channel_binding(crate::config::ChannelBinding::Require);
+
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("channel_binding=require accepted a server without SCRAM-SHA-256-PLUS"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("SCRAM-SHA-256-PLUS"),
+            "the refusal must name the mechanism the server failed to offer, \
+             so it cannot be confused with the backend-support refusal: {chain}"
+        );
+    }
+
+    /// One variable away: the same peer is ACCEPTED when channel binding is
+    /// only preferred, so the refusal above belongs to the setting and not to
+    /// the mechanism list.
+    ///
+    /// `prefer` proceeds to the SCRAM exchange, which this stub does not
+    /// continue, so the connection still fails -- but it must fail SOMEWHERE
+    /// ELSE, and never by naming SCRAM-SHA-256-PLUS.
+    #[compio::test]
+    async fn channel_binding_prefer_does_not_refuse_a_server_without_scram_plus() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&10i32.to_be_bytes());
+        body.extend_from_slice(b"SCRAM-SHA-256\0");
+        body.push(0);
+
+        let (stream, _) = scripted_server_after_startup(Some(frame(b'R', &body))).await;
+        let mut config = scram_config();
+        config.channel_binding(crate::config::ChannelBinding::Prefer);
+
+        if let Err(error) = config.connect_raw(stream, NoTls).await {
+            let chain = authentication_error_chain(error);
+            assert!(
+                !chain.contains("SCRAM-SHA-256-PLUS"),
+                "prefer must not raise the channel-binding downgrade refusal: {chain}"
+            );
+        }
+    }
 }

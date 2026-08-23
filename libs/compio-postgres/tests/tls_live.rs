@@ -689,7 +689,15 @@ async fn channel_binding_require_fails_without_tls() {
     .await
     .expect_err("channel_binding=require must not succeed over plaintext");
     let text = describe(&err);
-    assert!(text.contains("channel binding"), "unexpected error: {text}");
+    // Names the ARM, not just the topic. Over plaintext the server never
+    // advertises SCRAM-SHA-256-PLUS, so the server-side downgrade guard is the
+    // one that must fire. Asserting only "channel binding" cannot tell it from
+    // the backend-support guard, and that guard also fires here -- so the weaker
+    // assertion stayed green even with the first guard deleted entirely.
+    assert!(
+        text.contains("SCRAM-SHA-256-PLUS"),
+        "expected the omitted-mechanism refusal, got: {text}"
+    );
 }
 
 // ---------------------------------------------------------------------------
