@@ -3565,15 +3565,26 @@ mod tests {
             assert!(split_attempted.get(), "test did not enter serialized loop");
 
             drop(client);
-            driver
+            let driver_outcome = driver
                 .await
-                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-                .expect("serialized COPY driver failed");
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+
+            // THE PEER IS JUDGED FIRST, and the order is load-bearing. If the
+            // peer thread fails one of its own assertions it unwinds and drops
+            // its socket, so the driver reads EOF and reports "connection
+            // closed by server" -- the SYMPTOM. Asserting on the driver first
+            // therefore hides every peer-side cause behind one misleading
+            // message, which is what an intermittent failure of this test
+            // looked like on 2026-08-23.
+            //
+            // The driver still has to be awaited before this: the peer's drain
+            // loop only ends when the client's socket closes.
             peer_done
                 .recv_timeout(Duration::from_secs(2))
                 .expect("serialized COPY peer did not observe close");
             peer.join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            driver_outcome.expect("serialized COPY driver failed");
         })
         .await
         .expect("serialized COPY deadline test exceeded its watchdog");
