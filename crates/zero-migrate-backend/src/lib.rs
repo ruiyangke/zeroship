@@ -71,29 +71,39 @@
 //! backend contract supplies every vendor-specific spelling and catalog-normalization
 //! fact those algorithms consume.
 //!
-//! # `MigrationBackend` is not here YET, and the three blockers are measured
+//! # `MigrationBackend` is here, and what it took to get it here
 //!
-//! The apply/rollback seam itself is still
-//! `zero_migrate::apply::backend::MigrationBackend`. Its vocabulary has come down —
-//! [`conn::ExecutorConfig`], [`backend`], [`baseline`], [`requirements`], the three
-//! structured [`step`] operations — but three of its signatures still name the
-//! engine, and each is a DIFFERENT kind of obstacle:
+//! [`backend::MigrationBackend`] is the apply/rollback seam: session I/O, the
+//! per-migration confined apply, journal row I/O, parse-time non-txn validation,
+//! drift introspection, preconditions, and the structured operations. It could not
+//! be routed through [`registry::VendorSet`] like the renderer traits — it has an
+//! associated type, thirty-odd `async fn`, and borrows its session, so it is not
+//! dyn-compatible — which is why it had to physically move rather than be resolved
+//! dynamically.
 //!
-//! * `rebuild_one` and `rollback_plan_transactional` take
-//!   `render::plan::TableRebuildSpec` and `render::step::PlanStep`. `PlanStep`
-//!   reaches `TableRebuildSpec` through `RenameStep::TableRebuild`, and that spec's
-//!   `sequence_policy` field is typed `zero_migrate_sqlite::SqliteSequencePolicy`.
-//!   A VENDOR type cannot come down into the crate the vendors sit above, so this
-//!   one is not a size problem at all — it is a direction problem, and it needs a
-//!   decision about that field rather than a bigger move.
-//! * `shadow()` returns `Option<&dyn ShadowDryRun>`, whose
-//!   `dry_run_declarative` takes `engine::DeclarativeDeployPlan` and
-//!   `render::declarative::DesiredSchema`, and whose `SeedError` carries
-//!   `engine::EngineError`. These are ORCHESTRATION RESULTS — the engine's
-//!   `MigrationPlan`, its `ResolvedInject`, its whole error enum over
-//!   `plan::pending` and `ManifestError`. Moving them would move the engine.
-//! * Nothing else. Every other type named anywhere in the trait is already at or
-//!   below this crate.
+//! Three obstacles held it, and only one of them was about size:
+//!
+//! * **A direction error.** `TableRebuildSpec::sequence_policy` was typed
+//!   `zero_migrate_sqlite::SqliteSequencePolicy` — a VENDOR type, in the shared
+//!   plan vocabulary, in a crate the vendors sit above. `PlanStep` reaches it
+//!   through `RenameStep::TableRebuild`, so one field stranded
+//!   `TableRebuildSpec`, `TableRebuild`, `RenameStep` and `PlanStep` together. The
+//!   field carries a neutral [`table_rebuild::SequenceHighWaterPolicy`] now and the
+//!   vendor converts at its own boundary.
+//! * **A capability nobody had.** `MigrationBackend::shadow()` returned
+//!   `Option<&dyn ShadowDryRun>` and all three backends answered `None`, so the
+//!   seam asked every vendor to declare a harness none of them had — while
+//!   `ShadowDryRun::dry_run_declarative` names the engine's `DeclarativeDeployPlan`
+//!   and `DesiredSchema`. The harness is a parameter to the engine's `dry_run` now.
+//! * **An error variant nobody built.** `SeedError` dragged the engine's whole
+//!   `EngineError` into the dry-run capability's signature for two variants that
+//!   had zero constructors workspace-wide. Deleted.
+//!
+//! What deliberately did NOT come down: `EngineError`, `DeclarativeDeployPlan` and
+//! `DesiredSchema`. Those are ORCHESTRATION RESULTS — what the engine DECIDED,
+//! built on its `MigrationPlan`, its `ResolvedInject`, and an error enum over
+//! `plan::pending` and `ManifestError`. Moving them would move the engine, so
+//! `ShadowDryRun` stays above and is handed in rather than declared.
 
 pub mod advisory;
 // The caller's approval decision. Named by `OnlineSchemaChange::run_online` and by
@@ -104,12 +114,13 @@ pub mod approval;
 // Pure data for large-table backfill plan steps: the `BackfillSpec` a vendor's
 // backfill executor is handed, its cursor contract and its checksum. Depends on
 // `zero-migrate-ir` alone. The engine re-exports it at `zero_migrate::model::backfill`.
-// The neutral VALUES the `MigrationBackend` dialect seam's signatures name:
-// `PlaceholderStyle`, `JournalFuture`, `ProjectLockHolder`,
-// `ProjectLockAcquisition` and `PlanPreconditionVerdict`. The trait itself is
-// still in the engine — the rest of its signature reaches `render::step`,
-// `render::plan` and `engine`, which have not come down yet. The engine
-// re-exports these at `zero_migrate::apply::backend`.
+// THE APPLY/ROLLBACK SEAM: `MigrationBackend` itself, the `CrossDeployObligations`
+// capability, and the neutral values their signatures name (`PlaceholderStyle`,
+// `JournalFuture`, `ProjectLockHolder`, `ProjectLockAcquisition`,
+// `PlanPreconditionVerdict`). The three vendor IMPLEMENTATIONS are still in the
+// engine's `apply::backend::{postgres, mysql, sqlite}`; this is the trait they
+// implement, sitting below them so they can eventually leave. The engine
+// re-exports all of it at `zero_migrate::apply::backend`.
 pub mod backend;
 pub mod backfill;
 // The adoption path's dialect-neutral VOCABULARY: `BaselineOutcome` and the
@@ -118,12 +129,13 @@ pub mod backfill;
 // SQLite does the same through its actor, and MySQL refuses. The engine
 // re-exports it at `zero_migrate::apply::baseline`.
 pub mod baseline;
-// The two optional capability seams' shared vocabulary: the `OnlineIntent` an
-// online expand is handed and the `OnlineError` it refuses with, plus the shadow
-// dry-run's `ShadowConfig` input and its `DryRunReport`/`MigrationResult` output.
-// The `OnlineSchemaChange` and `ShadowDryRun` TRAITS are still in the engine —
-// their remaining arguments (`ExecutorConfig`, `DeclarativeDeployPlan`,
-// `DesiredSchema`) and `SeedError`'s `EngineError` have not come down.
+// The optional capabilities: `OnlineSchemaChange` in full, with the `OnlineIntent`
+// an expand is handed, the `OnlineError` it refuses with and the
+// `ExpandContractPlan` a rename lowers to; plus the shadow dry-run's neutral half
+// (`ShadowConfig` in, `DryRunReport`/`MigrationResult` out). `ShadowDryRun` itself
+// stays in the engine — `dry_run_declarative` names `DeclarativeDeployPlan` and
+// `DesiredSchema`, which are orchestration results — and the engine hands the
+// harness to its own `dry_run` rather than asking a backend to declare one.
 pub mod capability;
 // The per-run executor configuration: which project, which schema, which meta
 // schema, which timeout budgets, and the composed policy every executor-path
