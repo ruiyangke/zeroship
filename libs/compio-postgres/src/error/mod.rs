@@ -150,14 +150,15 @@ impl DbError {
                     })?);
                 }
                 b'R' => routine = Some(value.into_owned()),
-                b'V' => {
-                    parsed_severity = Some(Severity::from_str(&value).ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "`V` field contained an invalid value",
-                        )
-                    })?);
-                }
+                // An unrecognised level leaves this `None` rather than failing
+                // the whole message. `V` is a non-localized copy of `S` and its
+                // absence is already a supported state - it is `None` for every
+                // pre-9.6 server - so a level this table does not know is
+                // "unknown", not "malformed". Refusing here instead discarded a
+                // well-formed error's SQLSTATE and text and reported a parse
+                // failure in their place, while `S` carries the raw string
+                // either way.
+                b'V' => parsed_severity = Severity::from_str(&value),
                 _ => {}
             }
         }
@@ -668,5 +669,102 @@ impl Error {
             Kind::ReadTimeout,
             Some(Box::new(io::Error::new(io::ErrorKind::TimedOut, detail))),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+    use postgres_protocol::message::backend::Message;
+
+    /// Build a real `ErrorResponseBody` by framing `fields` and running the
+    /// protocol crate's own parser over it, rather than reaching into its
+    /// private storage. Each field is a type byte then a NUL-terminated value,
+    /// and a lone NUL ends the list.
+    fn error_response(fields: &[(u8, &str)]) -> ErrorResponseBody {
+        let mut body = BytesMut::new();
+        for (tag, value) in fields {
+            body.extend_from_slice(&[*tag]);
+            body.extend_from_slice(value.as_bytes());
+            body.extend_from_slice(b"\0");
+        }
+        body.extend_from_slice(b"\0");
+
+        let mut frame = BytesMut::new();
+        frame.extend_from_slice(b"E");
+        frame.extend_from_slice(&i32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        frame.extend_from_slice(&body);
+
+        match Message::parse(&mut frame)
+            .expect("frame a valid ErrorResponse")
+            .expect("a whole message")
+        {
+            Message::ErrorResponse(body) => body,
+            _ => panic!("expected an ErrorResponse"),
+        }
+    }
+
+    /// An unrecognised `V` must cost the SEVERITY, not the whole error.
+    ///
+    /// `V` is a non-localized copy of `S`, added in PostgreSQL 9.6, and this
+    /// type already models its absence: `parsed_severity` is an `Option` and is
+    /// `None` for every pre-9.6 server. Refusing the message outright on an
+    /// unknown value throws away the SQLSTATE and the text the caller needs and
+    /// hands them a parse error instead, while the raw severity string is right
+    /// there in `S` and is kept regardless.
+    ///
+    /// Reaching this needs a server that is not stock PostgreSQL -- a fork, a
+    /// proxy, or a future release that adds a level. Low severity; the point is
+    /// that the failure mode is losing a good error, which is worse than the
+    /// thing it guards against.
+    #[test]
+    fn an_unrecognised_severity_costs_the_severity_not_the_whole_error() {
+        let body = error_response(&[
+            (b'S', "ERROR"),
+            (b'C', "42P01"),
+            (b'M', "relation \"t\" does not exist"),
+            (b'V', "SOMETHING_NEW"),
+        ]);
+
+        let error = DbError::parse(&mut body.fields())
+            .expect("an unknown V must not discard a well-formed error");
+
+        assert_eq!(error.code().code(), "42P01");
+        assert_eq!(error.message(), "relation \"t\" does not exist");
+        assert_eq!(
+            error.severity(),
+            "ERROR",
+            "the raw S field is still carried"
+        );
+        assert_eq!(
+            error.parsed_severity(),
+            None,
+            "an unrecognised level is unknown, not fatal"
+        );
+    }
+
+    /// One variable away: a level the table DOES know must still parse, or the
+    /// arm above could be satisfied by never parsing severity at all.
+    #[test]
+    fn a_recognised_severity_is_still_parsed() {
+        let body = error_response(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "terminating connection"),
+            (b'V', "FATAL"),
+        ]);
+
+        let error = DbError::parse(&mut body.fields()).expect("a well-formed error");
+        assert_eq!(error.parsed_severity(), Some(Severity::Fatal));
+    }
+
+    /// The fields the protocol makes mandatory are still mandatory: dropping
+    /// the guard on `V` must not read as "accept anything".
+    #[test]
+    fn a_missing_mandatory_field_is_still_refused() {
+        // No `C`.
+        let body = error_response(&[(b'S', "ERROR"), (b'M', "no sqlstate here")]);
+        DbError::parse(&mut body.fields()).expect_err("`C` is mandatory");
     }
 }

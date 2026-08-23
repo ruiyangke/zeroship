@@ -480,6 +480,28 @@ where
         // is nothing left to refuse. The claim still has to happen, because a
         // connection whose `identify_system` was dropped must not go on to
         // start streaming on a stream that is mid-frame.
+        // Refused HERE, before a command goes out, because the two parsers
+        // involved disagree. The replication grammar accepts an LSN half wider
+        // than 32 bits -- `0/100000000` reaches the slot lookup rather than
+        // failing on the LSN -- while `'0/100000000'::pg_lsn` is refused as
+        // invalid input. So the server can accept a position this driver's
+        // u32-per-half representation cannot hold. This used to be
+        // `parse_lsn(..).unwrap_or(0)` at the point the stream was built, and
+        // 0 is not a neutral default for an LSN: it is the start of WAL. The
+        // server would stream from wherever it read the oversized value while
+        // the tracker reported 0, so every standby status update acknowledged
+        // a position the stream had never reached, silently.
+        let start_lsn = parse_lsn(opts.start_lsn).ok_or_else(|| {
+            Error::config(
+                format!(
+                    "start_lsn {:?} is not an LSN this driver can represent; each half must fit \
+                     in 32 bits, as `pg_lsn` requires",
+                    opts.start_lsn
+                )
+                .into(),
+            )
+        })?;
+
         self.in_flight.enter()?;
         self.stream.begin_read_response();
 
@@ -516,7 +538,7 @@ where
                     self.stream.finish_read_response();
                     return Ok(ReplicationStream {
                         stream: self.stream,
-                        lsn: LsnTracker::new(parse_lsn(opts.start_lsn).unwrap_or(0)),
+                        lsn: LsnTracker::new(start_lsn),
                         in_flight: InFlight::default(),
                         release: self.release,
                     });
