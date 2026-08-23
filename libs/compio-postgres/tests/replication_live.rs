@@ -853,3 +853,118 @@ async fn a_mid_frame_replication_stall_times_out_and_poisons_the_stream() {
     .await
     .expect("mid-frame replication timeout test exceeded its outer watchdog");
 }
+
+/// An out-of-range `start_lsn` must be REFUSED, not silently replaced by 0.
+///
+/// MEASURED against the test server on 2026-08-23, because the two parsers
+/// involved disagree and neither is obvious. `START_REPLICATION ... LOGICAL
+/// 0/100000000` -- nine hex digits in the low half -- is ACCEPTED by the
+/// replication grammar: the command reaches the slot lookup and fails with
+/// `replication slot "..." does not exist`, i.e. never on the LSN. But
+/// `SELECT '0/100000000'::pg_lsn` is REFUSED with `invalid input syntax for
+/// type pg_lsn`. So a server accepts a value that does not fit this driver's
+/// u32-per-half representation.
+///
+/// `parse_lsn` returns `None` there, and the call site paired that with
+/// `unwrap_or(0)`. Zero is not a neutral default for an LSN -- it is the start
+/// of WAL. The server would have begun streaming from wherever it read the
+/// oversized value while `LsnTracker` reported position 0, so every standby
+/// status update afterwards acknowledged a position the stream had never been
+/// at, and nothing anywhere reported a problem.
+///
+/// The refusal happens BEFORE the command is sent, so a start position this
+/// driver cannot track never starts a replication stream on the server.
+#[compio::test]
+async fn an_unrepresentable_start_lsn_is_refused_before_replication_starts() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            // No START_REPLICATION is expected: the driver must refuse the LSN
+            // without issuing a command. If it issues one anyway, this peer
+            // never answers and the watchdog fires -- a distinguishable
+            // failure from the assertion below.
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let error = replication
+            .start_logical_replication(StartReplicationOptions {
+                slot_name: "deadline_slot",
+                start_lsn: "0/100000000",
+                proto_version: 1,
+                publication_names: "deadline_publication",
+            })
+            .await
+            .err()
+            .expect("an LSN this driver cannot represent must not start a stream");
+
+        let rendered = format!("{error}");
+        let chain = std::iter::successors(std::error::Error::source(&error), |error| {
+            std::error::Error::source(*error)
+        })
+        .map(|cause| cause.to_string())
+        .collect::<Vec<_>>()
+        .join("; ");
+        assert!(
+            rendered.contains("start_lsn") || chain.contains("start_lsn"),
+            "the refusal must name start_lsn so the caller knows which value is \
+             wrong: {rendered} / {chain}"
+        );
+
+        server.finish();
+    })
+    .await
+    .expect("unrepresentable start_lsn test exceeded its outer watchdog");
+}
+
+/// One variable away: a well-formed LSN must still start a stream, or the
+/// refusal above could be satisfied by refusing every start_lsn.
+#[compio::test]
+async fn a_representable_start_lsn_still_starts_replication() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(
+                expect_simple_query(&mut stream),
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/16B3750 (\"proto_version\" '1', \"publication_names\" 'deadline_publication')\0"
+            );
+            send_copy_both(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            replication.start_logical_replication(StartReplicationOptions {
+                slot_name: "deadline_slot",
+                start_lsn: "0/16B3750",
+                proto_version: 1,
+                publication_names: "deadline_publication",
+            }),
+        )
+        .await
+        .expect("START_REPLICATION exceeded its watchdog")
+        .expect("a representable start_lsn must start a stream");
+
+        drop(stream);
+        server.finish();
+    })
+    .await
+    .expect("representable start_lsn test exceeded its outer watchdog");
+}
