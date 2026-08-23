@@ -3568,6 +3568,37 @@ mod tests {
             assert_eq!(sink.as_mut().finish().await.expect("finish COPY"), 0);
             assert!(split_attempted.get(), "test did not enter serialized loop");
 
+            // SETTLE THE SESSION BEFORE DROPPING THE CLIENT, and wait on that
+            // CONDITION rather than on any duration.
+            //
+            // `CopyInSink::finish` returns at `CommandComplete`, one frame
+            // BEFORE the `ReadyForQuery` that settles the session. The peer
+            // writes those two frames with separate `write_all` calls, so under
+            // load they routinely arrive as separate decoder batches and the
+            // COPY response is still queued and `Awaited` when the client drops.
+            // `crate::release` then shuts the socket down under the driver's
+            // parked Step D read, and Step D will not call an EOF with an
+            // awaited response a clean close - so `run` returns
+            // `UnexpectedEof`, "connection closed by server", for what is
+            // otherwise an ordinary shutdown. That is the whole of this test's
+            // intermittent failure, and it is NOT the read budget: a timed-out
+            // read reports `ReadTimeout`, not EOF, and the peer thread passes
+            // every one of its own assertions on a failing run.
+            //
+            // MEASURED 2026-08-23, 200 runs of this test alone at load 15.2
+            // against a concurrent workspace build: 14 failures, EVERY one with
+            // `transaction_status()` reading `None` at this point, and 0 of the
+            // 115 runs that reached `Some(Idle)` failed. Widening a budget would
+            // only have lowered the rate.
+            let settled_by = Instant::now() + Duration::from_secs(2);
+            while client.transaction_status() != Some(crate::TransactionStatus::Idle) {
+                assert!(
+                    Instant::now() < settled_by,
+                    "the COPY session never reached its trailing ReadyForQuery"
+                );
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+
             drop(client);
             let driver_outcome = driver
                 .await
