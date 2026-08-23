@@ -79,6 +79,7 @@ use postgres_protocol::message::frontend;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::future::poll_fn;
+use parking_lot::Mutex;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -351,7 +352,9 @@ fn finish_request_write(
 #[must_use = "connection does nothing unless run"]
 pub struct Connection<S, T> {
     stream: BufStream<MaybeTlsStream<S, T>>,
-    parameters: HashMap<String, String>,
+    /// Server runtime parameters, shared with the `Client` so a caller can read
+    /// them (`Client::parameter`). This task is the sole writer.
+    parameters: Arc<Mutex<HashMap<String, String>>>,
     receiver: mpsc::UnboundedReceiver<Request>,
     /// Async messages queued before the connection task started (notices
     /// captured during `read_info`). Delivered on the first iteration of
@@ -393,15 +396,20 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: AsyncRead + AsyncWrite + Unpin,
 {
+    /// `startup_parameters` are the `ParameterStatus` values captured during
+    /// the handshake; `parameters` is the map shared with the `Client`. They
+    /// arrive separately because the handshake runs before the `Client` exists.
     pub(crate) fn new(
         stream: BufStream<MaybeTlsStream<S, T>>,
         delayed_notices: VecDeque<Message>,
-        parameters: HashMap<String, String>,
+        startup_parameters: HashMap<String, String>,
+        parameters: Arc<Mutex<HashMap<String, String>>>,
         receiver: mpsc::UnboundedReceiver<Request>,
         tx_status: Arc<AtomicU8>,
         in_flight_requests: Arc<AtomicUsize>,
         drop_release: Option<crate::release::ConnectionDropRelease>,
     ) -> Connection<S, T> {
+        *parameters.lock() = startup_parameters;
         Connection {
             stream,
             parameters,
@@ -418,8 +426,13 @@ where
     }
 
     /// Returns the value of a runtime parameter for this connection.
-    pub fn parameter(&self, name: &str) -> Option<&str> {
-        self.parameters.get(name).map(|s| &**s)
+    ///
+    /// Prefer [`Client::parameter`](crate::Client::parameter): this half is
+    /// moved into a task by [`run`](Self::run) as soon as the session is
+    /// usable, so there is rarely anywhere to call this from.
+    #[must_use]
+    pub fn parameter(&self, name: &str) -> Option<String> {
+        self.parameters.lock().get(name).cloned()
     }
 
     /// Register a sink for asynchronous server->client messages (notices
@@ -605,7 +618,7 @@ where
     /// multiplexed loops route messages identically.
     fn handle_message(&mut self, message: BackendMessage) -> Result<(), Error> {
         Dispatch {
-            parameters: &mut self.parameters,
+            parameters: &self.parameters,
             responses: &mut self.responses,
             pending_responses: &mut self.pending_responses,
             async_sender: self.async_sender.as_ref(),
@@ -748,7 +761,10 @@ where
 /// never aliases the carried read future — that is what lets the read
 /// future stay alive across a `deliver_batch`/`handle_message` call.
 struct Dispatch<'a> {
-    parameters: &'a mut HashMap<String, String>,
+    /// Shared, not `&mut`: the map lives behind a `Mutex` so the `Client` can
+    /// read it, which also takes one borrow out of the disjointness argument
+    /// above.
+    parameters: &'a Mutex<HashMap<String, String>>,
     responses: &'a mut VecDeque<Response>,
     pending_responses: &'a mut VecDeque<PendingResponse>,
     async_sender: Option<&'a mpsc::UnboundedSender<AsyncMessage>>,
@@ -948,8 +964,14 @@ fn observe_response_batch(
 
 /// Route an async server message (notice / notification / parameter
 /// status update).
+///
+/// Takes the parameter map by shared reference and locks it only in the
+/// `ParameterStatus` arm: this runs inside the multiplexed loop, where the
+/// carried read future is alive, so a guard must not be held across an await
+/// (`clippy::await_holding_lock` is deny-level here). Nothing in this function
+/// awaits.
 fn route_async(
-    parameters: &mut HashMap<String, String>,
+    parameters: &Mutex<HashMap<String, String>>,
     async_sender: Option<&mpsc::UnboundedSender<AsyncMessage>>,
     msg: Message,
 ) -> Result<(), Error> {
@@ -979,10 +1001,9 @@ fn route_async(
             }
         }
         Message::ParameterStatus(body) => {
-            parameters.insert(
-                body.name().map_err(Error::parse)?.to_string(),
-                body.value().map_err(Error::parse)?.to_string(),
-            );
+            let name = body.name().map_err(Error::parse)?.to_string();
+            let value = body.value().map_err(Error::parse)?.to_string();
+            parameters.lock().insert(name, value);
         }
         _ => return Err(Error::unexpected_message()),
     }
@@ -1189,7 +1210,7 @@ async fn flush_with_read_draining<W>(
     write_half: &mut BufWriteHalf<W>,
     read_rx: &mut mpsc::Receiver<ReadEvent>,
     read_terminal_rx: &mut mpsc::UnboundedReceiver<Error>,
-    parameters: &mut HashMap<String, String>,
+    parameters: &Mutex<HashMap<String, String>>,
     responses: &mut VecDeque<Response>,
     pending_responses: &mut VecDeque<PendingResponse>,
     async_sender: Option<&mpsc::UnboundedSender<AsyncMessage>>,
@@ -1344,7 +1365,7 @@ where
         // Drain async messages captured during the handshake (e.g.
         // notices from `read_info`) before any socket I/O.
         while let Some(msg) = self.delayed_notices.pop_front() {
-            route_async(&mut self.parameters, self.async_sender.as_ref(), msg)?;
+            route_async(&self.parameters, self.async_sender.as_ref(), msg)?;
         }
 
         // Decompose so the stream can be consumed by the split; on the
@@ -1467,7 +1488,7 @@ where
     async fn run_multiplexed(
         read_half: BufReadHalf<<S as SplitStream>::ReadHalf>,
         mut write_half: BufWriteHalf<<S as SplitStream>::WriteHalf>,
-        mut parameters: HashMap<String, String>,
+        parameters: Arc<Mutex<HashMap<String, String>>>,
         mut receiver: mpsc::UnboundedReceiver<Request>,
         async_sender: Option<mpsc::UnboundedSender<AsyncMessage>>,
         tx_status: Arc<AtomicU8>,
@@ -1711,7 +1732,7 @@ where
                         acknowledgement,
                     }))) => {
                         let result = Dispatch {
-                            parameters: &mut parameters,
+                            parameters: &parameters,
                             responses: &mut responses,
                             pending_responses: &mut pending_responses,
                             async_sender: async_sender.as_ref(),
@@ -1797,7 +1818,7 @@ where
                                         &mut write_half,
                                         &mut read_rx,
                                         &mut read_terminal_rx,
-                                        &mut parameters,
+                                        &parameters,
                                         &mut responses,
                                         &mut pending_responses,
                                         async_sender.as_ref(),
@@ -1884,7 +1905,7 @@ where
                             &mut write_half,
                             &mut read_rx,
                             &mut read_terminal_rx,
-                            &mut parameters,
+                            &parameters,
                             &mut responses,
                             &mut pending_responses,
                             async_sender.as_ref(),
@@ -2614,7 +2635,7 @@ mod tests {
     #[test]
     fn transaction_neutral_ready_for_query_does_not_replace_session_status() {
         let (sender, _receiver) = mpsc::channel(1);
-        let mut parameters = HashMap::new();
+        let parameters = Mutex::new(HashMap::new());
         let mut responses = VecDeque::from([Response {
             sender,
             disposition: RequestDisposition::Housekeeping,
@@ -2629,7 +2650,7 @@ mod tests {
         let in_flight_requests = AtomicUsize::new(1);
 
         Dispatch {
-            parameters: &mut parameters,
+            parameters: &parameters,
             responses: &mut responses,
             pending_responses: &mut pending_responses,
             async_sender: None,
@@ -2674,6 +2695,7 @@ mod tests {
                 stream,
                 VecDeque::new(),
                 HashMap::new(),
+                Arc::default(),
                 request_rx,
                 Arc::new(AtomicU8::new(b'I')),
                 Arc::new(AtomicUsize::new(0)),
@@ -2754,7 +2776,7 @@ mod tests {
                 Connection::<WriteFailingSplitStream, WriteFailingSplitStream>::run_multiplexed(
                     read_half,
                     write_half,
-                    HashMap::new(),
+                    Arc::default(),
                     request_rx,
                     None,
                     Arc::new(AtomicU8::new(b'I')),
@@ -2826,7 +2848,7 @@ mod tests {
             let result = Connection::<TimeoutSplitStream, TimeoutSplitStream>::run_multiplexed(
                 read_half,
                 write_half,
-                HashMap::new(),
+                Arc::default(),
                 request_rx,
                 None,
                 Arc::clone(&tx_status),
