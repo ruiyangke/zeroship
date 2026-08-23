@@ -1361,11 +1361,34 @@ impl Pool {
         // now folds the check into its own return type, so there is no ordering
         // left to get wrong here.
         //
-        // Skipped when the client is already dirty: a ROLLBACK is queued and a
-        // second one would be pure noise on the wire.
-        if !entry.client.is_dirty()
-            && entry.client.transaction_status() != Some(TransactionStatus::Idle)
-        {
+        // `dirty` does NOT license skipping this, and until 2026-08-23 it did:
+        // `if !is_dirty() && status != Some(Idle)`. The flag means "a
+        // fire-and-forget command was queued and nobody observed its outcome",
+        // and NOTHING on the session clears it - not an awaited `query`, not an
+        // awaited `batch_execute`. Only the next checkout's barrier, or an
+        // explicit `Transaction::commit`/`rollback`, does. So the flag outlives
+        // the command it describes, and read here as "a ROLLBACK is already
+        // queued" it suppressed the rollback for a transaction opened AFTER
+        // that one: abandon a `Transaction`, then `batch_execute("BEGIN; INSERT
+        // ...")`, then release, and the next borrower inherited the open
+        // transaction and its uncommitted row. The checkout barrier then
+        // laundered the state rather than catching it - an empty `simple_query`
+        // succeeds inside a transaction, so it returned Ok and cleared `dirty`
+        // without ending anything.
+        //
+        // There is no cheap accurate version of that test. Restricting the skip
+        // to `transaction_status() == None` is not enough either: `None` only
+        // says some request is unsettled, never that the unsettled one is the
+        // ROLLBACK rather than a `BEGIN` a cancelled borrower left in flight
+        // behind it. So the correctness action is unconditional, and a
+        // heuristic flag no longer gets a veto over it. The cost is one
+        // redundant ROLLBACK frame on a session that is not provably idle -
+        // fire-and-forget, pipelined behind the one already queued, drained by
+        // the same checkout barrier, and answered with a `no transaction in
+        // progress` warning rather than an error. A session released while
+        // provably `Idle` - the overwhelmingly common case - still sends
+        // nothing.
+        if entry.client.transaction_status() != Some(TransactionStatus::Idle) {
             entry.client.__private_api_rollback(None);
         }
 
@@ -2387,8 +2410,9 @@ impl std::fmt::Debug for PooledClient<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codec::FrontendMessage;
     use crate::config::{SslMode, SslNegotiation};
-    use crate::connection::Request;
+    use crate::connection::{Request, RequestMessages};
     use futures_channel::mpsc;
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
@@ -2548,6 +2572,95 @@ mod tests {
         assert_eq!(pool.total_count(), 0, "read-retired entry kept its slot");
         assert_eq!(pool.active_count(), 0);
         assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
+    /// Drain a fake client's request channel and count the `ROLLBACK`
+    /// statements on it. Draining is deliberate: each call reports what was
+    /// queued since the previous one.
+    fn queued_rollbacks(receiver: &mut mpsc::UnboundedReceiver<Request>) -> usize {
+        let mut rollbacks = 0;
+        while let Ok(Some(request)) = receiver.try_next() {
+            if let RequestMessages::Single(FrontendMessage::Raw(bytes)) = &request.messages
+                && bytes.windows(b"ROLLBACK".len()).any(|w| w == b"ROLLBACK")
+            {
+                rollbacks += 1;
+            }
+        }
+        rollbacks
+    }
+
+    /// Release a session that is dirty from an ALREADY SETTLED command and
+    /// report how many `ROLLBACK`s the release queued.
+    ///
+    /// `settled_status` is the `ReadyForQuery` byte the borrower's next command
+    /// left behind, published the way the connection task publishes it.
+    fn release_rollbacks_after_settling_at(settled_status: u8) -> usize {
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 1, 1);
+        let (client, mut receiver) = fake_client(51);
+
+        // A borrower abandons a `Transaction`: `dirty` is set and one
+        // fire-and-forget ROLLBACK goes on the wire.
+        client.__private_api_rollback(None);
+        assert_eq!(
+            queued_rollbacks(&mut receiver),
+            1,
+            "fixture never queued the first ROLLBACK, so it cannot show a stale flag"
+        );
+
+        // The connection task consumes that ROLLBACK's ReadyForQuery and
+        // publishes the state the borrower's NEXT, awaited command left behind.
+        client
+            .tx_status_handle()
+            .store(settled_status, Ordering::Release);
+        client
+            .in_flight_requests_handle()
+            .store(0, Ordering::Release);
+        assert!(
+            client.is_dirty(),
+            "nothing clears `dirty` once its command settles, which is the whole defect"
+        );
+
+        let held = PooledClient {
+            entry: Some(PoolEntry::new(client, pool.config.max_lifetime)),
+            pool: &pool,
+        };
+        drop(held);
+        queued_rollbacks(&mut receiver)
+    }
+
+    /// A stale `dirty` flag must not veto the release rollback.
+    ///
+    /// The flag means "a fire-and-forget command was queued and nobody observed
+    /// its outcome", and nothing on the session clears it, so it outlives the
+    /// command it describes. Read at release as "a ROLLBACK is already queued",
+    /// it suppressed the rollback for a transaction opened AFTER that one and
+    /// the next borrower inherited it.
+    #[test]
+    fn a_stale_dirty_flag_does_not_veto_the_release_rollback() {
+        assert_eq!(
+            release_rollbacks_after_settling_at(b'T'),
+            1,
+            "a session released inside a transaction queued no ROLLBACK because an \
+             already-settled command had left `dirty` set"
+        );
+    }
+
+    /// One-variable control for the test above: same fixture, same stale flag,
+    /// settled status `I` instead of `T`. A provably idle session must still
+    /// send nothing, or the test above would pass on a pool that rolled back on
+    /// every release regardless of state - which is not the claim.
+    #[test]
+    fn a_stale_dirty_flag_on_an_idle_session_queues_no_release_rollback() {
+        assert_eq!(
+            release_rollbacks_after_settling_at(b'I'),
+            0,
+            "an idle session was rolled back on release"
+        );
     }
 
     fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
