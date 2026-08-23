@@ -637,6 +637,17 @@ impl RowStream {
     pub fn rows_affected(&self) -> Option<u64> {
         self.rows_affected
     }
+
+    /// The columns the statement will produce.
+    ///
+    /// Available BEFORE any row arrives, because it comes from the
+    /// `RowDescription` the Describe already returned. That is what lets a
+    /// caller rule on the shape of a result set that turns out to be empty --
+    /// see `Client::query_scalar`, which reported an arity error only when rows
+    /// happened to come back until this existed.
+    pub fn columns(&self) -> &[Column] {
+        self.statement.columns()
+    }
 }
 
 #[allow(dead_code)]

@@ -174,3 +174,105 @@ async fn row_stream_reports_affected_rows_only_after_exhaustion() {
     .await
     .expect("RowStream rows_affected claim exceeded its watchdog");
 }
+
+/// `query_scalar` rejects a multi-column query WHATEVER the row count.
+///
+/// Its arity check reads `rows.first()`, so it was decided by the DATA rather
+/// than by the statement: `SELECT 1, 2` errored, and `SELECT 1, 2 WHERE false`
+/// -- the same query, the same two columns -- returned `Ok(vec![])`. A caller
+/// whose test fixture happened to be empty got a green, and the error arrived
+/// once real rows existed. That is the worst shape for a wrong verdict: it
+/// hides in exactly the setup people write tests against.
+///
+/// The column count is a property of the RowDescription and is known before any
+/// row arrives, so both arms below are answerable without data.
+#[compio::test]
+async fn query_scalar_rejects_extra_columns_even_with_no_rows() {
+    compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+
+        let populated = client
+            .query_scalar::<i32, _>("SELECT 1, 2", &[])
+            .await
+            .expect_err("two columns cannot be one scalar");
+
+        let empty = client
+            .query_scalar::<i32, _>("SELECT 1, 2 WHERE false", &[])
+            .await;
+        assert!(
+            empty.is_err(),
+            "an empty result set hid the arity error the populated one reports \
+             ({populated}); the column count does not depend on the rows"
+        );
+
+        // The one-variable partner: a genuine single-column query must still
+        // work, or "reject extra columns" is satisfied by rejecting everything.
+        let ok: Vec<i32> = client
+            .query_scalar("SELECT g FROM generate_series(1, 3) g", &[])
+            .await
+            .expect("a single-column query is what this API is for");
+        assert_eq!(ok, vec![1, 2, 3]);
+
+        let none: Vec<i32> = client
+            .query_scalar("SELECT 1 WHERE false", &[])
+            .await
+            .expect("an empty single-column result is not an error");
+        assert!(none.is_empty());
+    })
+    .await
+    .expect("query_scalar arity test exceeded its watchdog");
+}
+
+/// `query_opt_scalar` rules on arity the same way, and for the same reason.
+///
+/// It read the column count off the returned row, so with no row there was
+/// nothing to read and a two-column query returning nothing was accepted. Both
+/// scalar helpers had this; neither had any test at all, which is how a public
+/// API keeps a data-dependent verdict.
+#[compio::test]
+async fn query_opt_scalar_rejects_extra_columns_even_with_no_rows() {
+    compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+
+        assert!(
+            client
+                .query_opt_scalar::<i32, _>("SELECT 1, 2", &[])
+                .await
+                .is_err(),
+            "two columns cannot be one scalar"
+        );
+        assert!(
+            client
+                .query_opt_scalar::<i32, _>("SELECT 1, 2 WHERE false", &[])
+                .await
+                .is_err(),
+            "an empty result set hid the arity error the populated one reports"
+        );
+
+        // One-variable partners: the shapes this API exists to serve.
+        assert_eq!(
+            client
+                .query_opt_scalar::<i32, _>("SELECT 7", &[])
+                .await
+                .expect("a single-column single-row query is what this is for"),
+            Some(7)
+        );
+        assert_eq!(
+            client
+                .query_opt_scalar::<i32, _>("SELECT 7 WHERE false", &[])
+                .await
+                .expect("no row is None, not an error"),
+            None
+        );
+        // And the row-count rule it inherits from query_opt is still enforced.
+        assert!(
+            client
+                .query_opt_scalar::<i32, _>("SELECT g FROM generate_series(1, 2) g", &[])
+                .await
+                .is_err(),
+            "query_opt_scalar must still refuse more than one row"
+        );
+    })
+    .await
+    .expect("query_opt_scalar arity test exceeded its watchdog");
+}
