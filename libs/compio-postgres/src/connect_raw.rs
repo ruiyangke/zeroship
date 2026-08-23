@@ -393,10 +393,11 @@ where
                 saw_command_complete = true;
             }
             Some(Message::ParameterStatus(body)) => {
-                parameters.insert(
+                record_parameter_status(
+                    parameters,
                     body.name().map_err(Error::parse)?.to_string(),
                     body.value().map_err(Error::parse)?.to_string(),
-                );
+                )?;
             }
             Some(Message::ReadyForQuery(_))
                 if saw_row_description && saw_command_complete =>
@@ -925,6 +926,39 @@ fn incomplete_authentication_exchange(config: &Config) -> Error {
     )
 }
 
+/// Fold one `ParameterStatus` from the handshake into `parameters`, refusing a
+/// text encoding this driver cannot decode.
+///
+/// THE HANDSHAKE IS THE DOOR THIS CHECK WAS MISSING FROM. `Config::param`
+/// refuses a `client_encoding` named in the connection string, and
+/// `connection::route_async` retires a session that changes it later, but a
+/// server was free to ANNOUNCE a different encoding during startup and be
+/// believed. Every string on that connection would then be decoded as UTF-8
+/// regardless -- and where the foreign bytes are themselves valid UTF-8, decoded
+/// silently as a different string.
+///
+/// Both `ParameterStatus` arms in this file route through here: the startup
+/// read and the `target_session_attrs` probe, which reads its own frames and
+/// would otherwise have been a fourth unguarded path.
+fn record_parameter_status(
+    parameters: &mut HashMap<String, String>,
+    name: String,
+    value: String,
+) -> Result<(), Error> {
+    if name.eq_ignore_ascii_case("client_encoding") && !crate::config::is_decodable_encoding(&value)
+    {
+        return Err(Error::config(
+            format!(
+                "server announced client_encoding {value} during startup; this \
+                 driver decodes text as UTF-8 and cannot read that encoding"
+            )
+            .into(),
+        ));
+    }
+    parameters.insert(name, value);
+    Ok(())
+}
+
 async fn read_info<S, T>(
     handshake: &mut Handshake<S, T>,
 ) -> Result<(i32, i32, HashMap<String, String>), Error>
@@ -943,10 +977,11 @@ where
                 secret_key = body.secret_key();
             }
             Some(Message::ParameterStatus(body)) => {
-                parameters.insert(
+                record_parameter_status(
+                    &mut parameters,
                     body.name().map_err(Error::parse)?.to_string(),
                     body.value().map_err(Error::parse)?.to_string(),
-                );
+                )?;
             }
             // NO `NoticeResponse` ARM HERE, and its absence is deliberate.
             // `Handshake::next` only yields what `read_backend` did not classify
@@ -1760,6 +1795,49 @@ mod tests {
     /// THE EXPECTED VALUE IS A LITERAL COMPUTED OUTSIDE THIS CRATE (`md5sum`
     /// over the two concatenations), not by calling the helper the driver
     /// calls. An oracle that shares the implementation under test cannot fail.
+    /// A server that announces an encoding this driver cannot decode is
+    /// refused DURING THE HANDSHAKE, before any row can be mis-decoded.
+    ///
+    /// `Config::param` already refused one named in the connection string and
+    /// `route_async` retires a session that changes it later; the startup
+    /// announcement was believed. Where the foreign bytes are themselves valid
+    /// UTF-8 the mis-decode is SILENT, which is why this is caught at the
+    /// protocol layer rather than left to the string decoder.
+    #[compio::test]
+    async fn a_startup_encoding_this_driver_cannot_decode_is_refused() {
+        let script = successful_handshake([frame(b'S', b"client_encoding\0LATIN1\0")]);
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+        let error = match scram_config().connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("a server announcing LATIN1 was accepted"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            chain.contains("client_encoding"),
+            "the refusal must name the setting that caused it: {chain}"
+        );
+    }
+
+    /// THE CONTROL, and it is not optional: PostgreSQL reports client_encoding
+    /// at startup on EVERY healthy connection, so "refuse when the server
+    /// announces client_encoding" would be satisfied by refusing everything.
+    /// Both accepted spellings are exercised -- `UNICODE` is libpq's alias for
+    /// UTF8, so dropping it would narrow the predicate silently.
+    #[compio::test]
+    async fn a_startup_encoding_the_driver_can_decode_is_accepted() {
+        for spelling in ["UTF8", "utf-8", "UNICODE"] {
+            let announcement = format!("client_encoding\0{spelling}\0");
+            let script = successful_handshake([frame(b'S', announcement.as_bytes())]);
+            let (stream, _) = scripted_server_after_startup(Some(script)).await;
+            let (client, connection) = scram_config()
+                .connect_raw(stream, NoTls)
+                .await
+                .unwrap_or_else(|error| panic!("{spelling} must be accepted: {error}"));
+            drop(client);
+            drop(connection);
+        }
+    }
+
     #[compio::test]
     async fn the_md5_response_is_the_digest_postgresql_specifies() {
         let mut md5_request = 5i32.to_be_bytes().to_vec();

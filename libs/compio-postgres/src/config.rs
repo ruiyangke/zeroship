@@ -1432,8 +1432,7 @@ impl Config {
                 // other encoding is a request this driver cannot honour --
                 // refuse it rather than decode the server's bytes as something
                 // they are not.
-                let normalized = value.replace(['-', '_'], "").to_ascii_uppercase();
-                if !matches!(normalized.as_str(), "UTF8" | "UNICODE") {
+                if !is_decodable_encoding(value) {
                     return Err(Error::config_parse(Box::new(InvalidValue(
                         "client_encoding",
                     ))));
@@ -1952,6 +1951,28 @@ impl fmt::Display for InvalidValue {
 }
 
 impl error::Error for InvalidValue {}
+
+/// Whether `value` names the only text encoding this driver can decode.
+///
+/// ONE definition, called from all three places that have to rule on it: the
+/// connection string (`Config::param`), the startup `ParameterStatus` a server
+/// sends during the handshake (`connect_raw::read_info`), and a mid-session
+/// change (`connection::route_async`). The predicate was written out separately
+/// in the first two and MISSING ENTIRELY from the third until 2026-08-23, which
+/// is the shape this consolidation exists to prevent: a guard on one door and
+/// not its twin.
+///
+/// Rust strings are UTF-8. Any other encoding would be decoded as something it
+/// is not -- and, where the foreign bytes happen to be valid UTF-8, decoded
+/// SILENTLY as a different string. `UNICODE` is libpq's accepted alias for
+/// UTF8, and the separators are stripped because `utf-8` and `utf_8` name the
+/// same encoding.
+pub(crate) fn is_decodable_encoding(value: &str) -> bool {
+    matches!(
+        value.replace(['-', '_'], "").to_ascii_uppercase().as_str(),
+        "UTF8" | "UNICODE"
+    )
+}
 
 fn parse_ssl_protocol_version(
     parameter: &'static str,
