@@ -303,9 +303,22 @@ fn read_timeout_is_opt_in_connection_policy() {
         Some(&Duration::from_millis(250))
     );
 
+    // THE CONTROL FIRST. `is_err()` alone was the whole assertion here until
+    // 2026-08-23, and it is satisfied by any regression that stops this DSN
+    // parsing for any reason - the key under test need not be involved. So:
+    // the same string WITHOUT the key must parse, and the rejection must name
+    // the key.
+    "host=localhost"
+        .parse::<Config>()
+        .expect("the control DSN must parse, or the rejection below proves nothing");
+    let rejected = "host=localhost read_timeout=1"
+        .parse::<Config>()
+        .err()
+        .expect("programmatic read policy became a libpq-looking DSN parameter");
+    let cause = common::error_chain(&rejected);
     assert!(
-        "host=localhost read_timeout=1".parse::<Config>().is_err(),
-        "programmatic read policy became a libpq-looking DSN parameter"
+        cause.contains("unknown option") && cause.contains("read_timeout"),
+        "the DSN parser rejected the string for the wrong reason: {cause}"
     );
 }
 
