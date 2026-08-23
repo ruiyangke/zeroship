@@ -3944,38 +3944,13 @@ pub enum DeclarativeApplyError {
     Expand(#[from] OnlineError),
 }
 
-/// A failure from
-/// [`OnlineSchemaChange::run_online`](crate::apply::backend::OnlineSchemaChange::run_online).
-#[derive(Debug, thiserror::Error)]
-pub enum OnlineError {
-    /// The online expand needs explicit [`Approval::Approved`] (its backfill
-    /// mutates data). Nothing was applied.
-    #[error("online expand requires approval (the backfill mutates data) but none was given")]
-    Approval,
-    /// **Per-version approval scope (executor-layer defense in depth).** The
-    /// expand is approved ([`Approval::Approved`]) but the rename's PLAN-GROUP
-    /// version is NOT in the operator's reviewed
-    /// [`ApprovalScope::Versions`](crate::ApprovalScope::Versions) set — the
-    /// executor-layer mirror of the engine's EXPAND scope gate, so a direct
-    /// `run_online` / `run_expand_pg` caller cannot mirror data for a rename the
-    /// operator never individually reviewed. Nothing was applied.
-    #[error(
-        "online expand for version '{version}' is not in the approved version scope \
-         (per-version approval required)"
-    )]
-    ApprovalNotScoped {
-        /// The rename's PLAN-GROUP version the scope refused.
-        version: String,
-    },
-    /// Applying E1/E2 or the E3 backfill marker failed.
-    #[error(transparent)]
-    Apply(#[from] ApplyError),
-    /// The backfill step failed — E3 is NOT journaled, so the gate keeps the
-    /// expand incomplete (the contract stays blocked) and the backfill is
-    /// resumable on a re-run.
-    #[error(transparent)]
-    Backfill(#[from] crate::apply::backend::BackfillError),
-}
+/// The failure an online expand refuses with. It moved down to the backend
+/// contract, beside the `OnlineSchemaChange::run_online` signature that is its
+/// only producer, and it travelled alone: every arm it carries
+/// (`ApplyError`, `BackfillError`) was already there. Re-exported so
+/// `crate::engine::OnlineError` and `zero_migrate::engine::OnlineError` resolve
+/// unchanged.
+pub use zero_migrate_backend::capability::OnlineError;
 
 #[cfg(test)]
 mod tests {

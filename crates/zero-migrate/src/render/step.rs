@@ -3,7 +3,6 @@
 use zero_migrate_ir::dialect::DialectId;
 
 use crate::model::backfill::BackfillSpec;
-use crate::model::ir::AlterPrimaryKeyAction;
 use crate::model::migration::{Checksum, Migration, MigrationId};
 use crate::render::declarative::TableRebuild;
 use crate::render::expand_contract::{ExpandContractPlan, OnlineIntent};
@@ -64,86 +63,26 @@ pub enum RenameStep {
 /// MOVED to `zero-migrate-backend` and re-exported here. It is the currency of
 /// [`DmlRenderer::bind_bytes`](zero_migrate_backend::renderer::DmlRenderer::bind_bytes),
 /// so a vendor crate cannot implement the contract without naming it. It carries
-/// nothing but scalars, so it travelled alone; the rest of this module — which reaches
-/// `render::declarative`, `render::expand_contract` and `model::backfill` — stayed
-/// in the engine.
+/// nothing but scalars, so it travelled alone.
 pub use zero_migrate_backend::step::BindValue;
 
-/// One explicit primary-key lifecycle mutation.
+/// The three steps that stay STRUCTURED until apply, because each one must read
+/// the live catalog under the migration lock before it can spell its statement.
 ///
-/// Unlike ordinary rendered DDL, this remains structured until apply so the
-/// backend can verify the exact live primary key, identity facets, candidate
-/// uniqueness, and inbound foreign keys while it holds the migration lock.
-#[derive(Debug, Clone)]
-pub struct AlterPrimaryKeyStep {
-    /// Journal marker and approval metadata for this operation.
-    pub migration: Migration,
-    /// Effective target schema selected during lowering.
-    pub schema: String,
-    /// Bare target table name.
-    pub table: String,
-    /// Exact add/replace/drop contract authored in the IR.
-    pub action: AlterPrimaryKeyAction,
-}
-
-/// One column retype that the target dialect spells by RESTATING the column.
+/// MOVED to `zero-migrate-backend` and re-exported here. They are
+/// `MigrationBackend::{alter_primary_key, alter_column_type,
+/// synchronize_identity}` arguments, so a vendor crate cannot implement the
+/// contract without naming them. Each carries a [`Migration`], an
+/// `AlterPrimaryKeyAction` and `String`s, and nothing else.
 ///
-/// MySQL has no `ALTER COLUMN … TYPE`. It has `MODIFY COLUMN`, which takes the
-/// COMPLETE column definition and silently DISCARDS every facet the statement
-/// leaves out — measured in `tests/mysql_engine/mysql_setcolumntype_restate.rs`,
-/// where a bare `MODIFY COLUMN label varchar(128)` destroys the column's
-/// `NOT NULL`, its `DEFAULT`, its `COLLATE` and its `COMMENT` in one statement,
-/// with no warning.
-///
-/// So the statement cannot be written until the current definition is known, and
-/// the current definition is not in the op: `Op::SetColumnType` carries one field.
-/// This step stays STRUCTURED until apply for exactly the reason
-/// [`AlterPrimaryKeyStep`] does — the backend reads `SHOW CREATE TABLE` under the
-/// migration lock and restates the clause the server itself reports, so the answer
-/// cannot go stale between the read and the `ALTER`.
-///
-/// WHY NOT AT LOWER TIME, which would need no new step at all: the apply path DOES
-/// have the live column there ([`crate::LiveSchema::table_snapshots`] is populated
-/// from a real catalog read by `engine.rs` before it lowers). But
-/// `ColumnSnapshot` is a LOSSY projection of a MySQL column — the same test
-/// measures that `COLUMN_COMMENT` is never read, that `EXTRA` is read only for
-/// `auto_increment` / `DEFAULT_GENERATED` so `ON UPDATE CURRENT_TIMESTAMP` cannot
-/// be spelled, and that the generated-column facet is deliberately left `None`.
-/// Restating from it would drop those four facets SILENTLY, which is strictly
-/// worse than today's refusal.
-#[derive(Debug, Clone)]
-pub struct AlterColumnTypeStep {
-    /// Journal marker and approval metadata for this operation.
-    pub migration: Migration,
-    /// Effective target schema selected during lowering.
-    pub schema: String,
-    /// Bare target table name.
-    pub table: String,
-    /// Bare target column name.
-    pub column: String,
-    /// The dialect-rendered target type, exactly as the renderer spells it.
-    pub ddl_type: String,
-}
-
-/// One explicit import-time identity-generator reconciliation.
-///
-/// This remains structured until apply so the backend validates the live
-/// identity/sequence association and performs a monotonic comparison while the
-/// project migration lock is held. `writes_quiesced` is the operator's named
-/// assertion; it is audit/status metadata, not something the engine can prove.
-#[derive(Debug, Clone)]
-pub struct SynchronizeIdentityStep {
-    /// Journal marker and execution metadata for this operation.
-    pub migration: Migration,
-    /// Effective target schema selected during lowering.
-    pub schema: String,
-    /// Bare target table name.
-    pub table: String,
-    /// Bare identity column name.
-    pub column: String,
-    /// Named maintenance window or invariant asserted by the operator.
-    pub writes_quiesced: String,
-}
+/// What is left in this module is [`PlanStep`], [`RenameStep`] and
+/// [`DialectScope`], and only one thing holds them: `RenameStep::TableRebuild`
+/// carries [`TableRebuild`], whose [`TableRebuildSpec`](crate::render::plan::TableRebuildSpec)
+/// has a `sequence_policy` field typed `zero_migrate_sqlite::SqliteSequencePolicy`.
+/// A vendor type cannot come DOWN into the crate the vendors sit above.
+pub use zero_migrate_backend::step::{
+    AlterColumnTypeStep, AlterPrimaryKeyStep, SynchronizeIdentityStep,
+};
 
 /// What one step's rollback is known to achieve, as distinct from whether it
 /// has reversing SQL at all. See [`PlanStep::reversibility`].

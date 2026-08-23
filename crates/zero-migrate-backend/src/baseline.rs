@@ -1,14 +1,17 @@
 //! Baseline an existing project DB (design "Baseline existing db", scenario
 //! 31) — the **adoption path**, and specifically its DIALECT-NEUTRAL vocabulary.
 //!
-//! [`BaselineOutcome`] and [`BaselineError`] are the
-//! [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
+//! [`BaselineOutcome`] and [`BaselineError`] are the `MigrationBackend::baseline_one`
 //! signature, so all three backends speak them. The IMPLEMENTATIONS do not live
-//! here and never could have: PostgreSQL's is
-//! [`postgres::baseline_sql`](crate::apply::backend::postgres), SQLite's is its own
-//! `journal_sql::baseline`, and MySQL refuses. What this module used to hold was
-//! PostgreSQL's body reaching `postgres::journal_sql` by name, which made "core's
-//! baseline" and "PostgreSQL's baseline" the same code.
+//! here and never could have: PostgreSQL's is its `postgres::baseline_sql`,
+//! SQLite's is its own `journal_sql::baseline`, and MySQL refuses. What this module
+//! used to hold was PostgreSQL's body reaching `postgres::journal_sql` by name,
+//! which made "core's baseline" and "PostgreSQL's baseline" the same code.
+//!
+//! The vocabulary sits HERE, below every vendor, for the reason every other item in
+//! this crate does: a type a backend's signature names cannot live in the engine
+//! that already depends on every backend. The engine re-exports it at
+//! `zero_migrate::apply::baseline`.
 //!
 //! A project DB may already physically carry its schema (created outside the
 //! engine, or a legacy DB being adopted). `baseline` records a baseline
@@ -16,7 +19,7 @@
 //! the schema already exists, so re-running `CREATE TABLE …` would error. The
 //! baseline's `up` *documents* the current schema (a FRESH rebuild could run it),
 //! but on the existing DB it is recorded-not-run. Future migrations then apply on
-//! top normally ([`MigrationEngine::apply`](crate::engine::MigrationEngine::apply)).
+//! top normally (`MigrationEngine::apply`).
 //!
 //! # Safety
 //!
@@ -33,13 +36,13 @@
 //! - **Privileged.** Baseline is an operator/admin operation (not creator
 //! self-service): it runs as the ADMIN (it journals, which the migrator role has
 //! no grant for) under the project advisory lock, serialized against every other
-//! migration activity exactly like [`apply`](crate::engine::MigrationEngine::apply).
+//! migration activity exactly like `MigrationEngine::apply`.
 //! - **Append-only journal preserved.** The baseline event is an ordinary
 //! immutable `completed` row stamped `kind = 'baseline'`; nothing is updated or
 //! deleted.
 
-use crate::apply::journal::JournalError;
 use crate::guard::GuardError;
+use crate::journal::JournalError;
 
 /// What `baseline` did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,13 +63,13 @@ pub enum BaselineError {
     /// Taking or releasing the project lock failed.
     ///
     /// Carried as its own variant so baseline can route through the SAME
-    /// [`MigrationBackend::acquire_project_lock`](crate::apply::backend::MigrationBackend::acquire_project_lock)
+    /// `MigrationBackend::acquire_project_lock`
     /// every other acquire site uses. That seam compensates for a grant the engine
     /// recorded before failing the acquiring statement; inlining the raw advisory
     /// lock here would take the lock without the compensation, which is what it
     /// used to do.
     #[error(transparent)]
-    Lock(#[from] crate::apply::executor::ApplyError),
+    Lock(#[from] crate::executor::ApplyError),
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
@@ -112,12 +115,12 @@ pub enum BaselineError {
         existing: String,
     },
     /// A dialect-neutral backend failure from a NON-Postgres
-    /// [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
+    /// `MigrationBackend::baseline_one`
     /// impl (e.g. the SQLite actor). The Postgres impl never produces this arm —
     /// its errors flow through the typed [`Db`](Self::Db)/[`Journal`](Self::Journal)/
     /// guard/first-entry arms above; only an engine whose internals are not
     /// `compio_postgres`-typed maps its own error string into here, mirroring
-    /// [`ApplyError::Backend`](crate::apply::executor::ApplyError::Backend).
+    /// [`ApplyError::Backend`](crate::executor::ApplyError::Backend).
     #[error("baseline backend error: {0}")]
     Backend(String),
 }

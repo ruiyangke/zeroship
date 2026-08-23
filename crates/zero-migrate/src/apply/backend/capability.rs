@@ -1,18 +1,25 @@
 //! Optional backend capabilities shared by the generic apply orchestrator.
 
-use crate::apply::drift::{DriftError, StructuralDrift};
+use crate::apply::drift::DriftError;
 use crate::conn::{ConnectError, ExecutorConfig};
-use crate::engine::{DeclarativeDeployPlan, EngineError, OnlineError};
+use crate::engine::{DeclarativeDeployPlan, EngineError};
 use crate::model::migration::{Migration, MigrationId};
 use crate::render::declarative::{DeclarativeError, DesiredSchema};
 use crate::render::expand_contract::OnlineIntent;
-use zero_migrate_backend::advisory::Advisory;
 
 // ── What a backfill IS, what running one produces, and how one refuses: all four
 // now live with the backend contract, beside the `BackfillSpec` a vendor executor
 // is handed. Re-exported so `capability::{BackfillSpec, BackfillOutcome,
 // BackfillError}` still resolve.
 pub use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillSpec};
+// ── The two capability signatures' neutral halves: what an online expand is
+// handed and refuses with, and the shadow dry-run's config + report. All five
+// reached nothing above the backend contract, so they went down ahead of the
+// traits. Re-exported so `capability::{OnlineError, ShadowConfig, DryRunReport,
+// MigrationResult}` still resolve.
+pub use zero_migrate_backend::capability::{
+    DryRunReport, MigrationResult, OnlineError, ShadowConfig,
+};
 
 /// The online schema-change capability — the dialect-neutral seam the generic
 /// declarative apply path uses to drive a zero-downtime online operation.
@@ -38,43 +45,6 @@ pub trait OnlineSchemaChange {
                 > + 'a,
         >,
     >;
-}
-
-/// Where + how to provision a throwaway shadow database.
-#[derive(Debug, Clone)]
-pub struct ShadowConfig {
-    /// A DSN for an admin connection whose role has `CREATEDB`.
-    pub admin_dsn: String,
-    /// The prefix for the throwaway database name.
-    pub db_name_prefix: String,
-}
-
-/// The per-migration outcome of a dry-run apply.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationResult {
-    /// The migration's version (`mig_...`).
-    pub version: String,
-    /// Whether this migration's `up` applied cleanly on the shadow.
-    pub applied_ok: bool,
-    /// The error when `applied_ok == false`.
-    pub error: Option<String>,
-}
-
-/// The result of a dry-run.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DryRunReport {
-    /// Overall success.
-    pub ok: bool,
-    /// Per-migration outcome, in apply order.
-    pub per_migration: Vec<MigrationResult>,
-    /// Declarative resulting drift, if this was a declarative dry-run.
-    pub resulting_drift: Option<StructuralDrift>,
-    /// Operational advisories per migration version.
-    pub advisories: Vec<(String, Vec<Advisory>)>,
-    /// Whether the shadow DB + role teardown fully succeeded.
-    pub teardown_ok: bool,
-    /// The teardown failure message when `teardown_ok == false`.
-    pub teardown_error: Option<String>,
 }
 
 /// A failure of the dry-run harness itself.

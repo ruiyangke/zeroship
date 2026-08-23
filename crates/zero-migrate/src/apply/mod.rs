@@ -1,5 +1,9 @@
 pub mod backend;
-pub mod baseline;
+// The adoption path's dialect-neutral vocabulary moved down to the backend
+// contract, beside the `MigrationBackend::baseline_one` signature that is its
+// only reason to exist. Re-exported so every `crate::apply::baseline::…`
+// reference resolves unchanged.
+pub use zero_migrate_backend::baseline;
 pub mod drift;
 pub mod executor;
 // The journal's dialect-neutral vocabulary moved down to the backend contract,

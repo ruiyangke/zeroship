@@ -33,81 +33,15 @@ use crate::model::precondition::PreconditionCheck;
 use crate::render::backends::SqliteSequencePolicy;
 use crate::render::step::{DialectScope, PlanStep, StepReversibility};
 
-/// A database feature whose exact IR lowering has live target requirements.
-/// These are derived from the typed expression AST and carried on the complete
-/// [`AppliedPlan`] so apply can check them before any authored step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DatabaseFeature {
-    /// Exact RFC 9562 UUIDv4 database generation: PostgreSQL's core
-    /// `gen_random_uuid()` or the capability-gated MySQL synthesis.
-    UuidV4Generation,
-    /// Exact RFC 9562 UUIDv7 generation through PostgreSQL's core `uuidv7()`
-    /// function.
-    UuidV7Generation,
-    /// Enforced canonical UUID text checks on MySQL. MySQL parsed but ignored
-    /// `CHECK` constraints before 8.0.16.
-    UuidValidation,
-    /// Enforced canonical TypeID format checks on MySQL. MySQL parsed but
-    /// ignored `CHECK` constraints before 8.0.16.
-    TypeIdValidation,
-    /// Enforced canonical ULID format checks on MySQL. MySQL parsed but ignored
-    /// `CHECK` constraints before 8.0.16.
-    UlidValidation,
-}
-
-impl DatabaseFeature {
-    /// PostgreSQL's numeric server-version floor for this feature.
-    #[must_use]
-    pub const fn minimum_postgres_version_num(self) -> i32 {
-        match self {
-            Self::UuidV4Generation => 130_000,
-            Self::UuidV7Generation => 180_000,
-            // Collected only for MySQL plans; PostgreSQL has enforced CHECK
-            // constraints throughout the engine's supported version range.
-            Self::UuidValidation | Self::TypeIdValidation | Self::UlidValidation => 0,
-        }
-    }
-
-    /// Operator-facing feature description for a target-capability error.
-    #[must_use]
-    pub const fn description(self) -> &'static str {
-        match self {
-            Self::UuidV4Generation => "exact RFC 9562 UUIDv4 database generation",
-            Self::UuidV7Generation => "exact RFC 9562 UUIDv7 database generation",
-            Self::UuidValidation => "canonical UUID format validation",
-            Self::TypeIdValidation => "canonical TypeID format validation",
-            Self::UlidValidation => "canonical ULID format validation",
-        }
-    }
-}
-
-/// The deduplicated database capabilities one lowered plan requires.
-///
-/// Requirements are execution metadata, not migration identity: the originating
-/// expression nodes are already folded into the canonical IR checksum, while the
-/// connected server version is an apply-time fact.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DatabaseRequirements {
-    features: std::collections::BTreeSet<DatabaseFeature>,
-}
-
-impl DatabaseRequirements {
-    /// Add one required database feature. Repeated expressions deduplicate.
-    pub fn require(&mut self, feature: DatabaseFeature) {
-        self.features.insert(feature);
-    }
-
-    /// Whether this plan needs no version-gated database feature.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.features.is_empty()
-    }
-
-    /// Iterate required features in stable order.
-    pub fn iter(&self) -> impl Iterator<Item = DatabaseFeature> + '_ {
-        self.features.iter().copied()
-    }
-}
+// What a lowered plan needs the LIVE target to be able to do. Both types moved
+// down to the backend contract, beside the
+// `MigrationBackend::verify_database_requirements` signature that is the only
+// thing that ASKS the question; the engine only collects the answer while
+// lowering. They travelled alone — `DatabaseFeature` is a closed enum of
+// `&'static str` descriptions and version floors, and `DatabaseRequirements` is a
+// `BTreeSet` of it. Re-exported so `crate::render::plan::{DatabaseFeature,
+// DatabaseRequirements}` resolve unchanged.
+pub use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
 
 /// The fully-resolved specification for ONE table rebuild.
 #[derive(Debug, Clone)]

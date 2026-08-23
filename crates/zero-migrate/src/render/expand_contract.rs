@@ -67,23 +67,16 @@ use crate::model::backfill::BackfillSpec;
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId, OnlinePhase};
 use zero_migrate_ir::dialect::DialectId;
 
-/// A high-level online-migration intent the [`ExpandContractAuthor`] expands
-/// into an ordered, phased [`Migration`] sequence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OnlineIntent {
-    /// Rename column `from` → `to` (of type `ty`) on `table`, online, via the
-    /// canonical expand-contract dual-write sequence.
-    RenameColumn {
-        /// The table the column lives on (bare; project-schema-qualified on emit).
-        table: String,
-        /// The existing column name.
-        from: String,
-        /// The new column name.
-        to: String,
-        /// The Postgres type of the column (emitted verbatim for the new column).
-        ty: String,
-    },
-}
+/// The neutral online-migration INTENT this author expands into a phased
+/// [`Migration`] sequence.
+///
+/// MOVED to `zero-migrate-backend` and re-exported here. It is what
+/// `OnlineSchemaChange::run_online` is handed — the rename's MEANING rather than
+/// this module's PostgreSQL spelling of it — so a vendor crate cannot implement
+/// the capability without naming it. It carries four `String`s, so it travelled
+/// alone; the [`ExpandContractPlan`] that holds it stayed, because it also holds
+/// the authored `Migration` sequence and the `BackfillSpec`.
+pub use zero_migrate_backend::capability::OnlineIntent;
 
 /// A failure to author an online expand-contract sequence.
 ///

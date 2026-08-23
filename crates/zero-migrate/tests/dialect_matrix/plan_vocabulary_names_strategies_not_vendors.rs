@@ -59,8 +59,12 @@
 //!
 //! # What this does NOT catch
 //!
-//! It reads `render/step.rs` and `render/plan.rs` only, and within those, only
-//! `RenameStep`'s variants and column-zero `pub` type declarations. It is blind to
+//! It reads `render/step.rs`, `render/plan.rs` and the contract crate's
+//! `requirements.rs` only, and within those, only `RenameStep`'s variants and
+//! column-zero `pub` type declarations. It follows the vocabulary as it moves
+//! down into `zero-migrate-backend` — the scan is over a NAMED file list, so a
+//! type that leaves one of them without being added to another silently stops
+//! being scanned, and only the floor below would notice. It is blind to
 //! vendor names on FIELDS, on private types, on types declared elsewhere that are not
 //! reachable as a `RenameStep` payload, and to `apply/` — where `PostgresBackend`,
 //! `MysqlBackend` and `SqliteBackend` are correctly vendor-named because they ARE the
@@ -95,6 +99,16 @@
 fn the_lowered_plan_vocabulary_names_no_vendor() {
     const STEP_SRC: &str = include_str!("../../src/render/step.rs");
     const PLAN_SRC: &str = include_str!("../../src/render/plan.rs");
+    /// `DatabaseFeature` and `DatabaseRequirements` moved OUT of `render/plan.rs`
+    /// and into the backend contract crate, beside the
+    /// `MigrationBackend::verify_database_requirements` signature that asks the
+    /// question. The scan follows them: the rule reads "the shared vocabulary a
+    /// fourth backend implements against", and a type that has physically arrived
+    /// in the extracted contract crate is more squarely inside that rule than it
+    /// was in the engine, not less. The floor below is unchanged because nothing
+    /// left the vocabulary.
+    const REQUIREMENTS_SRC: &str =
+        include_str!("../../../zero-migrate-backend/src/requirements.rs");
 
     /// Vendor spellings as they appear inside a CamelCase identifier. `Pg` is listed
     /// separately from `Postgres` because both spellings are live in this crate.
@@ -139,19 +153,24 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
         }
     }
 
-    // (b) Every column-zero `pub` type in `render/plan.rs` — the execution-side plan
-    // vocabulary, all of it crate-root re-exported.
+    // (b) Every column-zero `pub` type in the execution-side plan vocabulary, all of
+    // it crate-root re-exported — wherever it now lives.
     let mut plan_types = 0usize;
-    for line in PLAN_SRC.lines() {
-        let Some(rest) = line
-            .strip_prefix("pub struct ")
-            .or_else(|| line.strip_prefix("pub enum "))
-        else {
-            continue;
-        };
-        let name = rest.split(['<', '(', ' ', '{']).next().unwrap_or(rest);
-        plan_types += 1;
-        scanned.push((name, "a `pub` type in `render/plan.rs`".to_string()));
+    for (src, file) in [
+        (PLAN_SRC, "render/plan.rs"),
+        (REQUIREMENTS_SRC, "zero-migrate-backend/src/requirements.rs"),
+    ] {
+        for line in src.lines() {
+            let Some(rest) = line
+                .strip_prefix("pub struct ")
+                .or_else(|| line.strip_prefix("pub enum "))
+            else {
+                continue;
+            };
+            let name = rest.split(['<', '(', ' ', '{']).next().unwrap_or(rest);
+            plan_types += 1;
+            scanned.push((name, format!("a `pub` type in `{file}`")));
+        }
     }
 
     let offenders: Vec<String> = scanned
@@ -186,8 +205,8 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
 
     assert!(
         arms >= 2 && plan_types >= 6,
-        "scanned {arms} `RenameStep` arm(s) and {plan_types} `pub` type(s) in \
-         render/plan.rs, expected at least 2 and 6\n\
+        "scanned {arms} `RenameStep` arm(s) and {plan_types} plan-vocabulary `pub` \
+         type(s), expected at least 2 and 6\n\
          \n\
          This is the boundary self-check on the scans above, and it fires in two very \
          different situations. Either a scan broke — the `pub enum RenameStep {{` \

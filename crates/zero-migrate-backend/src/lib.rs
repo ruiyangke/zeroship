@@ -78,7 +78,27 @@ pub mod approval;
 // Pure data for large-table backfill plan steps: the `BackfillSpec` a vendor's
 // backfill executor is handed, its cursor contract and its checksum. Depends on
 // `zero-migrate-ir` alone. The engine re-exports it at `zero_migrate::model::backfill`.
+// The neutral VALUES the `MigrationBackend` dialect seam's signatures name:
+// `PlaceholderStyle`, `JournalFuture`, `ProjectLockHolder`,
+// `ProjectLockAcquisition` and `PlanPreconditionVerdict`. The trait itself is
+// still in the engine — the rest of its signature reaches `render::step`,
+// `render::plan` and `engine`, which have not come down yet. The engine
+// re-exports these at `zero_migrate::apply::backend`.
+pub mod backend;
 pub mod backfill;
+// The adoption path's dialect-neutral VOCABULARY: `BaselineOutcome` and the
+// `BaselineError` set every `MigrationBackend::baseline_one` impl speaks. No
+// implementation comes with it — PostgreSQL journals a recorded-not-run row,
+// SQLite does the same through its actor, and MySQL refuses. The engine
+// re-exports it at `zero_migrate::apply::baseline`.
+pub mod baseline;
+// The two optional capability seams' shared vocabulary: the `OnlineIntent` an
+// online expand is handed and the `OnlineError` it refuses with, plus the shadow
+// dry-run's `ShadowConfig` input and its `DryRunReport`/`MigrationResult` output.
+// The `OnlineSchemaChange` and `ShadowDryRun` TRAITS are still in the engine —
+// their remaining arguments (`ExecutorConfig`, `DeclarativeDeployPlan`,
+// `DesiredSchema`) and `SeedError`'s `EngineError` have not come down.
+pub mod capability;
 pub mod ddl;
 pub mod descriptors;
 pub mod dml;
@@ -111,6 +131,11 @@ pub mod mask_codec;
 pub mod mask_meta;
 pub mod registry;
 pub mod renderer;
+// What a lowered plan needs the LIVE target to be able to do — the closed
+// `DatabaseFeature` set and the deduplicated `DatabaseRequirements` a backend's
+// `verify_database_requirements` is handed. The engine re-exports both at
+// `zero_migrate::render::plan`.
+pub mod requirements;
 pub mod schema;
 pub mod schema_error;
 pub mod snapshot;
