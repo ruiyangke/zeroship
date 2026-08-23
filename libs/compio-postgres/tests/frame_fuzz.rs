@@ -25,6 +25,21 @@
 //!
 //! The case count is deliberately modest so this stays inside a normal test run.
 //! It is a floor on coverage, not a soak: raise `CASES` locally to hunt.
+//!
+//! WHAT THE FRAME CORPUS REACHES, measured 2026-08-23 by printing every case's
+//! outcome. The handshake section below has carried such a measurement since it
+//! was written; this half had none, and "the generator reaches the driver" was
+//! being taken on the strength of the generator's source. It does: all 48 cases
+//! produce a driver error and none returns rows. 28 of them name the content -
+//! 11 distinct unknown message tags (13 cases), "invalid message length:
+//! expected buffer to be empty" (8), "unexpected message from server" (5),
+//! unexpected EOF (1). The other 20 report only "connection closed", which is
+//! the in-flight query's view after the CONNECTION TASK has taken the real
+//! error; the diagnosis exists, it is just not on the path the query sees.
+//! That is why the per-case assertions below are about termination and defined
+//! state rather than about error text: for 20 of 48 there is no error text to
+//! be about, and a test demanding one would be measuring which side of the
+//! channel won a race.
 
 use compio_postgres::config::SslMode;
 use compio_postgres::{Config, NoTls};
@@ -308,11 +323,18 @@ async fn generated_backend_frames_never_hang_or_panic_the_driver() {
 // corpus to print each outcome gave eight distinct error classes, and 23 of the
 // 48 reported "unexpected message from server" - that is
 // `Error::unexpected_message()`, the connect_raw cluster this file exists to
-// reach. The rest were unexpected EOF (16), two different length-validation
-// failures (4), an unknown authentication tag, and an unsupported
-// authentication method. No generated handshake ever completed successfully,
-// so this corpus bounds the FAILURE paths and says nothing about the success
-// path.
+// reach. Re-measured 2026-08-23, unchanged, and the full 48 are: unexpected
+// message (23); unexpected EOF under two different wordings, "error parsing
+// response from server" and "error communicating with the server" (8 each);
+// "failed to fill whole buffer" (3); two different length validations,
+// "expected buffer to be empty" (3) and "error fields is not drained" (1); an
+// unknown authentication tag (1); an unsupported authentication method,
+// Kerberos V5 (1). The enumeration here summed to 45 until that re-run, which
+// is how the "failed to fill whole buffer" class went unlisted for a week while
+// the class COUNT next to it said eight - the count was right and the list was
+// short, and only adding them up finds that. No generated handshake ever
+// completed successfully, so this corpus bounds the FAILURE paths and says
+// nothing about the success path.
 // ---------------------------------------------------------------------------
 
 /// Build a scripted answer to a startup packet. Shapes are drawn from what a

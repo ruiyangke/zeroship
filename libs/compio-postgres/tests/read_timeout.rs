@@ -303,9 +303,21 @@ fn read_timeout_is_opt_in_connection_policy() {
         Some(&Duration::from_millis(250))
     );
 
+    // THE CONTROL FIRST. `is_err()` alone was the whole assertion here until
+    // 2026-08-23, and it is satisfied by any regression that stops this DSN
+    // parsing for any reason - the key under test need not be involved. So:
+    // the same string WITHOUT the key must parse, and the rejection must name
+    // the key.
+    "host=localhost"
+        .parse::<Config>()
+        .expect("the control DSN must parse, or the rejection below proves nothing");
+    let rejected = "host=localhost read_timeout=1"
+        .parse::<Config>()
+        .expect_err("programmatic read policy became a libpq-looking DSN parameter");
+    let cause = common::error_chain(&rejected);
     assert!(
-        "host=localhost read_timeout=1".parse::<Config>().is_err(),
-        "programmatic read policy became a libpq-looking DSN parameter"
+        cause.contains("unknown option") && cause.contains("read_timeout"),
+        "the DSN parser rejected the string for the wrong reason: {cause}"
     );
 }
 
@@ -659,9 +671,27 @@ async fn backpressure_cannot_hide_retirement_from_the_pool() {
         assert_eq!(pool.idle_count(), 0, "poisoned session became idle");
         assert_eq!(pool.total_count(), 0, "poisoned session kept its slot");
         assert_eq!(pool.metrics.evictions.get(), 1);
-        // Retain the unpolled response through every pool assertion. Dropping
-        // it earlier would remove the backpressure this regression requires.
-        drop(retained);
+
+        // WHY IT CLOSED. The loop above waits for `is_closed()`, which is "some
+        // poisoning happened" rather than "the read deadline fired", so the
+        // discriminating evidence has to come from somewhere. It comes from the
+        // substitution: run this same peer through
+        // `stub_config_without_read_timeout` and the test fails at that loop
+        // with `Elapsed` (measured 2026-08-23). Nothing else here closes the
+        // client inside two seconds, so the clock under test is what did.
+        //
+        // THE CLASSIFICATION IS NOT AVAILABLE ON THIS PATH, which is worth
+        // stating because the obvious strengthening does not work. Collecting
+        // the retained response and asserting `is_read_timeout()` on it fails:
+        // it reports `connection closed`. The deadline is taken by the
+        // connection task, and a response already queued behind backpressure
+        // sees only the closure that follows -- the same split
+        // `a_silent_server_trips_a_distinguishable_read_timeout` handles by
+        // asserting on the driver handle, which a pooled entry does not expose.
+        // So the assertion here is that it terminates rather than completing.
+        retained.try_collect::<Vec<_>>().await.expect_err(
+            "the backpressured response completed even though its session was retired",
+        );
 
         compio::time::timeout(Duration::from_secs(2), pool.close())
             .await
@@ -718,7 +748,27 @@ async fn a_complete_backpressured_response_does_not_arm_an_idle_read() {
             !client.is_closed(),
             "read-ahead timed out after ReadyForQuery was already decoded"
         );
-        drop(retained);
+
+        // THE PREMISE, ASSERTED. This test's name says "backpressured", and
+        // that is not a property of the client -- it is a property of the
+        // peer's phased write producing batches the consumer never polled. The
+        // response was `drop`ped here uninspected until 2026-08-23, so nothing
+        // checked the premise: if the phasing had failed to produce them the
+        // test would silently collapse into
+        // `an_idle_connection_does_not_spend_the_read_budget`, which is already
+        // covered, and still pass. Collecting it proves the batches were really
+        // queued and that they were the complete, well-formed response the
+        // claim depends on: RowDescription, two DataRows, CommandComplete.
+        let queued = retained
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the completed response must still be readable after the idle window");
+        assert_eq!(
+            queued.len(),
+            4,
+            "expected T + D + D + C to have been queued behind the unpolled consumer, got {queued:?}"
+        );
+
         client
             .simple_query("")
             .await

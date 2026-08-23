@@ -102,18 +102,44 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
             // Borrower 1 opens a transaction with RAW SQL - no `Transaction`
             // guard is involved, which is the case that has no other protection,
             // and releases without committing.
-            {
+            let leaked_pid: i32 = {
                 let client = pool.get().await.expect("second checkout");
                 client
                     .batch_execute(&format!("BEGIN; INSERT INTO {relation} VALUES (1);"))
                     .await
                     .expect("open a raw transaction and write in it");
-            }
+                let rows = client
+                    .query("SELECT pg_backend_pid() AS pid", &[])
+                    .await
+                    .expect("read the backend pid inside the leaked transaction");
+                rows[0].get("pid")
+            };
 
             // Borrower 2 gets the same backend. If the transaction leaked it
             // sees its own uncommitted row and reports an assigned transaction
             // id.
             let client = pool.get().await.expect("third checkout");
+
+            // THE SAME BACKEND, ASSERTED. The comment above says `max_size(1)`
+            // guarantees this. It does not: evict-and-reconnect stays inside a
+            // pool of one, and a pool that threw the dirty connection away and
+            // dialled a fresh one would satisfy every assertion below while
+            // never rolling anything back. Without this the test cannot tell
+            // "the pool cleaned the leak" from "the pool replaced the
+            // connection", which is the whole claim. Its sibling
+            // `a_terminated_backend_is_not_handed_to_the_next_borrower` already
+            // asserts the negative of this; the two isolation tests did not.
+            let reused_pid: i32 = client
+                .query("SELECT pg_backend_pid() AS pid", &[])
+                .await
+                .expect("read the next borrower's backend pid")[0]
+                .get("pid");
+            assert_eq!(
+                reused_pid, leaked_pid,
+                "the pool replaced the dirty connection instead of cleaning it, so nothing \
+                 below is evidence that a raw BEGIN gets rolled back"
+            );
+
             let rows = client
                 .query(
                     &format!("SELECT count(*)::int8 AS n FROM {relation}"),
@@ -122,14 +148,20 @@ async fn a_raw_begin_does_not_leak_to_the_next_borrower() {
                 .await
                 .expect("count rows");
             let visible: i64 = rows[0].get("n");
+            // `.unwrap_or(false)` here until 2026-08-23, which made the probe's
+            // FAILURE value identical to its PASS value: a borrower handed a
+            // session inside an aborted transaction fails this query with
+            // 25P02, and the test read that as "not in a transaction" and
+            // passed. The fixture could not represent the difference it
+            // asserts. A probe that cannot run is a failed test, not a false.
             let in_transaction: bool = client
                 .query(
                     "SELECT (pg_current_xact_id_if_assigned() IS NOT NULL) AS b",
                     &[],
                 )
                 .await
-                .map(|r| r[0].get("b"))
-                .unwrap_or(false);
+                .expect("the transaction-state probe must run, not report false by failing")[0]
+                .get("b");
 
             assert_eq!(
                 visible, 0,
@@ -188,8 +220,13 @@ async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
     // Borrower 1 poisons the session: the divide-by-zero aborts the
     // transaction, and the release happens with the server still in that
     // state.
-    {
+    let poisoned_pid: i32 = {
         let client = pool.get().await.expect("first checkout");
+        let pid: i32 = client
+            .query("SELECT pg_backend_pid() AS pid", &[])
+            .await
+            .expect("read the backend pid before poisoning it")[0]
+            .get("pid");
         let err = client
             .batch_execute("BEGIN; SELECT 1/0;")
             .await
@@ -199,11 +236,34 @@ async fn an_aborted_transaction_does_not_leak_to_the_next_borrower() {
             Some("22012"),
             "expected division_by_zero to be what aborted the transaction"
         );
-    }
+        pid
+    };
 
     // Borrower 2 gets the same backend. An inherited aborted transaction
     // shows up as 25P02 on a statement that has nothing to do with the first.
     let client = pool.get().await.expect("second checkout");
+
+    // THE SAME BACKEND, ASSERTED, for the reason recorded on
+    // `a_raw_begin_does_not_leak_to_the_next_borrower`: `max_size(1)` does not
+    // make the next borrower the same session, and a pool that discarded the
+    // poisoned connection and dialled a fresh one would answer `SELECT 1`
+    // perfectly while never having rolled anything back.
+    let reused_pid: i32 = client
+        .query("SELECT pg_backend_pid() AS pid", &[])
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "the next borrower inherited an aborted transaction: {}",
+                common::error_chain(&e)
+            )
+        })[0]
+        .get("pid");
+    assert_eq!(
+        reused_pid, poisoned_pid,
+        "the pool replaced the poisoned connection instead of clearing it, so this test is \
+         not evidence that an aborted transaction gets rolled back on release"
+    );
+
     let rows = client
         .query("SELECT 1::int4 AS n", &[])
         .await
