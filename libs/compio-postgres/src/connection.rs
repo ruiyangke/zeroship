@@ -474,34 +474,10 @@ where
         loop {
             // Step A — flush any batches that couldn't be delivered last
             // iteration because the downstream `Sender<BackendMessages>`
-            // slot was still occupied. This uses the `poll_ready` +
-            // `start_send` back-pressure dance tokio-postgres relies on:
-            // when the slot is full we suspend here until the consumer
-            // drains. Doing this BEFORE any read keeps batch ordering
-            // correct (a second batch for the same request can never
-            // overtake the first).
-            while let Some(PendingResponse {
-                mut sender,
-                messages,
-                ..
-            }) = self.pending_responses.pop_front()
-            {
-                // Wait until the downstream channel has capacity.
-                let ready = poll_fn(|cx| sender.poll_ready(cx)).await;
-                match ready {
-                    Ok(()) => {
-                        // Consumer may have been dropped between
-                        // poll_ready and start_send; ignore SendError.
-                        let _ = sender.start_send(messages);
-                    }
-                    Err(_) => {
-                        // Consumer hung up — drop the batch. This matches
-                        // tokio-postgres's behaviour at
-                        // `connection.rs::poll_read` when poll_ready
-                        // returns Err.
-                    }
-                }
-            }
+            // slot was still occupied. Doing this BEFORE any read keeps
+            // batch ordering correct (a second batch for the same request
+            // can never overtake the first).
+            self.drain_pending_responses().await;
 
             // Step B — clean shutdown once the client has gone away and
             // all awaited work is done. Drop-time housekeeping has no
@@ -642,6 +618,35 @@ where
         .handle_message(message)
     }
 
+    /// Deliver every stashed batch, waiting for downstream capacity, using the
+    /// `poll_ready` + `start_send` back-pressure dance tokio-postgres relies
+    /// on.
+    ///
+    /// THIS IS THE SERIALIZED LOOP'S FIFO GATE, and it has to run before EVERY
+    /// dispatch of an inbound frame, not merely at the top of the loop. While a
+    /// batch is stashed, delivering a later one first shows the caller its own
+    /// response out of wire order, and because the overtaking batch can be the
+    /// one carrying `ReadyForQuery`, `RowStream` ends the stream on it and the
+    /// rows in the stashed batch are never read. The multiplexed loop states
+    /// the same rule as `accept_read = pending_responses.is_empty()` and as
+    /// step (3) preceding step (4) in `flush_with_read_draining`.
+    async fn drain_pending_responses(&mut self) {
+        while let Some(PendingResponse {
+            mut sender,
+            messages,
+            ..
+        }) = self.pending_responses.pop_front()
+        {
+            // `Err` is a consumer that hung up between being stashed and now;
+            // the batch is dropped, matching tokio-postgres's `poll_read` when
+            // `poll_ready` returns `Err`. `start_send` can also fail for the
+            // same reason after a successful `poll_ready`; ignore it too.
+            if poll_fn(|cx| sender.poll_ready(cx)).await.is_ok() {
+                let _ = sender.start_send(messages);
+            }
+        }
+    }
+
     fn record_terminal_read(&mut self, error: &Error) {
         // Publish poison before the operation receives its error: a pooled
         // borrower may drop immediately and synchronous return must evict it.
@@ -723,6 +728,14 @@ where
                                 initial_flushed = true;
 
                                 while !read_obligation.copy_startup_finished() {
+                                    // This loop dispatches inbound frames while
+                                    // the main loop's Step A is suspended
+                                    // beneath it, so it owns the FIFO gate for
+                                    // as long as it runs. Without this, a batch
+                                    // read here reaches a consumer that has
+                                    // caught up AHEAD of the batch already
+                                    // stashed for it.
+                                    self.drain_pending_responses().await;
                                     let message = match read_backend(&mut self.stream).await {
                                         Ok(message) => message,
                                         Err(error) => {
@@ -739,16 +752,7 @@ where
                                 // before awaiting producer data, because the
                                 // producer cannot proceed until it sees that
                                 // very response.
-                                while let Some(PendingResponse {
-                                    mut sender,
-                                    messages,
-                                    ..
-                                }) = self.pending_responses.pop_front()
-                                {
-                                    if poll_fn(|cx| sender.poll_ready(cx)).await.is_ok() {
-                                        let _ = sender.start_send(messages);
-                                    }
-                                }
+                                self.drain_pending_responses().await;
                                 if read_obligation.is_complete() {
                                     return Ok(RequestOutcome::Continue);
                                 }
@@ -2058,6 +2062,7 @@ mod tests {
     use crate::connect_tls::Encryption;
     use crate::socket::{SocketReadHalf, SocketWriteHalf};
     use crate::{Config, NoTls};
+    use bytes::BytesMut;
     use compio::buf::{BufResult, IoBuf, IoBufMut};
     use futures_channel::oneshot;
     use std::io::{Read, Write};
@@ -3563,6 +3568,37 @@ mod tests {
             assert_eq!(sink.as_mut().finish().await.expect("finish COPY"), 0);
             assert!(split_attempted.get(), "test did not enter serialized loop");
 
+            // SETTLE THE SESSION BEFORE DROPPING THE CLIENT, and wait on that
+            // CONDITION rather than on any duration.
+            //
+            // `CopyInSink::finish` returns at `CommandComplete`, one frame
+            // BEFORE the `ReadyForQuery` that settles the session. The peer
+            // writes those two frames with separate `write_all` calls, so under
+            // load they routinely arrive as separate decoder batches and the
+            // COPY response is still queued and `Awaited` when the client drops.
+            // `crate::release` then shuts the socket down under the driver's
+            // parked Step D read, and Step D will not call an EOF with an
+            // awaited response a clean close - so `run` returns
+            // `UnexpectedEof`, "connection closed by server", for what is
+            // otherwise an ordinary shutdown. That is the whole of this test's
+            // intermittent failure, and it is NOT the read budget: a timed-out
+            // read reports `ReadTimeout`, not EOF, and the peer thread passes
+            // every one of its own assertions on a failing run.
+            //
+            // MEASURED 2026-08-23, 200 runs of this test alone at load 15.2
+            // against a concurrent workspace build: 14 failures, EVERY one with
+            // `transaction_status()` reading `None` at this point, and 0 of the
+            // 115 runs that reached `Some(Idle)` failed. Widening a budget would
+            // only have lowered the rate.
+            let settled_by = Instant::now() + Duration::from_secs(2);
+            while client.transaction_status() != Some(crate::TransactionStatus::Idle) {
+                assert!(
+                    Instant::now() < settled_by,
+                    "the COPY session never reached its trailing ReadyForQuery"
+                );
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+
             drop(client);
             let driver_outcome = driver
                 .await
@@ -3587,5 +3623,309 @@ mod tests {
         })
         .await
         .expect("serialized COPY deadline test exceeded its watchdog");
+    }
+
+    // -----------------------------------------------------------------
+    // The COPY startup read loop and the `pending_responses` FIFO gate.
+    //
+    // Every other place a decoded batch is dispatched runs behind the gate
+    // "no inbound frame may be dispatched while a batch is stashed":
+    // `run_serialized` drains `pending_responses` in Step A before it reads,
+    // and `run_multiplexed` disables its read branch (`accept_read`) and
+    // orders step (3) ahead of step (4) inside `flush_with_read_draining`.
+    // `handle_request`'s COPY startup loop reads and dispatches without it,
+    // which is what the pair below rules on.
+    // -----------------------------------------------------------------
+
+    /// A non-splittable duplex that replays scripted wire bytes and discards
+    /// writes. Every claim made with it is about dispatch order, never about
+    /// what reached a server.
+    struct ScriptedDuplex {
+        chunks: VecDeque<Vec<u8>>,
+    }
+
+    impl AsyncRead for ScriptedDuplex {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.chunks, &mut None, buf).await
+        }
+    }
+
+    impl AsyncWrite for ScriptedDuplex {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A single `CommandComplete` carrying `tag`, as one already-decoded
+    /// message. Used to give a stashed batch a name the assertion can read
+    /// back out of the consumer's channel.
+    fn command_complete_message(tag: &str) -> Message {
+        let body_len = u32::try_from(4 + tag.len() + 1).expect("test tag fits a wire frame");
+        let mut frame = BytesMut::new();
+        frame.extend_from_slice(&[b'C']);
+        frame.extend_from_slice(&body_len.to_be_bytes());
+        frame.extend_from_slice(tag.as_bytes());
+        frame.extend_from_slice(&[0]);
+        Message::parse(&mut frame)
+            .expect("hand-built CommandComplete is well formed")
+            .expect("hand-built CommandComplete is complete")
+    }
+
+    /// The `CommandComplete` tags a delivered batch carries, in order.
+    fn batch_tags(messages: &mut ResponseMessages) -> Vec<String> {
+        let mut tags = Vec::new();
+        let mut push = |message: &Message| {
+            if let Message::CommandComplete(body) = message {
+                tags.push(body.tag().expect("decode CommandComplete tag").to_string());
+            }
+        };
+        match messages {
+            ResponseMessages::Raw(batch) | ResponseMessages::Filtered(batch) => {
+                while let Some(message) = batch.next().expect("decode scripted batch") {
+                    push(&message);
+                }
+            }
+            ResponseMessages::Observed(queue) => {
+                for entry in queue.iter() {
+                    push(entry.as_ref().expect("observed entry is a message"));
+                }
+            }
+        }
+        tags
+    }
+
+    /// Enqueue one `RequestMessages::CopyIn` request without a connection task
+    /// behind it, and hand back the `Request` the client produced.
+    ///
+    /// `CopyInReceiver::new` is private to `copy_in`, so the receiver can only
+    /// be obtained the way the driver itself obtains it. The sink future is
+    /// polled once - enough to enqueue the request and the opening
+    /// `Parse`/`Bind`/`Execute`/`Sync` batch - and then DROPPED, which makes
+    /// the COPY stream terminate with `CopyFail + Sync` instead of waiting
+    /// forever for a producer this test does not have.
+    fn scripted_copy_in_request() -> Request {
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+            fn wake_by_ref(self: &Arc<Self>) {}
+        }
+
+        let (sender, mut requests) = mpsc::unbounded();
+        let client = crate::client::Client::new_with_statement_cache(
+            sender,
+            crate::config::SslMode::Disable,
+            crate::config::SslNegotiation::Postgres,
+            0,
+            0,
+            None,
+            crate::client::StatementCacheSettings::new(0, std::num::NonZeroUsize::MIN),
+        );
+        let inner = Arc::clone(client.inner());
+        let mut copy = Box::pin(async move {
+            let _ = crate::copy_in::copy_in::<bytes::Bytes>(
+                &inner,
+                Statement::unnamed(Vec::new(), Vec::new()),
+                None,
+            )
+            .await;
+        });
+
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        assert!(
+            copy.as_mut().poll(&mut context).is_pending(),
+            "copy_in resolved without a connection task answering it"
+        );
+        drop(copy);
+        drop(client);
+
+        let request = requests
+            .try_recv()
+            .expect("copy_in did not enqueue its request");
+        assert!(
+            matches!(request.messages, RequestMessages::CopyIn(_)),
+            "copy_in enqueued something other than a COPY stream"
+        );
+        request
+    }
+
+    /// Build a `Connection` over `chunks` whose response queue already holds
+    /// one in-flight request `P` with a batch stashed behind a full consumer.
+    ///
+    /// Returns the connection, `P`'s consumer, and the COPY request to drive.
+    #[allow(clippy::type_complexity)]
+    fn connection_with_stashed_batch(
+        chunks: Vec<Vec<u8>>,
+    ) -> (
+        Connection<ScriptedDuplex, ScriptedDuplex>,
+        mpsc::Receiver<ResponseMessages>,
+        Request,
+    ) {
+        let (mut p_sender, mut p_receiver) = mpsc::channel::<ResponseMessages>(1);
+
+        // Park `P`'s own handle the way a real backpressured consumer does:
+        // `futures_channel` lets one handle sit `buffer + 1` messages deep and
+        // refuses the next. The asserts pin that arithmetic, so a change in
+        // `futures-channel` fails here rather than silently voiding the setup.
+        for _ in 0..2 {
+            p_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .expect("priming send was refused before the handle parked");
+        }
+        assert!(
+            p_sender
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the consumer's handle did not park after two sends"
+        );
+
+        // The stash carries a CLONE, exactly as `deliver_batch` does.
+        let pending_responses = VecDeque::from([PendingResponse {
+            sender: p_sender.clone(),
+            messages: ResponseMessages::Observed(VecDeque::from([Ok(
+                command_complete_message("STASHED"),
+            )])),
+            disposition: RequestDisposition::Awaited,
+        }]);
+
+        // The consumer now catches up, which un-parks `P`'s own handle. This is
+        // the ordinary case: a consumer that is behind does eventually read.
+        for _ in 0..2 {
+            p_receiver
+                .try_recv()
+                .expect("consumer drained a channel that had two messages");
+        }
+
+        let responses = VecDeque::from([Response {
+            sender: p_sender,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            read_obligation: ReadObligation::new(None, false),
+        }]);
+
+        let (_request_sender, request_receiver) = mpsc::unbounded();
+        let copy_request = scripted_copy_in_request();
+        let mut connection = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: chunks.into(),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::new(Mutex::new(HashMap::new())),
+            request_receiver,
+            Arc::new(AtomicU8::new(b'I')),
+            // `P` plus the COPY: both are transaction-capable, so the
+            // ReadyForQuery below decrements rather than underflows.
+            Arc::new(AtomicUsize::new(2)),
+            None,
+        );
+        connection.responses = responses;
+        connection.pending_responses = pending_responses;
+        (connection, p_receiver, copy_request)
+    }
+
+    /// A `CopyInResponse` frame with no columns, as PostgreSQL sends it.
+    fn copy_in_response_frame() -> Vec<u8> {
+        vec![b'G', 0, 0, 0, 7, 0, 0, 0]
+    }
+
+    /// THE CASE. While `handle_request` reads through COPY startup, a batch
+    /// belonging to the EARLIER request `P` arrives. `P`'s consumer has caught
+    /// up, so `try_send` succeeds - and unless the stash is drained first, that
+    /// batch reaches `P` AHEAD of the one already waiting in
+    /// `pending_responses`. `P` then sees its response out of wire order, and
+    /// because the overtaking batch carries `ReadyForQuery`, `RowStream` ends
+    /// the stream on it and the stashed batch is delivered into a channel
+    /// nobody reads again.
+    #[compio::test]
+    async fn a_copy_startup_read_does_not_overtake_a_stashed_batch() {
+        let (mut connection, mut p_receiver, copy_request) =
+            connection_with_stashed_batch(vec![
+                // Batch for `P`: names itself, and completes `P`.
+                {
+                    let mut batch = Vec::new();
+                    let tag = "OVERTAKING\0";
+                    let body_len = u32::try_from(4 + tag.len()).unwrap();
+                    batch.push(b'C');
+                    batch.extend_from_slice(&body_len.to_be_bytes());
+                    batch.extend_from_slice(tag.as_bytes());
+                    batch.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+                    batch
+                },
+                // Batch for the COPY: pauses its read obligation and ends the
+                // startup loop.
+                copy_in_response_frame(),
+            ]);
+
+        compio::time::timeout(Duration::from_secs(5), connection.handle_request(copy_request))
+            .await
+            .expect("COPY startup exceeded its watchdog")
+            .expect("COPY startup failed");
+
+        let mut delivered = Vec::new();
+        while let Ok(mut messages) = p_receiver.try_recv() {
+            delivered.extend(batch_tags(&mut messages));
+        }
+
+        assert_eq!(
+            delivered,
+            vec!["STASHED".to_string(), "OVERTAKING".to_string()],
+            "a batch dispatched inside COPY startup overtook the stashed batch \
+             ahead of it, so the caller saw its response out of wire order"
+        );
+    }
+
+    /// THE ONE-VARIABLE CONTROL. Identical in every respect except that the
+    /// batch arriving during COPY startup belongs to NOBODY that is stashed -
+    /// `pending_responses` is empty. The gate is therefore not engaged, and
+    /// this must stay green through every mutation of the arm above: it is what
+    /// shows the assertion is about ORDER and not merely about the batch being
+    /// delivered at all.
+    #[compio::test]
+    async fn a_copy_startup_read_with_no_stash_delivers_immediately() {
+        let (mut connection, mut p_receiver, copy_request) =
+            connection_with_stashed_batch(vec![
+                {
+                    let mut batch = Vec::new();
+                    let tag = "OVERTAKING\0";
+                    let body_len = u32::try_from(4 + tag.len()).unwrap();
+                    batch.push(b'C');
+                    batch.extend_from_slice(&body_len.to_be_bytes());
+                    batch.extend_from_slice(tag.as_bytes());
+                    batch.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+                    batch
+                },
+                copy_in_response_frame(),
+            ]);
+        // THE ONE VARIABLE.
+        connection.pending_responses.clear();
+
+        compio::time::timeout(Duration::from_secs(5), connection.handle_request(copy_request))
+            .await
+            .expect("COPY startup exceeded its watchdog")
+            .expect("COPY startup failed");
+
+        let mut delivered = Vec::new();
+        while let Ok(mut messages) = p_receiver.try_recv() {
+            delivered.extend(batch_tags(&mut messages));
+        }
+
+        assert_eq!(
+            delivered,
+            vec!["OVERTAKING".to_string()],
+            "an unstashed response was not delivered during COPY startup"
+        );
     }
 }

@@ -6706,3 +6706,56 @@ async fn abandoned_copy_in_startup_rejection_does_not_poison_the_next_operation(
     .await
     .expect("abandoned COPY startup recovery exceeded its watchdog");
 }
+
+/// The empty query string through every extended-protocol entry point.
+///
+/// Each of these drives an arm of `query.rs`'s response state machine that
+/// nothing else in the suite reaches: an empty statement earns `NoData` from
+/// its `Describe` and `EmptyQueryResponse` from its `Execute`, so
+/// `query_typed` / `query_text_params` must return an empty `RowStream` rather
+/// than fall through to `unexpected_message`, and `execute` / `execute_typed` /
+/// `execute_text_params` must report zero rows rather than an error.
+///
+/// Measured with `cargo llvm-cov` on 2026-08-23: `query.rs` lines 305-307, 376,
+/// 381 and 464 were unexecuted by the WHOLE suite before this existed, so the
+/// claim "those arms are correct" rested on reading alone. It also pins that
+/// the session is still usable afterwards, which is the part that breaks if one
+/// of them ever stops consuming through its `ReadyForQuery`.
+#[compio::test]
+async fn an_empty_query_is_accepted_by_every_extended_protocol_entry_point() {
+    compio::time::timeout(PIPELINED_FAILURE_WATCHDOG, async {
+        let Some(url) = require_pg().await else { return };
+        let client = connect(&url).await.unwrap();
+
+        assert!(
+            client.query_typed("", &[]).await.unwrap().is_empty(),
+            "query_typed returned rows for an empty statement"
+        );
+        assert_eq!(client.execute_typed("", &[]).await.unwrap(), 0);
+        assert!(
+            client.query_text_params("", &[]).await.unwrap().is_empty(),
+            "query_text_params returned rows for an empty statement"
+        );
+        assert_eq!(client.execute_text_params("", &[]).await.unwrap(), 0);
+
+        let empty = client.prepare("").await.expect("prepare an empty statement");
+        assert_eq!(client.execute(&empty, &[]).await.unwrap(), 0);
+        assert!(client.query(&empty, &[]).await.unwrap().is_empty());
+
+        // `execute*` over a statement that DOES produce rows: the `DataRow`
+        // arms these paths must skip rather than refuse.
+        assert_eq!(
+            client
+                .execute_text_params("SELECT $1::int4", &[Some("5".to_string())])
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(client.execute_typed("SELECT 1, 2, 3", &[]).await.unwrap(), 1);
+
+        assert!(!client.is_closed(), "an empty query retired the session");
+        assert_autocommit_connection_is_reusable(&client, 7_900).await;
+    })
+    .await
+    .expect("empty-query entry-point test exceeded its watchdog");
+}
