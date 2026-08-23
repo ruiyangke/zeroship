@@ -46,15 +46,14 @@
 //!
 //! # What is deliberately NOT here yet
 //!
-//! The blockers still outstanding, written down rather than left to be rediscovered.
-//! Each resolves a vendor from a `DialectId` today, so each needs a
-//! `&'static BackendVendor` (or a `&dyn` renderer) parameter before it can come down:
+//! Nothing. The list this section carried held one entry —
+//! `zero_migrate::render::value_format`'s `catalog_id_default`,
+//! `catalog_text_id_default`, `catalog_uuid_id_default`, `recover_format_check` and
+//! `RecoveredFormatCheck`, all read by `drift_sql.rs` — and it came down exactly the
+//! way the entry predicted: each took a `&DialectId` and resolved a renderer out of
+//! the engine's registry, and each takes the renderers directly now.
 //!
-//! * `zero_migrate::render::value_format` — `catalog_id_default`,
-//!   `catalog_text_id_default`, `catalog_uuid_id_default`, `recover_format_check`
-//!   and `RecoveredFormatCheck`, read by `drift_sql.rs`.
-//!
-//! Add each one's line here in the commit that moves it.
+//! Add a line here if a new one appears, and take it off in the commit that moves it.
 
 use std::time::Duration;
 
@@ -66,8 +65,12 @@ use zero_migrate_backend::executor::{authorize_existence_guard_schema, ApplyErro
 use zero_migrate_backend::existence_probe::{decide, GuardVerdict};
 use zero_migrate_backend::fault;
 use zero_migrate_backend::journal::AppliedEntry;
-use zero_migrate_backend::snapshot::SchemaSnapshot;
+use zero_migrate_backend::snapshot::{IdDefaultSnapshot, SchemaSnapshot};
+use zero_migrate_backend::value_format::{
+    catalog_id_default, column_metadata, recover_format_check, RecoveredFormatCheck,
+};
 use zero_migrate_ir::dialect::DialectId;
+use zero_migrate_ir::ir::ValueFormat;
 use zero_migrate_ir::migration::Migration;
 use zero_migrate_ir::probe::{GuardDir, GuardProbe};
 
@@ -238,5 +241,98 @@ fn the_constraint_definition_codec_is_reachable_and_spells_the_comparison_form()
         "the FK body is not MySQL's canonical form: InnoDB folds RESTRICT into the \
          omitted NO ACTION default, so a rendered ` ON DELETE RESTRICT` here means \
          the vendor argument was ignored and PostgreSQL's spelling was used"
+    );
+}
+
+/// The catalog value-format comparison `drift_sql.rs` reads every MySQL column
+/// default and format `CHECK` through, reached with THIS vendor's renderers rather
+/// than by asking the registry which backend handles MySQL.
+///
+/// Reachability, plus the two answers that would be wrong if either renderer
+/// argument were ignored, one per renderer:
+///
+///   * MySQL is the one shipping vendor whose `information_schema` reports a literal
+///     default WITHOUT SQL quotes and marks the expression/literal distinction out of
+///     band, so a bare `abc` under the literal marker is a LITERAL here and an
+///     expression under any other vendor's `ValueFormatRenderer`; and
+///   * the UUIDv4 catalog form below is what MySQL's `DmlRenderer` emits and what its
+///     catalog echoes back, `_latin1` introducers and all. Recognizing it needs BOTH
+///     halves — the DML renderer to render the generator to compare against, and the
+///     value-format renderer to strip the introducers — so a call wired to another
+///     vendor's pair reports a plain expression and every UUID-defaulted MySQL column
+///     drifts on the first introspection.
+#[test]
+fn the_catalog_id_default_comparison_answers_with_this_vendors_renderers() {
+    /// MySQL's UUIDv4 default exactly as `information_schema` echoes it back.
+    const MYSQL_CATALOG_UUID_V4_DEFAULT: &str = "lower(concat(hex(random_bytes(4)),_latin1'-',hex(random_bytes(2)),_latin1'-',hex(((ord(random_bytes(1)) & 15) | 64)),hex(random_bytes(1)),_latin1'-',hex(((ord(random_bytes(1)) & 63) | 128)),hex(random_bytes(1)),_latin1'-',hex(random_bytes(6))))";
+
+    let vendor = &zero_migrate_mysql::VENDOR;
+
+    assert_eq!(
+        catalog_id_default(Some("abc"), vendor.value_format, vendor.dml, Some(false)),
+        IdDefaultSnapshot::Literal("\"abc\"".to_string()),
+        "MySQL reports an unquoted COLUMN_DEFAULT plus an out-of-band literal \
+         marker; reading that as anything but a literal makes every defaulted MySQL \
+         column drift on the first introspection"
+    );
+
+    assert_eq!(
+        catalog_id_default(
+            Some(MYSQL_CATALOG_UUID_V4_DEFAULT),
+            vendor.value_format,
+            vendor.dml,
+            Some(true)
+        ),
+        IdDefaultSnapshot::UuidV4,
+        "MySQL's own UUIDv4 catalog form was not recognized as the UUIDv4 default, so \
+         at least one of the two renderers handed in was not this vendor's"
+    );
+}
+
+/// The format-`CHECK` recovery `drift_sql.rs` runs over every catalog CHECK clause,
+/// reached with this vendor's renderers.
+///
+/// The discriminator is the MySQL-only charset introducer: its catalog echoes a
+/// CHECK back with `_utf8mb4'…'` in front of every string literal, and only MySQL's
+/// own normalization strips it. Recovery therefore fails on the exact clause MySQL
+/// stores unless the renderers handed in are MySQL's.
+#[test]
+fn the_format_check_recovery_answers_with_this_vendors_renderers() {
+    let vendor = &zero_migrate_mysql::VENDOR;
+    let authored = column_metadata(
+        "public_id",
+        &ValueFormat::TypeId {
+            prefix: "user".to_string(),
+        },
+        vendor.value_format,
+        vendor.dml,
+    )
+    .expect("a valid TypeID prefix lowers to column metadata");
+
+    assert_eq!(
+        recover_format_check(
+            "public_id",
+            &authored.inline_check,
+            vendor.value_format,
+            vendor.dml
+        ),
+        Some(RecoveredFormatCheck::Value(ValueFormat::TypeId {
+            prefix: "user".to_string(),
+        })),
+        "this vendor's own rendered format CHECK did not recover to the format it \
+         renders, so the recovery and the renderer disagree and every TypeID column \
+         would drift against itself"
+    );
+
+    assert_eq!(
+        recover_format_check(
+            "public_id",
+            "CHECK (public_id IS NOT NULL)",
+            vendor.value_format,
+            vendor.dml
+        ),
+        None,
+        "an unrelated CHECK was recovered as a format contract, so recovery is not \
+         comparing the whole clause"
     );
 }

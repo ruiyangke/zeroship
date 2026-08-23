@@ -1,25 +1,100 @@
-//! Backend-specific physical metadata for validated textual value formats and
-//! portable logical UUID storage.
+//! The engine's DOOR into the value-format seam — and the ONE place a dialect
+//! becomes a vendor for a catalog comparison.
 //!
-//! A [`ValueFormat`] is logical schema metadata carried separately from the
-//! physical [`ColType`](crate::model::ir::ColType). This module is the one seam
-//! that turns that metadata into the exact column collation and inline format
-//! `CHECK` consumed by the shared DDL emitters.
+//! A [`ValueFormat`] is logical schema metadata carried separately from the physical
+//! [`ColType`](crate::model::ir::ColType). Turning that metadata into an exact column
+//! collation and inline `CHECK`, and comparing what a catalog gives back against what
+//! was authored, is single-sourced in
+//! [`zero_migrate_backend::value_format`] so no backend can hold a private opinion
+//! about whether two defaults are the same default.
+//!
+//! # What lives HERE
+//!
+//! Two things, and the split is the same one `render::dml` draws.
+//!
+//! The first is the compatibility doors: the comparison functions took a
+//! `&DialectId` and resolved a renderer out of the registry, which is a cycle a
+//! backend crate cannot participate in (the registry names every vendor, so it sits
+//! above them; the comparison sits below them). They take the renderers directly
+//! now, and the engine — which genuinely holds a dialect identity and not a renderer
+//! — resolves once, here.
+//!
+//! The second is [`AllRegisteredVendors`], and it is not a door. A snapshot with no
+//! backend provenance has to be normalized by every registered vendor's declared
+//! rules composed together, because none of them can be ruled out. Composing across
+//! vendors needs the registry, so it is the ENGINE's answer and only the engine can
+//! write it: a backend crate holds exactly one renderer. It is the second
+//! implementor of [`CatalogRules`], beside the contract crate's single-vendor one.
+//!
+//! The AUTHORED half also stays: it reads `IrDefault` and renders an inline
+//! expression, so it needs the engine's IR-facing surface, and no backend calls it.
 
 use crate::model::expr::Expr;
-use crate::model::ir::{validate_type_id_prefix, IrDefault, IrScalar, SequenceRef, ValueFormat};
-use crate::model::snapshot::{
-    canonical_id_default_expression, ColumnCollationSnapshot, IdDefaultSnapshot,
-};
+use crate::model::ir::{IrDefault, IrScalar, SequenceRef, ValueFormat};
+use crate::model::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
+use crate::render::backends::{renderer, value_format_renderer, value_format_renderers};
+use zero_migrate_backend::value_format as seam;
 use zero_migrate_backend::value_format::{
-    CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
+    id_default_from_literal_fingerprint, CatalogRules, CatalogSqlContext, LiteralCastKind,
+    ValueFormatColumnMetadata, VendorRules,
 };
 use zero_migrate_ir::dialect::DialectId;
 
-const TYPE_ID_SUFFIX_LEN: usize = 26;
-const TYPE_ID_ALPHABET: &str = "0123456789abcdefghjkmnpqrstvwxyz";
-const ULID_LEN: usize = 26;
-const ULID_ALPHABET: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+pub(crate) use zero_migrate_backend::value_format::RecoveredFormatCheck;
+
+/// Every registered vendor's declared catalog rules, composed.
+///
+/// The answer for a legacy snapshot that does not record which backend produced it:
+/// no vendor can be ruled out, so each rule is the union (or the first vendor that
+/// claims the token) across the whole shipping set. This is the half of
+/// [`CatalogRules`] that cannot live in the contract crate — it needs the registry,
+/// and the registry names every vendor.
+///
+/// The per-method composition — `any` versus first-match versus apply-all — is a
+/// COMPARISON decision, which is why it is stated here rather than pushed down with
+/// the algorithm that consults it.
+struct AllRegisteredVendors;
+
+impl CatalogRules for AllRegisteredVendors {
+    fn literal_cast_kind(&self, compact_target: &str) -> Option<LiteralCastKind> {
+        value_format_renderers().find_map(|backend| backend.literal_cast_kind(compact_target))
+    }
+
+    fn is_catalog_cast_target(&self, compact_target: &str) -> bool {
+        value_format_renderers().any(|backend| backend.is_catalog_cast_target(compact_target))
+    }
+
+    fn canonical_catalog_cast_target(&self, compact_target: &str) -> String {
+        value_format_renderers()
+            .find_map(|backend| backend.canonical_unattributed_catalog_cast_target(compact_target))
+            .unwrap_or_else(|| compact_target.to_string())
+    }
+
+    fn catalog_literal_hex_carrier<'a>(&self, tokens: &'a [String]) -> Option<&'a str> {
+        value_format_renderers().find_map(|backend| backend.catalog_literal_hex_carrier(tokens))
+    }
+
+    fn is_catalog_string_introducer(&self, word: &str, followed_by_quote: bool) -> bool {
+        value_format_renderers()
+            .any(|backend| backend.is_catalog_string_introducer(word, followed_by_quote))
+    }
+
+    fn normalize_catalog_tokens(&self, context: CatalogSqlContext, tokens: &mut Vec<String>) {
+        for backend in value_format_renderers() {
+            backend.normalize_catalog_tokens(context, tokens);
+        }
+    }
+
+    fn normalizes_trim_both_from(&self) -> bool {
+        value_format_renderers().any(|backend| backend.normalizes_trim_both_from())
+    }
+
+    fn canonical_catalog_function_name<'a>(&self, name: &'a str) -> &'a str {
+        value_format_renderers()
+            .find_map(|backend| backend.canonical_unattributed_catalog_function_name(name))
+            .unwrap_or(name)
+    }
+}
 
 /// Project a structured authored default into the narrow ID-default drift key.
 pub(crate) fn authored_id_default(
@@ -141,63 +216,73 @@ fn authored_literal_fingerprint(value: &IrScalar) -> String {
     }
 }
 
+fn authored_storage_literal_snapshot(
+    snapshot: IdDefaultSnapshot,
+    rendered: Option<&str>,
+    dialect: &DialectId,
+) -> IdDefaultSnapshot {
+    let backend = crate::render::backends::value_format_renderer(dialect);
+    if !backend.authored_storage_uses_rendered_literal()
+        || !matches!(snapshot, IdDefaultSnapshot::Literal(_))
+    {
+        return snapshot;
+    }
+    rendered
+        .and_then(|rendered| sql_literal_fingerprint_in_dialect(rendered, dialect))
+        .map_or(snapshot, id_default_from_literal_fingerprint)
+}
+
 /// Project a live catalog default into the same semantic key as
-/// [`authored_id_default`]. `expression_default` is the authoritative catalog
-/// expression/literal distinction when the backend exposes one: some catalogs strip SQL
-/// quotes from literals, so the text alone cannot distinguish a literal such as
-/// `"uuid()"` from an expression.
+/// [`authored_id_default`].
 pub(crate) fn catalog_id_default(
     default: Option<&str>,
     dialect: &DialectId,
     expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
-    let Some(default) = default else {
-        return IdDefaultSnapshot::Absent;
-    };
-
-    let backend = crate::render::backends::value_format_renderer(dialect);
-    if backend.catalog_default_is_unquoted_literal(expression_default) {
-        return IdDefaultSnapshot::Literal(
-            serde_json::to_string(default).expect("string serialization is infallible"),
-        );
-    }
-    if default_matches_uuid(default, dialect, false) {
-        return IdDefaultSnapshot::UuidV4;
-    }
-    if default_matches_uuid(default, dialect, true) {
-        return IdDefaultSnapshot::UuidV7;
-    }
-    if let Some(literal) = sql_literal_fingerprint_in_dialect(default, dialect) {
-        return id_default_from_literal_fingerprint(literal);
-    }
-    IdDefaultSnapshot::Expression(catalog_expression_fingerprint_in_dialect(default, dialect))
+    seam::catalog_id_default(
+        default,
+        value_format_renderer(dialect),
+        renderer(dialect),
+        expression_default,
+    )
 }
 
+/// [`catalog_id_default`] with the UUID surface's semantic normalization applied.
 pub(crate) fn catalog_uuid_id_default(
     default: Option<&str>,
     dialect: &DialectId,
     expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
-    let snapshot = catalog_id_default(default, dialect, expression_default);
-    let snapshot = backend.normalize_text_literal_snapshot(snapshot);
-    backend.normalize_uuid_literal_snapshot(snapshot)
+    seam::catalog_uuid_id_default(
+        default,
+        value_format_renderer(dialect),
+        renderer(dialect),
+        expression_default,
+    )
 }
 
+/// [`catalog_id_default`] with the TypeID/ULID text surface's normalization applied.
 pub(crate) fn catalog_text_id_default(
     default: Option<&str>,
     dialect: &DialectId,
     expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
-    let snapshot = catalog_id_default(default, dialect, expression_default);
-    backend.normalize_text_literal_snapshot(snapshot)
+    seam::catalog_text_id_default(
+        default,
+        value_format_renderer(dialect),
+        renderer(dialect),
+        expression_default,
+    )
 }
 
 /// Compare a catalog default whose dialect-specific expression/literal marker
 /// was not retained against one expected semantic key. This is used for typed
 /// references: their local format CHECK is intentionally absent, but the
 /// authored side still declares that their default is an ID-default surface.
+///
+/// The only entry point that takes an OPTIONAL dialect, which is why it is the
+/// engine's rather than the contract crate's: an absent dialect is the
+/// no-provenance case, and answering it means composing every registered vendor.
 pub(crate) fn catalog_id_default_for_expected(
     expected: &IdDefaultSnapshot,
     default: Option<&str>,
@@ -216,19 +301,14 @@ pub(crate) fn catalog_id_default_for_expected(
         return catalog_uuid_id_default(Some(default), dialect, expression_default);
     }
     if let Some(dialect) = dialect {
-        if crate::render::backends::value_format_renderer(dialect)
-            .catalog_default_marker_is_authoritative()
-        {
+        if value_format_renderer(dialect).catalog_default_marker_is_authoritative() {
             if let Some(expression_default) = expression_default {
                 return catalog_id_default(Some(default), dialect, Some(expression_default));
             }
         }
     }
     if matches!(expected, IdDefaultSnapshot::Literal(_)) {
-        if let Some(literal) = dialect.map_or_else(
-            || sql_literal_fingerprint(default),
-            |dialect| sql_literal_fingerprint_in_dialect(default, dialect),
-        ) {
+        if let Some(literal) = sql_literal_fingerprint(default, dialect) {
             return IdDefaultSnapshot::Literal(literal);
         }
         // MySQL information_schema returns literal text without SQL quotes.
@@ -242,941 +322,53 @@ pub(crate) fn catalog_id_default_for_expected(
             return recovered;
         }
     }
-    IdDefaultSnapshot::Expression(dialect.map_or_else(
-        || catalog_expression_fingerprint(default),
-        |dialect| catalog_expression_fingerprint_in_dialect(default, dialect),
-    ))
+    IdDefaultSnapshot::Expression(catalog_expression_fingerprint_for(default, dialect))
 }
 
-fn default_matches_uuid(default: &str, dialect: &DialectId, v7: bool) -> bool {
-    let dml = crate::render::backends::renderer(dialect);
-    let backend = crate::render::backends::value_format_renderer(dialect);
-    let rendered = if v7 {
-        dml.uuid_v7().ok()
-    } else {
-        Some(dml.uuid_v4())
-    };
-    rendered.is_some_and(|rendered| {
-        let actual = catalog_expression_fingerprint_in_dialect(default, dialect);
-        backend
-            .uuid_generator_candidates(&rendered)
-            .iter()
-            .any(|candidate| {
-                actual == catalog_expression_fingerprint_in_dialect(candidate, dialect)
-            })
-    })
-}
-
-fn id_default_from_literal_fingerprint(literal: String) -> IdDefaultSnapshot {
-    if literal == "null" {
-        IdDefaultSnapshot::Absent
-    } else {
-        IdDefaultSnapshot::Literal(literal)
+/// The literal comparison key for catalog SQL, under one dialect's rules or —
+/// when the snapshot has no provenance — every registered vendor's, composed.
+fn sql_literal_fingerprint(expression: &str, dialect: Option<&DialectId>) -> Option<String> {
+    match dialect {
+        Some(dialect) => {
+            seam::sql_literal_fingerprint(expression, &VendorRules(value_format_renderer(dialect)))
+        }
+        None => seam::sql_literal_fingerprint(expression, &AllRegisteredVendors),
     }
-}
-
-fn authored_storage_literal_snapshot(
-    snapshot: IdDefaultSnapshot,
-    rendered: Option<&str>,
-    dialect: &DialectId,
-) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
-    if !backend.authored_storage_uses_rendered_literal()
-        || !matches!(snapshot, IdDefaultSnapshot::Literal(_))
-    {
-        return snapshot;
-    }
-    rendered
-        .and_then(|rendered| sql_literal_fingerprint_in_dialect(rendered, dialect))
-        .map_or(snapshot, id_default_from_literal_fingerprint)
-}
-
-fn canonical_decimal_sql_literal(value: &str) -> Option<String> {
-    if !crate::model::ir::is_decimal_string(value) {
-        return None;
-    }
-    let (negative, body) = if let Some(body) = value.strip_prefix('-') {
-        (true, body)
-    } else {
-        (false, value.strip_prefix('+').unwrap_or(value))
-    };
-    let (integer, fraction) = body
-        .split_once('.')
-        .map_or((body, None), |(integer, fraction)| {
-            (integer, Some(fraction))
-        });
-    let integer = integer.trim_start_matches('0');
-    let integer = if integer.is_empty() { "0" } else { integer };
-    let nonzero = integer != "0"
-        || fraction.is_some_and(|fraction| fraction.bytes().any(|digit| digit != b'0'));
-    let sign = if negative && nonzero { "-" } else { "" };
-    Some(match fraction {
-        Some("") | None => format!("{sign}{integer}"),
-        Some(fraction) => format!("{sign}{integer}.{fraction}"),
-    })
-}
-
-fn sql_literal_fingerprint(expression: &str) -> Option<String> {
-    sql_literal_fingerprint_with_backend(expression, None)
 }
 
 fn sql_literal_fingerprint_in_dialect(expression: &str, dialect: &DialectId) -> Option<String> {
-    sql_literal_fingerprint_with_backend(
-        expression,
-        Some(crate::render::backends::value_format_renderer(dialect)),
-    )
+    sql_literal_fingerprint(expression, Some(dialect))
 }
 
-fn sql_literal_fingerprint_with_backend(
-    expression: &str,
-    backend: Option<&dyn ValueFormatRenderer>,
-) -> Option<String> {
-    fn top_level_token(tokens: &[String], needle: &str, from_end: bool) -> Option<usize> {
-        let mut depth = 0_i32;
-        let mut found = None;
-        for (index, token) in tokens.iter().enumerate() {
-            match token.as_str() {
-                "(" => depth += 1,
-                ")" => depth -= 1,
-                _ if depth == 0 && token == needle => {
-                    if !from_end {
-                        return Some(index);
-                    }
-                    found = Some(index);
-                }
-                _ => {}
-            }
-        }
-        found
-    }
-
-    fn cast_kind(
-        tokens: &[String],
-        backend: Option<&dyn ValueFormatRenderer>,
-    ) -> Option<LiteralCastKind> {
-        let compact = tokens.join("");
-        if let Some(backend) = backend {
-            return backend.literal_cast_kind(&compact);
-        }
-        crate::render::backends::value_format_renderers()
-            .find_map(|backend| backend.literal_cast_kind(&compact))
-    }
-
-    fn apply_cast(
-        input: String,
-        target: &[String],
-        backend: Option<&dyn ValueFormatRenderer>,
-    ) -> Option<String> {
-        // A typed NULL remains the absence-equivalent SQL NULL even for cast
-        // targets outside the portable scalar surface (for example BYTEA).
-        if input == "null" {
-            return Some(input);
-        }
-
-        let kind = cast_kind(target, backend)?;
-        let string = serde_json::from_str::<String>(&input).ok();
-        let number = canonical_decimal_sql_literal(&input);
-        match kind {
-            LiteralCastKind::Text | LiteralCastKind::Uuid => {
-                if let Some(string) = string {
-                    serde_json::to_string(&string).ok()
-                } else {
-                    number.and_then(|number| serde_json::to_string(&number).ok())
-                }
-            }
-            LiteralCastKind::SignedInteger { bits } => number
-                .or_else(|| string.and_then(|value| canonical_decimal_sql_literal(&value)))
-                .filter(|value| !value.contains('.'))
-                .and_then(|value| {
-                    let parsed = value.parse::<i128>().ok()?;
-                    let minimum = -(1_i128 << (bits - 1));
-                    let maximum = (1_i128 << (bits - 1)) - 1;
-                    (parsed >= minimum && parsed <= maximum).then_some(value)
-                }),
-            LiteralCastKind::UnsignedInteger { bits } => number
-                .or_else(|| string.and_then(|value| canonical_decimal_sql_literal(&value)))
-                .filter(|value| !value.contains('.') && !value.starts_with('-'))
-                .and_then(|value| {
-                    let parsed = value.parse::<u128>().ok()?;
-                    let maximum = (1_u128 << bits) - 1;
-                    (parsed <= maximum).then_some(value)
-                }),
-            LiteralCastKind::ExactNumeric => {
-                number.or_else(|| string.and_then(|value| canonical_decimal_sql_literal(&value)))
-            }
-            LiteralCastKind::Real => None,
-            LiteralCastKind::Boolean => {
-                if matches!(input.as_str(), "true" | "false") {
-                    Some(input)
-                } else {
-                    string
-                        .filter(|value| {
-                            value.eq_ignore_ascii_case("true")
-                                || value.eq_ignore_ascii_case("false")
-                        })
-                        .map(|value| value.to_ascii_lowercase())
-                }
-            }
-        }
-    }
-
-    fn decode_quoted_string(token: &str) -> Option<String> {
-        let bytes = token.as_bytes();
-        if bytes.first() != Some(&b'\'') || bytes.last() != Some(&b'\'') {
-            return None;
-        }
-        let mut decoded = String::new();
-        let mut cursor = 1_usize;
-        while cursor + 1 < bytes.len() {
-            if bytes[cursor] == b'\'' {
-                if bytes.get(cursor + 1) != Some(&b'\'') {
-                    return None;
-                }
-                decoded.push('\'');
-                cursor += 2;
-            } else {
-                let start = cursor;
-                while cursor + 1 < bytes.len() && bytes[cursor] != b'\'' {
-                    cursor += 1;
-                }
-                decoded.push_str(&token[start..cursor]);
-            }
-        }
-        Some(decoded)
-    }
-
-    fn leaf(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> Option<String> {
-        if tokens.len() == 1 {
-            if let Some(decoded) = decode_quoted_string(&tokens[0]) {
-                return serde_json::to_string(&decoded).ok();
-            }
-        }
-
-        let carrier = backend
-            .and_then(|backend| backend.catalog_literal_hex_carrier(tokens))
-            .or_else(|| {
-                backend.is_none().then(|| {
-                    crate::render::backends::value_format_renderers()
-                        .find_map(|backend| backend.catalog_literal_hex_carrier(tokens))
-                })?
-            });
-        if let Some(carrier) = carrier {
-            let encoded = decode_quoted_string(carrier)?;
-            let decoded = String::from_utf8(hex::decode(encoded).ok()?).ok()?;
-            return serde_json::to_string(&decoded).ok();
-        }
-
-        let joined = tokens.join("");
-        let compact = canonical_id_default_expression(&joined);
-        let compact = compact.strip_prefix('+').unwrap_or(&compact);
-        if matches!(compact, "null" | "true" | "false") {
-            return Some(compact.to_string());
-        }
-        canonical_decimal_sql_literal(compact)
-    }
-
-    fn parse(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> Option<String> {
-        let tokens = strip_outer_token_parens(tokens);
-
-        if tokens.first().map(String::as_str) == Some("cast")
-            && tokens.get(1).map(String::as_str) == Some("(")
-            && tokens.last().map(String::as_str) == Some(")")
-        {
-            let body = &tokens[2..tokens.len() - 1];
-            let separator = top_level_token(body, "as", false)?;
-            if separator == 0 || separator + 1 == body.len() {
-                return None;
-            }
-            let input = parse(&body[..separator], backend)?;
-            return apply_cast(input, &body[separator + 1..], backend);
-        }
-
-        if let Some(separator) = top_level_token(tokens, "::", true) {
-            if separator == 0 || separator + 1 == tokens.len() {
-                return None;
-            }
-            let input = parse(&tokens[..separator], backend)?;
-            return apply_cast(input, &tokens[separator + 1..], backend);
-        }
-
-        leaf(tokens, backend)
-    }
-
-    parse(
-        &catalog_sql_tokens_with_backend(None, expression, backend, CatalogSqlContext::Literal),
-        backend,
-    )
+/// Catalog-stable fingerprint for the closed expression-default subset, composed
+/// across every registered vendor when the snapshot has no provenance.
+pub(crate) fn catalog_expression_fingerprint(sql: &str) -> String {
+    seam::catalog_expression_fingerprint(sql, &AllRegisteredVendors)
 }
 
-/// Engine-owned format contract recovered from one catalog CHECK.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RecoveredFormatCheck {
-    /// The portable textual UUID spelling CHECK used on MySQL/SQLite.
-    Uuid,
-    /// A TypeID or ULID CHECK, including the exact TypeID prefix.
-    Value(ValueFormat),
+pub(crate) fn catalog_expression_fingerprint_in_dialect(sql: &str, dialect: &DialectId) -> String {
+    seam::catalog_expression_fingerprint(sql, &VendorRules(value_format_renderer(dialect)))
+}
+
+fn catalog_expression_fingerprint_for(sql: &str, dialect: Option<&DialectId>) -> String {
+    dialect.map_or_else(
+        || catalog_expression_fingerprint(sql),
+        |dialect| catalog_expression_fingerprint_in_dialect(sql, dialect),
+    )
 }
 
 /// Recover an engine-owned UUID/TypeID/ULID CHECK from catalog SQL.
-///
-/// A candidate format is first inferred from its anchored grammar literal, then
-/// the complete clause is compared against a freshly rendered authoritative
-/// contract after removing catalog-only syntax (redundant parentheses,
-/// whitespace, PostgreSQL's `::text`, identifier quote choices, and MySQL
-/// charset introducers). A partially edited CHECK therefore does not masquerade
-/// as a valid format contract.
 pub(crate) fn recover_format_check(
     column: &str,
     check_sql: &str,
     dialect: &DialectId,
 ) -> Option<RecoveredFormatCheck> {
-    let backend = crate::render::backends::value_format_renderer(dialect);
-    if let Ok(Some(uuid)) = uuid_column_metadata(column, dialect) {
-        if canonical_check_sql(column, check_sql, backend)
-            == canonical_check_sql(column, &uuid.inline_check, backend)
-        {
-            return Some(RecoveredFormatCheck::Uuid);
-        }
-    }
-
-    let literals = sql_string_literals(check_sql);
-    let mut candidates = Vec::new();
-    for literal in &literals {
-        let candidate = if literal == &ulid_regex() {
-            Some(ValueFormat::Ulid)
-        } else {
-            type_id_format_from_regex(literal)
-        };
-        if let Some(candidate) = candidate {
-            candidates.push(candidate);
-        }
-    }
-    candidates.extend(backend.recovery_candidates(&literals, TYPE_ID_ALPHABET, ULID_ALPHABET));
-
-    let mut unique_candidates = Vec::new();
-    for candidate in candidates {
-        if !unique_candidates.contains(&candidate) {
-            unique_candidates.push(candidate);
-        }
-    }
-    for candidate in unique_candidates {
-        let expected = column_metadata(column, &candidate, dialect).ok()?;
-        if canonical_check_sql(column, check_sql, backend)
-            == canonical_check_sql(column, &expected.inline_check, backend)
-        {
-            return Some(RecoveredFormatCheck::Value(candidate));
-        }
-    }
-    None
-}
-
-fn ulid_regex() -> String {
-    format!("^[0-7][{ULID_ALPHABET}]{{{}}}$", ULID_LEN - 1)
-}
-
-fn type_id_format_from_regex(regex: &str) -> Option<ValueFormat> {
-    let suffix = format!("[0-7][{TYPE_ID_ALPHABET}]{{{}}}$", TYPE_ID_SUFFIX_LEN - 1);
-    let stored_prefix = regex.strip_prefix('^')?.strip_suffix(&suffix)?;
-    let prefix = if stored_prefix.is_empty() {
-        String::new()
-    } else {
-        stored_prefix.strip_suffix('_')?.to_string()
-    };
-    validate_type_id_prefix(&prefix).ok()?;
-    Some(ValueFormat::TypeId { prefix })
-}
-
-fn sql_string_literals(sql: &str) -> Vec<String> {
-    let bytes = sql.as_bytes();
-    let mut literals = Vec::new();
-    let mut cursor = 0_usize;
-    while cursor < bytes.len() {
-        if bytes[cursor] != b'\'' {
-            cursor += 1;
-            continue;
-        }
-        cursor += 1;
-        let mut literal = String::new();
-        while cursor < bytes.len() {
-            if bytes[cursor] == b'\'' {
-                if bytes.get(cursor + 1) == Some(&b'\'') {
-                    literal.push('\'');
-                    cursor += 2;
-                    continue;
-                }
-                cursor += 1;
-                literals.push(literal);
-                break;
-            }
-            let start = cursor;
-            while cursor < bytes.len() && bytes[cursor] != b'\'' {
-                cursor += 1;
-            }
-            literal.push_str(&sql[start..cursor]);
-        }
-    }
-    literals
-}
-
-fn catalog_sql_tokens_with_backend(
-    column: Option<&str>,
-    sql: &str,
-    backend: Option<&dyn ValueFormatRenderer>,
-    context: CatalogSqlContext,
-) -> Vec<String> {
-    let bytes = sql.as_bytes();
-    let mut out = Vec::new();
-    let mut cursor = 0_usize;
-    while cursor < bytes.len() {
-        let byte = bytes[cursor];
-        if byte.is_ascii_whitespace() {
-            cursor += 1;
-            continue;
-        }
-        if byte == b'\'' {
-            let mut literal = String::from("'");
-            cursor += 1;
-            while cursor < bytes.len() {
-                literal.push(char::from(bytes[cursor]));
-                if bytes[cursor] == b'\'' {
-                    cursor += 1;
-                    if bytes.get(cursor) == Some(&b'\'') {
-                        literal.push('\'');
-                        cursor += 1;
-                        continue;
-                    }
-                    break;
-                }
-                cursor += 1;
-            }
-            out.push(literal);
-            continue;
-        }
-        if matches!(byte, b'"' | b'`' | b'[') {
-            let close = if byte == b'[' { b']' } else { byte };
-            cursor += 1;
-            let mut identifier = String::new();
-            while cursor < bytes.len() {
-                if bytes[cursor] == close {
-                    if bytes.get(cursor + 1) == Some(&close) {
-                        identifier.push(char::from(close));
-                        cursor += 2;
-                        continue;
-                    }
-                    cursor += 1;
-                    break;
-                }
-                let start = cursor;
-                while cursor < bytes.len() && bytes[cursor] != close {
-                    cursor += 1;
-                }
-                identifier.push_str(&sql[start..cursor]);
-            }
-            if column.is_some_and(|column| identifier.eq_ignore_ascii_case(column)) {
-                out.push("@column".to_string());
-            } else {
-                out.push(format!("ident:{identifier}"));
-            }
-            continue;
-        }
-        if byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$') {
-            let start = cursor;
-            cursor += 1;
-            while bytes.get(cursor).is_some_and(|candidate| {
-                candidate.is_ascii_alphanumeric() || matches!(candidate, b'_' | b'$')
-            }) {
-                cursor += 1;
-            }
-            let word = &sql[start..cursor];
-            let followed_by_quote = bytes.get(cursor) == Some(&b'\'');
-            let is_introducer = backend.map_or_else(
-                || {
-                    crate::render::backends::value_format_renderers().any(|backend| {
-                        backend.is_catalog_string_introducer(word, followed_by_quote)
-                    })
-                },
-                |backend| backend.is_catalog_string_introducer(word, followed_by_quote),
-            );
-            if is_introducer {
-                continue;
-            }
-            if column.is_some_and(|column| word.eq_ignore_ascii_case(column)) {
-                out.push("@column".to_string());
-            } else {
-                out.push(word.to_ascii_lowercase());
-            }
-            continue;
-        }
-        if byte.is_ascii_digit() {
-            let start = cursor;
-            cursor += 1;
-            while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
-                cursor += 1;
-            }
-            out.push(sql[start..cursor].to_string());
-            continue;
-        }
-        let two = bytes
-            .get(cursor..cursor + 2)
-            .and_then(|pair| std::str::from_utf8(pair).ok());
-        if matches!(two, Some("::" | "<>" | "!=" | "<=" | ">=" | "<<" | ">>")) {
-            out.push(two.expect("matched two-byte operator").to_string());
-            cursor += 2;
-        } else {
-            out.push(char::from(byte.to_ascii_lowercase()).to_string());
-            cursor += 1;
-        }
-    }
-    if let Some(backend) = backend {
-        backend.normalize_catalog_tokens(context, &mut out);
-    } else {
-        for backend in crate::render::backends::value_format_renderers() {
-            backend.normalize_catalog_tokens(context, &mut out);
-        }
-    }
-    out
-}
-
-fn strip_outer_token_parens(mut tokens: &[String]) -> &[String] {
-    loop {
-        if tokens.first().map(String::as_str) != Some("(")
-            || tokens.last().map(String::as_str) != Some(")")
-        {
-            return tokens;
-        }
-        let mut depth = 0_i32;
-        let mut encloses_all = true;
-        for (index, token) in tokens.iter().enumerate() {
-            match token.as_str() {
-                "(" => depth += 1,
-                ")" => depth -= 1,
-                _ => {}
-            }
-            if depth == 0 && index + 1 != tokens.len() {
-                encloses_all = false;
-                break;
-            }
-            if depth < 0 {
-                return tokens;
-            }
-        }
-        if !encloses_all || depth != 0 {
-            return tokens;
-        }
-        tokens = &tokens[1..tokens.len() - 1];
-    }
-}
-
-fn split_top_level<'a>(tokens: &'a [String], separator: &str) -> Vec<&'a [String]> {
-    let mut depth = 0_i32;
-    let mut start = 0_usize;
-    let mut parts = Vec::new();
-    for (index, token) in tokens.iter().enumerate() {
-        match token.as_str() {
-            "(" => depth += 1,
-            ")" => depth -= 1,
-            _ if depth == 0 && token == separator => {
-                parts.push(&tokens[start..index]);
-                start = index + 1;
-            }
-            _ => {}
-        }
-    }
-    if !parts.is_empty() {
-        parts.push(&tokens[start..]);
-    }
-    parts
-}
-
-fn serialize_tokens(tokens: &[String]) -> String {
-    tokens
-        .iter()
-        .map(|token| format!("{}:{token}", token.len()))
-        .collect::<Vec<_>>()
-        .join("|")
-}
-
-#[derive(Debug)]
-enum BooleanFingerprint {
-    Or(Vec<Self>),
-    And(Vec<Self>),
-    Atom(String),
-}
-
-impl BooleanFingerprint {
-    fn parse(tokens: &[String]) -> Self {
-        let tokens = strip_outer_token_parens(tokens);
-        let or_parts = split_top_level(tokens, "or");
-        if !or_parts.is_empty() {
-            let mut nodes = Vec::new();
-            for part in or_parts {
-                match Self::parse(part) {
-                    Self::Or(inner) => nodes.extend(inner),
-                    node => nodes.push(node),
-                }
-            }
-            return Self::Or(nodes);
-        }
-        let and_parts = split_top_level(tokens, "and");
-        if !and_parts.is_empty() {
-            let mut nodes = Vec::new();
-            for part in and_parts {
-                match Self::parse(part) {
-                    Self::And(inner) => nodes.extend(inner),
-                    node => nodes.push(node),
-                }
-            }
-            return Self::And(nodes);
-        }
-        Self::Atom(serialize_tokens(tokens))
-    }
-
-    fn serialize(&self) -> String {
-        match self {
-            Self::Or(nodes) => format!(
-                "or({})",
-                nodes
-                    .iter()
-                    .map(Self::serialize)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            Self::And(nodes) => format!(
-                "and({})",
-                nodes
-                    .iter()
-                    .map(Self::serialize)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            Self::Atom(atom) => format!("atom({atom})"),
-        }
-    }
-}
-
-fn canonical_check_sql(column: &str, sql: &str, backend: &dyn ValueFormatRenderer) -> String {
-    let mut tokens =
-        catalog_sql_tokens_with_backend(Some(column), sql, Some(backend), CatalogSqlContext::Check);
-    if tokens.first().is_some_and(|token| token == "check") {
-        tokens.remove(0);
-    }
-    BooleanFingerprint::parse(&tokens).serialize()
-}
-
-/// Catalog-stable fingerprint for the closed expression-default subset. It
-/// parses function arguments and bitwise precedence, so MySQL's redundant
-/// grouping parentheses normalize away without erasing semantically meaningful
-/// grouping (or parentheses inside string literals).
-pub(crate) fn catalog_expression_fingerprint(sql: &str) -> String {
-    catalog_expression_fingerprint_with_backend(sql, None)
-}
-
-pub(crate) fn catalog_expression_fingerprint_in_dialect(sql: &str, dialect: &DialectId) -> String {
-    catalog_expression_fingerprint_with_backend(
-        sql,
-        Some(crate::render::backends::value_format_renderer(dialect)),
+    seam::recover_format_check(
+        column,
+        check_sql,
+        value_format_renderer(dialect),
+        renderer(dialect),
     )
-}
-
-fn catalog_expression_fingerprint_with_backend(
-    sql: &str,
-    backend: Option<&dyn ValueFormatRenderer>,
-) -> String {
-    fn top_level_token(tokens: &[String], needle: &str, from_end: bool) -> Option<usize> {
-        let mut depth = 0_i32;
-        let mut found = None;
-        for (index, token) in tokens.iter().enumerate() {
-            match token.as_str() {
-                "(" => depth += 1,
-                ")" => depth -= 1,
-                _ if depth == 0 && token == needle => {
-                    if !from_end {
-                        return Some(index);
-                    }
-                    found = Some(index);
-                }
-                _ => {}
-            }
-        }
-        found
-    }
-
-    fn cast_parts<'a>(
-        tokens: &'a [String],
-        backend: Option<&dyn ValueFormatRenderer>,
-    ) -> Option<(&'a [String], &'a [String])> {
-        let tokens = strip_outer_token_parens(tokens);
-        if tokens.first().map(String::as_str) == Some("cast")
-            && tokens.get(1).map(String::as_str) == Some("(")
-            && tokens.last().map(String::as_str) == Some(")")
-        {
-            let body = &tokens[2..tokens.len() - 1];
-            let separator = top_level_token(body, "as", false)?;
-            if separator > 0 && separator + 1 < body.len() {
-                return Some((&body[..separator], &body[separator + 1..]));
-            }
-        }
-        if let Some(separator) = top_level_token(tokens, "::", true) {
-            let operand = &tokens[..separator];
-            let target = &tokens[separator + 1..];
-            let operand_is_primary = operand.len() == 1
-                || call_parts(operand).is_some()
-                || (operand.first().map(String::as_str) == Some("(")
-                    && operand.last().map(String::as_str) == Some(")")
-                    && strip_outer_token_parens(operand).len() < operand.len());
-            if separator > 0
-                && !target.is_empty()
-                && operand_is_primary
-                && is_cast_target(target, backend)
-            {
-                return Some((operand, target));
-            }
-        }
-        None
-    }
-
-    fn is_cast_target(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> bool {
-        let compact = tokens
-            .iter()
-            .filter(|token| !matches!(token.as_str(), "(" | ")" | ","))
-            .map(String::as_str)
-            .collect::<String>();
-        backend.map_or_else(
-            || {
-                crate::render::backends::value_format_renderers()
-                    .any(|backend| backend.is_catalog_cast_target(&compact))
-            },
-            |backend| backend.is_catalog_cast_target(&compact),
-        )
-    }
-
-    fn cast_target(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> String {
-        let compact = tokens
-            .iter()
-            .filter(|token| !matches!(token.as_str(), "(" | ")"))
-            .map(String::as_str)
-            .collect::<String>();
-        if let Some(backend) = backend {
-            backend.canonical_catalog_cast_target(&compact)
-        } else {
-            crate::render::backends::value_format_renderers()
-                .find_map(|backend| backend.canonical_unattributed_catalog_cast_target(&compact))
-                .unwrap_or(compact)
-        }
-    }
-
-    fn call_parts(tokens: &[String]) -> Option<(&str, &[String])> {
-        let tokens = strip_outer_token_parens(tokens);
-        if tokens.len() < 3
-            || tokens.get(1).map(String::as_str) != Some("(")
-            || tokens.last().map(String::as_str) != Some(")")
-        {
-            return None;
-        }
-        let mut depth = 0_i32;
-        for (index, token) in tokens.iter().enumerate().skip(1) {
-            match token.as_str() {
-                "(" => depth += 1,
-                ")" => depth -= 1,
-                _ => {}
-            }
-            if depth == 0 {
-                return (index + 1 == tokens.len())
-                    .then_some((tokens[0].as_str(), &tokens[2..tokens.len() - 1]));
-            }
-        }
-        None
-    }
-
-    fn normalize_embedded_literals(
-        tokens: &[String],
-        backend: Option<&dyn ValueFormatRenderer>,
-    ) -> Vec<String> {
-        let mut normalized = Vec::with_capacity(tokens.len());
-        let mut cursor = 0_usize;
-        while cursor < tokens.len() {
-            let mut best = None;
-            for end in cursor + 1..=tokens.len() {
-                if let Some(literal) =
-                    sql_literal_fingerprint_with_backend(&tokens[cursor..end].join(" "), backend)
-                {
-                    best = Some((end, literal));
-                }
-            }
-            if let Some((end, literal)) = best {
-                normalized.push(format!("literal:{literal}"));
-                cursor = end;
-            } else {
-                normalized.push(tokens[cursor].clone());
-                cursor += 1;
-            }
-        }
-        normalized
-    }
-
-    fn remove_implicit_case_else_null(
-        tokens: &mut Vec<String>,
-        backend: Option<&dyn ValueFormatRenderer>,
-    ) {
-        let mut cursor = 0_usize;
-        while cursor + 2 < tokens.len() {
-            if tokens[cursor] == "else" {
-                let implicit_end = (cursor + 2..tokens.len()).find(|end| {
-                    tokens[*end] == "end"
-                        && sql_literal_fingerprint_with_backend(
-                            &tokens[cursor + 1..*end].join(" "),
-                            backend,
-                        )
-                        .as_deref()
-                            == Some("null")
-                });
-                if let Some(end) = implicit_end {
-                    tokens.drain(cursor..end);
-                    continue;
-                }
-            }
-            cursor += 1;
-        }
-    }
-
-    fn normalize_unary_numeric_literals(tokens: &mut Vec<String>) {
-        let mut cursor = 0_usize;
-        while cursor + 1 < tokens.len() {
-            let sign = tokens[cursor].as_str();
-            let unary_context = cursor == 0
-                || matches!(
-                    tokens[cursor - 1].as_str(),
-                    "(" | ","
-                        | "+"
-                        | "-"
-                        | "*"
-                        | "/"
-                        | "%"
-                        | "="
-                        | "<>"
-                        | "!="
-                        | "<"
-                        | ">"
-                        | "<="
-                        | ">="
-                        | "&"
-                        | "|"
-                        | "then"
-                        | "else"
-                        | "when"
-                        | "from"
-                        | "as"
-                );
-            let numeric = tokens[cursor + 1]
-                .strip_prefix("literal:")
-                .and_then(canonical_decimal_sql_literal);
-            if matches!(sign, "+" | "-") && unary_context {
-                if let Some(number) = numeric {
-                    let signed = if sign == "-" {
-                        canonical_decimal_sql_literal(&format!("-{number}"))
-                            .expect("a sign plus a decimal remains a decimal")
-                    } else {
-                        number.to_string()
-                    };
-                    tokens.splice(cursor..=cursor + 1, [format!("literal:{signed}")]);
-                    continue;
-                }
-            }
-            cursor += 1;
-        }
-    }
-
-    fn expression(tokens: &[String], backend: Option<&dyn ValueFormatRenderer>) -> String {
-        let tokens = strip_outer_token_parens(tokens);
-        // PostgreSQL annotates otherwise-untyped scalar constants while resolving
-        // function overloads (`'X'::text`, `'-1'::integer`, ...). Reuse the
-        // typed-literal normalizer recursively so those catalog casts compare to
-        // the authored scalar value, while nonliteral/value-changing casts remain.
-        if let Some(literal) = sql_literal_fingerprint_with_backend(&tokens.join(" "), backend) {
-            return format!("literal:{literal}");
-        }
-        if let Some(sign @ ("+" | "-")) = tokens.first().map(String::as_str) {
-            if let Some(number) =
-                sql_literal_fingerprint_with_backend(&tokens[1..].join(" "), backend)
-                    .and_then(|number| canonical_decimal_sql_literal(&number))
-            {
-                return if sign == "-" {
-                    format!(
-                        "literal:{}",
-                        canonical_decimal_sql_literal(&format!("-{number}"))
-                            .expect("a sign plus a decimal remains a decimal")
-                    )
-                } else {
-                    format!("literal:{number}")
-                };
-            }
-        }
-        for operator in ["|", "&"] {
-            let parts = split_top_level(tokens, operator);
-            if !parts.is_empty() {
-                return format!(
-                    "{operator}({})",
-                    parts
-                        .iter()
-                        .map(|part| expression(part, backend))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-            }
-        }
-
-        if let Some((operand, target)) = cast_parts(tokens, backend) {
-            let target = cast_target(target, backend);
-            return format!("cast:{target}({})", expression(operand, backend));
-        }
-
-        if let Some((name, body)) = call_parts(tokens) {
-            if backend.map_or_else(
-                || {
-                    crate::render::backends::value_format_renderers()
-                        .any(|backend| backend.normalizes_trim_both_from())
-                },
-                |backend| backend.normalizes_trim_both_from(),
-            ) && name == "trim"
-                && body.first().map(String::as_str) == Some("both")
-                && body.get(1).map(String::as_str) == Some("from")
-            {
-                return format!("call:trim({})", expression(&body[2..], backend));
-            }
-            let args = split_top_level(body, ",");
-            let args = if args.is_empty() && body.is_empty() {
-                Vec::new()
-            } else if args.is_empty() {
-                vec![expression(body, backend)]
-            } else {
-                args.into_iter()
-                    .map(|argument| expression(argument, backend))
-                    .collect()
-            };
-            let name = backend.map_or_else(
-                || {
-                    crate::render::backends::value_format_renderers()
-                        .find_map(|backend| {
-                            backend.canonical_unattributed_catalog_function_name(name)
-                        })
-                        .unwrap_or(name)
-                },
-                |backend| backend.canonical_catalog_function_name(name),
-            );
-            return format!("call:{name}({})", args.join(","));
-        }
-        // PostgreSQL materializes an omitted searched-CASE ELSE arm as a typed
-        // `ELSE NULL::<resolved type>`. SQL defines omission as exactly ELSE
-        // NULL, so erase that deparser-only arm before general leaf rewriting.
-        let mut tokens = tokens.to_vec();
-        remove_implicit_case_else_null(&mut tokens, backend);
-        let mut tokens = normalize_embedded_literals(&tokens, backend);
-        normalize_unary_numeric_literals(&mut tokens);
-        serialize_tokens(&tokens)
-    }
-
-    let tokens = catalog_sql_tokens_with_backend(None, sql, backend, CatalogSqlContext::Expression);
-    expression(&tokens, backend)
 }
 
 /// Lower a logical UUID column to the portable textual contract used on MySQL
@@ -1186,80 +378,20 @@ pub(crate) fn uuid_column_metadata(
     column: &str,
     dialect: &DialectId,
 ) -> Result<Option<ValueFormatColumnMetadata>, String> {
-    let quoted = zero_migrate_backend::dml::quote_ident_for_backend(
-        "UUID column",
-        column,
-        crate::render::backends::renderer(dialect),
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(crate::render::backends::value_format_renderer(dialect).uuid_column_metadata(&quoted))
+    seam::uuid_column_metadata(column, value_format_renderer(dialect), renderer(dialect))
 }
 
 /// Lower one logical value format to its dialect-specific text representation.
-///
-/// Prefixes are validated here as well as in the policy validator because some
-/// internal tests and trusted callers exercise lowering directly. Malformed
-/// hand-built IR must fail closed at either entry point.
 pub(crate) fn column_metadata(
     column: &str,
-    value_format: &ValueFormat,
+    format: &ValueFormat,
     dialect: &DialectId,
 ) -> Result<ValueFormatColumnMetadata, String> {
-    match value_format {
-        ValueFormat::TypeId { prefix } => type_id_column_metadata(column, prefix, dialect),
-        ValueFormat::Ulid => ulid_column_metadata(column, dialect),
-    }
-}
-
-fn ulid_column_metadata(
-    column: &str,
-    dialect: &DialectId,
-) -> Result<ValueFormatColumnMetadata, String> {
-    let quoted = zero_migrate_backend::dml::quote_ident_for_backend(
-        "ULID column",
+    seam::column_metadata(
         column,
-        crate::render::backends::renderer(dialect),
-    )
-    .map_err(|error| error.to_string())?;
-    let regex = ulid_regex();
-    Ok(crate::render::backends::value_format_renderer(dialect)
-        .ulid_column_metadata(&quoted, &regex, ULID_LEN))
-}
-
-fn type_id_column_metadata(
-    column: &str,
-    prefix: &str,
-    dialect: &DialectId,
-) -> Result<ValueFormatColumnMetadata, String> {
-    validate_type_id_prefix(prefix)?;
-
-    let quoted = zero_migrate_backend::dml::quote_ident_for_backend(
-        "TypeID column",
-        column,
-        crate::render::backends::renderer(dialect),
-    )
-    .map_err(|error| error.to_string())?;
-    let stored_prefix = if prefix.is_empty() {
-        String::new()
-    } else {
-        format!("{prefix}_")
-    };
-    let suffix_start = stored_prefix.len() + 1; // SQL strings are one-indexed.
-    let total_len = stored_prefix.len() + TYPE_ID_SUFFIX_LEN;
-    let regex = format!(
-        "^{stored_prefix}[0-7][{TYPE_ID_ALPHABET}]{{{}}}$",
-        TYPE_ID_SUFFIX_LEN - 1
-    );
-    Ok(
-        crate::render::backends::value_format_renderer(dialect).type_id_column_metadata(
-            &quoted,
-            &stored_prefix,
-            suffix_start,
-            total_len,
-            TYPE_ID_SUFFIX_LEN,
-            TYPE_ID_ALPHABET,
-            &regex,
-        ),
+        format,
+        value_format_renderer(dialect),
+        renderer(dialect),
     )
 }
 
@@ -1292,7 +424,7 @@ pub(crate) fn bytewise_column_metadata(
     rendered_type: &str,
     dialect: &DialectId,
 ) -> (String, Option<ColumnCollationSnapshot>) {
-    crate::render::backends::value_format_renderer(dialect).bytewise_column_metadata(rendered_type)
+    value_format_renderer(dialect).bytewise_column_metadata(rendered_type)
 }
 
 #[cfg(test)]
