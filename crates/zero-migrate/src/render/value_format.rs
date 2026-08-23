@@ -532,7 +532,8 @@ pub(crate) fn recover_format_check(
 ) -> Option<RecoveredFormatCheck> {
     let backend = crate::render::backends::value_format_renderer(dialect);
     if let Ok(Some(uuid)) = uuid_column_metadata(column, dialect) {
-        if canonical_check_sql(column, check_sql) == canonical_check_sql(column, &uuid.inline_check)
+        if canonical_check_sql(column, check_sql, backend)
+            == canonical_check_sql(column, &uuid.inline_check, backend)
         {
             return Some(RecoveredFormatCheck::Uuid);
         }
@@ -560,8 +561,8 @@ pub(crate) fn recover_format_check(
     }
     for candidate in unique_candidates {
         let expected = column_metadata(column, &candidate, dialect).ok()?;
-        if canonical_check_sql(column, check_sql)
-            == canonical_check_sql(column, &expected.inline_check)
+        if canonical_check_sql(column, check_sql, backend)
+            == canonical_check_sql(column, &expected.inline_check, backend)
         {
             return Some(RecoveredFormatCheck::Value(candidate));
         }
@@ -853,9 +854,9 @@ impl BooleanFingerprint {
     }
 }
 
-fn canonical_check_sql(column: &str, sql: &str) -> String {
+fn canonical_check_sql(column: &str, sql: &str, backend: &dyn ValueFormatRenderer) -> String {
     let mut tokens =
-        catalog_sql_tokens_with_backend(Some(column), sql, None, CatalogSqlContext::Check);
+        catalog_sql_tokens_with_backend(Some(column), sql, Some(backend), CatalogSqlContext::Check);
     if tokens.first().is_some_and(|token| token == "check") {
         tokens.remove(0);
     }
@@ -1397,6 +1398,51 @@ mod tests {
                 prefix: "account".to_string(),
             }))
         );
+    }
+
+    /// A CHECK recovery is normalised by ONE dialect's rules — the dialect it was
+    /// read from — and not by every registered vendor's at once.
+    ///
+    /// `canonical_check_sql` used to take no dialect, so it ran all three vendors'
+    /// `normalize_catalog_tokens` over the same token stream in sequence. Only
+    /// PostgreSQL implements that hook, so a SQLite or MySQL contract was silently
+    /// normalised by POSTGRESQL's catalog rules: `pg_catalog.` qualifiers and
+    /// `::text` annotations were erased from a stream that can never contain them
+    /// legitimately. An edit that injected either therefore normalised back onto the
+    /// pristine contract and was recovered as valid — the exact failure
+    /// `any_contract_edit_is_not_recovered_as_the_original_format` forbids, reached
+    /// through a foreign vendor's normaliser instead of through a weakened comparison.
+    #[test]
+    fn a_foreign_vendors_catalog_decoration_does_not_normalise_away() {
+        let pristine = column_metadata(
+            "id",
+            &ValueFormat::TypeId {
+                prefix: "account".to_string(),
+            },
+            &SQLITE,
+        )
+        .expect("TypeID metadata")
+        .inline_check;
+        assert_eq!(
+            recover_format_check("id", &pristine, &SQLITE),
+            Some(RecoveredFormatCheck::Value(ValueFormat::TypeId {
+                prefix: "account".to_string(),
+            })),
+            "the pristine SQLite contract must still recover"
+        );
+
+        for decorated in [
+            pristine.replacen("typeof(", "pg_catalog.typeof(", 1),
+            pristine.replacen("'text'", "'text'::text", 1),
+        ] {
+            assert_ne!(decorated, pristine, "fixture must actually decorate");
+            assert_eq!(
+                recover_format_check("id", &decorated, &SQLITE),
+                None,
+                "SQLite declares no catalog-token normalisation, so PostgreSQL's must \
+                 not run on a SQLite CHECK: {decorated}"
+            );
+        }
     }
 
     #[test]
