@@ -98,6 +98,35 @@ pub(crate) async fn finish_batch_execute(mut responses: Responses) -> Result<(),
     }
 }
 
+/// Drain the stream and report the command tag of the LAST statement in the
+/// batch that completed.
+///
+/// The tag is the only place PostgreSQL says WHICH command it decided it had
+/// run, and for one statement that answer is not the one that was sent:
+/// `COMMIT` inside an aborted transaction block is executed, discards every
+/// change, and completes with the tag `ROLLBACK` and no `ErrorResponse`.
+/// [`finish_batch_execute`] drops tags, so a caller draining through it cannot
+/// tell that outcome from a successful commit. libpq exposes it as
+/// `PQcmdStatus`; this is the equivalent for the one caller that needs it.
+///
+/// `None` means the batch completed without any `CommandComplete` - an empty
+/// query.
+pub(crate) async fn finish_batch_execute_reporting_tag(
+    mut responses: Responses,
+) -> Result<Option<String>, Error> {
+    let mut tag = None;
+    loop {
+        match responses.next().await? {
+            Message::ReadyForQuery(_) => return Ok(tag),
+            Message::CommandComplete(body) => {
+                tag = Some(body.tag().map_err(Error::parse)?.to_string());
+            }
+            Message::EmptyQueryResponse | Message::RowDescription(_) | Message::DataRow(_) => {}
+            _ => return Err(Error::unexpected_message()),
+        }
+    }
+}
+
 fn encode(client: &InnerClient, query: &str) -> Result<Bytes, Error> {
     client.with_buf(|buf| {
         frontend::query(query, buf).map_err(Error::encode)?;
