@@ -159,6 +159,7 @@ mod tests {
                 tcp_user_timeout: None,
                 keepalive: None,
                 require_peer: None,
+                encryption: crate::connect_tls::Encryption::Plaintext,
             }),
             ssl_mode: SslMode::Disable,
             ssl_negotiation: SslNegotiation::Postgres,

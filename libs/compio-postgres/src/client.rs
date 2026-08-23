@@ -7,6 +7,7 @@
 
 use crate::codec::{BackendMessages, FrontendMessage};
 use crate::config::{SslMode, SslNegotiation};
+use crate::connect_tls::Encryption;
 use crate::connection::{
     Request, RequestDisposition, RequestMessages, TransactionEffect,
 };
@@ -1564,6 +1565,16 @@ pub(crate) struct SocketConfig {
     pub tcp_user_timeout: Option<Duration>,
     pub keepalive: Option<KeepaliveConfig>,
     pub require_peer: Option<String>,
+    /// The transport this session ACTUALLY negotiated - recorded, never
+    /// re-derived.
+    ///
+    /// `sslmode` plus the address does not determine it. `allow` dials
+    /// plaintext first and re-dials with TLS when the server refuses, so an
+    /// `hostssl`-only server yields an encrypted session under a mode whose
+    /// first offer is plaintext; `prefer` does the reverse. A cancel has no
+    /// second leg, so guessing wrong either puts the cancel key on the wire in
+    /// the clear or fails the cancel outright.
+    pub encryption: Encryption,
 }
 
 /// Resolved transport endpoint: either a concrete IP or a Unix socket
