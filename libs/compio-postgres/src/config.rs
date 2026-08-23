@@ -1561,11 +1561,18 @@ impl Config {
             "port" => {
                 self.port.clear();
                 for port in value.split(',') {
+                    // Port 0 is refused, as libpq refuses it: it means "any port"
+                    // to bind(2) and nothing at all to connect(2), so a config
+                    // carrying it can never reach a server.
                     let port = if port.is_empty() {
                         5432
                     } else {
-                        port.parse()
-                            .map_err(|_| Error::config_parse(Box::new(InvalidValue("port"))))?
+                        match port.parse() {
+                            Ok(0) | Err(_) => {
+                                return Err(Error::config_parse(Box::new(InvalidValue("port"))));
+                            }
+                            Ok(port) => port,
+                        }
                     };
                     self.port(port);
                 }
@@ -2266,6 +2273,7 @@ impl<'a> UrlParser<'a> {
         self.config.user(user);
 
         if let Some(password) = it.next() {
+            Self::validate_percent_escapes(password)?;
             let password = Cow::from(percent_encoding::percent_decode(password.as_bytes()));
             self.config.password(password);
         }
@@ -2320,8 +2328,13 @@ impl<'a> UrlParser<'a> {
             let port: u16 = if port.is_empty() {
                 5432
             } else {
-                port.parse()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("port"))))?
+                match port.parse() {
+                    // Port 0 is refused here too; see the `"port"` arm above.
+                    Ok(0) | Err(_) => {
+                        return Err(Error::config_parse(Box::new(InvalidValue("port"))));
+                    }
+                    Ok(port) => port,
+                }
             };
             self.config.port(port);
         }
@@ -2407,6 +2420,7 @@ impl<'a> UrlParser<'a> {
     /// not the other. Only the `/`-prefixed socket path is genuinely
     /// Unix-only.
     fn host_param(&mut self, s: &str) -> Result<(), Error> {
+        Self::validate_percent_escapes(s)?;
         let decoded = Cow::from(percent_encoding::percent_decode(s.as_bytes()));
 
         #[cfg(unix)]
@@ -2420,7 +2434,37 @@ impl<'a> UrlParser<'a> {
         Ok(())
     }
 
+    /// Refuse a malformed percent escape, as libpq does
+    /// (`invalid percent-encoded token: "%zz"`).
+    ///
+    /// `percent_encoding::percent_decode` NEVER FAILS: a `%` not followed by
+    /// two hex digits is copied through verbatim. So `?password=se%cret`
+    /// authenticated with a literal `se%cret` rather than telling the caller
+    /// their string was malformed, and `[fe80::1%eth0]` -- a zone id written
+    /// without encoding the `%` -- became a host name containing a percent
+    /// sign. Silently using a different credential than the one written is the
+    /// failure worth refusing.
+    fn validate_percent_escapes(s: &str) -> Result<(), Error> {
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] != b'%' {
+                i += 1;
+                continue;
+            }
+            let escape = bytes.get(i + 1..i + 3);
+            if !escape.is_some_and(|pair| pair.iter().all(u8::is_ascii_hexdigit)) {
+                return Err(Error::config_parse(
+                    format!("invalid percent-encoded token: \"{s}\"").into(),
+                ));
+            }
+            i += 3;
+        }
+        Ok(())
+    }
+
     fn decode(&self, s: &'a str) -> Result<Cow<'a, str>, Error> {
+        Self::validate_percent_escapes(s)?;
         percent_encoding::percent_decode(s.as_bytes())
             .decode_utf8()
             .map_err(|e| Error::config_parse(e.into()))
