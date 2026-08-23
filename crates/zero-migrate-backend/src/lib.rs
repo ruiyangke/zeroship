@@ -200,6 +200,10 @@ pub mod schema;
 pub mod schema_error;
 pub mod snapshot;
 pub mod spelling;
+// The status VOCABULARY — what a journal read reduces to. The status VERBS stay in
+// the engine; this is the shape the engine's neutral verb and a vendor's own
+// snapshot read both fill in, so the two can never answer in different words.
+pub mod status;
 pub mod step;
 pub mod stored_ddl;
 pub mod table_rebuild;

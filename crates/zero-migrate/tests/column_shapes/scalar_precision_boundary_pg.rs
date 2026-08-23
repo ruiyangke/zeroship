@@ -32,8 +32,8 @@ use zero_migrate::apply::executor::LockMode;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
-    PostgresBackend,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_scalar_precision";
 

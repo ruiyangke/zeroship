@@ -62,11 +62,11 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::MigrationIr;
 use zero_migrate::model::snapshot::MysqlPhysicalType;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops, model::ir::Op,
-    resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    LockMode, MigrationEngine, SchemaSnapshot, StructuralDrift,
+    diff_snapshots, fold_ops, model::ir::Op, resolve_create_table_policy, Approval, ExecutorConfig,
+    GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, SchemaSnapshot, StructuralDrift,
 };
 use zero_migrate_mysql::MysqlBackend;
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
 use zero_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_drift_column_physical_type";
@@ -568,7 +568,7 @@ async fn an_untouched_postgres_table_reports_clean() {
                 .await
                 .map_err(|error| format!("apply {}: {error}", migration.name))?;
         }
-        let actual = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+        let actual = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect the postgres control schema: {error}"))?;
         let drift = diff_snapshots(&expected, &actual);

@@ -100,11 +100,13 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, desired_snapshot_for_dialect, Approval,
-    CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor,
-    GuardConfig, IndexDescriptor, MigrationEngine, PostgresBackend, RenameHint,
+    desired_snapshot_for_dialect, Approval, CollectionDescriptor, DeclarativeAuthor,
+    EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor,
+    MigrationEngine, RenameHint,
 };
 use zero_migrate_mysql::MysqlBackend;
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_declarative_rename";
 const TABLE: &str = "people";
@@ -539,7 +541,7 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
         &policy_for(&schema),
     )
     .expect("desired v1");
-    let live_empty = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+    let live_empty = snapshot_schema(&session, &schema)
         .await
         .expect("snapshot live PG (empty)");
     let plan1 = engine
@@ -585,7 +587,7 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
         &policy_for(&schema),
     )
     .expect("desired v2");
-    let live_v1 = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+    let live_v1 = snapshot_schema(&session, &schema)
         .await
         .expect("snapshot live PG (v1)");
     let plan2 = engine

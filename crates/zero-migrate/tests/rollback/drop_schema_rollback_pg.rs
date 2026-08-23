@@ -31,10 +31,11 @@ use zero_migrate::model::ir::Op;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, fold_ops, guard_for, Approval,
-    EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
-    PostgresBackend,
+    fold_ops, guard_for, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
+    LiveSchema, MigrationEngine,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_drop_schema_rollback_pg";
 
@@ -132,7 +133,7 @@ async fn apply_doc(
 /// Does the schema PHYSICALLY exist? `snapshot_schema` looks it up in
 /// `pg_namespace` by name, so an empty `schemas` map means absent.
 async fn schema_exists(session: &PgDevSession, name: &str) -> Result<bool, String> {
-    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, name)
+    let snapshot = snapshot_schema(session, name)
         .await
         .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
     Ok(snapshot.schemas.contains_key(name))

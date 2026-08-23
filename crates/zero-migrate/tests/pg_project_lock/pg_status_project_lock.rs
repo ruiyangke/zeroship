@@ -24,7 +24,8 @@ use crate::support::PgDevSession;
 
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
-use zero_migrate::{ExecutorConfig, PostgresBackend, StatusSnapshot};
+use zero_migrate::{ExecutorConfig, StatusSnapshot};
+use zero_migrate_postgres::PostgresBackend;
 
 /// How long a reader gets to answer before the test calls it blocked. The bounded
 /// retry is three attempts around 200ms apart, so a correct reader answers in well

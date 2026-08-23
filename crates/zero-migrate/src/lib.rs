@@ -168,13 +168,15 @@ pub use apply::backend::{
     BackfillError, BackfillOutcome, CrossDeployObligations, DryRunError, DryRunReport,
     MigrationBackend, MigrationResult, OnlineSchemaChange, ShadowConfig, ShadowDryRun,
 };
-// `PostgresBackend` comes from the backend composition root, which is how a host
-// names the engine it wants. `PostgresSessionSnapshot` used to be re-exported beside
-// it and no longer is: it had zero consumers outside `apply/backend/postgres/`, and
-// aliasing one vendor's type at the crate root made the neutral root name a vendor
-// module. It is still reachable, at the path that says whose it is —
-// `apply::backend::postgres::PostgresSessionSnapshot`.
-pub use apply::backend::PostgresBackend;
+// `PostgresBackend` IS NOT RE-EXPORTED HERE, and neither is any other vendor's.
+// It lives in `zero-migrate-postgres` with the rest of the PostgreSQL execution
+// half, and a `pub use zero_migrate_postgres::PostgresBackend` at this root would be
+// core naming a vendor CRATE outside the registry — the thing
+// `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. Closing one
+// coupling by opening the other would have been a wash. A host that wants a
+// PostgreSQL backend names `zero_migrate_postgres::PostgresBackend`, exactly as it
+// already names `zero_migrate_sqlite::SqliteBackend` and
+// `zero_migrate_mysql::MysqlBackend`.
 // The driver-neutral `SqlSession` seam types (the engine-root `crate::driver`
 // module). Public so a host (napi) driver can construct return values / binds,
 // and so error consumers read the neutral `DbError` (SQLSTATE in `.sqlstate`). The
@@ -226,7 +228,7 @@ pub use zero_migrate_backend::guard::ParseError;
 // re-exported here. They read `pg_catalog`/`information_schema` and drive a
 // PostgreSQL savepoint probe; promising them at the crate root said the engine
 // offers them, when what the engine offers is whatever the REGISTERED backend
-// implements. They live at `apply::backend::postgres::drift_sql`, reached by that
+// implements. They live at `zero_migrate_postgres::backend::drift_sql`, reached by that
 // name. The neutral surface is
 // `MigrationBackend::{check_checksum_drift, snapshot_schema}`.
 pub use apply::executor::{
@@ -377,7 +379,7 @@ pub use apply::journal::{
 // crate at all — those are simply gone from the public surface. MySQL and SQLite
 // have their own peer `journal_sql.rs` modules, and no caller reaching
 // `zero_migrate::applied` could ever have got one. The ones with real callers live
-// at `apply::backend::postgres::journal_sql`, reached by that name; the neutral
+// at `zero_migrate_postgres::backend::journal_sql`, reached by that name; the neutral
 // surface is `MigrationBackend`'s journal methods.
 // The structured pending-contract interlock payloads.
 pub use ops::squash::{squash, SquashError, SquashOutcome};

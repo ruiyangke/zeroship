@@ -25,9 +25,11 @@
 //! `information_schema` and `&Client` whose own header called it "the POSTGRES
 //! precondition impl", sitting in the neutral layer and naming
 //! `PostgresBackend` three times in code. It moved to
-//! `apply/backend/postgres/precondition.rs`, which is the only place it could
-//! go — it needs `SqlSession`/`ExecutorConfig`/`ApplyError`/`Migration`, so it
-//! cannot follow the renderers out into `zero-migrate-postgres`, which must not
+//! `apply/backend/postgres/precondition.rs`, which was the only place it could go
+//! at the time — it needs `SqlSession`/`ExecutorConfig`/`ApplyError`/`Migration`, and
+//! all four were the engine's. All four moved down to `zero-migrate-backend`
+//! afterwards, so the evaluator DID follow the renderers out: it is
+//! `zero_migrate_postgres::backend::precondition` now, and that crate still does not
 //! depend on the engine.
 //!
 //! [`the_backend_contract_declares_no_vendor_named_item`] caught
@@ -37,7 +39,8 @@
 //! is genuinely vendor (its three fields are PostgreSQL GUCs; `SqliteBackend`'s
 //! `SessionSnapshot` is `()`), so it kept a vendor name and moved to
 //! `apply/backend/postgres/mod.rs` beside the sibling, spelled the way the
-//! dialect id spells it.
+//! dialect id spells it. (That file is `zero-migrate-postgres/src/backend/mod.rs`
+//! now; the type went with it.)
 //!
 //! # What this does NOT catch
 //!
@@ -113,8 +116,15 @@ fn neutral_layer_files() -> Vec<PathBuf> {
     out
 }
 
-/// A vendor implementation lives under `apply/backend/<dialect>/`, not in the
-/// neutral apply layer above it.
+/// A vendor implementation lives in that vendor's own crate, not in the neutral
+/// apply layer.
+///
+/// It used to live under `apply/backend/<dialect>/`, one storey below this one, and
+/// this test's job was to keep the two storeys apart. All three of those directories
+/// have since become `zero-migrate-{postgres,sqlite,mysql}/src/backend/`, so the
+/// destination is a crate rather than a subdirectory — but the rule over THIS layer
+/// is unchanged and so is what a red means: a file here that needs a concrete backend
+/// is a vendor's implementation wearing a neutral path.
 #[test]
 fn the_neutral_apply_layer_names_no_vendor_backend() {
     let files = neutral_layer_files();
@@ -166,8 +176,8 @@ fn the_neutral_apply_layer_names_no_vendor_backend() {
                 "{rel} names `{backend}` on {hits} code line(s), but it sits in the \
                  DIALECT-NEUTRAL apply layer, which reaches a backend only through \
                  `dyn MigrationBackend`. A file that needs a concrete backend is that \
-                 vendor's implementation and belongs under apply/backend/<dialect>/ \
-                 with the rest of it."
+                 vendor's implementation and belongs in that vendor's crate, under \
+                 `zero-migrate-<dialect>/src/backend/`, with the rest of it."
             );
         }
     }
@@ -176,11 +186,12 @@ fn the_neutral_apply_layer_names_no_vendor_backend() {
 /// The neutral backend contract declares the SEAM; each vendor declares its own
 /// types beside its own impl.
 ///
-/// `mod` declarations are exempt and that is not a loophole: owning
-/// `mod postgres` / `mod mysql` / `mod sqlite` is precisely this file's job, and
-/// it names all three symmetrically. `pub use` is exempt for the same reason and
-/// because it is not a declaration — re-exporting `postgres::PostgresBackend` at
-/// a stable path is the contract publishing its vendors, not hosting one.
+/// `mod` declarations are exempt and that was not a loophole: owning
+/// `mod postgres` / `mod mysql` / `mod sqlite` was precisely that file's job while
+/// the vendors lived there, and it named all three symmetrically. It owns NONE of
+/// them now — every execution half is in its own crate and core re-exports none —
+/// so the exemption covers nothing today and stays only because a `mod` declaration
+/// is still not a vendor-named item.
 #[test]
 fn the_backend_contract_declares_no_vendor_named_item() {
     const CONTRACT: &str = "apply/backend/mod.rs";

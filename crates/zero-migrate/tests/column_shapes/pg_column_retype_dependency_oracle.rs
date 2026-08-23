@@ -28,7 +28,8 @@
 use crate::support;
 
 use zero_migrate::driver::SqlSession;
-use zero_migrate::{ExecutorConfig, MigrationBackend, PostgresBackend};
+use zero_migrate::{ExecutorConfig, MigrationBackend};
+use zero_migrate_postgres::PostgresBackend;
 
 /// The shipped predicate's own answer for one column.
 ///

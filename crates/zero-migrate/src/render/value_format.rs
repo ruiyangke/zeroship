@@ -40,6 +40,10 @@ use zero_migrate_backend::value_format::{
 };
 use zero_migrate_ir::dialect::DialectId;
 
+// The recovered-format verdict. `#[cfg(test)]` for the same reason the door below
+// is: its last production consumer left with the PostgreSQL execution half, and the
+// comparison tests here still name it.
+#[cfg(test)]
 pub(crate) use zero_migrate_backend::value_format::RecoveredFormatCheck;
 
 /// Every registered vendor's declared catalog rules, composed.
@@ -358,6 +362,16 @@ fn catalog_expression_fingerprint_for(sql: &str, dialect: Option<&DialectId>) ->
 }
 
 /// Recover an engine-owned UUID/TypeID/ULID CHECK from catalog SQL.
+///
+/// `#[cfg(test)]` because its last PRODUCTION caller left with the PostgreSQL
+/// execution half: all three vendors now enter
+/// [`zero_migrate_backend::value_format::recover_format_check`] with their OWN
+/// renderers, which is what the contract crate's copy takes, so nothing in the
+/// engine holds a `DialectId` and needs it turned into a pair of renderers here. The
+/// comparison tests below still drive it, and they are the reason it is gated rather
+/// than deleted: they are the engine's own proof that the dialect-resolving spelling
+/// and the renderer-taking one answer identically.
+#[cfg(test)]
 pub(crate) fn recover_format_check(
     column: &str,
     check_sql: &str,

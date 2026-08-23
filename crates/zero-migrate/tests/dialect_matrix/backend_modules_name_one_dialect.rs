@@ -22,12 +22,39 @@
 //! rule gets its own check or it has none, which is what it had.
 //!
 //! WHY THIS FILE AND NOT A `#[cfg(test)] mod tests` IN `backends/mod.rs`. The check
-//! reads the nine modules as TEXT, which a unit test could do with `include_str!`
-//! just as well. It lives out here because it is a fact about the two layers'
-//! SHAPE rather than about their behaviour, and because this theme binary is where
-//! the other "what does each dialect declare" checks already are. It still reads the
-//! real files, so it tracks them: `include_str!` is a compile-time dependency, and
-//! editing any of the nine rebuilds this binary.
+//! reads the RENDERER modules as TEXT — an enumerated list of `include_str!`s, one
+//! per (basename, vendor) pair — which a unit test could do just as well. It lives
+//! out here because it is a fact about the two layers' SHAPE rather than about their
+//! behaviour, and because this theme binary is where the other "what does each
+//! dialect declare" checks already are. It still reads the real files, so it tracks
+//! them: `include_str!` is a compile-time dependency, and editing any of them
+//! rebuilds this binary.
+//!
+//! (That sentence used to say "the nine modules". The list has been 17 for some time
+//! — 4 anchored basenames plus 5 unanchored ones across three vendors — and a stale
+//! count in prose reads as authoritative: it caused one reader to misreport this
+//! census's scope. The list is the fact; there is no number here to go stale now.)
+//!
+//! # The second half: the EXECUTION modules
+//!
+//! The enumerated list above reaches ZERO `backend/` directories, and for most of
+//! this census's life that was not a gap — the execution halves were inside the
+//! engine, where a different census (`core_names_no_vendor_backend_module`) covered
+//! them. All three left: `zero-migrate-mysql/src/backend/`,
+//! `zero-migrate-sqlite/src/backend/`, `zero-migrate-postgres/src/backend/`. Nothing
+//! covered them afterwards.
+//!
+//! [`no_backend_directory_module_names_a_foreign_dialect`] does, and it enforces the
+//! SECOND clause only: a module names no OTHER vendor's dialect. Measured across all
+//! three execution halves the day it was written, that clause is at zero, so it is
+//! asserted as a real zero rather than ratcheted.
+//!
+//! The FIRST clause — "exactly once, as the `DIALECT` const" — is deliberately NOT
+//! enforced over the whole walk. Each execution half carries its const in exactly one
+//! file (`backend/mod.rs`) and every sibling reads `super::DIALECT`, which is the rule
+//! working; asserting the const per FILE would redden 28 files that are correct.
+//! The three `backend/mod.rs` files are pinned individually instead, and that pin
+//! doubles as this walk's needle control.
 
 /// The rule, as a test: one dialect literal per backend module, its own, and it is
 /// the `DIALECT` const.
@@ -239,4 +266,193 @@ fn a_backend_module_names_only_its_own_dialect_and_only_once() {
              own constant appears elsewhere has lost the const that makes the vendor deletable"
         );
     }
+}
+
+/// The vendor crates and the dialect constant each one IS, for the execution-half
+/// walk below.
+const VENDORS: &[(&str, &str)] = &[
+    ("zero-migrate-postgres", "POSTGRES"),
+    ("zero-migrate-sqlite", "SQLITE"),
+    ("zero-migrate-mysql", "MYSQL"),
+];
+
+/// The three shipping dialect constants, so "foreign" is computed rather than listed
+/// per vendor.
+const DIALECT_CONSTANTS: &[&str] = &["POSTGRES", "SQLITE", "MYSQL"];
+
+/// The walk's ANCHORS, relative to `crates/`: the file in each execution half that
+/// carries its dialect const, the constant it IS, and the declaration verbatim.
+///
+/// A floor over a discovered set bounds HOW MANY files were read; these bound WHICH,
+/// and they stay true at any size. They are also where the needle control runs — each
+/// must show its own constant exactly twice (the import and the const) — so a matcher
+/// that stopped recognizing a dialect constant fails here instead of reporting a
+/// confident zero over every file it walked.
+///
+/// The declaration is spelled out per vendor rather than derived, because SQLite's
+/// half names its const `SQLITE_DIALECT` (the module also carries `rusqlite`'s
+/// `SQLITE_*` flag names, so a bare `DIALECT` would have read ambiguously to a human
+/// scanning the file). Deriving the string would have quietly stopped matching there.
+const EXECUTION_ANCHORS: &[(&str, &str, &str)] = &[
+    (
+        "zero-migrate-postgres/src/backend/mod.rs",
+        "POSTGRES",
+        "const DIALECT: DialectId = POSTGRES;",
+    ),
+    (
+        "zero-migrate-sqlite/src/backend/mod.rs",
+        "SQLITE",
+        "const SQLITE_DIALECT: DialectId = SQLITE;",
+    ),
+    (
+        "zero-migrate-mysql/src/backend/mod.rs",
+        "MYSQL",
+        "const DIALECT: DialectId = MYSQL;",
+    ),
+];
+
+/// The walk's floor across the three execution halves. They hold 31 `.rs` files under
+/// `src/backend` the day this was written; the floor sits under that with room for
+/// ordinary churn and would still notice losing an entire ten-file directory
+/// (31 minus PostgreSQL's ten is 21).
+///
+/// A scan over a DISCOVERED set fails OPEN: narrow the walk and it iterates nothing,
+/// finds nothing, and reports clean. Raise it deliberately as the halves grow. NEVER
+/// lower it to get green — check [`EXECUTION_ANCHORS`] first and trust them over this
+/// number.
+const EXECUTION_FILE_FLOOR: usize = 24;
+
+/// How many times `src` names `identifier` on a CODE line, as a whole token.
+///
+/// The same matcher the enumerated check above uses, lifted to a free function so
+/// both halves of this file provably run ONE needle. A census whose two halves used
+/// two matchers could have one of them go blind while the other vouched for it.
+fn code_identifier_hits(src: &str, identifier: &str) -> usize {
+    src.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .flat_map(|line| line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
+        .filter(|token| *token == identifier)
+        .count()
+}
+
+/// Every `.rs` file under `root`, sorted.
+fn rs_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries =
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// CLAUSE TWO over the three EXECUTION halves: no file under a vendor's
+/// `src/backend/` names another vendor's dialect constant.
+///
+/// # Why only clause two
+///
+/// See the module header. Clause one binds a `DIALECT` const to a MODULE; an
+/// execution half is a directory whose siblings all read `super::DIALECT`, which is
+/// the rule being obeyed rather than broken. Enforcing "exactly once per file" here
+/// would redden 28 correct files in three vendors, which is a census demanding a
+/// defect. The const's home is pinned per anchor instead.
+///
+/// # What a red here means
+///
+/// A vendor's execution half wrote another vendor's dialect constant. That is either
+/// a cross-vendor reach — the thing this rule exists to make loud — or a test in that
+/// half asserting something about a foreign dialect, which belongs in the engine's
+/// test tree where all three are visible. Both are questions for the author; neither
+/// is fixed by adding an exemption here.
+#[test]
+fn no_backend_directory_module_names_a_foreign_dialect() {
+    let crates = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/zero-migrate has a parent")
+        .to_path_buf();
+
+    // ---- THE ANCHORS, which double as the NEEDLE POSITIVE CONTROL. -----------
+    for (rel, own, declaration) in EXECUTION_ANCHORS {
+        let path = crates.join(rel);
+        assert!(
+            path.is_file(),
+            "this census must read {}, and it does not exist. If the execution half \
+             legitimately moved, repoint the anchor and say so in the commit; do NOT \
+             delete it to get green.",
+            path.display()
+        );
+        let src = std::fs::read_to_string(&path).expect("anchor reads");
+        let hits = code_identifier_hits(&src, own);
+        assert_eq!(
+            hits, 2,
+            "{rel} names its own `{own}` constant {hits} time(s); expected 2 (the \
+             import and the `DIALECT` declaration). Either the const moved — say so \
+             deliberately — or `code_identifier_hits` stopped matching, in which case \
+             the zero this test reports over every other file is blind."
+        );
+        assert!(
+            src.lines()
+                .map(str::trim)
+                .any(|line| line.ends_with(declaration)),
+            "{rel} must carry its execution half's dialect identity in \
+             `{declaration}`; the siblings all read it through `super::` and a half \
+             whose const moved has lost the one line that knows the vendor"
+        );
+    }
+
+    // ---- THE WALK, with its floor. ------------------------------------------
+    let mut walked = 0usize;
+    let mut violations: Vec<String> = Vec::new();
+    for (vendor_crate, own) in VENDORS {
+        let root = crates.join(vendor_crate).join("src").join("backend");
+        assert!(
+            root.is_dir(),
+            "{} does not exist, so this census would walk nothing for {vendor_crate} \
+             and report clean",
+            root.display()
+        );
+        for path in rs_files(&root) {
+            walked += 1;
+            let rel = path
+                .strip_prefix(&crates)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+            for other in DIALECT_CONSTANTS {
+                if other == own {
+                    continue;
+                }
+                let hits = code_identifier_hits(&src, other);
+                if hits > 0 {
+                    violations.push(format!("  {rel}: names `{other}` {hits} time(s)"));
+                }
+            }
+        }
+    }
+
+    assert!(
+        walked >= EXECUTION_FILE_FLOOR,
+        "the census walked only {walked} execution-half files, below the floor of \
+         {EXECUTION_FILE_FLOOR}. A narrowed walk finds nothing and reports clean; fix \
+         the walk, do not lower the floor to get green."
+    );
+
+    assert!(
+        violations.is_empty(),
+        "a vendor execution half names a FOREIGN dialect constant:\n{}\n\nA backend \
+         module names its own dialect and no other. See the one-dialect-literal rule \
+         in render/backends/mod.rs.",
+        violations.join("\n")
+    );
 }

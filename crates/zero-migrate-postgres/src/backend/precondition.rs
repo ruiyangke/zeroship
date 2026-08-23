@@ -45,7 +45,7 @@
 //!
 //! # Where this is evaluated — the backend seam (multi-engine abstraction)
 //!
-//! [`MigrationEngine::apply`](crate::engine::MigrationEngine::apply) evaluates a pending migration's preconditions
+//! `MigrationEngine::apply` evaluates a pending migration's preconditions
 //! **inside the apply flow, under the project advisory lock**, immediately before
 //! the migration's `up` — so the state a precondition checks is stable for the
 //! apply. All evaluation is read-only (catalog reads + a single read-only
@@ -54,12 +54,12 @@
 //! **This module is the POSTGRES precondition impl.** Both the SQL VALIDATION
 //! (`validate_single_select`, `pg_query::parse` — "is this a safe single
 //! SELECT?") and the EVALUATION
-//! ([`evaluate`](crate::apply::backend::postgres::precondition::evaluate),
+//! ([`evaluate`](crate::backend::precondition::evaluate),
 //! `information_schema` catalog reads +
 //! the `&Client`-bound `SqlBoolean` run) are PG-dialect-specific, so they live
 //! BEHIND the [`MigrationBackend`] seam: the
 //! generic apply path calls
-//! [`backend.evaluate_preconditions`](crate::apply::backend::MigrationBackend::evaluate_preconditions),
+//! [`backend.evaluate_preconditions`](zero_migrate_backend::backend::MigrationBackend::evaluate_preconditions),
 //! and only [`PostgresBackend`] routes into this
 //! module (via `evaluate_all`, which folds the per-check verdict loop). The
 //! SQLite backend validates/evaluates in its own dialect (descriptor migrations
@@ -68,18 +68,17 @@
 //! all contained here, the PG leaf.
 
 use super::PostgresBackend;
-use crate::apply::backend::MigrationBackend;
-use crate::driver::SqlSession;
 use pg_query::protobuf::node::Node as NodeEnum;
 use serde_json::Value;
+use zero_migrate_backend::backend::MigrationBackend;
+use zero_migrate_backend::driver::SqlSession;
 
-use crate::apply::executor::{unmet_halt_error, ApplyError, PreconditionVerdict};
-use crate::conn::ExecutorConfig;
-use crate::guard::GuardError;
-use crate::model::migration::Migration;
-use crate::model::precondition::{OnUnmet, Precondition};
-use crate::render::backends::guard_for;
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::executor::{unmet_halt_error, ApplyError, PreconditionVerdict};
+use zero_migrate_backend::guard::GuardError;
 use zero_migrate_ir::dialect::DialectId;
+use zero_migrate_ir::migration::Migration;
+use zero_migrate_ir::precondition::{OnUnmet, Precondition};
 
 /// Sequence-mutating and lock-acquiring builtins a read-only precondition may
 /// NEVER call. `nextval`/`setval` mutate a sequence (NOT blocked by `READ
@@ -110,7 +109,7 @@ const MUTATING_OR_LOCK_BUILTINS: &[&str] = &[
 pub enum PreconditionError {
     /// A database error while running a (structured or `SqlBoolean`) check.
     #[error("precondition db error: {0}")]
-    Db(#[from] crate::driver::DbError),
+    Db(#[from] zero_migrate_backend::driver::DbError),
     /// A structured check named an identifier that is not a bare SQL identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`) — a schema-qualified name, a quoted-injection
     /// attempt, whitespace, or punctuation. Rejected before any query runs.
@@ -142,9 +141,9 @@ pub enum PreconditionError {
     },
     /// An engine-supplied identifier (project schema / migrator role) was not
     /// quotable (empty or NUL-bearing) at a render seam — fail-closed rather than
-    /// interpolate it. Maps [`crate::render::dml::IdentQuoteError`].
+    /// interpolate it. Maps [`zero_migrate_backend::dml::IdentQuoteError`].
     #[error("precondition: {0}")]
-    IdentQuote(#[from] crate::render::dml::IdentQuoteError),
+    IdentQuote(#[from] zero_migrate_backend::dml::IdentQuoteError),
 }
 
 /// Validate a bare SQL identifier (mirrors `backfill::validate_ident`): non-empty,
@@ -170,8 +169,8 @@ fn validate_ident(what: &'static str, value: &str) -> Result<(), PreconditionErr
 /// The only caller is the `row_count` probe. Its owning
 /// backend supplies the dialect explicitly rather than this core module assuming
 /// one; the renderer registered for that dialect owns the emitted spelling.
-fn quote_ident(ident: &str, dialect: &DialectId) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(ident, dialect)
+fn quote_ident(ident: &str) -> String {
+    zero_migrate_backend::dml::escape_quote_ident_for_backend(ident, &crate::dml::RENDERER)
 }
 
 /// Evaluate a precondition against the live DB. Returns `true` if the assertion
@@ -231,7 +230,7 @@ pub async fn evaluate<D: SqlSession>(
         }
         Precondition::RowCount { table, op, value } => {
             validate_ident("table", table)?;
-            let n = row_count(conn, cfg, dialect, table).await?;
+            let n = row_count(conn, cfg, table).await?;
             Ok(op.apply(n, *value))
         }
         Precondition::SqlBoolean { sql } => evaluate_sql_boolean(conn, cfg, dialect, sql).await,
@@ -240,7 +239,7 @@ pub async fn evaluate<D: SqlSession>(
 
 /// Evaluate ALL of a migration's preconditions, in declaration order,
 /// BEFORE its `up` runs — the **Postgres** precondition path behind
-/// [`PostgresBackend::evaluate_preconditions`](crate::apply::backend::PostgresBackend),
+/// [`PostgresBackend::evaluate_preconditions`](super::PostgresBackend),
 /// reached only via the backend seam (multi-engine abstraction). Folds the
 /// former generic-executor `evaluate_preconditions` loop into the PG leaf, so the
 /// `&Client` + per-check `pg_query`/`information_schema` evaluation never sits in
@@ -301,7 +300,7 @@ pub(crate) async fn evaluate_all<D: SqlSession>(
 ///
 /// The shared body behind BOTH seams that ask this question: the per-migration
 /// [`evaluate_all`] and the plan-wide preflight
-/// ([`crate::apply::plan_precondition`], via
+/// (`zero_migrate::apply::plan_precondition`, via
 /// `MigrationBackend::evaluate_plan_precondition`). One body so the two can never
 /// come to different conclusions, or word the same refusal differently.
 ///
@@ -441,13 +440,12 @@ async fn column_exists<D: SqlSession>(
 async fn row_count<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     table: &str,
 ) -> Result<i64, PreconditionError> {
     let stmt = format!(
         "SELECT count(*)::bigint AS n FROM {}.{}",
-        quote_ident(&cfg.project_schema, dialect),
-        quote_ident(table, dialect),
+        quote_ident(&cfg.project_schema),
+        quote_ident(table),
     );
     let row = conn.query_one(&stmt, &[]).await?;
     Ok(row.try_get("n")?)
@@ -629,7 +627,7 @@ async fn evaluate_sql_boolean<D: SqlSession>(
     // Platform ⇒ the operator allowlist. Latent for the port (the loader sets
     // `preconditions = []`), but threaded so it is correct the day a platform
     // precondition is written.
-    let guard = guard_for(&cfg.guard_config_for(dialect));
+    let guard = crate::guard::guard(&cfg.guard_config_for(dialect));
     guard.check(sql)?;
 
     // 2. Shape gate (THE pre-execution line): a single SELECT with no DML
@@ -648,7 +646,7 @@ async fn evaluate_sql_boolean<D: SqlSession>(
     // transaction-scoped, so it vanishes at COMMIT and never leaks onto the
     // session — the same discipline the executor uses.
     conn.batch("BEGIN READ ONLY").await?;
-    let result = run_sql_boolean_in_txn(conn, cfg, dialect, sql).await;
+    let result = run_sql_boolean_in_txn(conn, cfg, sql).await;
     // Always end the transaction. A read-only txn has nothing to persist, so we
     // COMMIT on success and ROLLBACK on error (both end the txn + revert the
     // SET LOCALs); failures here are surfaced behind the primary result.
@@ -671,21 +669,25 @@ async fn evaluate_sql_boolean<D: SqlSession>(
 async fn run_sql_boolean_in_txn<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     sql: &str,
 ) -> Result<bool, PreconditionError> {
     // Pin the project schema (and only it) on the path, scoped to this txn.
     // Routed through the ONE engine seam so it fails closed on an empty/NUL
     // schema, byte-identical to the prior `escape_quote_ident` on every real
     // (quote-free / `-`-bearing UUIDv7) schema.
-    let schema_q =
-        crate::render::dml::quote_ident_checked_for_dialect(&cfg.project_schema, dialect)?;
+    let schema_q = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+        &cfg.project_schema,
+        &crate::dml::RENDERER,
+    )?;
     conn.batch(&format!("SET LOCAL search_path TO {schema_q}"))
         .await?;
     // Drop to the migrator role for the read, scoped to this txn (line-2). No
     // role configured (tests / single-tenant dev) runs as the connecting role.
     if let Some(role) = &cfg.confinement.postgres.migrator_role {
-        let role_q = crate::render::dml::quote_ident_checked_for_dialect(role, dialect)?;
+        let role_q = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+            role,
+            &crate::dml::RENDERER,
+        )?;
         conn.batch(&format!("SET LOCAL ROLE {role_q}")).await?;
     }
     let row = conn.query_one(sql, &[]).await?;
@@ -710,7 +712,7 @@ async fn run_sql_boolean_in_txn<D: SqlSession>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::precondition::{CmpOp, PreconditionCheck};
+    use zero_migrate_ir::precondition::{CmpOp, PreconditionCheck};
 
     #[test]
     fn cmp_op_applies() {

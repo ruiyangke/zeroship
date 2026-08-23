@@ -117,7 +117,7 @@ const ALLOWED: &[(&str, usize)] = &[
 /// a walk that broke — [`WALK_ANCHORS`] is what tells those two apart, so check it
 /// first and trust it over this number.
 ///
-/// It has now fired exactly that way twice, on consecutive extractions.
+/// It has now fired exactly that way three times, on consecutive extractions.
 ///
 /// - The MySQL execution half — `apply/backend/mysql/`, eight files — moved into
 ///   `zero-migrate-mysql`, taking core from 77 `.rs` files to 69 and under the 70
@@ -126,11 +126,16 @@ const ALLOWED: &[(&str, usize)] = &[
 ///   `zero-migrate-sqlite/src/backend/`, taking core from 69 to 58 and under that 60.
 ///   Lowered to 50.
 ///
-/// Both times [`WALK_ANCHORS`] passed, which is what said the walk was intact and the
-/// shrink was the extraction. 50 is under 58 with room to churn and still far from a
-/// walk that found nothing. `apply/backend/postgres/` is the last vendor subtree in
-/// core, so expect this to fire a third time.
-const SRC_FILE_FLOOR: usize = 50;
+/// - The PostgreSQL execution half — `apply/backend/postgres/`, TEN files — moved
+///   into `zero-migrate-postgres/src/backend/`, taking core from 58 to 48 and under
+///   that 50. Lowered to 42.
+///
+/// All three times [`WALK_ANCHORS`] passed, which is what said the walk was intact
+/// and the shrink was the extraction. 42 is under 48 with room to churn and still far
+/// from a walk that found nothing. There is no vendor subtree left in core — this was
+/// the last one — so the next time this fires it is core shrinking for some other
+/// reason, and that is a question rather than a routine lowering.
+const SRC_FILE_FLOOR: usize = 42;
 
 /// Files the walk MUST reach, which is the real defence against a census that fails
 /// open.
@@ -143,7 +148,8 @@ const SRC_FILE_FLOOR: usize = 50;
 /// narrowed to nothing and still pass, however small core gets.
 ///
 /// Pick replacements only from files that cannot move. Anchoring on something inside
-/// `apply/backend/` would rot the moment that directory is extracted.
+/// `apply/backend/` would have rotted the moment that directory was extracted, and it
+/// has been: `apply/backend/` holds `mod.rs` and `capability.rs` now and no vendor.
 const WALK_ANCHORS: &[&str] = &["lib.rs", "render/backends/mod.rs"];
 
 /// Whether a source line is CODE rather than a comment.

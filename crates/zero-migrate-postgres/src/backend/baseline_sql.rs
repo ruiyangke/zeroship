@@ -1,7 +1,7 @@
 //! The PostgreSQL adoption baseline: record an existing project DB's schema as a
 //! `completed` journal event WITHOUT running its `up`.
 //!
-//! This body used to live in `crate::apply::baseline`, next to the dialect-neutral
+//! This body used to live in `zero_migrate_backend::baseline`, next to the dialect-neutral
 //! [`BaselineOutcome`]/[`BaselineError`] vocabulary it returns — and from there it
 //! called `apply::backend::postgres::journal_sql` by name. That made core's baseline
 //! verb PostgreSQL's baseline verb: SQLite has its own body in
@@ -11,16 +11,15 @@
 //! that named this one.
 //!
 //! The neutral half stayed where it was. `BaselineOutcome` and `BaselineError` are
-//! the [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
+//! the [`MigrationBackend::baseline_one`](zero_migrate_backend::backend::MigrationBackend::baseline_one)
 //! signature, so every backend still speaks them; only the PostgreSQL IMPLEMENTATION
 //! moved down here, where naming `journal_sql` is naming yourself.
 
-use crate::apply::baseline::{BaselineError, BaselineOutcome};
-use crate::apply::journal::{self, JournalError};
-use crate::conn::ExecutorConfig;
-use crate::driver::SqlSession;
-use crate::model::migration::Migration;
-use crate::render::backends::guard_for;
+use zero_migrate_backend::baseline::{BaselineError, BaselineOutcome};
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::journal::{self, JournalError};
+use zero_migrate_ir::migration::Migration;
 
 use super::journal_sql;
 
@@ -28,9 +27,9 @@ use super::journal_sql;
 /// — a `completed` journal event WITHOUT running its `up`.
 ///
 /// This is the **Postgres impl behind**
-/// [`MigrationBackend::baseline_one`](crate::apply::backend::MigrationBackend::baseline_one)
+/// [`MigrationBackend::baseline_one`](zero_migrate_backend::backend::MigrationBackend::baseline_one)
 /// (multi-engine abstraction): it is `pub(crate)`, reached only through
-/// [`PostgresBackend::baseline_one`](crate::apply::backend::PostgresBackend), which keeps the
+/// [`PostgresBackend::baseline_one`](super::PostgresBackend), which keeps the
 /// `&Client`/`pg_advisory_lock` confined to the PG backend. There is no longer a
 /// top-level PG-`&Client`-typed `baseline` on the public surface; callers go through
 /// `backend.baseline_one(…)`.
@@ -48,7 +47,7 @@ use super::journal_sql;
 /// migrations (not a first-entry DB).
 /// - [`BaselineError::ConflictingBaseline`] — a different baseline already exists.
 /// - [`BaselineError::Db`] / [`BaselineError::Journal`] — infrastructure failures.
-pub(crate) async fn baseline<B: crate::apply::backend::MigrationBackend, D: SqlSession>(
+pub(crate) async fn baseline<B: zero_migrate_backend::backend::MigrationBackend, D: SqlSession>(
     backend: &B,
     conn: &D,
     cfg: &ExecutorConfig,
@@ -58,7 +57,7 @@ pub(crate) async fn baseline<B: crate::apply::backend::MigrationBackend, D: SqlS
 ) -> Result<BaselineOutcome, BaselineError> {
     // GUARD (defense in depth) — BEFORE the lock, no DB needed. A baseline that
     // carries a denied/cross-schema construct is refused even though it never runs.
-    let guard = guard_for(&cfg.guard_config_for(dialect));
+    let guard = crate::guard::guard(&cfg.guard_config_for(dialect));
     guard
         .check(&baseline_migration.up)
         .map_err(|source| BaselineError::Guard {
@@ -74,7 +73,7 @@ pub(crate) async fn baseline<B: crate::apply::backend::MigrationBackend, D: SqlS
     // advisory lock and still fail the acquiring statement, and a caller told the
     // acquisition failed has nothing to release with.
     backend.acquire_project_lock(cfg).await?;
-    let result = baseline_locked(conn, cfg, dialect, baseline_migration, applied_by).await;
+    let result = baseline_locked(conn, cfg, baseline_migration, applied_by).await;
     let unlock = backend.release_project_lock(cfg).await;
     match result {
         Ok(o) => unlock.map(|()| o).map_err(BaselineError::Lock),
@@ -86,16 +85,15 @@ pub(crate) async fn baseline<B: crate::apply::backend::MigrationBackend, D: SqlS
 async fn baseline_locked<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &zero_migrate_ir::dialect::DialectId,
     baseline_migration: &Migration,
     applied_by: &str,
 ) -> Result<BaselineOutcome, BaselineError> {
-    journal_sql::ensure_journal(conn, cfg, dialect).await?;
+    journal_sql::ensure_journal(conn, cfg).await?;
 
     let version = baseline_migration.version.as_str();
 
     // Idempotency + first-entry check. Read net-applied state once.
-    let applied = journal_sql::applied(conn, cfg, dialect).await?;
+    let applied = journal_sql::applied(conn, cfg).await?;
     let net_applied: Vec<&str> = applied
         .iter()
         .filter(|e| e.phase == journal::Phase::Completed)
@@ -115,7 +113,7 @@ async fn baseline_locked<D: SqlSession>(
     // generic already-managed error.
     if !net_applied.is_empty() {
         // Is the existing net-applied entry a baseline? Report the clearer error.
-        if let Some(existing_baseline) = first_baseline_version(conn, cfg, dialect).await? {
+        if let Some(existing_baseline) = first_baseline_version(conn, cfg).await? {
             return Err(BaselineError::ConflictingBaseline {
                 project: cfg.project_id.clone(),
                 requested: version.to_string(),
@@ -133,7 +131,6 @@ async fn baseline_locked<D: SqlSession>(
     journal_sql::record_baseline(
         conn,
         cfg,
-        dialect,
         journal::BaselineRecord {
             version,
             name: &baseline_migration.name,
@@ -155,15 +152,16 @@ async fn baseline_locked<D: SqlSession>(
 async fn first_baseline_version<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &zero_migrate_ir::dialect::DialectId,
 ) -> Result<Option<String>, BaselineError> {
     // Engine-supplied meta schema: route through the ONE shared engine seam so it
     // fails closed on an empty / NUL name, byte-identical to the prior
     // `escape_quote_ident`. This is a journal-table read, so the fail-closed error
     // is mapped through `JournalError` (which carries `From<IdentQuoteError>`).
-    let meta =
-        crate::render::dml::quote_ident_checked_for_dialect(&cfg.confinement.meta_schema, dialect)
-            .map_err(JournalError::from)?;
+    let meta = zero_migrate_backend::dml::quote_ident_checked_for_backend(
+        &cfg.confinement.meta_schema,
+        &crate::dml::RENDERER,
+    )
+    .map_err(JournalError::from)?;
     let rows = conn
         .query(
             &format!(

@@ -25,35 +25,6 @@ description = "Portable, security-first, multi-dialect DB migration engine — d
 # structurally, so there is no build configuration left to select.
 
 [dependencies]
-# Parse SQL with the REAL Postgres parser (libpg_query bindings) so the security
-# PRECONDITION shape-gate + the idempotence/txn scans see exactly what Postgres
-# would execute. The parse-time SQL security GUARD (deny-list, classify, advisories)
-# lives in the `zero-migrate-postgres` crate, behind the `MigrationGuard` contract.
-#
-# COUNT THE CALL SITES BEFORE EDITING THIS COMMENT. It previously named three
-# "engine still parses directly here" paths and two of them had already moved; a
-# comment naming paths that do not exist is a false map. What is true today, all of
-# it PostgreSQL-only and NONE of it in neutral core:
-#
-#   - `apply/backend/postgres/session.rs` — the non-transactional idempotence scan,
-#     the non-txn `down` reason, and the crash-recovery replayability/index-name
-#     scans. Reached only through `MigrationBackend`; MySQL and SQLite each write
-#     their own answer and never touch this.
-#   - `apply/backend/postgres/backfill_sql.rs` — the assembled-backfill cursor
-#     mutation check.
-#   - `apply/backend/postgres/precondition.rs` — the `SqlBoolean` boolean-SELECT
-#     shape gate, reached only via `PostgresBackend::evaluate_preconditions`; both
-#     other backends refuse a migration that declares a precondition. It used to
-#     sit at the neutral-looking `apply/precondition.rs`, which is what made this
-#     entry need a "despite the path" caveat; the path says PostgreSQL now.
-#
-# The raw-view-body scan is NO LONGER on this list: it goes through
-# `ValidationPolicy::raw_view_body_refusal` so each backend vets its own grammar.
-#
-# This dependency cannot leave until `apply/backend/postgres/**` relocates into
-# `zero-migrate-postgres` — which now covers the precondition evaluator too, since
-# it moved under that directory. pg_query carries a C build dep (libpg_query).
-pg_query = "6"
 sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
@@ -139,6 +110,20 @@ tracing = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+# TEST-ONLY now, and this is the commit that made it so. Every engine parse site the
+# `[dependencies]` entry justified was PostgreSQL's and reached only through
+# `MigrationBackend`: the non-transactional idempotence / crash-recovery scans, the
+# assembled-backfill cursor mutation check, and the `SqlBoolean` precondition shape
+# gate. All three left with `apply/backend/postgres/` for
+# `zero-migrate-postgres/src/backend/`, which is the exit condition the old comment
+# named. The engine's own code opens no PostgreSQL parser anywhere.
+#
+# COUNT THE CALL SITES BEFORE EDITING THIS COMMENT — the entry it replaces was wrong
+# twice before for exactly that reason. Today there is ONE, in a test:
+# `tests/authoring_surface/sequences_exclusion.rs` parses a rendered exclusion
+# constraint to prove the bytes the author emitted are bytes PostgreSQL accepts.
+# pg_query carries a C build dep (libpg_query).
+pg_query = "6"
 # TEST-ONLY, and it is the SAME crate the `[dependencies]` entry above names — this
 # line exists only for the `testing` feature. That feature publishes MySQL's canned
 # `SqlSession` recorder, which fourteen tests in `tests/mysql_engine/` drive while
@@ -151,6 +136,18 @@ toml = { workspace = true }
 # Resolver 3 keeps dev-dependency features out of the normal build, so
 # `cargo build -p zero-migrate` links none of it.
 zero-migrate-mysql = { workspace = true, features = ["testing"] }
+# TEST-ONLY FEATURE on a crate this manifest already depends on: it publishes
+# `zero_migrate_postgres::backend::recording`, the canned `SqlSession` that crate's
+# own unit tests drive. Five tests over that SAME recorder additionally drive
+# `MigrationEngine` / `AppliedPlan` / `ops::status::history_via_backend`. Those three
+# are the engine's, so those tests cannot live in the vendor crate (the edge back is a
+# cycle Cargo refuses) — and a second copy of the recorder over here would be worse
+# than the feature: its canned rows are the shared premise of both suites, and two
+# copies drift silently.
+#
+# Resolver 3 keeps dev-dependency features out of the normal build, so
+# `cargo build -p zero-migrate` links none of it.
+zero-migrate-postgres = { workspace = true, features = ["testing"] }
 # TEST-ONLY: the SEAM-generic async apply/backend surface is
 # `async`, so the test harness drives it on a runtime. `#[compio::test]` spins a
 # throwaway compio run loop per test (zero tokio) to `.await` the seam-generic

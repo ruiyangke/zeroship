@@ -33,9 +33,8 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::migration::{Checksum, ChecksumInput, MigrationFlags, MigrationId};
 use zero_migrate::model::precondition::{OnUnmet, Precondition, PreconditionCheck};
 use zero_migrate::render::step::PlanStep;
-use zero_migrate::{
-    model::migration::Migration, Approval, ExecutorConfig, MigrationEngine, PostgresBackend,
-};
+use zero_migrate::{model::migration::Migration, Approval, ExecutorConfig, MigrationEngine};
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_precondition_pg";
 

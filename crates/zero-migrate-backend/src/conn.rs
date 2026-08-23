@@ -142,17 +142,18 @@ pub struct ConfinementConfig {
 ///
 /// This doc used to claim every field was referenced "solely from
 /// `apply/backend/postgres/` and the precondition evaluator". Half of that has
-/// become true — the precondition evaluator IS `apply/backend/postgres/` now — and
-/// the other half was never true, which is why the claim is replaced by the
-/// measurement rather than trimmed.
+/// become true — the precondition evaluator IS the PostgreSQL backend now — and the
+/// other half was never true, which is why the claim is replaced by the measurement
+/// rather than trimmed. (That backend is `zero-migrate-postgres/src/backend/` since
+/// the execution half left the engine; the paths below are relative to it.)
 ///
-/// `migrator_role` is read only from `apply/backend/postgres/`
+/// `migrator_role` is read only from the PostgreSQL backend
 /// (`session`, `backfill_sql`, `primary_key_sql`, `precondition`) and written by
 /// [`ExecutorConfig::with_migrator_role`], the host's provisioning seam.
 ///
 /// `extension_schemas` is read from exactly ONE place, and that place is now the
-/// PostgreSQL backend too: `search_path_clause`, in
-/// `apply/backend/postgres/session.rs`. It used to be a method on the neutral
+/// PostgreSQL backend too: `search_path_clause`, in that crate's
+/// `backend/session.rs`. It used to be a method on the neutral
 /// [`ExecutorConfig`] in this file, and this doc named that as the real reason the
 /// neutral [`ConfinementConfig`] still carried a vendor-typed field — "relocating
 /// the field without first relocating `search_path_clause` would only move the

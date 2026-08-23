@@ -166,7 +166,7 @@ pub enum SquashError {
 /// and the supersession write
 /// ([`record_squash`](MigrationBackend::record_squash)) all route through the
 /// trait. No concrete driver client / `pg_advisory_lock` / `pg_query` appears
-/// here; the PG specifics stay inside [`PostgresBackend`](crate::apply::backend::PostgresBackend).
+/// here; the PG specifics stay inside `zero_migrate_postgres::PostgresBackend`.
 /// The PG path is byte-identical: the PG lock SQL, guard, and `record_baseline`
 /// write are the EXACT pre-seam code, now reached through the backend.
 pub async fn squash<B: MigrationBackend>(

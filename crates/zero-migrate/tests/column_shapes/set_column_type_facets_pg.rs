@@ -45,10 +45,12 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops,
-    resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend, StructuralDrift,
+    diff_snapshots, fold_ops, resolve_create_table_policy, Approval, EffectivePolicy,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
+    StructuralDrift,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
 /// imported from the crate. It used to be
@@ -194,13 +196,9 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Applied {
             &policy,
         )
         .map_err(|error| format!("fold the applied PostgreSQL ops: {error}"))?;
-        let actual = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            &session,
-            &cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let actual = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(Applied {
             drift: diff_snapshots(&expected, &actual),
         })

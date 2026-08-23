@@ -34,10 +34,11 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots,
-    effective_policy_from_charter_toml, fold_ops, Approval, EffectivePolicy, ExecutorConfig,
-    GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend,
+    diff_snapshots, effective_policy_from_charter_toml, fold_ops, Approval, EffectivePolicy,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_fold_role_extension";
 /// Available on the test image, and not installed by default - so creating it is
@@ -214,13 +215,9 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         );
 
         // (1) Applied and folded agree.
-        let actual = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            &session,
-            &cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("snapshot: {error}"))?;
+        let actual = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot: {error}"))?;
         let drift = diff_snapshots(&expected, &actual);
         assert!(
             drift.is_clean(),
@@ -235,13 +232,9 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
             .batch(&format!("DROP ROLE {}", quote_ident(&role)))
             .await
             .map_err(|error| format!("drop the role: {error}"))?;
-        let after_role = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            &session,
-            &cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("snapshot after dropping the role: {error}"))?;
+        let after_role = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot after dropping the role: {error}"))?;
         assert_eq!(
             diff_snapshots(&expected, &after_role).missing_objects,
             vec![format!("role {role}")],
@@ -252,13 +245,9 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
             .batch(&format!("DROP EXTENSION {}", quote_ident(EXTENSION)))
             .await
             .map_err(|error| format!("drop the extension: {error}"))?;
-        let after_both = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            &session,
-            &cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("snapshot after dropping the extension: {error}"))?;
+        let after_both = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot after dropping the extension: {error}"))?;
         let mut both = diff_snapshots(&expected, &after_both).missing_objects;
         both.sort();
         assert_eq!(
@@ -395,7 +384,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
             ));
         }
 
-        let actual = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &cfg.project_schema)
+        let actual = snapshot_schema(&session, &cfg.project_schema)
             .await
             .map_err(|error| format!("snapshot: {error}"))?;
         let drift = diff_snapshots(&expected, &actual);
@@ -412,7 +401,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
             .batch(&format!("ALTER ROLE {} NOCREATEDB", quote_ident(&role)))
             .await
             .map_err(|error| format!("alter the role out of band: {error}"))?;
-        let after = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &cfg.project_schema)
+        let after = snapshot_schema(&session, &cfg.project_schema)
             .await
             .map_err(|error| format!("snapshot after the alter: {error}"))?;
         let drifted = diff_snapshots(&expected, &after);

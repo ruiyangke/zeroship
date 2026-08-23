@@ -27,9 +27,11 @@ use zero_migrate::model::ir::Op;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, fold_ops, guard_for, Approval,
-    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, PostgresBackend,
+    fold_ops, guard_for, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
+    MigrationEngine,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_drop_view_rollback_pg";
 const VIEW: &str = "active_users";
@@ -174,7 +176,7 @@ async fn apply_doc_under(
 
 /// The view's live body as `pg_get_viewdef` reports it, or `None` when absent.
 async fn live_view_body(session: &PgDevSession, schema: &str) -> Result<Option<String>, String> {
-    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, schema)
+    let snapshot = snapshot_schema(session, schema)
         .await
         .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
     Ok(snapshot

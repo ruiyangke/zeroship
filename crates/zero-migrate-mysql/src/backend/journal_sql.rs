@@ -731,8 +731,8 @@ pub(crate) async fn record_completed_in_transaction<D: SqlSession>(
 }
 
 /// Append an immutable `rolled_back` event — the MySQL analogue of the PostgreSQL
-/// rollback journal INSERT. That peer is `record_rolled_back` in the engine's
-/// `apply::backend::postgres::journal_sql`, which this crate does not depend on and
+/// rollback journal INSERT. That peer is `record_rolled_back` in
+/// `zero_migrate_postgres::backend::journal_sql`, which this crate does not depend on and
 /// so cannot link; the contract has no method of its own for it. `?`
 /// placeholders. The applied-only columns stay NULL (the CHECK enforces the
 /// `rolled_back` shape).
@@ -769,7 +769,7 @@ pub(crate) async fn record_rolled_back<D: SqlSession>(
 }
 
 /// Clear the inflight `started` marker for a version — the MySQL analogue of
-/// `clear_inflight` in the engine's `apply::backend::postgres::journal_sql`, which
+/// `clear_inflight` in `zero_migrate_postgres::backend::journal_sql`, which
 /// this crate does not depend on and so cannot link. `?` placeholder.
 ///
 /// # Errors

@@ -104,11 +104,14 @@ const ENGINE_FILE_THAT_MAY_SPELL: &str = "apply/drift.rs";
 ///   became `zero-migrate-sqlite/src/backend/`, taking core from 69 to 58.
 ///   Lowered to 50.
 ///
-/// Both times the anchor passed, which is what said the walk was intact and the
-/// shrink was the move. 50 is still far from a walk that collapsed toward nothing,
-/// and the one remaining backend subtree — `apply/backend/postgres/` — will take it
-/// lower again.
-const ENGINE_FILE_FLOOR: usize = 50;
+/// - `apply/backend/postgres/` — TEN files, the whole PostgreSQL execution half —
+///   became `zero-migrate-postgres/src/backend/`, taking core from 58 to 48.
+///   Lowered to 42.
+///
+/// All three times the anchor passed, which is what said the walk was intact and the
+/// shrink was the move. 42 is still far from a walk that collapsed toward nothing.
+/// There is no backend subtree left under `apply/backend/` to take it lower again.
+const ENGINE_FILE_FLOOR: usize = 42;
 
 /// The needle's positive control: call sites the allowed file is known to make.
 ///

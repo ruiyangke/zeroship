@@ -940,7 +940,7 @@ pub async fn apply_pg<D: zero_migrate::driver::SqlSession>(
     applied_by: &str,
 ) -> Result<zero_migrate::ApplyOutcome, zero_migrate::ApplyError> {
     zero_migrate::apply(
-        &zero_migrate::PostgresBackend::new_generic(conn),
+        &zero_migrate_postgres::PostgresBackend::new_generic(conn),
         cfg,
         migrations,
         approval,

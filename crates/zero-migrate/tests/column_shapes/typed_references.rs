@@ -10,10 +10,10 @@ use serde_json::{json, Value};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, fold_ops, validate_ir, ColumnSnapshot,
-    ConstraintSnapshot, IrAuthor, LiveSchema, MysqlTextStorageSnapshot, SchemaSnapshot,
-    TableSnapshot,
+    fold_ops, validate_ir, ColumnSnapshot, ConstraintSnapshot, IrAuthor, LiveSchema,
+    MysqlTextStorageSnapshot, SchemaSnapshot, TableSnapshot,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
 
 const PROJECT_SCHEMA: &str = "app";
 const OWNER: &str = "app_typed_references";
@@ -891,7 +891,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                 .map_err(|error| format!("apply formatted parent key: {error}"))?;
         }
 
-        let parent_snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+        let parent_snapshot = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect formatted parent keys: {error}"))?;
         for table in ["type_id_parents", "ulid_parents"] {
@@ -955,7 +955,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
             .await
             .map_err(|error| format!("apply typed child references: {error}"))?;
 
-        let applied = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+        let applied = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect applied typed references: {error}"))?;
         let foreign_key_count = applied

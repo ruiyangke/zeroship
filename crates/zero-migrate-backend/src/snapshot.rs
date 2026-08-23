@@ -6,8 +6,8 @@ use zero_migrate_ir::expr::Expr;
 use zero_migrate_ir::ir::{
     ColType, ForEach, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol,
     IndexSortOrder, IndexStorageParams, PartitionBounds, PartitionSpec, PolicyCmd, SafeI64,
-    SafeU64, SequenceOwnedBy, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming,
-    ValueFormat,
+    SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions, TriggerAction, TriggerEvent,
+    TriggerTiming, ValueFormat,
 };
 
 /// Quote one identifier in the canonical constraint-definition normal form.
@@ -2224,6 +2224,89 @@ pub fn canonical_pg_arg_type(raw: &str) -> String {
         "timestamptz" | "timestamp with time zone" => "timestamptz".to_string(),
         _ => collapsed,
     }
+}
+
+// ── The `nextval` default's ONE spelling, and its ONE parse ───────────────────
+//
+// Only PostgreSQL writes `nextval('<seq>'::regclass)`, and both of these read
+// PostgreSQL's spelling. They are still SHARED vocabulary rather than that vendor's
+// private business, by the same test `constraint_definition` passes: the
+// DIALECT-BLIND differ compares a snapshot whose producer it does not know, so it
+// has to be able to read every producer's spelling, and the vendor that writes the
+// spelling has to render the identical bytes. Two copies of that pair is the defect
+// — a differ that stopped recognizing what one producer emits silently stops
+// comparing that producer's defaults.
+//
+// They sat in `zero_migrate::apply::drift` and `zero_migrate::render::declarative`,
+// which put them above the vendor that writes them; the PostgreSQL introspector
+// reaches both, so they came down to where both callers can.
+
+/// Canonical rendered form of a `nextval` default over a sequence identity.
+pub fn nextval_default_expr(sequence: &SequenceRef) -> String {
+    let regclass_name = match sequence.schema.as_deref() {
+        Some(schema) => format!("{schema}.{}", sequence.name),
+        None => sequence.name.clone(),
+    };
+    format!(
+        "nextval({}::regclass)",
+        crate::dml::sql_string_literal(&regclass_name)
+    )
+}
+
+/// The sequence a `nextval(...)` default names, or `None` when the expression is not
+/// one.
+///
+/// SHARED rather than PostgreSQL-private, and the two callers are why. The PG
+/// introspector reaches it to recover an ID default from `pg_get_expr`
+/// (`backend::postgres::drift_sql::recover_nextval_default`), and the DIALECT-BLIND
+/// differ reaches it through `zero_migrate::apply::drift::comparable_column_default` —
+/// which runs for every
+/// dialect, because the snapshot it is handed may have been produced by any of them.
+/// A differ that could not read the spelling one producer emits would silently stop
+/// comparing that producer's defaults, so the parse belongs to the shared vocabulary
+/// even though only PostgreSQL writes the spelling.
+pub fn parse_nextval_sequence_ref(expr: &str) -> Option<SequenceRef> {
+    let expression = expr.trim();
+    // pg_get_expr qualifies the built-in when a same-signature function earlier
+    // on search_path would otherwise capture the deparsed spelling. The OID is
+    // still proven through pg_depend below, so pg_catalog qualification is
+    // catalog decoration rather than generator identity.
+    let call = expression
+        .strip_prefix("nextval(")
+        .or_else(|| expression.strip_prefix("pg_catalog.nextval("))?;
+    let inner = call.strip_suffix(')')?.trim();
+    let literal = inner.strip_suffix("::regclass")?.trim();
+    let regclass = parse_single_quoted_sql_string(literal)?;
+    let (schema, name) = match regclass.split_once('.') {
+        Some((schema, name)) if !schema.is_empty() && !name.is_empty() => {
+            (Some(schema.to_string()), name.to_string())
+        }
+        None if !regclass.is_empty() => (None, regclass),
+        _ => return None,
+    };
+    Some(SequenceRef { name, schema })
+}
+
+/// Read one single-quoted SQL string literal, undoubling `''`. Returns `None` when
+/// the input is not exactly one such literal.
+fn parse_single_quoted_sql_string(input: &str) -> Option<String> {
+    let mut chars = input.chars();
+    if chars.next()? != '\'' {
+        return None;
+    }
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            match chars.next() {
+                Some('\'') => out.push('\''),
+                None => return Some(out),
+                Some(_) => return None,
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

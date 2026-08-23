@@ -40,7 +40,8 @@ use crate::support::PgDevSession;
 
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
-use zero_migrate::{ExecutorConfig, PostgresBackend, ProjectLockAcquisition};
+use zero_migrate::{ExecutorConfig, ProjectLockAcquisition};
+use zero_migrate_postgres::PostgresBackend;
 
 /// The engine's own acquisition statement, sent verbatim by the control arm so it
 /// races the identical server-side path with no compensation wrapped around it.

@@ -30,8 +30,8 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     guard_for, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
-    PostgresBackend,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_rollback_pg";
 

@@ -330,3 +330,25 @@ pub fn partition_divergences(
     }
     out
 }
+
+/// The authored view body, rendered the way the LOWERING that created the view
+/// rendered it.
+///
+/// A view-body drift check needs a body on both sides, and only one side can be
+/// read out of a catalog. The other side is a typed
+/// [`ViewQuery`](zero_migrate_ir::ir::ViewQuery) an author wrote, and printing it is
+/// the engine's lowering — not a vendor's. A backend that re-printed it itself would
+/// be comparing the DIFFER's idea of the body against the ENGINE's, which is the one
+/// comparison a body check must never make.
+///
+/// So the probe takes the printer instead of resolving one. The engine implements
+/// this over its own view-query walk; the backend that drives the server-side
+/// re-print consumes it and never learns how a body is spelled.
+///
+/// `None` means "this body could not be rendered" — the caller DECLINES that view
+/// (leaves it uncompared) rather than manufacturing drift for it.
+pub trait AuthoredViewBody {
+    /// Render `query` as it would have been rendered when the view was created,
+    /// with `eff_schema` as the effective schema for unqualified relations.
+    fn render(&self, query: &zero_migrate_ir::ir::ViewQuery, eff_schema: &str) -> Option<String>;
+}

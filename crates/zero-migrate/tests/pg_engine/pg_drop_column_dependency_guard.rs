@@ -14,10 +14,11 @@ use std::collections::BTreeMap;
 use crate::support::PgDevSession;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, ApplyError, Approval,
-    DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    LockMode, MigrationEngine, MigrationIr, PlanStep, PostgresBackend,
+    ApplyError, Approval, DeclarativeApplyError, EngineError, ExecutorConfig, GuardConfig,
+    IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, PlanStep,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_drop_column_dependency_guard";
 
@@ -83,13 +84,9 @@ async fn lower_drop_steps(
     table: &str,
     column: &str,
 ) -> Vec<PlanStep> {
-    let snapshot = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot the drop fixture");
+    let snapshot = snapshot_schema(session, &cfg.project_schema)
+        .await
+        .expect("snapshot the drop fixture");
     let live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
     let source = format!(
         r#"{{"ir_version":1,"name":"{name}","owner_app":"{OWNER}","ops":[

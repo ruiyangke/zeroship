@@ -203,7 +203,7 @@ fn precondition_variant_names_from_schema() {
     // tagged, it emits a bare `const` with no `required` key - and it is NOT the
     // way this fires, which was measured rather than assumed. Adding one to
     // `Precondition` does not reach any test:
-    // `apply::backend::postgres::precondition::evaluate`
+    // `zero_migrate_postgres::backend::precondition::evaluate`
     // matches the enum exhaustively, so the build stops first with E0004
     // "non-exhaustive patterns". The compiler is the earlier gate for any variant
     // an evaluator must handle.

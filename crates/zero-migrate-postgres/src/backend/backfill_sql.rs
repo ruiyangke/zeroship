@@ -7,20 +7,21 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::apply::backend::{BackfillError, BackfillOutcome, BackfillProgressEntry, BackfillSpec};
-use crate::apply::executor::ApplyError;
-use crate::apply::journal::{self, JournalError};
-use crate::apply::timeout::resolve_timeout_ms;
-use crate::approval::Approval;
-use crate::conn::ExecutorConfig;
-use crate::driver::{Bind, Row, SqlSession};
-use crate::model::backfill::{
+use zero_migrate_backend::approval::Approval;
+use zero_migrate_backend::backfill::{
     generate_per_row_value, CursorColumnContract, CursorComparison, CursorContract,
     CursorScalarType, CursorTuple,
 };
-use crate::model::ir::{CursorStability, IrScalar, PerRowGenerator};
-use crate::model::migration::{Checksum, MigrationId};
-use crate::render::backends::guard_for;
+use zero_migrate_backend::backfill::{
+    BackfillError, BackfillOutcome, BackfillProgressEntry, BackfillSpec,
+};
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::driver::{Bind, Row, SqlSession};
+use zero_migrate_backend::executor::ApplyError;
+use zero_migrate_backend::journal::{self, JournalError};
+use zero_migrate_backend::timeout::resolve_timeout_ms;
+use zero_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
+use zero_migrate_ir::migration::{Checksum, MigrationId};
 
 use super::session::AUTHOR_SQL_LITERAL_MODE;
 
@@ -43,9 +44,9 @@ fn validate_ident(what: &str, value: &str) -> Result<(), ApplyError> {
 }
 
 fn quote_ident(value: &str) -> Result<String, ApplyError> {
-    Ok(crate::render::dml::quote_ident_checked_for_dialect(
+    Ok(zero_migrate_backend::dml::quote_ident_checked_for_backend(
         value,
-        &super::DIALECT,
+        &crate::dml::RENDERER,
     )?)
 }
 
@@ -586,7 +587,7 @@ fn validate_spec(spec: &BackfillSpec) -> Result<Option<&CursorContract>, ApplyEr
             )));
         }
         if let PerRowGenerator::TypeId { prefix } = assignment.generator() {
-            crate::model::ir::validate_type_id_prefix(prefix).map_err(|error| {
+            zero_migrate_ir::ir::validate_type_id_prefix(prefix).map_err(|error| {
                 backend_error(format!(
                     "invalid TypeID prefix for per-row destination {column:?}: {error}"
                 ))
@@ -1004,7 +1005,7 @@ fn prove_allowed_engine_trigger(
     let function_body: String = row.try_get("function_body")?;
     let from = quote_ident(&expected.from_column)?;
     let to = quote_ident(&expected.to_column)?;
-    let expected_body = crate::render::expand_contract::dual_write_function_body(&from, &to);
+    let expected_body = zero_migrate_backend::capability::dual_write_function_body(&from, &to);
     let touches_cursor = spec
         .cursor_columns
         .iter()
@@ -1744,9 +1745,9 @@ pub(super) async fn read_progress_entries<D: SqlSession>(
     if !table_exists {
         return Ok(Vec::new());
     }
-    let meta = crate::render::dml::quote_ident_checked_for_dialect(
+    let meta = zero_migrate_backend::dml::quote_ident_checked_for_backend(
         &cfg.confinement.meta_schema,
-        &super::DIALECT,
+        &crate::dml::RENDERER,
     )?;
     let rows = conn
         .query(
@@ -2357,7 +2358,7 @@ pub(super) async fn run_backfill<D: SqlSession>(
         });
     }
 
-    let guard = guard_for(&cfg.guard_config_for(&super::DIALECT));
+    let guard = crate::guard::guard(&cfg.guard_config_for(&super::DIALECT));
     let end_sql = build_end_cursor_sql(spec, &cursor)?;
     guard
         .check(&end_sql)
@@ -2426,7 +2427,9 @@ pub(super) async fn run_backfill<D: SqlSession>(
             batches = batches.saturating_add(1);
             rows_updated = rows_updated.saturating_add(updated);
             last_cursor = next_cursor;
-            crate::fault::trip(crate::fault::points::BACKFILL_MID_BATCHES)?;
+            zero_migrate_backend::fault::trip(
+                zero_migrate_backend::fault::points::BACKFILL_MID_BATCHES,
+            )?;
             if selected < u64::from(spec.batch_size) {
                 break;
             }
@@ -2459,7 +2462,7 @@ mod tuple_tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::driver::Value as DriverValue;
+    use zero_migrate_backend::driver::Value as DriverValue;
 
     fn contract() -> CursorContract {
         CursorContract {
@@ -2499,10 +2502,10 @@ mod tuple_tests {
     }
 
     fn checksum() -> Checksum {
-        Checksum::of(&crate::model::migration::ChecksumInput {
+        Checksum::of(&zero_migrate_ir::migration::ChecksumInput {
             up: "postgres tuple backfill test",
             down: None,
-            flags: &crate::model::migration::MigrationFlags::default(),
+            flags: &zero_migrate_ir::migration::MigrationFlags::default(),
             owner_app: "app",
             depends_on: &[],
             supersedes: &[],
@@ -2729,7 +2732,7 @@ mod tuple_tests {
             "email".into(),
             "email_address".into(),
         );
-        let body = crate::render::expand_contract::dual_write_function_body(
+        let body = zero_migrate_backend::capability::dual_write_function_body(
             "\"email\"",
             "\"email_address\"",
         );

@@ -47,7 +47,7 @@
 use std::collections::BTreeMap;
 
 use crate::model::ir::{
-    IndexSortOrder, IndexStorageParams, SafeI64, SequenceOwnedBy, SequenceRef, TriggerEvent,
+    IndexSortOrder, IndexStorageParams, SafeI64, SequenceOwnedBy, TriggerEvent,
 };
 use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
@@ -476,58 +476,12 @@ fn format_sequence_owned_by(value: Option<&SequenceOwnedBy>) -> String {
     })
 }
 
-fn parse_single_quoted_sql_string(input: &str) -> Option<String> {
-    let mut chars = input.chars();
-    if chars.next()? != '\'' {
-        return None;
-    }
-    let mut out = String::new();
-    while let Some(c) = chars.next() {
-        if c == '\'' {
-            match chars.next() {
-                Some('\'') => out.push('\''),
-                None => return Some(out),
-                Some(_) => return None,
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    None
-}
-
-/// The sequence a `nextval(...)` default names, or `None` when the expression is not
-/// one.
-///
-/// SHARED rather than PostgreSQL-private, and the two callers are why. The PG
-/// introspector reaches it to recover an ID default from `pg_get_expr`
-/// (`backend::postgres::drift_sql::recover_nextval_default`), and the DIALECT-BLIND
-/// differ reaches it through [`comparable_column_default`] — which runs for every
-/// dialect, because the snapshot it is handed may have been produced by any of them.
-/// A differ that could not read the spelling one producer emits would silently stop
-/// comparing that producer's defaults, so the parse belongs to the shared vocabulary
-/// even though only PostgreSQL writes the spelling.
-pub(crate) fn parse_nextval_sequence_ref(expr: &str) -> Option<SequenceRef> {
-    let expression = expr.trim();
-    // pg_get_expr qualifies the built-in when a same-signature function earlier
-    // on search_path would otherwise capture the deparsed spelling. The OID is
-    // still proven through pg_depend below, so pg_catalog qualification is
-    // catalog decoration rather than generator identity.
-    let call = expression
-        .strip_prefix("nextval(")
-        .or_else(|| expression.strip_prefix("pg_catalog.nextval("))?;
-    let inner = call.strip_suffix(')')?.trim();
-    let literal = inner.strip_suffix("::regclass")?.trim();
-    let regclass = parse_single_quoted_sql_string(literal)?;
-    let (schema, name) = match regclass.split_once('.') {
-        Some((schema, name)) if !schema.is_empty() && !name.is_empty() => {
-            (Some(schema.to_string()), name.to_string())
-        }
-        None if !regclass.is_empty() => (None, regclass),
-        _ => return None,
-    };
-    Some(SequenceRef { name, schema })
-}
+// The `nextval` spelling's parse moved down to the backend contract, beside the
+// sequence-bound normalizers that already carry PostgreSQL's sequence semantics as
+// shared vocabulary. The PostgreSQL introspector reaches it to recover an ID default
+// out of `pg_get_expr`, and it cannot reach into the engine. Re-exported so
+// `crate::apply::drift::parse_nextval_sequence_ref` resolves unchanged.
+pub(crate) use zero_migrate_backend::snapshot::parse_nextval_sequence_ref;
 
 /// Canonical rendered form of a `nextval` default, or `None` when the expression
 /// is not one. Backend-identity-free on purpose: the sequence identity is the whole key.
@@ -1518,7 +1472,7 @@ fn index_referenced_columns(index: &IndexSnapshot) -> Option<Vec<&str>> {
 /// compare structurally, rather than comparing spellings.
 ///
 /// Kept separate from `constraint_definition_is_retained` (private to
-/// `apply::backend::postgres::drift_sql`, so it is named here rather than linked)
+/// `zero_migrate_postgres::backend::drift_sql`, so it is named here rather than linked)
 /// on purpose — it is the PostgreSQL introspector's own rule about what to STORE and
 /// now lives with the reader that applies it. Not
 /// comparing a body is not a reason to stop recording it: the guard's fail-closed

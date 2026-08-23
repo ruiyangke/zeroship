@@ -1,7 +1,7 @@
 //! PostgreSQL live-catalog introspection for drift, and the PG journal read that
 //! feeds the checksum comparison.
 //!
-//! The VENDOR half of [`apply::drift`](crate::apply::drift), which keeps the
+//! The VENDOR half of [`apply::drift`](zero_migrate_backend::drift), which keeps the
 //! dialect-blind half: the snapshot/report types, the pure `diff_snapshots`, and the
 //! `compare_applied_to_set` every backend shares. Everything here names
 //! `pg_catalog` / `information_schema`, parses what those return, or exists only to
@@ -17,18 +17,13 @@
 use std::collections::BTreeMap;
 
 use super::journal_sql;
-use crate::apply::drift::{
-    compare_applied_to_set, parse_nextval_sequence_ref, ChecksumDriftReport, DriftError,
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::drift::{
+    compare_applied_to_set, AuthoredViewBody, ChecksumDriftReport, DriftError,
 };
-use crate::conn::ExecutorConfig;
-use crate::driver::SqlSession;
-use crate::model::ir::{
-    IdentityCol, IndexSortOrder, IndexStorageParams, PartitionBoundValue, PartitionBounds,
-    PartitionSpec, PolicyCmd, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TriggerEvent,
-    TriggerTiming,
-};
-use crate::model::migration::Migration;
-use crate::model::snapshot::{
+use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::snapshot::parse_nextval_sequence_ref;
+use zero_migrate_backend::snapshot::{
     normalize_sequence_max_value, normalize_sequence_min_value, ColumnCollationSnapshot,
     ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionIdentity, FunctionKey,
     GeneratedKindSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,
@@ -36,11 +31,20 @@ use crate::model::snapshot::{
     SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
     TableSnapshot, TriggerIdentity, TriggerKey, VendorObjectIdentities, ViewSnapshot,
 };
-use crate::render::value_format::{
-    catalog_expression_fingerprint_in_dialect, catalog_id_default, catalog_uuid_id_default,
-    recover_format_check, RecoveredFormatCheck,
+use zero_migrate_ir::ir::{
+    IdentityCol, IndexSortOrder, IndexStorageParams, PartitionBoundValue, PartitionBounds,
+    PartitionSpec, PolicyCmd, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TriggerEvent,
+    TriggerTiming,
 };
-use zero_migrate_ir::dialect::DialectId;
+use zero_migrate_ir::migration::Migration;
+// The value-format comparison seam, entered with THIS vendor's own renderers. The
+// engine's `render::value_format` doors take a `&DialectId` and resolve a renderer
+// out of the registry, which is the round trip a vendor cannot participate in; the
+// contract crate's copies take the renderers directly, so a vendor passes its own.
+use zero_migrate_backend::value_format::{
+    catalog_expression_fingerprint, catalog_id_default, catalog_uuid_id_default,
+    recover_format_check, RecoveredFormatCheck, VendorRules,
+};
 
 /// Compare the journal's NET-applied checksums against the supplied migration
 /// set.
@@ -49,16 +53,16 @@ use zero_migrate_ir::dialect::DialectId;
 /// [`journal_sql::applied`]):
 ///
 /// - the supplied set has a migration with that version whose checksum differs
-/// ⇒ [`ChecksumDrift`](crate::ChecksumDrift) (the migration SQL was mutated after apply, or the
+/// ⇒ [`ChecksumDrift`](zero_migrate_backend::drift::ChecksumDrift) (the migration SQL was mutated after apply, or the
 /// journal row was tampered — scenario 36);
-/// - the supplied set has NO migration with that version ⇒ [`OrphanJournal`](crate::OrphanJournal).
+/// - the supplied set has NO migration with that version ⇒ [`OrphanJournal`](zero_migrate_backend::drift::OrphanJournal).
 ///
 /// The recorded checksum used is the one [`journal_sql::applied`] returns, which is
 /// the **latest `completed` event's** checksum for the version — correct across
 /// rollback↔re-apply cycles (a re-applied migration's checksum is its newest
 /// incarnation, not a stale earlier one).
 ///
-/// This is the canonical comparison; [`apply`](crate::engine::MigrationEngine::apply) calls it as its
+/// This is the canonical comparison; `MigrationEngine::apply` calls it as its
 /// abort-on-drift pre-check (it aborts if [`checksum_drift`](ChecksumDriftReport::checksum_drift)
 /// is non-empty), so the report and the apply gate cannot diverge.
 ///
@@ -67,12 +71,11 @@ use zero_migrate_ir::dialect::DialectId;
 /// # Errors
 /// [`DriftError::Journal`] if the journal read fails.
 pub async fn check_checksum_drift<D: SqlSession>(
-    dialect: &DialectId,
     conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> Result<ChecksumDriftReport, DriftError> {
-    let applied = journal_sql::applied(conn, cfg, dialect).await?;
+    let applied = journal_sql::applied(conn, cfg).await?;
     Ok(compare_applied_to_set(&applied, migrations))
 }
 
@@ -382,11 +385,10 @@ fn parse_index_storage_params_pg(
 }
 
 pub async fn snapshot_schema<D: SqlSession>(
-    dialect: &DialectId,
     conn: &D,
     schema: &str,
 ) -> Result<SchemaSnapshot, DriftError> {
-    snapshot_schema_for(conn, schema, dialect).await
+    snapshot_schema_for(conn, schema).await
 }
 
 /// The savepoint the view-body probe rolls back to. One name, reused per view,
@@ -400,7 +402,7 @@ const VIEW_BODY_PROBE_VIEW: &str = "zm_view_body_probe";
 /// Put a COMPARABLE view body on both sides of a drift check, using the server as
 /// the only normaliser.
 ///
-/// **WHY THIS EXISTS AS A SEPARATE STEP.** [`diff_snapshots`](crate::diff_snapshots) is pure and has no
+/// **WHY THIS EXISTS AS A SEPARATE STEP.** `zero_migrate::diff_snapshots` is pure and has no
 /// connection, and the two snapshots it compares do not carry the same
 /// representation of a view body. A folded snapshot carries
 /// [`ViewSnapshot::authored_query`] - the typed `SelectAst` an author wrote - and
@@ -450,16 +452,24 @@ const VIEW_BODY_PROBE_VIEW: &str = "zm_view_body_probe";
 /// skips it, and the result is exactly the pre-existing behaviour. Manufacturing
 /// drift for every view on a replica would be a louder defect than the blind spot.
 ///
+/// **WHO PRINTS THE AUTHORED SIDE.** Not this module. `authored` is the engine's
+/// view-query lowering, handed in as an
+/// [`AuthoredViewBody`]. The whole
+/// point of the probe is that the server normalises both sides of ONE spelling, and
+/// the spelling has to be the one `createView` actually wrote; a body this crate
+/// re-printed for itself would be the differ's idea of the body, compared against
+/// the engine's.
+///
 /// **WHAT IT DOES NOT COVER.** Only views carrying an `authored_query` and present
 /// on both sides are probed. An adopted view - one introspected rather than authored
 /// - has no typed body anywhere in the history, so there is nothing to compare it
 /// against and it stays uncompared.
 pub async fn resolve_view_bodies<D: SqlSession>(
-    dialect: &DialectId,
     conn: &D,
     schema: &str,
     expected: &mut SchemaSnapshot,
     actual: &mut SchemaSnapshot,
+    authored: &dyn AuthoredViewBody,
 ) -> Result<(), DriftError> {
     // Nothing to probe: skip the transaction dance entirely rather than open and
     // roll back a transaction on every drift check of a view-free schema.
@@ -483,7 +493,8 @@ pub async fn resolve_view_bodies<D: SqlSession>(
         conn.batch("BEGIN").await?;
     }
 
-    let outcome = resolve_view_bodies_in_transaction(conn, schema, expected, actual, dialect).await;
+    let outcome =
+        resolve_view_bodies_in_transaction(conn, schema, expected, actual, authored).await;
 
     let unwind = if nested {
         conn.batch(&format!(
@@ -509,7 +520,7 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
     schema: &str,
     expected: &mut SchemaSnapshot,
     actual: &mut SchemaSnapshot,
-    dialect: &DialectId,
+    authored: &dyn AuthoredViewBody,
 ) -> Result<(), DriftError> {
     let names: Vec<String> = expected
         .views
@@ -528,9 +539,10 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
         let view_schema = exp_view.authored_schema.as_deref().unwrap_or(schema);
         // The authored body rendered the same way `createView` rendered it when the
         // migration ran. Anything else would be comparing the differ's idea of the
-        // body against the engine's.
-        let Ok(body) = crate::render::lower::render_view_query(query, view_schema, dialect, None)
-        else {
+        // body against the engine's — which is why the printer is HANDED IN rather
+        // than reached for: printing a typed `ViewQuery` is the engine's lowering,
+        // and a backend crate cannot call into the engine that depends on it.
+        let Some(body) = authored.render(query, view_schema) else {
             continue;
         };
 
@@ -540,7 +552,7 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
         // because temp object creation is transactional.
         conn.batch(&format!("SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}_one"))
             .await?;
-        let probed = probe_one_view_body(conn, view_schema, &name, &body, dialect).await;
+        let probed = probe_one_view_body(conn, view_schema, &name, &body).await;
         conn.batch(&format!(
             "ROLLBACK TO SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}_one; \
              RELEASE SAVEPOINT {VIEW_BODY_PROBE_SAVEPOINT}_one"
@@ -582,8 +594,8 @@ async fn resolve_view_bodies_in_transaction<D: SqlSession>(
 /// function and this whole probe lives in the PostgreSQL backend. It used to call
 /// the crate's raw escape primitive, which produced correct bytes for no stated
 /// dialect.
-fn pg_view_ident(ident: &str, dialect: &DialectId) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(ident, dialect)
+fn pg_view_ident(ident: &str) -> String {
+    zero_migrate_backend::dml::escape_quote_ident_for_backend(ident, &crate::dml::RENDERER)
 }
 
 async fn probe_one_view_body<D: SqlSession>(
@@ -591,7 +603,6 @@ async fn probe_one_view_body<D: SqlSession>(
     view_schema: &str,
     name: &str,
     body: &str,
-    dialect: &DialectId,
 ) -> Result<Option<(String, String)>, DriftError> {
     if conn
         .batch(&format!(
@@ -616,12 +627,7 @@ async fn probe_one_view_body<D: SqlSession>(
                         AS expected_body, \
                         pg_get_viewdef($1::text::regclass, true) AS actual_body"
             ),
-            &[format!(
-                "{}.{}",
-                pg_view_ident(view_schema, dialect),
-                pg_view_ident(name, dialect)
-            )
-            .into()],
+            &[format!("{}.{}", pg_view_ident(view_schema), pg_view_ident(name)).into()],
         )
         .await?;
 
@@ -852,7 +858,6 @@ fn trigger_events_from_tgtype(tgtype: i32) -> Vec<TriggerEvent> {
 pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     conn: &D,
     schema: &str,
-    dialect: &DialectId,
 ) -> Result<SchemaSnapshot, DriftError> {
     let mut tables: BTreeMap<String, TableSnapshot> = BTreeMap::new();
     let mut partitions: BTreeMap<String, PartitionSnapshot> = BTreeMap::new();
@@ -1238,7 +1243,10 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 let schema: Option<String> = r.try_get("default_sequence_schema").ok().flatten();
                 let name: Option<String> = r.try_get("default_sequence_name").ok().flatten();
                 name.map(|name| {
-                    crate::render::declarative::nextval_default_expr(&SequenceRef { name, schema })
+                    zero_migrate_backend::snapshot::nextval_default_expr(&SequenceRef {
+                        name,
+                        schema,
+                    })
                 })
             });
             let default = structured_nextval.or(parsed_nextval).or(raw_default);
@@ -1248,7 +1256,6 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 default.as_deref(),
                 false,
                 has_user_semantic_dependency,
-                dialect,
             );
             t.columns.push(ColumnSnapshot {
                 name: column_name,
@@ -1547,9 +1554,12 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 && local_columns.len() == 1
             {
                 let column_name = &local_columns[0];
-                if let Some(RecoveredFormatCheck::Value(value_format)) =
-                    recover_format_check(column_name, &catalog_definition, dialect)
-                {
+                if let Some(RecoveredFormatCheck::Value(value_format)) = recover_format_check(
+                    column_name,
+                    &catalog_definition,
+                    &crate::value_format::RENDERER,
+                    &crate::dml::RENDERER,
+                ) {
                     if let Some(column) = t
                         .columns
                         .iter_mut()
@@ -1570,7 +1580,6 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                                     .get(&(table.clone(), column.name.clone()))
                                     .copied()
                                     .unwrap_or(false),
-                                dialect,
                             );
                             continue;
                         }
@@ -1600,7 +1609,6 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                                     .get(&(table.clone(), column.name.clone()))
                                     .copied()
                                     .unwrap_or(false),
-                                dialect,
                             );
                         }
                     }
@@ -1807,7 +1815,9 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
 
 fn recover_nextval_default(expr: Option<String>) -> Option<String> {
     let sequence = parse_nextval_sequence_ref(expr.as_deref()?)?;
-    Some(crate::render::declarative::nextval_default_expr(&sequence))
+    Some(zero_migrate_backend::snapshot::nextval_default_expr(
+        &sequence,
+    ))
 }
 
 fn recover_pg_id_default(
@@ -1816,7 +1826,6 @@ fn recover_pg_id_default(
     expression: Option<&str>,
     force_id_surface: bool,
     has_user_semantic_dependency: bool,
-    dialect: &DialectId,
 ) -> Option<IdDefaultSnapshot> {
     let nextval = expression.and_then(|expr| recover_nextval_default(Some(expr.to_string())));
     if !force_id_surface
@@ -1841,7 +1850,10 @@ fn recover_pg_id_default(
         }
         return Some(IdDefaultSnapshot::Expression(format!(
             "user-defined:{}",
-            catalog_expression_fingerprint_in_dialect(expression, dialect)
+            catalog_expression_fingerprint(
+                expression,
+                &VendorRules(&crate::value_format::RENDERER)
+            )
         )));
     }
 
@@ -1854,13 +1866,26 @@ fn recover_pg_id_default(
     if has_user_semantic_dependency {
         return Some(IdDefaultSnapshot::Expression(format!(
             "user-defined:{}",
-            catalog_expression_fingerprint_in_dialect(expression, dialect)
+            catalog_expression_fingerprint(
+                expression,
+                &VendorRules(&crate::value_format::RENDERER)
+            )
         )));
     }
     Some(if data_type.eq_ignore_ascii_case("uuid") {
-        catalog_uuid_id_default(Some(expression), dialect, None)
+        catalog_uuid_id_default(
+            Some(expression),
+            &crate::value_format::RENDERER,
+            &crate::dml::RENDERER,
+            None,
+        )
     } else {
-        catalog_id_default(Some(expression), dialect, None)
+        catalog_id_default(
+            Some(expression),
+            &crate::value_format::RENDERER,
+            &crate::dml::RENDERER,
+            None,
+        )
     })
 }
 
@@ -1897,10 +1922,10 @@ fn pg_foreign_key_definition(
 
     let mut definition = format!(
         "FOREIGN KEY ({}) REFERENCES {}.{}({})",
-        crate::render::declarative::constraintdef_cols(local_columns),
-        crate::render::declarative::quote_ident_if_needed(referenced_schema),
-        crate::render::declarative::quote_ident_if_needed(referenced_table),
-        crate::render::declarative::constraintdef_cols(referenced_columns),
+        zero_migrate_backend::constraint_definition::constraintdef_cols(local_columns),
+        zero_migrate_backend::constraint_definition::quote_ident_if_needed(referenced_schema),
+        zero_migrate_backend::constraint_definition::quote_ident_if_needed(referenced_table),
+        zero_migrate_backend::constraint_definition::constraintdef_cols(referenced_columns),
     );
 
     match match_type {
@@ -1938,7 +1963,7 @@ fn pg_foreign_key_definition(
             let _ = write!(
                 definition,
                 " ({})",
-                crate::render::declarative::constraintdef_cols(delete_set_columns)
+                zero_migrate_backend::constraint_definition::constraintdef_cols(delete_set_columns)
             );
         }
     } else if !delete_set_columns.is_empty() {

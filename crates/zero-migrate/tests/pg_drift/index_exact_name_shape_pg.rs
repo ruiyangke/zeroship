@@ -31,10 +31,13 @@ use std::collections::HashMap;
 use crate::support::PgDevSession;
 
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, Approval, CollectionDescriptor,
-    DeclarativeAuthor, DeclarativeError, EffectivePolicy, ExecutorConfig, FieldDescriptor,
-    GuardConfig, IndexDescriptor, MigrationEngine, PostgresBackend,
+    Approval, CollectionDescriptor, DeclarativeAuthor, DeclarativeError, EffectivePolicy,
+    ExecutorConfig, FieldDescriptor, GuardConfig, IndexDescriptor, MigrationEngine,
 };
+
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+
+use zero_migrate_postgres::PostgresBackend;
 
 fn desired_snapshot(
     project_schema: &str,
@@ -177,13 +180,9 @@ async fn deploy(session: &PgDevSession, cfg: &ExecutorConfig, engine: &Migration
         &effective_policy(cfg),
     )
     .expect("desired_snapshot");
-    let live = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot live");
+    let live = snapshot_schema(session, &cfg.project_schema)
+        .await
+        .expect("snapshot live");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -257,13 +256,9 @@ async fn replan(
         &effective_policy(cfg),
     )
     .expect("desired_snapshot");
-    let live = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot live (after)");
+    let live = snapshot_schema(session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (after)");
     engine.plan_declarative(
         &desired,
         &live,

@@ -25,9 +25,11 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::model::snapshot::SequenceSnapshot;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, fold_ops, guard_for, Approval,
-    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, PostgresBackend,
+    fold_ops, guard_for, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
+    MigrationEngine,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_drop_sequence_rollback_pg";
 const SEQ: &str = "order_no";
@@ -139,7 +141,7 @@ async fn live_sequence(
     session: &PgDevSession,
     schema: &str,
 ) -> Result<Option<SequenceSnapshot>, String> {
-    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, schema)
+    let snapshot = snapshot_schema(session, schema)
         .await
         .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
     Ok(snapshot.sequences.get(SEQ).cloned())

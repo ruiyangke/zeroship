@@ -34,8 +34,9 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, PostgresBackend,
+    MigrationEngine,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_replace_function_rollback_pg";
 const FUNCTION: &str = "greet";

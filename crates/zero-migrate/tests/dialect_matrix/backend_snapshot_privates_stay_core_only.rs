@@ -31,17 +31,41 @@
 //! | `from_create` / `from_drop` | `model/snapshot.rs` | function-snapshot folding |
 //! | `canonical_pg_arg_type` | `model/validate.rs` | PG signature-collision fold |
 //!
-//! Every one of them COMPARES or NORMALIZES. By this workspace's own boundary rule
-//! — stated at length in `zero_migrate::render::backends`'s header — comparison and
-//! normalization stay in the engine, dialect-parameterized; only SPELLING is the
-//! engine asking a vendor a question. So the property the `pub(crate)` was carrying
-//! is still exactly right, and it is this:
+//! # The sixteen are two kinds, and the PostgreSQL extraction is what proved it
 //!
-//! **no vendor crate calls any of them.**
+//! The first version of this file said "every one of them COMPARES or NORMALIZES"
+//! and asserted one rule over all sixteen: **no vendor crate calls any of them.** That
+//! was true while it was written and it was true for the wrong reason — PostgreSQL's
+//! catalog reader was still INSIDE the engine, so the only code that could reach the
+//! sequence half was engine code by construction. When `apply/backend/postgres/`
+//! became `zero-migrate-postgres/src/backend/`, four call sites in one file crossed
+//! the boundary and the single rule went red. Nothing about the code's behaviour
+//! changed; what changed is that the rule's unstated premise stopped holding.
 //!
-//! A vendor that reached one would be a vendor deciding whether two schemas differ,
-//! which is the engine's judgement and not its own. That is what this file measures,
-//! and it is now the only thing that measures it.
+//! Reading the four honestly separates the list in two:
+//!
+//! * **[`VERDICT_ITEMS`] — deciding whether two schemas DIFFER.** Index element
+//!   equality, sort-order canonicalization, predicate equality, constraint
+//!   rename-vs-change blame, the ID-default normal form, the PG signature fold. A
+//!   vendor that called one of these would be answering the engine's question with
+//!   its own opinion. **ZERO, across all three vendor crates**, and that is the
+//!   property the `pub(crate)` was carrying.
+//!
+//! * **[`SHARED_NORMAL_FORM_ITEMS`] — producing the CURRENCY the verdict is taken
+//!   over.** `SequenceSnapshot`'s bounds are `Option<SafeI64>`, where `None` MEANS
+//!   "PostgreSQL's default for this type and increment". Both sides of a drift check
+//!   have to reduce to that same `None`: the engine's authored fold
+//!   (`render::fold::fold_create_sequence_snapshot`) and the vendor's catalog read
+//!   (`zero_migrate_postgres::backend::drift_sql`). A vendor calling these is not
+//!   deciding difference — it is refusing to re-derive the normal form, which is the
+//!   only way the two sides can agree. A SECOND implementation is the defect, and it
+//!   is the defect this half now measures.
+//!
+//! The verdict rule did not weaken. What was one rule with a hidden premise is two
+//! rules with stated ones, and the second is enforced in the direction that can
+//! actually go wrong now: not "no vendor calls it" (a vendor MUST), but "no vendor
+//! re-implements it, and the one that reads a sequence catalog demonstrably reaches
+//! the shared one".
 //!
 //! # Why a census and not a visibility modifier
 //!
@@ -63,20 +87,32 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The sixteen degraded items, by the ident a caller would have to write.
+/// The degraded items that take the VERDICT: a vendor calling one is a vendor
+/// deciding whether two schemas differ. **Zero vendor call sites.**
 ///
 /// `ColumnSnapshot::new` and `IndexSnapshot::new` were `pub(crate)` too and are NOT
 /// here: `new` is far too generic to match on a line-oriented census, and a needle
 /// that fires on every constructor in three vendor crates is a needle nobody can
 /// keep green. They are the two of the eighteen this file does not cover, and saying
 /// so is better than a match that would have to be special-cased into uselessness.
-const CORE_ONLY_ITEMS: &[&str] = &[
+const VERDICT_ITEMS: &[&str] = &[
     "canonical_id_default_expression",
     "index_elements_canonically_eq",
     "canonical_index_sort_order",
     "index_predicates_canonically_eq",
     "same_definition_except_name",
     "definition_differences_except_name",
+    "canonical_pg_signature_type",
+    "canonical_pg_arg_type",
+];
+
+/// The degraded items that build the shared NORMAL FORM a verdict is taken over.
+///
+/// A vendor MAY call these — it must, or its catalog read and the engine's authored
+/// fold reduce a sequence's bounds differently and every sequence reports drift. What
+/// a vendor may NOT do is define its own, which is what [`defines_own_copy`] looks
+/// for.
+const SHARED_NORMAL_FORM_ITEMS: &[&str] = &[
     "from_sequence_col_type",
     "from_pg_type_name",
     "normalize_sequence_min_value",
@@ -84,8 +120,6 @@ const CORE_ONLY_ITEMS: &[&str] = &[
     "sequence_default_start_value",
     "sequence_default_min_value",
     "sequence_default_max_value",
-    "canonical_pg_signature_type",
-    "canonical_pg_arg_type",
     "normalize_sequence_bound",
 ];
 
@@ -110,6 +144,16 @@ const VENDOR_FILE_FLOOR: usize = 13;
 /// these. The engine had well over this when the move landed; the number only has to
 /// prove the matcher is not blind, so it is set low and blunt on purpose.
 const ENGINE_CALLSITE_FLOOR: usize = 10;
+
+/// The SHARED-NORMAL-FORM half's positive control: how many vendor code lines must
+/// reach the one implementation.
+///
+/// Measured at 4, all in `zero-migrate-postgres/src/backend/drift_sql.rs` — the
+/// `SequenceDataTypeSnapshot::from_pg_type_name` call, the two bound normalizers, and
+/// the `use` that imports them. Set below that so ordinary churn does not trip it; a
+/// drop to zero is the question, and the answer is either "the needle broke" or "a
+/// vendor stopped reusing and started re-deriving".
+const SHARED_NORMAL_FORM_REUSE_FLOOR: usize = 3;
 
 /// Whether a source line is CODE rather than a comment.
 ///
@@ -143,8 +187,8 @@ fn src_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Code lines in `files` that name one of [`CORE_ONLY_ITEMS`], keyed by display path.
-fn callsites(files: &[PathBuf], base: &Path) -> BTreeMap<String, usize> {
+/// Code lines in `files` that name one of `items`, keyed by display path.
+fn callsites(files: &[PathBuf], base: &Path, items: &[&str]) -> BTreeMap<String, usize> {
     let mut found = BTreeMap::new();
     for path in files {
         let rel = path
@@ -157,7 +201,34 @@ fn callsites(files: &[PathBuf], base: &Path) -> BTreeMap<String, usize> {
         let n = text
             .lines()
             .filter(|l| is_code(l))
-            .filter(|l| CORE_ONLY_ITEMS.iter().any(|i| l.contains(i)))
+            .filter(|l| items.iter().any(|i| l.contains(i)))
+            .count();
+        if n > 0 {
+            found.insert(rel, n);
+        }
+    }
+    found
+}
+
+/// Code lines in `files` that DEFINE one of `items` — a second implementation of a
+/// shared normal form, which is the thing a vendor must never grow.
+///
+/// `fn <name>` bounded on the right, so a CALL (`normalize_sequence_min_value(..)`)
+/// does not match and a definition (`pub fn normalize_sequence_min_value(`) does.
+fn definitions(files: &[PathBuf], base: &Path, items: &[&str]) -> BTreeMap<String, usize> {
+    let mut found = BTreeMap::new();
+    for path in files {
+        let rel = path
+            .strip_prefix(base)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        let n = text
+            .lines()
+            .filter(|l| is_code(l))
+            .filter(|l| items.iter().any(|i| l.contains(&format!("fn {i}"))))
             .count();
         if n > 0 {
             found.insert(rel, n);
@@ -202,28 +273,70 @@ fn no_vendor_crate_calls_an_engine_snapshot_comparison() {
     // engine, where these names live and are called. A zero here means the matcher is
     // broken and every vendor zero below it is meaningless.
     let engine_src = crates.join("zero-migrate").join("src");
-    let engine = callsites(&src_files(&engine_src), &engine_src);
+    let all_items: Vec<&str> = VERDICT_ITEMS
+        .iter()
+        .chain(SHARED_NORMAL_FORM_ITEMS.iter())
+        .copied()
+        .collect();
+    let engine = callsites(&src_files(&engine_src), &engine_src, &all_items);
     let engine_total: usize = engine.values().sum();
     assert!(
         engine_total >= ENGINE_CALLSITE_FLOOR,
         "the positive control found only {engine_total} engine call sites for \
          {} idents, below the floor of {ENGINE_CALLSITE_FLOOR}. Either these helpers \
          genuinely left the engine — in which case retire this file deliberately — or \
-         `CORE_ONLY_ITEMS` stopped matching and the census is blind.",
-        CORE_ONLY_ITEMS.len()
+         the item lists stopped matching and the census is blind.",
+        all_items.len()
     );
 
-    // THE PROPERTY.
-    let violations = callsites(&vendor_files, &crates);
+    // THE PROPERTY, HALF ONE: no vendor takes the verdict.
+    let violations = callsites(&vendor_files, &crates, VERDICT_ITEMS);
     assert!(
         violations.is_empty(),
-        "a vendor crate calls one of the engine's snapshot comparison/normalization \
-         helpers:\n{}\n\nThese were `pub(crate)` in `zero-migrate` before the snapshot \
-         types moved to `zero-migrate-backend`; the crate boundary made them `pub` and \
-         this census is what stands in for the modifier. A vendor decides how to SPELL \
-         something, never whether two schemas DIFFER — see \
-         `zero_migrate::render::backends`'s header for the rule.",
+        "a vendor crate calls one of the engine's snapshot COMPARISON helpers:\n{}\n\n\
+         These were `pub(crate)` in `zero-migrate` before the snapshot types moved to \
+         `zero-migrate-backend`; the crate boundary made them `pub` and this census is \
+         what stands in for the modifier. A vendor decides how to SPELL something, \
+         never whether two schemas DIFFER — see `zero_migrate::render::backends`'s \
+         header for the rule.",
         violations
+            .iter()
+            .map(|(f, n)| format!("  {f}: {n} line(s)"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // THE PROPERTY, HALF TWO: no vendor grows its own copy of the shared normal form.
+    let forks = definitions(&vendor_files, &crates, SHARED_NORMAL_FORM_ITEMS);
+    assert!(
+        forks.is_empty(),
+        "a vendor crate DEFINES one of the shared snapshot normal-form helpers:\n{}\n\n\
+         There is one implementation and both sides of a drift check must reduce \
+         through it — the engine's authored fold and the vendor's catalog read. A \
+         second copy does not report a difference, it MANUFACTURES one, silently, the \
+         first time the two drift apart.",
+        forks
+            .iter()
+            .map(|(f, n)| format!("  {f}: {n} definition(s)"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // AND ITS POSITIVE CONTROL. The vendor that reads a sequence catalog must
+    // demonstrably REACH the shared normal form; a zero here would mean either that
+    // it stopped (and re-derived one somewhere this file cannot see) or that
+    // `SHARED_NORMAL_FORM_ITEMS` stopped matching, in which case the fork check above
+    // is blind. Measured on the tree that introduced this half: four code lines in
+    // `zero-migrate-postgres/src/backend/drift_sql.rs`.
+    let reuse = callsites(&vendor_files, &crates, SHARED_NORMAL_FORM_ITEMS);
+    let reuse_total: usize = reuse.values().sum();
+    assert!(
+        reuse_total >= SHARED_NORMAL_FORM_REUSE_FLOOR,
+        "only {reuse_total} vendor code lines reach the shared snapshot normal form, \
+         below the floor of {SHARED_NORMAL_FORM_REUSE_FLOOR}. PostgreSQL is the one \
+         shipping vendor with sequences and its catalog read must reduce their bounds \
+         through the same helpers the engine's authored fold does. Found:\n{}",
+        reuse
             .iter()
             .map(|(f, n)| format!("  {f}: {n} line(s)"))
             .collect::<Vec<_>>()

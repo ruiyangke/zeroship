@@ -19,6 +19,7 @@ mod pg_declarative;
 mod pg_drop_column_dependency_guard;
 mod pg_plan_precondition_preflight;
 mod pg_primary_key;
+mod pg_recorded_engine_paths;
 mod pg_scenarios;
 mod precondition_evaluation_pg;
 mod timeout_budget_pg;

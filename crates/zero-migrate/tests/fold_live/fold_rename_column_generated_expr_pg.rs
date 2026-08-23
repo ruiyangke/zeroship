@@ -44,8 +44,9 @@ use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, BinaryOp, ColType, EffectivePolicy,
     ExecutorConfig, Expr, GeneratedCol, GuardConfig, IrAuthor, IrColumn, IrScalar, LiveSchema,
-    LockMode, MigrationEngine, MigrationIr, Op, PostgresBackend,
+    LockMode, MigrationEngine, MigrationIr, Op,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
 /// imported from the crate. It used to be

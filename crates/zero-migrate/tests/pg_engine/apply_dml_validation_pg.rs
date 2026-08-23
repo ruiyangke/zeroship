@@ -7,8 +7,9 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::{DbError, SqlSession};
 use zero_migrate::{
     ApplyError, Approval, EngineError, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr,
-    PostgresBackend, POSTGRES,
+    POSTGRES,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_test";
 

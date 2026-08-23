@@ -12,6 +12,7 @@ mod support;
 #[path = "../dialect_corpus/mod.rs"]
 mod dialect_corpus;
 
+mod a_test_recorder_never_ships;
 mod alter_column_dialect_support;
 mod backend_modules_name_one_dialect;
 mod backend_snapshot_privates_stay_core_only;
@@ -44,7 +45,6 @@ mod shadow_dry_run_has_no_implementor;
 mod sqlite_declaration_flip_over_refusal_control;
 mod sqlite_trigger_quoting_reaches_postgres;
 mod sqlite_trigger_render_bytes;
-mod the_mysql_recorder_never_ships;
 mod touched_tables_dialect_legs;
 mod unsupported_reason_is_operator_facing;
 mod value_format_comparison_is_not_an_emission_route;

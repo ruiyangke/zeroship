@@ -54,7 +54,7 @@ fn rb_err(e: SqliteActorError) -> RollbackError {
 
 /// Roll back ONE migration's `down` transactionally + journal a `rolled_back`
 /// event. Mirrors the PG
-/// `zero_migrate::apply::backend::postgres::session::rollback_one_transactional`
+/// `zero_migrate_postgres::backend::session::rollback_one_transactional`
 /// semantics, dialect-translated. Named in prose rather than linked: the engine
 /// depends on this crate, so this crate cannot name the engine back.
 ///

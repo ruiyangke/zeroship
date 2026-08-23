@@ -170,9 +170,9 @@ use zero_migrate::render::lower::{
 use zero_migrate::{
     resolve_create_table_policy, Approval, DeclarativeApplyError, EffectivePolicy, EngineError,
     ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine, MigrationIr,
-    PostgresBackend,
 };
 use zero_migrate_mysql::MysqlBackend;
+use zero_migrate_postgres::PostgresBackend;
 use zero_migrate_sqlite::SqliteBackend;
 
 /// What the MySQL leg needed, and where each piece of it now lives. Recorded as a

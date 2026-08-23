@@ -30,8 +30,9 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, PostgresBackend,
+    MigrationIr,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_plan_precondition_preflight";
 

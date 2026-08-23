@@ -12,17 +12,17 @@
 
 use std::time::Instant;
 
-use crate::apply::executor::ApplyError;
-use crate::apply::journal::{self, JournalError, Phase};
-use crate::conn::ExecutorConfig;
-use crate::driver::SqlSession;
-use crate::render::dml::{quote_ident_checked_for_dialect, IdentQuoteError};
-use crate::render::step::SynchronizeIdentityStep;
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::dml::{quote_ident_checked_for_backend, IdentQuoteError};
+use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::executor::ApplyError;
+use zero_migrate_backend::journal::{self, JournalError, Phase};
+use zero_migrate_backend::step::SynchronizeIdentityStep;
 
 use super::session;
 
 fn quote_ident_checked(ident: &str) -> Result<String, IdentQuoteError> {
-    quote_ident_checked_for_dialect(ident, &super::DIALECT)
+    quote_ident_checked_for_backend(ident, &crate::dml::RENDERER)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +60,7 @@ pub(super) async fn apply<D: SqlSession>(
     }
 
     let marker = &step.migration;
-    let completed = super::journal_sql::applied(conn, cfg, &super::DIALECT)
+    let completed = super::journal_sql::applied(conn, cfg)
         .await?
         .into_iter()
         .filter(|entry| matches!(entry.phase, Phase::Completed))
@@ -374,8 +374,8 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    use crate::driver::{Bind, DbError, Row, Value};
-    use crate::model::migration::{
+    use zero_migrate_backend::driver::{Bind, DbError, Row, Value};
+    use zero_migrate_ir::migration::{
         Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
     };
 

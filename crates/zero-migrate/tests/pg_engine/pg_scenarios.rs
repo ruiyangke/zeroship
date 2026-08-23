@@ -56,15 +56,17 @@ use crate::support::apply_pg as apply;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::model::migration::Checksum;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::check_checksum_drift,
-    apply::backend::postgres::drift_sql::snapshot_schema,
-    apply::backend::postgres::journal_sql::ensure_journal,
-    apply::backend::postgres::status_sql::status, ops::status::history_via_backend,
-    resolve_create_table_policy, ApplyError, Approval, ApprovalScope, BackfillSpec, BindValue,
-    DeclarativeApplyError, EngineError, ExecutorConfig, ExpandContractAuthor, GuardConfig,
-    IrAuthor, LiveSchema, LockMode, Migration, MigrationEngine, MigrationFlags, MigrationId,
-    MigrationIr, OnlineIntent, PlanStep, PostgresBackend, RenameStep, Resolution, POSTGRES,
+    ops::status::history_via_backend, resolve_create_table_policy, ApplyError, Approval,
+    ApprovalScope, BackfillSpec, BindValue, DeclarativeApplyError, EngineError, ExecutorConfig,
+    ExpandContractAuthor, GuardConfig, IrAuthor, LiveSchema, LockMode, Migration, MigrationEngine,
+    MigrationFlags, MigrationId, MigrationIr, OnlineIntent, PlanStep, RenameStep, Resolution,
+    POSTGRES,
 };
+use zero_migrate_postgres::backend::drift_sql::check_checksum_drift;
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::backend::journal_sql::ensure_journal;
+use zero_migrate_postgres::backend::status_sql::status;
+use zero_migrate_postgres::PostgresBackend;
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -2356,13 +2358,10 @@ async fn interrupt_online_rename_deploy(
         "the existing apply fault must be the interruption: {interrupted_text}"
     );
 
-    let completed_after_interrupt = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        session,
-        cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("read journal after interruption");
+    let completed_after_interrupt =
+        zero_migrate_postgres::backend::journal_sql::applied(session, cfg)
+            .await
+            .expect("read journal after interruption");
     assert!(
         expand_versions.iter().all(|version| {
             completed_after_interrupt.iter().any(|entry| {
@@ -2469,13 +2468,10 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
         .await,
         "the pending-contract refusal must run before the touching DDL"
     );
-    let journal_after_refusal = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("read journal after refused same-table DDL");
+    let journal_after_refusal =
+        zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+            .await
+            .expect("read journal after refused same-table DDL");
     assert!(
         !journal_after_refusal
             .iter()
@@ -2643,13 +2639,9 @@ async fn transactional_apply_creates_table_and_journals_completed() {
     );
 
     // The journal recorded a completed event, readable back over the seam.
-    let applied = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal read");
+    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert_eq!(applied.len(), 1, "one journal row");
     assert_eq!(applied[0].version, v.as_str());
     assert_eq!(applied[0].checksum, m.checksum.as_str());
@@ -2665,13 +2657,9 @@ async fn transactional_apply_creates_table_and_journals_completed() {
     .await
     .expect("re-apply no-op");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal re-read");
+    let applied2 = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal re-read");
     assert_eq!(applied2.len(), 1, "no duplicate journal row on re-apply");
 
     drop_schemas(&session, &cfg).await;
@@ -2732,13 +2720,9 @@ async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused(
     // The journal must have recorded it as a once-only kind. That recording is
     // what the guard trusts over the supplied flag, so an arm that never checked
     // it could be measuring a journal that said "repeatable" all along.
-    let applied = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal read");
+    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert_eq!(applied.len(), 1);
     assert!(
         !applied[0]
@@ -2793,13 +2777,9 @@ async fn re_classifying_an_applied_once_only_migration_as_repeatable_is_refused(
 
     // The journal is still the original single completed event - the refused
     // apply appended nothing and rewrote nothing.
-    let after = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal re-read");
+    let after = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal re-read");
     assert_eq!(after.len(), 1, "the refused apply appended no journal row");
     assert_eq!(
         after[0].checksum,
@@ -2942,10 +2922,9 @@ async fn non_transactional_two_phase_apply_and_recovery() {
         ),
     );
     // Arm a `started` marker directly (the pre-crash phase-1 write).
-    zero_migrate::apply::backend::postgres::journal_sql::record_started(
+    zero_migrate_postgres::backend::journal_sql::record_started(
         &session,
         &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
         v2.as_str(),
         "idx_items_id",
         idx2.checksum.as_str(),
@@ -2969,13 +2948,9 @@ async fn non_transactional_two_phase_apply_and_recovery() {
             || out2.recovered.contains(&v2.as_str().to_string()),
         "the crashed non-txn migration was recovered + completed: {out2:?}"
     );
-    let applied = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal read");
+    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert!(
         applied.iter().any(|e| e.version == v2.as_str()),
         "the recovered version is now net-applied in the journal"
@@ -3049,10 +3024,9 @@ async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
     );
 
     // Arm the marker for the body that half-ran, then supply the edited one.
-    zero_migrate::apply::backend::postgres::journal_sql::record_started(
+    zero_migrate_postgres::backend::journal_sql::record_started(
         &session,
         &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
         v1.as_str(),
         "idx_items",
         half_ran.checksum.as_str(),
@@ -3084,13 +3058,9 @@ async fn a_mismatched_inflight_marker_aborts_instead_of_replaying() {
     }
 
     // The marker survives the refusal, so the operator can still inspect it.
-    let applied = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal read");
+    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert!(
         applied
             .iter()
@@ -3318,13 +3288,9 @@ async fn a_committed_non_txn_concurrent_index_still_recovers_on_replay() {
         out.recovered.contains(&v1.as_str().to_string()),
         "the replay is reported as a recovery: {out:?}"
     );
-    let applied = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal read");
+    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert!(
         applied.iter().any(|e| e.version == v1.as_str()),
         "the recovered version is net-applied"
@@ -3502,19 +3468,18 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
 
-    ensure_journal(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
+    ensure_journal(&session, &cfg)
         .await
         .expect("ensure_journal 1");
     // Re-bootstrap: must not error (CREATE … IF NOT EXISTS discipline).
-    ensure_journal(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
+    ensure_journal(&session, &cfg)
         .await
         .expect("ensure_journal 2 (idempotent)");
 
     let v = MigrationId::generate();
-    zero_migrate::apply::backend::postgres::journal_sql::record_completed(
+    zero_migrate_postgres::backend::journal_sql::record_completed(
         &session,
         &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
         zero_migrate::apply::journal::CompletedRecord {
             down: None,
             version: v.as_str(),
@@ -3528,13 +3493,9 @@ async fn journal_ensure_is_idempotent_and_records_read_back() {
     .await
     .expect("record_completed");
 
-    let applied = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal read");
+    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0].version, v.as_str());
     assert_eq!(applied[0].checksum, "cafef00d");
@@ -3574,14 +3535,9 @@ async fn checksum_drift_detects_a_tampered_applied_migration() {
     .expect("apply");
 
     // No drift when the set matches the journal.
-    let report = check_checksum_drift(
-        &zero_migrate_ir::dialect::POSTGRES,
-        &session,
-        &cfg,
-        std::slice::from_ref(&m),
-    )
-    .await
-    .expect("drift check clean");
+    let report = check_checksum_drift(&session, &cfg, std::slice::from_ref(&m))
+        .await
+        .expect("drift check clean");
     assert!(
         report.is_clean(),
         "no drift when the set matches: {report:?}"
@@ -3602,14 +3558,9 @@ async fn checksum_drift_detects_a_tampered_applied_migration() {
         m.checksum.as_str(),
         "tamper changed the checksum"
     );
-    let report2 = check_checksum_drift(
-        &zero_migrate_ir::dialect::POSTGRES,
-        &session,
-        &cfg,
-        std::slice::from_ref(&tampered),
-    )
-    .await
-    .expect("drift check tampered");
+    let report2 = check_checksum_drift(&session, &cfg, std::slice::from_ref(&tampered))
+        .await
+        .expect("drift check tampered");
     assert!(
         !report2.is_clean(),
         "a tampered applied checksum is detected as drift"
@@ -3645,13 +3596,9 @@ async fn snapshot_schema_reflects_the_live_catalog() {
     .await
     .expect("apply");
 
-    let snap = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        &session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot_schema over the seam");
+    let snap = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot_schema over the seam");
     let table = snap
         .tables
         .get("profiles")
@@ -3694,13 +3641,9 @@ async fn snapshot_schema_preserves_quoted_named_type_identity() {
         .await
         .expect("create quoted enum/domain fixture");
 
-    let snap = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        &session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot quoted named types");
+    let snap = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot quoted named types");
     let table = &snap.tables["named_values"];
     for (column_name, type_name) in [("mood", "MoodState"), ("code", "StateCode")] {
         let column = table
@@ -3897,7 +3840,7 @@ async fn baseline_records_completed_without_running_up() {
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
-    ensure_journal(&session, &cfg, &zero_migrate_ir::dialect::POSTGRES)
+    ensure_journal(&session, &cfg)
         .await
         .expect("ensure_journal");
 
@@ -3928,13 +3871,9 @@ async fn baseline_records_completed_without_running_up() {
 
     // The version is journaled net-applied (via the baseline), and the table
     // survived (the up did NOT run).
-    let applied = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal read");
+    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert!(
         applied.iter().any(|e| e.version == v.as_str()),
         "the baseline recorded the version as net-applied"
@@ -3975,14 +3914,9 @@ async fn status_and_history_report_over_the_seam() {
     .await
     .expect("apply");
 
-    let st = status(
-        &zero_migrate_ir::dialect::POSTGRES,
-        &session,
-        &cfg,
-        std::slice::from_ref(&m),
-    )
-    .await
-    .expect("status over the seam");
+    let st = status(&session, &cfg, std::slice::from_ref(&m))
+        .await
+        .expect("status over the seam");
     assert!(
         st.applied.iter().any(|e| e.version == v.as_str()),
         "status reports the applied version"
@@ -4039,13 +3973,9 @@ async fn non_idempotent_non_txn_dml_aborts_before_any_apply() {
         "expected NonIdempotentNonTxn, got {err:?}"
     );
     // All-up-front: nothing applied (not even the valid base migration).
-    let applied = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .unwrap_or_default();
+    let applied = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .unwrap_or_default();
     assert!(
         applied.is_empty(),
         "a denied batch applies NOTHING (all-up-front guard): {applied:?}"
@@ -5161,13 +5091,9 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
     );
     let atomic_version =
         MigrationId::derive("resolve_pending_apply_atomic", pending_version.as_bytes());
-    let journal = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("read journal after append fault");
+    let journal = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("read journal after append fault");
     assert!(
         journal
             .iter()
@@ -5329,15 +5255,11 @@ async fn journal_applied(
     cfg: &ExecutorConfig,
     version: &MigrationId,
 ) -> bool {
-    zero_migrate::apply::backend::postgres::journal_sql::applied(
-        session,
-        cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal read")
-    .iter()
-    .any(|e| e.version == version.as_str())
+    zero_migrate_postgres::backend::journal_sql::applied(session, cfg)
+        .await
+        .expect("journal read")
+        .iter()
+        .any(|e| e.version == version.as_str())
 }
 
 /// A masked `addColumn` lowers to TWO units over TWO DIFFERENT objects - the MAIN
@@ -6979,13 +6901,9 @@ async fn a_migration_edited_after_it_applied_aborts_the_next_deploy() {
         "the batch must be refused BEFORE the pending migration executes"
     );
     // And the tampered version must not have been re-journalled.
-    let journal = zero_migrate::apply::backend::postgres::journal_sql::applied(
-        &session,
-        &cfg,
-        &zero_migrate_ir::dialect::POSTGRES,
-    )
-    .await
-    .expect("journal read");
+    let journal = zero_migrate_postgres::backend::journal_sql::applied(&session, &cfg)
+        .await
+        .expect("journal read");
     assert_eq!(
         journal.iter().filter(|e| e.version == v1.as_str()).count(),
         1,

@@ -38,8 +38,9 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::{
     effective_policy_from_charter_toml, render_artifacts, resolve_create_table_policy, Approval,
     EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, PostgresBackend,
+    MigrationIr,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_env_db_ts_server";
 

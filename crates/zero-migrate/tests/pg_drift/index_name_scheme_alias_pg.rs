@@ -27,11 +27,14 @@ use std::collections::HashMap;
 use crate::support::PgDevSession;
 
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots,
-    diff_snapshots_with_index_aliases, AcceptedIndexAlias, Approval, CollectionDescriptor,
-    DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor, GuardConfig,
-    IndexDescriptor, MigrationEngine, PostgresBackend,
+    diff_snapshots, diff_snapshots_with_index_aliases, AcceptedIndexAlias, Approval,
+    CollectionDescriptor, DeclarativeAuthor, EffectivePolicy, ExecutorConfig, FieldDescriptor,
+    GuardConfig, IndexDescriptor, MigrationEngine,
 };
+
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+
+use zero_migrate_postgres::PostgresBackend;
 
 fn desired_snapshot(
     project_schema: &str,
@@ -209,13 +212,9 @@ async fn deploy(
     let author = author_for(cfg);
     let desired = desired_snapshot(&cfg.project_schema, descs, &effective_policy(cfg))
         .expect("desired_snapshot");
-    let live = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot live");
+    let live = snapshot_schema(session, &cfg.project_schema)
+        .await
+        .expect("snapshot live");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -239,13 +238,9 @@ async fn deploy(
         )
         .await
         .expect("apply_declarative");
-    snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot live after deploy")
+    snapshot_schema(session, &cfg.project_schema)
+        .await
+        .expect("snapshot live after deploy")
 }
 
 /// ARM A - the defect. An index the DATA PLANE created re-diffs CLEAN against the
@@ -327,13 +322,9 @@ async fn a_data_plane_named_index_re_diffs_clean() {
         &effective_policy(&cfg),
     )
     .expect("desired_snapshot");
-    let live_after = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        &session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot live (after)");
+    let live_after = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (after)");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -425,13 +416,9 @@ async fn b_engine_named_index_still_round_trips_clean() {
         &effective_policy(&cfg),
     )
     .expect("desired_snapshot");
-    let live_after = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        &session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot live (after)");
+    let live_after = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (after)");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -510,13 +497,9 @@ async fn c_author_supplied_rename_still_creates_and_drops() {
         &effective_policy(&cfg),
     )
     .expect("desired_snapshot");
-    let live_after = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        &session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot live (after)");
+    let live_after = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (after)");
     let plan = engine
         .plan_declarative(
             &desired,
@@ -608,13 +591,9 @@ async fn d_alias_accepted_no_op_does_not_trip_ownership() {
         "the owner must be the other app for this to be a non-owner deploy"
     );
 
-    let live_after = snapshot_schema(
-        &zero_migrate_ir::dialect::POSTGRES,
-        &session,
-        &cfg.project_schema,
-    )
-    .await
-    .expect("snapshot live (after)");
+    let live_after = snapshot_schema(&session, &cfg.project_schema)
+        .await
+        .expect("snapshot live (after)");
     let non_owner = DeclarativeAuthor::new_for_dialect(
         cfg.project_schema.clone(),
         "app_zzz",

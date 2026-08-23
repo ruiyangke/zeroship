@@ -30,11 +30,12 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots,
-    effective_policy_from_charter_toml, fold_ops, resolve_create_table_policy, Approval,
-    EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine,
-    MigrationIr, PostgresBackend, StructuralDrift,
+    diff_snapshots, effective_policy_from_charter_toml, fold_ops, resolve_create_table_policy,
+    Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode,
+    MigrationEngine, MigrationIr, StructuralDrift,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_fold_roundtrip_pg";
 
@@ -233,13 +234,9 @@ async fn assert_roundtrip(
             &support::no_inject(&cfg.project_schema),
         )
         .map_err(|error| format!("fold the applied PostgreSQL ops: {error}"))?;
-        let actual = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            &session,
-            &cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let actual = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(diff_snapshots(&expected, &actual))
     }
     .await;
@@ -482,15 +479,11 @@ async fn assert_lifecycle_roundtrip(
                 .map_err(|error| {
                     format!("{checkpoint}: fold the applied PostgreSQL ops: {error}")
                 })?;
-                let actual = snapshot_schema(
-                    &zero_migrate_ir::dialect::POSTGRES,
-                    &session,
-                    &cfg.project_schema,
-                )
-                .await
-                .map_err(|error| {
-                    format!("{checkpoint}: snapshot the live PostgreSQL schema: {error}")
-                })?;
+                let actual = snapshot_schema(&session, &cfg.project_schema)
+                    .await
+                    .map_err(|error| {
+                        format!("{checkpoint}: snapshot the live PostgreSQL schema: {error}")
+                    })?;
                 let drift = diff_snapshots(&expected, &actual);
                 if !drift.is_clean() {
                     return Err(format!(

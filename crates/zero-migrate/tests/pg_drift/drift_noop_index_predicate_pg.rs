@@ -33,9 +33,9 @@ use crate::support;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops, IrAuthor,
-    LiveSchema, SchemaSnapshot, StructuralDrift,
+    diff_snapshots, fold_ops, IrAuthor, LiveSchema, SchemaSnapshot, StructuralDrift,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
 
 const OWNER: &str = "app_drift_noop_predicate";
 
@@ -106,7 +106,7 @@ async fn snapshot_after_mutation(
         let _ = session.batch("ROLLBACK").await;
         return Err(format!("apply drift mutation `{mutation}`: {error}"));
     }
-    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, schema)
+    let snapshot = snapshot_schema(session, schema)
         .await
         .map_err(|error| format!("snapshot after `{mutation}`: {error}"));
     let rollback = session
@@ -194,7 +194,7 @@ async fn live_postgres_does_not_invent_drift_for_a_constant_true_predicate() {
         }
 
         // The false-drift control: apply, change NOTHING, demand silence.
-        let clean = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+        let clean = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect clean no-op predicate fixture: {error}"))?;
         let live_predicate = clean

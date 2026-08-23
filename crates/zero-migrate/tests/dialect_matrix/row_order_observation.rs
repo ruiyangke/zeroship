@@ -97,9 +97,10 @@ use zero_migrate::model::ir::Op;
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
     resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, MigrationEngine, MigrationIr, PostgresBackend,
+    LiveSchema, MigrationEngine, MigrationIr,
 };
 use zero_migrate_mysql::MysqlBackend;
+use zero_migrate_postgres::PostgresBackend;
 use zero_migrate_sqlite::backend::Mode;
 use zero_migrate_sqlite::SqliteBackend;
 

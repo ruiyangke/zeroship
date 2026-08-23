@@ -50,7 +50,6 @@ use crate::apply::backend::MigrationBackend;
 use crate::apply::journal::{AppliedEntry, Phase};
 use crate::conn::ExecutorConfig;
 use crate::model::migration::{Migration, MigrationId};
-use crate::model::precondition::Precondition;
 use crate::render::plan::AppliedPlan;
 use crate::render::step::PlanStep;
 
@@ -69,32 +68,10 @@ pub use zero_migrate_backend::executor::{
 // policy and nothing of the orchestration's.
 pub use zero_migrate_backend::executor::authorize_existence_guard_schema;
 
-/// The refusal an unmet
-/// [`OnUnmet::Halt`](crate::model::precondition::OnUnmet::Halt) check produces.
-///
-/// Shared by the per-migration seam and the plan-wide preflight so that moving
-/// WHEN a refusal fires never changes WHAT the operator reads.
-///
-/// It is dialect-neutral and belongs here despite having spent a while inside the
-/// PostgreSQL precondition evaluator: it formats a [`Precondition`] and a blocker
-/// list into an [`ApplyError`] and touches no database at all. It ended up there
-/// because it happened to sit in a file that moved wholesale, which is the general
-/// hazard — a whole-file move classifies by FILE BOUNDARY, and any neutral code the
-/// file happens to contain rides across the boundary silently and starts looking
-/// like the vendor's.
-pub(crate) fn unmet_halt_error(
-    version: &str,
-    check: &Precondition,
-    blockers: Option<&[String]>,
-) -> ApplyError {
-    let blocker_detail = blockers.map_or_else(String::new, |blockers| {
-        format!(": blocking dependents {blockers:?}")
-    });
-    ApplyError::PreconditionFailed {
-        version: version.to_string(),
-        which: format!("{check:?} is unmet (OnUnmet::Halt){blocker_detail}"),
-    }
-}
+// `unmet_halt_error` travelled with them and for the same reason: it formats a
+// `Precondition` and a blocker list into an `ApplyError`, touches no database, and the
+// PostgreSQL precondition evaluator is one of its two callers.
+pub(crate) use zero_migrate_backend::executor::unmet_halt_error;
 
 /// Apply the project's pending migrations through a backend the CALLER built.
 /// Idempotent: a re-run with no new migrations is a no-op.
@@ -957,7 +934,7 @@ fn order_repeatables<'a>(
 }
 
 /// The per-migration precondition verdict loop now lives in
-/// [`crate::apply::backend::postgres::precondition::evaluate_all`] — the **Postgres** leaf reached only via
+/// `zero_migrate_postgres::backend::precondition::evaluate_all` — the **Postgres** leaf reached only via
 /// [`MigrationBackend::evaluate_preconditions`]
 /// (multi-engine abstraction). The generic apply body calls the backend method
 /// (`backend.evaluate_preconditions(cfg, m)`); it holds no `&Client` and runs no
@@ -1039,218 +1016,18 @@ fn check_expand_contract_gate(
     Ok(())
 }
 
-/// Order the pending migrations honoring `depends_on` (cross-slice
-/// ordering) when set, falling back to pure version order otherwise.
-///
-/// The default order is UUIDv7 version (time-ordered), but `depends_on` can pull a
-/// *higher*-version migration to run **after** a lower-version one it depends on —
-/// or, the converse the task calls out: a later-version migration whose
-/// `depends_on` is empty may still need to run *after* an earlier-version one
-/// because that earlier one depends on **it**. We therefore topologically sort the
-/// dependency DAG (edge `dep -> m` for each `dep` in `m.depends_on`), using a
-/// version-ordered worklist so the result is **stable** and version-tiebroken
-/// (among nodes with no outstanding deps, the lowest version goes first).
-///
-/// Dependencies already satisfied by the journal (a `completed` version not in the
-/// pending set) are treated as pre-met edges — they impose no ordering on the
-/// pending batch but must still resolve to a real version (set or journal),
-/// otherwise the graph is unsatisfiable.
-///
-/// # Errors
-/// - [`ApplyError::MissingDependency`] — a `depends_on` names a version absent
-///   from both the supplied set and the journal.
-/// - [`ApplyError::DependencyCycle`] — the pending edges form a cycle.
-///
-/// `pub(crate)` so the read-only status API ([`crate::ops::status`]) computes its
-/// `pending` list in the **exact same topo order** apply uses — there is one
-/// pending-ordering implementation, never a re-derived one.
-pub(crate) fn order_pending<'a>(
-    migrations: &'a [Migration],
-    completed: &HashMap<&str, &AppliedEntry>,
-    satisfied: &std::collections::HashSet<&str>,
-) -> Result<Vec<&'a Migration>, ApplyError> {
-    use std::collections::HashSet;
-
-    // The pending set, indexed by version, plus the set of all known versions
-    // (pending ∪ completed) for dependency-existence checks.
-    //
-    // `satisfied` (squash) is the set of versions made redundant by a
-    // SUPERSESSION — a version `v_i` superseded by a squash `S` that is net-applied
-    // OR being applied in this batch. Such a version is treated like a completed
-    // one: it is EXCLUDED from pending (its `up` must never run — `S` covers it),
-    // and it counts as a pre-met dependency (a later migration `depends_on v_i` is
-    // satisfied by `S`). `S` itself is NOT in `satisfied` (it is pending and runs).
-    let pending: Vec<&Migration> = migrations
-        .iter()
-        .filter(|m| {
-            !completed.contains_key(m.version.as_str()) && !satisfied.contains(m.version.as_str())
-        })
-        .collect();
-    // Dependency edges to versions already satisfied by the journal/squash are
-    // pre-met: they must RESOLVE to a real version (set or journal) but impose no
-    // ordering on the batch. The shared Kahn core orders the PENDING subgraph;
-    // pre-met deps are supplied as `pre_satisfied`.
-    let pre_satisfied: HashSet<&str> = completed
-        .keys()
-        .copied()
-        .chain(satisfied.iter().copied())
-        .collect();
-    topo_order_version_tiebroken(&pending, &pre_satisfied)
-}
-
-/// The SHARED canonical ordering core: a deterministic, **version-tiebroken
-/// topological sort** of `nodes` over their `depends_on` edges. Both the apply
-/// path ([`order_pending`]) and the integrity manifest ([`canonical_set_order`],
-/// folded by [`crate::plan::manifest::compute_manifest`]) order through this one
-/// implementation, so the order the manifest blesses can NEVER diverge from the
-/// order the executor runs.
-///
-/// `pre_satisfied` is the set of versions that resolve a dependency WITHOUT being
-/// in `nodes` (already net-applied / superseded in the journal). An edge to such a
-/// version is pre-met (no ordering constraint) but must still resolve; an edge to
-/// a version in neither `nodes` nor `pre_satisfied` is a dangling dependency.
-///
-/// Kahn with a version-ordered (`BTreeSet`) ready set: among nodes with no
-/// remaining unmet dep, the lowest `UUIDv7` version emits first. With no edges this
-/// degrades to pure ascending version order.
-///
-/// # Errors
-/// - [`ApplyError::MissingDependency`] — an edge names a version absent from both
-///   `nodes` and `pre_satisfied`.
-/// - [`ApplyError::DependencyCycle`] — the edges among `nodes` form a cycle.
-fn topo_order_version_tiebroken<'a>(
-    nodes: &[&'a Migration],
-    pre_satisfied: &std::collections::HashSet<&str>,
-) -> Result<Vec<&'a Migration>, ApplyError> {
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-
-    let node_versions: HashSet<&str> = nodes.iter().map(|m| m.version.as_str()).collect();
-
-    // adj[dep] = nodes that must run AFTER `dep`; indeg[m] = unmet in-set deps.
-    let mut indeg: BTreeMap<&str, usize> =
-        nodes.iter().map(|m| (m.version.as_str(), 0usize)).collect();
-    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-    for m in nodes {
-        for dep in &m.depends_on {
-            let dep_v = dep.as_str();
-            if !node_versions.contains(dep_v) && !pre_satisfied.contains(dep_v) {
-                return Err(ApplyError::MissingDependency {
-                    version: m.version.as_str().to_string(),
-                    missing: dep_v.to_string(),
-                });
-            }
-            // Only edges to another in-set node constrain order; a pre-satisfied
-            // dep imposes none.
-            if node_versions.contains(dep_v) {
-                adj.entry(dep_v).or_default().push(m.version.as_str());
-                *indeg.get_mut(m.version.as_str()).expect("node") += 1;
-            }
-        }
-    }
-
-    let by_version: HashMap<&str, &Migration> =
-        nodes.iter().map(|m| (m.version.as_str(), *m)).collect();
-    let mut ready: BTreeSet<&str> = indeg
-        .iter()
-        .filter(|(_, &d)| d == 0)
-        .map(|(&v, _)| v)
-        .collect();
-    let mut ordered: Vec<&Migration> = Vec::with_capacity(nodes.len());
-    while let Some(&v) = ready.iter().next() {
-        ready.remove(v);
-        ordered.push(by_version[v]);
-        if let Some(succs) = adj.get(v) {
-            for &s in succs {
-                let e = indeg.get_mut(s).expect("successor node");
-                *e -= 1;
-                if *e == 0 {
-                    ready.insert(s);
-                }
-            }
-        }
-    }
-
-    if ordered.len() != nodes.len() {
-        let mut cyclic: Vec<&str> = indeg
-            .iter()
-            .filter(|(_, &d)| d > 0)
-            .map(|(&v, _)| v)
-            .collect();
-        cyclic.sort_unstable();
-        return Err(ApplyError::DependencyCycle(cyclic.join(", ")));
-    }
-    Ok(ordered)
-}
-
-/// The CANONICAL EXECUTED ORDER of a FULL supplied set, used by
-/// [`crate::plan::manifest::compute_manifest`] to fold the manifest over the order the
-/// executor will actually run — NOT the cosmetic slice order.
-///
-/// This is [`topo_order_version_tiebroken`] over the WHOLE set with NO journal
-/// context (the control plane stamps the manifest before any apply, over the raw
-/// authored set), so it is exactly the order [`order_pending`] produces for an
-/// all-pending set. Two consequences the manifest relies on:
-///
-/// - a pure **slice reorder** of an additive set (no `depends_on`) sorts back to
-///   the SAME version order ⇒ the SAME manifest (no false mismatch);
-/// - a `depends_on` change that REORDERS execution sorts differently ⇒ a DIFFERENT
-///   manifest (also independently caught by the checksum fold).
-///
-/// On an unorderable set (a `depends_on` cycle, or a dangling dependency that
-/// names a version outside the set) there is no executed order — such a set never
-/// applies (the executor refuses it at [`order_pending`]). For the manifest we
-/// fall back to a DETERMINISTIC ascending-version order so the hash is still a
-/// stable function of the set (identical when the control plane stamps and when
-/// the engine verifies); the real cycle/dangling error surfaces at apply, not as a
-/// manifest mismatch. The manifest's job is integrity of the SET, not graph
-/// validation.
-#[must_use]
-pub(crate) fn canonical_set_order(migrations: &[Migration]) -> Vec<&Migration> {
-    let nodes: Vec<&Migration> = migrations.iter().collect();
-    let empty = std::collections::HashSet::new();
-    topo_order_version_tiebroken(&nodes, &empty).unwrap_or_else(|_| {
-        // Unorderable (cycle / dangling dep): deterministic version-sorted fallback.
-        let mut v: Vec<&Migration> = migrations.iter().collect();
-        v.sort_by(|a, b| a.version.as_str().cmp(b.version.as_str()));
-        v
-    })
-}
-
-/// Compute the set of versions made redundant by a SUPERSESSION (squash),
-/// for the supplied set + the journal's net state.
-///
-/// A version `v_i` is satisfied-by-supersession when a squash `S` (with `v_i ∈
-/// S.supersedes`) is either:
-/// - **net-applied in the journal** (`journal_superseded`, read via
-///   [`MigrationBackend::superseded_versions`]); or
-/// - **present in the supplied set** — whether already net-applied OR pending. A
-///   pending `S` will run its `up` THIS batch, so its superseded versions must not
-///   also run (`order_pending` excludes them); an already-applied `S` is also
-///   covered by `journal_superseded`, so adding the in-set edges is at worst
-///   redundant.
-///
-/// The squash `S` itself is never added to the result (it is not superseded by
-/// itself; it runs or is already applied). Used by both [`apply_locked`] and the
-/// read-only [`crate::ops::status`] so their "pending" views agree.
-pub(crate) fn compute_superseded(
-    migrations: &[Migration],
-    journal_superseded: &[String],
-) -> std::collections::HashSet<String> {
-    let mut out: std::collections::HashSet<String> = journal_superseded.iter().cloned().collect();
-    for m in migrations {
-        if m.supersedes.is_empty() {
-            continue;
-        }
-        // An in-set squash covers its superseded versions whether it is already
-        // net-applied OR will be applied this batch (pending). Either way, the
-        // superseded versions must not (re-)run, so they enter the satisfied set.
-        for dep in &m.supersedes {
-            out.insert(dep.as_str().to_string());
-        }
-    }
-    out
-}
-
+// The migration-graph vocabulary — `order_pending`, the shared version-tiebroken
+// topological core beneath it, `canonical_set_order` and `compute_superseded` — moved
+// down to the backend contract. Every line of it reads `depends_on`/`supersedes` off a
+// `Migration` and a journal `AppliedEntry`; none of it names a dialect, a vendor or a
+// statement. It had to travel because a vendor journal reader answers the same
+// "what is pending?" question apply answers and must reuse the ONE implementation:
+// `zero-migrate-postgres`'s `status_sql` says so in its own comment, "so the two views
+// never diverge". Re-exported so every `crate::apply::executor::…` path resolves
+// unchanged.
+pub(crate) use zero_migrate_backend::executor::{
+    canonical_set_order, compute_superseded, order_pending, topo_order_version_tiebroken,
+};
 /// Refuse a malformed set in which two distinct squashes both supersede the same
 /// version. A version may be collapsed by at most one
 /// squash; two in-set squashes over an overlapping prefix would both be pending

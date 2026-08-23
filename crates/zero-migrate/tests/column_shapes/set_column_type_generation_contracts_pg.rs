@@ -41,10 +41,12 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops,
-    resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend, StructuralDrift,
+    diff_snapshots, fold_ops, resolve_create_table_policy, Approval, EffectivePolicy,
+    ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr,
+    StructuralDrift,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 /// The test-side PostgreSQL identifier spelling, written out here rather than
 /// imported from the crate. It used to be
@@ -213,13 +215,9 @@ impl<'a> Deployment<'a> {
                 .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let catalog = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            self.session,
-            &self.cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("introspect the live PostgreSQL schema: {error}"))?;
+        let catalog = snapshot_schema(self.session, &self.cfg.project_schema)
+            .await
+            .map_err(|error| format!("introspect the live PostgreSQL schema: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(catalog, OWNER);
         let author = IrAuthor::new(
             &self.cfg.project_schema,
@@ -293,13 +291,9 @@ impl<'a> Deployment<'a> {
             &self.policy,
         )
         .map_err(|error| format!("fold the applied PostgreSQL ops: {error}"))?;
-        let actual = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            self.session,
-            &self.cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let actual = snapshot_schema(self.session, &self.cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(diff_snapshots(&expected, &actual))
     }
 

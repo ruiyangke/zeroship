@@ -30,10 +30,11 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::model::snapshot::ExtensionSnapshot;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, fold_ops, guard_for, Approval,
-    EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, MigrationEngine,
-    PostgresBackend,
+    fold_ops, guard_for, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
+    LiveSchema, MigrationEngine,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_drop_extension_rollback_pg";
 const PROJECT_SCHEMA: &str = "zero_migrate";
@@ -167,7 +168,7 @@ async fn live_extension(
     schema: &str,
     ext: &str,
 ) -> Result<Option<ExtensionSnapshot>, String> {
-    let snapshot = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, session, schema)
+    let snapshot = snapshot_schema(session, schema)
         .await
         .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
     Ok(snapshot.extensions.get(ext).cloned())

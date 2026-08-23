@@ -609,7 +609,7 @@ pub fn apply_ir(
         }
         match target {
             ApplyDialect::Postgres => {
-                let backend = zero_migrate::PostgresBackend::new_generic(&session);
+                let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
                 apply_ir_with_locked_backend(
                     &backend,
                     &cfg,
@@ -846,7 +846,7 @@ pub fn rollback(
         }
         match target_backend {
             ApplyDialect::Postgres => {
-                let backend = zero_migrate::PostgresBackend::new_generic(&session);
+                let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
                 rollback_with_locked_backend(
                     &backend,
                     &cfg,
@@ -999,7 +999,7 @@ pub fn resolve_pending(
         if let Some(role) = migrator_role {
             cfg = cfg.with_migrator_role(role);
         }
-        let backend = zero_migrate::PostgresBackend::new_generic(&session);
+        let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
         resolve_pending_with_locked_backend(
             &backend,
             &cfg,
@@ -1062,7 +1062,7 @@ pub fn status_ir(
         );
         match target {
             ApplyDialect::Postgres => {
-                let backend = zero_migrate::PostgresBackend::new_generic(&session);
+                let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
                 status_ir_with_locked_backend(
                     &backend,
                     &cfg,
@@ -1194,7 +1194,7 @@ pub fn status(
         let cfg = ExecutorConfig::new(project_id, project_schema, effective);
         match target {
             ApplyDialect::Postgres => {
-                let backend = zero_migrate::PostgresBackend::new_generic(&session);
+                let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
                 legacy_status_with_locked_backend(&backend, &cfg, &migrations).await
             }
             ApplyDialect::Mysql => {
@@ -1230,7 +1230,7 @@ pub fn history(
         // handed `ops::status::history` a raw session plus a `POSTGRES` dialect
         // argument that the function then ignored in favour of PostgreSQL's journal
         // module — naming the dialect and resolving it were two different things.
-        let backend = zero_migrate::PostgresBackend::new_generic(&session);
+        let backend = zero_migrate_postgres::PostgresBackend::new_generic(&session);
         zero_migrate::ops::status::history_via_backend(&backend, &cfg)
             .await
             .map(|h| history_reply(&h))

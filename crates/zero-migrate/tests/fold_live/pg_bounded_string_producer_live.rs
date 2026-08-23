@@ -74,8 +74,9 @@ use zero_migrate::render::declarative::{CollectionDescriptor, DeclarativeAuthor,
 use zero_migrate::{
     descriptors_to_create_ops, desired_snapshot_for_dialect, render_schema_export_from_descriptors,
     resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend, TableRuntimeOptions,
+    LiveSchema, LockMode, MigrationEngine, MigrationIr, TableRuntimeOptions,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_bounded_string";
 const TABLE: &str = "profiles";

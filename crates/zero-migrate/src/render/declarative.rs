@@ -1088,16 +1088,10 @@ fn render_json_value_text(value: &IrJsonValue) -> String {
     }
 }
 
-pub(crate) fn nextval_default_expr(sequence: &crate::model::ir::SequenceRef) -> String {
-    let regclass_name = match sequence.schema.as_deref() {
-        Some(schema) => format!("{schema}.{}", sequence.name),
-        None => sequence.name.clone(),
-    };
-    format!(
-        "nextval({}::regclass)",
-        crate::render::dml::sql_string_literal(&regclass_name)
-    )
-}
+// `nextval_default_expr` moved down beside the parse that reads what it writes. The
+// two are one spelling, and a vendor introspector needs both. Re-exported so
+// `crate::render::declarative::nextval_default_expr` resolves unchanged.
+pub(crate) use zero_migrate_backend::snapshot::nextval_default_expr;
 
 fn generated_column_snapshot(
     generated: &crate::model::ir::GeneratedCol,

@@ -1,7 +1,7 @@
 //! The PostgreSQL status read: net journal state under a `REPEATABLE READ READ
 //! ONLY` snapshot.
 //!
-//! This body used to live in `crate::ops::status` under the neutral name `status`,
+//! This body used to live in `zero_migrate::ops::status` under the neutral name `status`,
 //! and from there it reached `apply::backend::postgres::journal_sql` five times.
 //! Core's status verb WAS PostgreSQL's status verb — nothing about the signature
 //! (`&D: SqlSession`, a `dialect` argument) could have routed it anywhere else, and
@@ -9,24 +9,24 @@
 //! ONLY` is not a statement MySQL or SQLite accepts.
 //!
 //! Its DIALECT-NEUTRAL peer is
-//! [`status_via_backend`](crate::ops::status::status_via_backend), which reads the
-//! same net state through [`MigrationBackend`](crate::apply::backend::MigrationBackend)
+//! `zero_migrate::ops::status::status_via_backend`, which reads the
+//! same net state through [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend)
 //! and is what the shipped CLI/addon path uses on every dialect including this one.
-//! The two differ in ONE field: [`MigrationStatus::rolled_back`](crate::ops::status::MigrationStatus::rolled_back) is populated here
+//! The two differ in ONE field: [`MigrationStatus::rolled_back`](zero_migrate_backend::status::MigrationStatus::rolled_back) is populated here
 //! and left empty there, because the neutral trait exposes rollback VERSION IDS
 //! (`net_rolled_back_versions`) while this path reads the full
-//! [`RolledBackEntry`](crate::apply::journal::RolledBackEntry) detail. MySQL and
+//! [`RolledBackEntry`](zero_migrate_backend::journal::RolledBackEntry) detail. MySQL and
 //! SQLite have no `net_rolled_back` returning that detail, so the two signatures do
 //! not unify and the field was not forced onto the contract.
 
 use std::collections::HashMap;
 
-use crate::apply::executor::order_pending;
-use crate::apply::journal::{AppliedEntry, JournalError, Phase};
-use crate::conn::ExecutorConfig;
-use crate::driver::SqlSession;
-use crate::model::migration::{Migration, MigrationId};
-use crate::ops::status::{derive_pending_contract_status, MigrationStatus, StatusError};
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::executor::order_pending;
+use zero_migrate_backend::journal::{AppliedEntry, JournalError, Phase};
+use zero_migrate_backend::status::{derive_pending_contract_status, MigrationStatus, StatusError};
+use zero_migrate_ir::migration::{Migration, MigrationId};
 
 use super::journal_sql;
 
@@ -64,12 +64,11 @@ use super::journal_sql;
 /// - [`StatusError::Ordering`] if the supplied set's `depends_on` is
 ///   unsatisfiable or cyclic (the same fault apply would surface).
 pub async fn status<D: SqlSession>(
-    dialect: &zero_migrate_ir::dialect::DialectId,
     conn: &D,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
 ) -> Result<MigrationStatus, StatusError> {
-    journal_sql::ensure_journal(conn, cfg, dialect).await?;
+    journal_sql::ensure_journal(conn, cfg).await?;
 
     // One consistent snapshot over both journal reads (applied + rolled_back). A
     // REPEATABLE READ READ ONLY txn pins a single MVCC view, so a concurrent
@@ -77,7 +76,7 @@ pub async fn status<D: SqlSession>(
     conn.batch("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .await
         .map_err(|e| StatusError::Journal(JournalError::Db(e.into())))?;
-    let snapshot = read_status_snapshot(conn, cfg, dialect, migrations).await;
+    let snapshot = read_status_snapshot(conn, cfg, migrations).await;
     finish_status_snapshot(conn, snapshot).await
 }
 
@@ -115,10 +114,9 @@ async fn finish_status_snapshot<D: SqlSession, T>(
 async fn read_status_snapshot<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &zero_migrate_ir::dialect::DialectId,
     migrations: &[Migration],
 ) -> Result<MigrationStatus, StatusError> {
-    let entries = journal_sql::applied(conn, cfg, dialect).await?;
+    let entries = journal_sql::applied(conn, cfg).await?;
     // NET-applied entries only (drop lone `started` inflight markers — those are
     // crash-recovery keys, not settled applied state).
     let applied: Vec<AppliedEntry> = entries
@@ -142,22 +140,22 @@ async fn read_status_snapshot<D: SqlSession>(
     // Supersession (squash): a version superseded by a net-applied squash OR
     // by an in-set squash is NOT pending — status must agree with apply. Reuses the
     // executor's `compute_superseded` so the two views never diverge.
-    let journal_superseded = journal_sql::superseded_versions(conn, cfg, dialect).await?;
+    let journal_superseded = journal_sql::superseded_versions(conn, cfg).await?;
     let superseded_owned =
-        crate::apply::executor::compute_superseded(migrations, &journal_superseded);
+        zero_migrate_backend::executor::compute_superseded(migrations, &journal_superseded);
     let superseded: std::collections::HashSet<&str> =
         superseded_owned.iter().map(String::as_str).collect();
     let ordered =
         order_pending(migrations, &completed, &superseded).map_err(StatusError::Ordering)?;
     let pending: Vec<MigrationId> = ordered.iter().map(|m| m.version.clone()).collect();
 
-    let rolled_back = journal_sql::net_rolled_back(conn, cfg, dialect).await?;
+    let rolled_back = journal_sql::net_rolled_back(conn, cfg).await?;
 
     // Surface the outstanding cross-deploy pending contracts
     // (with orphan detection) + the plans blocked on a pending-contract
     // dependency. Read inside this same REPEATABLE READ READ ONLY snapshot so the
     // obligation view is consistent with the applied/rolled-back buckets.
-    let outstanding = journal_sql::outstanding_pending_contracts(conn, cfg, dialect).await?;
+    let outstanding = journal_sql::outstanding_pending_contracts(conn, cfg).await?;
     let (pending_contracts, blocked) = derive_pending_contract_status(&outstanding, migrations);
 
     Ok(MigrationStatus {
@@ -173,8 +171,8 @@ async fn read_status_snapshot<D: SqlSession>(
 #[cfg(test)]
 mod legacy_snapshot_transaction_tests {
     use super::*;
-    use crate::driver::{Bind, DbError, Row};
     use std::cell::{Cell, RefCell};
+    use zero_migrate_backend::driver::{Bind, DbError, Row};
 
     struct RecordingSession {
         batches: RefCell<Vec<String>>,

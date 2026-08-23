@@ -30,7 +30,7 @@ mod support;
 use std::cell::RefCell;
 
 use zero_migrate::conn::ExecutorConfig;
-use zero_migrate::PostgresBackend;
+use zero_migrate_postgres::PostgresBackend;
 
 use zero_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};
 use zero_migrate_node::session::{NapiHostSession, VerbDispatch, VerbReply};

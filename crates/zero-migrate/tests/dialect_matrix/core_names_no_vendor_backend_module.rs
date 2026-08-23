@@ -22,28 +22,34 @@
 //!
 //! A `postgres::` / `mysql::` / `sqlite::` segment in PATH position — preceded by a
 //! character that cannot continue an identifier. That is what separates
-//! `crate::apply::backend::postgres::journal_sql::applied` (core reached PostgreSQL)
+//! `crate::zero_migrate_postgres::backend::journal_sql::applied` (core reached PostgreSQL)
 //! from `zero_migrate_postgres::VENDOR` (the sibling census's subject, whose
 //! `postgres::` is preceded by `_`) and from prose about either.
 //!
-//! The three vendors' OWN subtrees are not walked. A file under
-//! `apply/backend/postgres/` naming `postgres` is that vendor describing itself,
-//! which is the one place the knowledge belongs.
+//! # The ratchet reached zero
 //!
-//! # The allowances
-//!
-//! [`ALLOWED`] records, per file, EXACTLY how many times it may name a vendor
-//! backend module. One more is a red and one FEWER is also a red, because a count
-//! that drifts down silently is a count nobody maintains. A file not listed may not
-//! name one at all.
+//! It is an EMPTY [`ALLOWED`] now, and an empty [`VENDOR_SUBTREES`] with it. Every
+//! vendor execution half has left `crates/zero-migrate/src` — MySQL at `6a7dc142`,
+//! SQLite at `11772209`, PostgreSQL here — so there is no vendor subtree to exempt,
+//! no composition root declaring a vendor submodule, and no file in core that names
+//! one. The ratchet only ever went DOWN, and this is the bottom.
 //!
 //! # The floors, because a scan over a DISCOVERED set fails OPEN
 //!
 //! Narrow the walk and it iterates nothing and reports clean; break the needle and
 //! it reads every file and still reports clean. Two different blindnesses with the
-//! same green, so there are two floors: [`WALKED_FILE_FLOOR`] for the walk, and the
-//! `render/dml.rs` entry for the needle — a positive control that must keep
-//! matching exactly twice.
+//! same green, so there are two floors: [`WALKED_FILE_FLOOR`] for the walk, and
+//! [`needle_positive_control`] for the needle.
+//!
+//! The needle's control USED TO BE a corpus hit — `render/dml.rs` named the
+//! PostgreSQL journal seam exactly twice, in `all_engine_seams_render_uniformly`,
+//! which had to name it to compare it. That leg went with the execution half (it is
+//! `zero_migrate_postgres::backend::journal_sql`'s
+//! `the_journal_seam_renders_uniformly_and_fails_closed` now), so the corpus count is
+//! a true zero and a corpus control is no longer available AT ALL: there is nothing
+//! left in core for it to match. The control is a FIXTURE instead — the identical
+//! matcher over lines whose answers are stated here — which proves the needle still
+//! discriminates without requiring core to keep a violation alive to be measured by.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -54,51 +60,43 @@ const VENDOR_MODULES: &[&str] = &["postgres::", "mysql::", "sqlite::"];
 /// The vendors' own subtrees, relative to `crates/zero-migrate/src`. A vendor
 /// naming itself inside its own module is not core resolving a vendor.
 ///
-/// ONE now, not three. `apply/backend/mysql/` and then `apply/backend/sqlite/` left
-/// the engine entirely, for `zero-migrate-mysql/src/backend/` and
-/// `zero-migrate-sqlite/src/backend/`, so an exemption for either would be an
-/// exemption for nothing — and a stale exemption is the shape that quietly stops
-/// covering a directory somebody later recreates under that path. `postgres` is the
-/// last vendor subtree in core.
-const VENDOR_SUBTREES: &[&str] = &["apply/backend/postgres/"];
+/// NONE now. `apply/backend/mysql/`, then `apply/backend/sqlite/`, then
+/// `apply/backend/postgres/` left the engine entirely, for
+/// `zero-migrate-{mysql,sqlite,postgres}/src/backend/`, so an exemption for any of
+/// them would be an exemption for nothing — and a stale exemption is the shape that
+/// quietly stops covering a directory somebody later recreates under that path. The
+/// walk reads ALL of `src` now, which is strictly more than it read before.
+const VENDOR_SUBTREES: &[&str] = &[];
 
 /// The ratchet: which core files may name a vendor backend module, and how often.
 ///
-/// Paths are relative to `crates/zero-migrate/src`. Lowering an entry is the point
-/// of this file. RAISING one, or adding a file, is what it exists to make loud.
-const ALLOWED: &[(&str, usize)] = &[
-    // The backend composition root: it declares the vendor submodules still in this
-    // crate and re-exports their backend TYPES, which is how a host names the engine
-    // it wants. Nothing here reaches a vendor's SQL.
-    //
-    // ONE, down from three, and neither of the two that went is at another path —
-    // they went away. MySQL's execution half is `zero-migrate-mysql` and SQLite's is
-    // `zero-migrate-sqlite`, and this file re-exports NEITHER: a
-    // `pub use zero_migrate_sqlite::SqliteBackend` here would be core naming a vendor
-    // CRATE outside the registry, which is what the sibling census
-    // `core_names_no_vendor_crate` forbids. Closing one coupling by opening the other
-    // would have been a wash. A host that wants `SqliteBackend` names the vendor
-    // crate; `zero-migrate-node`'s bridge does exactly that for both.
-    //
-    // The last one goes the same way when `postgres` follows, which is why this entry
-    // is no longer marked PERMANENT.
-    ("apply/backend/mod.rs", 1),
-    // The cross-seam identifier-quoting test. `all_engine_seams_render_uniformly`
-    // asserts that the author seam and the PostgreSQL journal seam quote and
-    // fail-closed BYTE-IDENTICALLY, which it cannot do without naming both. A
-    // `#[cfg(test)]` seam, not a production path, and also this census's positive
-    // control (see the module header).
-    ("render/dml.rs", 2),
-];
-
-/// The walk's floor. `crates/zero-migrate/src` holds 48 `.rs` files outside the
-/// remaining vendor subtree; the floor sits under that with room for ordinary churn
-/// but nowhere near zero, so a walk that lost its root cannot pass.
+/// Paths are relative to `crates/zero-migrate/src`. Lowering an entry is the point of
+/// this file. RAISING one, or adding a file, is what it exists to make loud.
 ///
-/// Unchanged by the SQLite extraction, and that is the point of measuring OUTSIDE the
-/// vendor subtrees: the eleven files that left `apply/backend/sqlite/` were already
-/// excluded from this count, so 48 before and 48 after. The sibling censuses that
-/// walk ALL of `src` had to be lowered; this one did not.
+/// EMPTY, and both entries that went are gone rather than moved:
+///
+/// - `apply/backend/mod.rs` declared `pub mod postgres` and re-exported
+///   `PostgresBackend`. The module left for `zero-migrate-postgres` and the re-export
+///   was NOT repointed: a `pub use zero_migrate_postgres::PostgresBackend` here would
+///   be core naming a vendor CRATE outside the registry, which is what the sibling
+///   census `core_names_no_vendor_crate` forbids. Closing one coupling by opening the
+///   other would have been a wash. A host that wants `PostgresBackend` names the
+///   vendor crate; `zero-migrate-node`'s bridge already does that for all three.
+/// - `render/dml.rs`'s two were `all_engine_seams_render_uniformly` comparing the
+///   author seam against the PostgreSQL journal seam. That leg went WITH the
+///   execution half, exactly as the `role` leg did before it; the engine's test keeps
+///   the seam it can still see.
+const ALLOWED: &[(&str, usize)] = &[];
+
+/// The walk's floor. `crates/zero-migrate/src` holds 48 `.rs` files; the floor sits
+/// under that with room for ordinary churn but nowhere near zero, so a walk that lost
+/// its root cannot pass.
+///
+/// Unchanged by the SQLite extraction and unchanged by the PostgreSQL one, and that
+/// is the point of measuring OUTSIDE the vendor subtrees: the files that left
+/// `apply/backend/{sqlite,postgres}/` were already excluded from this count, so it
+/// reads 48 before and 48 after both. The sibling censuses that walk ALL of `src` had
+/// to be lowered twice; this one did not move.
 ///
 /// Raise it deliberately if the crate grows. NEVER lower it to get green — a drop
 /// means the walk stopped seeing files, which is the failure this defends.
@@ -172,6 +170,43 @@ fn walked_files(root: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
+/// FLOOR TWO — the NEEDLE, as a fixture.
+///
+/// The corpus count is a real zero: no file in `crates/zero-migrate/src` names a
+/// vendor backend module any more. So the control cannot be a corpus hit without
+/// core keeping a violation alive purely to be measured by, which would be the
+/// census demanding the defect it forbids. It runs the identical matcher over lines
+/// whose answers are STATED, which is what makes a broken needle loud:
+///
+/// * the three vendor module names in path position each count once — a needle that
+///   stopped matching them returns 0 here and this fails;
+/// * `zero_migrate_postgres::VENDOR` counts ZERO, because its `postgres::` is
+///   preceded by `_`. That discount is the whole boundary between this census and
+///   its crate-naming sibling, so a needle that lost it returns 1 here and this
+///   fails just as loudly. Both directions, not just the blind one.
+fn needle_positive_control() {
+    let hits = vendor_module_names("use crate::apply::backend::postgres::journal_sql::applied;");
+    assert_eq!(
+        hits, 1,
+        "the needle found {hits} vendor backend modules in a line that carries exactly \
+         one. It has stopped matching, and every zero the census reports is blind."
+    );
+    let all = vendor_module_names("postgres::a mysql::b sqlite::c");
+    assert_eq!(
+        all, 3,
+        "the needle found {all} of the three vendor backend modules in a line that \
+         carries all three; it recognizes some vendors and not others."
+    );
+    let crate_named = vendor_module_names("pub use zero_migrate_postgres::VENDOR;");
+    assert_eq!(
+        crate_named, 0,
+        "the needle counted {crate_named} vendor backend modules in a line that names \
+         a vendor CRATE and no module. That is the sibling census's subject, not this \
+         one's; without the leading-identifier discount this file would red on every \
+         registry line in core."
+    );
+}
+
 /// The census.
 #[test]
 fn core_names_no_vendor_backend_module_outside_the_composition_root() {
@@ -202,19 +237,9 @@ fn core_names_no_vendor_backend_module_outside_the_composition_root() {
         }
     }
 
-    // FLOOR TWO — the NEEDLE. `render/dml.rs` names the PostgreSQL journal seam
-    // exactly twice, in a test that exists BECAUSE it must name it. It is a
-    // positive control: if this stops matching, the census has gone blind and every
-    // other zero below it is meaningless.
-    let control = found.get("render/dml.rs").copied().unwrap_or(0);
-    assert_eq!(
-        control, 2,
-        "the needle found {control} vendor-backend-module names in render/dml.rs, \
-         expected 2 (the two `journal_sql::quote_ident_for_test` calls in \
-         `all_engine_seams_render_uniformly`). Either that test was restructured — \
-         update this control deliberately — or the needle stopped matching, in which \
-         case the whole census is blind."
-    );
+    // FLOOR TWO — the NEEDLE, run over a fixture rather than over the corpus,
+    // because the corpus is a true zero now and has nothing left to control on.
+    needle_positive_control();
 
     let allowed: BTreeMap<&str, usize> = ALLOWED.iter().copied().collect();
     let mut violations: Vec<String> = Vec::new();

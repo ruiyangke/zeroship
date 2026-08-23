@@ -17,7 +17,7 @@
 //! `render/fold.rs` matched the drop against `IndexSnapshot::columns` alone - the
 //! KEY column list - so an index that covered the dropped column only through
 //! `IndexSnapshot::include` survived the fold and left a PHANTOM INDEX that live
-//! introspection does not have, making `fold_ops != snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, live)`.
+//! introspection does not have, making `fold_ops != snapshot_schema(live)`.
 //!
 //! The other two column-bearing fields, `IndexSnapshot::predicate` and the
 //! `IndexElementSnapshot::Expr` key, cascade in PostgreSQL for the same reason but
@@ -42,10 +42,11 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops,
-    resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    LockMode, MigrationEngine, MigrationIr, PostgresBackend, StructuralDrift,
+    diff_snapshots, fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, GuardConfig,
+    IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, StructuralDrift,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_fold_drop_index_pg";
 
@@ -136,13 +137,9 @@ async fn drift_after_applying(source: &str) -> StructuralDrift {
             &policy,
         )
         .map_err(|error| format!("fold the applied PostgreSQL ops: {error}"))?;
-        let actual = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            &session,
-            &cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let actual = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(diff_snapshots(&expected, &actual))
     }
     .await;

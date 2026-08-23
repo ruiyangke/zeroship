@@ -528,7 +528,7 @@ test("PostgreSQL: a rollback whose project lock is held waits instead of failing
     assert.equal(applied.status, 0, `apply failed: ${applied.stderr}`);
 
     // The engine's own acquire, run verbatim rather than re-derived: the key is
-    // `hashtext(project_id)` (crates/zero-migrate/src/apply/backend/postgres/session.rs:60-74)
+    // `hashtext(project_id)` (crates/zero-migrate-postgres/src/backend/session.rs)
     // and the CLI passes the project SCHEMA as the project id
     // (packages/zero-migrate-cli/src/index.ts:544).
     await holder.query(`SELECT pg_advisory_lock(hashtext($1)::bigint)`, [schema]);

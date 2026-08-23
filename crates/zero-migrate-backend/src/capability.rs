@@ -236,3 +236,100 @@ impl ExpandContractPlan {
         self.expand.iter().chain(&self.contract).cloned().collect()
     }
 }
+
+// ── The dual-write trigger's derived identities and its function body ─────────
+//
+// A cross-deploy online rename is authored by the engine and executed by a vendor,
+// and BOTH sides have to arrive at the same trigger. The executor deliberately
+// DERIVES the trigger identity from the same `OnlineIntent` the trigger was authored
+// from rather than accepting it from its caller — that is what stops a direct seam
+// caller from pointing the mirror at a trigger the engine never wrote — and its
+// backfill guard re-derives the function BODY to prove the live trigger is the one
+// the author emitted. A second copy of either derivation on the vendor side would be
+// two answers to one question, which is precisely the check being defeated.
+//
+// So they live here, in the vocabulary both sides already name (`OnlineIntent`,
+// `ExpandContractPlan`), rather than in the engine where only one side could reach
+// them. The byte budget is a PARAMETER: the engine passes the limiting registered
+// backend's declared cap and a vendor passes its own descriptor's, so neither side
+// hard-codes 63 and neither has to resolve the other.
+
+/// Deterministically derive the dual-write function name for a rename, capped to
+/// `max_bytes` — the identifier byte budget the caller's own vendor declares. Stable across re-authoring (so the
+/// `down` and the orchestrator target the same object), with a hash suffix to
+/// disambiguate over-long natural names — mirroring the authoring layer's
+/// `index_name` discipline.
+pub fn dual_write_fn_name(table: &str, from: &str, to: &str, max_bytes: usize) -> String {
+    capped_name(&format!("zsdw_{table}_{from}_{to}_fn"), max_bytes)
+}
+
+/// Deterministically derive the dual-write trigger name (see
+/// [`dual_write_fn_name`]).
+pub fn dual_write_trg_name(table: &str, from: &str, to: &str, max_bytes: usize) -> String {
+    capped_name(&format!("zsdw_{table}_{from}_{to}_trg"), max_bytes)
+}
+
+/// Cap a natural name to ≤ `max_bytes` deterministically: verbatim when it fits,
+/// else a readable prefix + a 10-hex-char hash of the full natural name (so
+/// distinct long inputs stay distinct). Identical algorithm to the authoring layer's
+/// `index_name`, factored for the function/trigger names.
+fn capped_name(natural: &str, max_bytes: usize) -> String {
+    use sha2::{Digest, Sha256};
+    if natural.len() <= max_bytes {
+        return natural.to_string();
+    }
+    let digest = Sha256::digest(natural.as_bytes());
+    let suffix = hex::encode(&digest[..5]); // 10 hex chars
+    let budget = max_bytes - (1 + suffix.len());
+    let mut prefix = String::with_capacity(budget);
+    for ch in natural.chars() {
+        if prefix.len() + ch.len_utf8() > budget {
+            break;
+        }
+        prefix.push(ch);
+    }
+    format!("{prefix}_{suffix}")
+}
+
+/// Render the dual-write function + trigger SQL (shared by E2's `up` and C1's
+/// `down`, so they are byte-identical).
+///
+/// `CREATE OR REPLACE FUNCTION … LANGUAGE plpgsql` (SECURITY INVOKER — the
+/// plpgsql default; we deliberately emit NO `SECURITY DEFINER`). The body is
+/// **total**: after it runs, `from` and `to` are ALWAYS equal, for every INSERT
+/// and UPDATE — no input row is left divergent (a divergent pair would be
+/// silently destroyed by the contract's `DROP COLUMN <from>`). Precedence is
+/// **`to` wins** (consistent with the contract keeping `to`):
+///
+/// - on INSERT: if only `from` is set, mirror `from → to`; otherwise (`to` set,
+///   both set, or both NULL) copy `to → from`;
+/// - on UPDATE: if only `from` changed, mirror `from → to`; otherwise (`to`
+///   changed, both changed → to wins, or neither changed → no-op) copy
+///   `to → from`.
+///
+/// The only-`from` arm is `IS DISTINCT FROM`-guarded (NULL-safe). The else arm
+/// is the total catch-all; when nothing changed it is a no-op self-copy, so an
+/// UPDATE that touches neither column is not amplified.
+pub fn dual_write_function_body(from_q: &str, to_q: &str) -> String {
+    format!(
+        "\nBEGIN\n\
+         \x20   IF TG_OP = 'INSERT' THEN\n\
+         \x20       IF NEW.{to_q} IS NULL AND NEW.{from_q} IS NOT NULL THEN\n\
+         \x20           NEW.{to_q} := NEW.{from_q};   -- only from set\n\
+         \x20       ELSE\n\
+         \x20           NEW.{from_q} := NEW.{to_q};   -- to set / both set (to wins) / both null (no-op)\n\
+         \x20       END IF;\n\
+         \x20   ELSE\n\
+         \x20       -- UPDATE: TOTAL, to wins. Only-from-changed mirrors from→to;\n\
+         \x20       -- to-changed / both-changed / neither-changed all resolve to→from.\n\
+         \x20       IF NEW.{from_q} IS DISTINCT FROM OLD.{from_q}\n\
+         \x20          AND NEW.{to_q} IS NOT DISTINCT FROM OLD.{to_q} THEN\n\
+         \x20           NEW.{to_q} := NEW.{from_q};   -- only from changed\n\
+         \x20       ELSE\n\
+         \x20           NEW.{from_q} := NEW.{to_q};   -- to changed / both changed (to wins) / neither (no-op)\n\
+         \x20       END IF;\n\
+         \x20   END IF;\n\
+         \x20   RETURN NEW;\n\
+         END;\n"
+    )
+}

@@ -22,7 +22,7 @@
 //
 // Does NOT cover a collision the same migration UNIT creates before the statement
 // runs, AND NOTHING ELSE COVERS IT EITHER - this is a hole, not a handoff. The probe
-// reads one catalog snapshot per unit (`apply/backend/postgres/session.rs:430`), so a
+// reads one catalog snapshot per unit (`zero-migrate-postgres/src/backend/session.rs`), so a
 // name an earlier statement in the same `up` created is invisible to it; and the
 // fold's `DuplicateIndex` check keys on the target table's own index list
 // (`render/fold.rs:1765`, `:2733`, `:2788`), so it never asks which OTHER table owns

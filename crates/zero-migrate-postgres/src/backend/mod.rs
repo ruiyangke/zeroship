@@ -1,11 +1,12 @@
-//! Postgres [`MigrationBackend`] implementation.
+//! Postgres [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend)
+//! implementation.
 //!
-//! Generic over the dialect-neutral [`SqlSession`] seam
-//! (engine root `crate::driver`) — a host driver (the napi `pg` shell) supplies the
-//! `SqlSession` impl. SQLite does NOT ride this seam (it is an in-process rusqlite
-//! actor).
+//! Generic over the dialect-neutral
+//! [`SqlSession`](zero_migrate_backend::driver::SqlSession) seam — a host driver (the
+//! napi `pg` shell) supplies the impl. SQLite does NOT ride this seam (it is an
+//! in-process rusqlite actor).
 
-use crate::driver::SqlSession;
+use zero_migrate_backend::driver::SqlSession;
 
 mod backfill_sql;
 /// The PostgreSQL adoption baseline (record-not-run), relocated out of the neutral
@@ -30,28 +31,50 @@ mod primary_key_sql;
 /// dialect-specific SQL lives in the shared executor.
 pub(crate) mod session;
 /// The PostgreSQL `REPEATABLE READ READ ONLY` status snapshot, relocated out of
-/// the neutral `ops::status` module, whose remaining verbs go through
-/// [`MigrationBackend`](super::MigrationBackend).
+/// the neutral `zero_migrate::ops::status` module, whose remaining verbs go through
+/// [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend).
 pub mod status_sql;
 
-use super::capability::{BackfillSpec, OnlineSchemaChange};
-use super::{
+/// The canned `SqlSession` this backend's tests drive, shared with the engine's
+/// integration tests through the `testing` feature. See its own header for why it
+/// is not simply `#[cfg(test)]`.
+#[cfg(any(test, feature = "testing"))]
+pub mod recording;
+
+use zero_migrate_backend::backend::{
     CrossDeployObligations, JournalFuture, MigrationBackend, ProjectLockAcquisition,
     PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
 };
-use crate::apply::baseline::{BaselineError, BaselineOutcome};
-use crate::apply::drift::DriftError;
-use crate::apply::executor::{ApplyError, RollbackError};
-use crate::apply::journal::{self, AppliedEntry, JournalError};
-use crate::conn::ExecutorConfig;
-use crate::model::migration::{Migration, MigrationId};
-use crate::model::snapshot::SchemaSnapshot;
-use crate::render::plan::{DatabaseRequirements, TableRebuildSpec};
-use crate::render::step::BindValue;
-use crate::render::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
+use zero_migrate_backend::backfill::BackfillSpec;
+use zero_migrate_backend::baseline::{BaselineError, BaselineOutcome};
+use zero_migrate_backend::capability::OnlineSchemaChange;
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::drift::DriftError;
+use zero_migrate_backend::executor::{ApplyError, RollbackError};
+use zero_migrate_backend::journal::{self, AppliedEntry, JournalError};
+use zero_migrate_backend::requirements::DatabaseRequirements;
+use zero_migrate_backend::snapshot::SchemaSnapshot;
+use zero_migrate_backend::step::BindValue;
+use zero_migrate_backend::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
+use zero_migrate_backend::table_rebuild::TableRebuildSpec;
 use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_ir::migration::{Migration, MigrationId};
 
 pub(crate) const DIALECT: DialectId = POSTGRES;
+
+/// This crate's DECLARED identifier byte cap, read off its own descriptor rather than
+/// restated as a literal, and handed to the dual-write name derivations in the backend
+/// contract. The engine's author reads the same declaration through the registry, so
+/// the name the author writes and the name this executor looks for are capped by ONE
+/// number.
+pub(crate) const IDENT_MAX_BYTES: usize =
+    match crate::descriptor::POSTGRES_DESCRIPTOR.limits.identifier {
+        zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
+        zero_migrate_ir::backend::IdentifierLimit::Unbounded
+        | zero_migrate_ir::backend::IdentifierLimit::Characters(_) => {
+            panic!("PostgreSQL declares a BYTE identifier cap")
+        }
+    };
 
 /// The Postgres session GUCs the backend restores on exit so its per-apply
 /// settings never leak onto the pooled/long-lived connection.
@@ -215,8 +238,8 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         step: &AlterPrimaryKeyStep,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
     ) -> Result<bool, ApplyError> {
         primary_key_sql::apply(self.conn, cfg, step, approval, scope, applied_by).await
@@ -244,7 +267,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         forward: &Migration,
-        inverse_steps: &[crate::render::step::PlanStep],
+        inverse_steps: &[zero_migrate_backend::step::PlanStep],
         applied_by: &str,
     ) -> Result<(), RollbackError> {
         session::rollback_dml_plan_transactional(self.conn, cfg, forward, inverse_steps, applied_by)
@@ -277,25 +300,25 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError> {
-        journal_sql::ensure_journal(self.conn, cfg, &DIALECT).await
+        journal_sql::ensure_journal(self.conn, cfg).await
     }
 
     async fn applied(&self, cfg: &ExecutorConfig) -> Result<Vec<AppliedEntry>, JournalError> {
-        journal_sql::applied(self.conn, cfg, &DIALECT).await
+        journal_sql::applied(self.conn, cfg).await
     }
 
     async fn history(
         &self,
         cfg: &ExecutorConfig,
-    ) -> Result<Vec<crate::apply::journal::HistoryEvent>, JournalError> {
-        journal_sql::history(self.conn, cfg, &DIALECT).await
+    ) -> Result<Vec<zero_migrate_backend::journal::HistoryEvent>, JournalError> {
+        journal_sql::history(self.conn, cfg).await
     }
 
     async fn net_rolled_back_versions(
         &self,
         cfg: &ExecutorConfig,
     ) -> Result<Vec<String>, JournalError> {
-        journal_sql::net_rolled_back(self.conn, cfg, &DIALECT)
+        journal_sql::net_rolled_back(self.conn, cfg)
             .await
             .map(|entries| entries.into_iter().map(|entry| entry.version).collect())
     }
@@ -303,38 +326,38 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     async fn backfill_progress(
         &self,
         cfg: &ExecutorConfig,
-    ) -> Result<Vec<crate::apply::backend::BackfillProgressEntry>, JournalError> {
+    ) -> Result<Vec<zero_migrate_backend::backfill::BackfillProgressEntry>, JournalError> {
         backfill_sql::read_progress_entries(self.conn, cfg).await
     }
 
     async fn superseded_versions(&self, cfg: &ExecutorConfig) -> Result<Vec<String>, JournalError> {
-        journal_sql::superseded_versions(self.conn, cfg, &DIALECT).await
+        journal_sql::superseded_versions(self.conn, cfg).await
     }
 
     async fn latest_completed_checksums(
         &self,
         cfg: &ExecutorConfig,
     ) -> Result<std::collections::HashMap<String, String>, JournalError> {
-        journal_sql::latest_completed_checksums(self.conn, cfg, &DIALECT).await
+        journal_sql::latest_completed_checksums(self.conn, cfg).await
     }
 
     async fn check_checksum_drift(
         &self,
         cfg: &ExecutorConfig,
         migrations: &[Migration],
-    ) -> Result<crate::apply::drift::ChecksumDriftReport, DriftError> {
-        drift_sql::check_checksum_drift(&DIALECT, self.conn, cfg, migrations).await
+    ) -> Result<zero_migrate_backend::drift::ChecksumDriftReport, DriftError> {
+        drift_sql::check_checksum_drift(self.conn, cfg, migrations).await
     }
 
     async fn snapshot_schema(&self, cfg: &ExecutorConfig) -> Result<SchemaSnapshot, DriftError> {
-        drift_sql::snapshot_schema_for(self.conn, &cfg.project_schema, &DIALECT).await
+        drift_sql::snapshot_schema_for(self.conn, &cfg.project_schema).await
     }
 
     async fn evaluate_preconditions(
         &self,
         cfg: &ExecutorConfig,
         m: &Migration,
-    ) -> Result<crate::apply::executor::PreconditionVerdict, ApplyError> {
+    ) -> Result<zero_migrate_backend::executor::PreconditionVerdict, ApplyError> {
         precondition::evaluate_all(self.conn, cfg, &DIALECT, m).await
     }
 
@@ -378,16 +401,18 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         version: &str,
-        check: &crate::model::precondition::Precondition,
-    ) -> Result<crate::apply::backend::PlanPreconditionVerdict, ApplyError> {
+        check: &zero_migrate_ir::precondition::Precondition,
+    ) -> Result<zero_migrate_backend::backend::PlanPreconditionVerdict, ApplyError> {
         let (met, blockers) =
             precondition::evaluate_one(self.conn, cfg, &DIALECT, version, check).await?;
         if met {
-            return Ok(crate::apply::backend::PlanPreconditionVerdict::Met);
+            return Ok(zero_migrate_backend::backend::PlanPreconditionVerdict::Met);
         }
-        Ok(crate::apply::backend::PlanPreconditionVerdict::Unmet {
-            blockers: blockers.unwrap_or_default(),
-        })
+        Ok(
+            zero_migrate_backend::backend::PlanPreconditionVerdict::Unmet {
+                blockers: blockers.unwrap_or_default(),
+            },
+        )
     }
 
     async fn blocking_column_dependents(
@@ -566,8 +591,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         journal_sql::record_baseline(
             self.conn,
             cfg,
-            &DIALECT,
-            crate::apply::journal::BaselineRecord {
+            zero_migrate_backend::journal::BaselineRecord {
                 version: squash_migration.version.as_str(),
                 name: &squash_migration.name,
                 checksum: squash_migration.checksum.as_str(),
@@ -584,7 +608,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         spec: &TableRebuildSpec,
         _m: &Migration,
-        _scope: &crate::approval::ApprovalScope,
+        _scope: &zero_migrate_backend::approval::ApprovalScope,
         _applied_by: &str,
     ) -> Result<(), ApplyError> {
         Err(ApplyError::Backend(format!(
@@ -598,19 +622,19 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         version: &MigrationId,
-        checksum: &crate::model::migration::Checksum,
+        checksum: &zero_migrate_ir::migration::Checksum,
         spec: &BackfillSpec,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: crate::apply::executor::LockMode,
-    ) -> Result<crate::apply::executor::ApplyOutcome, ApplyError> {
+        _lock_mode: zero_migrate_backend::executor::LockMode,
+    ) -> Result<zero_migrate_backend::executor::ApplyOutcome, ApplyError> {
         if let Some(entry) = self
             .applied(cfg)
             .await
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|entry| matches!(entry.phase, crate::apply::journal::Phase::Completed))
+            .filter(|entry| matches!(entry.phase, zero_migrate_backend::journal::Phase::Completed))
             .find(|entry| entry.version == version.as_str())
         {
             if entry.checksum != checksum.as_str() {
@@ -620,13 +644,13 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
                     expected: checksum.as_str().to_string(),
                 });
             }
-            return Ok(crate::apply::executor::ApplyOutcome {
+            return Ok(zero_migrate_backend::executor::ApplyOutcome {
                 applied: Vec::new(),
                 skipped: vec![version.as_str().to_string()],
                 recovered: Vec::new(),
             });
         }
-        if approval != crate::approval::Approval::Approved {
+        if approval != zero_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if !scope.admits(version.as_str()) {
@@ -638,7 +662,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
             self.conn, cfg, version, checksum, spec, approval, None, applied_by,
         )
         .await?;
-        Ok(crate::apply::executor::ApplyOutcome {
+        Ok(zero_migrate_backend::executor::ApplyOutcome {
             applied: outcome
                 .complete
                 .then(|| version.as_str().to_string())
@@ -653,7 +677,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         &self,
         cfg: &ExecutorConfig,
         version: &MigrationId,
-        checksum: &crate::model::migration::Checksum,
+        checksum: &zero_migrate_ir::migration::Checksum,
         name: &str,
         template: &str,
         binds: &[BindValue],
@@ -663,17 +687,17 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         _mutates_data: bool,
         destructive: bool,
         _owner_app: &str,
-        approval: crate::approval::Approval,
-        scope: &crate::approval::ApprovalScope,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &zero_migrate_backend::approval::ApprovalScope,
         applied_by: &str,
-        _lock_mode: crate::apply::executor::LockMode,
+        _lock_mode: zero_migrate_backend::executor::LockMode,
     ) -> Result<bool, ApplyError> {
         let completed = self
             .applied(cfg)
             .await
             .map_err(ApplyError::Journal)?
             .into_iter()
-            .filter(|e| matches!(e.phase, crate::apply::journal::Phase::Completed))
+            .filter(|e| matches!(e.phase, zero_migrate_backend::journal::Phase::Completed))
             .find(|e| e.version == version.as_str());
         if let Some(entry) = completed {
             if entry.checksum != checksum.as_str() {
@@ -685,7 +709,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
             }
             return Ok(false);
         }
-        if destructive && approval != crate::approval::Approval::Approved {
+        if destructive && approval != zero_migrate_backend::approval::Approval::Approved {
             return Err(ApplyError::ApprovalRequired);
         }
         if destructive && !scope.admits(version.as_str()) {
@@ -744,11 +768,11 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
     /// trigger the engine never wrote.
     fn run_online_backfill<'a>(
         &'a self,
-        intent: &'a crate::render::expand_contract::OnlineIntent,
+        intent: &'a zero_migrate_backend::capability::OnlineIntent,
         marker: &'a Migration,
         backfill: &'a BackfillSpec,
-        approval: crate::approval::Approval,
-        scope: &'a crate::approval::ApprovalScope,
+        approval: zero_migrate_backend::approval::Approval,
+        scope: &'a zero_migrate_backend::approval::ApprovalScope,
         approval_key: &'a MigrationId,
         cfg: &'a ExecutorConfig,
         applied_by: &'a str,
@@ -757,7 +781,7 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
             dyn std::future::Future<
                     Output = Result<
                         zero_migrate_backend::backfill::BackfillOutcome,
-                        crate::engine::OnlineError,
+                        zero_migrate_backend::capability::OnlineError,
                     >,
                 > + 'a,
         >,
@@ -767,20 +791,35 @@ impl<D: SqlSession> OnlineSchemaChange for PostgresBackend<'_, D> {
             // same `approval_key` before it applied E1/E2; these are the
             // independent checks that stop a DIRECT seam caller from mirroring data
             // for a rename that was never approved, or never individually reviewed.
-            if approval != crate::approval::Approval::Approved {
-                return Err(crate::engine::OnlineError::Approval);
+            if approval != zero_migrate_backend::approval::Approval::Approved {
+                return Err(zero_migrate_backend::capability::OnlineError::Approval);
             }
             if !scope.admits(approval_key.as_str()) {
-                return Err(crate::engine::OnlineError::ApprovalNotScoped {
-                    version: approval_key.as_str().to_string(),
-                });
+                return Err(
+                    zero_migrate_backend::capability::OnlineError::ApprovalNotScoped {
+                        version: approval_key.as_str().to_string(),
+                    },
+                );
             }
-            let crate::render::expand_contract::OnlineIntent::RenameColumn {
-                table, from, to, ..
+            let zero_migrate_backend::capability::OnlineIntent::RenameColumn {
+                table,
+                from,
+                to,
+                ..
             } = intent;
             let allowed_engine_trigger = backfill_sql::AllowedOnlineRenameTrigger::new(
-                crate::render::expand_contract::dual_write_trg_name(table, from, to),
-                crate::render::expand_contract::dual_write_fn_name(table, from, to),
+                zero_migrate_backend::capability::dual_write_trg_name(
+                    table,
+                    from,
+                    to,
+                    IDENT_MAX_BYTES,
+                ),
+                zero_migrate_backend::capability::dual_write_fn_name(
+                    table,
+                    from,
+                    to,
+                    IDENT_MAX_BYTES,
+                ),
                 from.clone(),
                 to.clone(),
             );
@@ -804,18 +843,14 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         &'a self,
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::PendingContract>> {
-        Box::pin(async move {
-            journal_sql::outstanding_pending_contracts(self.conn, cfg, &DIALECT).await
-        })
+        Box::pin(async move { journal_sql::outstanding_pending_contracts(self.conn, cfg).await })
     }
 
     fn resolved_pending_contracts<'a>(
         &'a self,
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::ResolvedPendingContract>> {
-        Box::pin(
-            async move { journal_sql::resolved_pending_contracts(self.conn, cfg, &DIALECT).await },
-        )
+        Box::pin(async move { journal_sql::resolved_pending_contracts(self.conn, cfg).await })
     }
 
     fn pending_contract_shape<'a>(
@@ -824,14 +859,8 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         contract: &'a journal::PendingContract,
     ) -> JournalFuture<'a, journal::PendingContractShape> {
         Box::pin(async move {
-            journal_sql::pending_contract_shape(
-                self.conn,
-                cfg,
-                &DIALECT,
-                contract,
-                crate::render::backends::vendor(&DIALECT).catalog_fold,
-            )
-            .await
+            journal_sql::pending_contract_shape(self.conn, cfg, contract, &crate::fold::POLICY)
+                .await
         })
     }
 
@@ -842,8 +871,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         scope: Option<journal::DeployRecoveryScope<'a>>,
     ) -> JournalFuture<'a, bool> {
         Box::pin(async move {
-            journal_sql::record_pending_contract_with_recovery(self.conn, cfg, &DIALECT, rec, scope)
-                .await
+            journal_sql::record_pending_contract_with_recovery(self.conn, cfg, rec, scope).await
         })
     }
 
@@ -855,8 +883,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         by: &'a str,
     ) -> JournalFuture<'a, ()> {
         Box::pin(async move {
-            journal_sql::resolve_pending_contract(self.conn, cfg, &DIALECT, pc, resolution, by)
-                .await
+            journal_sql::resolve_pending_contract(self.conn, cfg, pc, resolution, by).await
         })
     }
 
@@ -871,7 +898,6 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
             journal_sql::mark_deploy_recovery_committed_batch(
                 self.conn,
                 cfg,
-                &DIALECT,
                 deploy_id,
                 pending_versions,
                 by,
@@ -891,7 +917,6 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
             journal_sql::mark_deploy_recovery_reconciled(
                 self.conn,
                 cfg,
-                &DIALECT,
                 deploy_id,
                 pending_version,
                 by,
@@ -904,9 +929,7 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
         &'a self,
         cfg: &'a ExecutorConfig,
     ) -> JournalFuture<'a, Vec<journal::DeployRecovery>> {
-        Box::pin(async move {
-            journal_sql::outstanding_deploy_recoveries(self.conn, cfg, &DIALECT).await
-        })
+        Box::pin(async move { journal_sql::outstanding_deploy_recoveries(self.conn, cfg).await })
     }
 }
 
@@ -918,312 +941,16 @@ impl<D: SqlSession> CrossDeployObligations for PostgresBackend<'_, D> {
 /// that a host driver can build return values without a `compio_postgres::Row`,
 /// closing the old `unreachable!("read verbs…")` gap.
 #[cfg(test)]
+#[cfg(test)]
 mod recording_session_genericity {
     use super::*;
-    use crate::apply::executor::LockMode;
-    use crate::approval::{Approval, ApprovalScope};
-    use crate::driver::{Bind, DbError, Row, Value};
-    use crate::engine::{DeclarativeApplyError, EngineError, MigrationEngine};
-    use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags};
-    use crate::model::probe::{GuardDir, GuardProbe};
-    use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
-    use crate::render::step::PlanStep;
-    use std::cell::RefCell;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::backend::recording::{canned_journal_row, InFlightGuard, RecordingSession};
+    use std::sync::atomic::AtomicBool;
 
-    /// The host-shaped one-in-flight guard, mechanically enforced in the
-    /// driver rather than trusted by analogy. Every verb `compare_exchange(false,
-    /// true)`s on entry and clears via [`InFlightGuard`]'s `Drop` on the way out
-    /// (so error paths clear too). A second verb entered while the first's future
-    /// is still alive **panics** — turning "the engine issues one verb at a time"
-    /// from a claim into a checked invariant. On a real pinned host connection this
-    /// would otherwise deadlock (the second `tsfn.call` blocks on a socket the
-    /// first hasn't released); the panic surfaces the bug loudly instead.
-    ///
-    /// This is the exact discipline the MySQL `JsDriverBackend` uses
-    /// (`transport.rs` `in_flight: bool`), lifted to `AtomicBool` because the seam
-    /// is `&self`, not `&mut self`.
-    struct InFlightGuard<'a>(&'a AtomicBool);
-
-    impl<'a> InFlightGuard<'a> {
-        /// Arm the guard on verb entry, panicking on re-entry.
-        fn enter(flag: &'a AtomicBool) -> Self {
-            if flag
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-            {
-                panic!(
-                    "SqlSession verb issued while another is in flight — the engine \
-                     must be strictly one-verb-at-a-time"
-                );
-            }
-            Self(flag)
-        }
-    }
-
-    impl Drop for InFlightGuard<'_> {
-        fn drop(&mut self) {
-            // Clear in the completion arm (RAII) so an error/early-return path also
-            // releases — a leaked `true` would deadlock every later verb.
-            self.0.store(false, Ordering::Release);
-        }
-    }
-
-    /// A non-compio, host-SHAPED [`SqlSession`] that (a) records the SQL + binds of
-    /// every verb, (b) returns canned neutral rows for the read verbs, routed by a
-    /// substring match on the SQL so a full apply/introspection sweep decodes, and
-    /// (c) enforces the one-in-flight guard on every verb. This is NOT a
-    /// napi bridge — it is the in-crate host-shaped producer that
-    /// proves the generic PG apply path is genuinely driver-neutral, and converts
-    /// the one-in-flight invariant from by-analogy to mechanically-checked.
-    struct RecordingSession {
-        log: RefCell<Vec<String>>,
-        binds: RefCell<Vec<Vec<Bind>>>,
-        /// The mechanically-enforced one-verb-at-a-time guard.
-        in_flight: AtomicBool,
-        /// Canned rows the `net_applied` journal read returns (SQL-routed).
-        canned_journal: RefCell<Vec<Row>>,
-        /// Canned rows returned by the read-only backfill progress reader.
-        canned_progress: RefCell<Vec<Row>>,
-        progress_table_exists: bool,
-        progress_checksum_exists: bool,
-        server_version_num: i32,
-    }
-
-    impl RecordingSession {
-        fn new() -> Self {
-            Self {
-                log: RefCell::new(Vec::new()),
-                binds: RefCell::new(Vec::new()),
-                in_flight: AtomicBool::new(false),
-                canned_journal: RefCell::new(Vec::new()),
-                canned_progress: RefCell::new(Vec::new()),
-                progress_table_exists: false,
-                progress_checksum_exists: false,
-                server_version_num: 180_000,
-            }
-        }
-
-        fn with_server_version(server_version_num: i32) -> Self {
-            Self {
-                server_version_num,
-                ..Self::new()
-            }
-        }
-
-        fn with_canned_journal(rows: Vec<Row>) -> Self {
-            let s = Self::new();
-            *s.canned_journal.borrow_mut() = rows;
-            s
-        }
-
-        fn with_canned_progress(rows: Vec<Row>, checksum_exists: bool) -> Self {
-            let mut session = Self::new();
-            *session.canned_progress.borrow_mut() = rows;
-            session.progress_table_exists = true;
-            session.progress_checksum_exists = checksum_exists;
-            session
-        }
-
-        /// Route a read to its canned rows by SQL shape. ONLY the journal net-state
-        /// read (`journal_sql::applied`, recognisable by its `union_all` CTE + the
-        /// `schema_migrations_inflight` UNION leg — a shape no other query has) gets
-        /// the canned (version, checksum, mig_kind, event_seq, phase) journal rows; every other
-        /// read (catalog introspection in `snapshot_schema`, the `superseded_versions`
-        /// squash read whose only column is `v`, drift probes) gets an EMPTY result,
-        /// which yields an empty-but-valid decode — enough to drive every path
-        /// end-to-end without feeding a wrong-shaped row into a decoder.
-        fn rows_for(&self, sql: &str) -> Vec<Row> {
-            if sql.contains("current_setting('server_version_num')") {
-                vec![Row::new(
-                    vec!["server_version_num".into()],
-                    vec![Value::Text(self.server_version_num.to_string())],
-                )]
-            } else if sql.contains("union_all") && sql.contains("schema_migrations_inflight") {
-                self.canned_journal.borrow().clone()
-            } else if sql.contains("AS table_exists")
-                && sql.contains("pg_catalog.pg_class")
-                && sql.contains("schema_backfills")
-            {
-                vec![Row::new(
-                    vec!["table_exists".into()],
-                    vec![Value::Bool(self.progress_table_exists)],
-                )]
-            } else if sql.contains("AS table_exists") && sql.contains("pg_catalog.pg_attribute") {
-                vec![Row::new(
-                    vec!["table_exists".into(), "checksum_exists".into()],
-                    vec![
-                        Value::Bool(self.progress_table_exists),
-                        Value::Bool(self.progress_checksum_exists),
-                    ],
-                )]
-            } else if sql.contains("schema_backfills")
-                && sql.contains("backfill_id, checksum, complete")
-            {
-                self.canned_progress.borrow().clone()
-            } else {
-                Vec::new()
-            }
-        }
-    }
-
-    impl SqlSession for RecordingSession {
-        async fn batch(&self, sql: &str) -> Result<(), DbError> {
-            let _g = InFlightGuard::enter(&self.in_flight);
-            self.log.borrow_mut().push(format!("batch: {sql}"));
-            Ok(())
-        }
-        async fn exec(&self, sql: &str, params: &[Bind]) -> Result<u64, DbError> {
-            let _g = InFlightGuard::enter(&self.in_flight);
-            self.log.borrow_mut().push(format!("exec: {sql}"));
-            self.binds.borrow_mut().push(params.to_vec());
-            Ok(1)
-        }
-        async fn exec_text(&self, sql: &str, _params: &[Option<String>]) -> Result<u64, DbError> {
-            let _g = InFlightGuard::enter(&self.in_flight);
-            self.log.borrow_mut().push(format!("exec_text: {sql}"));
-            Ok(1)
-        }
-        async fn query(&self, sql: &str, params: &[Bind]) -> Result<Vec<Row>, DbError> {
-            let _g = InFlightGuard::enter(&self.in_flight);
-            self.log.borrow_mut().push(format!("query: {sql}"));
-            self.binds.borrow_mut().push(params.to_vec());
-            Ok(self.rows_for(sql))
-        }
-        async fn query_one(&self, sql: &str, params: &[Bind]) -> Result<Row, DbError> {
-            let _g = InFlightGuard::enter(&self.in_flight);
-            self.log.borrow_mut().push(format!("query_one: {sql}"));
-            self.binds.borrow_mut().push(params.to_vec());
-            self.rows_for(sql)
-                .into_iter()
-                .next()
-                .ok_or_else(|| DbError::message("query_one: no canned row"))
-        }
-    }
-
-    /// A single completed journal event, shaped like the `applied()` CTE output:
-    /// (version, checksum, mig_kind, event_seq, phase) — exactly what a host `pg` driver would
-    /// return for that read.
-    fn canned_journal_row(version: &str, checksum: &str) -> Row {
-        Row::new(
-            vec![
-                "version".to_string(),
-                "checksum".to_string(),
-                "mig_kind".to_string(),
-                "event_seq".to_string(),
-                "phase".to_string(),
-                // The applied read now selects the stored reverse too, so a canned
-                // row without the column is a row the reader cannot parse.
-                "down".to_string(),
-            ],
-            vec![
-                Value::Text(version.to_string()),
-                Value::Text(checksum.to_string()),
-                Value::Text("apply".to_string()),
-                Value::Int(1),
-                Value::Text("completed".to_string()),
-                Value::Null,
-            ],
-        )
-    }
-
-    fn plan_dml_step(label: &str, destructive: bool) -> (PlanStep, MigrationId, Checksum) {
-        let version = MigrationId::generate();
-        let template = if destructive {
-            "DELETE FROM users WHERE id = $1"
-        } else {
-            "UPDATE users SET ready = $1 WHERE id = $2"
-        };
-        let checksum = Checksum::of(&ChecksumInput {
-            up: label,
-            down: None,
-            flags: &MigrationFlags::default(),
-            owner_app: "app_test",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        });
-        let binds = if destructive {
-            vec![BindValue::Int(1)]
-        } else {
-            vec![BindValue::Bool(true), BindValue::Int(1)]
-        };
-        (
-            PlanStep::Dml {
-                version: version.clone(),
-                checksum: checksum.clone(),
-                name: label.to_string(),
-                template: template.to_string(),
-                binds,
-                target_schema: "proj_x".into(),
-                target_table: "users".into(),
-                conflict_target: None,
-                mutates_data: true,
-                transactional: true,
-                destructive,
-                requires_approval: destructive,
-                owner_app: "app_test".into(),
-            },
-            version,
-            checksum,
-        )
-    }
-
-    fn plan_backfill_step() -> (PlanStep, MigrationId, Checksum) {
-        let version = MigrationId::generate();
-        let checksum = Checksum::of(&ChecksumInput {
-            up: "backfill users",
-            down: None,
-            flags: &MigrationFlags::default(),
-            owner_app: "app_test",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        });
-        (
-            PlanStep::Backfill {
-                version: version.clone(),
-                checksum: checksum.clone(),
-                spec: BackfillSpec {
-                    schema: "proj_x".into(),
-                    table: "users".into(),
-                    cursor_columns: vec!["id".into()],
-                    cursor_stability: crate::model::ir::CursorStability::GuardUpdates,
-                    cursor_contract: None,
-                    batch_size: 100,
-                    set_clause: "ready = TRUE".into(),
-                    per_row: std::collections::BTreeMap::new(),
-                    filter: None,
-                    name: "backfill users".into(),
-                },
-            },
-            version,
-            checksum,
-        )
-    }
-
-    async fn apply_recorded_plan(
-        rec: &RecordingSession,
-        steps: &[PlanStep],
-        approval: Approval,
-        scope: &ApprovalScope,
-    ) -> Result<crate::engine::DeclarativeDeployOutcome, DeclarativeApplyError> {
-        let backend = PostgresBackend::<'_, RecordingSession>::new_generic(rec);
-        MigrationEngine::new()
-            .apply_plan_with_touched_and_depends_scoped(
-                steps,
-                &["users".into()],
-                &[],
-                approval,
-                scope,
-                &backend,
-                &ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x")),
-                "tester",
-                LockMode::Acquire,
-                None,
-            )
-            .await
-    }
+    use zero_migrate_backend::driver::{Bind, Row, Value};
+    use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
+    use zero_migrate_ir::migration::{Checksum, ChecksumInput, Migration, MigrationFlags};
+    use zero_migrate_ir::probe::{GuardDir, GuardProbe};
 
     fn migration_with_guard_schema(schema: &str) -> Migration {
         let flags = MigrationFlags::default();
@@ -1292,7 +1019,7 @@ mod recording_session_genericity {
             &["proj_x", "reporting"],
             &[],
             false,
-            crate::model::policy::DestructiveOps::Allow,
+            zero_migrate_ir::policy::DestructiveOps::Allow,
         );
         let cfg = ExecutorConfig::new("prj_x", "proj_x", effective);
         let migration = migration_with_guard_schema("reporting");
@@ -1325,132 +1052,6 @@ mod recording_session_genericity {
                 matches!(values.as_slice(), [Bind::Text(schema)] if schema == "proj_x")
             }),
             "the probe snapshot must not fall back to the project schema: {binds:?}"
-        );
-    }
-
-    #[compio::test]
-    async fn mixed_plan_refuses_pending_delete_before_earlier_update() {
-        let rec = RecordingSession::new();
-        let (update, _, _) = plan_dml_step("update users", false);
-        let (delete, _, _) = plan_dml_step("delete users", true);
-
-        let result =
-            apply_recorded_plan(&rec, &[update, delete], Approval::None, &ApprovalScope::All).await;
-
-        assert!(matches!(
-            result,
-            Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired))
-        ));
-        let log = rec.log.borrow();
-        assert!(
-            !log.iter().any(|entry| {
-                entry.contains("UPDATE users SET ready")
-                    || entry.contains("DELETE FROM users WHERE id")
-            }),
-            "approval preflight must run before either target mutation: {log:?}"
-        );
-    }
-
-    #[compio::test]
-    async fn mixed_plan_treats_partial_backfill_as_pending_before_earlier_update() {
-        let (backfill, version, checksum) = plan_backfill_step();
-        let rec = RecordingSession::with_canned_progress(
-            vec![Row::new(
-                vec!["backfill_id".into(), "checksum".into(), "complete".into()],
-                vec![
-                    Value::Text(version.as_str().to_string()),
-                    Value::Text(checksum.as_str().to_string()),
-                    Value::Bool(false),
-                ],
-            )],
-            true,
-        );
-        let (update, _, _) = plan_dml_step("update before backfill", false);
-
-        let result = apply_recorded_plan(
-            &rec,
-            &[update, backfill],
-            Approval::None,
-            &ApprovalScope::All,
-        )
-        .await;
-
-        assert!(matches!(
-            result,
-            Err(DeclarativeApplyError::Plain(EngineError::ApprovalRequired))
-        ));
-        let log = rec.log.borrow();
-        assert!(
-            log.iter().any(|entry| entry.contains("schema_backfills")),
-            "preflight must reconcile partial progress: {log:?}"
-        );
-        assert!(
-            !log.iter()
-                .any(|entry| entry.contains("UPDATE users SET ready")),
-            "the earlier update must not run before a pending backfill gate: {log:?}"
-        );
-    }
-
-    #[compio::test]
-    async fn completed_delete_skips_without_renewed_approval_but_drift_aborts_plan() {
-        let (update, update_version, _) = plan_dml_step("update users", false);
-        let (delete, delete_version, delete_checksum) = plan_dml_step("delete users", true);
-        let rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
-            delete_version.as_str(),
-            delete_checksum.as_str(),
-        )]);
-
-        let outcome = apply_recorded_plan(
-            &rec,
-            &[update.clone(), delete.clone()],
-            Approval::None,
-            &ApprovalScope::Versions(Default::default()),
-        )
-        .await
-        .expect("a matching completed delete is an unapproved no-op");
-        assert_eq!(outcome.applied.applied, vec![update_version.as_str()]);
-        assert_eq!(outcome.applied.skipped, vec![delete_version.as_str()]);
-        assert!(
-            !rec.log
-                .borrow()
-                .iter()
-                .any(|entry| entry.contains("DELETE FROM users WHERE id")),
-            "the completed delete must not execute again"
-        );
-
-        let stale = Checksum::of(&ChecksumInput {
-            up: "stale delete",
-            down: None,
-            flags: &MigrationFlags::default(),
-            owner_app: "app_test",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        });
-        let drift_rec = RecordingSession::with_canned_journal(vec![canned_journal_row(
-            delete_version.as_str(),
-            stale.as_str(),
-        )]);
-        let result = apply_recorded_plan(
-            &drift_rec,
-            &[update, delete],
-            Approval::None,
-            &ApprovalScope::All,
-        )
-        .await;
-        assert!(matches!(
-            result,
-            Err(DeclarativeApplyError::Plain(EngineError::Apply(
-                ApplyError::ChecksumDrift { .. }
-            )))
-        ));
-        assert!(
-            !drift_rec
-                .log
-                .borrow()
-                .iter()
-                .any(|entry| entry.contains("UPDATE users SET ready")),
-            "drift must abort before the earlier update"
         );
     }
 
@@ -1517,66 +1118,6 @@ mod recording_session_genericity {
                 .iter()
                 .any(|entry| { entry.contains("current_setting('server_version_num')") }));
         }
-    }
-
-    #[compio::test]
-    async fn plan_requirement_refuses_before_authored_sql_runs() {
-        let rec = RecordingSession::with_server_version(170_000);
-        let backend = PostgresBackend::new_generic(&rec);
-        let flags = MigrationFlags::default();
-        let up = "CREATE TABLE authored_uuid_v7 (id uuid DEFAULT uuidv7())";
-        let checksum = Checksum::of(&ChecksumInput {
-            up,
-            down: None,
-            flags: &flags,
-            owner_app: "app_test",
-            depends_on: &[],
-            supersedes: &[],
-            preconditions: &[],
-        });
-        let migration = Migration {
-            version: MigrationId::generate(),
-            name: "authored UUIDv7 table".into(),
-            up: up.into(),
-            down: None,
-            checksum,
-            flags,
-            owner_app: "app_test".into(),
-            depends_on: Vec::new(),
-            supersedes: Vec::new(),
-            preconditions: Vec::new(),
-            existence_guard: None,
-            effect: None,
-        };
-        let mut plan = AppliedPlan::single_step(migration);
-        plan.database_requirements
-            .require(DatabaseFeature::UuidV7Generation);
-
-        let result = MigrationEngine::new()
-            .apply_applied_plan_with_touched_and_depends(
-                &plan,
-                &[],
-                &[],
-                Approval::None,
-                &backend,
-                &ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x")),
-                "tester",
-                LockMode::Acquire,
-            )
-            .await;
-        let error = result.expect_err("PostgreSQL 17 must refuse UUIDv7 generation");
-        assert!(error.to_string().contains("PostgreSQL 18"), "{error}");
-        let log = rec.log.borrow();
-        assert!(
-            log.iter()
-                .any(|entry| entry.contains("current_setting('server_version_num')")),
-            "the version preflight must run: {log:?}"
-        );
-        assert!(
-            !log.iter()
-                .any(|entry| entry.contains("CREATE TABLE authored_uuid_v7")),
-            "authored DDL must not run after a capability refusal: {log:?}"
-        );
     }
 
     /// The flagship proof: `PostgresBackend::<'_, RecordingSession>::new_generic`
@@ -1679,7 +1220,7 @@ mod recording_session_genericity {
 
         assert_eq!(
             progress,
-            vec![crate::apply::backend::BackfillProgressEntry {
+            vec![zero_migrate_backend::backfill::BackfillProgressEntry {
                 version: "mig_progress".into(),
                 checksum: Some("checksum_a".into()),
                 complete: false,
@@ -1726,115 +1267,6 @@ mod recording_session_genericity {
                     && entry.contains("ADD COLUMN IF NOT EXISTS down TEXT")
             }),
             "legacy journal bootstrap must add nullable down idempotently: {log:?}"
-        );
-    }
-
-    /// One-in-flight, mechanically-proven: drive a FULL sweep over the whole DDL +
-    /// journal-write + journal-read + drift-read + status/history surface against the host-
-    /// shaped recording driver **with the `in_flight` guard armed**, and assert it
-    /// **never trips** (the test would panic inside the driver if any verb were
-    /// issued while another's future is still alive). This converts the one-in-flight
-    /// invariant from by-analogy (the MySQL precedent) to checked over the exact
-    /// generic PG apply/introspection code paths a host driver drives.
-    ///
-    /// It simultaneously proves genericity end-to-end: the WRITE path records the
-    /// expected SQL sequence (schema/journal DDL + a journal INSERT with neutral
-    /// Bind params), the READ path returns driver::Rows the engine decodes
-    /// (`applied` → `AppliedEntry`), and `status()`/`history()` run over the same
-    /// driver — their decoded shapes matching what a live host driver produces.
-    #[compio::test]
-    async fn full_surface_runs_generically_with_in_flight_guard_never_tripping() {
-        let rec =
-            RecordingSession::with_canned_journal(vec![canned_journal_row("mig_0001", "cafef00d")]);
-        let backend = PostgresBackend::<'_, RecordingSession>::new_generic(&rec);
-        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"));
-
-        // 1. WRITE / DDL — journal bootstrap: CREATE SCHEMA + the append-only events
-        //    table + the immutability trigger, all through `batch`.
-        backend
-            .ensure_journal(&cfg)
-            .await
-            .expect("ensure_journal DDL");
-
-        // 2. WRITE — a journal INSERT (`record_started`) through `exec` with
-        //    neutral Bind params. Drives the param-side seam on a write.
-        journal_sql::record_started(
-            &rec,
-            &cfg,
-            &DIALECT,
-            "mig_0001",
-            "create_users",
-            "cafef00d",
-            "tester",
-        )
-        .await
-        .expect("record_started journal write");
-
-        // 3. READ (journal) — `applied()` decodes the canned journal Row into an
-        //    AppliedEntry over the non-compio driver.
-        let applied = backend.applied(&cfg).await.expect("applied read");
-        assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].version, "mig_0001");
-        assert_eq!(applied[0].checksum, "cafef00d");
-
-        // 4. READ (drift/catalog) — `snapshot_schema` issues its catalog introspection
-        //    queries; the empty canned rows yield an empty-but-valid snapshot, proving
-        //    the whole introspection decode chain runs over Row.
-        let snap = backend
-            .snapshot_schema(&cfg)
-            .await
-            .expect("snapshot_schema");
-        assert!(
-            snap.tables.is_empty(),
-            "empty canned catalog → empty snapshot (decode chain ran clean)"
-        );
-
-        // 5. READ — the PostgreSQL status snapshot over the SAME driver
-        //    (generalized to `<D: SqlSession>`), and the neutral history verb
-        //    through the backend contract.
-        let st = status_sql::status(&DIALECT, &rec, &cfg, &[])
-            .await
-            .expect("status over host driver");
-        // The canned journal row is net-applied, so status sees it as applied.
-        assert!(
-            st.applied.iter().any(|e| e.version == "mig_0001"),
-            "status decoded the net-applied version over Row: {:?}",
-            st.applied
-        );
-        let hist = crate::ops::status::history_via_backend(&backend, &cfg)
-            .await
-            .expect("history over host driver");
-        // history() over the empty canned history read returns an empty log without
-        // error — the point is the decode path ran over the neutral seam.
-        assert!(hist.is_empty(), "empty canned history decoded to empty log");
-
-        // The guard was armed on every verb above and never tripped (a trip would
-        // have panicked inside the driver). Assert it is cleared (RAII released) and
-        // that the expected WRITE SQL sequence was recorded.
-        assert!(
-            !rec.in_flight.load(Ordering::Acquire),
-            "in_flight guard released after the last verb (RAII clear)"
-        );
-        let log = rec.log.borrow();
-        assert!(
-            log.iter().any(|s| s.contains("CREATE SCHEMA")),
-            "ensure_journal recorded the CREATE SCHEMA DDL: {log:?}"
-        );
-        assert!(
-            log.iter().any(|s| s.contains("schema_migrations")),
-            "the journal DDL/INSERT sequence touched schema_migrations: {log:?}"
-        );
-        assert!(
-            log.iter()
-                .any(|s| s.starts_with("exec:") && s.contains("INSERT INTO")),
-            "record_started drove a journal INSERT through exec: {log:?}"
-        );
-        // The journal INSERT bound its fields as neutral Binds (param widening).
-        assert!(
-            rec.binds.borrow().iter().any(|b| b
-                .iter()
-                .any(|v| matches!(v, Bind::Text(t) if t == "mig_0001"))),
-            "journal INSERT bound the version as a neutral Bind::Text"
         );
     }
 

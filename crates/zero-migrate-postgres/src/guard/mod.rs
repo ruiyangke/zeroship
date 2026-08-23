@@ -20,7 +20,7 @@
 //! This did NOT make this crate the sole owner of `libpg_query`, and claiming so
 //! would be the same false map the old guard crate's manifest carried for as long as
 //! it was wrong. `crates/zero-migrate/Cargo.toml` still declares `pg_query`
-//! independently, for the shape gates under `apply/backend/postgres/**` (the
+//! independently, for the shape gates under `src/backend/**` (the
 //! precondition boolean-SELECT gate, the idempotence/txn scans, the backfill cursor
 //! check). Two crates declare it; no other crate in the workspace does. Sole
 //! ownership needs those files to relocate here, which is a separate move.

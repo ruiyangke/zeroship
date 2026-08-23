@@ -10,9 +10,10 @@ use serde_json::{json, Value};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, fold_ops, fold_ops_onto,
-    validate_ir, IrAuthor, LiveSchema, MysqlTextStorageSnapshot, PlanStep, RenameStep,
+    diff_snapshots, fold_ops, fold_ops_onto, validate_ir, IrAuthor, LiveSchema,
+    MysqlTextStorageSnapshot, PlanStep, RenameStep,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
 
 const PROJECT_SCHEMA: &str = "app";
 const OWNER: &str = "app_composite_foreign_keys";
@@ -1253,7 +1254,7 @@ async fn live_postgres_composite_fk_introspection_and_policy_drift() {
                 .map_err(|error| format!("apply {}: {error}", migration.name))?;
         }
 
-        let expected = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+        let expected = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect composite FK: {error}"))?;
         let foreign_key = expected
@@ -1289,7 +1290,7 @@ async fn live_postgres_composite_fk_introspection_and_policy_drift() {
             ))
             .await
             .map_err(|error| format!("mutate composite FK policy: {error}"))?;
-        let actual = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+        let actual = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("re-introspect changed composite FK: {error}"))?;
         let drift = diff_snapshots(&expected, &actual);

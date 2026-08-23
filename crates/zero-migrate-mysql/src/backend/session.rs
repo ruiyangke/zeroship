@@ -4,7 +4,7 @@
 //! [`MysqlBackend`](super::MysqlBackend)
 //! [`MigrationBackend`](zero_migrate_backend::backend::MigrationBackend) impl drives — the
 //! MySQL analogue of the Postgres
-//! `zero_migrate::apply::backend::postgres::session` leaves. Every one of them
+//! `zero_migrate_postgres::backend::session` leaves. Every one of them
 //! is MySQL-flavoured, so it lives in the MySQL backend, never the shared executor:
 //!
 //! - **project lock** — `GET_LOCK(name, timeout)` / `RELEASE_LOCK(name)`, MySQL's

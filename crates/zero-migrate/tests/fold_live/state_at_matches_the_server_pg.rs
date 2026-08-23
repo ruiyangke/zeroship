@@ -69,7 +69,7 @@
 //! # The introspection surface, named
 //!
 //! `expected` is `render::fold::effects::state_at(&live_at_0, &ops, k, ..)`.
-//! `actual` is `snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, project_schema)` - the engine's own
+//! `actual` is `snapshot_schema(&session, project_schema)` - the engine's own
 //! introspection, the SAME function that produced `live_at_0`, returning the SAME
 //! `SchemaSnapshot` type `state_at` returns. Nothing is hand-rolled from the catalog,
 //! so the comparison is between two values of one representation.
@@ -110,11 +110,12 @@ use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::render::fold::effects::state_at;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots,
-    resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, LockMode, MigrationEngine, MigrationIr, PostgresBackend, SchemaSnapshot,
+    diff_snapshots, resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig,
+    GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, SchemaSnapshot,
     StructuralDrift,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_state_at_matches_the_server_pg";
 
@@ -234,13 +235,9 @@ async fn prefixes(
             .await
             .map_err(|error| format!("seed the pre-existing schema: {error}"))?;
 
-        let live_at_0 = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            &session,
-            &cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("introspect live_at_0: {error}"))?;
+        let live_at_0 = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("introspect live_at_0: {error}"))?;
 
         for object in seeded {
             if !object.present_in(&live_at_0) {
@@ -321,13 +318,9 @@ async fn prefixes(
                 &policy,
             )
             .map_err(|error| format!("prefix {k}: state_at must fold: {error:?}"))?;
-            let actual = snapshot_schema(
-                &zero_migrate_ir::dialect::POSTGRES,
-                &session,
-                &cfg.project_schema,
-            )
-            .await
-            .map_err(|error| format!("prefix {k}: introspect the live schema: {error}"))?;
+            let actual = snapshot_schema(&session, &cfg.project_schema)
+                .await
+                .map_err(|error| format!("prefix {k}: introspect the live schema: {error}"))?;
 
             if k == 0 {
                 // The floor. See the module doc: without this, a comparator blind to

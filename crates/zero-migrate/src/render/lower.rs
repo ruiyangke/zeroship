@@ -8125,6 +8125,31 @@ fn render_view_op(
     }
 }
 
+/// The engine's view-query printer, handed to a backend's view-body drift probe.
+///
+/// `render_view_query` stays `pub(crate)`: it takes the POLICY-bound
+/// [`SchemaScope`](crate::model::policy::SchemaScope) a raw body is validated against,
+/// and that argument is the engine's business. This is the door a vendor's drift
+/// probe needs and nothing more — a query, an effective schema, and the dialect the
+/// probe is running against.
+///
+/// It exists because the PostgreSQL body probe re-prints the AUTHORED side through
+/// the server and must hand the server the bytes the LOWERING would have written.
+/// A backend crate cannot call into the engine (the engine depends on every
+/// backend), so the printer travels to the probe as a
+/// [`AuthoredViewBody`](zero_migrate_backend::drift::AuthoredViewBody) instead.
+#[derive(Debug)]
+pub struct AuthoredViewBodyRenderer<'a> {
+    /// The dialect the probe is running against.
+    pub dialect: &'a DialectId,
+}
+
+impl zero_migrate_backend::drift::AuthoredViewBody for AuthoredViewBodyRenderer<'_> {
+    fn render(&self, query: &ViewQuery, eff_schema: &str) -> Option<String> {
+        render_view_query(query, eff_schema, self.dialect, None).ok()
+    }
+}
+
 pub(crate) fn render_view_query(
     query: &ViewQuery,
     eff_schema: &str,

@@ -11,9 +11,8 @@ use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
-use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, diff_snapshots, IrAuthor, LiveSchema,
-};
+use zero_migrate::{diff_snapshots, IrAuthor, LiveSchema};
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
 use zero_migrate_sqlite::SqliteBackend;
 
 const OWNER: &str = "app_collation_introspection";
@@ -206,7 +205,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
             .await
             .map_err(|error| format!("create PostgreSQL collation fixture: {error}"))?;
 
-        let expected = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+        let expected = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("initial PostgreSQL snapshot: {error}"))?;
         let c_collation = expected.tables["children"]
@@ -228,7 +227,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
             ))
             .await
             .map_err(|error| format!("change PostgreSQL child collation: {error}"))?;
-        let actual = snapshot_schema(&zero_migrate_ir::dialect::POSTGRES, &session, &schema)
+        let actual = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("changed PostgreSQL snapshot: {error}"))?;
         let posix = actual.tables["children"]

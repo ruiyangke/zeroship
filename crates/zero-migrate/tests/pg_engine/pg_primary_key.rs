@@ -13,8 +13,9 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::AlterPrimaryKeyAction;
 use zero_migrate::{
     AlterPrimaryKeyStep, ApplyError, Approval, ApprovalScope, Checksum, ChecksumInput,
-    ExecutorConfig, Migration, MigrationBackend, MigrationFlags, MigrationId, PostgresBackend,
+    ExecutorConfig, Migration, MigrationBackend, MigrationFlags, MigrationId,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 fn token() -> String {
     static NEXT: AtomicU64 = AtomicU64::new(0);

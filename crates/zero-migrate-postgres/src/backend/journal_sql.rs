@@ -4,7 +4,7 @@
 //! This is the PostgreSQL analogue of the MySQL `zero_migrate_mysql::backend::journal_sql`
 //! and SQLite `zero_migrate_sqlite::backend::journal_sql` modules. The three backends
 //! share the journal's *vocabulary* — [`Phase`], [`EventKind`], [`AppliedEntry`],
-//! [`JournalError`], … all live in the dialect-neutral [`crate::apply::journal`] —
+//! [`JournalError`], … all live in the dialect-neutral [`zero_migrate_backend::journal`] —
 //! and nothing else. Every byte of SQL below is PostgreSQL's alone: `DO $do$`
 //! bodies, `pg_trigger`/`pg_proc`/`pg_class` catalog joins, `EXECUTE FUNCTION`,
 //! `GENERATED ALWAYS AS IDENTITY`, and `$1` placeholders.
@@ -31,32 +31,26 @@
 //!
 //! Bootstrap ([`ensure_journal`]) is idempotent.
 
-use crate::apply::journal::{
+use zero_migrate_backend::conn::ExecutorConfig;
+use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::journal::{
     AppliedEntry, BaselineRecord, CompletedRecord, DeployRecovery, DeployRecoveryScope, EventKind,
     HistoryEvent, HistoryKind, JournalError, JournaledKind, PendingContract, PendingContractRecord,
     PendingContractShape, PendingState, Phase, Resolution, ResolvedPendingContract,
     RolledBackEntry,
 };
-use crate::conn::ExecutorConfig;
-use crate::driver::SqlSession;
-use zero_migrate_ir::dialect::DialectId;
 
 /// Quote a SQL identifier by doubling embedded quotes and wrapping in
 /// double-quotes, so a schema name is never interpolated as raw SQL. Routes
 /// through the explicit backend seam
-/// ([`crate::render::dml::quote_ident_checked_for_dialect`])
+/// ([`zero_migrate_backend::dml::quote_ident_checked_for_backend`])
 /// — byte-identical to (and uniformly self-defending with)
 /// `author`/`backfill`/`role`/`dml`: fail-closed on an empty / NUL identifier.
-fn quote_ident(dialect: &DialectId, ident: &str) -> Result<String, JournalError> {
-    Ok(crate::render::dml::quote_ident_checked_for_dialect(
-        ident, dialect,
+fn quote_ident(ident: &str) -> Result<String, JournalError> {
+    Ok(zero_migrate_backend::dml::quote_ident_checked_for_backend(
+        ident,
+        &crate::dml::RENDERER,
     )?)
-}
-
-/// Test seam (see `dml::tests::all_engine_seams_render_uniformly`).
-#[cfg(test)]
-pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> {
-    quote_ident(&zero_migrate_ir::dialect::POSTGRES, ident)
 }
 
 /// Bootstrap (idempotently) the meta schema + journal table + inflight
@@ -82,16 +76,12 @@ pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, JournalError> 
 pub async fn ensure_journal<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
-    let trg_fn = quote_ident(
-        dialect,
-        &format!(
-            "{}_schema_migrations_immutable",
-            cfg.confinement.meta_schema
-        ),
-    )?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
+    let trg_fn = quote_ident(&format!(
+        "{}_schema_migrations_immutable",
+        cfg.confinement.meta_schema
+    ))?;
     let meta_lit = cfg.confinement.meta_schema.replace('\'', "''");
 
     // 1. Meta schema.
@@ -124,7 +114,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // ran), a `baseline` (the schema already existed; the `up` recorded NOT run —
     // adoption path), a `squash` (a supersession; the squash's `up` recorded NOT
     // run because `[v1..vN]` were already applied — see [`record_baseline`] /
-    // [`crate::ops::squash`]), or a `repeatable` (— a re-applied
+    // `zero_migrate::ops::squash`), or a `repeatable` (— a re-applied
     // repeatable's `up` ran, but the version's IDENTITY is a repeatable). The
     // `repeatable` kind is LOAD-BEARING for the tamper guard: the drift exemption
     // anchors on the JOURNALED kind, not the attacker-suppliable
@@ -171,7 +161,7 @@ pub async fn ensure_journal<D: SqlSession>(
     // 2a-bis. The append-only SUPERSESSION log. One row per
     // (squash_version → superseded_version) edge, written by the ADMIN when a
     // squash migration `S` is journaled (whether via `apply` running its `up`
-    // on a fresh DB, or via [`crate::ops::squash`] recording it baseline-style on a
+    // on a fresh DB, or via `zero_migrate::ops::squash` recording it baseline-style on a
     // DB that already ran `[v1..vN]`). The pending computation joins this
     // against net-applied squashes to decide that a superseded version is
     // SATISFIED. Append-only + immutable (trigger below): a squash's
@@ -466,7 +456,7 @@ pub async fn ensure_journal<D: SqlSession>(
             ),
         ] {
             let trg_lit = trg.replace('\'', "''");
-            let trg_q = quote_ident(dialect, trg)?;
+            let trg_q = quote_ident(trg)?;
             conn.batch(&format!(
                 "DO $do$ BEGIN
                     IF NOT EXISTS (
@@ -515,9 +505,8 @@ pub async fn ensure_journal<D: SqlSession>(
 pub async fn applied<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
 ) -> Result<Vec<AppliedEntry>, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     // Single-table net state: take the LATEST event per version (DISTINCT ON over
     // the consolidated events table, by `event_seq DESC`) and keep only the
     // versions whose latest event is `applied` (net-applied). Then UNION the lone
@@ -603,9 +592,8 @@ pub async fn applied<D: SqlSession>(
 pub async fn net_rolled_back<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
 ) -> Result<Vec<RolledBackEntry>, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -652,9 +640,8 @@ pub async fn net_rolled_back<D: SqlSession>(
 pub async fn history<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
 ) -> Result<Vec<HistoryEvent>, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -707,14 +694,13 @@ pub async fn history<D: SqlSession>(
 pub async fn record_rolled_back<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     version: &str,
     name: &str,
     checksum: &str,
     rolled_back_by: &str,
     exec_ms: i64,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let n = conn
         .exec(
             &format!(
@@ -745,13 +731,12 @@ pub async fn record_rolled_back<D: SqlSession>(
 pub async fn record_started<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     version: &str,
     name: &str,
     checksum: &str,
     applied_by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     conn.exec(
         &format!(
             "INSERT INTO {meta}.schema_migrations_inflight
@@ -778,10 +763,9 @@ pub async fn record_started<D: SqlSession>(
 pub async fn record_completed<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     rec: CompletedRecord<'_>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     // Plain INSERT (consistent with the transactional path). `event_seq` is a
     // surrogate identity PK, so this appends a fresh `completed` event — including
     // a re-apply after a rollback, where a prior `completed` + a later
@@ -829,9 +813,8 @@ pub async fn record_completed<D: SqlSession>(
 pub async fn outstanding_pending_contracts<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
 ) -> Result<Vec<PendingContract>, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -894,9 +877,8 @@ pub async fn outstanding_pending_contracts<D: SqlSession>(
 pub async fn resolved_pending_contracts<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
 ) -> Result<Vec<ResolvedPendingContract>, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -950,7 +932,6 @@ pub async fn resolved_pending_contracts<D: SqlSession>(
 pub async fn pending_contract_shape<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     contract: &PendingContract,
     catalog_fold: &dyn zero_migrate_backend::fold::CatalogFoldPolicy,
 ) -> Result<PendingContractShape, JournalError> {
@@ -1010,10 +991,10 @@ pub async fn pending_contract_shape<D: SqlSession>(
     };
 
     let values_synchronized = if columns_compatible {
-        let schema = quote_ident(dialect, &cfg.project_schema)?;
-        let table = quote_ident(dialect, &contract.table)?;
-        let from = quote_ident(dialect, &contract.from_col)?;
-        let to = quote_ident(dialect, &contract.to_col)?;
+        let schema = quote_ident(&cfg.project_schema)?;
+        let table = quote_ident(&contract.table)?;
+        let from = quote_ident(&contract.from_col)?;
+        let to = quote_ident(&contract.to_col)?;
         conn.query_one(
             &format!(
                 "SELECT NOT EXISTS (
@@ -1029,15 +1010,17 @@ pub async fn pending_contract_shape<D: SqlSession>(
         false
     };
 
-    let trigger_name = crate::render::expand_contract::dual_write_trg_name(
+    let trigger_name = zero_migrate_backend::capability::dual_write_trg_name(
         &contract.table,
         &contract.from_col,
         &contract.to_col,
+        super::IDENT_MAX_BYTES,
     );
-    let function_name = crate::render::expand_contract::dual_write_fn_name(
+    let function_name = zero_migrate_backend::capability::dual_write_fn_name(
         &contract.table,
         &contract.from_col,
         &contract.to_col,
+        super::IDENT_MAX_BYTES,
     );
     let trigger_ready: bool = conn
         .query_one(
@@ -1116,11 +1099,10 @@ fn canonical_pending_contract_type(
 pub async fn record_pending_contract_with_recovery<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     rec: PendingContractRecord<'_>,
     scope: Option<DeployRecoveryScope<'_>>,
 ) -> Result<bool, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let cv_json = serde_json::to_string(rec.contract_versions).map_err(|e| {
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
@@ -1138,7 +1120,7 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
         pending = PendingState::Pending.as_str(),
         resolved = PendingState::Resolved.as_str()
     );
-    let obligation_params: [crate::driver::Bind; 9] = [
+    let obligation_params: [zero_migrate_backend::driver::Bind; 9] = [
         rec.owner_app.into(),
         rec.table.into(),
         rec.from_col.into(),
@@ -1222,12 +1204,11 @@ pub async fn record_pending_contract_with_recovery<D: SqlSession>(
 pub async fn resolve_pending_contract<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     pc: &PendingContract,
     resolution: Resolution,
     by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let cv_json = serde_json::to_string(&pc.contract_versions).map_err(|e| {
         JournalError::Backend(format!("failed to serialize contract_versions JSON: {e}"))
     })?;
@@ -1282,12 +1263,11 @@ pub async fn resolve_pending_contract<D: SqlSession>(
 pub async fn mark_deploy_recovery_committed<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     deploy_id: &str,
     pending_version: &str,
     by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let n = conn
         .exec(
             &format!(
@@ -1329,7 +1309,6 @@ pub async fn mark_deploy_recovery_committed<D: SqlSession>(
 pub async fn mark_deploy_recovery_committed_batch<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     deploy_id: &str,
     pending_versions: &[String],
     by: &str,
@@ -1340,7 +1319,7 @@ pub async fn mark_deploy_recovery_committed_batch<D: SqlSession>(
     conn.batch("BEGIN").await?;
     let result = async {
         for pv in pending_versions {
-            mark_deploy_recovery_committed(conn, cfg, dialect, deploy_id, pv, by).await?;
+            mark_deploy_recovery_committed(conn, cfg, deploy_id, pv, by).await?;
         }
         Ok::<(), JournalError>(())
     }
@@ -1369,12 +1348,11 @@ pub async fn mark_deploy_recovery_committed_batch<D: SqlSession>(
 pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     deploy_id: &str,
     pending_version: &str,
     by: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let n = conn
         .exec(
             &format!(
@@ -1422,9 +1400,8 @@ pub async fn mark_deploy_recovery_reconciled<D: SqlSession>(
 pub async fn outstanding_deploy_recoveries<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
 ) -> Result<Vec<DeployRecovery>, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1490,9 +1467,8 @@ pub async fn outstanding_deploy_recoveries<D: SqlSession>(
 pub async fn superseded_versions<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
 ) -> Result<Vec<String>, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1527,7 +1503,7 @@ pub async fn superseded_versions<D: SqlSession>(
 /// Read the **latest `completed` checksum per version** from the journal of
 /// record.
 ///
-/// A repeatable migration ([`MigrationFlags::repeatable`](crate::model::migration::MigrationFlags::repeatable))
+/// A repeatable migration ([`MigrationFlags::repeatable`](zero_migrate_ir::migration::MigrationFlags::repeatable))
 /// has a STABLE identity (its `version`/name never changes across edits) and is
 /// re-applied whenever its definition checksum changes. Each re-apply appends a
 /// fresh `completed` event for the same version (append-only), so a repeatable
@@ -1562,9 +1538,8 @@ pub async fn superseded_versions<D: SqlSession>(
 pub async fn latest_completed_checksums<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
 ) -> Result<std::collections::HashMap<String, String>, JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
             &format!(
@@ -1594,9 +1569,9 @@ pub async fn latest_completed_checksums<D: SqlSession>(
 /// meta-schema grant), exactly like [`record_completed`]. `exec_ms` is recorded as
 /// 0 (no SQL ran).
 ///
-/// This is the journal-without-running primitive shared by [`crate::apply::baseline`]
+/// This is the journal-without-running primitive shared by [`zero_migrate_backend::baseline`]
 /// (the adoption path: the schema already physically exists, so the `up` is
-/// recorded not run) and [`crate::ops::squash`]'s existing-DB path (a supersession: the
+/// recorded not run) and `zero_migrate::ops::squash`'s existing-DB path (a supersession: the
 /// effect of `[v1..vN]` is already present, so the squash's `up` is recorded not
 /// run). #3 fix: the `completed` row + every supersession edge are inserted in ONE
 /// transaction THIS function brackets (`BEGIN … COMMIT`, ROLLBACK on any error), so
@@ -1610,11 +1585,10 @@ pub async fn latest_completed_checksums<D: SqlSession>(
 pub async fn record_baseline<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
     conn.batch("BEGIN").await?;
-    let result = record_baseline_inner(conn, cfg, dialect, rec).await;
+    let result = record_baseline_inner(conn, cfg, rec).await;
     if let Err(e) = result {
         // Roll back the partial row/edges; surface the original error.
         if let Err(rb) = conn.batch("ROLLBACK").await {
@@ -1632,10 +1606,9 @@ pub async fn record_baseline<D: SqlSession>(
 async fn record_baseline_inner<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     rec: BaselineRecord<'_>,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     let n = conn
         .exec(
             &format!(
@@ -1681,10 +1654,9 @@ async fn record_baseline_inner<D: SqlSession>(
 pub async fn clear_inflight<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-    dialect: &DialectId,
     version: &str,
 ) -> Result<(), JournalError> {
-    let meta = quote_ident(dialect, &cfg.confinement.meta_schema)?;
+    let meta = quote_ident(&cfg.confinement.meta_schema)?;
     conn.exec(
         &format!("DELETE FROM {meta}.schema_migrations_inflight WHERE version = $1"),
         &[version.into()],
@@ -1699,8 +1671,7 @@ mod tests {
 
     #[test]
     fn pending_contract_type_aliases_preserve_modifiers() {
-        let catalog_fold =
-            crate::render::backends::vendor(&zero_migrate_ir::dialect::POSTGRES).catalog_fold;
+        let catalog_fold = &crate::fold::POLICY;
         assert_eq!(
             canonical_pending_contract_type(catalog_fold, "timestamp with time zone"),
             canonical_pending_contract_type(catalog_fold, "timestamptz")
@@ -1717,5 +1688,29 @@ mod tests {
             canonical_pending_contract_type(catalog_fold, "character varying(128)[]"),
             canonical_pending_contract_type(catalog_fold, "varchar(128)[]")
         );
+    }
+}
+
+#[cfg(test)]
+mod seam_tests {
+    use super::quote_ident;
+
+    /// The journal seam quotes and fails closed BYTE-IDENTICALLY to every other
+    /// seam that routes through `quote_ident_checked_for_backend`.
+    ///
+    /// This assertion used to be a leg of the engine's
+    /// `render::dml::tests::all_engine_seams_render_uniformly`, which named
+    /// `journal_sql::quote_ident_for_test` to reach it. It came here with the
+    /// execution half, exactly as the `role` leg did when the migrator role
+    /// derivation left — the invariant did not get dropped, it got a home next to
+    /// its subject, which is the only place it can still see it. The engine's leg
+    /// still asserts the same two facts about the author seam against the same
+    /// shared helper.
+    #[test]
+    fn the_journal_seam_renders_uniformly_and_fails_closed() {
+        let schema = "ap\"p"; // a quote-bearing engine schema
+        assert_eq!(quote_ident(schema).unwrap(), "\"ap\"\"p\"");
+        assert!(quote_ident("a\0b").is_err());
+        assert!(quote_ident("").is_err());
     }
 }

@@ -470,13 +470,9 @@ async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order() {
         let expected =
             zero_migrate::fold_ops(&resolved.ops, &zero_migrate::POSTGRES, &schema, &policy)
                 .map_err(|error| format!("fold the injected create: {error}"))?;
-        let live = zero_migrate::apply::backend::postgres::drift_sql::snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            &session,
-            &schema,
-        )
-        .await
-        .map_err(|error| format!("introspect the probe schema: {error}"))?;
+        let live = zero_migrate_postgres::backend::drift_sql::snapshot_schema(&session, &schema)
+            .await
+            .map_err(|error| format!("introspect the probe schema: {error}"))?;
         let drift = zero_migrate::diff_snapshots(&expected, &live);
         if !drift.is_clean() {
             return Err(format!(

@@ -268,6 +268,14 @@ mod tests {
     /// facts (byte-identical escape-and-quote, fail-closed on empty/NUL) against
     /// the same shared helper. The invariant did not get dropped; it got a home
     /// next to its subject, which is the only place it can still see it.
+    ///
+    /// `journal` went the SAME way, and for the same reason, when the PostgreSQL
+    /// execution half followed the role derivation out of this crate:
+    /// `zero_migrate_postgres::backend::journal_sql`'s
+    /// `the_journal_seam_renders_uniformly_and_fails_closed` is that leg now. What
+    /// is left here is the ENGINE's own seam, which is the only one this crate can
+    /// still see — and that is why this file no longer names a vendor backend
+    /// module at all.
     #[test]
     fn all_engine_seams_render_uniformly() {
         let schema = "ap\"p"; // a quote-bearing engine schema
@@ -277,15 +285,8 @@ mod tests {
             crate::plan::author::quote_ident_for_test(schema).unwrap(),
             canonical
         );
-        assert_eq!(
-            crate::apply::backend::postgres::journal_sql::quote_ident_for_test(schema).unwrap(),
-            canonical
-        );
-        // …and they fail closed uniformly on a NUL too.
+        // …and it fails closed uniformly on a NUL too.
         assert!(crate::plan::author::quote_ident_for_test("a\0b").is_err());
-        assert!(
-            crate::apply::backend::postgres::journal_sql::quote_ident_for_test("a\0b").is_err()
-        );
     }
 
     /// The BACKTICK half of the same invariant, and it is a separate test rather

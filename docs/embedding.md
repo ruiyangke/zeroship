@@ -46,7 +46,7 @@ selected by your application.
 | `AppliedPlanStatus` | Plan-aware status, including `applied`, `pending`, `aborted`, plan details, and pending contracts |
 | `ReconciledPlanState` | Plan state: applied, aborted, pending, partial, drifted, blocked, or unknown dependency |
 | `PlanStatusStepState` | Step state: pending, inflight, applied, aborted, or drifted |
-| `PostgresBackend<S>` | PostgreSQL execution over a host-provided `SqlSession` |
+| `zero_migrate_postgres::PostgresBackend<S>` | PostgreSQL execution over a host-provided `SqlSession` |
 | `zero_migrate_mysql::MysqlBackend<S>` | MySQL execution over a host-provided `SqlSession` |
 | `zero_migrate_sqlite::SqliteBackend` | SQLite execution from a Rust host |
 | `SchemaSnapshot` | Captured schema used for explicit structural drift |
@@ -57,9 +57,10 @@ The example begins after your host has produced a reviewed `Vec<Migration>`:
 
 ```rust
 use zero_migrate::{
-    Approval, ExecutorConfig, GuardConfig, Migration, MigrationEngine,
-    POSTGRES, PostgresBackend, SqlSession, effective_policy_from_charter_toml,
+    Approval, ExecutorConfig, GuardConfig, Migration, MigrationEngine, POSTGRES, SqlSession,
+    effective_policy_from_charter_toml,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const POLICY_CHARTER: &str = r#"policy_version = 1
 
@@ -122,9 +123,8 @@ provisioned.
 Both network backends accept a `SqlSession`:
 
 ```rust,ignore
-let postgres = zero_migrate::PostgresBackend::new_generic(&session);
-let mysql =
-    zero_migrate::apply::backend::MysqlBackend::new_generic(&session);
+let postgres = zero_migrate_postgres::PostgresBackend::new_generic(&session);
+let mysql = zero_migrate_mysql::MysqlBackend::new_generic(&session);
 ```
 
 Give each operation a dedicated, idle session. In particular, never pass a

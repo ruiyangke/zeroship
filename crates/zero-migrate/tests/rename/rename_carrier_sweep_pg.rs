@@ -63,10 +63,11 @@ use crate::support::PgDevSession;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::{
-    apply::backend::postgres::drift_sql::snapshot_schema, fold_ops, resolve_create_table_policy,
-    Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema, LockMode,
-    MigrationEngine, MigrationIr, PostgresBackend, SchemaSnapshot,
+    fold_ops, resolve_create_table_policy, Approval, EffectivePolicy, ExecutorConfig, GuardConfig,
+    IrAuthor, LiveSchema, LockMode, MigrationEngine, MigrationIr, SchemaSnapshot,
 };
+use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_rename_carrier_sweep_pg";
 
@@ -440,13 +441,9 @@ async fn measure() -> Measured {
         }
 
         let folded = fold(FOLDED_IR, &policy, &cfg.project_schema)?;
-        let live = snapshot_schema(
-            &zero_migrate_ir::dialect::POSTGRES,
-            &session,
-            &cfg.project_schema,
-        )
-        .await
-        .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
+        let live = snapshot_schema(&session, &cfg.project_schema)
+            .await
+            .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
 
         Ok(Measured { folded, live })
     }

@@ -224,18 +224,21 @@ const WALK_ANCHORS: &[&str] = &[
 /// levels down and is the registry composition that census calls PERMANENT.
 const ENGINE_WALK_ANCHORS: &[&str] = &["lib.rs", "render/backends/mod.rs"];
 
-/// The walk's floor across all three vendor crates. They hold 67 `.rs` files under
-/// `src` (19 + 26 + 22), up from 55: the SQLite execution half landed in
-/// `zero-migrate-sqlite/src/backend/` — eleven files, plus that crate's own
-/// `test_fixtures.rs` — the same way the MySQL half landed in
-/// `zero-migrate-mysql/src/backend/` before it. That is what the extraction does.
+/// The walk's floor across all three vendor crates. They hold 79 `.rs` files under
+/// `src` (31 + 26 + 22), up from 67: the PostgreSQL execution half landed in
+/// `zero-migrate-postgres/src/backend/` — ten files, plus that crate's own
+/// `recording.rs` and `test_fixtures.rs` — the same way the SQLite and MySQL halves
+/// landed before it. That was the last one; there is no vendor code left in the
+/// engine to arrive here.
 ///
-/// Raise it deliberately as the vendors grow, and this is one of those times: 45 was
-/// set against 55 and would no longer notice losing an entire eleven-file directory.
+/// Raise it deliberately as the vendors grow, and this is one of those times: 55 was
+/// set against 67 and would no longer notice losing an entire ten-file directory. 70
+/// would: 79 minus that directory is 69.
+///
 /// NEVER lower it to get green: unlike the engine, these crates are the destination of
 /// the extraction, so a falling vendor file count is not the project working — it is
 /// the walk losing a root. Check [`WALK_ANCHORS`] first and trust it over this number.
-const VENDOR_FILE_FLOOR: usize = 55;
+const VENDOR_FILE_FLOOR: usize = 70;
 
 /// The needle's floor, PER RESOLVER: how many free-call sites the identical matcher
 /// must still find in the engine.

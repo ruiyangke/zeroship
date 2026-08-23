@@ -24,6 +24,15 @@
 
 mod advisory;
 pub mod analysis;
+/// The `MigrationBackend` implementation: PostgreSQL's session/lock/transaction
+/// bracket, its journal, drift, backfill, identity, primary-key, baseline,
+/// precondition and status SQL.
+///
+/// This is the EXECUTION half. It arrived from `zero-migrate`'s
+/// `apply/backend/postgres/` — the LAST vendor backend inside the engine — and it
+/// reaches nothing but `zero-migrate-backend`, `zero-migrate-ir` and this crate's
+/// own renderers, descriptor and guard.
+pub mod backend;
 mod ddl;
 mod descriptor;
 mod dml;
@@ -57,6 +66,19 @@ mod vendor;
 /// This vendor's line-1 guard, re-exported because the engine's public API has
 /// surfaced it since before the vendor crates existed.
 pub use guard::PgGuard;
+
+/// This vendor's `MigrationBackend`, re-exported at the crate root the way
+/// `zero_migrate_sqlite::SqliteBackend` and `zero_migrate_mysql::MysqlBackend` are.
+pub use backend::PostgresBackend;
+
+/// TEST-ONLY charter fixtures, shared by this crate's unit tests.
+///
+/// The engine's `zero_migrate::test_fixtures::no_inject` is `pub(crate)`, and no
+/// visibility widening can make a `pub(crate)` reachable across a crate boundary —
+/// so the execution half's tests needed a sibling when they moved here. This is it,
+/// and it is the same shape `zero-migrate-sqlite`'s and `zero-migrate-mysql`'s have.
+#[cfg(test)]
+mod test_fixtures;
 
 use zero_migrate_backend::registry::BackendVendor;
 

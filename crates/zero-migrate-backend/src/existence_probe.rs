@@ -647,7 +647,7 @@ fn decide_index(
     //
     // Does NOT cover a name a preceding statement in the SAME migration unit
     // creates, and nothing else covers that: the snapshot is read once per unit
-    // (`apply::backend::postgres::session`), and the fold's `DuplicateIndex` check
+    // (`zero_migrate_postgres::backend::session`), and the fold's `DuplicateIndex` check
     // keys on the target table's own index list, never on which OTHER table owns a
     // name. Noted, not silently narrowed.
     let schema_wide = vendor

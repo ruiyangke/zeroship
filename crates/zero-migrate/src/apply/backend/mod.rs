@@ -1,18 +1,20 @@
-//! The three implementations of the `MigrationBackend` dialect seam.
+//! What is left of the `MigrationBackend` dialect seam's old home: the optional
+//! capability traits, and the re-exports.
 //!
 //! The seam itself is [`zero_migrate_backend::backend::MigrationBackend`],
 //! re-exported below at the `apply::backend::MigrationBackend` path it has always
 //! been reached by. It is declared in the contract crate rather than here for the
 //! reason every other item there is: a vendor crate cannot implement a trait that
-//! lives in the engine, because the engine already depends on every vendor. What
-//! remains in THIS module is the vendor side — `postgres`, its public re-export,
-//! and the project-lock constants all three backends read. MySQL and SQLite are no
-//! longer among them: their execution halves live in `zero-migrate-mysql` and
-//! `zero-migrate-sqlite`, and core re-exports neither, because a
-//! `pub use zero_migrate_sqlite::…` here would be core NAMING a vendor outside the
-//! registry — the thing `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists
-//! to forbid. A caller that wants `SqliteBackend` names the vendor crate, exactly as
-//! the registry composition does. `postgres` is the last one left.
+//! lives in the engine, because the engine already depends on every vendor.
+//!
+//! NO VENDOR IS LEFT IN THIS MODULE. All three execution halves live in
+//! `zero-migrate-postgres`, `zero-migrate-sqlite` and `zero-migrate-mysql`, and core
+//! re-exports none of them, because a `pub use zero_migrate_postgres::…` here would
+//! be core NAMING a vendor outside the registry — the thing
+//! `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. A caller
+//! that wants `PostgresBackend` names the vendor crate, exactly as the registry
+//! composition does. PostgreSQL was the last one inside, and the governing rule
+//! asked for exactly this: the core is neutral, and that is the hard limit.
 //!
 //! The executor's apply/rollback **orchestration** — partition versioned vs
 //! repeatable, the drift/tamper gate, squash/expand gates, `order_pending`, the
@@ -41,31 +43,25 @@
 //!   the checksum/tamper comparison itself is dialect-agnostic and stays generic
 //!   ([`check_checksum_drift`](crate::apply::backend::MigrationBackend::check_checksum_drift)).
 //!
-//! [`PostgresBackend`], `zero_migrate_sqlite::SqliteBackend` and
-//! `zero_migrate_mysql::MysqlBackend` are the live implementations. Postgres remains
-//! the richest regression bar; SQLite and MySQL provide dialect-specific session,
-//! journal, drift, and DML behavior behind the same orchestration trait, without
-//! forking the generic executor.
+//! `zero_migrate_postgres::PostgresBackend`, `zero_migrate_sqlite::SqliteBackend`
+//! and `zero_migrate_mysql::MysqlBackend` are the live implementations. Postgres
+//! remains the richest regression bar; SQLite and MySQL provide dialect-specific
+//! session, journal, drift, and DML behavior behind the same orchestration trait,
+//! without forking the generic executor.
 //!
 //! The trait is used through **static dispatch** (`<B: MigrationBackend>`), so
 //! native `async fn` in trait (Rust ≥ 1.75) is used directly — no boxing, no
 //! `dyn`, no `async-trait` allocation on the apply hot path.
 
 pub mod capability;
-// The PG backend's generic core (`PostgresBackend<D>` + the `SqlSession` trait +
-// the neutral seam types) names no driver-concrete type — a host driver (the napi
-// `pg` shell) supplies the `SqlSession` impl.
-pub mod postgres;
-// SQLite and MySQL used to sit here beside it. SQLite is in-process (`rusqlite`) and
-// rides no network seam at all; MySQL rides the SAME `driver::SqlSession` seam as
-// Postgres. They are `zero_migrate_sqlite::backend` and `zero_migrate_mysql::backend`
-// now, and neither is re-exported from here.
+// PostgreSQL used to sit here, and SQLite and MySQL beside it. All three are
+// `zero_migrate_postgres::backend`, `zero_migrate_sqlite::backend` and
+// `zero_migrate_mysql::backend` now, and none is re-exported from here.
 
 pub use capability::{
     BackfillError, BackfillOutcome, BackfillSpec, DryRunError, DryRunReport, MigrationResult,
     OnlineSchemaChange, ShadowConfig, ShadowDryRun,
 };
-pub use postgres::PostgresBackend;
 // The progress row a resumable backfill reads back. It moved down beside the
 // `BackfillSpec` it describes progress THROUGH; re-exported so
 // `apply::backend::BackfillProgressEntry` resolves unchanged.
@@ -74,9 +70,8 @@ pub use zero_migrate_backend::backfill::BackfillProgressEntry;
 // declared in `zero-migrate-backend` now — the crate every vendor already depends
 // on — so a backend crate can implement it without depending on the engine that
 // depends on every backend. That inversion is the whole point of the contract
-// crate, and this module is what is left of the trait's old home: the three vendor
-// modules that implement it, their re-exports, and the project-lock constants those
-// modules read.
+// crate, and this module is what is left of the trait's old home: the optional
+// capability traits and these re-exports.
 //
 // Re-exported so every historical `apply::backend::…` and
 // `zero_migrate::apply::backend::…` path resolves unchanged.
@@ -87,9 +82,5 @@ pub use zero_migrate_backend::backend::{
 
 // The non-blocking project-lock retry budget moved down beside
 // `ProjectLockAcquisition`, the type it budgets. All three backends read the same
-// two values so their busy verdicts cannot drift apart, and a backend that has left
-// this crate still has to read them. Re-exported so every
-// `apply::backend::PROJECT_LOCK_TRY_*` path resolves unchanged.
-pub(crate) use zero_migrate_backend::backend::{
-    PROJECT_LOCK_TRY_ATTEMPTS, PROJECT_LOCK_TRY_BACKOFF,
-};
+// two values so their busy verdicts cannot drift apart, and every backend has now
+// left this crate.

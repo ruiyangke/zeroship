@@ -39,8 +39,9 @@ use zero_migrate::model::migration::{
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, squash, Approval, ExecutorConfig, GuardConfig, IrAuthor, LiveSchema,
-    MigrationEngine, PostgresBackend, SquashError,
+    MigrationEngine, SquashError,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_squash_supersession_pg";
 

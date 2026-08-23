@@ -19,8 +19,9 @@ use zero_migrate::model::migration::Migration;
 use zero_migrate::render::step::PlanStep;
 use zero_migrate::{
     fold_ops, guard_for, Approval, EffectivePolicy, ExecutorConfig, GuardConfig, IrAuthor,
-    LiveSchema, MigrationEngine, PostgresBackend,
+    LiveSchema, MigrationEngine,
 };
+use zero_migrate_postgres::PostgresBackend;
 
 const OWNER: &str = "app_drop_function_rollback_pg";
 const PROJECT_SCHEMA: &str = "zero_migrate";
