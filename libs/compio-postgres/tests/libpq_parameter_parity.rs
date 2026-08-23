@@ -183,3 +183,64 @@ fn a_repeated_key_replaces_rather_than_appending() {
         "an override after a list must replace it, not extend it"
     );
 }
+
+/// The keyword-string LEXER, measured against libpq rather than its docs.
+///
+/// The table above rules on which KEYS are accepted. Nothing had ever checked
+/// how a VALUE is read, which is the other half of the same surface and the
+/// one with quoting in it. Every expectation below was taken by handing the
+/// string to psql and asking the server what it received
+/// (`current_setting('application_name')`), so these are observations of the
+/// reference implementation, not readings of the manual.
+///
+/// THE SWALLOW RULE IS THE SURPRISING ONE AND IT IS libpq's, NOT A BUG OF
+/// OURS. `application_name= user=u` does not mean "empty, then user"; the
+/// value is the next whitespace-delimited token, so it means
+/// `application_name` is literally `user=u` and `user` is never set. Verified
+/// against psql twice: once as `... application_name= connect_timeout=2`,
+/// which reports `[app=connect_timeout=2]`, and once as `application_name=
+/// user=postgres`, which fails as role "root" because the user was consumed.
+/// I first read our matching behaviour as a defect; it is parity.
+///
+/// The one genuine divergence is a TRAILING empty value, which libpq accepts
+/// as the empty string and we refuse. We differ LOUDLY there, which is the
+/// safe direction -- an empty value at the end is usually an unset variable --
+/// so this pins the difference rather than erasing it.
+#[test]
+fn the_value_lexer_matches_libpq() {
+    // (connection string, what libpq makes application_name)
+    const AGREED: &[(&str, &str)] = &[
+        ("host=h application_name='a b'", "a b"),
+        ("host=h application_name='a\\'b'", "a'b"),
+        ("host=h application_name='a\\\\b'", "a\\b"),
+        ("host=h application_name = spaced", "spaced"),
+        ("host=h application_name=''", ""),
+        // The swallow rule, both orders.
+        ("host=h application_name= user=u", "user=u"),
+        ("application_name= host=h", "host=h"),
+    ];
+
+    let mut wrong = Vec::new();
+    for (dsn, expected) in AGREED {
+        match dsn.parse::<Config>() {
+            Ok(config) => {
+                let ours = config.get_application_name();
+                if ours != Some(*expected) {
+                    wrong.push(format!("{dsn}: libpq reads {expected:?}, we read {ours:?}"));
+                }
+            }
+            Err(error) => wrong.push(format!("{dsn}: libpq reads {expected:?}, we refuse ({error})")),
+        }
+    }
+    assert!(wrong.is_empty(), "value lexing diverges from libpq:\n  {}", wrong.join("\n  "));
+
+    // The known divergence, pinned so it cannot change unnoticed in either
+    // direction. libpq yields the empty string for both of these.
+    for trailing in ["host=h application_name=", "host=h user="] {
+        assert!(
+            trailing.parse::<Config>().is_err(),
+            "a trailing empty value is refused here and accepted by libpq; if this \
+             now parses, the divergence was closed and this test should say so"
+        );
+    }
+}
