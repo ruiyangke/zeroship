@@ -2041,3 +2041,137 @@ mod constraint_definition_tests {
         );
     }
 }
+
+/// **A snapshot no backend claims must not be read in any backend's dialect.**
+///
+/// [`introspected_table_vendor`] recognises a live catalog read by the evidence only
+/// introspection leaves — a `ddl_type_override`, a `mysql_text_storage`, a
+/// `stored_create_sql` — and a table carrying none of the three matches no vendor. The
+/// ID-default comparison below it then reaches
+/// [`catalog_id_default_for_expected`](crate::render::value_format::catalog_id_default_for_expected)
+/// with `None` for the dialect, which is the only entry point that takes an optional
+/// one.
+///
+/// That is a LIVE shape, not a defensive one, and the two shipping halves of the proof
+/// live in different places on purpose:
+///
+/// * `pg_drift::drift_unattributed_snapshot` measures it against a real server. MySQL
+///   introspection writes `ddl_type_override: None` and `stored_create_sql: None`
+///   unconditionally, so a MySQL table whose columns are all numeric leaves nothing any
+///   vendor claims.
+/// * These two cover the case that server cannot reach. A UUID generator default needs
+///   a UUID column, and on MySQL that is character-typed — which hands MySQL its marker
+///   back — while PostgreSQL stamps `ddl_type_override` on EVERY column it reads. The
+///   route in is [`diff_snapshots`] itself, which is `pub` and takes whatever actual
+///   snapshot the caller holds, including one restored from storage that predates the
+///   markers.
+///
+/// The contract: an unattributed snapshot is never granted a vendor's SEMANTIC
+/// identity. `gen_random_uuid()` is PostgreSQL's UUIDv4 generator and nothing else's,
+/// so reading it as [`IdDefaultSnapshot::UuidV4`] would be core resolving a vendor out
+/// of a snapshot that names none — and it would silently accept a column whose default
+/// is the literal STRING `gen_random_uuid()` as satisfying an authored UUIDv4. The
+/// answer degrades to the vendor-neutral textual key instead, which still NAMES what
+/// the catalog holds, so the operator gets a line they can act on rather than silence.
+/// The same refusal the dialect-KNOWN half already makes in
+/// `render::value_format`'s `qualified_postgres_generators_and_dialect_specific_fallbacks_are_exact`,
+/// where a foreign dialect's generator may not satisfy a typed-reference default.
+#[cfg(test)]
+mod unattributed_snapshot_tests {
+    use super::{diff_snapshots, ColumnSnapshot, IdDefaultSnapshot, SchemaSnapshot, TableSnapshot};
+    use crate::TableRuntimeOptions;
+
+    /// PostgreSQL's UUIDv4 generator, as `pg_get_expr` deparses it.
+    const PG_UUID_V4: &str = "gen_random_uuid()";
+
+    fn snapshot_with(column: ColumnSnapshot) -> SchemaSnapshot {
+        let mut snapshot = SchemaSnapshot::default();
+        snapshot.tables.insert(
+            "accounts".to_string(),
+            TableSnapshot {
+                columns: vec![column],
+                indexes: Vec::new(),
+                constraints: Vec::new(),
+                runtime_options: TableRuntimeOptions::default(),
+                partition_by: None,
+                comment: None,
+                stored_create_sql: None,
+            },
+        );
+        snapshot
+    }
+
+    /// The authored side: an ID column declared to default to UUIDv4.
+    fn expected() -> SchemaSnapshot {
+        snapshot_with(ColumnSnapshot {
+            name: "id".to_string(),
+            data_type: "uuid".to_string(),
+            id_default: Some(IdDefaultSnapshot::UuidV4),
+            ..Default::default()
+        })
+    }
+
+    /// The live side holding the generator as catalog text, with `ddl_type_override`
+    /// as the ONLY difference between the two runs — it is PostgreSQL's provenance
+    /// marker, and it is excluded from `ColumnSnapshot`'s equality, so it moves nothing
+    /// else the differ looks at.
+    fn actual(ddl_type_override: Option<&str>) -> SchemaSnapshot {
+        snapshot_with(ColumnSnapshot {
+            name: "id".to_string(),
+            data_type: "uuid".to_string(),
+            default: Some(PG_UUID_V4.to_string()),
+            id_default: None,
+            ddl_type_override: ddl_type_override.map(str::to_string),
+            ..Default::default()
+        })
+    }
+
+    /// The one `default` line for `accounts.id`, or a report of why there is none.
+    fn default_line(actual: &SchemaSnapshot) -> Result<super::AlteredObject, String> {
+        let drift = diff_snapshots(&expected(), actual);
+        drift
+            .altered_objects
+            .iter()
+            .find(|a| a.object == "column id" && a.field == "default")
+            .cloned()
+            .ok_or_else(|| format!("no default line for accounts.id in {drift:#?}"))
+    }
+
+    /// **THE INSTRUMENT.** With the marker present the snapshot IS a PostgreSQL read,
+    /// the generator is recovered as UUIDv4, and the two sides agree. Without this, the
+    /// refusal below is satisfied by a fixture whose default nothing could ever
+    /// recover.
+    #[test]
+    fn a_postgres_marked_snapshot_recovers_the_generator_it_carries() {
+        let drift = diff_snapshots(&expected(), &actual(Some("uuid")));
+        assert!(
+            drift.is_clean(),
+            "a snapshot carrying PostgreSQL's own provenance marker must recover \
+             {PG_UUID_V4} as the authored UUIDv4 default: {drift:#?}"
+        );
+    }
+
+    #[test]
+    fn an_unattributed_snapshot_is_not_granted_a_vendor_semantic_identity() {
+        let line = default_line(&actual(None)).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            line.expected, "uuidV4",
+            "the authored side is unchanged by the actual side's provenance"
+        );
+        for granted in ["uuidV4", "uuidV7"] {
+            assert_ne!(
+                line.actual, granted,
+                "a snapshot no backend claims must not be read in PostgreSQL's dialect: \
+                 {PG_UUID_V4} is PostgreSQL's generator and nothing else's, so granting \
+                 it {granted} would also accept a column defaulting to the literal \
+                 string"
+            );
+        }
+        assert!(
+            line.actual.contains("gen_random_uuid"),
+            "the refusal must still NAME what the catalog holds so the operator can act \
+             on the line, and it reads {:?}",
+            line.actual
+        );
+    }
+}
