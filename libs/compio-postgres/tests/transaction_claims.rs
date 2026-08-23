@@ -486,3 +486,50 @@ async fn abandoning_bind_before_bind_complete_closes_the_server_portal() {
     .await
     .expect("abandoned-bind cleanup claim exceeded its watchdog");
 }
+
+/// A suspended portal resumes where it left off, and an exhausted one is empty
+/// rather than an error.
+///
+/// The only place three successive `query_portal` calls appear today is an
+/// OBSERVER test, and it asserts the chunk SIZES -- `[2, 2, 1]`. That is a
+/// proxy for "the portal continued": it rules out a portal that restarts every
+/// time, because the sizes would read `[2, 2, 2]`, but it says nothing about
+/// WHICH rows each chunk carried. Nothing in the tree asserts the values.
+///
+/// The fourth call is the edge nobody states. Once the portal is drained the
+/// server answers `CommandComplete` with no rows, and a caller draining a
+/// cursor in a loop needs that to be an empty result rather than an error or a
+/// hang -- which is exactly the shape of the loop anyone writes around this API.
+#[compio::test]
+async fn a_suspended_portal_resumes_and_then_empties() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let mut client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let transaction = client.transaction().await.unwrap();
+        let statement = transaction
+            .prepare("SELECT i::int4 FROM generate_series(1, 5) AS i ORDER BY i")
+            .await
+            .unwrap();
+        let portal = transaction.bind(&statement, &[]).await.unwrap();
+
+        let mut chunks = Vec::new();
+        for _ in 0..4 {
+            let rows = transaction
+                .query_portal(&portal, 2)
+                .await
+                .expect("a portal fetch must not fail, drained or not");
+            chunks.push(rows.iter().map(|row| row.get::<_, i32>(0)).collect::<Vec<_>>());
+        }
+
+        assert_eq!(
+            chunks,
+            vec![vec![1, 2], vec![3, 4], vec![5], Vec::<i32>::new()],
+            "the portal did not resume where it left off, or the drained fetch \
+             was not empty"
+        );
+    })
+    .await
+    .expect("portal resume test exceeded its watchdog");
+}
