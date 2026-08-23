@@ -928,6 +928,26 @@ where
     ) -> Result<(), Error> {
         self.in_flight.enter()?;
         let result = self.send_standby_status_update_inner(reply_requested).await;
+        if result.is_err() {
+            // ANY write failure retires the stream, not just a cancelled one.
+            // `BufStream::flush` takes the frame out of the write buffer before
+            // it awaits, so a `write_all` that wrote part of the frame and then
+            // failed has discarded the rest: the peer holds a fragment and the
+            // remainder exists nowhere. Sending the next update would append a
+            // whole frame after it and leave the walsender parsing our frame's
+            // middle as a frame's start.
+            //
+            // Not conditioned on the error kind, because nothing here can tell
+            // a failure that wrote nothing from one that wrote half. On a dead
+            // socket this costs nothing - every later call fails regardless -
+            // and it is the only correct answer in the case that matters. This
+            // mirrors `next`, which already retires the stream on framing I/O
+            // failures.
+            self.in_flight.poison();
+            if let Some(release) = &self.release {
+                release.shutdown();
+            }
+        }
         self.in_flight.leave();
         result
     }
@@ -2726,6 +2746,276 @@ mod tests {
         }
         async fn shutdown(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    /// A peer that writes part of the first frame, fails the remainder, and is
+    /// healthy for every write after that.
+    ///
+    /// The recovery is the whole point. A peer that simply stayed broken would
+    /// make the test below pass on the unfixed driver too, because the second
+    /// call would fail on its own write rather than on the refusal -- and a
+    /// dead socket is the case where none of this matters. Healing the peer
+    /// isolates the only question worth asking: does the DRIVER still consider
+    /// the stream usable after it left a fragment of a frame on the wire.
+    ///
+    /// This does not contradict the note on `ScriptedPeer` above. The subject
+    /// here is not how many bytes reached a server; it is what the driver does
+    /// with a write error, which no real peer is needed to produce.
+    struct WriteFailingPeer {
+        writes: usize,
+    }
+
+    impl compio::io::AsyncRead for WriteFailingPeer {
+        async fn read<B: compio::buf::IoBufMut>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            // Nothing to read: the subject is the write path.
+            compio::buf::BufResult(Ok(0), buf)
+        }
+    }
+
+    impl compio::io::AsyncWrite for WriteFailingPeer {
+        async fn write<B: compio::buf::IoBuf>(
+            &mut self,
+            buf: B,
+        ) -> compio::buf::BufResult<usize, B> {
+            self.writes += 1;
+            let len = compio::buf::IoBuf::buf_len(&buf);
+            match self.writes {
+                // Accept half the frame, so `write_all` comes back for the rest.
+                1 => compio::buf::BufResult(Ok(len / 2), buf),
+                // ... and fail it. `BufStream::flush` took the frame out of the
+                // write buffer before awaiting, so the tail is now gone.
+                2 => compio::buf::BufResult(
+                    Err(std::io::Error::other("scripted mid-frame write failure")),
+                    buf,
+                ),
+                _ => compio::buf::BufResult(Ok(len), buf),
+            }
+        }
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn stream_over_failing_writer() -> ReplicationStream<WriteFailingPeer, WriteFailingPeer> {
+        ReplicationStream {
+            stream: BufStream::new(MaybeTlsStream::Raw(WriteFailingPeer { writes: 0 })),
+            lsn: LsnTracker::new(0),
+            in_flight: InFlight::default(),
+            release: None,
+        }
+    }
+
+    /// A standby status update that fails part-way through its flush must
+    /// retire the stream, exactly as a failed read does.
+    ///
+    /// `BufStream::flush` calls `write_buf.split()` BEFORE it awaits, so a
+    /// `write_all` that consumes part of the frame and then errors discards the
+    /// remainder: a fragment of a 39-byte CopyData frame is on the wire and the
+    /// rest exists nowhere. `send_standby_status_update` nonetheless called
+    /// `in_flight.leave()` unconditionally and handed the stream back as if
+    /// nothing had happened, so the next update appended a whole frame after
+    /// that fragment and the walsender read our frame's middle as a frame's
+    /// start.
+    ///
+    /// `InFlight`'s own documentation describes this hazard for a CANCELLED
+    /// write, and cancellation is handled -- the dropped future never reaches
+    /// the clear, so `busy` stays set. The error return was the same hazard
+    /// through a path the guard did not cover. `next` already retires the
+    /// stream on framing I/O failures; this is that rule applied to the other
+    /// direction.
+    #[compio::test]
+    async fn a_standby_update_that_fails_mid_flush_retires_the_stream() {
+        let mut stream = stream_over_failing_writer();
+
+        let first = stream
+            .send_standby_status_update(false)
+            .await
+            .expect_err("the scripted peer failed the second half of the frame");
+        assert!(
+            !first.is_cancelled(),
+            "the first failure is the write itself, not a refusal: {first}"
+        );
+
+        let second = stream
+            .send_standby_status_update(false)
+            .await
+            .expect_err("a stream carrying half a frame must not accept another");
+        assert!(
+            second.is_cancelled(),
+            "the driver wrote a second frame after a fragment instead of refusing: {second}"
+        );
+    }
+
+    /// Randomised CopyBoth frames against the bespoke replication framer.
+    ///
+    /// `codec.rs` has `tests/frame_fuzz.rs`; this framer has had nothing. It is
+    /// a SEPARATE, hand-rolled framer -- [`read_header`] plus `next_inner` --
+    /// with its own length arithmetic ([`WireHeader::body_len`] subtracts 4 and
+    /// documents that underflowing it hands a `usize::MAX`-ish size to
+    /// `split_to`) and its own index maths on the `XLogData` and
+    /// `PrimaryKeepalive` bodies. None of it is reachable from the codec
+    /// corpus, because a replication stream never goes through
+    /// `Message::parse`.
+    ///
+    /// Same bargain as `tests/frame_fuzz.rs`: weak per-case assertions, many
+    /// cases. ASSERTED -- the framer terminates, does not panic, and once it
+    /// has REFUSED the stream (`Error::cancelled`, which only `InFlight::enter`
+    /// produces and which nothing clears) it never decodes another message.
+    /// NOT asserted: that random bytes produce an error, because some generated
+    /// frames are legitimate and a test demanding failure would be wrong about
+    /// the protocol rather than about the driver.
+    ///
+    /// THE INVARIANT IS KEYED TO THE REFUSAL, NOT TO ERRORS IN GENERAL, and
+    /// getting that wrong is how this test was first written. "An error means
+    /// the framer lost sync" is false for a whole class of arms: an empty
+    /// `CopyData`, an `XLogData` or `PrimaryKeepalive` under its size floor, an
+    /// unknown sub-tag, and a server-sent `ErrorResponse` all return `Err`
+    /// AFTER `split_to` has consumed the body, so the wire is still aligned and
+    /// the next frame legitimately decodes. The first version of this generator
+    /// failed on case 134 for exactly that, and the driver was right.
+    /// `Error::cancelled` is the only signal that means "this stream is
+    /// finished", because it is the one the poison flag produces.
+    #[compio::test]
+    async fn generated_copyboth_frames_never_hang_or_panic_the_framer() {
+        /// Fixed so the corpus is identical on every machine. Changing it
+        /// explores a different corpus; it cannot hide a failure, because the
+        /// failing case prints its own seed.
+        const ROOT_SEED: u64 = 0x7a1e_c0de_5eed_1234;
+        const CASES: u32 = 192;
+        /// A generated stream is finite, so the framer reaches EOF well inside
+        /// this. It turns a hang into a failure; it does not pace anything.
+        const MAX_FRAMES_READ: usize = 24;
+
+        /// xorshift64*, inline so this adds no dependency (as in
+        /// `tests/frame_fuzz.rs`).
+        struct Rng(u64);
+        impl Rng {
+            fn new(seed: u64) -> Self {
+                Self(if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed })
+            }
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
+                self.0 = x;
+                x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+            }
+            fn below(&mut self, bound: u32) -> u32 {
+                u32::try_from(self.next_u64() % u64::from(bound)).expect("bound fits")
+            }
+            fn byte(&mut self) -> u8 {
+                u8::try_from(self.next_u64() & 0xff).expect("masked to a byte")
+            }
+        }
+
+        /// The tags this framer dispatches on, so most of the budget lands
+        /// inside the arms rather than on the unknown-tag refusal.
+        const FRAMER_TAGS: &[u8] = &[
+            COPY_DATA_TAG,
+            COPY_DONE_TAG,
+            ERROR_RESPONSE_TAG,
+            NOTICE_RESPONSE_TAG,
+        ];
+        /// `CopyData` sub-tags, including the two frontend-only ones a server
+        /// has no business sending back.
+        const SUB_TAGS: &[u8] = &[
+            XLOG_DATA_TAG,
+            PRIMARY_KEEPALIVE_TAG,
+            STANDBY_STATUS_UPDATE_TAG,
+            HOT_STANDBY_FEEDBACK_TAG,
+        ];
+
+        fn generate(rng: &mut Rng) -> Vec<u8> {
+            let mut out = Vec::new();
+            for _ in 0..1 + rng.below(4) {
+                let tag = if rng.below(5) == 0 {
+                    rng.byte()
+                } else {
+                    FRAMER_TAGS[rng.below(4) as usize]
+                };
+
+                let mut body = Vec::new();
+                if tag == COPY_DATA_TAG && rng.below(4) != 0 {
+                    body.push(SUB_TAGS[rng.below(4) as usize]);
+                    // Land on, just under and just over the 25- and 18-byte
+                    // floors the XLogData and PrimaryKeepalive arms check: the
+                    // interesting index maths is exactly at those boundaries.
+                    let payload = match rng.below(4) {
+                        0 => 0,
+                        1 => 16 + rng.below(3) as usize,
+                        2 => 23 + rng.below(4) as usize,
+                        _ => rng.below(40) as usize,
+                    };
+                    for _ in 0..payload {
+                        body.push(rng.byte());
+                    }
+                } else {
+                    for _ in 0..rng.below(24) {
+                        body.push(rng.byte());
+                    }
+                }
+
+                // Usually honest, sometimes a lie either way, and sometimes
+                // below 4 -- the underflow `read_header`'s floor check exists
+                // to refuse.
+                let honest = u32::try_from(body.len() + 4).expect("body fits");
+                let declared = match rng.below(8) {
+                    0 => rng.below(4),
+                    1 => honest + 1 + rng.below(64),
+                    2 => honest.saturating_sub(1 + rng.below(4)),
+                    _ => honest,
+                };
+
+                out.push(tag);
+                out.extend_from_slice(&declared.to_be_bytes());
+                out.extend_from_slice(&body);
+            }
+            out
+        }
+
+        for case in 0..CASES {
+            let seed = ROOT_SEED ^ u64::from(case).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let mut rng = Rng::new(seed);
+            let wire = generate(&mut rng);
+
+            let mut stream = stream_over(wire.clone());
+            let mut refused = false;
+            for step in 0..MAX_FRAMES_READ {
+                let outcome =
+                    compio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "case {case} (seed {seed:#x}) hung at step {step} on {wire:02x?}"
+                            )
+                        });
+
+                match outcome {
+                    Ok(message) => {
+                        assert!(
+                            !refused,
+                            "case {case} (seed {seed:#x}) decoded a message after refusing \
+                             the stream; the poison flag is documented as unclearable"
+                        );
+                        if message.is_none() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        if error.is_cancelled() {
+                            refused = true;
+                        }
+                    }
+                }
+            }
         }
     }
 
