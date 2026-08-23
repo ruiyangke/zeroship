@@ -23,7 +23,7 @@ use crate::config::{self, AuthMethod, Config, ReplicationMode, TargetSessionAttr
 use crate::connect_tls::{Encryption, negotiate_tls};
 use crate::connection::Connection;
 use crate::maybe_tls_stream::MaybeTlsStream;
-use crate::tls::{TlsConnect, TlsStream};
+use crate::tls::{ServerVerification, TlsConnect, TlsStream};
 use crate::Error;
 use bytes::BytesMut;
 use compio::io::{AsyncRead, AsyncWrite};
@@ -337,6 +337,23 @@ where
             format!(
                 "sslcertmode={} cannot be honoured by the supplied TLS connector",
                 ssl_cert_mode.as_str()
+            )
+            .into(),
+        ));
+    }
+
+    // Server authentication last, because it is the one whose absence is
+    // silent: an unhonoured `sslsni` or `sslcertmode` changes what the wire
+    // carries, while an unhonoured `sslmode=verify-full` produces a session
+    // that looks exactly like a verified one.
+    let ssl_mode = config.get_ssl_mode();
+    let verification = ServerVerification::demanded_by(ssl_mode, config.get_ssl_root_cert())?;
+    if !tls.can_honor_server_verification(verification) {
+        return Err(Error::tls(
+            format!(
+                "sslmode={} asks for server-certificate verification the supplied TLS connector \
+                 does not attest to performing",
+                ssl_mode.as_str()
             )
             .into(),
         ));
@@ -2165,5 +2182,153 @@ mod tests {
             .expect("connection timeout cause must be an I/O error");
         assert_eq!(io.kind(), std::io::ErrorKind::TimedOut);
         assert_eq!(io.to_string(), "connection timed out");
+    }
+
+    /// The shape every third-party TLS backend has before it opts into a
+    /// policy: a working connector (`can_connect` is true) that overrides none
+    /// of the `can_honor_*` attestations.
+    struct UnattestedTls;
+
+    impl<S> TlsConnect<S> for UnattestedTls {
+        type Stream = crate::tls::NoTlsStream;
+        type Error = std::io::Error;
+        type Future = std::future::Ready<Result<crate::tls::NoTlsStream, std::io::Error>>;
+
+        fn connect(self, _: S) -> Self::Future {
+            std::future::ready(Err(std::io::Error::other("not a real handshake")))
+        }
+    }
+
+    const VERIFIER_CA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/verifier_ca.pem");
+
+    fn tls_config(extra: &str) -> Config {
+        format!("host=db.example.com {extra}")
+            .parse::<Config>()
+            .expect("parse a TLS connection string")
+    }
+
+    /// A connector that never read `sslrootcert` cannot have checked the
+    /// server certificate against it, so the modes that promise verification
+    /// must refuse it rather than report an authenticated session.
+    #[test]
+    fn a_connector_that_cannot_attest_to_verification_is_refused() {
+        for extra in [
+            format!("sslmode=verify-full sslrootcert={VERIFIER_CA}"),
+            format!("sslmode=verify-ca sslrootcert={VERIFIER_CA}"),
+            format!("sslmode=require sslrootcert={VERIFIER_CA}"),
+        ] {
+            let config = tls_config(&extra);
+            let error = validate_tls_connector_parameters::<crate::Socket, _>(
+                &UnattestedTls,
+                Encryption::Tls,
+                &config,
+            )
+            .expect_err(&format!("`{extra}` accepted an unverifying TLS connector"));
+            let cause = std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                cause.contains("sslmode="),
+                "the refusal must name the setting it could not honour: {cause}"
+            );
+        }
+    }
+
+    /// The same hole reached without any `sslrootcert` at all. The rustls
+    /// connector refuses this configuration when it is built; a connector this
+    /// crate did not build was never asked, so the refusal has to live on the
+    /// connection path as well.
+    #[test]
+    fn a_verifying_mode_with_no_trust_anchors_is_refused_on_the_connection_path() {
+        for mode in ["verify-ca", "verify-full"] {
+            let config = tls_config(&format!("sslmode={mode}"));
+            let error = validate_tls_connector_parameters::<crate::Socket, _>(
+                &UnattestedTls,
+                Encryption::Tls,
+                &config,
+            )
+            .unwrap_err();
+            let cause = std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                cause.contains("needs trust anchors"),
+                "sslmode={mode} with no sslrootcert must say what is missing: {cause}"
+            );
+        }
+    }
+
+    /// The one-variable partner. The SAME connector, under the modes that
+    /// promise no server authentication at all, must still be accepted -
+    /// otherwise the check above would be satisfied by refusing everything.
+    #[test]
+    fn a_connector_that_cannot_attest_still_serves_the_unverified_modes() {
+        for mode in ["require", "prefer", "allow"] {
+            let config = tls_config(&format!("sslmode={mode}"));
+            validate_tls_connector_parameters::<crate::Socket, _>(
+                &UnattestedTls,
+                Encryption::Tls,
+                &config,
+            )
+            .unwrap_or_else(|e| {
+                panic!("sslmode={mode} promises no verification and must not be refused: {e}")
+            });
+        }
+    }
+
+    /// The other one-variable partner, and the one that keeps the refusal from
+    /// being "nothing may ever use verify-full": the connector this crate ships
+    /// reads the same `sslmode` and `sslrootcert`, so it attests and is
+    /// accepted for exactly the configurations the unattested connector above
+    /// was refused.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn the_connector_built_from_the_same_config_is_accepted() {
+        use crate::tls::MakeTlsConnect;
+        use crate::tls_rustls::MakeRustlsConnect;
+
+        for extra in [
+            format!("sslmode=verify-full sslrootcert={VERIFIER_CA}"),
+            format!("sslmode=verify-ca sslrootcert={VERIFIER_CA}"),
+            format!("sslmode=require sslrootcert={VERIFIER_CA}"),
+            "sslmode=require".to_string(),
+        ] {
+            let config = tls_config(&extra);
+            let mut make = MakeRustlsConnect::from_config(&config)
+                .unwrap_or_else(|e| panic!("`{extra}` did not build a connector: {e}"));
+            let connector = <MakeRustlsConnect as MakeTlsConnect<crate::Socket>>::make_tls_connect(
+                &mut make,
+                "db.example.com",
+            )
+            .expect("make the per-connection rustls connector");
+            validate_tls_connector_parameters::<crate::Socket, _>(
+                &connector,
+                Encryption::Tls,
+                &config,
+            )
+            .unwrap_or_else(|e| panic!("`{extra}` refused its own rustls connector: {e}"));
+        }
+    }
+
+    /// A connector built from a *different* `sslmode` is refused, so the
+    /// attestation is about the configuration in hand rather than a constant
+    /// the rustls connector always returns.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn a_rustls_connector_built_for_a_weaker_mode_is_refused() {
+        use crate::tls::MakeTlsConnect;
+        use crate::tls_rustls::MakeRustlsConnect;
+
+        let weak = tls_config("sslmode=require");
+        let mut make = MakeRustlsConnect::from_config(&weak).expect("build the weak connector");
+        let connector = <MakeRustlsConnect as MakeTlsConnect<crate::Socket>>::make_tls_connect(
+            &mut make,
+            "db.example.com",
+        )
+        .expect("make the per-connection rustls connector");
+
+        let strong = tls_config(&format!("sslmode=verify-full sslrootcert={VERIFIER_CA}"));
+        validate_tls_connector_parameters::<crate::Socket, _>(&connector, Encryption::Tls, &strong)
+            .expect_err("a connector built for sslmode=require must not serve verify-full");
     }
 }

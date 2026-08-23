@@ -8,7 +8,7 @@
 //! TLS support.
 
 use crate::Error;
-use crate::config::SslCertMode;
+use crate::config::{SslCertMode, SslMode, SslRootCert};
 use compio::io::{AsyncRead, AsyncWrite};
 use std::error;
 use std::fmt;
@@ -17,6 +17,85 @@ use std::io;
 
 pub(crate) mod private {
     pub struct ForcePrivateApi;
+}
+
+/// What a connection string asks a connector to check about the certificate
+/// the server presents.
+///
+/// Three levels, because libpq has three: no verification, chain only, and
+/// chain plus host name. Six `sslmode` values and the presence or absence of
+/// `sslrootcert` map onto them, so the mapping is many-to-one and writing it as
+/// one match is what keeps it reviewable.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ServerVerification {
+    /// Accept whatever the server sends. Encryption only.
+    ///
+    /// libpq's `require`, `prefer` and `allow` when no root CA is configured.
+    None,
+    /// The certificate must chain to a configured trust anchor. The host name
+    /// is not looked at. libpq's `verify-ca`, and the weaker modes once a root
+    /// CA is configured.
+    Chain,
+    /// Chain, and the host name must match. libpq's `verify-full`; rustls'
+    /// default behaviour.
+    ChainAndHostname,
+}
+
+impl ServerVerification {
+    /// THE selection. Every certificate check this driver performs or skips is
+    /// decided by this function, from these two arguments.
+    ///
+    /// The load-bearing lines: `VerifyFull` is the only arm that yields
+    /// [`ChainAndHostname`](ServerVerification::ChainAndHostname), and the two
+    /// `Verify*` arms are the only ones that can fail - the weaker modes
+    /// degrade to [`None`](ServerVerification::None) rather than erroring,
+    /// which is exactly what makes `require` "encrypted, unverified".
+    pub(crate) fn select(
+        mode: SslMode,
+        roots_configured: bool,
+    ) -> Result<ServerVerification, Error> {
+        match mode {
+            SslMode::VerifyFull if roots_configured => Ok(ServerVerification::ChainAndHostname),
+            SslMode::VerifyCa if roots_configured => Ok(ServerVerification::Chain),
+            SslMode::VerifyCa | SslMode::VerifyFull => Err(Error::tls(
+                format!(
+                    "sslmode={} verifies the server certificate, so it needs trust anchors: set \
+                     sslrootcert to the CA that signed it (or to sslrootcert=system for the \
+                     operating system store, which requires sslmode=verify-full)",
+                    mode.as_str()
+                )
+                .into(),
+            )),
+            SslMode::Require | SslMode::Prefer | SslMode::Allow => {
+                if roots_configured {
+                    Ok(ServerVerification::Chain)
+                } else {
+                    Ok(ServerVerification::None)
+                }
+            }
+            // `disable` never reaches a connector: `Encryption::first_for`
+            // gives it plaintext and no retry can promote it, and
+            // `Transport::resolve` / `MakeRustlsConnect::from_config` both stop
+            // before here. Refusing is better than inventing a policy for a
+            // mode that has none.
+            SslMode::Disable => Err(Error::tls(
+                "sslmode=disable does not use TLS, so no verification policy applies".into(),
+            )),
+        }
+    }
+
+    /// The verification a [`Config`](crate::Config)'s TLS settings demand.
+    pub(crate) fn demanded_by(
+        mode: SslMode,
+        root_cert: &SslRootCert,
+    ) -> Result<ServerVerification, Error> {
+        // "Configured" is asked of `sslrootcert`, and it cannot disagree with
+        // the trust store a connector actually built: `MakeRustlsConnect` loads
+        // nothing for `Unset`, and errors rather than returning an empty store
+        // for `System` or `File`.
+        ServerVerification::select(mode, *root_cert != SslRootCert::Unset)
+    }
 }
 
 /// Channel binding information returned from a TLS handshake.
@@ -106,6 +185,23 @@ pub trait TlsConnect<S> {
     /// [`TlsStream::client_cert_status`].
     fn can_honor_sslcertmode(&self, mode: SslCertMode) -> bool {
         mode == SslCertMode::Allow
+    }
+
+    /// Reports whether this connector authenticates the server the way the
+    /// connection string asked.
+    ///
+    /// This is the attestation that matters most, because the setting it
+    /// covers - `sslmode` together with `sslrootcert` - is the only one that
+    /// promises the peer is who it claims to be. The default answers "yes"
+    /// only to [`ServerVerification::None`], the level that promises nothing:
+    /// a connector built without reading those settings cannot have applied
+    /// them, and accepting `verify-full` on its behalf would report an
+    /// authenticated session that nothing authenticated.
+    ///
+    /// A connector that reads a [`Config`](crate::Config)'s TLS settings must
+    /// override this and compare against the level it really built.
+    fn can_honor_server_verification(&self, verification: ServerVerification) -> bool {
+        verification == ServerVerification::None
     }
 
     #[doc(hidden)]
@@ -212,8 +308,115 @@ impl fmt::Display for NoTlsError {
 
 impl error::Error for NoTlsError {}
 
-// Suppress unused-warning: Error is imported so callers can surface TLS
-// failures via Error::tls; it's also referenced indirectly from
-// connect_tls.rs.
-#[allow(dead_code)]
-fn _ref_error(_: Error) {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The mode-to-policy table, asserted arm by arm.
+    ///
+    /// This is one half of the mutation proof. Swapping the `VerifyFull` arm of
+    /// `ServerVerification::select` for a weaker policy fails here; it is the
+    /// cheapest place such a change can be caught, and it needs no
+    /// certificates.
+    ///
+    /// It does NOT prove the policies *do* anything - a `Chain` variant wired
+    /// to a no-op verifier would still satisfy every assertion below. That is
+    /// what `tls_rustls`'s `the_three_policies_discriminate` is for.
+    ///
+    /// It lives here rather than beside the rustls connector because the table
+    /// now also governs connectors that are not rustls: `connect_raw` evaluates
+    /// it to decide what the supplied connector has to attest to, and that
+    /// happens whether or not the `tls` feature is on.
+    #[test]
+    fn policy_selection_follows_mode_and_whether_roots_are_configured() {
+        use ServerVerification::*;
+        use SslMode::*;
+
+        // No trust anchors: the three weak modes encrypt without
+        // authenticating, and the two verifying modes refuse to run at all.
+        for mode in [Require, Prefer, Allow] {
+            assert_eq!(
+                ServerVerification::select(mode, false).unwrap(),
+                None,
+                "sslmode={} with no sslrootcert must not claim to verify",
+                mode.as_str()
+            );
+        }
+        for mode in [VerifyCa, VerifyFull] {
+            ServerVerification::select(mode, false)
+                .expect_err("a verifying mode with no trust anchors must be an error");
+        }
+
+        // Trust anchors configured: everything checks the chain, and exactly
+        // one mode also checks the host name.
+        for mode in [Require, Prefer, Allow, VerifyCa] {
+            assert_eq!(
+                ServerVerification::select(mode, true).unwrap(),
+                Chain,
+                "sslmode={} with sslrootcert must check the chain and NOT the host name",
+                mode.as_str()
+            );
+        }
+        assert_eq!(
+            ServerVerification::select(VerifyFull, true).unwrap(),
+            ChainAndHostname
+        );
+
+        ServerVerification::select(Disable, true).expect_err("disable has no verification policy");
+    }
+
+    /// `sslrootcert` is read for the demand exactly as the trust store is read
+    /// for the promise, so the two questions cannot answer differently.
+    #[test]
+    fn naming_trust_anchors_raises_the_demand_on_every_mode_that_uses_tls() {
+        for mode in [SslMode::Require, SslMode::Prefer, SslMode::Allow] {
+            assert_eq!(
+                ServerVerification::demanded_by(mode, &SslRootCert::Unset).unwrap(),
+                ServerVerification::None
+            );
+            assert_eq!(
+                ServerVerification::demanded_by(mode, &SslRootCert::File("ca.pem".into())).unwrap(),
+                ServerVerification::Chain,
+                "sslmode={} with sslrootcert asks for chain checking",
+                mode.as_str()
+            );
+        }
+        assert_eq!(
+            ServerVerification::demanded_by(SslMode::VerifyFull, &SslRootCert::System).unwrap(),
+            ServerVerification::ChainAndHostname
+        );
+    }
+
+    /// The default attestation, which is what every third-party connector gets
+    /// until it overrides the method. It must claim nothing beyond the level
+    /// that promises nothing.
+    #[test]
+    fn the_default_attestation_claims_only_the_unverified_level() {
+        struct Unattested;
+
+        impl<S> TlsConnect<S> for Unattested {
+            type Stream = NoTlsStream;
+            type Error = io::Error;
+            type Future = std::future::Ready<Result<NoTlsStream, io::Error>>;
+
+            fn connect(self, _: S) -> Self::Future {
+                std::future::ready(Err(io::Error::other("not a real handshake")))
+            }
+        }
+
+        let connector = Unattested;
+        assert!(
+            TlsConnect::<()>::can_honor_server_verification(&connector, ServerVerification::None),
+            "a connector must still serve the modes that promise no verification"
+        );
+        for level in [
+            ServerVerification::Chain,
+            ServerVerification::ChainAndHostname,
+        ] {
+            assert!(
+                !TlsConnect::<()>::can_honor_server_verification(&connector, level),
+                "{level:?} must not be claimed by a connector that never read sslrootcert"
+            );
+        }
+    }
+}
