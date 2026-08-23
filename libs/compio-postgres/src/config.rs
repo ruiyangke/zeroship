@@ -1530,12 +1530,27 @@ impl Config {
             "requirepeer" => {
                 self.require_peer(value);
             }
+            // The list-valued keys CLEAR before they append, so a repeated key
+            // replaces rather than extending. libpq resolves
+            // `host=a host=b` to `b` alone; appending made it a two-host
+            // failover list that tries `a` FIRST, so a string assembled as
+            // default-then-override kept the default and preferred it. Measured
+            // against psql, which fails to resolve `host=127.0.0.1
+            // host=nonexistent.invalid` and could only do that by discarding
+            // the first.
+            //
+            // The comma form is untouched and remains the way to ask for
+            // several hosts, in both drivers. The builder methods still append;
+            // this is a property of PARSING a connection string, where a later
+            // key is an override.
             "host" => {
+                self.host.clear();
                 for host in value.split(',') {
                     self.host(host);
                 }
             }
             "hostaddr" => {
+                self.hostaddr.clear();
                 for hostaddr in value.split(',') {
                     let addr = hostaddr
                         .parse()
@@ -1544,6 +1559,7 @@ impl Config {
                 }
             }
             "port" => {
+                self.port.clear();
                 for port in value.split(',') {
                     let port = if port.is_empty() {
                         5432
