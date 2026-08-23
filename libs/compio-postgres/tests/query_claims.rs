@@ -405,6 +405,252 @@ async fn binary_copy_write_refuses_a_short_value_list() {
         .expect("unreachable: the arity assert fires first");
 }
 
+/// A row `write_raw` REFUSED must leave nothing of itself in the writer.
+///
+/// The arity case above is the caller's mistake and panics. This is the other
+/// half: the arity is right and one VALUE is refused, which returns `Err`. By
+/// then `write_raw` has already put the tuple's field count and that value's
+/// four-byte length placeholder into the writer's shared buffer, and nothing
+/// rolls either back. The next row the caller writes is appended behind that
+/// stub, and `finish` hands the whole buffer to PostgreSQL.
+///
+/// The damage is SILENT, not a failed COPY. The stub parses: one field of
+/// length zero is a legal empty `text`, so PostgreSQL inserts a row the caller
+/// was told it had failed to write, `finish` reports one row more than the
+/// caller wrote, and no error is raised anywhere. A caller that logs the
+/// per-row error and carries on -- the obvious thing to do with a
+/// per-row-fallible API -- gets one junk row per refusal.
+///
+/// A wrong type is used because it is the cheapest way to fail
+/// `to_sql_checked`: it rejects on `accepts` BEFORE calling `to_sql`, so not
+/// one byte of value data is written and the leftover is purely `write_raw`'s
+/// own bookkeeping. `a_binary_copy_row_refused_after_writing_bytes_leaves_no_
+/// garbage` below covers the case where `to_sql` itself writes and then fails.
+#[compio::test]
+async fn a_refused_binary_copy_row_leaves_nothing_behind() {
+    use compio_postgres::binary_copy::BinaryCopyInWriter;
+    use compio_postgres::types::Type;
+
+    compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+        client
+            .batch_execute("CREATE TEMP TABLE query_claims_binary_rollback (v text)")
+            .await
+            .expect("create the binary COPY fixture");
+
+        let sink = client
+            .copy_in("COPY query_claims_binary_rollback FROM STDIN BINARY")
+            .await
+            .expect("enter binary COPY");
+        let mut writer = Box::pin(BinaryCopyInWriter::new(sink, &[Type::TEXT]));
+
+        writer
+            .as_mut()
+            .write(&[&"alpha"])
+            .await
+            .expect("a text value into a text column");
+
+        // Right arity, wrong type: the assert does not fire, `to_sql_checked`
+        // refuses on `accepts`, and `write_raw` returns.
+        writer
+            .as_mut()
+            .write(&[&1_i32])
+            .await
+            .expect_err("an i32 is not a text and must be refused");
+
+        writer
+            .as_mut()
+            .write(&[&"gamma"])
+            .await
+            .expect("the writer must still take good rows after a refused one");
+
+        let written = writer
+            .as_mut()
+            .finish()
+            .await
+            .expect("finish the binary COPY");
+
+        let rows: Vec<String> = client
+            .query(
+                "SELECT v FROM query_claims_binary_rollback ORDER BY v",
+                &[],
+            )
+            .await
+            .expect("read back the copied rows")
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec!["alpha".to_string(), "gamma".to_string()],
+            "a refused row still reached the table: only the two rows that were \
+             ACCEPTED may land"
+        );
+        assert_eq!(
+            written, 2,
+            "finish counted rows the caller was told had failed"
+        );
+    })
+    .await
+    .expect("refused-binary-row test exceeded its watchdog");
+}
+
+/// The one-variable control for the test above: same table, same three writes,
+/// same `finish`, with the middle value CORRECT.
+///
+/// It pins that the rollback removes the refused row and nothing else. A fix
+/// that cleared the buffer, or that poisoned the writer on the first error,
+/// would satisfy the test above and fail this one; so would a fix that dropped
+/// the row before the failure or the row after it.
+#[compio::test]
+async fn an_accepted_binary_copy_row_between_two_others_is_kept() {
+    use compio_postgres::binary_copy::BinaryCopyInWriter;
+    use compio_postgres::types::Type;
+
+    compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+        client
+            .batch_execute("CREATE TEMP TABLE query_claims_binary_control (v text)")
+            .await
+            .expect("create the binary COPY control fixture");
+
+        let sink = client
+            .copy_in("COPY query_claims_binary_control FROM STDIN BINARY")
+            .await
+            .expect("enter binary COPY");
+        let mut writer = Box::pin(BinaryCopyInWriter::new(sink, &[Type::TEXT]));
+
+        writer.as_mut().write(&[&"alpha"]).await.expect("first row");
+        // THE ONE VARIABLE: a text where the test above passes an i32.
+        writer.as_mut().write(&[&"beta"]).await.expect("second row");
+        writer.as_mut().write(&[&"gamma"]).await.expect("third row");
+
+        let written = writer
+            .as_mut()
+            .finish()
+            .await
+            .expect("finish the binary COPY");
+
+        let rows: Vec<String> = client
+            .query("SELECT v FROM query_claims_binary_control ORDER BY v", &[])
+            .await
+            .expect("read back the copied rows")
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![
+                "alpha".to_string(),
+                "beta".to_string(),
+                "gamma".to_string()
+            ],
+            "an accepted row was dropped"
+        );
+        assert_eq!(written, 3, "finish undercounted accepted rows");
+    })
+    .await
+    .expect("accepted-binary-row control exceeded its watchdog");
+}
+
+/// The same defect where `to_sql` writes bytes BEFORE it fails, which is the
+/// shape that puts a genuinely partial row on the wire.
+///
+/// `to_sql` is handed the writer's buffer directly and may append to it any
+/// number of times before deciding it cannot encode the value -- a length
+/// ceiling reached mid-encode, a nested composite whose last member is out of
+/// range. Whatever it wrote stays, ahead of a length placeholder still reading
+/// zero, and the tuple that follows starts inside those bytes.
+///
+/// Here the failure is LOUD rather than silent, and that is not better: the
+/// stub's stray bytes are read as the next tuple's field count, PostgreSQL
+/// rejects the stream, and the rows the caller successfully wrote are lost
+/// along with the one it was told had failed.
+#[compio::test]
+async fn a_binary_copy_row_refused_after_writing_bytes_leaves_no_garbage() {
+    use bytes::BufMut;
+    use compio_postgres::binary_copy::BinaryCopyInWriter;
+    use compio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
+
+    /// Appends to the shared buffer and only then refuses.
+    #[derive(Debug)]
+    struct RefusedMidEncode;
+
+    impl ToSql for RefusedMidEncode {
+        fn to_sql(
+            &self,
+            _: &Type,
+            out: &mut bytes::BytesMut,
+        ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+            // Two bytes, because that is exactly the width of the field count
+            // the next tuple is supposed to begin with.
+            out.put_slice(b"\x7f\x7f");
+            Err("refused after writing".into())
+        }
+
+        fn accepts(ty: &Type) -> bool {
+            *ty == Type::TEXT
+        }
+
+        to_sql_checked!();
+    }
+
+    compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+        client
+            .batch_execute("CREATE TEMP TABLE query_claims_binary_partial (v text)")
+            .await
+            .expect("create the partial-encode fixture");
+
+        let sink = client
+            .copy_in("COPY query_claims_binary_partial FROM STDIN BINARY")
+            .await
+            .expect("enter binary COPY");
+        let mut writer = Box::pin(BinaryCopyInWriter::new(sink, &[Type::TEXT]));
+
+        writer
+            .as_mut()
+            .write(&[&"alpha"])
+            .await
+            .expect("a text value into a text column");
+        writer
+            .as_mut()
+            .write(&[&RefusedMidEncode])
+            .await
+            .expect_err("a value whose to_sql fails must be refused");
+        writer
+            .as_mut()
+            .write(&[&"gamma"])
+            .await
+            .expect("the writer must still take good rows after a refused one");
+
+        let written = writer
+            .as_mut()
+            .finish()
+            .await
+            .expect("a COPY carrying only accepted rows must be accepted");
+
+        let rows: Vec<String> = client
+            .query("SELECT v FROM query_claims_binary_partial ORDER BY v", &[])
+            .await
+            .expect("read back the copied rows")
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec!["alpha".to_string(), "gamma".to_string()],
+            "bytes from a refused row reached the wire"
+        );
+        assert_eq!(written, 2, "finish counted a row that was never encoded");
+    })
+    .await
+    .expect("partial-encode binary row test exceeded its watchdog");
+}
+
 /// `RowStream::columns` is available BEFORE any row is consumed.
 ///
 /// That is the property `Client::query_scalar` depends on: it reads the arity
