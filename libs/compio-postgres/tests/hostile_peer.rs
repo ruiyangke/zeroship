@@ -52,6 +52,16 @@
 //! check is cheap, it is the only thing that catches this, and it belongs on
 //! every test in this file.
 //!
+//! ALL FOUR HELPERS HAVE NOW BEEN THROUGH IT, so this need not be redone:
+//! `hostile_response_retires_session` (the `CommandComplete` + `ReadyForQuery`
+//! result quoted above), `hostile_copy_out_retires_session` and
+//! `hostile_copy_in_retires_session` (both fixed to earn it, 2026-08-23), and
+//! `hostile_prepare_retires_session`, whose three tests were checked the same
+//! day against a well-formed `ParseComplete` + `ParameterDescription` +
+//! `NoData` + `ReadyForQuery` and all three duly failed. The prepare helper
+//! needed no change: a correct prepare reply ends in `ReadyForQuery`, so it
+//! never had the truncation problem the COPY helper did.
+//!
 //! NOT covered here: TLS, authentication, replication framing, or a peer that
 //! trickles bytes slowly rather than sending wrong ones.
 
