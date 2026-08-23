@@ -121,6 +121,15 @@ const SHARED_NORMAL_FORM_ITEMS: &[&str] = &[
     "sequence_default_min_value",
     "sequence_default_max_value",
     "normalize_sequence_bound",
+    // The `nextval` default's ONE spelling and ONE parse, added when they came down
+    // from `zero_migrate::render::declarative` and `zero_migrate::apply::drift`. They
+    // are the same kind as the bounds above and by the same argument: the vendor
+    // WRITES `nextval('<seq>'::regclass)` and the dialect-blind differ has to READ it,
+    // so a second copy on either side does not report a difference, it manufactures
+    // one. They were `pub(crate)` in the engine and are `pub` here, which is the
+    // degradation this file exists to stand in for.
+    "nextval_default_expr",
+    "parse_nextval_sequence_ref",
 ];
 
 /// The vendor crates, relative to the workspace `crates/` directory. A vendor crate
@@ -148,12 +157,12 @@ const ENGINE_CALLSITE_FLOOR: usize = 10;
 /// The SHARED-NORMAL-FORM half's positive control: how many vendor code lines must
 /// reach the one implementation.
 ///
-/// Measured at 4, all in `zero-migrate-postgres/src/backend/drift_sql.rs` — the
-/// `SequenceDataTypeSnapshot::from_pg_type_name` call, the two bound normalizers, and
-/// the `use` that imports them. Set below that so ordinary churn does not trip it; a
-/// drop to zero is the question, and the answer is either "the needle broke" or "a
-/// vendor stopped reusing and started re-deriving".
-const SHARED_NORMAL_FORM_REUSE_FLOOR: usize = 3;
+/// Measured at 8, all in `zero-migrate-postgres/src/backend/drift_sql.rs` — the
+/// `SequenceDataTypeSnapshot::from_pg_type_name` call, the two bound normalizers, the
+/// `nextval` render and parse, and the `use` lines that import them. Set below that so
+/// ordinary churn does not trip it; a drop to zero is the question, and the answer is
+/// either "the needle broke" or "a vendor stopped reusing and started re-deriving".
+const SHARED_NORMAL_FORM_REUSE_FLOOR: usize = 5;
 
 /// Whether a source line is CODE rather than a comment.
 ///
