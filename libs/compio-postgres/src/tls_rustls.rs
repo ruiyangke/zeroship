@@ -9,7 +9,7 @@
 //!
 //! What is checked about the server's certificate is a function of two inputs
 //! and nothing else: the [`SslMode`], and whether [`SslRootCert`] names any
-//! trust anchors. `VerifyPolicy::select` is the *only* place that function is
+//! trust anchors. `ServerVerification::select` is the *only* place that function is
 //! evaluated, and `verifier_for` is the only place a policy becomes a rustls
 //! [`ServerCertVerifier`]. Both are small on purpose: a mistake in either
 //! silently disables verification for every connection this driver makes, and
@@ -77,7 +77,7 @@ use zeroize::Zeroize;
 use crate::Error;
 use crate::config::{Config, SslCertMode, SslMode, SslProtocolVersion, SslRootCert};
 use crate::tls::{
-    ChannelBinding, ClientCertStatus, MakeTlsConnect, TlsConnect, TlsStream,
+    ChannelBinding, ClientCertStatus, MakeTlsConnect, ServerVerification, TlsConnect, TlsStream,
 };
 
 /// `PostgreSQL`'s registered ALPN protocol identifier.
@@ -91,66 +91,11 @@ const TLS12_AND_TLS13: &[&SupportedProtocolVersion] =
 // ---------------------------------------------------------------------------
 // Verification policy - the one decision, and the one place it is made
 // ---------------------------------------------------------------------------
-
-/// What a connection checks about the certificate the server presents.
-///
-/// Three policies, because libpq has three: no verification, chain only, and
-/// chain plus host name. Six `sslmode` values map onto them, so the mapping is
-/// many-to-one and writing it as one match is what keeps it reviewable.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum VerifyPolicy {
-    /// Accept whatever the server sends. Encryption only.
-    ///
-    /// libpq's `require`, `prefer` and `allow` when no root CA is configured.
-    AcceptAny,
-    /// The certificate must chain to a configured trust anchor. The host name
-    /// is not looked at. libpq's `verify-ca`, and the weaker modes once a root
-    /// CA is configured.
-    Chain,
-    /// Chain, and the host name must match. libpq's `verify-full`; rustls'
-    /// default behaviour.
-    ChainAndHostname,
-}
-
-impl VerifyPolicy {
-    /// THE selection. Every certificate check this driver performs or skips is
-    /// decided by this function, from these two arguments.
-    ///
-    /// Read the arms against [`SslRootCert`]'s table. The load-bearing lines:
-    /// `VerifyFull` is the only arm that yields
-    /// [`ChainAndHostname`](VerifyPolicy::ChainAndHostname), and the two
-    /// `Verify*` arms are the only ones that can fail - the weaker modes
-    /// degrade to [`AcceptAny`](VerifyPolicy::AcceptAny) rather than erroring,
-    /// which is exactly what makes `require` "encrypted, unverified".
-    fn select(mode: SslMode, roots_configured: bool) -> Result<VerifyPolicy, Error> {
-        match mode {
-            SslMode::VerifyFull if roots_configured => Ok(VerifyPolicy::ChainAndHostname),
-            SslMode::VerifyCa if roots_configured => Ok(VerifyPolicy::Chain),
-            SslMode::VerifyCa | SslMode::VerifyFull => Err(Error::tls(
-                format!(
-                    "sslmode={} verifies the server certificate, so it needs trust anchors: set \
-                     sslrootcert to the CA that signed it (or to sslrootcert=system for the \
-                     operating system store, which requires sslmode=verify-full)",
-                    mode.as_str()
-                )
-                .into(),
-            )),
-            SslMode::Require | SslMode::Prefer | SslMode::Allow => {
-                if roots_configured {
-                    Ok(VerifyPolicy::Chain)
-                } else {
-                    Ok(VerifyPolicy::AcceptAny)
-                }
-            }
-            // `disable` never builds a connector; `Transport::resolve` and
-            // `MakeRustlsConnect::from_config` both stop before here. Refusing
-            // is better than inventing a policy for a mode that has none.
-            SslMode::Disable => Err(Error::tls(
-                "sslmode=disable does not use TLS, so no verification policy applies".into(),
-            )),
-        }
-    }
-}
+//
+// The policy type and its selection live in `crate::tls` (see
+// [`ServerVerification`]), not here, because `connect_raw` has to evaluate the
+// same function to hold a NON-rustls connector to the same promise. Read
+// `ServerVerification::select`'s arms against [`SslRootCert`]'s table.
 
 #[derive(Default)]
 struct ConfiguredCrls {
@@ -186,6 +131,7 @@ impl CrlDirectoryReload {
             },
             &self.provider,
         )
+        .map(|(verifier, _)| verifier)
     }
 }
 
@@ -203,16 +149,20 @@ fn verifier_for(
     roots: Arc<RootCertStore>,
     crls: ConfiguredCrls,
     provider: &CryptoProvider,
-) -> Result<Arc<dyn ServerCertVerifier>, Error> {
+) -> Result<(Arc<dyn ServerCertVerifier>, ServerVerification), Error> {
     let algorithms = provider.signature_verification_algorithms;
     // "Configured" is asked of the store, not of `SslRootCert`, and the two
     // cannot disagree: `from_config` loads nothing for `Unset`, and errors
     // rather than returning an empty store for `System` or `File`. Asking the
     // store is the safer of the two identical questions, because a store with
     // no anchors could not verify anything even if a path had been named.
-    let policy = VerifyPolicy::select(mode, !roots.is_empty())?;
-    if policy == VerifyPolicy::AcceptAny {
-        return Ok(Arc::new(AcceptAnyServerCert { algorithms }));
+    //
+    // The policy is returned as well as applied, because the connector has to
+    // repeat it to `connect_raw`: that is what turns "this verifier does X"
+    // into an attestation `connect_raw` can hold every connector to.
+    let policy = ServerVerification::select(mode, !roots.is_empty())?;
+    if policy == ServerVerification::None {
+        return Ok((Arc::new(AcceptAnyServerCert { algorithms }), policy));
     }
 
     let builder = || {
@@ -293,14 +243,15 @@ fn verifier_for(
         }
     };
 
-    Ok(match policy {
-        VerifyPolicy::Chain => Arc::new(ChainOnlyServerCert { verifier }),
-        VerifyPolicy::ChainAndHostname => verifier,
-        VerifyPolicy::AcceptAny => unreachable!("handled above"),
-    })
+    let verifier: Arc<dyn ServerCertVerifier> = match policy {
+        ServerVerification::Chain => Arc::new(ChainOnlyServerCert { verifier }),
+        ServerVerification::ChainAndHostname => verifier,
+        ServerVerification::None => unreachable!("handled above"),
+    };
+    Ok((verifier, policy))
 }
 
-/// [`VerifyPolicy::Chain`]: the chain is checked against the configured trust
+/// [`ServerVerification::Chain`]: the chain is checked against the configured trust
 /// anchors, the host name is not.
 ///
 /// The inner webpki verifier checks the chain and CRLs before the host name.
@@ -361,7 +312,7 @@ impl ServerCertVerifier for ChainOnlyServerCert {
     }
 }
 
-/// [`VerifyPolicy::AcceptAny`]: no chain, no host name, no expiry.
+/// [`ServerVerification::None`]: no chain, no host name, no expiry.
 ///
 /// The session is encrypted against a passive eavesdropper and against nobody
 /// else: anyone able to answer on the socket can present a self-signed
@@ -888,6 +839,12 @@ impl SigningKey for ObservingSigningKey {
 pub struct MakeRustlsConnect {
     config: Arc<ClientConfig>,
     ssl_cert_mode: SslCertMode,
+    /// What the verifier inside `config` really checks. Reported to
+    /// `connect_raw`, which refuses the connection when the connection string
+    /// asked for more. [`MakeRustlsConnect::new`] cannot inspect a
+    /// caller-supplied [`ClientConfig`], so it claims
+    /// [`ServerVerification::None`] - the only honest answer.
+    server_verification: ServerVerification,
     /// A CRL directory is mutable verification policy. libpq observes it for
     /// each new connection, so retain only the public verification inputs
     /// needed to rebuild the verifier instead of freezing the first directory
@@ -907,6 +864,14 @@ impl MakeRustlsConnect {
     /// In particular, this method does not append `postgresql`; a caller that
     /// supplies an incompatible list can cause `PostgreSQL` to reject the TLS
     /// handshake, including when `sslnegotiation=direct` is used.
+    ///
+    /// The verification policy of a caller-supplied [`ClientConfig`] cannot be
+    /// read back out of it, so a connector built this way attests to
+    /// [`ServerVerification::None`] and the connection path refuses it under
+    /// `sslmode=verify-ca` / `verify-full`, or under any `sslmode` that names
+    /// `sslrootcert`. Use [`MakeRustlsConnect::from_config`] for those - it is
+    /// the constructor that reads those settings and can therefore promise
+    /// them.
     pub fn new(config: Arc<ClientConfig>) -> MakeRustlsConnect {
         let config = if config.alpn_protocols.is_empty() {
             let mut config = (*config).clone();
@@ -918,6 +883,7 @@ impl MakeRustlsConnect {
         MakeRustlsConnect {
             config,
             ssl_cert_mode: SslCertMode::Allow,
+            server_verification: ServerVerification::None,
             crl_directory_reload: None,
         }
     }
@@ -996,7 +962,8 @@ impl MakeRustlsConnect {
                 provider: provider.clone(),
             })
         });
-        let verifier = verifier_for(config.get_ssl_mode(), roots, crls, &provider)?;
+        let (verifier, server_verification) =
+            verifier_for(config.get_ssl_mode(), roots, crls, &provider)?;
 
         // `dangerous()` is rustls saying "you are about to choose the
         // verification policy yourself", and that is precisely what a
@@ -1072,6 +1039,7 @@ impl MakeRustlsConnect {
 
         let mut connector = MakeRustlsConnect::new(Arc::new(client_config));
         connector.ssl_cert_mode = config.get_ssl_cert_mode();
+        connector.server_verification = server_verification;
         connector.crl_directory_reload = crl_directory_reload;
         Ok(connector)
     }
@@ -1104,6 +1072,7 @@ where
             config,
             domain: domain.to_string(),
             ssl_cert_mode: self.ssl_cert_mode,
+            server_verification: self.server_verification,
         })
     }
 }
@@ -1113,6 +1082,7 @@ pub struct RustlsConnect {
     config: Arc<ClientConfig>,
     domain: String,
     ssl_cert_mode: SslCertMode,
+    server_verification: ServerVerification,
 }
 
 impl<S> TlsConnect<S> for RustlsConnect
@@ -1172,6 +1142,10 @@ where
 
     fn can_honor_sslcertmode(&self, mode: SslCertMode) -> bool {
         self.ssl_cert_mode == mode
+    }
+
+    fn can_honor_server_verification(&self, verification: ServerVerification) -> bool {
+        self.server_verification == verification
     }
 }
 
@@ -1328,7 +1302,8 @@ mod tests {
             ConfiguredCrls::default(),
             &provider,
         )
-        .expect("build accept-any test verifier");
+        .expect("build accept-any test verifier")
+        .0;
         let mut config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("safe protocol versions")
@@ -1408,61 +1383,13 @@ mod tests {
         roots: Arc<RootCertStore>,
         name: &'static str,
     ) -> Result<(), String> {
-        let verifier = verifier_for(mode, roots, ConfiguredCrls::default(), &provider())
+        let (verifier, _) = verifier_for(mode, roots, ConfiguredCrls::default(), &provider())
             .map_err(|e| e.to_string())?;
         let cert = CertificateDer::from_pem_slice(SERVER_LOCALHOST.as_bytes()).unwrap();
         verifier
             .verify_server_cert(&cert, &[], &ServerName::try_from(name).unwrap(), &[], AT)
             .map(|_| ())
             .map_err(|e| e.to_string())
-    }
-
-    /// The mode-to-policy table, asserted arm by arm.
-    ///
-    /// This is one half of the mutation proof. Swapping the `VerifyFull` arm of
-    /// `VerifyPolicy::select` for a weaker policy fails here; it is the
-    /// cheapest place such a change can be caught, and it needs no
-    /// certificates.
-    ///
-    /// It does NOT prove the policies *do* anything - a `Chain` variant wired
-    /// to a no-op verifier would still satisfy every assertion below. That is
-    /// what `the_three_policies_discriminate` is for.
-    #[test]
-    fn policy_selection_follows_mode_and_whether_roots_are_configured() {
-        use SslMode::*;
-        use VerifyPolicy::*;
-
-        // No trust anchors: the three weak modes encrypt without
-        // authenticating, and the two verifying modes refuse to run at all.
-        for mode in [Require, Prefer, Allow] {
-            assert_eq!(
-                VerifyPolicy::select(mode, false).unwrap(),
-                AcceptAny,
-                "sslmode={} with no sslrootcert must not claim to verify",
-                mode.as_str()
-            );
-        }
-        for mode in [VerifyCa, VerifyFull] {
-            VerifyPolicy::select(mode, false)
-                .expect_err("a verifying mode with no trust anchors must be an error");
-        }
-
-        // Trust anchors configured: everything checks the chain, and exactly
-        // one mode also checks the host name.
-        for mode in [Require, Prefer, Allow, VerifyCa] {
-            assert_eq!(
-                VerifyPolicy::select(mode, true).unwrap(),
-                Chain,
-                "sslmode={} with sslrootcert must check the chain and NOT the host name",
-                mode.as_str()
-            );
-        }
-        assert_eq!(
-            VerifyPolicy::select(VerifyFull, true).unwrap(),
-            ChainAndHostname
-        );
-
-        VerifyPolicy::select(Disable, true).expect_err("disable has no verification policy");
     }
 
     /// The three policies, driven through `verifier_for` against real
