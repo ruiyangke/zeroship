@@ -1208,14 +1208,33 @@ fn parse_identify_system_row(row: &DataRowBody) -> Result<IdentifySystem, Error>
         }
     }
 
+    // Refused rather than defaulted. Every one of these used to fall back to a
+    // plausible-looking value -- `""` for the two strings, `0` for the
+    // timeline -- and none of those is neutral. `systemid` is the CLUSTER
+    // identity, which callers compare to notice they have been failed over
+    // onto a different cluster; two empty strings compare EQUAL, so the check
+    // passes silently in exactly the case it exists to catch. PostgreSQL
+    // numbers timelines from 1, so `0` is not a timeline at all, and an
+    // unparseable one became `0` as well.
+    //
+    // A conforming server sends all three non-NULL, so this only fires for a
+    // broken or hostile peer -- which is the threat model the rest of this
+    // module already works in. `dbname` stays optional because it is genuinely
+    // NULL on a replication connection that is not database-specific.
+    let required = |index: usize, name: &'static str| -> Result<&str, Error> {
+        fields
+            .get(index)
+            .and_then(|field| *field)
+            .ok_or_else(|| missing_identify_field(name))
+    };
+
+    let timeline = required(1, "timeline")?;
     Ok(IdentifySystem {
-        systemid: fields.first().and_then(|f| *f).unwrap_or("").to_string(),
-        timeline: fields
-            .get(1)
-            .and_then(|f| *f)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0),
-        xlogpos: fields.get(2).and_then(|f| *f).unwrap_or("").to_string(),
+        systemid: required(0, "systemid")?.to_string(),
+        timeline: timeline
+            .parse()
+            .map_err(|_| missing_identify_field("timeline"))?,
+        xlogpos: required(2, "xlogpos")?.to_string(),
         dbname: fields.get(3).and_then(|f| *f).map(|s| s.to_string()),
     })
 }
@@ -1226,6 +1245,18 @@ fn eof_identify_row() -> Error {
     Error::parse(std::io::Error::new(
         std::io::ErrorKind::UnexpectedEof,
         "IDENTIFY_SYSTEM DataRow truncated",
+    ))
+}
+
+/// A field `IDENTIFY_SYSTEM` must supply was absent, NULL, or unreadable.
+///
+/// Named so the caller learns WHICH field, because the three that are required
+/// mean quite different things and a caller cannot tell them apart from a
+/// generic parse failure.
+fn missing_identify_field(name: &str) -> Error {
+    Error::parse(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("IDENTIFY_SYSTEM did not return a usable {name}"),
     ))
 }
 
@@ -2422,12 +2453,34 @@ mod tests {
             "a field length exceeding the remaining bytes must be Err, not panic"
         );
 
-        // A row with no fields at all yields the empty identity rather than an
-        // error: there is nothing malformed about it, and `identify_system`
-        // reports the absence through its own values.
+        // A row with no fields is REFUSED. This assertion used to say the
+        // opposite -- that an empty row "yields the empty identity rather than
+        // an error: there is nothing malformed about it, and `identify_system`
+        // reports the absence through its own values". That reasoning was
+        // wrong on its own terms, which is why it is reversed here rather than
+        // merely adjusted.
+        //
+        // An empty string does not report an absence; it is a VALUE, and two
+        // of them compare equal. `systemid` is the cluster identity a caller
+        // compares to notice it has been failed over onto a different cluster,
+        // so an identity that defaults to `""` makes that comparison succeed
+        // in precisely the case it exists to catch. `IDENTIFY_SYSTEM` is
+        // specified to return four columns, so a row with none is malformed
+        // for this command whatever it might mean for some other one.
+        //
+        // Nothing depended on the old shape: the sole caller in the workspace
+        // (`crates/plugin-db/src/wal_consumer.rs`) uses `identify_system` as a
+        // health check and discards the value, so this change only makes that
+        // check harder to pass with a broken peer.
         let row = identify_row(&[]);
-        let got = parse_identify_system_row(&row).expect("an empty row is not malformed");
-        assert_eq!(got.systemid, "");
+        let error = parse_identify_system_row(&row)
+            .expect_err("a row with no fields cannot be an IDENTIFY_SYSTEM identity");
+        assert!(
+            error
+                .to_string()
+                .contains("error parsing response from server"),
+            "unexpected error: {error}"
+        );
     }
 
     /// Build a full `ErrorResponse` wire message: `E` tag + 4-byte
