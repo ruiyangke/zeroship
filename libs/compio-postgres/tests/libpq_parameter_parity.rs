@@ -536,3 +536,61 @@ fn negative_keepalives_is_accepted_and_means_on() {
             .expect_err("libpq refuses this with `invalid integer value`");
     }
 }
+
+/// An EMPTY ssl file path is refused here and accepted by libpq.
+///
+/// MEASURED against the live server on 2026-08-23: `sslcert=`, `sslkey=`,
+/// `sslrootcert=` and `sslcrl=` with empty values all CONNECT under psql.
+/// libpq treats an empty path as unset and falls back to its defaults
+/// (`~/.postgresql/postgresql.crt` and friends).
+///
+/// This driver refuses all three of the first ones, and that is deliberate.
+/// The usual argument for accepting -- "match libpq" -- does not carry here,
+/// and the usual argument against accepting does not either, so both are
+/// recorded:
+///
+/// * The SAFETY argument for refusing does NOT apply to this driver. libpq
+///   would hand you its default client certificate; `tls_rustls.rs` never
+///   reads those files at all (`(None, None) => with_no_client_auth()`, and
+///   `sslcertmode=require` errors saying so). An empty `sslrootcert` would
+///   likewise be `SslRootCert::Unset`, which adds no roots and fails
+///   verification LOUDLY rather than silently trusting anything.
+/// * What actually justifies refusing is that an empty path is almost always
+///   a mistake -- `sslcert=${VAR}` where `VAR` is unset expands to exactly
+///   this -- and a config error naming the option beats a TLS failure several
+///   steps later, or silently no client authentication at all.
+///
+/// So this is a divergence taken on purpose. It was previously UNTESTED: a
+/// mutation sweep on 2026-08-23 removed the `sslcert` guard and the entire
+/// config test set stayed green (268 passed, 0 failed), including the
+/// feature-gated `tls_live` target. Whichever way a future reader decides, it
+/// should be by changing this test rather than by discovering the guard is
+/// load-bearing for nothing.
+#[test]
+fn an_empty_ssl_path_is_refused_even_though_libpq_accepts_it() {
+    // NOTE THE QUOTES, they are load-bearing. In keyword syntax a bare
+    // trailing "key=" at end of string is rejected by the LEXER with
+    // "unexpected EOF" before any option arm runs, so that spelling tests the
+    // tokeniser and never reaches this guard at all -- the first version of
+    // this test used it and failed for that reason. "key=''" and the URL form
+    // "?key=" are what actually deliver an empty value to the arm; both were
+    // measured against libpq, which accepts all of them.
+    for key in ["sslcert", "sslkey", "sslrootcert"] {
+        let error = format!("host=h {key}=''")
+            .parse::<Config>()
+            .expect_err("an empty ssl path must be refused");
+        assert!(
+            a_cause_names(&error, key),
+            "the refusal must name {key} so the caller knows which option is \
+             empty: {error}"
+        );
+    }
+
+    // One variable away: the SAME keys with a real path are accepted, so the
+    // refusal belongs to the emptiness and not to the key.
+    for key in ["sslcert", "sslkey", "sslrootcert"] {
+        format!("host=h {key}=/tmp/some-file")
+            .parse::<Config>()
+            .unwrap_or_else(|error| panic!("{key} with a path must parse: {error}"));
+    }
+}
