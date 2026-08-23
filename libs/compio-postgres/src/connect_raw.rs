@@ -683,22 +683,29 @@ where
             check_require_auth(config, AuthMethod::ScramSha256)?;
             authenticate_sasl(handshake, body, config).await?;
         }
+        // The four methods this driver does not implement. Each names ITSELF:
+        // all four used to return the same "unsupported authentication method",
+        // which tells an operator nothing about what their server asked for or
+        // what to reconfigure. This crate already holds refusals to that
+        // standard elsewhere -- `libpq_parameter_parity` requires a refused
+        // connection parameter to be named through the error's source chain,
+        // for exactly this reason.
         Some(Message::AuthenticationGss) => {
             check_require_auth(config, AuthMethod::Gss)?;
-            return Err(Error::authentication(
-                "unsupported authentication method".into(),
-            ));
+            return Err(unsupported_authentication("GSSAPI"));
         }
         Some(Message::AuthenticationSspi) => {
             check_require_auth(config, AuthMethod::Sspi)?;
-            return Err(Error::authentication(
-                "unsupported authentication method".into(),
-            ));
+            return Err(unsupported_authentication("SSPI"));
         }
-        Some(Message::AuthenticationKerberosV5 | Message::AuthenticationScmCredential) => {
-            return Err(Error::authentication(
-                "unsupported authentication method".into(),
-            ));
+        // Neither of these has an `AuthMethod` variant, so neither consults
+        // `require_auth`: there is no policy that could permit a method the
+        // driver cannot perform.
+        Some(Message::AuthenticationKerberosV5) => {
+            return Err(unsupported_authentication("Kerberos V5"));
+        }
+        Some(Message::AuthenticationScmCredential) => {
+            return Err(unsupported_authentication("SCM credential"));
         }
         Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
         Some(_) => return Err(Error::unexpected_message()),
@@ -712,6 +719,12 @@ where
         Some(_) => Err(Error::unexpected_message()),
         None => Err(Error::closed()),
     }
+}
+
+/// A method this driver does not implement, named so the operator knows what
+/// their server asked for.
+fn unsupported_authentication(method: &str) -> Error {
+    Error::authentication(format!("unsupported authentication method: {method}").into())
 }
 
 fn check_require_auth(config: &Config, method: AuthMethod) -> Result<(), Error> {
@@ -1625,6 +1638,58 @@ mod tests {
         );
         drop(client);
         drop(connection);
+    }
+
+    /// Each unimplemented authentication method is refused BY NAME.
+    ///
+    /// All four returned the identical string "unsupported authentication
+    /// method", so an operator whose server asked for GSSAPI learned only that
+    /// something was unsupported -- not which of the four, and so not what to
+    /// reconfigure. That is the failure `libpq_parameter_parity` already rules
+    /// out for connection parameters, whose refusals must name the key through
+    /// the error's source chain; the same standard belongs here.
+    ///
+    /// The table is the test: a shared message passes any single-method
+    /// assertion, so each name must be checked against a refusal that should
+    /// NOT produce it. That is what the second loop does.
+    #[compio::test]
+    async fn every_unimplemented_authentication_method_is_refused_by_name() {
+        // (AuthenticationRequest code, the name its refusal must carry)
+        const UNIMPLEMENTED: &[(i32, &str)] = &[
+            (2, "Kerberos V5"),
+            (6, "SCM credential"),
+            (7, "GSSAPI"),
+            (9, "SSPI"),
+        ];
+
+        let mut chains = Vec::new();
+        for (code, name) in UNIMPLEMENTED {
+            let (stream, _) =
+                scripted_password_auth_server(code.to_be_bytes().to_vec(), false).await;
+            let error = match scram_config().connect_raw(stream, NoTls).await {
+                Ok(_) => panic!("the driver accepted authentication code {code}"),
+                Err(error) => error,
+            };
+            let chain = authentication_error_chain(error);
+            assert!(
+                chain.contains(name),
+                "authentication code {code} must be refused by name, got: {chain}"
+            );
+            chains.push((code, name, chain));
+        }
+
+        // No refusal may carry another method's name, which is what a single
+        // shared message would do.
+        for (code, _, chain) in &chains {
+            for (other_code, other_name) in UNIMPLEMENTED {
+                if code != &other_code {
+                    assert!(
+                        !chain.contains(other_name),
+                        "the refusal for code {code} also names {other_name}: {chain}"
+                    );
+                }
+            }
+        }
     }
 
     /// The MD5 response the driver actually puts on the wire.
