@@ -1608,8 +1608,13 @@ impl Config {
             }
             #[cfg(not(target_arch = "wasm32"))]
             "keepalives" => {
+                // Signed, as libpq is: it reads this with `strtol` and tests the
+                // result against zero, so `keepalives=-1` is non-zero and means
+                // ON. Parsing it as unsigned refuses a value the reference
+                // implementation accepts, which turns a DSN psql connects with
+                // into a config error here.
                 let keepalives = value
-                    .parse::<u64>()
+                    .parse::<i64>()
                     .map_err(|_| Error::config_parse(Box::new(InvalidValue("keepalives"))))?;
                 self.keepalives(keepalives != 0);
             }
