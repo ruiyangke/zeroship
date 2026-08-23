@@ -5847,6 +5847,176 @@ async fn statement_cache_does_not_retry_0a000_inside_a_transaction() {
     );
 }
 
+/// The same recovery as `statement_cache_retries_stale_result_shape_once_
+/// after_0a000`, with ONE variable changed: an unrelated request is in flight
+/// on the connection when the stale execution begins.
+///
+/// The retry used to be gated on `transaction_status() == Some(Idle)`, read
+/// BEFORE the operation was sent. That accessor answers `None` -- "ask again
+/// after the next round trip" -- whenever ANY transaction-capable request has
+/// not reached its `ReadyForQuery`, so on a pipelined or concurrently used
+/// connection the gate was never satisfied and the recovery was inert. A
+/// `0A000` the sequential test proves is absorbed reached the caller instead,
+/// and the two runs are indistinguishable from the outside: nothing logs, the
+/// cache still self-heals on the NEXT call, and only this one query fails.
+///
+/// The peer is a server-side sleep, so the request is genuinely outstanding
+/// rather than merely enqueued -- an undrained `RowStream` does NOT hold one,
+/// because the connection task consumes a response whether or not its caller
+/// polls. The precondition is asserted, not assumed: if `transaction_status()`
+/// is not `None` when the stale query is fired, this test never exercised the
+/// gate it exists for and says so rather than passing green.
+#[compio::test]
+async fn statement_cache_retries_stale_result_shape_while_a_peer_request_is_in_flight() {
+    let url = test_url();
+    let client = std::rc::Rc::new(connect_with_statement_cache(&url, 3).await.unwrap());
+    let table = common::test_object_name("cpg_cache_shape_busy");
+    let sql = format!("SELECT * FROM {table}");
+
+    client
+        .batch_execute(&format!(
+            "CREATE TEMP TABLE {table} (id int4); INSERT INTO {table} VALUES (71)"
+        ))
+        .await
+        .unwrap();
+    let first_rows = client.query(sql.as_str(), &[]).await.unwrap();
+    assert_eq!(first_rows[0].len(), 1);
+    drop(first_rows);
+    assert_eq!(prepared_statement_names(&client, &sql).await.len(), 1);
+
+    client
+        .batch_execute(&format!(
+            "ALTER TABLE {table} ADD COLUMN label text NOT NULL DEFAULT 'busy'"
+        ))
+        .await
+        .unwrap();
+
+    let peer = {
+        let client = std::rc::Rc::clone(&client);
+        compio::runtime::spawn(async move { client.query("SELECT pg_sleep(1)", &[]).await })
+    };
+
+    // Poll for the precondition instead of sleeping a guessed interval: the
+    // peer needs several round trips before its Execute is outstanding, and a
+    // fixed wait would be a load-dependent coin flip in both directions.
+    let deadline = std::time::Instant::now() + ADMIN_STATEMENT_TIMEOUT;
+    while client.transaction_status().is_some() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the peer request never went in flight, so the busy gate was never exercised"
+        );
+        compio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        client.transaction_status(),
+        None,
+        "precondition: the stale execution must start while a peer request is in flight"
+    );
+
+    let refreshed_rows = client
+        .query(sql.as_str(), &[])
+        .await
+        .expect("a busy connection must still absorb the stale-plan 0A000");
+    assert_eq!(refreshed_rows[0].len(), 2);
+    assert_eq!(refreshed_rows[0].get::<_, i32>("id"), 71);
+    assert_eq!(refreshed_rows[0].get::<_, &str>("label"), "busy");
+    assert_eq!(prepared_statement_names(&client, &sql).await.len(), 1);
+
+    peer.await.unwrap().unwrap();
+}
+
+/// The retry barrier under SUSTAINED concurrency, which the single-peer test
+/// above cannot reach.
+///
+/// That test pins the pre-send gate. This one pins the barrier itself, and the
+/// two fail for different reasons. `query::sync` waits for its own
+/// `ReadyForQuery`, and requests are FIFO, so in a closed system every earlier
+/// request has already retired by then and the shared `transaction_status()`
+/// reads `Some(Idle)` -- which is why a closed test cannot tell the two
+/// instruments apart. Keep peers arriving and the count is nonzero at that
+/// instant instead, `transaction_status()` answers `None`, and the barrier
+/// declines forever. Reading the status byte off the barrier's OWN
+/// `ReadyForQuery` is what makes the answer independent of unrelated traffic.
+///
+/// This arm is LOAD-MEASURED, not scripted: it reports the rounds it ruled on
+/// and the peer queries that were in flight across them, and requires every
+/// round to have recovered. Measured on both instruments: 40/40 recovered with
+/// the status byte, 0/40 with the shared accessor, three consecutive runs each.
+#[compio::test]
+async fn statement_cache_retries_stale_result_shape_under_sustained_concurrency() {
+    const ROUNDS: usize = 20;
+    const PEERS: usize = 4;
+
+    let url = test_url();
+    let client = std::rc::Rc::new(connect_with_statement_cache(&url, 8).await.unwrap());
+    let table = common::test_object_name("cpg_cache_shape_load");
+    let sql = format!("SELECT * FROM {table}");
+    client
+        .batch_execute(&format!(
+            "CREATE TEMP TABLE {table} (id int4); INSERT INTO {table} VALUES (72)"
+        ))
+        .await
+        .unwrap();
+
+    let stop = std::rc::Rc::new(std::cell::Cell::new(false));
+    let mut peers = Vec::new();
+    for peer in 0..PEERS {
+        let client = std::rc::Rc::clone(&client);
+        let stop = std::rc::Rc::clone(&stop);
+        peers.push(compio::runtime::spawn(async move {
+            // A server-side sleep, so each peer is genuinely outstanding
+            // rather than merely enqueued.
+            let sql = format!("SELECT {peer}::int4 AS cpg_load_peer, pg_sleep(0.002)");
+            let mut sent = 0u32;
+            while !stop.get() && client.query(sql.as_str(), &[]).await.is_ok() {
+                sent += 1;
+            }
+            sent
+        }));
+    }
+
+    let mut recovered = 0usize;
+    let mut escaped = Vec::new();
+    for round in 0..ROUNDS {
+        client.query(sql.as_str(), &[]).await.unwrap();
+        client
+            .batch_execute(&format!(
+                "ALTER TABLE {table} ADD COLUMN c_{round} int4 DEFAULT {round}"
+            ))
+            .await
+            .unwrap();
+        match client.query(sql.as_str(), &[]).await {
+            Ok(rows) => {
+                assert_eq!(rows[0].get::<_, i32>("id"), 72);
+                recovered += 1;
+            }
+            Err(error) => escaped.push(format!("round {round}: {:?}", error.code())),
+        }
+    }
+
+    stop.set(true);
+    let mut peer_queries = 0u32;
+    for peer in peers {
+        peer_queries += peer.await.unwrap();
+    }
+
+    println!(
+        "sustained stale-plan recovery: {recovered} of {ROUNDS} rounds recovered \
+         behind {peer_queries} peer queries from {PEERS} peers"
+    );
+    assert!(
+        escaped.is_empty(),
+        "{} of {ROUNDS} rounds let the stale-plan error escape: {escaped:?}",
+        escaped.len()
+    );
+    assert_eq!(recovered, ROUNDS);
+    assert!(
+        peer_queries >= u32::try_from(ROUNDS).unwrap(),
+        "only {peer_queries} peer queries ran, so the connection was not \
+         meaningfully busy and this arm ruled on nothing"
+    );
+}
+
 /// An explicit Statement is a caller-owned object, even when the connection's
 /// implicit SQL cache is enabled. Replacing it would silently change the
 /// metadata and identity the caller chose to retain.
