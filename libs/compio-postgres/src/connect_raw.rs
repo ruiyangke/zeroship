@@ -292,6 +292,7 @@ where
         handshake.stream,
         handshake.delayed,
         parameters,
+        client.parameters_handle(),
         receiver,
         client.tx_status_handle(),
         client.in_flight_requests_handle(),

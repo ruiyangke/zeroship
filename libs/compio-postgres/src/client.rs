@@ -1018,6 +1018,17 @@ pub struct InnerClient {
     /// `None` for [`Config::connect_raw`](crate::Config::connect_raw), whose
     /// stream belongs to the caller and need not be a socket at all.
     release: Option<ConnectionRelease>,
+
+    /// Server runtime parameters as last reported by `ParameterStatus`, shared
+    /// with the connection task.
+    ///
+    /// Seeded from the startup sequence and then maintained by the connection
+    /// task, which is the SOLE WRITER: it observes every frame exactly once and
+    /// in wire order, so a value here is the most recent one the server sent.
+    /// Readers take the lock only in [`Client::parameter`]; nothing on a query
+    /// hot path touches it, and `route_async` locks it only for the
+    /// `ParameterStatus` arm.
+    parameters: Arc<Mutex<HashMap<String, String>>>,
 }
 
 struct ClearBufferOnDrop<'a>(&'a mut BytesMut);
@@ -1637,6 +1648,7 @@ impl Client {
                 tx_status: Arc::new(AtomicU8::new(b'I')),
                 in_flight_requests: Arc::new(AtomicUsize::new(0)),
                 release,
+                parameters: Arc::default(),
             }),
             socket_config: None,
             ssl_mode,
@@ -1685,6 +1697,29 @@ impl Client {
 
     pub(crate) fn in_flight_requests_handle(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.inner.in_flight_requests)
+    }
+
+    pub(crate) fn parameters_handle(&self) -> Arc<Mutex<HashMap<String, String>>> {
+        Arc::clone(&self.inner.parameters)
+    }
+
+    /// The server's current value for a runtime parameter, or `None` if the
+    /// server has never reported one.
+    ///
+    /// This is libpq's `PQparameterStatus`. PostgreSQL reports only the
+    /// parameters flagged `GUC_REPORT` -- `server_version`, `client_encoding`,
+    /// `application_name`, `DateStyle`, `TimeZone`, `standard_conforming_strings`
+    /// and a handful of others -- once at startup and again whenever the value
+    /// changes, so this tracks the session rather than snapshotting it. A
+    /// parameter the server does not report reads `None` however it was set;
+    /// `SHOW` is the way to ask about those, and it costs a round trip, which
+    /// is the whole reason this exists.
+    ///
+    /// Returns an owned `String` because the map is shared with the connection
+    /// task and the lock cannot outlive the call.
+    #[must_use]
+    pub fn parameter(&self, name: &str) -> Option<String> {
+        self.inner.parameters.lock().get(name).cloned()
     }
 
     pub(crate) fn has_in_flight_requests(&self) -> bool {
