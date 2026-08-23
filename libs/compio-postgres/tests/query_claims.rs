@@ -320,3 +320,42 @@ async fn raw_size_bytes_counts_field_data_and_not_the_frame() {
     .await
     .expect("raw_size_bytes test exceeded its watchdog");
 }
+
+/// A short value list is refused before it can corrupt the binary stream.
+///
+/// `write_raw` documents this panic, and nothing tested it -- the crate has no
+/// `should_panic` test at all. What the assert prevents is not a tidy error but
+/// a SILENT wire corruption: the field count is written from `types.len()`
+/// BEFORE the values are encoded, and the encode loop `zip`s values against
+/// types, so it stops at the shorter one. Remove the assert and a short list
+/// emits a tuple claiming N fields while carrying fewer, and PostgreSQL parses
+/// the next tuple's bytes as the remainder of this one.
+///
+/// A panic is the right answer here, unlike the `DataRow` arity case in
+/// `src/row.rs`: that input comes from the PEER and must never panic, this one
+/// is the caller's own argument list, so it is a programmer error in the sense
+/// slice indexing is. tokio-postgres asserts here too.
+#[compio::test]
+#[should_panic(expected = "expected 2 values but got 1")]
+async fn binary_copy_write_refuses_a_short_value_list() {
+    use compio_postgres::binary_copy::BinaryCopyInWriter;
+    use compio_postgres::types::Type;
+
+    let client = connect().await;
+    client
+        .batch_execute("CREATE TEMP TABLE query_claims_binary_arity (a int4, b text)")
+        .await
+        .expect("create the binary COPY fixture");
+    let sink = client
+        .copy_in("COPY query_claims_binary_arity FROM STDIN BINARY")
+        .await
+        .expect("enter binary COPY");
+    let mut writer = Box::pin(BinaryCopyInWriter::new(sink, &[Type::INT4, Type::TEXT]));
+
+    // Two columns were declared; one value is offered.
+    writer
+        .as_mut()
+        .write(&[&1_i32])
+        .await
+        .expect("unreachable: the arity assert fires first");
+}
