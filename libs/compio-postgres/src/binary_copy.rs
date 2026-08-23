@@ -164,20 +164,15 @@ impl Stream for BinaryCopyOutStream {
         };
 
         check_remaining(&chunk, 2)?;
-        let mut len = chunk.get_i16();
-        if len == -1 {
+        let raw = chunk.get_i16();
+        if raw == -1 {
             return Poll::Ready(None);
         }
 
-        if has_oids {
-            len += 1;
-        }
-        if len as usize != this.types.len() {
-            return Poll::Ready(Some(Err(Error::parse(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("expected {} values but got {}", this.types.len(), len),
-            )))));
-        }
+        let len = match tuple_field_count(raw, has_oids, this.types.len()) {
+            Ok(len) => len,
+            Err(e) => return Poll::Ready(Some(Err(e))),
+        };
 
         let mut ranges = vec![];
         for _ in 0..len {
@@ -239,6 +234,28 @@ fn parse_binary_copy_header(chunk: &mut Cursor<Bytes>) -> Result<Header, Error> 
     chunk.advance(header_extension);
 
     Ok(Header { has_oids })
+}
+
+/// How many values a tuple header declares, checked against the column count
+/// the caller asked for.
+///
+/// `raw` is the tuple's field count straight off the wire and `has_oids` comes
+/// from a flag bit in the file header, so BOTH are chosen by the peer. The
+/// `-1` end-of-data sentinel is handled by the caller; anything else reaching
+/// here is a count.
+fn tuple_field_count(raw: i16, has_oids: bool, expected: usize) -> Result<usize, Error> {
+    // Widened before the adjustment: `raw` reaches `i16::MAX` and the OID adds
+    // one, which overflows an i16 and aborts wherever overflow checks are on.
+    // A negative count still lands far from any real column count once cast,
+    // so it is refused below rather than needing its own arm.
+    let len = i32::from(raw) + i32::from(has_oids);
+    if len as usize != expected {
+        return Err(Error::parse(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("expected {} values but got {}", expected, len),
+        )));
+    }
+    Ok(len as usize)
 }
 
 fn check_remaining(buf: &Cursor<Bytes>, len: usize) -> Result<(), Error> {
@@ -359,6 +376,64 @@ mod tests {
         assert!(
             parse_binary_copy_header(&mut chunk).is_err(),
             "a bad magic value must be rejected"
+        );
+    }
+
+    /// A peer that sets the has-OIDs flag and declares `i16::MAX` fields must
+    /// get an error, not a panic.
+    ///
+    /// Both inputs are chosen by the peer: the flag is bit 16 of the file
+    /// header and the count is the tuple's own `i16`. Adding one to
+    /// `i16::MAX` overflows, and `[profile.dev]` in the workspace root sets no
+    /// `overflow-checks`, so it inherits the default ON and the add ABORTS the
+    /// process. Release wraps instead, and the wrapped value then fails the
+    /// comparison, so this is a debug-profile panic rather than a wrong
+    /// answer -- but a driver should not abort on bytes a peer chose.
+    ///
+    /// No conforming PostgreSQL sends this: has-OIDs went away in PG12 and the
+    /// server's column ceiling is 1664. It takes a hostile or broken peer,
+    /// which is the threat model `tests/hostile_peer.rs` already works in.
+    #[test]
+    fn a_tuple_field_count_at_i16_max_with_oids_errors_rather_than_overflowing() {
+        let error = tuple_field_count(i16::MAX, true, 1)
+            .expect_err("a field count that cannot match must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("error parsing response from server"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// One variable away from the case above: same count, no OID flag, so no
+    /// addition happens. It must still be REFUSED (32767 != 1). This is what
+    /// keeps the test above honest -- were this one to panic as well, the
+    /// overflow would not be the thing the other test caught.
+    #[test]
+    fn the_same_count_without_the_oid_flag_is_refused_without_arithmetic() {
+        let error =
+            tuple_field_count(i16::MAX, false, 1).expect_err("32767 fields cannot match 1 column");
+        assert!(
+            error
+                .to_string()
+                .contains("error parsing response from server"),
+            "unexpected error: {error}"
+        );
+    }
+
+    /// The counting still has to WORK, or "never panics" could be satisfied by
+    /// refusing everything.
+    #[test]
+    fn a_matching_tuple_field_count_is_accepted_with_and_without_oids() {
+        assert_eq!(
+            tuple_field_count(2, false, 2).expect("2 fields against 2 columns"),
+            2
+        );
+        // With the OID flag the wire count is one SHORT of the column count,
+        // because the OID is the extra value.
+        assert_eq!(
+            tuple_field_count(1, true, 2).expect("1 field plus an OID against 2 columns"),
+            2
         );
     }
 }
