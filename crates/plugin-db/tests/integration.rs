@@ -141,7 +141,7 @@ fn row_to_json(row: &compio_postgres::Row) -> Value {
             },
             // JSONB = 3802 — binary format has 1-byte version prefix, strip it
             3802 => match row.raw_value(name) {
-                Some(bytes) if bytes.len() > 1 => {
+                Ok(Some(bytes)) if bytes.len() > 1 => {
                     let json_str = std::str::from_utf8(&bytes[1..]).unwrap_or("null");
                     serde_json::from_str(json_str).unwrap_or(Value::Null)
                 }
@@ -157,7 +157,7 @@ fn row_to_json(row: &compio_postgres::Row) -> Value {
             },
             // TIMESTAMPTZ = 1184 — read raw, return as number
             1184 => match row.raw_value(name) {
-                Some(bytes) if bytes.len() == 8 => {
+                Ok(Some(bytes)) if bytes.len() == 8 => {
                     let pg_usec = i64::from_be_bytes(bytes.try_into().unwrap());
                     let unix_ms = pg_usec / 1_000 + 946_684_800_000;
                     Value::Number(unix_ms.into())
