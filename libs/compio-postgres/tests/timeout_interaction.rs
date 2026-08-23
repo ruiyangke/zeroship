@@ -23,7 +23,21 @@ use std::time::{Duration, Instant};
 #[allow(dead_code)]
 mod common;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+/// Bounds a connect that must SUCCEED -- every scripted peer in this file
+/// accepts, and no test here expects a connect to fail. So this is a hang
+/// detector, and its shortness buys nothing.
+///
+/// It was 1s, the shortest budget in the suite, for a loopback connect to an
+/// in-process stub that normally completes in microseconds. That is the same
+/// shape as the 5s `ADMIN_STATEMENT_TIMEOUT` in `integration.rs`, which lost a
+/// `CREATE SCHEMA` at load 16.4 on 2026-08-23 while a peer project's suite ran.
+///
+/// THE DISTINCTION THAT MATTERS, when reading the other budgets here: a test
+/// asserting a timeout FIRES is robust under load, because load only makes it
+/// fire sooner. One bounding an operation that must COMPLETE is fragile. Only
+/// the second kind should be widened, which is why this changed and the
+/// read/command deadlines below did not -- those are the subject.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const ACQUIRE_TIMEOUT: Duration = Duration::from_millis(150);
 const READ_FIRST_TIMEOUT: Duration = Duration::from_millis(100);
 const COMMAND_FIRST_TIMEOUT: Duration = Duration::from_millis(100);
