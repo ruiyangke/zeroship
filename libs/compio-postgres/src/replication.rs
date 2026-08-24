@@ -1772,13 +1772,6 @@ pub mod pgoutput {
         /// track the chunk state the rest of the transaction needs. Use
         /// [`Decoder`].
         StreamingNeedsDecoder,
-        /// A message inside a stream chunk named a different transaction than
-        /// the chunk it arrived in - the frames are out of step, and decoding
-        /// on would produce values that look real.
-        StreamXidMismatch {
-            expected: u32,
-            carried: u32,
-        },
     }
 
     impl std::fmt::Display for DecodeError {
@@ -1795,11 +1788,6 @@ pub mod pgoutput {
                     "pgoutput: this frame belongs to a streamed transaction, whose framing is \
                      stateful; decode the stream with pgoutput::Decoder rather than the \
                      stateless decode()"
-                ),
-                DecodeError::StreamXidMismatch { expected, carried } => write!(
-                    f,
-                    "pgoutput: a message inside the chunk for xid {expected} carried xid \
-                     {carried}; the stream is out of step"
                 ),
             }
         }
@@ -1958,18 +1946,23 @@ pub mod pgoutput {
         let tag = read_u8(&mut cur)?;
 
         // Inside a chunk, every message that belongs to the transaction
-        // repeats its xid here. Measured on 16.14: `52 000a8649 0003853e ...`
-        // streamed against `52 0003853e ...` not. It is redundant with the
-        // enclosing StreamStart, so rather than read and drop it - which
-        // would make a desynchronised stream decode into plausible nonsense -
-        // it is CHECKED against the chunk we believe is open.
-        if let Some(expected) = stream_xid
-            && matches!(tag, b'R' | b'Y' | b'I' | b'U' | b'D' | b'T' | b'M')
-        {
-            let carried = read_u32(&mut cur)?;
-            if carried != expected {
-                return Err(DecodeError::StreamXidMismatch { expected, carried });
-            }
+        // repeats an xid here. Measured on 16.14: `52 000a8649 0003853e ...`
+        // streamed against `52 0003853e ...` not.
+        //
+        // It is NOT a redundant copy of the chunk's xid, and must not be
+        // checked against one. A change made after a SAVEPOINT carries the
+        // SUBTRANSACTION's xid while the enclosing StreamStart carries the
+        // top-level one. Measured: one streamed transaction with a savepoint
+        // in the middle gave 21 StreamStarts with a single xid 000ab400 and
+        // 4000 Inserts with two, 000ab400 and 000ab401.
+        //
+        // This code did compare them, and returned StreamXidMismatch. That
+        // rejected every streamed transaction containing a subtransaction -
+        // including any PL/pgSQL block with an EXCEPTION handler, which opens
+        // one implicitly. Consumed and passed over here; the message's own
+        // identity comes from the chunk.
+        if stream_xid.is_some() && matches!(tag, b'R' | b'Y' | b'I' | b'U' | b'D' | b'T' | b'M') {
+            let _subtransaction_xid = read_u32(&mut cur)?;
         }
 
         let msg = match tag {
