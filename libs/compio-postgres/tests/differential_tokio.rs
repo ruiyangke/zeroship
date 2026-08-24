@@ -985,3 +985,136 @@ async fn both_drivers_agree_on_copy_in_results() {
          {only_theirs} only theirs"
     );
 }
+
+/// How a portal paged: the rows each fetch returned, in order.
+///
+/// An Execute carrying a row limit ends with PortalSuspended when the limit
+/// was reached and with CommandComplete when the portal ran out. Telling those
+/// apart is the driver's own work, and getting it wrong shows up as a page
+/// boundary in the wrong place or a fetch that never terminates - not as a
+/// wrong value, which is why row COUNTS per page are what this compares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Paging {
+    pages: Vec<usize>,
+    values: Vec<i32>,
+}
+
+/// Row limits chosen around the boundaries.
+///
+/// 10 rows fetched 3 at a time ends exactly on a short final page; fetched 5
+/// at a time divides evenly, so the LAST full page is followed by an empty one
+/// and the driver must not mistake that for more data; 0 means "no limit" and
+/// takes a different protocol path entirely.
+const PAGE_SIZES: [i32; 4] = [3, 5, 10, 0];
+const PORTAL_ROWS: i32 = 10;
+
+fn portal_sql() -> String {
+    format!("SELECT g::int4 FROM generate_series(1, {PORTAL_ROWS}) g ORDER BY g")
+}
+
+fn tokio_paging(url: String, page: i32) -> Paging {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let paging = runtime.block_on(async move {
+            let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let transaction = client.transaction().await.expect("tokio transaction");
+            let statement = transaction.prepare(&portal_sql()).await.expect("prepare");
+            let portal = transaction.bind(&statement, &[]).await.expect("bind");
+
+            let mut pages = Vec::new();
+            let mut values = Vec::new();
+            loop {
+                let rows = transaction
+                    .query_portal(&portal, page)
+                    .await
+                    .expect("tokio query_portal");
+                pages.push(rows.len());
+                for row in &rows {
+                    values.push(row.get::<_, i32>(0));
+                }
+                // A zero limit fetches everything at once, so one call is the
+                // whole story; otherwise stop when a page comes back short.
+                if page == 0 || rows.len() < page as usize {
+                    break;
+                }
+            }
+            drop(transaction);
+            drop(client);
+            let _ = driver.await;
+            Paging { pages, values }
+        });
+        let _ = sender.send(paging);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver.recv().expect("no paging came back from tokio")
+}
+
+/// Portal paging is the driver's own accounting of PortalSuspended against
+/// CommandComplete. Both must page identically.
+#[compio::test]
+async fn both_drivers_agree_on_portal_paging() {
+    let url = common::test_url();
+
+    let (mut client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let mut divergences = Vec::new();
+    for page in PAGE_SIZES {
+        let theirs = tokio_paging(url.clone(), page);
+
+        let transaction = client.transaction().await.expect("transaction");
+        let statement = transaction.prepare(&portal_sql()).await.expect("prepare");
+        let portal = transaction.bind(&statement, &[]).await.expect("bind");
+        let mut pages = Vec::new();
+        let mut values = Vec::new();
+        loop {
+            let rows = transaction
+                .query_portal(&portal, page)
+                .await
+                .expect("query_portal");
+            pages.push(rows.len());
+            for row in &rows {
+                values.push(row.get::<_, i32>(0));
+            }
+            if page == 0 || rows.len() < page as usize {
+                break;
+            }
+        }
+        drop(transaction);
+        let ours = Paging { pages, values };
+
+        if ours != theirs {
+            divergences.push(format!(
+                "  max_rows={page}\n    ours: {ours:?}\n    tokio-postgres: {theirs:?}"
+            ));
+        }
+
+        // Whatever the paging, every row must arrive exactly once and in
+        // order, or two drivers could agree on the same loss.
+        let expected: Vec<i32> = (1..=PORTAL_ROWS).collect();
+        assert_eq!(
+            ours.values, expected,
+            "max_rows={page} did not deliver every row in order"
+        );
+    }
+
+    assert!(
+        divergences.is_empty(),
+        "the two portal implementations page differently:\n{}",
+        divergences.join("\n")
+    );
+}
