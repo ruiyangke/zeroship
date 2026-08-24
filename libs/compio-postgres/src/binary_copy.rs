@@ -122,7 +122,27 @@ where
     P: BorrowToSql,
     I: Iterator<Item = P>,
 {
-    buf.put_i16(types.len() as i16);
+    // REFUSED, not cast. The column types come from the CALLER
+    // (`BinaryCopyInWriter::new` takes them as a slice), so this length is
+    // caller-controlled, and `as i16` wraps SILENTLY - a cast does not panic on
+    // overflow the way arithmetic does, so 32768 columns became -32768 on the
+    // wire in every build. A negative field count desynchronises the COPY
+    // stream, which costs the connection rather than just the row.
+    //
+    // `tuple_field_count` already refuses the same shape on the READ side,
+    // widening to `i32` so a hostile `i16::MAX` cannot overflow. This is that
+    // rule applied to what we write.
+    let field_count = i16::try_from(types.len()).map_err(|_| {
+        Error::encode(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "binary COPY supports at most {} columns, but {} were given",
+                i16::MAX,
+                types.len()
+            ),
+        ))
+    })?;
+    buf.put_i16(field_count);
 
     for (i, (value, type_)) in values.zip(types).enumerate() {
         let idx = buf.len();
@@ -486,6 +506,52 @@ mod tests {
         assert_eq!(
             tuple_field_count(1, true, 2).expect("1 field plus an OID against 2 columns"),
             2
+        );
+    }
+
+    /// A column count that does not fit the wire's `int16` is refused, not
+    /// wrapped.
+    ///
+    /// `BinaryCopyInWriter::new` takes the column types from the CALLER, so the
+    /// count is caller-controlled. `types.len() as i16` wraps SILENTLY - a cast
+    /// does not panic on overflow the way arithmetic does, so this was quiet in
+    /// every build - and 32768 columns became -32768 on the wire. A negative
+    /// field count desynchronises the COPY stream, which costs the connection
+    /// rather than just the row.
+    ///
+    /// The read side already refuses its twin (`tuple_field_count` widens to
+    /// `i32` before comparing, precisely so a hostile `i16::MAX` cannot
+    /// overflow). This is the same rule applied to what we WRITE.
+    #[test]
+    fn a_column_count_that_cannot_fit_the_wire_is_refused() {
+        let types = vec![Type::INT4; usize::from(u16::MAX) + 2];
+        let mut buf = BytesMut::new();
+        let values: Vec<&(dyn ToSql + Sync)> = Vec::new();
+        let error = encode_row(&mut buf, &types, values.into_iter())
+            .expect_err("a column count past i16::MAX must be refused, not wrapped");
+        let chain = std::iter::successors(
+            std::error::Error::source(&error),
+            |e| std::error::Error::source(*e),
+        )
+        .fold(format!("{error}"), |acc, e| format!("{acc}: {e}"));
+        assert!(
+            chain.contains("at most") && chain.contains("columns"),
+            "the refusal should name the column limit and the count given: {chain}"
+        );
+    }
+
+    /// THE CONTROL, one variable: a count that DOES fit is still written, and
+    /// written as itself. Refusing everything would satisfy the test above.
+    #[test]
+    fn a_column_count_that_fits_is_written_unchanged() {
+        let types = vec![Type::INT4, Type::INT4, Type::INT4];
+        let mut buf = BytesMut::new();
+        let values: Vec<&(dyn ToSql + Sync)> = vec![&1i32, &2i32, &3i32];
+        encode_row(&mut buf, &types, values.into_iter()).expect("a normal row encodes");
+        assert_eq!(
+            i16::from_be_bytes([buf[0], buf[1]]),
+            3,
+            "the field count on the wire must be the real column count"
         );
     }
 }
