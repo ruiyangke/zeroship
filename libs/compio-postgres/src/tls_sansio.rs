@@ -245,6 +245,18 @@ pub(crate) fn share(conn: ClientConnection) -> SharedSession {
 /// memcpy of at most a read chunk is the cheaper thing to be sure of.
 fn commit<B: IoBufMut>(buf: &mut B, src: &[u8]) {
     let uninit = buf.as_uninit();
+    // The `min` is a safety floor for `set_len`, NOT an expected outcome. The
+    // caller sizes its fill by this same buffer's capacity, so a shorter buffer
+    // here would mean plaintext rustls has already decrypted gets dropped on
+    // the floor - a silent short read, which the protocol layer would see as a
+    // truncated frame rather than as a bug here. Assert it so a future change
+    // that breaks the sizing fails loudly instead of corrupting a stream.
+    debug_assert!(
+        src.len() <= uninit.len(),
+        "commit would truncate {} decrypted bytes into a {}-byte buffer",
+        src.len(),
+        uninit.len()
+    );
     let n = src.len().min(uninit.len());
     for (slot, byte) in uninit.iter_mut().zip(&src[..n]) {
         // `MaybeUninit::write` is safe: it initializes the slot.
