@@ -124,7 +124,7 @@ fn trigger_function(schema: &str) -> serde_json::Value {
     let table = format!("{}.\"t\"", quote_ident(schema));
     json!({
         "op": "createFunction", "name": "f", "returns": "trigger",
-        "language": "plpgsql",
+        "language": "procedural",
         "body": format!(
             "BEGIN INSERT INTO {table} (\"id\", \"a\") VALUES ('seeded', 'from the trigger'); RETURN NEW; END"
         ),

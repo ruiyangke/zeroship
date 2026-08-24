@@ -124,14 +124,21 @@ pub enum IrLoadError {
     ///
     /// This is the author-facing half of the rule: it fails the artifact at load,
     /// where the author can still edit it. The binding half runs at apply, where
-    /// the effective value is resolved (`zero_migrate::apply::timeout`), because
-    /// an embedder can build the `Migration` directly and a zero can also come
-    /// from executor config that never passes through this gate.
+    /// the effective value is resolved
+    /// (`zero_migrate_backend::timeout::resolve_timeout_ms`), because an embedder
+    /// can build the `Migration` directly and a zero can also come from executor
+    /// config that never passes through this gate.
+    ///
+    /// The MESSAGE names no engine, and cannot: this gate runs on the artifact
+    /// alone, with no target resolved, so it does not know which server will read
+    /// the budget. It says "the database", the same wording the binding half
+    /// emits, rather than telling an author aimed at a third engine what two
+    /// other engines would have done.
     #[error(
-        "indefinite timeout: flags.{field} is 0, which PostgreSQL and MySQL both read as \
-         \"no limit\" rather than a zero budget: the migration would wait indefinitely \
-         while holding the locks it already took. Set a finite number of milliseconds, \
-         or omit {field} to inherit the executor default"
+        "indefinite timeout: flags.{field} is 0, which the database reads as \"no limit\" \
+         rather than a zero budget: the migration would wait indefinitely while holding \
+         the locks it already took. Set a finite number of milliseconds, or omit {field} \
+         to inherit the executor default"
     )]
     IndefiniteTimeoutFlag {
         /// The zero-valued override (`timeout_ms` or `lock_timeout_ms`).

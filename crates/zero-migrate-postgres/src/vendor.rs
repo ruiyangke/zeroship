@@ -40,7 +40,9 @@
 
 use zero_migrate_backend::dml::{quote_ident_checked_for_backend, render_predicate, DmlError};
 use zero_migrate_backend::vendor::{VendorError, VendorStatement};
-use zero_migrate_ir::ir::{is_conservative_type_ref, GrantTarget, Op, Privilege, TriggerAction};
+use zero_migrate_ir::ir::{
+    is_conservative_type_ref, FuncLanguage, GrantTarget, Op, Privilege, TriggerAction,
+};
 
 /// Quote an identifier through the crate's single seam, mapping the error.
 fn qid(ident: &str) -> Result<String, VendorError> {
@@ -77,6 +79,21 @@ fn function_body_dollar_tag(body: &str) -> String {
         i += 1;
     }
     tag
+}
+
+/// This server's `LANGUAGE <token>` spelling for a neutral [`FuncLanguage`].
+///
+/// The IR names the two languages it will accept — the target's own procedural
+/// language, or plain SQL — and stops there, because what the procedural one is
+/// CALLED is a fact about the server. Here it is `plpgsql`, the name this server
+/// registers it under and the name
+/// [`crate::guard::denylist::TRUSTED_LANGUAGES`] already had to spell to scan a
+/// raw `CREATE FUNCTION`. Both spellings are this crate's, and they agree.
+const fn func_language_sql(language: FuncLanguage) -> &'static str {
+    match language {
+        FuncLanguage::Procedural => "plpgsql",
+        FuncLanguage::Sql => "sql",
+    }
 }
 
 /// Single-quote-escape a SQL string literal (`'` ⇒ `''`).
@@ -658,7 +675,7 @@ pub(crate) fn render_vendor_op(
             let tag = function_body_dollar_tag(body);
             let up = format!(
                 "{or_replace} FUNCTION {qname}({args_sql}) RETURNS {returns} LANGUAGE {}{vol} AS {tag}\n{body}\n{tag}",
-                language.as_sql(),
+                func_language_sql(*language),
             );
             // A create that BROUGHT THE FUNCTION INTO BEING is undone by dropping it. A
             // REPLACE is not that: it changes the body of a function that predates the

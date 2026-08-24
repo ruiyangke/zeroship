@@ -658,7 +658,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
             schema: None,
             args: None,
             returns: "trigger".into(),
-            language: zero_migrate::model::ir::FuncLanguage::Plpgsql,
+            language: zero_migrate::model::ir::FuncLanguage::Procedural,
             replace: None,
             volatility: None,
             body: "BEGIN RETURN NEW; END".into(),

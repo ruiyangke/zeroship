@@ -14004,7 +14004,7 @@ columns = [
             {"op":"comment","target":{"kind":"table","schema":"zero_migrate",
                 "name":"platform_registry"},"comment":"Platform route registry"},
             {"op":"createFunction","name":"platform_registry_touch","schema":"zero_migrate",
-                "returns":"trigger","language":"plpgsql","replace":true,
+                "returns":"trigger","language":"procedural","replace":true,
                 "body":"BEGIN RETURN NEW; END;"},
             {"op":"createTrigger","name":"platform_registry_touch_trg",
                 "table":"platform_registry","schema":"zero_migrate","timing":"before",

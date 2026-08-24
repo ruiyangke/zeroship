@@ -544,7 +544,7 @@ mod tests {
                 "name":"platform_registry_target_idx",
                 "columns":[{"kind":"column","name":"target"}]},
             {"op":"createFunction","name":"platform_registry_touch","schema":"zero_migrate",
-                "returns":"trigger","language":"plpgsql","replace":true,
+                "returns":"trigger","language":"procedural","replace":true,
                 "body":"BEGIN RETURN NEW; END;"},
             {"op":"createTrigger","name":"platform_registry_touch_trg",
                 "table":"platform_registry","schema":"zero_migrate","timing":"before",

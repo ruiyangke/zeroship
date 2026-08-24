@@ -1196,9 +1196,25 @@ fn render_sqlite_trigger_stmt(
         } => Ok("SELECT RAISE(IGNORE)".to_string()),
         TriggerStmt::Raise { level, message, .. } => Ok(format!(
             "SELECT RAISE({},{})",
-            level.as_sqlite_sql(),
+            raise_level_sql(*level),
             zero_migrate_backend::dml::sql_string_literal(message)
         )),
+    }
+}
+
+/// The `RAISE(<action>, …)` action token for a neutral [`RaiseLevel`].
+///
+/// This spelling is THIS backend's, and lives here rather than on the IR enum for
+/// the reason the enum's own comment records: a target without `RAISE` reads the
+/// same level and answers in its own grammar — MySQL discards the level and emits
+/// `SIGNAL SQLSTATE`. A shared `as_sql` would have implied one of the two is the
+/// level's real spelling.
+const fn raise_level_sql(level: RaiseLevel) -> &'static str {
+    match level {
+        RaiseLevel::Abort => "ABORT",
+        RaiseLevel::Fail => "FAIL",
+        RaiseLevel::Ignore => "IGNORE",
+        RaiseLevel::Rollback => "ROLLBACK",
     }
 }
 

@@ -272,7 +272,7 @@ pub(super) const STREAMS: &[Stream] = &[
   {"op":"createTable","name":"secrets","columns":[{"name":"id","type":"text","nullable":false},{"name":"app_id","type":"text","nullable":false}],"primaryKey":["id"]},
   {"op":"setRls","table":"secrets","enabled":true,"forced":true},
   {"op":"createPolicy","name":"tenant_isolation","table":"secrets","forCmd":"all","using":{"node":"unaryOp","op":"isNotNull","operand":{"node":"colRef","name":"app_id"}}},
-  {"op":"createFunction","name":"block_tamper","returns":"trigger","language":"plpgsql","replace":true,"body":"BEGIN RAISE EXCEPTION 'append-only'; END;"},
+  {"op":"createFunction","name":"block_tamper","returns":"trigger","language":"procedural","replace":true,"body":"BEGIN RAISE EXCEPTION 'append-only'; END;"},
   {"op":"createTrigger","name":"secrets_block","table":"secrets","timing":"before","events":["update"],"forEach":"row","action":{"kind":"executeFunction","name":"block_tamper"}},
   {"op":"raw","sql":"SELECT set_config('zero_migrate.tenant_app', 'demo', false)","reason":"corpus vehicle"},
   {"op":"dropTrigger","name":"secrets_block","table":"secrets","ifExists":true},

@@ -269,11 +269,18 @@ export type FuncArgMode = "in" | "out" | "inout";
 
 /**
  * **VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately
- * 2-set: `plpgsql`/`sql` ONLY — an untrusted PL (`plpythonu`/`plperlu`/`c`) is
- * REJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list scan
- * even runs.
+ * 2-set: the plain SQL body language, or the TARGET'S OWN procedural language —
+ * nothing else. An externally installed PL (`plpythonu`/`plperlu`/`c`) has no
+ * spelling here at all, so it is REJECTED at DESERIALIZE (serde
+ * unknown-variant) BEFORE the body deny-list scan even runs.
+ *
+ * The 2-set is the ENGINE's security decision, not one server's language
+ * namespace: a target may trust several installed PLs and this vocabulary still
+ * offers exactly two. That is why the set stays closed HERE while the token each
+ * member renders to stays with the backend that renders it — the one place that
+ * knows what its procedural language is called.
  */
-export type FuncLanguage = "plpgsql" | "sql";
+export type FuncLanguage = "procedural" | "sql";
 
 /**
  * **VENDOR** — the CLOSED function-volatility lexicon.

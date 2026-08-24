@@ -657,7 +657,7 @@ fn create_sequence() -> Value {
 fn create_function() -> Value {
     json!({
         "op": "createFunction", "name": "f", "returns": "trigger",
-        "language": "plpgsql", "body": "BEGIN RETURN NEW; END",
+        "language": "procedural", "body": "BEGIN RETURN NEW; END",
     })
 }
 

@@ -102,7 +102,7 @@ fn fixture(schema: &str) -> MigrationIr {
                 "name": "plpgsql_body",
                 "schema": schema,
                 "returns": "int",
-                "language": "plpgsql",
+                "language": "procedural",
                 "body": "BEGIN\n   RETURN   42;\nEND"
             },
             {
@@ -110,7 +110,7 @@ fn fixture(schema: &str) -> MigrationIr {
                 "name": "dollar_quoted",
                 "schema": schema,
                 "returns": "text",
-                "language": "plpgsql",
+                "language": "procedural",
                 "body": "BEGIN\n  RETURN $tag$he said $$hi$$ to me$tag$;\nEND"
             },
             {

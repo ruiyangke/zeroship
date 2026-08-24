@@ -127,7 +127,7 @@ const TS = {
   ].sort(),
   PolicyCmd: ["all", "select", "insert", "update", "delete"].sort(),
   FuncArgMode: ["in", "out", "inout"].sort(),
-  FuncLanguage: ["plpgsql", "sql"].sort(),
+  FuncLanguage: ["procedural", "sql"].sort(),
   FuncVolatility: ["volatile", "stable", "immutable"].sort(),
   TableStrictness: ["strict", "lenient", "off"].sort(),
 };

@@ -1018,7 +1018,7 @@ async fn trigger_and_function_lifecycle() {
           {"name":"payload","type":"text","nullable":true}
         ],"primaryKey":["id"]},
         {"op":"createFunction","name":"trigger_rows_audit",
-         "returns":"trigger","language":"plpgsql",
+         "returns":"trigger","language":"procedural",
          "body":"BEGIN RETURN NEW; END;"},
         {"op":"createTrigger","name":"trigger_rows_audit_trg","table":"trigger_rows",
          "timing":"after","events":["insert","update"],"forEach":"row",

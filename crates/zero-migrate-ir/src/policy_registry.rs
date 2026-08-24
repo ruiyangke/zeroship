@@ -213,7 +213,8 @@ pub const KEY_ACCESS_POLICY: &str = "access.policy";
 pub const KEY_CODE_EXTENSION: &str = "code.extension";
 /// `CREATE/DROP FUNCTION` / `PROCEDURE` (Global Bool grant).
 pub const KEY_CODE_FUNCTION: &str = "code.function";
-/// `PostgreSQL` materialized views (Global Bool grant).
+/// `CREATE/DROP MATERIALIZED VIEW` (Global Bool grant). Gates the op wherever a
+/// backend declares `Capability::MaterializedView`; it is not one product's knob.
 pub const KEY_CODE_MATERIALIZED_VIEW: &str = "code.materialized_view";
 
 // ── runtime — execution & resource behavior ─────────────────────────────────────
@@ -470,7 +471,7 @@ pub fn builtin_registry() -> PolicyRegistry {
             bool_grant(KEY_SCHEMA_CROSS_SCHEMA, ObjectModel::PerSchema, false, "Which schemas this migration may reference (default-deny)."),
             // ── code — programmable / installed objects ─────────────────────────
             bool_grant(KEY_CODE_FUNCTION, ObjectModel::Global, true, "CREATE/DROP FUNCTION."),
-            bool_grant(KEY_CODE_MATERIALIZED_VIEW, ObjectModel::Global, false, "PostgreSQL materialized views."),
+            bool_grant(KEY_CODE_MATERIALIZED_VIEW, ObjectModel::Global, false, "CREATE/DROP MATERIALIZED VIEW."),
             // the CREATE EXTENSION name allowlist (StrSet, Global) — the allowlist IS
             // the knob (empty = deny all); FORBIDDEN_EXTENSIONS still overrides.
             KnobDef {

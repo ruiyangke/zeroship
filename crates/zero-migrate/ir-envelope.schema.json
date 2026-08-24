@@ -1598,7 +1598,7 @@
               ]
             },
             "materialized": {
-              "description": "`PostgreSQL` materialized view. Requires `VendorCapability::MaterializedView`.",
+              "description": "`CREATE MATERIALIZED VIEW`. Requires `VendorCapability::MaterializedView`,\nwhich every target answers for itself.",
               "type": [
                 "boolean",
                 "null"
@@ -3250,7 +3250,7 @@
       ]
     },
     "IrDefault": {
-      "description": "A column DEFAULT (`t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL string (property\nA); the per-dialect default clause is rendered by the shared snapshot-builder\nkernel from this structured value.",
+      "description": "A column DEFAULT (`t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na reference to a named SEQUENCE the column draws from. NEVER a raw SQL string\n(property A); the per-dialect default clause is rendered by the shared\nsnapshot-builder kernel from this structured value.",
       "oneOf": [
         {
           "description": "A typed scalar literal default (constrained numeric domain).",
@@ -3315,7 +3315,7 @@
           "additionalProperties": false
         },
         {
-          "description": "A PostgreSQL `nextval('<sequence>'::regclass)` default.",
+          "description": "A default drawn from a named SEQUENCE. The IR carries the sequence reference, never a spelling: which function call (and which cast, if any) expresses \"the next value of this sequence\" is the target's.",
           "type": "object",
           "properties": {
             "nextval": {
@@ -7007,15 +7007,15 @@
       ]
     },
     "FuncLanguage": {
-      "description": "**VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately\n2-set: `plpgsql`/`sql` ONLY — an untrusted PL (`plpythonu`/`plperlu`/`c`) is\nREJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list scan\neven runs.",
+      "description": "**VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately\n2-set: the plain SQL body language, or the TARGET'S OWN procedural language —\nnothing else. An externally installed PL (`plpythonu`/`plperlu`/`c`) has no\nspelling here at all, so it is REJECTED at DESERIALIZE (serde\nunknown-variant) BEFORE the body deny-list scan even runs.\n\nThe 2-set is the ENGINE's security decision, not one server's language\nnamespace: a target may trust several installed PLs and this vocabulary still\noffers exactly two. That is why the set stays closed HERE while the token each\nmember renders to stays with the backend that renders it — the one place that\nknows what its procedural language is called.",
       "oneOf": [
         {
-          "description": "`LANGUAGE plpgsql`.",
+          "description": "The target's own procedural language — the one it accepts a `BEGIN … END`\nbody in, whatever that language is named on that server.",
           "type": "string",
-          "const": "plpgsql"
+          "const": "procedural"
         },
         {
-          "description": "`LANGUAGE sql`.",
+          "description": "The plain SQL body language (`LANGUAGE sql`).",
           "type": "string",
           "const": "sql"
         }

@@ -816,9 +816,9 @@ pub struct SequenceRef {
 /// A column DEFAULT (`t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —
 /// either a typed scalar literal, a closed expression AST, an EMPTY container
 /// default for JSON/text-array columns, a non-empty JSON value default for JSON
-/// columns, or a `PostgreSQL` sequence `nextval(...)` reference. NEVER a raw SQL
-/// string (property A); the per-dialect default clause is rendered by the shared
-/// snapshot-builder kernel from this structured value.
+/// columns, or a reference to a named SEQUENCE the column draws from. NEVER a raw
+/// SQL string (property A); the per-dialect default clause is rendered by the
+/// shared snapshot-builder kernel from this structured value.
 /// Deliberately richer than the DML [`IrValue`] slot: container/json/nextval
 /// defaults carry real distinctions that are not scalar-or-expression values.
 #[derive(Debug, Clone, PartialEq)]
@@ -846,7 +846,10 @@ pub enum IrDefault {
         /// The JSON value.
         value: IrJsonValue,
     },
-    /// A `PostgreSQL` `nextval('<sequence>'::regclass)` default.
+    /// A default drawn from a named SEQUENCE. The IR carries the sequence
+    /// REFERENCE, never a spelling: which function call (and which cast, if any)
+    /// expresses "the next value of this sequence" is the target's, and is
+    /// rendered by the backend that resolves the reference.
     Nextval {
         /// Closed sequence reference.
         sequence: SequenceRef,
@@ -936,7 +939,7 @@ impl JsonSchema for IrDefault {
         let sequence_ref = serde_json::to_value(g.subschema_for::<SequenceRef>())
             .expect("SequenceRef schema ref serializes");
         schemars::json_schema!({
-            "description": "A column DEFAULT (`t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na PostgreSQL sequence `nextval(...)` reference. NEVER a raw SQL string (property\nA); the per-dialect default clause is rendered by the shared snapshot-builder\nkernel from this structured value.",
+            "description": "A column DEFAULT (`t.*` `.default(value | (c) => Expr)`). A CLOSED carrier —\neither a typed scalar literal, a closed expression AST, an EMPTY container default\nfor JSON/text-array columns, a non-empty JSON value default for JSON columns, or\na reference to a named SEQUENCE the column draws from. NEVER a raw SQL string\n(property A); the per-dialect default clause is rendered by the shared\nsnapshot-builder kernel from this structured value.",
             "oneOf": [
                 {
                     "description": "A typed scalar literal default (constrained numeric domain).",
@@ -991,7 +994,7 @@ impl JsonSchema for IrDefault {
                     "additionalProperties": false
                 },
                 {
-                    "description": "A PostgreSQL `nextval('<sequence>'::regclass)` default.",
+                    "description": "A default drawn from a named SEQUENCE. The IR carries the sequence reference, never a spelling: which function call (and which cast, if any) expresses \"the next value of this sequence\" is the target's.",
                     "type": "object",
                     "properties": {
                         "nextval": {
@@ -2452,18 +2455,13 @@ pub enum RaiseLevel {
     Rollback,
 }
 
-impl RaiseLevel {
-    /// `SQLite`'s uppercase token spelling.
-    #[must_use]
-    pub const fn as_sqlite_sql(self) -> &'static str {
-        match self {
-            Self::Abort => "ABORT",
-            Self::Fail => "FAIL",
-            Self::Ignore => "IGNORE",
-            Self::Rollback => "ROLLBACK",
-        }
-    }
-}
+// `RaiseLevel` carries no `as_*_sql`. The four SQL TOKENS it used to hand out
+// belong to the one backend whose `RAISE(<level>, …)` grammar spells them, and
+// they live there now, beside the renderer that writes them —
+// `raise_level_sql` in `zero-migrate-sqlite`'s `dml`. A target with a different
+// grammar reads the same level and answers differently: the MySQL renderer
+// discards it entirely and emits `SIGNAL SQLSTATE`, which is why the enum stays
+// here and only the spelling left.
 
 /// **VENDOR** — the CLOSED `CREATE POLICY … FOR <cmd>` lexicon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2496,27 +2494,24 @@ impl PolicyCmd {
 }
 
 /// **VENDOR** — the CLOSED `CREATE FUNCTION … LANGUAGE` lexicon. A deliberately
-/// 2-set: `plpgsql`/`sql` ONLY — an untrusted PL (`plpythonu`/`plperlu`/`c`) is
-/// REJECTED at DESERIALIZE (serde unknown-variant) BEFORE the body deny-list scan
-/// even runs.
+/// 2-set: the plain SQL body language, or the TARGET'S OWN procedural language —
+/// nothing else. An externally installed PL (`plpythonu`/`plperlu`/`c`) has no
+/// spelling here at all, so it is REJECTED at DESERIALIZE (serde
+/// unknown-variant) BEFORE the body deny-list scan even runs.
+///
+/// The 2-set is the ENGINE's security decision, not one server's language
+/// namespace: a target may trust several installed PLs and this vocabulary still
+/// offers exactly two. That is why the set stays closed HERE while the token each
+/// member renders to stays with the backend that renders it — the one place that
+/// knows what its procedural language is called.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum FuncLanguage {
-    /// `LANGUAGE plpgsql`.
-    Plpgsql,
-    /// `LANGUAGE sql`.
+    /// The target's own procedural language — the one it accepts a `BEGIN … END`
+    /// body in, whatever that language is named on that server.
+    Procedural,
+    /// The plain SQL body language (`LANGUAGE sql`).
     Sql,
-}
-
-impl FuncLanguage {
-    /// The SQL spelling (the lower-case language token).
-    #[must_use]
-    pub const fn as_sql(self) -> &'static str {
-        match self {
-            Self::Plpgsql => "plpgsql",
-            Self::Sql => "sql",
-        }
-    }
 }
 
 /// **VENDOR** — the CLOSED function-volatility lexicon.
@@ -3438,7 +3433,8 @@ pub enum Op {
         /// `CREATE OR REPLACE VIEW` on Postgres; `SQLite` lowers to drop+create.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replace: Option<bool>,
-        /// `PostgreSQL` materialized view. Requires `VendorCapability::MaterializedView`.
+        /// `CREATE MATERIALIZED VIEW`. Requires `VendorCapability::MaterializedView`,
+        /// which every target answers for itself.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         materialized: Option<bool>,
     },

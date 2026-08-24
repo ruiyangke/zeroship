@@ -75,7 +75,7 @@ export function schema() {
     name: "audit_events_block_tamper",
     schema: "zero_migrate",
     returns: "trigger",
-    language: "plpgsql",
+    language: "procedural",
     replace: true,
     body: "BEGIN RAISE EXCEPTION 'audit_events is append-only'; END;",
   });

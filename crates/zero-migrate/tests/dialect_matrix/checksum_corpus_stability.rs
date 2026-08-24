@@ -116,8 +116,20 @@ fn corpus_checksums_are_byte_stable() {
     // rename rather than a wire-format drift. Aggregate:
     // 0590adee7a3048a19689e2f2632c860d59797afc5e72c3d19705dbc85f360471 ->
     // 7b960d132e2487c27567e906cec97834bf12222a9ca429b375d006072835b7c3.
+    //
+    // Re-recorded again when `FuncLanguage`'s procedural-language variant stopped
+    // spelling one server's product in the neutral vocabulary: the variant is
+    // `Procedural` and the wire tag is `"procedural"`, with the `plpgsql` token it
+    // renders to now living in `zero-migrate-postgres`. Same review, same tool, and
+    // again EXACTLY ONE of the 92 rows moved --
+    //   -createFunction|base|57a4260da7befada75c0e8c0e34ebc21d88f7835cc984c3a04be10b008fabdc9
+    //   +createFunction|base|d37ce769303e359ab9bbce5dbf6fdfe0128d377e46448ed1d5e423f5f84251c5
+    // -- which is the row whose op carries a `language` field, and the other 91 are
+    // byte-identical. Aggregate:
+    // 7b960d132e2487c27567e906cec97834bf12222a9ca429b375d006072835b7c3 ->
+    // 127f7b8221fd98393e7fe8a704e5ec85eae387c1e8d84ace62418501a521983b.
     const EXPECTED_AGGREGATE: &str =
-        "7b960d132e2487c27567e906cec97834bf12222a9ca429b375d006072835b7c3";
+        "127f7b8221fd98393e7fe8a704e5ec85eae387c1e8d84ace62418501a521983b";
     assert_eq!(
         aggregate,
         EXPECTED_AGGREGATE,
