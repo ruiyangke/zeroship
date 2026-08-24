@@ -123,14 +123,21 @@ pub const CODE_AGGREGATE_IN_SCALAR_CONTEXT: &str = "AGGREGATE_IN_SCALAR_CONTEXT"
 /// A sequence carries a semantically invalid option (`increment = 0`,
 /// `cache < 1`, or `minValue > maxValue`).
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
-/// **VENDOR (`zero-migrate`)** — a privileged vendor op (role/grant/RLS/
+/// **VENDOR (`zero-migrate`)** — a privileged op (role/grant/RLS/
 /// policy/trigger/function/extension/schema/`raw`) whose required
 /// [`VendorCapability`](crate::capability::VendorCapability) is NOT granted by the
 /// active capability set. The Confined creator/AI posture
-/// grants NO vendor capability, so EVERY vendor op is refused fail-closed at
+/// grants NO vendor capability, so EVERY such op is refused fail-closed at
 /// validate, BEFORE lower — the first gate. The redundant lower gate
 /// (the rendered SQL hits the Confined deny-list) means a future refactor
 /// that drops this gate still fails closed.
+///
+/// The list above is the CAPABILITY-GATED set, which is not the same set as the
+/// privileged catalog-object family exactly one backend renders. A trigger is a
+/// member here by AUTHORITY: every backend renders one, so an artifact carrying a
+/// trigger still reaches every dialect. Reading one membership off the other is the
+/// mistake this sentence used to invite, back when it named triggers in a list the
+/// gate could not actually see them in.
 pub const CODE_VENDOR_OP_DENIED: &str = "VENDOR_OP_DENIED";
 /// A `raw` op must carry a non-empty audit reason for using the raw SQL escape.
 pub const CODE_RAW_REASON_REQUIRED: &str = "RAW_REASON_REQUIRED";

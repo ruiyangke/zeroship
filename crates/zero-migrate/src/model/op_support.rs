@@ -863,9 +863,13 @@ fn create_trigger_variant(
     "bodySimple"
 }
 
-/// All VENDOR capabilities this op requires. Most ops require at most one; a
-/// raw materialized view requires both the raw-view-body and materialized-view
-/// capabilities.
+/// All VENDOR capabilities this op's AUTHOR must hold. Most ops require at most
+/// one; a raw materialized view requires both the raw-view-body and
+/// materialized-view capabilities, and a trigger executing a named function requires
+/// both the trigger and the function capabilities.
+///
+/// This is not the list of primitives the op RENDERS - see
+/// [`rendered_vendor_capabilities`], which is the one a backend can answer for.
 #[must_use]
 pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapability> {
     use crate::model::capability::VendorCapability as C;

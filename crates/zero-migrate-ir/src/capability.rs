@@ -1,9 +1,12 @@
 //! The VENDOR capability-composition policy.
 //!
 //! The privileged `zero-migrate` primitives (roles, grants, RLS/policies,
-//! functions, extensions, schemas, the gated raw escape) are gated NOT
+//! functions, triggers, extensions, schemas, the gated raw escape) are gated NOT
 //! by a hard-coded "platform" profile name but by a **composition of boolean
-//! capability flags** + a schema allowlist. A vendor op declares the closed set of
+//! capability flags** + a schema allowlist. Every one of them but the trigger is
+//! also confined to the single backend that renders that family; the trigger is
+//! gated for AUTHORITY while staying portable, and [`VendorCapability::Trigger`]
+//! records why. A vendor op declares the closed set of
 //! [`VendorCapability`] values it needs (computed by
 //! `zero_migrate::model::op_support::vendor_capabilities`); the active
 //! [`VendorCapabilities`] set either grants them (the op lowers) or REFUSES it
