@@ -23,8 +23,9 @@ use compio_postgres::{Client, NoTls};
 #[allow(dead_code)]
 mod common;
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -43,10 +44,7 @@ async fn connect_client(url: &str) -> Client {
 /// A real table column carries the catalog's own oid, attnum and typmod.
 #[compio::test]
 async fn a_table_column_reports_its_catalog_identity() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let table = common::test_object_name("cpg_colmeta");
 
@@ -115,10 +113,7 @@ async fn a_table_column_reports_its_catalog_identity() {
 /// test above would still pass and only this one would fail.
 #[compio::test]
 async fn a_computed_column_has_no_table_or_attribute_number() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let statement = client

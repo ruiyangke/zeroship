@@ -26,8 +26,9 @@ use compio_postgres::{Client, NoTls};
 #[allow(dead_code)]
 mod common;
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -67,10 +68,7 @@ async fn row_count(client: &Client, table: &str) -> i64 {
 /// One `batch_execute` carrying a failing statement rolls the whole thing back.
 #[compio::test]
 async fn a_failure_inside_one_batch_rolls_back_its_earlier_statements() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let table = probe_table(&client, "one").await;
 
@@ -96,10 +94,7 @@ async fn a_failure_inside_one_batch_rolls_back_its_earlier_statements() {
 /// everything unconditionally.
 #[compio::test]
 async fn the_same_statements_sent_separately_are_not_atomic() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let table = probe_table(&client, "two").await;
 
@@ -126,10 +121,7 @@ async fn the_same_statements_sent_separately_are_not_atomic() {
 /// durable past the failing statement that follows it.
 #[compio::test]
 async fn an_explicit_commit_inside_a_batch_makes_earlier_work_durable() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let table = probe_table(&client, "commit").await;
 
