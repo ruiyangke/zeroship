@@ -21,7 +21,7 @@
 
 use compio_postgres::config::SslMode;
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
-use compio_postgres::{Config, NoTls};
+use compio_postgres::Config;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -276,7 +276,8 @@ fn test_url() -> String {
     common::test_url()
 }
 
-/// The credentials and database from the test DSN, with no host or port.
+/// The credentials, database and TLS settings from the test DSN, with no host
+/// or port.
 ///
 /// The multi-host tests below need to place the live endpoint at a chosen
 /// position in a list, which a DSN's single host cannot express.
@@ -291,6 +292,12 @@ fn credentials_only(url: &str) -> Config {
     }
     if let Some(dbname) = parsed.get_dbname() {
         config.dbname(dbname);
+    }
+    config.ssl_mode(parsed.get_ssl_mode());
+    config.ssl_root_cert(parsed.get_ssl_root_cert().clone());
+    config.ssl_cert_mode(parsed.get_ssl_cert_mode());
+    if let Some(cert) = parsed.get_ssl_cert() {
+        config.ssl_cert(cert);
     }
     config
 }
