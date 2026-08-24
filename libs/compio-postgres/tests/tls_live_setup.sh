@@ -2,7 +2,7 @@
 # Stand up the PostgreSQL servers `tests/tls_live.rs` needs, and write the
 # descriptor that test reads.
 #
-# FIVE servers, because each one is the control for a claim that would
+# SIX servers, because each one is the control for a claim that would
 # otherwise be unfalsifiable:
 #
 #   tls       ssl=on, TLS 1.2 only, certificate for `localhost` signed by a
@@ -24,8 +24,11 @@
 #   clientcert ssl=on with ssl_ca_file and `cert` authentication: the client
 #             MUST present a certificate. The only way to tell "sslcert and
 #             sslkey are parsed" from "sslcert and sslkey are sent and used".
+#   directtls PostgreSQL 18, ssl=on, using the same certificate as `tls`. This
+#             is the positive server for direct SSL negotiation; `tls` remains
+#             the PostgreSQL 16 discriminator.
 #
-#   usage: tests/tls_live_setup.sh [tls_port] [plain_port] [mismatch_port] [sslonly_port] [clientcert_port]
+#   usage: tests/tls_live_setup.sh [tls_port] [plain_port] [mismatch_port] [sslonly_port] [clientcert_port] [directtls_port]
 #          tests/tls_live_setup.sh --down     # remove the containers
 #
 # Everything it generates lives in tests/data/live/, which is gitignored.
@@ -38,7 +41,7 @@
 # tree still holds the old ca.crt - so every connection from the first tree
 # fails verify-full and reports `error performing TLS handshake`, which reads
 # like a driver bug. Measured 2026-08-24, it cost a wrong diagnosis. Give a
-# concurrent worktree its own ports (all five are positional) and re-run this
+# concurrent worktree its own ports (all six are positional) and re-run this
 # in your own tree before trusting a TLS result.
 set -euo pipefail
 
@@ -49,13 +52,14 @@ plain_name=compio-pg-plain-test
 mismatch_name=compio-pg-mismatch-test
 sslonly_name=compio-pg-sslonly-test
 clientcert_name=compio-pg-clientcert-test
+directtls_name=compio-pg-directtls-test
 password=compio-postgres-tls-test
 key_password=compio-postgres-encrypted-key-test
 
 if [ "${1:-}" = "--down" ]; then
-    docker rm -f "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name" >/dev/null 2>&1 || true
+    docker rm -f "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name" "$directtls_name" >/dev/null 2>&1 || true
     rm -f "$live/tls_live.conf"
-    echo "removed $tls_name, $plain_name, $mismatch_name, $sslonly_name, $clientcert_name"
+    echo "removed $tls_name, $plain_name, $mismatch_name, $sslonly_name, $clientcert_name, $directtls_name"
     exit 0
 fi
 
@@ -64,6 +68,7 @@ plain_port="${2:-5448}"
 mismatch_port="${3:-5449}"
 sslonly_port="${4:-5450}"
 clientcert_port="${5:-5451}"
+directtls_port="${6:-5452}"
 
 # Wipe the previous run's material, but keep the .gitignore that keeps all of
 # it out of the repository - `git add -A` after a setup run must not offer to
@@ -179,7 +184,7 @@ EOF
 sudo chown 0:999 server.key mismatch.key
 sudo chmod 640 server.key mismatch.key
 
-docker rm -f "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name" >/dev/null 2>&1 || true
+docker rm -f "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name" "$directtls_name" >/dev/null 2>&1 || true
 
 start_pg() {
     local name=$1 port=$2
@@ -219,9 +224,21 @@ docker run -d --name "$plain_name" \
     -p "127.0.0.1:$plain_port:5432" \
     postgres:16 >/dev/null
 
-for name in "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name"; do
+docker run -d --name "$directtls_name" \
+    -e POSTGRES_PASSWORD="$password" \
+    -e POSTGRES_HOST_AUTH_METHOD=scram-sha-256 \
+    -p "127.0.0.1:$directtls_port:5432" \
+    -v "$live:/certs:ro" \
+    postgres:18 \
+    -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key >/dev/null
+
+for name in "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name" "$directtls_name"; do
     for _ in $(seq 60); do
-        if docker exec "$name" pg_isready -q -U postgres 2>/dev/null; then break; fi
+        # The image briefly starts a bootstrap postmaster before replacing PID
+        # 1 with the final server. Do not mistake that transient server for the
+        # fixture being ready, then race its intentional shutdown below.
+        if docker exec "$name" sh -c '[ "$(cat /proc/1/comm)" = postgres ]' 2>/dev/null && \
+            docker exec "$name" pg_isready -q -U postgres 2>/dev/null; then break; fi
         sleep 1
     done
     docker exec "$name" pg_isready -U postgres
@@ -308,6 +325,7 @@ plain_url=host=localhost port=$plain_port user=postgres password=$password dbnam
 mismatch_url=host=localhost port=$mismatch_port user=postgres password=$password dbname=postgres
 sslonly_url=host=localhost port=$sslonly_port user=postgres password=$password dbname=postgres
 clientcert_url=host=localhost port=$clientcert_port user=postgres dbname=postgres
+directtls_url=host=localhost port=$directtls_port user=postgres password=$password dbname=postgres
 ca=$live/ca.crt
 client_cert=$live/client.crt
 client_key=$live/client.key
