@@ -21,21 +21,29 @@
 //! S  6 bytes  53 000a8649 01     tag, xid u32, first-segment flag u8
 //! E  1 byte   45                 tag only, no payload
 //! c 30 bytes  63 000a8649 00 ... tag, xid, flags u8, 3 x 8-byte fields
-//! A  9 bytes  41 000a864b 000a864b   tag, xid u32, subxid u32
+//! A  9 bytes  41 000a864b 000a864b   on: tag, xid u32, subxid u32
+//! A 25 bytes  41 000a864b 000a864b ... parallel: plus abort LSN and timestamp
 //! ```
 //!
-//! `A` measured identical at proto_version 2, 3 and 4, and with `two_phase`
-//! both on and off.
+//! The 9-byte `A` was observed with streaming `on` at proto_version 2 through
+//! 4, with `two_phase` both on and off. The 25-byte `A` was separately
+//! observed with streaming `parallel` at proto_version 4. All observations
+//! came from PostgreSQL 16.14 on 2026-08-24 while the decoder still returned
+//! `DecodeError::UnknownTag` for these tags.
 
-use compio_postgres::replication::pgoutput::{self, PgOutputMessage};
+use compio_postgres::error::SqlState;
+use compio_postgres::replication::pgoutput::{self, PgOutputMessage, TupleColumn};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions, Streaming};
 use compio_postgres::{Client, NoTls};
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 #[allow(dead_code)]
 mod common;
 
 const WATCHDOG: Duration = Duration::from_secs(120);
+const SLOT_DETACH_ATTEMPTS: usize = 100;
+const SLOT_DETACH_RETRY: Duration = Duration::from_millis(10);
 
 /// Small enough that a few thousand rows spill, so the test does not have to
 /// write the 64 MB the default would demand. This is the server's minimum.
@@ -64,50 +72,69 @@ async fn client() -> Client {
 /// Collect messages until the transaction ends, however it ends: a
 /// non-streamed `Commit`, a streamed `StreamCommit`, or a `StreamAbort`.
 async fn collect(slot: &str, streaming: Streaming, publication: &str) -> Vec<PgOutputMessage> {
+    try_collect(slot, streaming, publication)
+        .await
+        .unwrap_or_else(|error| panic!("a live frame failed to decode: {error}"))
+}
+
+async fn try_collect(
+    slot: &str,
+    streaming: Streaming,
+    publication: &str,
+) -> Result<Vec<PgOutputMessage>, String> {
     let mut config = common::replication_config("cpg_streaming");
     // The walsender is the process that decodes, so the limit has to be set
     // on ITS session. Startup options are the only channel a replication
     // connection has for that - it never runs a `SET`.
     config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
 
-    let mut replication = compio_postgres::replication::connect_replication(NoTls, &config)
+    let replication = compio_postgres::replication::connect_replication(NoTls, &config)
         .await
-        .expect("replication connect failed");
+        .map_err(|error| {
+            format!(
+                "replication connect failed: {}",
+                common::error_chain(&error)
+            )
+        })?;
+
+    let proto_version = match streaming {
+        Streaming::Parallel => 4,
+        Streaming::Off | Streaming::On => 2,
+    };
 
     let mut stream = replication
         .start_logical_replication(StartReplicationOptions {
             slot_name: slot,
             publication_names: &[publication],
-            proto_version: 2,
+            proto_version,
             streaming,
             ..Default::default()
         })
         .await
-        .unwrap_or_else(|error| {
-            panic!("START_REPLICATION failed: {}", common::error_chain(&error))
-        });
+        .map_err(|error| format!("START_REPLICATION failed: {}", common::error_chain(&error)))?;
 
     let mut decoder = pgoutput::Decoder::new();
     let mut messages = Vec::new();
     loop {
-        match stream.next().await.expect("replication stream failed") {
+        match stream.next().await.map_err(|error| {
+            format!("replication stream failed: {}", common::error_chain(&error))
+        })? {
             Some(ReplicationMessage::XLogData { body, .. }) => {
-                let message = decoder.decode(&body).unwrap_or_else(|error| {
-                    panic!("a live frame failed to decode: {error:?}");
-                });
-                let done = matches!(
-                    message,
-                    PgOutputMessage::Commit { .. }
-                        | PgOutputMessage::StreamCommit { .. }
-                        | PgOutputMessage::StreamAbort { .. }
-                );
+                let message = decoder
+                    .decode(&body)
+                    .map_err(|error| format!("{error:?}"))?;
+                let done = match &message {
+                    PgOutputMessage::Commit { .. } | PgOutputMessage::StreamCommit { .. } => true,
+                    PgOutputMessage::StreamAbort { xid, subxid, .. } => xid == subxid,
+                    _ => false,
+                };
                 messages.push(message);
                 if done {
-                    return messages;
+                    return Ok(messages);
                 }
             }
             Some(ReplicationMessage::PrimaryKeepalive { .. }) => continue,
-            None => return messages,
+            None => return Ok(messages),
         }
     }
 }
@@ -166,19 +193,92 @@ impl Fixture {
             .expect("bulk transaction failed");
     }
 
-    async fn drop_all(&self) {
-        let _ = self
-            .setup
+    async fn write_big_subtransaction(&self) {
+        self.setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{s}')
-                   FROM pg_replication_slots WHERE slot_name = '{s}';
-                 DROP PUBLICATION IF EXISTS {p};
+                "BEGIN;
+                 INSERT INTO {t}
+                    SELECT g, repeat('x', 200)
+                      FROM generate_series(1, {half}) g;
+                 SAVEPOINT streamed_child;
+                 INSERT INTO {t}
+                    SELECT g, repeat('x', 200)
+                      FROM generate_series({child_start}, {ROWS}) g;
+                 RELEASE SAVEPOINT streamed_child;
+                 COMMIT;",
+                t = self.table,
+                half = ROWS / 2,
+                child_start = ROWS / 2 + 1,
+            ))
+            .await
+            .expect("bulk subtransaction failed");
+    }
+
+    async fn write_rolled_back_big_subtransaction(&self) {
+        self.setup
+            .batch_execute(&format!(
+                "BEGIN;
+                 INSERT INTO {t} VALUES (1, 'top before');
+                 SAVEPOINT streamed_child;
+                 INSERT INTO {t}
+                    SELECT g, repeat('x', 200)
+                      FROM generate_series(2, {ROWS}) g;
+                 ROLLBACK TO SAVEPOINT streamed_child;
+                 INSERT INTO {t} VALUES ({after}, 'top after');
+                 COMMIT;",
+                t = self.table,
+                after = ROWS + 1,
+            ))
+            .await
+            .expect("rolled-back bulk subtransaction failed");
+    }
+
+    async fn drop_all(&self) {
+        // Dropping the client side of a replication stream closes its socket,
+        // but the walsender may remain attached to the slot for a few more
+        // scheduler turns. Retry that one expected race before dropping the
+        // publication and table; putting all three statements in one batch
+        // leaves every fixture object behind when the first attempt sees
+        // SQLSTATE 55006.
+        let mut last_error = None;
+        for _ in 0..SLOT_DETACH_ATTEMPTS {
+            match self
+                .setup
+                .batch_execute(&format!(
+                    "SELECT pg_drop_replication_slot(slot_name)
+                       FROM pg_replication_slots WHERE slot_name = '{s}';",
+                    s = self.slot,
+                ))
+                .await
+            {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(error)
+                    if error
+                        .code()
+                        .is_some_and(|code| code == &SqlState::OBJECT_IN_USE) =>
+                {
+                    last_error = Some(error);
+                }
+                Err(error) => panic!("unexpected replication slot cleanup failure: {error}"),
+            }
+            compio::time::sleep(SLOT_DETACH_RETRY).await;
+        }
+        if let Some(error) = last_error {
+            panic!("replication slot did not detach for cleanup: {error}");
+        }
+
+        self.setup
+            .batch_execute(&format!(
+                "DROP PUBLICATION IF EXISTS {p};
                  DROP TABLE IF EXISTS {t};",
-                s = self.slot,
                 p = self.publication,
                 t = self.table,
             ))
-            .await;
+            .await
+            .expect("fixture cleanup failed");
     }
 }
 
@@ -202,7 +302,7 @@ async fn a_streamed_transaction_arrives_in_chunks_and_commits_as_a_stream() {
             .count();
         let inserts = messages
             .iter()
-            .filter(|m| matches!(m, PgOutputMessage::Insert { .. }))
+            .filter(|message| matches!(message, PgOutputMessage::Insert { .. }))
             .count();
 
         assert!(
@@ -237,6 +337,97 @@ async fn a_streamed_transaction_arrives_in_chunks_and_commits_as_a_stream() {
     })
     .await
     .expect("the streaming test exceeded its watchdog");
+}
+
+/// Changes made under a SAVEPOINT carry the subtransaction xid, not the
+/// top-level xid in StreamStart. Both are valid members of the same streamed
+/// transaction and must decode rather than being treated as corrupt framing.
+#[compio::test]
+async fn a_streamed_subtransaction_preserves_its_own_xid() {
+    compio::time::timeout(WATCHDOG, async {
+        let fixture = Fixture::create("cpg stream subxid").await;
+        fixture.write_big_subtransaction().await;
+        let decoded = try_collect(&fixture.slot, Streaming::On, &fixture.publication).await;
+        fixture.drop_all().await;
+
+        let messages = decoded.unwrap_or_else(|error| {
+            panic!("a valid streamed subtransaction failed to decode: {error}")
+        });
+        let top_xid = messages
+            .iter()
+            .find_map(|message| match message {
+                PgOutputMessage::StreamCommit { xid, .. } => Some(*xid),
+                _ => None,
+            })
+            .expect("the streamed transaction had no StreamCommit");
+        let mut carried_xids = BTreeSet::new();
+        let mut ids = BTreeSet::new();
+        for message in &messages {
+            if let PgOutputMessage::Insert {
+                xid: Some(xid),
+                new_tuple,
+                ..
+            } = message
+            {
+                carried_xids.insert(*xid);
+                let Some(TupleColumn::Text(id)) = new_tuple.columns.first() else {
+                    panic!("streamed insert had no text id: {new_tuple:?}");
+                };
+                ids.insert(id.parse::<i32>().expect("streamed id was not an i32"));
+            }
+        }
+
+        assert_eq!(ids.len(), ROWS as usize, "every streamed row must decode");
+        assert_eq!(ids.first(), Some(&1));
+        assert_eq!(ids.last(), Some(&ROWS));
+        assert!(
+            carried_xids.contains(&top_xid),
+            "top-level changes must retain xid {top_xid}: {carried_xids:?}"
+        );
+        assert!(
+            carried_xids.iter().any(|xid| *xid != top_xid),
+            "SAVEPOINT changes must retain their subxid, not be relabelled as {top_xid}"
+        );
+    })
+    .await
+    .expect("the streamed-subtransaction test exceeded its watchdog");
+}
+
+/// A child StreamAbort invalidates only the messages carrying its `subxid`;
+/// the parent transaction remains live and must still reach StreamCommit.
+#[compio::test]
+async fn a_child_stream_abort_does_not_end_its_parent_transaction() {
+    compio::time::timeout(WATCHDOG, async {
+        let fixture = Fixture::create("cpg stream child abort").await;
+        fixture.write_rolled_back_big_subtransaction().await;
+        let decoded = try_collect(&fixture.slot, Streaming::On, &fixture.publication).await;
+        fixture.drop_all().await;
+
+        let messages = decoded
+            .unwrap_or_else(|error| panic!("a valid child abort failed to decode: {error}"));
+        let (top_xid, child_xid, abort_index) = messages
+            .iter()
+            .enumerate()
+            .find_map(|(index, message)| match message {
+                PgOutputMessage::StreamAbort { xid, subxid, .. } if xid != subxid => {
+                    Some((*xid, *subxid, index))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no child StreamAbort among {messages:?}"));
+
+        assert!(messages[abort_index + 1..].iter().any(
+            |message| matches!(message, PgOutputMessage::StreamCommit { xid, .. } if *xid == top_xid)
+        ));
+        assert!(messages.iter().any(|message| {
+            matches!(message, PgOutputMessage::Insert { xid: Some(xid), .. } if *xid == child_xid)
+        }));
+        assert!(messages.iter().any(|message| {
+            matches!(message, PgOutputMessage::Insert { xid: Some(xid), .. } if *xid == top_xid)
+        }));
+    })
+    .await
+    .expect("the child stream-abort test exceeded its watchdog");
 }
 
 /// The control: the same transaction, streaming off, is one Begin/Commit pair
@@ -281,7 +472,7 @@ async fn a_rolled_back_streamed_transaction_ends_with_stream_abort() {
         let abort = messages
             .iter()
             .find_map(|m| match m {
-                PgOutputMessage::StreamAbort { xid, subxid } => Some((*xid, *subxid)),
+                PgOutputMessage::StreamAbort { xid, subxid, .. } => Some((*xid, *subxid)),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no StreamAbort among {messages:?}"));
@@ -293,6 +484,39 @@ async fn a_rolled_back_streamed_transaction_ends_with_stream_abort() {
     })
     .await
     .expect("the stream-abort test exceeded its watchdog");
+}
+
+/// Parallel streaming adds the abort location and timestamp in protocol 4.
+/// Keeping them lets a parallel apply worker order the rollback against work
+/// it may already have scheduled.
+#[compio::test]
+async fn a_parallel_stream_abort_preserves_protocol_four_metadata() {
+    compio::time::timeout(WATCHDOG, async {
+        let fixture = Fixture::create("cpg parallel abort").await;
+        fixture.write_big_transaction("ROLLBACK").await;
+        let messages = collect(&fixture.slot, Streaming::Parallel, &fixture.publication).await;
+        fixture.drop_all().await;
+
+        let (xid, subxid, abort_lsn, abort_timestamp) = messages
+            .iter()
+            .find_map(|message| match message {
+                PgOutputMessage::StreamAbort {
+                    xid,
+                    subxid,
+                    abort_lsn,
+                    abort_timestamp,
+                } => Some((*xid, *subxid, *abort_lsn, *abort_timestamp)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no StreamAbort among {messages:?}"));
+
+        assert_ne!(xid, 0);
+        assert_eq!(subxid, xid);
+        assert!(abort_lsn.is_some_and(|lsn| lsn > 0));
+        assert!(abort_timestamp.is_some_and(|timestamp| timestamp > 0));
+    })
+    .await
+    .expect("the parallel stream-abort test exceeded its watchdog");
 }
 
 /// Asking for a setting the running protocol version cannot carry is refused
@@ -325,6 +549,11 @@ async fn streaming_below_its_minimum_proto_version_is_refused_locally() {
             .err()
             .expect("an option the proto_version cannot carry must be refused");
 
+        assert!(
+            error.as_db_error().is_none(),
+            "the invalid combination reached PostgreSQL instead of being refused locally: {}",
+            common::error_chain(&error)
+        );
         let rendered = format!("{error}");
         let chain = std::iter::successors(std::error::Error::source(&error), |error| {
             std::error::Error::source(*error)
@@ -337,4 +566,38 @@ async fn streaming_below_its_minimum_proto_version_is_refused_locally() {
             "the refusal must name the version needed ({needed}): {rendered} / {chain}"
         );
     }
+}
+
+/// PostgreSQL 16 speaks no protocol above 4, and this driver cannot decode a
+/// future shape merely because the caller supplied a larger number. Refuse it
+/// locally rather than starting a stream whose next frame may be ambiguous.
+#[compio::test]
+async fn protocol_above_four_is_refused_locally() {
+    let replication = compio_postgres::replication::connect_replication(
+        NoTls,
+        &common::replication_config("cpg_protocol_ceiling"),
+    )
+    .await
+    .expect("replication connect failed");
+
+    let error = replication
+        .start_logical_replication(StartReplicationOptions {
+            slot_name: "never_used",
+            publication_names: &["never_used"],
+            proto_version: 5,
+            ..Default::default()
+        })
+        .await
+        .err()
+        .expect("proto_version 5 must be refused before START_REPLICATION");
+    let chain = common::error_chain(&error);
+
+    assert!(
+        error.as_db_error().is_none(),
+        "the invalid version reached PostgreSQL instead of being refused locally: {chain}"
+    );
+    assert!(
+        chain.contains("proto_version") && chain.contains("4 or lower"),
+        "the refusal must name the supported maximum: {chain}"
+    );
 }
