@@ -3624,8 +3624,11 @@ pub enum Op {
     // VENDOR (`zero-migrate/pg`) — Postgres-ONLY privileged primitives.
     // Each is REFUSED fail-closed under a Confined capability
     // set at validate AND at lower (gate 1 = capability gate; gate 2 = the
-    // rendered SQL hits the Confined deny-list). All are `dialect_scope = PgOnly`:
-    // a SQLite deploy of any of them is hard-rejected at load. `password`,
+    // rendered SQL hits the Confined deny-list). Exactly one registered backend
+    // renders them, so an artifact carrying any of them measures a
+    // `DialectScope::Only` reach naming that backend: a deploy against any other
+    // target is refused at load AND, for an already-lowered plan, whole-plan at apply
+    // before a step runs. `password`,
     // `body`, and `sql` are the only free `String` fields — the operator-gated raw
     // surface, still parse-scanned by the guard deny-list.
     // ──────────────────────────────────────────────────────────────────────

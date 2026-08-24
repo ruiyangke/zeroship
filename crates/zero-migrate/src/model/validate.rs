@@ -76,15 +76,15 @@ pub use zero_migrate_ir::validate::{
     validate_alter_primary_key_action, AuthoringError, ExprDialectFeature, ExprDialectRejection,
     ExprDialectValidator, ExprDialectValidatorSet, TargetScope, UnsupportedKind,
     CODE_AGGREGATE_IN_SCALAR_CONTEXT, CODE_COLUMN_DEFAULT_TYPE, CODE_COLUMN_FACET_CONFLICT,
-    CODE_CROSS_SCHEMA, CODE_DIALECT_SCOPE_PGONLY, CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE,
-    CODE_GUARD_DIRECTION, CODE_IMMUTABLE_CONTEXT_VOLATILE, CODE_INVALID_ID_PREFIX,
-    CODE_INVALID_SCHEMA_IDENT, CODE_INVALID_TYPE_ID_PREFIX, CODE_OP_INVALID,
-    CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED, CODE_PARTITION_BOUNDS_NOT_TOTAL,
-    CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, CODE_PARTITION_HASH_DROP_UNDERIVABLE,
-    CODE_PARTITION_KEY_COVERAGE, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
-    CODE_PRIMARY_KEY_INVALID, CODE_RAW_REASON_REQUIRED, CODE_SEQUENCE_OPTION_INVALID,
-    CODE_TABLE_SHAPE_POLICY, CODE_UNSUPPORTED, CODE_VECTOR_METRIC_MISPLACED, CODE_VENDOR_OP_DENIED,
-    MAX_EXPR_DEPTH, MAX_ID_PREFIX_LEN,
+    CODE_CROSS_SCHEMA, CODE_DIALECT_SCOPE_REFUSED, CODE_DIALECT_UNSUPPORTED,
+    CODE_EXPR_NOT_PORTABLE, CODE_GUARD_DIRECTION, CODE_IMMUTABLE_CONTEXT_VOLATILE,
+    CODE_INVALID_ID_PREFIX, CODE_INVALID_SCHEMA_IDENT, CODE_INVALID_TYPE_ID_PREFIX,
+    CODE_OP_INVALID, CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED,
+    CODE_PARTITION_BOUNDS_NOT_TOTAL, CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED,
+    CODE_PARTITION_HASH_DROP_UNDERIVABLE, CODE_PARTITION_KEY_COVERAGE,
+    CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, CODE_PRIMARY_KEY_INVALID, CODE_RAW_REASON_REQUIRED,
+    CODE_SEQUENCE_OPTION_INVALID, CODE_TABLE_SHAPE_POLICY, CODE_UNSUPPORTED,
+    CODE_VECTOR_METRIC_MISPLACED, CODE_VENDOR_OP_DENIED, MAX_EXPR_DEPTH, MAX_ID_PREFIX_LEN,
 };
 
 /// Validate one expression against the backend registered for this open target
@@ -6237,8 +6237,10 @@ pub fn validate_op_authorized(
     validate_op_schema_and_guard(op, target_dialect, op_index, schema_scope)?;
 
     // **VENDOR (`zero-migrate`)** - the capability gate, BEFORE any expression walk. A
-    // privileged vendor op is refused fail-closed when (a) the target is SQLite (every
-    // vendor op is `PgOnly`), or (b) the authority does not GRANT the op's required
+    // privileged vendor op is refused fail-closed when (a) the target does not render
+    // the privileged catalog-object family (exactly one registered backend does, which
+    // is why an artifact carrying one measures a `DialectScope::Only` reach), or (b)
+    // the authority does not GRANT the op's required
     // capability: the charter's own grant when the caller threaded one, else the
     // capability set the threaded `SchemaScope` derives.
     validate_vendor_op(op, target_dialect, op_index, schema_scope, authority)?;
@@ -7499,9 +7501,12 @@ fn validate_op_support(
 /// **VENDOR (`zero-migrate`)** — the capability-composition gate.
 /// For every VENDOR [`Op`](crate::model::ir::Op) variant:
 ///
-/// 1. **SQLite refusal** — every vendor op is `dialect_scope = PgOnly` (no SQLite
-///    analogue); a SQLite target is refused [`CODE_UNSUPPORTED`] `{kind:"op"}`
-///    at load, never silently skipped.
+/// 1. **Non-renderer refusal** — exactly one registered backend renders the
+///    privileged catalog-object family, so an artifact carrying one of these ops
+///    measures a `DialectScope::Only` reach naming that backend. A target that is not
+///    it is refused [`CODE_UNSUPPORTED`] `{kind:"op"}` at load, never silently
+///    skipped. (An already-lowered plan never reaches load; that case is declined
+///    whole-plan at apply by the reach gate.)
 /// 2. **Capability gate** - the authority must GRANT the op's required
 ///    [`VendorCapability`](crate::model::capability::VendorCapability), else
 ///    [`CODE_VENDOR_OP_DENIED`]. With a [`VendorAuthority`] the grant is read off the

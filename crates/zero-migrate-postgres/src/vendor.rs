@@ -28,9 +28,12 @@
 //! `self`. The bytes are identical — `PostgresDmlRenderer::quote_ident` was always
 //! what that lookup resolved to — and the round trip is gone.
 //!
-//! Every vendor op is `dialect_scope = PgOnly`: this module only renders PostgreSQL,
-//! and the lower seam (`zero_migrate::render::lower`) hard-rejects a non-PostgreSQL
-//! target before reaching here. The render is pure (no DB, no live schema).
+//! This module is the only vendor-op renderer any registered backend ships, so an
+//! artifact carrying one of these ops measures a `DialectScope::Only` reach naming
+//! this dialect — and apply declines that plan against every other target. The lower
+//! seam (`zero_migrate::render::lower`) hard-rejects a target without
+//! `Capability::PrivilegedCatalogObjects` before reaching here. The render is pure
+//! (no DB, no live schema).
 //!
 //! # NOT in this module
 //!
@@ -202,8 +205,8 @@ fn type_ref_sql<'a>(value: &'a str, slot: &'static str) -> Result<&'a str, Vendo
 ///
 /// # Errors
 /// [`VendorError`] on an invalid identifier, an unrenderable predicate, or an
-/// empty required list. The caller (`IrAuthor`) is responsible for the SQLite
-/// `PgOnly` refusal BEFORE calling this.
+/// empty required list. The caller (`IrAuthor`) is responsible for refusing a target
+/// without `Capability::PrivilegedCatalogObjects` BEFORE calling this.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn render_vendor_op(
     op: &Op,

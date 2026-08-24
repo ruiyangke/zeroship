@@ -56,10 +56,22 @@ use crate::ir::AlterPrimaryKeyAction;
 pub const CODE_UNSUPPORTED: &str = "UNSUPPORTED";
 /// An expression that is *expressible* but out of its portable envelope (e.g. an
 /// out-of-envelope `c.fn.splitPart`) — kept distinct from `UNSUPPORTED` because
-/// the remedy differs ("stay in-envelope or accept `PgOnly`").
+/// the remedy differs ("stay in-envelope, or give the expression its own
+/// `dialect({ ... })` leg and accept the narrower reach that pins").
 pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
-/// A `dialect_scope = PgOnly` artifact deployed against a `SQLite` target.
-pub const CODE_DIALECT_SCOPE_PGONLY: &str = "DIALECT_SCOPE_PGONLY";
+/// An artifact whose measured dialect reach is one backend, deployed against another.
+///
+/// **RESERVED, AND NOTHING EMITS IT.** Stated plainly because the value used to read
+/// `DIALECT_SCOPE_PGONLY`, naming a `DialectScope` variant that does not exist — the
+/// pinned arm is `Only(DialectId)` — on a facet no author can write, since the reach
+/// is derived from the op list rather than declared. A census over vendor NAMES
+/// cannot see it: `PgOnly` lowercases to `pgonly`, which contains no product needle.
+///
+/// The live refusal is `zero_migrate::engine::EngineError::DialectScopeRefused`,
+/// raised whole-plan at APPLY. It is not an authoring code because the question it
+/// answers is not an authoring one: a plan reaching one dialect is perfectly valid to
+/// author, and load already refuses the per-target cases it can see.
+pub const CODE_DIALECT_SCOPE_REFUSED: &str = "DIALECT_SCOPE_REFUSED";
 /// An op-function called outside an active recorder — emitted JS-side.
 pub const CODE_OP_OUTSIDE_RECORDER: &str = "OP_OUTSIDE_RECORDER";
 /// An op is structurally valid JSON but carries an internally inconsistent shape.

@@ -136,8 +136,10 @@ pub enum ScalarFn {
     /// **VENDOR** — `current_setting('<name>', <missingOk>)`.
     /// A PG GUC read needed by the RLS policy predicates (e.g. a tenant-isolation
     /// policy's `current_setting('app.tenant_id', true)`). Pure, side-effect-free; it
-    /// is PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A
-    /// closed-AST `FnCall` node — NOT a raw escape.
+    /// is PG-only and lowers only on PG. Its containing vendor op is rendered by one
+    /// registered backend, so the artifact's measured dialect reach is that backend
+    /// alone and apply refuses every other target. A closed-AST `FnCall` node — NOT a
+    /// raw escape.
     CurrentSetting,
     /// **VENDOR** — `current_user`. A nullary identity scalar;
     /// renders WITHOUT parentheses (it is a reserved keyword, not a function call).

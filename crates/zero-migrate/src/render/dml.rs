@@ -2708,7 +2708,7 @@ mod tests {
         assert!(matches!(err, DmlError::UnrenderableExpr(_)), "{err:?}");
     }
 
-    /// The documented `dialect_scope=PgOnly` escape for an
+    /// The documented dialect-leg escape for an
     /// out-of-envelope `c.fn.splitPart`. The validator ADMITS a
     /// multi-char delimiter and `n > 8` on a Postgres target; the renderer MUST
     /// therefore lower it to native `split_part(col, 'delim', n)` on PG, not

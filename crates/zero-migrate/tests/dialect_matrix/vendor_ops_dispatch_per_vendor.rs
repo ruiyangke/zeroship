@@ -20,7 +20,8 @@
 //! * `crates/zero-migrate-sqlite/src` and `crates/zero-migrate-mysql/src` contain no
 //!   vendor-op renderer and never did — `dml`, `guard`, `lib`, `schema` (+ `collation`
 //!   on MySQL) and nothing else.
-//! * Every one of the sixteen op kinds is `dialect_scope = PgOnly`.
+//! * Exactly one registered backend renders each of the sixteen op kinds, so an
+//!   artifact carrying one measures a `DialectScope::Only` reach naming it.
 //! * The engine's lower seam refuses a non-PostgreSQL target BEFORE it renders, and it
 //!   refuses on a CAPABILITY (`Capability::PrivilegedCatalogObjects`), not on a dialect
 //!   match.
@@ -140,8 +141,9 @@ fn exactly_one_shipping_vendor_renders_the_vendor_ops() {
     assert_eq!(
         renders,
         vec!["postgres"],
-        "every vendor op is `dialect_scope = PgOnly`, so exactly one shipping vendor \
-         may render one. A second entry here means a vendor acquired PostgreSQL's \
-         renderer; an empty list means the surface was lost."
+        "exactly one shipping vendor may render a vendor op — that is what makes an \
+         artifact carrying one measure a `DialectScope::Only` reach. A second entry \
+         here means a vendor acquired PostgreSQL's renderer AND that the reach a \
+         pinned plan measures is now wrong; an empty list means the surface was lost."
     );
 }

@@ -119,7 +119,8 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
 /// The RENDER-path companion to the load-only test above.
 /// The grammar test proved an out-of-envelope splitPart LOADS on PG; this proves it
 /// actually LOWERS to native `split_part(col, 'delim', n)` on a Postgres target
-/// (the `dialect_scope=PgOnly` escape) instead of hard-erroring at
+/// (the dialect-leg escape, whose narrowed reach is what pins the plan) instead of
+/// hard-erroring at
 /// render — and that the SAME node still rejects at lower on a `SQLite` target.
 #[test]
 fn out_of_envelope_split_part_lowers_native_on_pg_rejects_on_sqlite() {

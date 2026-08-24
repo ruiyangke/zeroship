@@ -4080,7 +4080,7 @@
           "const": "replace"
         },
         {
-          "description": "**VENDOR** — `current_setting('<name>', <missingOk>)`.\nA PG GUC read needed by the RLS policy predicates (e.g. a tenant-isolation\npolicy's `current_setting('app.tenant_id', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG (the containing vendor op is `PgOnly`). A\nclosed-AST `FnCall` node — NOT a raw escape.",
+          "description": "**VENDOR** — `current_setting('<name>', <missingOk>)`.\nA PG GUC read needed by the RLS policy predicates (e.g. a tenant-isolation\npolicy's `current_setting('app.tenant_id', true)`). Pure, side-effect-free; it\nis PG-only and lowers only on PG. Its containing vendor op is rendered by one\nregistered backend, so the artifact's measured dialect reach is that backend\nalone and apply refuses every other target. A closed-AST `FnCall` node — NOT a\nraw escape.",
           "type": "string",
           "const": "currentSetting"
         },

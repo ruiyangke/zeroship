@@ -174,6 +174,12 @@ impl ValidationPolicy for SqliteValidationPolicy {
                 "materializedView: SQLite has no materialized views; materialized:true is PostgreSQL-only".to_string(),
                 "drop materialized:true for SQLite, or target Postgres for this view".to_string(),
             )),
+            // This backend speaks only for itself and names only itself, from its own
+            // DialectId. The old text called the family "Postgres-only" and tagged it
+            // "(PgOnly)" — a variant that does not exist, on a facet no author writes.
+            // What is true is narrower and checkable: these ops have no analogue here,
+            // so an artifact carrying one reaches whichever backend renders them and
+            // this is not that backend.
             capability @ (VendorCapability::Extension
             | VendorCapability::Schema
             | VendorCapability::Role
@@ -184,10 +190,14 @@ impl ValidationPolicy for SqliteValidationPolicy {
             | VendorCapability::Function
             | VendorCapability::RawSql) => Some(refusal(
                 format!(
-                    "the zero-migrate vendor op (capability {:?}) is Postgres-only — roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/raw have no SQLite analogue (PgOnly)",
-                    capability.as_token()
+                    "the zero-migrate vendor op (capability {:?}) has no {} analogue — roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/raw are the privileged catalog-object family, which this backend does not render",
+                    capability.as_token(),
+                    crate::DIALECT.as_str()
                 ),
-                "vendor primitives target Postgres only — deploy this migration against a Postgres backend, or remove the privileged Postgres op".to_string(),
+                format!(
+                    "deploy this migration against the backend that renders the privileged catalog-object family — an artifact carrying one of these ops is pinned to that dialect and refused everywhere else — or remove the privileged op so the migration reaches {} too",
+                    crate::DIALECT.as_str()
+                ),
             )),
         }
     }

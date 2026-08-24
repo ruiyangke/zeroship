@@ -550,8 +550,10 @@ impl DmlRenderer for PostgresDmlRenderer {
         render_comment_op(op, eff_schema)
     }
 
-    /// This vendor OWNS the vendor-op surface: all sixteen op kinds are
-    /// `dialect_scope = PgOnly` and every one of them is this crate's spelling.
+    /// This vendor OWNS the vendor-op surface: all sixteen op kinds are this crate's
+    /// spelling, and it is the only registered backend that renders them — so an
+    /// artifact carrying one measures a `DialectScope::Only` reach naming this
+    /// dialect, and apply declines it against every other target.
     ///
     /// A one-line delegation to the module that already held them. Nothing about the
     /// rendering changed when the engine stopped naming it — `crate::vendor` is the

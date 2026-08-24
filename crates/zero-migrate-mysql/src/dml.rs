@@ -1065,7 +1065,9 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// inherited.
     ///
     /// The sixteen privileged op kinds — roles, grants, RLS, policies, functions,
-    /// extensions, schemas, `raw` — are every one of them `dialect_scope = PgOnly`.
+    /// extensions, schemas, `raw` — are rendered by exactly one registered backend,
+    /// so an artifact carrying any of them measures a `DialectScope::Only` reach that
+    /// names that backend and not this one.
     /// MySQL has no analogue for any of them, so there is nothing to render. The
     /// engine refuses earlier and more informatively (the lower seam checks
     /// `Capability::PrivilegedCatalogObjects` and reports the op KIND), so nothing in
