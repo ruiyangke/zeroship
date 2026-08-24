@@ -434,7 +434,7 @@ fn default_needs_parens(expr: &Expr) -> bool {
 fn render_enum_values(values: &[String]) -> String {
     values
         .iter()
-        .map(|v| zero_migrate_backend::dml::mysql_grammar_string_literal(v))
+        .map(|v| crate::dml::grammar_string_literal(v))
         .collect::<Vec<_>>()
         .join(", ")
 }

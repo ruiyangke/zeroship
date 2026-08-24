@@ -32,6 +32,18 @@ use zero_migrate_ir::validate::{
 
 const SPLIT_PART_MAX_N: i64 = 8;
 
+/// This backend's numbered placeholder spelling.
+///
+/// `pub(crate)` rather than private because the batched-backfill executor
+/// (`crate::backend::backfill_sql`) assembles its own per-batch statements and has to
+/// bind through the same spelling the one-shot assembler reaches via
+/// [`SqliteDmlRenderer::placeholder`]. Two paths, one spelling, in the crate that owns
+/// it — it used to be `zero_migrate_backend::dml::sqlite_placeholder`, a vendor name in
+/// the neutral contract whose only two callers were both here.
+pub(crate) fn placeholder(n: usize) -> String {
+    format!("?{n}")
+}
+
 /// This module's own vendor identity — the ONE dialect literal it is allowed to
 /// name. See `backends/mod.rs`.
 ///
@@ -485,7 +497,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn placeholder(&self, n: usize) -> String {
-        dml::sqlite_placeholder(n)
+        placeholder(n)
     }
 
     fn inline_string_literal(&self, s: &str) -> String {

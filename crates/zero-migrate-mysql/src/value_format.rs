@@ -1,6 +1,6 @@
 //! MySQL value-format spelling and catalog normalization.
 
-use zero_migrate_backend::dml::mysql_grammar_string_literal;
+use crate::dml::grammar_string_literal;
 use zero_migrate_backend::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
 use zero_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
@@ -198,7 +198,7 @@ impl ValueFormatRenderer for MysqlValueFormatRenderer {
     }
 
     fn uuid_column_metadata(&self, quoted: &str) -> Option<ValueFormatColumnMetadata> {
-        let regex = mysql_grammar_string_literal(
+        let regex = grammar_string_literal(
             "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         );
         Some(ValueFormatColumnMetadata {
@@ -217,7 +217,7 @@ impl ValueFormatRenderer for MysqlValueFormatRenderer {
         regex: &str,
         len: usize,
     ) -> ValueFormatColumnMetadata {
-        let regex = mysql_grammar_string_literal(regex);
+        let regex = grammar_string_literal(regex);
         ValueFormatColumnMetadata {
             ddl_type: "VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
             collation: None,
@@ -238,7 +238,7 @@ impl ValueFormatRenderer for MysqlValueFormatRenderer {
         _alphabet: &str,
         regex: &str,
     ) -> ValueFormatColumnMetadata {
-        let regex = mysql_grammar_string_literal(regex);
+        let regex = grammar_string_literal(regex);
         ValueFormatColumnMetadata {
             ddl_type: "VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin".to_string(),
             collation: None,

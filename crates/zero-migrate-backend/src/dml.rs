@@ -86,21 +86,19 @@
 //!   required backend method append values while owning its conflict and limited
 //!   delete grammar; core neither picks a shipping id nor supplies a fallback.
 //!
-//! # The shared SQLite-DML module seam
+//! # There is no placeholder seam here, and there never was one
 //!
-//! The SQLite numbered `?n` placeholder spelling lives in [`sqlite_placeholder`],
-//! which the batched-backfill SQLite executor calls. The one-shot DML assembler
-//! does NOT reach it by that name: it emits through `BindCtx::push`, which asks its
-//! already-resolved backend (`self.backend.placeholder(n)`), and the SQLite backend's
-//! impl is the same spelling.
-//!
-//! **This paragraph used to claim the two paths met at a shared
-//! `placeholder(dialect, n)` function. They never did** — that function had zero
-//! callers and was deleted; see the tombstone above its old home below. The two
-//! paths agree because both end at `SqliteDmlRenderer`, not because a common
-//! function routes them, and the distinction matters: the old wording made a
+//! This section used to describe a shared `placeholder(dialect, n)` function the
+//! one-shot assembler and a vendor's batched-backfill executor supposedly both called.
+//! They never did: that function had zero callers anywhere and was deleted, and the
+//! two paths agree because both end at the SAME resolved `DmlRenderer`, not because a
+//! common function routes them. The distinction matters — the old wording made a
 //! `renderer(dialect)` lookup nothing performed look like a dialect boundary, and it
-//! was counted as one.
+//! was counted as one. See the tombstone above its old home below.
+//!
+//! A `sqlite_placeholder` sat beside it with two real callers, both inside one vendor
+//! crate. Two callers in one crate is that crate's helper; it is `crate::dml::placeholder`
+//! in `zero-migrate-sqlite` now, and this module names no backend's placeholder spelling.
 //!
 //! The transport-safe bind mirror
 //! (`zero_migrate_sqlite::backend::actor::SqliteBind`) is the single
@@ -449,15 +447,12 @@ fn scalar_to_bind(s: &IrScalar) -> BindValue {
  * neither a boundary nor reachable — just a `renderer(dialect)` lookup that nothing
  * performed. 0.1.0 was never published and nothing outside this repo consumes the
  * crate, so deleting it costs nothing and stops the miscount recurring.
+ *
+ * `sqlite_placeholder` sat here too and its callers WERE real — both of them inside
+ * `zero-migrate-sqlite`, one the `DmlRenderer::placeholder` impl and one the batched
+ * backfill executor. Two callers in one vendor crate is that crate's shared helper,
+ * not the contract's, so it is `crate::dml::placeholder` there now.
  */
-
-/// The SQLite numbered placeholder (`?n`) — factored out as the shared-module
-/// entry the batched-backfill SQLite executor reuses for per-batch statement
-/// assembly, so the two paths bind values through ONE path.
-#[must_use]
-pub fn sqlite_placeholder(n: usize) -> String {
-    format!("?{n}")
-}
 
 /// Render a single inline SQL literal for the **backfill** string path
 /// ([`render_expr_inline_for_backend`]). Numeric/bool literals print verbatim, except that an
@@ -471,17 +466,6 @@ pub fn sqlite_placeholder(n: usize) -> String {
 #[must_use]
 pub fn sql_string_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
-}
-
-/// Render a MySQL string in a grammar position that accepts only a quoted
-/// string token (not a hex expression), such as an `ENUM(...)` member or the
-/// five-character `SIGNAL SQLSTATE` code. Every MySQL author-SQL execution path
-/// pins `NO_BACKSLASH_ESCAPES` before executing these literals, so standard
-/// quote doubling has one stable interpretation regardless of the connection's
-/// inherited `sql_mode`.
-#[must_use]
-pub fn mysql_grammar_string_literal(s: &str) -> String {
-    sql_string_literal(s)
 }
 
 /// Render an inline string without depending on a server's string-escape mode.
@@ -510,20 +494,6 @@ pub fn inline_literal_for_backend(
         IrScalar::Str(s) => backend.inline_string_literal(s),
         IrScalar::Bytes(bytes) => backend.inline_bytes_literal(bytes),
     })
-}
-
-pub fn pg_text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
-    if s.is_empty() {
-        return Err(DmlError::UnrenderableExpr(format!(
-            "{what} must be non-empty"
-        )));
-    }
-    if s.contains('\0') {
-        return Err(DmlError::UnrenderableExpr(format!(
-            "{what} contains a NUL byte"
-        )));
-    }
-    Ok(format!("{}::text", sql_string_literal(s)))
 }
 
 /// Validate an in-list / regex text operand, then let the CALLER'S OWN backend
@@ -594,28 +564,6 @@ fn homogeneous_in_list_kind(elems: &[IrScalar]) -> Result<Option<InListScalarKin
     Ok(kind)
 }
 
-pub fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
-    Ok(match elem {
-        IrScalar::Str(s) => pg_text_literal(s, "inList element")?,
-        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
-        IrScalar::Decimal(d) => d.clone(),
-        IrScalar::Bool(b) => {
-            if *b {
-                "TRUE".to_string()
-            } else {
-                "FALSE".to_string()
-            }
-        }
-        IrScalar::Null => "NULL".to_string(),
-        IrScalar::Bytes(_) => {
-            return Err(DmlError::UnrenderableExpr(
-                "inList elements must be string, number, boolean, or null; bytes are not allowed"
-                    .to_string(),
-            ));
-        }
-    })
-}
-
 /// One in-list element in the spelling of the backend that asked, for the two
 /// vendors whose in-list is a plain `IN (...)` over inline literals.
 ///
@@ -631,14 +579,14 @@ pub fn render_in_list_elem_pg(elem: &IrScalar) -> Result<String, DmlError> {
 /// SQL either way, so no behaviour test can see it. The backends now pass `self`,
 /// and the round trip is gone.
 ///
-/// # Why PostgreSQL has a separate, lookup-free helper
+/// # Why one backend keeps its own lookup-free helper instead of calling this
 ///
-/// Not because PostgreSQL is exempt from the rule. [`render_in_list_elem_pg`] can be
-/// lookup-free because every PG in-list spelling is FIXED — `'x'::text` for a
-/// string, the decimal verbatim — so it needs no vendor at all. SQLite quotes
-/// decimals to match its lossless TEXT storage and MySQL emits strings as a UTF-8
-/// hex literal, so this helper genuinely needs a vendor. It just needs the CALLER's,
-/// which the caller already is.
+/// Not because it is exempt from the rule. PostgreSQL's in-list spellings are all
+/// FIXED — `'x'::text` for a string, the decimal verbatim — so its element renderer
+/// needs no vendor at all, and it is a private function in its own crate rather than
+/// a `_pg`-suffixed one here. SQLite quotes decimals to match its lossless TEXT
+/// storage and MySQL emits strings as a UTF-8 hex literal, so this helper genuinely
+/// needs a vendor. It just needs the CALLER's, which the caller already is.
 ///
 /// Pinned by `tests/dialect_matrix/dml_emitters_do_not_relookup_a_backend.rs`.
 pub fn render_in_list_elem_portable(

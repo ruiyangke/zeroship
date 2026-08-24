@@ -55,9 +55,12 @@
 //! exactly the shape the crate split exists to remove.
 //!
 //! `backends/postgres.rs` was already free of it, but NOT because PostgreSQL is
-//! special: it calls the lookup-free `render_in_list_elem_pg`, which can be
-//! lookup-free only because every PG in-list spelling is fixed (`'x'::text`, a
-//! verbatim decimal). SQLite quotes decimals and MySQL emits strings as hex, so the
+//! special: it calls a lookup-free element renderer PRIVATE TO ITS OWN CRATE
+//! (`zero_migrate_postgres::dml::in_list_elem`), which can be lookup-free only
+//! because every PG in-list spelling is fixed (`'x'::text`, a verbatim decimal). It
+//! used to sit in the contract crate as `render_in_list_elem_pg`, a vendor name in
+//! neutral code; nothing about the cycle argument changed when it moved home.
+//! SQLite quotes decimals and MySQL emits strings as hex, so the
 //! portable helper genuinely needs a vendor — it just needs the CALLER's vendor,
 //! which the caller already is. The fix was to pass it: the helper takes
 //! `backend: &dyn DmlRenderer` and both backends hand it `self`.

@@ -36,6 +36,26 @@ use zero_migrate_ir::validate::{
 /// what keeps that from being a hard-coded vendor name inside a vendor module.
 const DIALECT: DialectId = MYSQL;
 
+/// Render a string in a grammar position that accepts only a quoted string TOKEN,
+/// not an expression.
+///
+/// This backend's ordinary inline string is a `_utf8mb4 X'…'` hex literal, chosen so
+/// `NO_BACKSLASH_ESCAPES` cannot change either the value or the statement shape. Some
+/// grammar positions do not accept an expression there — an `ENUM(...)` member and the
+/// five-character `SIGNAL SQLSTATE` code are the two in this crate — so those take the
+/// standard quote-doubled form instead. Every author-SQL execution path here pins
+/// `NO_BACKSLASH_ESCAPES` before executing, so quote doubling has one stable reading
+/// whatever `sql_mode` the connection inherited.
+///
+/// It lives here rather than in the contract crate because the DISTINCTION it marks is
+/// this backend's alone: a backend whose ordinary literal already is a quoted string
+/// has no second form to pick between. It was
+/// `zero_migrate_backend::dml::mysql_grammar_string_literal`, a vendor name in the
+/// neutral contract whose every caller was in this crate.
+pub(crate) fn grammar_string_literal(s: &str) -> String {
+    dml::sql_string_literal(s)
+}
+
 const PREVIEW_SESSION_PROLOGUE: &[&str] = &[
     "SET @__zero_migrate_preview_saved_sql_mode = @@SESSION.sql_mode;",
     "SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES', 'NO_AUTO_VALUE_ON_ZERO');",
@@ -1317,7 +1337,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
             let errcode = errcode.as_deref().unwrap_or("45000");
             Ok(format!(
                 "SIGNAL SQLSTATE {} SET MESSAGE_TEXT = {}",
-                zero_migrate_backend::dml::mysql_grammar_string_literal(errcode),
+                grammar_string_literal(errcode),
                 RENDERER.inline_string_literal(message)
             ))
         }

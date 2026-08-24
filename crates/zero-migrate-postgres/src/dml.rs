@@ -26,6 +26,65 @@ use zero_migrate_ir::validate::{ExprDialectFeature, ExprDialectRejection, ExprDi
 /// needs when it becomes its own crate.
 const DIALECT: DialectId = POSTGRES;
 
+/// A validated text operand in this backend's explicitly-typed spelling.
+///
+/// The `::text` cast is not decoration. Both positions that reach this — a regex
+/// pattern and an `IN`-list element — put the literal next to an operator whose
+/// overload resolution would otherwise see an untyped literal, so the cast is what
+/// pins which operator runs.
+///
+/// Core owns whether the operand is LEGAL (non-empty, no NUL) and the two checks below
+/// mirror `zero_migrate_backend::dml::in_list_text_literal`, which applies the same two
+/// to the operand a caller's own backend then spells. This function was
+/// `zero_migrate_backend::dml::pg_text_literal`, a vendor name in the neutral contract
+/// whose only callers were this file and [`in_list_elem`] beside it.
+fn text_literal(s: &str, what: &'static str) -> Result<String, DmlError> {
+    if s.is_empty() {
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} must be non-empty"
+        )));
+    }
+    if s.contains('\0') {
+        return Err(DmlError::UnrenderableExpr(format!(
+            "{what} contains a NUL byte"
+        )));
+    }
+    Ok(format!("{}::text", dml::sql_string_literal(s)))
+}
+
+/// One `IN`-list element in this backend's spelling.
+///
+/// It takes no backend, and that is the difference from the shared
+/// `zero_migrate_backend::dml::render_in_list_elem_portable`: every spelling here is
+/// FIXED — `'x'::text` for a string, the decimal verbatim — so there is no vendor to
+/// resolve. The two backends whose in-list needs one (a quoted decimal, a hex string)
+/// call the portable helper and hand it `self`.
+///
+/// It lived in the contract crate as `render_in_list_elem_pg`, and its only caller was
+/// [`PostgresDmlRenderer::render_in_list`] below. The `inList` NODE is portable; this
+/// backend's SPELLING of one is not, and that is the distinction the old home lost.
+fn in_list_elem(elem: &IrScalar) -> Result<String, DmlError> {
+    Ok(match elem {
+        IrScalar::Str(s) => text_literal(s, "inList element")?,
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
+        IrScalar::Decimal(d) => d.clone(),
+        IrScalar::Bool(b) => {
+            if *b {
+                "TRUE".to_string()
+            } else {
+                "FALSE".to_string()
+            }
+        }
+        IrScalar::Null => "NULL".to_string(),
+        IrScalar::Bytes(_) => {
+            return Err(DmlError::UnrenderableExpr(
+                "inList elements must be string, number, boolean, or null; bytes are not allowed"
+                    .to_string(),
+            ));
+        }
+    })
+}
+
 #[derive(Debug)]
 pub(super) struct PostgresDmlRenderer;
 
@@ -306,7 +365,7 @@ impl DmlRenderer for PostgresDmlRenderer {
         negated: bool,
         joiner: &str,
     ) -> Result<String, DmlError> {
-        let rendered: Result<Vec<_>, _> = elems.iter().map(dml::render_in_list_elem_pg).collect();
+        let rendered: Result<Vec<_>, _> = elems.iter().map(in_list_elem).collect();
         let (cmp, quantifier) = if negated { ("<>", "ALL") } else { ("=", "ANY") };
         Ok(format!(
             "({expr} {cmp} {quantifier} (ARRAY[{}]))",
@@ -317,7 +376,7 @@ impl DmlRenderer for PostgresDmlRenderer {
     fn render_regex_match(&self, expr: &str, pattern: &str) -> Result<String, DmlError> {
         Ok(format!(
             "({expr} ~ {})",
-            dml::pg_text_literal(pattern, "PG regex pattern")?
+            text_literal(pattern, "regex pattern")?
         ))
     }
 

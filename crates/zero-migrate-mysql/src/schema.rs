@@ -412,7 +412,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     }
 
     fn schema_grammar_string_literal(&self, value: &str) -> String {
-        zero_migrate_backend::dml::mysql_grammar_string_literal(value)
+        crate::dml::grammar_string_literal(value)
     }
 
     fn empty_json_expr(&self, object: bool) -> &'static str {

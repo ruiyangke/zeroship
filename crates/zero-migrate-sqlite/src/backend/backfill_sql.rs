@@ -9,7 +9,6 @@ use zero_migrate_backend::backfill::{
     CursorScalarType, CursorTuple,
 };
 use zero_migrate_backend::backfill::{BackfillError, BackfillOutcome, BackfillProgressEntry};
-use zero_migrate_backend::dml::sqlite_placeholder;
 use zero_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
 use zero_migrate_ir::migration::{Checksum, MigrationId};
 
@@ -646,7 +645,7 @@ fn lexicographic_comparison(
             parts.push(format!(
                 "{} = {}",
                 comparison_expression(column),
-                sqlite_placeholder(first_placeholder + prefix)
+                crate::dml::placeholder(first_placeholder + prefix)
             ));
         }
         let operator = if upper_bound {
@@ -661,7 +660,7 @@ fn lexicographic_comparison(
         parts.push(format!(
             "{} {operator} {}",
             comparison_expression(&columns[index]),
-            sqlite_placeholder(first_placeholder + index)
+            crate::dml::placeholder(first_placeholder + index)
         ));
         terms.push(format!("({})", parts.join(" AND ")));
     }
@@ -705,7 +704,7 @@ fn build_window_sql(
         cursor_projection(&columns),
         quote_ident(table),
         order_by(&contract.columns, false),
-        sqlite_placeholder(limit_placeholder)
+        crate::dml::placeholder(limit_placeholder)
     )
 }
 
@@ -743,7 +742,7 @@ fn build_batch_update_sql(
         quote_ident(table),
         quote_ident(table),
         order_by(&contract.columns, false),
-        sqlite_placeholder(limit_placeholder)
+        crate::dml::placeholder(limit_placeholder)
     )
 }
 
@@ -1356,7 +1355,7 @@ fn build_per_row_update_sql(
         assignments.push(format!(
             "{} = {}",
             quote_ident(column),
-            sqlite_placeholder(index + 1)
+            crate::dml::placeholder(index + 1)
         ));
     }
     let cursor_first = spec.per_row.len() + 1;
@@ -1368,7 +1367,7 @@ fn build_per_row_update_sql(
             format!(
                 "{} = {}",
                 comparison_expression(column),
-                sqlite_placeholder(cursor_first + index)
+                crate::dml::placeholder(cursor_first + index)
             )
         })
         .collect::<Vec<_>>()
