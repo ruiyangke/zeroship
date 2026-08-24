@@ -4,7 +4,7 @@
 //! their private walkers one at a time, in ascending blast radius.
 //! `fold_to_field_defs` is the third and the first that is not artifact-only: its
 //! output is `schema.runtime.json`'s `fields` block AND, on SQLite,
-//! `LiveSchema::sqlite_schemas`, which the 12-step table rebuild renders its new
+//! `LiveSchema::sdk_schemas`, which the 12-step table rebuild renders its new
 //! `CREATE TABLE` from. The proposal orders it third for exactly that reason
 //! (section I: "Step 4 touches SQLite rebuild DDL").
 //!

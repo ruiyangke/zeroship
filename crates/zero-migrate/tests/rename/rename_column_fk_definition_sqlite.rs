@@ -225,11 +225,11 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = charter();
     let snapshot =
         fold_ops(history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
-    let sqlite_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
+    let sdk_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = sqlite_schemas;
+    live.sdk_schemas = sdk_schemas;
     live.unique_indexes = BTreeSet::new();
     live
 }
@@ -552,7 +552,7 @@ async fn the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite() {
         .await
         .expect("the catalog snapshot reads");
     let mut catalog_live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    catalog_live.sqlite_schemas =
+    catalog_live.sdk_schemas =
         single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
             .map(|folded| folded.project_field_defs())
             .expect("the history folds to field defs");
@@ -630,7 +630,7 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
         .expect("the stored CREATE text");
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas =
+    live.sdk_schemas =
         single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
             .map(|folded| folded.project_field_defs())
             .expect("the history folds to field defs");

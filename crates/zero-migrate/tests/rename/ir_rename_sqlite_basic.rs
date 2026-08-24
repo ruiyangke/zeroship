@@ -109,7 +109,7 @@ fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
         policies: desired.snapshot.policies.clone(),
         triggers: desired.snapshot.triggers.clone(),
         schemas: desired.snapshot.schemas.clone(),
-        sqlite_schemas: desired.sqlite_schemas,
+        sdk_schemas: desired.sdk_schemas,
         table_ownership,
         logical_columns: Default::default(),
         // No op in this fixture declares an identity or generated column, so the
@@ -586,7 +586,7 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
 // (both are fail-closed and emit NO rebuild); the type-reconciliation gate is the
 // outermost, so it is the one observed. The deeper `RenameNeedsLiveTable`
 // arm still guards the case where the live `from` column type IS known but the
-// full rebuild shape (sqlite_schemas) is not — exercised by
+// full rebuild shape (sdk_schemas) is not — exercised by
 // `renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema`.
 #[test]
 fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
@@ -598,7 +598,7 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
     );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
     // LiveSchema knows the table NAME but not its structure (table_snapshots /
-    // sqlite_schemas empty) — there is no live `from` column to reconcile against.
+    // sdk_schemas empty) — there is no live `from` column to reconcile against.
     let mut live = LiveSchema::default();
     live.tables.insert("ghost".into());
     let err = author
@@ -617,7 +617,7 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
 
 // Fail-closed (deeper arm): the live `from` column TYPE is known (so the
 // type reconciliation passes), but the full rebuild shape — the live SDK schema
-// `Value` in `sqlite_schemas` — is absent. The SQLite leg then refuses with
+// `Value` in `sdk_schemas` — is absent. The SQLite leg then refuses with
 // `RenameNeedsLiveTable` rather than emit a rebuild from a partial view.
 // This keeps the rebuild-needs-whole-shape guard exercised after the type gate.
 #[test]
@@ -631,7 +631,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
     );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
     // Carry the live `from` column TYPE (so the type gate passes — text == text),
-    // but DO NOT populate `sqlite_schemas` (the rebuild's SDK Value is missing).
+    // but DO NOT populate `sdk_schemas` (the rebuild's SDK Value is missing).
     let a_type = {
         // Derive the live `data_type` for a text column the SAME way the builder
         // does, so the reconciliation passes (live == IR-derived).

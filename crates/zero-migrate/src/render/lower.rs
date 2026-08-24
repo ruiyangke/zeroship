@@ -287,12 +287,12 @@ pub struct LiveSchema {
     pub table_snapshots: std::collections::BTreeMap<String, crate::model::snapshot::TableSnapshot>,
     /// the SQLite `renameColumn` rebuild facts.** The live per-table SDK
     /// schema `Value` (`table → registerModel-shaped JSON`), the SAME shape
-    /// [`crate::render::declarative::DesiredSchema`]'s `sqlite_schemas` carries. The SQLite
+    /// [`crate::render::declarative::DesiredSchema`]'s `sdk_schemas` carries. The SQLite
     /// rebuild author renders the post-rename `CREATE TABLE` from this Value (with
     /// the renamed field key) through the shared `crate::schema::query` emitter,
     /// so the rebuilt table is byte-identical to what the declarative diff would
     /// emit. Only read on the SQLite `renameColumn` leg (see `table_snapshots`).
-    pub sqlite_schemas: std::collections::BTreeMap<String, serde_json::Value>,
+    pub sdk_schemas: std::collections::BTreeMap<String, serde_json::Value>,
     /// the live per-table OWNER (`table → owning app`).** The SQLite
     /// `renameColumn` rebuild routes through the declarative differ, whose
     /// `enforce_ownership` REFUSES a structural change to a table the deploying app
@@ -511,7 +511,7 @@ impl LiveSchema {
             tables: live.tables.keys().cloned().collect(),
             unique_indexes,
             table_snapshots: live.tables,
-            sqlite_schemas: std::collections::BTreeMap::new(),
+            sdk_schemas: std::collections::BTreeMap::new(),
             table_ownership,
             partitions: live.partitions,
             views: live.views,
@@ -536,7 +536,7 @@ impl LiveSchema {
             tables,
             unique_indexes: BTreeSet::new(),
             table_snapshots: std::collections::BTreeMap::new(),
-            sqlite_schemas: std::collections::BTreeMap::new(),
+            sdk_schemas: std::collections::BTreeMap::new(),
             table_ownership: std::collections::BTreeMap::new(),
             partitions: std::collections::BTreeMap::new(),
             views: std::collections::BTreeMap::new(),
@@ -2647,7 +2647,7 @@ impl IrAuthor {
     /// inlines, and a non-live target defers on PG / errors on SQLite — mirroring
     /// `diff`); `live.unique_indexes` is the authoritative set of live UNIQUE-index
     /// names that drives the `dropIndex` destructive/approval gate (OR-ed with the
-    /// IR's advisory `unique` hint); `live.table_snapshots` + `live.sqlite_schemas`
+    /// IR's advisory `unique` hint); `live.table_snapshots` + `live.sdk_schemas`
     /// carry the full live table structure the SQLite `renameColumn` rebuild needs;
     /// `live.partitions` carries child bounds for collapse DELETE derivation.
     /// Tables created EARLIER in the same IR are added to the working live-table set
@@ -3597,7 +3597,7 @@ impl IrAuthor {
     ///
     /// `live` is the full [`LiveSchema`]: `live_tables` is the MUTABLE working
     /// table set (advanced as createTable ops lower); the SQLite `renameColumn` leg
-    /// also reads `live.table_snapshots` / `live.sqlite_schemas`.
+    /// also reads `live.table_snapshots` / `live.sdk_schemas`.
     ///
     /// # Errors
     /// - [`IrLowerError::Snapshot`] — the shared builder rejected the op's fields.
@@ -7186,7 +7186,7 @@ impl IrAuthor {
     ///   emitter, whose per-column affinity comes from the field's type token — the
     ///   token the live schema already carries for the dialect-neutral `ColType`.
     ///   The bridge needs the table's full live structure
-    ///   ([`LiveSchema::table_snapshots`] + [`LiveSchema::sqlite_schemas`]); absent ⇒
+    ///   ([`LiveSchema::table_snapshots`] + [`LiveSchema::sdk_schemas`]); absent ⇒
     ///   [`IrLowerError::RenameNeedsLiveTable`] (fail-closed).
     ///
     /// **Authoritative IR-vs-live type reconciliation (BOTH legs).** Before EITHER
@@ -7392,11 +7392,11 @@ impl IrAuthor {
                         missing: "the live column structure (LiveSchema::table_snapshots)",
                     }
                 })?;
-                let live_schema_value = live.sqlite_schemas.get(table).ok_or_else(|| {
+                let live_schema_value = live.sdk_schemas.get(table).ok_or_else(|| {
                     IrLowerError::RenameNeedsLiveTable {
                         table: table.to_string(),
                         dialect: self.dialect.clone(),
-                        missing: "the live stored schema (LiveSchema::sqlite_schemas)",
+                        missing: "the live stored schema (LiveSchema::sdk_schemas)",
                     }
                 })?;
                 // The REAL introspected owner of the live table — the subject of the

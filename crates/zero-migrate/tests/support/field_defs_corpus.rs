@@ -3,10 +3,10 @@
 //! `docs/proposals/single-fold-and-effects.md` section G step 4 moves
 //! `fold_to_field_defs` onto `FoldedSchema::project_field_defs`. The wire `FieldDef`
 //! map that walker produced is not an artifact a human reads: it is
-//! `schema.runtime.json`'s `fields` block AND, on SQLite, `LiveSchema::sqlite_schemas`,
+//! `schema.runtime.json`'s `fields` block AND, on SQLite, `LiveSchema::sdk_schemas`,
 //! which is what the 12-step table rebuild renders its new `CREATE TABLE` from
 //! (`render/lower.rs`'s SQLite `renameColumn` leg -> `lower_ir_rename` ->
-//! `render/declarative.rs`'s `desired.sqlite_schemas.get(table)`). So this reduction
+//! `render/declarative.rs`'s `desired.sdk_schemas.get(table)`). So this reduction
 //! carries the DDL, not just the JSON.
 //!
 //! # Why this lives in `support` rather than in the gate that reads it

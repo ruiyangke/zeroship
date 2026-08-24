@@ -188,7 +188,7 @@ const RENAME_FORMAT_IR: &str = r#"{
 ///
 /// A SQLite `renameColumn` is LIVE-RESOLVED and needs the live COLUMN, not just the
 /// table name, so `LiveSchema::from_tables` is not enough (`RenameNeedsLiveColumn`), and
-/// `from_catalog_snapshot` alone leaves `sqlite_schemas` empty, which is the map the
+/// `from_catalog_snapshot` alone leaves `sdk_schemas` empty, which is the map the
 /// 12-step rebuild renders its new `CREATE TABLE` from. This is the same pair
 /// `rename_column_indexed_sqlite` assembles, and the leg with NO `stored_create_sql` -
 /// so `preserve_stored_shape` is OFF and the rebuild really does render from the folded
@@ -197,11 +197,11 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::no_inject(APP);
     let snapshot =
         fold_ops(history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
-    let sqlite_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
+    let sdk_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = sqlite_schemas;
+    live.sdk_schemas = sdk_schemas;
     live
 }
 

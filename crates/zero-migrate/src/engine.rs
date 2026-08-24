@@ -403,7 +403,7 @@ fn refresh_historical_live(
         // as a PROJECTION of the single fold rather than a fourth replay of the op
         // stream (step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
         // section G).
-        historical_live.sqlite_schemas =
+        historical_live.sdk_schemas =
             single_fold::fold(cumulative_ops, dialect, project, policy)
                 .map_err(|error| error.to_string())?
                 .project_field_defs();
@@ -642,7 +642,7 @@ impl MigrationEngine {
                 // consumer 3; `tests/sqlite_rebuild_field_defs_live.rs` deploys through
                 // this function against a real SQLite file and reads the server's own
                 // `PRAGMA`s back across the rebuild.
-                live.sqlite_schemas = single_fold::fold(&cumulative_ops, dialect, project, policy)
+                live.sdk_schemas = single_fold::fold(&cumulative_ops, dialect, project, policy)
                     .map_err(|error| {
                         envelope_deploy_error(
                             &migration_name,

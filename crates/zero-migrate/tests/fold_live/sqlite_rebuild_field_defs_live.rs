@@ -6,9 +6,9 @@
 //!
 //! ```text
 //! fold_to_field_defs
-//!   -> engine.rs, inside `deploy_envelopes_locked`      live.sqlite_schemas
-//!   -> render/lower.rs, the SQLite `renameColumn` leg   live.sqlite_schemas.get(table)
-//!   -> render/declarative.rs                            desired.sqlite_schemas.get(table)
+//!   -> engine.rs, inside `deploy_envelopes_locked`      live.sdk_schemas
+//!   -> render/lower.rs, the SQLite `renameColumn` leg   live.sdk_schemas.get(table)
+//!   -> render/declarative.rs                            desired.sdk_schemas.get(table)
 //!   -> schema/query.rs                                  the rebuilt CREATE TABLE
 //!   -> SQLite's 12-step table rebuild                   INSERT INTO tmp SELECT … FROM old
 //! ```
@@ -25,12 +25,12 @@
 //! on `preserve_stored_shape = pure_rename.is_some() && dt.stored_create_sql.is_some()`:
 //!
 //! * the STORED-SHAPE arm replays SQLite's own `CREATE TABLE` text and defers the rename
-//!   to SQLite's `ALTER TABLE … RENAME COLUMN`. It never reads `sqlite_schemas`;
-//! * the SDK-VALUE arm renders a new `CREATE TABLE` from `sqlite_schemas` verbatim.
+//!   to SQLite's `ALTER TABLE … RENAME COLUMN`. It never reads `sdk_schemas`;
+//! * the SDK-VALUE arm renders a new `CREATE TABLE` from `sdk_schemas` verbatim.
 //!
 //! On the `deploy_envelopes` path the live snapshot is INTROSPECTED, so it carries
 //! `stored_create_sql`, and a `renameColumn` the engine accepts is a pure rename. So the
-//! deploy path takes the STORED-SHAPE arm, and its dependency on `sqlite_schemas` is one
+//! deploy path takes the STORED-SHAPE arm, and its dependency on `sdk_schemas` is one
 //! of PRESENCE, not of content: `render/lower.rs` fails closed when the table's entry is
 //! MISSING (`RenameNeedsLiveTable`) and never looks inside it.
 //!
@@ -60,7 +60,7 @@
 //!
 //! Every case runs against a real SQLite file. The deploy-path cases go through the
 //! shipped [`zero_migrate::MigrationEngine::deploy_envelopes`] - the same entry point the
-//! CLI uses, and the one that populates `live.sqlite_schemas` from the fold; the
+//! CLI uses, and the one that populates `live.sdk_schemas` from the fold; the
 //! content-reading case lowers and applies through `IrAuthor` + `apply_plan` against the
 //! fold-seeded live schema, which is the shape `engine::refresh_historical_live` builds.
 //!
@@ -122,7 +122,7 @@ fn registry(tables: &[&str]) -> BTreeMap<String, String> {
 /// Deploy an ordered envelope set through the shipped engine.
 ///
 /// The REAL path on purpose: `deploy_envelopes_locked` is the only place that seeds
-/// `live.sqlite_schemas` from the fold, so a test that assembled a `LiveSchema` by hand
+/// `live.sdk_schemas` from the fold, so a test that assembled a `LiveSchema` by hand
 /// would be measuring its own wiring rather than the engine's.
 async fn deploy(backend: &SqliteBackend, tables: &[&str], sources: &[&str]) -> Result<(), String> {
     let policy = support::no_inject(PROJECT);
@@ -247,7 +247,7 @@ async fn indexes(backend: &SqliteBackend, table: &str) -> Vec<(String, bool)> {
 /// Deliberately no generated column, no inline CHECK and no case-insensitive text: those
 /// three route the rebuild through the SNAPSHOT renderer instead
 /// (`declarative::render_create_table_rebuild`'s first arm), which does NOT read
-/// `sqlite_schemas`. A fixture carrying one of them would exercise a different arm and
+/// `sdk_schemas`. A fixture carrying one of them would exercise a different arm and
 /// prove nothing about this leg. The charter is `no_inject` for the same reason: an
 /// injected table cannot reach the SDK-value arm at all, which
 /// `tests/rename_column_indexed_sqlite.rs` pins separately.
@@ -257,7 +257,7 @@ const CREATE: &str = r#"{"ir_version":1,"name":"create_orders","owner_app":"app_
 ]}"#;
 
 /// The op that forces the 12-step rebuild. A SQLite `renameColumn` is the ONE consumer
-/// of `LiveSchema::sqlite_schemas` in the whole engine (`render/lower.rs`), so this is
+/// of `LiveSchema::sdk_schemas` in the whole engine (`render/lower.rs`), so this is
 /// what puts the folded map into a `CREATE TABLE` that rows are copied through.
 const RENAME: &str = r#"{"ir_version":1,"name":"rename_note","owner_app":"app_rebuild_field_defs","ops":[
   {"op":"renameColumn","table":"orders","from":"note","to":"memo","type":"text"}
@@ -482,7 +482,7 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
     let snapshot = fold_ops(history, &SQLITE, PROJECT, &policy).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = single_fold::fold(history, &SQLITE, PROJECT, &policy)
+    live.sdk_schemas = single_fold::fold(history, &SQLITE, PROJECT, &policy)
         .expect("the history folds")
         .project_field_defs();
     live
@@ -513,7 +513,7 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
 /// **The content claim: the rebuilt table is the one the folded map describes, and the
 /// rows come through it intact.**
 ///
-/// This is the arm the module docs identify as reading `sqlite_schemas` verbatim. Every
+/// This is the arm the module docs identify as reading `sdk_schemas` verbatim. Every
 /// assertion below is a claim the MAP makes - the column set and order, the declared
 /// types, the NOT NULLs, the DEFAULT, the unique index and the foreign key - read back
 /// out of the SERVER after a real 12-step rebuild has copied three real rows through it.
@@ -571,7 +571,7 @@ async fn a_fold_seeded_rebuild_renders_its_create_table_from_the_map() {
     // THE MAP's own claim about `qty`, asserted before the server's, so the difference
     // below is attributable to the emitter rather than to the fold.
     assert_eq!(
-        live.sqlite_schemas["orders"]["qty"].get("default"),
+        live.sdk_schemas["orders"]["qty"].get("default"),
         Some(&serde_json::json!(1)),
         "the folded map declares the DEFAULT, or the row below is not about the emitter"
     );
@@ -641,7 +641,7 @@ async fn a_fold_seeded_rebuild_renders_its_create_table_from_the_map() {
 
 /// **The finding this file was rewritten around, pinned so it is not rediscovered.**
 ///
-/// On the DEPLOY path the rebuild takes the stored-shape arm, so `LiveSchema::sqlite_schemas`
+/// On the DEPLOY path the rebuild takes the stored-shape arm, so `LiveSchema::sdk_schemas`
 /// is required to be PRESENT and is never read. This test states both halves: the entry
 /// must exist, and the deploy is indifferent to what is in it.
 ///
@@ -678,13 +678,13 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
         .expect_err("an absent field map is refused")
         .to_string();
     assert!(
-        error.contains("sqlite_schemas"),
+        error.contains("sdk_schemas"),
         "and the refusal names the map it needs: {error}"
     );
 
     // CONTENT is not: the same rename lowers identically whether the map is the real one
     // or a deliberately wrong one, because this arm replays SQLite's own stored text.
-    live.sqlite_schemas = single_fold::fold(&history, &SQLITE, PROJECT, &policy)
+    live.sdk_schemas = single_fold::fold(&history, &SQLITE, PROJECT, &policy)
         .expect("the history folds")
         .project_field_defs();
     let real = format!(
@@ -693,7 +693,7 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
     );
 
     let mut wrong = live;
-    for schema in wrong.sqlite_schemas.values_mut() {
+    for schema in wrong.sdk_schemas.values_mut() {
         if let Some(columns) = schema.as_object_mut() {
             for field in columns.values_mut() {
                 if let Some(object) = field.as_object_mut() {

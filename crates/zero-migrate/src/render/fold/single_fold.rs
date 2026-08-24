@@ -21,7 +21,7 @@
 //! * `FoldedSchema::project_authoring_tables` replaced `authoring_tables_from_ops`,
 //!   and is the source model `env.db.ts` is rendered from;
 //! * `FoldedSchema::project_field_defs` replaced `fold_to_field_defs`, and is the wire
-//!   `FieldDef` map behind `schema.runtime.json` and behind `LiveSchema::sqlite_schemas`.
+//!   `FieldDef` map behind `schema.runtime.json` and behind `LiveSchema::sdk_schemas`.
 //!
 //! (Backticks rather than intra-doc links on purpose, for a reason narrower than it
 //! first looks. A `//!` module-level comment here resolves paths in the PARENT
@@ -91,7 +91,7 @@
 //! `Op::DropColumn` below need no un-lift arm: there is nothing to un-lift.
 //!
 //! What consumer 3 did NOT get is a live adjudication of the rebuild DDL, and the reason
-//! is worth carrying here. `LiveSchema::sqlite_schemas` is read by exactly one caller,
+//! is worth carrying here. `LiveSchema::sdk_schemas` is read by exactly one caller,
 //! `render/lower.rs`'s SQLite `renameColumn`, and on the deploy path that rename takes
 //! the `preserve_stored_shape` arm - which replays SQLite's own `CREATE TABLE` and never
 //! looks inside the map. Measured: corrupting every column in the map the engine builds
@@ -906,9 +906,9 @@ impl FoldedSchema {
 
     /// **Projection 2: the per-table wire `FieldDef` map.** LIVE since step 4 consumer
     /// 3, which deleted the `fold_to_field_defs` walker that used to produce it. It
-    /// feeds `schema.runtime.json` and, on SQLite, `live.sqlite_schemas`.
+    /// feeds `schema.runtime.json` and, on SQLite, `live.sdk_schemas`.
     ///
-    /// The `live.sqlite_schemas` half is READ by exactly one caller - `render/lower.rs`'s
+    /// The `live.sdk_schemas` half is READ by exactly one caller - `render/lower.rs`'s
     /// SQLite `renameColumn` - and only its PRESENCE is load-bearing on the deploy path:
     /// that rename takes `declarative::render_create_table_rebuild`'s `preserve_stored_shape`
     /// arm, which replays SQLite's own `CREATE TABLE` text. The map's CONTENT reaches a

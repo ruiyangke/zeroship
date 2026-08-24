@@ -48,7 +48,7 @@
 //! `def_to_constraints_for_dialect` is dialect-parameterised and this file drives
 //! its PostgreSQL arm on a real PostgreSQL server. The only PRODUCTION caller that
 //! reaches it today is the SQLite 12-step table rebuild
-//! (`render/declarative.rs`'s `desired.sqlite_schemas` arm, the `SQLITE` dialect
+//! (`render/declarative.rs`'s `desired.sdk_schemas` arm, the `SQLITE` dialect
 //! hard-coded); `sqlite_rebuild_field_defs_live.rs` is the live oracle for that
 //! path. So this file measures the emitter, not a shipped PostgreSQL code path.
 

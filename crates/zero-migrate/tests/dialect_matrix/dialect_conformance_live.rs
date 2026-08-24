@@ -1332,7 +1332,7 @@ async fn run_row<B: MigrationBackend>(
     // 2. LIVE SCHEMA read back from the catalog, so the subject lowers against what
     //    actually exists rather than against a default.
     //
-    //    SQLite additionally needs `sqlite_schemas`: its 12-step rebuild is authored
+    //    SQLite additionally needs `sdk_schemas`: its 12-step rebuild is authored
     //    from the SDK field maps, not from the catalog, so a catalog-only LiveSchema
     //    makes every rebuild-shaped op refuse with "the live table snapshot is
     //    incomplete" whatever the dialect table says. `engine::refresh_historical_live`
@@ -1350,7 +1350,7 @@ async fn run_row<B: MigrationBackend>(
         if let Ok(defs) = single_fold::fold(&history, dialect, &cfg.project_schema, policy)
             .map(|folded| folded.project_field_defs())
         {
-            live.sqlite_schemas = defs;
+            live.sdk_schemas = defs;
         }
     }
 

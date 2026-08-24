@@ -1,7 +1,7 @@
 //! **What SQLite actually stores for the type tokens `col_type_to_token` emits.**
 //!
 //! `render/lower.rs::col_type_to_token` maps a closed [`ColType`] to the SDK `FieldDef`
-//! type token that lands in `LiveSchema::sqlite_schemas`. `schema/query.rs`'s SQLite
+//! type token that lands in `LiveSchema::sdk_schemas`. `schema/query.rs`'s SQLite
 //! `column_type` maps that token back to a declared SQL type when the 12-step rebuild
 //! re-renders `CREATE TABLE` from the map. The two are a matched pair and nothing
 //! checks that they agree.
@@ -155,7 +155,7 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let snapshot =
         fold_ops(history, &zero_migrate::SQLITE, PROJECT, &policy).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &policy)
+    live.sdk_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &policy)
         .expect("the history folds")
         .project_field_defs();
     live
@@ -275,13 +275,13 @@ async fn a_big_int_column_survives_a_rebuild_as_an_integer() {
          SQLite's own text and this test observes nothing about the map"
     );
     assert_eq!(
-        live.sqlite_schemas["ledger"]["amount"].get("type"),
+        live.sdk_schemas["ledger"]["amount"].get("type"),
         Some(&serde_json::json!("bigInt")),
         "the folded map spells the token `bigInt`, or the row below is not about the \
          SQLite type emitter"
     );
     assert_eq!(
-        live.sqlite_schemas["ledger"]["payload"].get("type"),
+        live.sdk_schemas["ledger"]["payload"].get("type"),
         Some(&serde_json::json!("bytes")),
         "and `bytes` for the raw-bytes column"
     );

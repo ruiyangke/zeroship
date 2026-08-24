@@ -1676,7 +1676,7 @@ pub struct DesiredSchema {
     /// lowering. The keys match `snapshot.tables`. It does not participate in drift
     /// — drift is the snapshot's job — so it is excluded from `PartialEq` (see the
     /// manual impl).
-    pub sqlite_schemas: BTreeMap<String, serde_json::Value>,
+    pub sdk_schemas: BTreeMap<String, serde_json::Value>,
     /// The policy-resolved injection for each table, derived from the same
     /// [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy) that built the
     /// table snapshot. Emission paths use this to distinguish injected indexes
@@ -1687,12 +1687,12 @@ pub struct DesiredSchema {
     /// the two derivations disagree, and only for names the author DERIVED - never
     /// for an author-supplied [`IndexDescriptor::name`].
     ///
-    /// Like `sqlite_schemas`, this is derived provenance rather than schema
+    /// Like `sdk_schemas`, this is derived provenance rather than schema
     /// identity, so it does not participate in `PartialEq` (see the manual impl).
     pub derived_index_aliases: BTreeMap<String, BTreeMap<String, String>>,
 }
 
-// The `sqlite_schemas` side-map is a derived emission aid (it is rebuilt from the
+// The `sdk_schemas` side-map is a derived emission aid (it is rebuilt from the
 // same descriptors that produce `snapshot`), so two `DesiredSchema`s are equal iff
 // their snapshot + ownership are — matching the pre-union equality semantics so
 // existing tests/asserts that compare `DesiredSchema`s stay valid.
@@ -1811,11 +1811,11 @@ pub fn desired_snapshot_for_dialect(
     // The per-table SDK schema `Value` (the descriptor→`Value` bridge), retained
     // for SQLite rename lowering. Keyed by table; identical re-declarations
     // overwrite with an identical value (idempotent, like the snapshot itself).
-    let mut sqlite_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut sdk_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
     let mut resolved_injects: BTreeMap<String, ResolvedInject> = BTreeMap::new();
     // The derived-name provenance, captured here beside the snapshot that carries
     // the derived names themselves. Identical re-declarations overwrite with an
-    // identical map, like `sqlite_schemas` above.
+    // identical map, like `sdk_schemas` above.
     let mut derived_index_aliases: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     for d in descriptors {
@@ -1824,7 +1824,7 @@ pub fn desired_snapshot_for_dialect(
         // loop consumes the descriptor. Conflicting declarations are caught on the
         // snapshot in the second pass, so storing per-descriptor here is safe —
         // identical twins store identical values.
-        sqlite_schemas.insert(d.name.clone(), descriptor_to_sdk_schema(d));
+        sdk_schemas.insert(d.name.clone(), descriptor_to_sdk_schema(d));
 
         // MANDATE — the per-column / per-index snapshot construction (system-
         // field injection, default rendering, encryption/comment sentinels, vector/
@@ -1847,7 +1847,7 @@ pub fn desired_snapshot_for_dialect(
     // pick the owner — both order-independent (1b).
     desired_snapshot_second_pass(
         declarations,
-        sqlite_schemas,
+        sdk_schemas,
         resolved_injects,
         derived_index_aliases,
     )
@@ -2310,7 +2310,7 @@ fn build_table_snapshot_impl(
 /// resolution untouched.
 fn desired_snapshot_second_pass(
     declarations: BTreeMap<String, Vec<(String, TableSnapshot)>>,
-    mut sqlite_schemas: BTreeMap<String, serde_json::Value>,
+    mut sdk_schemas: BTreeMap<String, serde_json::Value>,
     mut resolved_injects: BTreeMap<String, ResolvedInject>,
     mut derived_index_aliases: BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<DesiredSchema, DeclarativeError> {
@@ -2360,7 +2360,7 @@ fn desired_snapshot_second_pass(
     // keep only the SDK schemas for tables that survived conflict
     // resolution (the keys of `tables`), so the side-map stays exactly aligned with
     // the snapshot.
-    sqlite_schemas.retain(|table, _| tables.contains_key(table));
+    sdk_schemas.retain(|table, _| tables.contains_key(table));
     resolved_injects.retain(|table, _| tables.contains_key(table));
     derived_index_aliases.retain(|table, _| tables.contains_key(table));
 
@@ -2371,7 +2371,7 @@ fn desired_snapshot_second_pass(
     Ok(DesiredSchema {
         snapshot,
         ownership,
-        sqlite_schemas,
+        sdk_schemas,
         resolved_injects,
         derived_index_aliases,
     })
@@ -4492,7 +4492,7 @@ impl DeclarativeAuthor {
                 });
         }
 
-        let schema = desired.sqlite_schemas.get(table).ok_or_else(|| {
+        let schema = desired.sdk_schemas.get(table).ok_or_else(|| {
             DeclarativeError::Invalid(format!(
                 "internal: no SDK schema for SQLite rebuild table '{table}'"
             ))
@@ -4884,7 +4884,7 @@ impl DeclarativeAuthor {
     ///   — the affinity comes from the SDK Value, which the caller built from the
     ///   dialect-neutral `ColType`.
     ///
-    /// `live_snapshot` / `live_sqlite_schema` are this table's full introspected
+    /// `live_snapshot` / `live_sdk_schema` are this table's full introspected
     /// structure (the SQLite leg needs the whole shape, not just the column being
     /// renamed). `expand_contract_ty` is used only on the expand-contract leg.
     ///
@@ -4905,7 +4905,7 @@ impl DeclarativeAuthor {
         to: &str,
         expand_contract_ty: &str,
         live_snapshot: &TableSnapshot,
-        live_sqlite_schema: &serde_json::Value,
+        live_sdk_schema: &serde_json::Value,
         live_owner: &str,
         known_live_tables: &BTreeSet<String>,
         effective: &zero_migrate_policy::EffectivePolicy,
@@ -4941,7 +4941,7 @@ impl DeclarativeAuthor {
                     from,
                     to,
                     live_snapshot,
-                    live_sqlite_schema,
+                    live_sdk_schema,
                     live_owner,
                     known_live_tables,
                     effective,
@@ -4984,7 +4984,7 @@ impl DeclarativeAuthor {
         from: &str,
         to: &str,
         live_snapshot: &TableSnapshot,
-        live_sqlite_schema: &serde_json::Value,
+        live_sdk_schema: &serde_json::Value,
         live_owner: &str,
         known_live_tables: &BTreeSet<String>,
         effective: &zero_migrate_policy::EffectivePolicy,
@@ -5061,10 +5061,10 @@ impl DeclarativeAuthor {
         // above) so the value-copy mapping is authoritative; the SDK `Value` may then be
         // sourced from EITHER shape. If it carries NEITHER `from` nor `to`, fail closed.
         let desired_schema_value =
-            if let Some(v) = rename_sdk_schema_field(live_sqlite_schema, from, to) {
+            if let Some(v) = rename_sdk_schema_field(live_sdk_schema, from, to) {
                 // (1) pre-rename Value → rename the field key to the post-rename shape.
                 v
-            } else if let Some(to_def) = live_sqlite_schema.as_object().and_then(|o| o.get(to)) {
+            } else if let Some(to_def) = live_sdk_schema.as_object().and_then(|o| o.get(to)) {
                 // (2) post-rename desired Value (already keyed `to`) → use as-is, BUT
                 // ONLY after asserting its column AFFINITY equals the live `from` column's
                 // The new-table CREATE renders from THIS descriptor-sourced
@@ -5119,7 +5119,7 @@ impl DeclarativeAuthor {
                         facet,
                     });
                 }
-                live_sqlite_schema.clone()
+                live_sdk_schema.clone()
             } else {
                 return Err(DeclarativeError::Invalid(format!(
                     "renameColumn: SDK schema for '{table}' has neither the pre-rename field \
@@ -5142,8 +5142,8 @@ impl DeclarativeAuthor {
         desired_tables.insert(table.to_string(), desired_table);
         let mut ownership: BTreeMap<String, String> = BTreeMap::new();
         ownership.insert(table.to_string(), live_owner.to_string());
-        let mut sqlite_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        sqlite_schemas.insert(table.to_string(), desired_schema_value);
+        let mut sdk_schemas: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        sdk_schemas.insert(table.to_string(), desired_schema_value);
         let inject = ResolvedInject::for_table(effective, &self.project_schema, table)
             .map_err(|error| DeclarativeError::Invalid(error.to_string()))?;
         let mut resolved_injects = BTreeMap::new();
@@ -5154,7 +5154,7 @@ impl DeclarativeAuthor {
                 ..Default::default()
             },
             ownership,
-            sqlite_schemas,
+            sdk_schemas,
             // This one-table desired schema is assembled from an IR rename lowering
             // rather than the descriptor compiler, so no index name here came from
             // `derived_index_aliases_for`. An empty map leaves index pairing on

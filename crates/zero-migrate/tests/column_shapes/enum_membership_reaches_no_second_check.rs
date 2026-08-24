@@ -18,7 +18,7 @@
 //! WHY IT CANNOT ARRIVE. The `FieldDef` projection ends at `descriptor_to_sdk_schema`; the
 //! DDL is built by `fold_ops` / the lower, which never see its `FieldDescriptor`s.
 //! The one place its output IS load-bearing for DDL is the SQLite 12-step rebuild
-//! (`engine`'s `live.sqlite_schemas`), and that case is measured below rather than
+//! (`engine`'s `live.sdk_schemas`), and that case is measured below rather than
 //! reasoned about. The measurement REFUTED the guess that prompted it: the rebuilt
 //! CREATE is byte-identical with the lift disabled and enabled, because the rebuilt
 //! column's membership comes from the desired snapshot's `inline_checks` - which
@@ -117,7 +117,7 @@ fn an_inlined_enum_column_gets_exactly_one_membership_check() {
 }
 
 /// The one place the `FieldDef` map IS load-bearing for DDL: the engine
-/// seeds `live.sqlite_schemas` from it (`engine::refresh_historical_live`) and the
+/// seeds `live.sdk_schemas` from it (`engine::refresh_historical_live`) and the
 /// SQLite 12-step rebuild consumes that `Value`. So the descriptor now carrying a
 /// membership has to be checked against real rebuild DDL, not argued about.
 ///
@@ -150,7 +150,7 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
         fold_ops(&ops, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
-    live.sqlite_schemas = single_fold::fold(&ops, &zero_migrate::SQLITE, PROJECT, &effective)
+    live.sdk_schemas = single_fold::fold(&ops, &zero_migrate::SQLITE, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the field-def replay folds");
 

@@ -10,7 +10,7 @@
 //! * `render/lower.rs::col_type_to_token` maps `ColType::Decimal { .. }` AND
 //!   `ColType::Double` to the same token, `"number"`, discarding the precision and scale
 //!   because the `FieldDef` vocabulary has no slot for them. That token rides in the
-//!   per-table field-def MAP (`LiveSchema::sqlite_schemas`), and `schema/query.rs`'s
+//!   per-table field-def MAP (`LiveSchema::sdk_schemas`), and `schema/query.rs`'s
 //!   SQLite `column_type` answers `REAL` for it.
 //!
 //! The 12-step rebuild picks ONE of those carriers per rebuild
@@ -196,7 +196,7 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
     let snapshot = fold_ops(history, &SQLITE, PROJECT, &policy).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = single_fold::fold(history, &SQLITE, PROJECT, &policy)
+    live.sdk_schemas = single_fold::fold(history, &SQLITE, PROJECT, &policy)
         .expect("the history folds")
         .project_field_defs();
     live
@@ -225,7 +225,7 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
 }
 
 /// Deploy an ordered envelope set through the shipped engine - the same entry point the
-/// CLI uses, and the only place that seeds `live.sqlite_schemas` from the fold while the
+/// CLI uses, and the only place that seeds `live.sdk_schemas` from the fold while the
 /// live snapshot itself is genuinely INTROSPECTED.
 async fn deploy(backend: &SqliteBackend, tables: &[&str], sources: &[&str]) -> Result<(), String> {
     let policy = support::no_inject(PROJECT);
@@ -364,14 +364,14 @@ async fn a_decimal_column_keeps_its_digits_through_a_fold_seeded_rebuild() {
          SQLite's own text and this test observes nothing about the map"
     );
     assert_eq!(
-        live.sqlite_schemas["ledger"]["amount"].get("type"),
+        live.sdk_schemas["ledger"]["amount"].get("type"),
         Some(&serde_json::json!("number")),
         "the folded map spells the decimal column `number` - the SAME token \
          `ColType::Double` gets, with the precision and scale discarded. That collision \
          is the defect under test; if this line changes, re-read what the fix did."
     );
     assert_eq!(
-        live.sqlite_schemas["ledger"]["fee"].get("type"),
+        live.sdk_schemas["ledger"]["fee"].get("type"),
         Some(&serde_json::json!("number")),
         "and the domain column collapses to the SAME token: the domain lift resolves \
          `money_t` to its `Decimal` base and then spells it through the same map"
@@ -565,7 +565,7 @@ async fn the_deploy_path_rename_replays_the_stored_create_and_leaves_the_decimal
     );
 
     // The WHOLE ordered envelope set, the way the CLI re-presents it on every deploy:
-    // `deploy_envelopes` seeds `live.sqlite_schemas` from the CUMULATIVE ops, so the
+    // `deploy_envelopes` seeds `live.sdk_schemas` from the CUMULATIVE ops, so the
     // already-applied `CREATE` has to be in view or the rename fails closed with
     // `RenameNeedsLiveTable`. Its steps are journaled, so it is skipped, not
     // re-applied.

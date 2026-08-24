@@ -12,7 +12,7 @@
 //! `apply_fold_named_type_column_metadata`, never from a `FieldDescriptor`.
 //!
 //! THE ONE PLACE THIS REPLAY IS LOAD-BEARING FOR DDL is the SQLite 12-step rebuild -
-//! `engine` seeds `live.sqlite_schemas` from the `FieldDef` projection and the rebuild
+//! `engine` seeds `live.sdk_schemas` from the `FieldDef` projection and the rebuild
 //! renders `CREATE TABLE` from that `Value`. Measured with the lift disabled and
 //! enabled: the rebuilt CREATE is BYTE-IDENTICAL, because the rebuilt column's storage
 //! and its inline CHECK both come from the `ColumnSnapshot` `fold_ops` produced.
@@ -194,7 +194,7 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
 }
 
 /// The one place the `FieldDef` map IS load-bearing for DDL: the engine seeds
-/// `live.sqlite_schemas` from it and the SQLite 12-step rebuild renders `CREATE TABLE`
+/// `live.sdk_schemas` from it and the SQLite 12-step rebuild renders `CREATE TABLE`
 /// from that `Value`. So the descriptor now carrying `"int"` has to be checked against
 /// real rebuild DDL, not argued about.
 ///
@@ -210,7 +210,7 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
         fold_ops(&ops, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
-    live.sqlite_schemas = single_fold::fold(&ops, &zero_migrate::SQLITE, PROJECT, &effective)
+    live.sdk_schemas = single_fold::fold(&ops, &zero_migrate::SQLITE, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the field-def replay folds");
 

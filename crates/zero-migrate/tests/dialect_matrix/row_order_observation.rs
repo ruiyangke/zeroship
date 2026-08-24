@@ -257,7 +257,7 @@ async fn apply_envelope<B: MigrationBackend>(
 /// The DML lowers against a live schema read back from the CATALOG, not against
 /// `LiveSchema::default()`, for the reason layer 1 records: an op that lowers against
 /// a schema the server does not have is answering a different question. SQLite
-/// additionally needs `sqlite_schemas`, folded from the DDL that just applied, which
+/// additionally needs `sdk_schemas`, folded from the DDL that just applied, which
 /// IS this stream's history.
 async fn apply_fixture<B: MigrationBackend>(
     pin: Pin,
@@ -290,7 +290,7 @@ async fn apply_fixture<B: MigrationBackend>(
         if let Ok(defs) = single_fold::fold(&history, dialect, &cfg.project_schema, policy)
             .map(|folded| folded.project_field_defs())
         {
-            live.sqlite_schemas = defs;
+            live.sdk_schemas = defs;
         }
     }
 

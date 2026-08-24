@@ -284,11 +284,11 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = charter();
     let snapshot =
         fold_ops(history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
-    let sqlite_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
+    let sdk_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas = sqlite_schemas;
+    live.sdk_schemas = sdk_schemas;
     live
 }
 
@@ -815,7 +815,7 @@ async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_
          through the replay arm"
     );
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas =
+    live.sdk_schemas =
         single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
             .map(|folded| folded.project_field_defs())
             .expect("the history folds to field defs");
@@ -1205,7 +1205,7 @@ async fn a_rebuild_that_renames_one_column_and_drops_another_keeps_only_the_surv
 /// `declarative::render_create_table_rebuild` has two arms. A table with a generated column,
 /// an inline CHECK or a case-insensitive text column goes through the SNAPSHOT renderer;
 /// an ordinary table goes through the SDK-VALUE arm, which re-emits from
-/// `LiveSchema::sqlite_schemas` - the map the `FieldDef` projection builds, exactly as
+/// `LiveSchema::sdk_schemas` - the map the `FieldDef` projection builds, exactly as
 /// `engine::refresh_historical_live` does in production. Under a charter with a
 /// MANDATORY `[[inject]]`, that map contains the injected columns, and the emitter
 /// refuses its own input:
@@ -1287,7 +1287,7 @@ columns = [
     let snapshot = fold_ops(&create.ops, &zero_migrate::SQLITE, PROJECT, &effective)
         .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sqlite_schemas =
+    live.sdk_schemas =
         single_fold::fold(&create.ops, &zero_migrate::SQLITE, PROJECT, &effective)
             .map(|folded| folded.project_field_defs())
             .expect("the history folds to field defs");
