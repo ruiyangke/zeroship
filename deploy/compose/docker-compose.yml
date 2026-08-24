@@ -108,10 +108,17 @@ services:
     # none of them. Nearby comments still say eleven and twelve - the number was
     # written once and copied, and nothing re-ran it. See NOTES-s31.md for the
     # two-server transcript.
+    # max_prepared_transactions is also a restart-only setting. PostgreSQL's
+    # default is zero, which makes PREPARE TRANSACTION unavailable and leaves
+    # pgoutput's `two_phase` protocol untestable. compio-postgres exercises the
+    # real prepare/commit/rollback frames against this service, so keep a small
+    # nonzero budget here rather than weakening that test into a skip.
     command:
       - postgres
       - -c
       - wal_level=logical
+      - -c
+      - max_prepared_transactions=10
     environment:
       POSTGRES_PASSWORD: zeroship
       POSTGRES_DB: zeroship
