@@ -171,9 +171,7 @@ impl Fixture {
         fixture
             .setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{s}')
-                   FROM pg_replication_slots WHERE slot_name = '{s}';
-                 SELECT pg_create_logical_replication_slot('{s}', 'pgoutput');",
+                "SELECT pg_create_logical_replication_slot('{s}', 'pgoutput');",
                 s = fixture.slot,
             ))
             .await

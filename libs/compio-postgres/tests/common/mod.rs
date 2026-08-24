@@ -285,6 +285,43 @@ fn process_is_alive(_pid: u32) -> bool {
     true
 }
 
+/// Drop a replication slot, waiting for its walsender to let go first.
+///
+/// `drop(stream)` closes the connection CLIENT-side; the server retires the
+/// walsender a moment later, and until it does the slot is still `active` and
+/// `pg_drop_replication_slot` fails with 55006. Tests that ignore that error
+/// LEAK THE SLOT, and slots are a bounded server resource - a run that leaks
+/// enough of them starts failing with "max_replication_slots" on whatever
+/// happens to run next, which reads as a misconfigured server rather than as
+/// test litter.
+///
+/// Polls rather than sleeping a fixed amount: a sleep long enough for a loaded
+/// machine is wasted on every green run, and one tuned on an idle machine is
+/// the flake again. A slot that is already gone is success, not an error.
+pub async fn drop_replication_slot(client: &compio_postgres::Client, slot: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let outcome = client
+            .execute(
+                "SELECT pg_drop_replication_slot(s.slot_name)
+                   FROM pg_replication_slots s WHERE s.slot_name = $1",
+                &[&slot],
+            )
+            .await;
+        let Err(error) = outcome else {
+            return;
+        };
+        let still_held = error.code().is_some_and(|code| code.code() == "55006");
+        if !still_held || std::time::Instant::now() >= deadline {
+            // Best effort: the caller is cleaning up, often after a failure
+            // that is more interesting than this one.
+            eprintln!("could not drop slot {slot}: {}", error_chain(&error));
+            return;
+        }
+        compio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
 /// A `Config` for a replication connection to the test server.
 ///
 /// Carries the test DSN's credentials, host and port, and nothing else - a
