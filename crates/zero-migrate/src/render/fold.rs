@@ -3363,7 +3363,7 @@ fn apply_fold_rowid_metadata(
     dialect: &DialectId,
 ) -> Result<(), FoldError> {
     for column in &mut snap.columns {
-        column.sqlite_rowid = false;
+        column.rowid_alias = false;
     }
     let Some((_, columns)) = folded_primary_key(snap)? else {
         return Ok(());
@@ -3387,10 +3387,10 @@ fn apply_fold_rowid_metadata(
     ) || matches!(snap.columns[column_index].identity, Some(identity) if !identity.always);
     let stored_shape_allows_rowid = fold_policy(dialect)
         .stored_primary_key_allows_rowid(snap.stored_create_sql.as_deref(), column_name);
-    let sqlite_rowid = storage_generates && stored_shape_allows_rowid;
+    let rowid_alias = storage_generates && stored_shape_allows_rowid;
     let column = &mut snap.columns[column_index];
-    column.sqlite_rowid = sqlite_rowid;
-    if column.sqlite_rowid {
+    column.rowid_alias = rowid_alias;
+    if column.rowid_alias {
         column.id_default = Some(catalog_id_default(column.default.as_deref(), dialect, None));
     }
     Ok(())

@@ -573,7 +573,7 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
         generated,
         generated_kind,
         identity,
-        sqlite_rowid,
+        rowid_alias,
         value_format,
         catalog_uuid_format_check,
         id_default,
@@ -607,7 +607,7 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
     check("generated", *generated == theirs.generated);
     check("generated_kind", *generated_kind == theirs.generated_kind);
     check("identity", *identity == theirs.identity);
-    check("sqlite_rowid", *sqlite_rowid == theirs.sqlite_rowid);
+    check("rowid_alias", *rowid_alias == theirs.rowid_alias);
     check("value_format", *value_format == theirs.value_format);
     check(
         "catalog_uuid_format_check",

@@ -3,7 +3,7 @@
 //! The MySQL leg of `schema_model_equivalence_pg.rs`, and it is not a duplicate: it is
 //! the ONLY leg that exercises the vendor side table with real values.
 //!
-//! On PostgreSQL every family in `VendorFacts` is at its default - `sqlite_rowid` false,
+//! On PostgreSQL every family in `VendorFacts` is at its default - `rowid_alias` false,
 //! `catalog_uuid_format_check` false, `pg_index_only` false (PostgreSQL introspection
 //! hardcodes it), `mysql_*` absent - so a round trip that silently dropped a vendor
 //! family would still pass there. MySQL populates its physical-contract leg,
@@ -187,7 +187,7 @@ async fn the_neutral_model_preserves_mysql_behaviour_exactly() {
     //
     // This is where the vendor physical leg earns its place. Mutating it must move
     // NEITHER verdict, because `ColumnSnapshot::eq` excludes it and
-    // `column_shape_identity` cannot see it - and mutating `sqlite_rowid` must move
+    // `column_shape_identity` cannot see it - and mutating `rowid_alias` must move
     // BOTH, because `ColumnSnapshot::eq` compares it and
     // `VendorFacts::column_shape_identity` is the half that recombines it.
     let checked =

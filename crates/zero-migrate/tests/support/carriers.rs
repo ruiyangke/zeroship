@@ -188,7 +188,7 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
         generated,
         generated_kind,
         identity,
-        sqlite_rowid,
+        rowid_alias,
         value_format,
         catalog_uuid_format_check,
         id_default,
@@ -243,8 +243,8 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
         "`IdentityCol` is a single `always: bool`.",
     );
     never_a_column_name(
-        "TableSnapshot::columns[].sqlite_rowid",
-        sqlite_rowid,
+        "TableSnapshot::columns[].rowid_alias",
+        rowid_alias,
         "a bool.",
     );
     never_a_column_name(

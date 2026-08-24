@@ -128,7 +128,7 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
         generated,
         generated_kind,
         identity,
-        sqlite_rowid,
+        rowid_alias,
         value_format,
         catalog_uuid_format_check,
         id_default,
@@ -176,8 +176,8 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
     set.probe("ColumnSnapshot::identity", identity, |c| {
         c.identity = Some(IdentityCol { always: true });
     });
-    set.probe("ColumnSnapshot::sqlite_rowid", sqlite_rowid, |c| {
-        c.sqlite_rowid = true;
+    set.probe("ColumnSnapshot::rowid_alias", rowid_alias, |c| {
+        c.rowid_alias = true;
     });
     set.probe("ColumnSnapshot::value_format", value_format, |c| {
         c.value_format = Some(ValueFormat::Ulid);

@@ -845,10 +845,17 @@ fn format_collation(collation: Option<&ColumnCollationSnapshot>) -> String {
     collation.map_or_else(String::new, ColumnCollationSnapshot::display_name)
 }
 
+/// The `identity` drift attribute's operator-facing spelling.
+///
+/// The two row-identifier-alias arms used to read "sqlite rowid" and "sqlite
+/// autoincrement" -- core naming a vendor in a report line it prints for whichever
+/// backend produced the snapshot. They name the CONTRACT now: an alias with no
+/// identity is a plain row-identifier alias, and one carrying a by-default identity
+/// is that alias plus an always-increasing allocator.
 fn format_identity(column: &ColumnSnapshot) -> &'static str {
-    match (column.sqlite_rowid, column.identity) {
-        (true, Some(identity)) if !identity.always => "sqlite autoincrement",
-        (true, None) => "sqlite rowid",
+    match (column.rowid_alias, column.identity) {
+        (true, Some(identity)) if !identity.always => "rowid alias, auto increment",
+        (true, None) => "rowid alias",
         (_, Some(identity)) if identity.always => "always",
         (_, Some(_)) => "by default / auto increment",
         _ => "",
@@ -914,14 +921,18 @@ fn column_data_types_eq(expected: &ColumnSnapshot, actual: &ColumnSnapshot) -> b
     if expected.data_type == actual.data_type {
         return true;
     }
-    if !(expected.sqlite_rowid && actual.sqlite_rowid) {
+    if !(expected.rowid_alias && actual.rowid_alias) {
         return false;
     }
 
-    // SQLite's rowid alias requires the physical declaration `INTEGER PRIMARY
-    // KEY`, even when the portable authored integer width was bigint/smallint.
-    // Preserve exact type drift everywhere else; this equivalence is confined to
-    // two columns already proven to be the same rowid-alias contract.
+    // A row-identifier alias fixes its column's PHYSICAL type on any backend that
+    // has one -- that is what makes it an alias rather than an ordinary key -- so the
+    // authored integer width the portable `data_type` records (bigint, smallint) is
+    // not what the column physically is. Two columns BOTH proven to be that alias are
+    // therefore the same physical column across the whole integer family.
+    //
+    // Confined to that pair on purpose: exact type drift is preserved everywhere
+    // else, and only a producer that sets `rowid_alias` on both sides reaches here.
     let integer_family = |data_type: &str| {
         matches!(
             data_type.trim().to_ascii_lowercase().as_str(),

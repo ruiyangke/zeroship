@@ -209,16 +209,16 @@ impl IndexElementKey {
 /// side map over a field for the same reason.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VendorFacts {
-    /// SQLite: whether this column is the exact rowid-alias shape
-    /// (`INTEGER PRIMARY KEY`).
+    /// Whether this column is the table's physical row-identifier alias. SQLite is
+    /// the shipping backend that answers yes.
     ///
     /// This one is why [`drift_identity`] alone cannot reproduce today's verdict.
-    /// `ColumnSnapshot::eq` COMPARES `sqlite_rowid`, so a comparator that only sees the
+    /// `ColumnSnapshot::eq` COMPARES `rowid_alias`, so a comparator that only sees the
     /// neutral column would stop reporting an out-of-band rowid flip. The neutral and
     /// vendor halves are therefore combined explicitly by
     /// [`SchemaModel::column_drift_identity`], which is the dependency the old exclusion
     /// list kept implicit.
-    pub sqlite_rowid: BTreeMap<ColumnKey, bool>,
+    pub rowid_alias: BTreeMap<ColumnKey, bool>,
     /// SQLite: the verbatim `sqlite_master.sql` body for this table.
     pub sqlite_stored_create_sql: BTreeMap<TableKey, String>,
     /// MySQL and SQLite: whether the live catalog carries the engine's own UUID
@@ -251,7 +251,7 @@ impl VendorFacts {
     pub fn absorb(&mut self, other: Self) {
         // EXHAUSTIVE, no `..`: a new fact family breaks this line until it is merged.
         let Self {
-            sqlite_rowid,
+            rowid_alias,
             sqlite_stored_create_sql,
             catalog_uuid_format_check,
             expression_default,
@@ -263,7 +263,7 @@ impl VendorFacts {
             pg_index_element_opclass,
             pg_index_element_collation,
         } = other;
-        self.sqlite_rowid.extend(sqlite_rowid);
+        self.rowid_alias.extend(rowid_alias);
         self.sqlite_stored_create_sql
             .extend(sqlite_stored_create_sql);
         self.catalog_uuid_format_check
@@ -284,10 +284,10 @@ impl VendorFacts {
     /// The VENDOR half of TABLE-SHAPE identity for one column: the vendor term
     /// `ColumnSnapshot::eq` compares today.
     ///
-    /// Exactly one family participates, `sqlite_rowid`, and it participates because
+    /// Exactly one family participates, `rowid_alias`, and it participates because
     /// `ColumnSnapshot::eq` compares it - not because a vendor-neutral argument says it
     /// should. **This is the term that proves the side table cannot be a pure
-    /// subtraction.** Move `sqlite_rowid` out of the neutral column and stop there, and
+    /// subtraction.** Move `rowid_alias` out of the neutral column and stop there, and
     /// an out-of-band rowid/AUTOINCREMENT flip silently stops being a difference. The
     /// neutral and vendor halves are therefore recombined explicitly, by
     /// [`SchemaModel::column_shape_identity`], which is the dependency the old exclusion
@@ -312,16 +312,16 @@ impl VendorFacts {
     ///   asked."
     #[must_use]
     pub fn column_shape_identity(&self, left: &ColumnKey, right: &ColumnKey) -> bool {
-        self.sqlite_rowid.get(left).copied().unwrap_or(false)
-            == self.sqlite_rowid.get(right).copied().unwrap_or(false)
+        self.rowid_alias.get(left).copied().unwrap_or(false)
+            == self.rowid_alias.get(right).copied().unwrap_or(false)
     }
 
     /// The VENDOR half of STRUCTURAL DRIFT for one column.
     ///
     /// A DIFFERENT set from [`Self::column_shape_identity`], and that is the finding
     /// rather than a design choice: `apply::drift::column_data_types_eq` consults the
-    /// vendor carrier AND `sqlite_rowid`, while `ColumnSnapshot::eq` reads
-    /// `sqlite_rowid` only. Two definitions of "the same column" already exist in the
+    /// vendor carrier AND `rowid_alias`, while `ColumnSnapshot::eq` reads
+    /// `rowid_alias` only. Two definitions of "the same column" already exist in the
     /// tree; naming both is what stops the next reader assuming there is one.
     ///
     /// (That reference used to carry a line range. It is a bare function name now,
@@ -538,9 +538,7 @@ impl Column {
     #[must_use]
     pub fn from_snapshot(table: &str, snapshot: &ColumnSnapshot, vendor: &mut VendorFacts) -> Self {
         let key = ColumnKey::new(table, &snapshot.name);
-        vendor
-            .sqlite_rowid
-            .insert(key.clone(), snapshot.sqlite_rowid);
+        vendor.rowid_alias.insert(key.clone(), snapshot.rowid_alias);
         vendor
             .catalog_uuid_format_check
             .insert(key.clone(), snapshot.catalog_uuid_format_check);
@@ -592,7 +590,7 @@ impl Column {
             generated: self.generated.clone(),
             generated_kind: self.generated_kind,
             identity: self.identity,
-            sqlite_rowid: vendor.sqlite_rowid.get(&key).copied().unwrap_or(false),
+            rowid_alias: vendor.rowid_alias.get(&key).copied().unwrap_or(false),
             value_format: self.value_format.clone(),
             catalog_uuid_format_check: vendor
                 .catalog_uuid_format_check
@@ -828,7 +826,7 @@ impl SchemaModel {
     /// half, combined here and nowhere else.
     ///
     /// The combination is the point. Today it is implicit - `ColumnSnapshot::eq` compares
-    /// `sqlite_rowid` alongside nine neutral fields, so every consumer of column equality
+    /// `rowid_alias` alongside nine neutral fields, so every consumer of column equality
     /// silently inherits a SQLite fact. Here the caller can SEE that the verdict has two
     /// inputs, and a backend that needs another vendor term adds it to
     /// [`VendorFacts::column_shape_identity`] without touching [`column_shape_identity`]

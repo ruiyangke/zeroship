@@ -322,12 +322,12 @@ async fn introspect_columns(
         // NULL so the introspected nullability agrees with the dialect-agnostic model
         // (and with the PG snapshot).
         let nullable = notnull.trim() != "1" && pk_ord == 0;
-        let sqlite_rowid = primary_members == 1
+        let rowid_alias = primary_members == 1
             && pk_ord == 1
             && raw_type.trim().eq_ignore_ascii_case("INTEGER")
             && !without_rowid
             && !primary_key_has_separate_index;
-        let identity = (sqlite_rowid && column_declares_autoincrement(stored_create_sql, &name))
+        let identity = (rowid_alias && column_declares_autoincrement(stored_create_sql, &name))
             .then_some(IdentityCol { always: false });
         let recovered_checks = recover_column_format_checks(stored_create_sql, &name);
         if recovered_checks.mixed_uuid_and_value_format {
@@ -363,7 +363,7 @@ async fn introspect_columns(
         // when another catalog facet proves that the column carries an ID contract.
         let tracks_id_default = is_uuid_v4_default
             || identity.is_some()
-            || sqlite_rowid
+            || rowid_alias
             || has_uuid_format_check
             || value_format.is_some();
         let id_default = tracks_id_default.then_some(catalog_default);
@@ -392,7 +392,7 @@ async fn introspect_columns(
             default: raw_default,
             generated: None,
             identity,
-            sqlite_rowid,
+            rowid_alias,
             value_format,
             // Retain the engine's own UUID contract as catalog evidence. The
             // id-default classification above consumes the recovered CHECK

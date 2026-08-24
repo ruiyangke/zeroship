@@ -288,10 +288,7 @@ async fn rowid_and_autoincrement_identity_are_introspected_and_drift_compared() 
             .iter()
             .find(|column| column.name == "id")
             .expect("id column");
-        assert!(
-            id.sqlite_rowid,
-            "exact INTEGER PRIMARY KEY is a rowid alias"
-        );
+        assert!(id.rowid_alias, "exact INTEGER PRIMARY KEY is a rowid alias");
         assert_eq!(
             id.identity.map(|identity| identity.always),
             expected_identity,
@@ -304,15 +301,15 @@ async fn rowid_and_autoincrement_identity_are_introspected_and_drift_compared() 
             "identity_drop",
             AUTO,
             BARE,
-            "sqlite autoincrement",
-            "sqlite rowid",
+            "rowid alias, auto increment",
+            "rowid alias",
         ),
         (
             "identity_add",
             BARE,
             AUTO,
-            "sqlite rowid",
-            "sqlite autoincrement",
+            "rowid alias",
+            "rowid alias, auto increment",
         ),
     ] {
         let p = paths(tag);
@@ -794,7 +791,7 @@ async fn authored_identity_default_and_format_snapshot_matches_live_sqlite() {
         &diff_snapshots(&expected, &changed),
         "id",
         "identity",
-        "sqlite rowid",
+        "rowid alias",
         "",
     );
 }
@@ -817,7 +814,7 @@ async fn catalog_seeded_fold_preserves_non_rowid_integer_primary_keys() {
     let live = be.snapshot_schema_sqlite().await.expect("live snapshot");
     for table in ["without_rowid", "descending_rowid"] {
         assert!(
-            !live.tables[table].columns[0].sqlite_rowid,
+            !live.tables[table].columns[0].rowid_alias,
             "{table} must not be classified as a rowid alias"
         );
     }

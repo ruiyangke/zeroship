@@ -242,7 +242,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             inline_checks: Vec::new(),
             generated: None,
             identity,
-            sqlite_rowid: false,
+            rowid_alias: false,
             value_format: None,
             // Set below from the CHECK pass, which is the only place the
             // engine's own UUID contract is recoverable on MySQL.

@@ -316,7 +316,7 @@ fn the_neutral_column_carries_eighteen_fields_and_the_catalog_snapshot_carries_t
     );
 
     // 24 catalog fields = 18 neutral + 5 vendor + one ephemeral schema-query token
-    // carrier. The vendor five are `sqlite_rowid`,
+    // carrier. The vendor five are `rowid_alias`,
     // `catalog_uuid_format_check`, `expression_default`, `text_storage` and
     // the vendor physical leg, and `tests/schema_model_equivalence_mysql.rs` proves the
     // split is lossless with all of them populated.

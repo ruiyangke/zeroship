@@ -135,15 +135,28 @@ pub struct ColumnSnapshot {
     /// `attidentity`, MySQL `AUTO_INCREMENT`, or SQLite's explicit
     /// `AUTOINCREMENT` clause. It is drift-comparable.
     pub identity: Option<IdentityCol>,
-    /// Whether this SQLite column is the exact rowid alias shape
-    /// (`INTEGER PRIMARY KEY`, excluding `DESC` and `WITHOUT ROWID`).
+    /// Whether this column IS the table's physical row identifier, aliased onto a
+    /// declared column.
     ///
-    /// SQLite's ordinary rowid allocator and its stronger `AUTOINCREMENT`
-    /// contract are physically distinct even though only the latter corresponds
-    /// to [`Self::identity`]. Desired and live SQLite snapshots populate this
-    /// drift-comparable bit so a normal rowid primary key stays clean while an
-    /// out-of-band rowid/AUTOINCREMENT flip is visible.
-    pub sqlite_rowid: bool,
+    /// A target with such an alias fixes the column's physical type, so this is a
+    /// stronger statement than "it is the primary key". It is also distinct from
+    /// [`Self::identity`]: a backend's ordinary row-identifier allocator and its
+    /// stronger always-increasing contract are physically different things, and only
+    /// the latter is an identity. A column can therefore be a row-identifier alias
+    /// with no identity at all, and that pair is exactly what makes an out-of-band
+    /// flip between the two visible instead of silent.
+    ///
+    /// The producer decides, never core: whether a stored CREATE permits the alias and
+    /// whether the storage generates the value are
+    /// [`CatalogFoldPolicy::stored_primary_key_allows_rowid`](crate::fold::CatalogFoldPolicy::stored_primary_key_allows_rowid)
+    /// and
+    /// [`rowid_storage_generates`](crate::fold::CatalogFoldPolicy::rowid_storage_generates),
+    /// which have been spelled neutrally since they were written. This field carried a
+    /// vendor prefix until it caught up with them. A backend with no such alias leaves
+    /// it `false` and nothing downstream changes.
+    ///
+    /// Drift-comparable.
+    pub rowid_alias: bool,
     /// A locally enforced TypeID/ULID format CHECK recovered from the catalog.
     ///
     /// This is deliberately separate from [`Self::inline_checks`], which may
@@ -371,7 +384,7 @@ impl std::fmt::Debug for ColumnSnapshot {
             s.field("generated_kind", &self.generated_kind);
         }
         s.field("identity", &self.identity)
-            .field("sqlite_rowid", &self.sqlite_rowid)
+            .field("rowid_alias", &self.rowid_alias)
             .field("value_format", &self.value_format)
             .field("id_default", &self.id_default)
             .field("case_sensitive", &self.case_sensitive)
@@ -580,7 +593,7 @@ impl PartialEq for ColumnSnapshot {
             && self.data_type == other.data_type
             && self.nullable == other.nullable
             && self.identity == other.identity
-            && self.sqlite_rowid == other.sqlite_rowid
+            && self.rowid_alias == other.rowid_alias
             && self.value_format == other.value_format
             && self.id_default == other.id_default
             && self.case_sensitive == other.case_sensitive

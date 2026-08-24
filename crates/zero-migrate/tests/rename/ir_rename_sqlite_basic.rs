@@ -655,7 +655,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
                 generated: None,
                 generated_kind: None,
                 identity: None,
-                sqlite_rowid: false,
+                rowid_alias: false,
                 value_format: None,
                 catalog_uuid_format_check: false,
                 id_default: None,
