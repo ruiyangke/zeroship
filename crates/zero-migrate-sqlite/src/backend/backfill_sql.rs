@@ -973,7 +973,10 @@ fn sqlite_journal_err(error: SqliteActorError) -> BackfillError {
 
 fn batch_error(last: Option<&CursorTuple>, error: SqliteActorError) -> BackfillError {
     match error {
-        SqliteActorError::Poisoned(message) => BackfillError::SqlitePoisoned(message),
+        SqliteActorError::Poisoned(message) => BackfillError::SessionPoisoned {
+            dialect: zero_migrate_ir::dialect::SQLITE,
+            detail: message,
+        },
         error => BackfillError::BatchFailedAtCursor {
             at_cursor: last.and_then(|cursor| cursor.to_json().ok()),
             source_msg: error.to_string(),

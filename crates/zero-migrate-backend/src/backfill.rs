@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::{CursorStability, IrScalar, PerRowGenerator};
 
 use crate::guard::GuardError;
@@ -555,9 +556,26 @@ pub enum BackfillError {
         /// The backend error message from the failed batch.
         source_msg: String,
     },
-    /// The SQLite migration connection can no longer be safely reused.
-    #[error("sqlite backfill connection poisoned: {0}")]
-    SqlitePoisoned(String),
+    /// The session this backfill was paging on can no longer be safely reused, so
+    /// nothing further may be attempted over it.
+    ///
+    /// Distinct from [`Self::BatchFailedAtCursor`], and the difference is what a
+    /// caller does next: a failed batch leaves a usable session and a committed
+    /// cursor to resume from, while this says the SESSION itself is unusable and a
+    /// resume has to open a new one. Only a backend that can reach such a state
+    /// produces it — SQLite's single-connection actor thread poisons on a panic —
+    /// and a backend whose sessions are pooled simply never returns this variant.
+    ///
+    /// The refusing target names itself from its own [`DialectId`] rather than being
+    /// written into the message, which is why the concept can be stated once here
+    /// instead of once per backend that grows a way to reach it.
+    #[error("{dialect} backfill session is poisoned and cannot be reused: {detail}")]
+    SessionPoisoned {
+        /// The target whose session is unusable, from its own identity.
+        dialect: DialectId,
+        /// That backend's account of how the session was lost.
+        detail: String,
+    },
 }
 
 #[cfg(test)]
