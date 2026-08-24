@@ -726,3 +726,47 @@ async fn row_stream_columns_are_known_before_any_row_is_read() {
     .await
     .expect("row-stream columns test exceeded its watchdog");
 }
+
+/// `query_one_scalar` rules on arity from the STATEMENT, so its diagnostic does
+/// not depend on whether the table happened to have rows.
+///
+/// Both queries below select two columns, which is wrong either way. Before this
+/// change the zero-row case reported a ROW-count error, blaming the data for a
+/// mistake in the query text; only the one-row case named the columns. Nothing
+/// was wrongly accepted - `query_one` guarantees a row exists, so the check
+/// always ran - but the two answers disagreed about what was wrong.
+#[compio::test]
+async fn query_one_scalar_names_the_columns_regardless_of_row_count() {
+    let client = connect().await;
+
+    for sql in [
+        "SELECT 1::int4, 2::int4 WHERE false",
+        "SELECT 1::int4, 2::int4",
+    ] {
+        let error = client
+            .query_one_scalar::<i32, _>(sql, &[])
+            .await
+            .expect_err("a two-column query is not a scalar");
+        assert!(
+            format!("{error}").contains("columns"),
+            "`{sql}` should name the column count, got: {error}"
+        );
+    }
+}
+
+/// THE CONTROL, one variable: a genuine one-column query with no row must still
+/// report a ROW-count problem, not a column one. Reporting "columns" for
+/// everything would satisfy the test above.
+#[compio::test]
+async fn query_one_scalar_still_reports_a_missing_row_as_a_row_problem() {
+    let client = connect().await;
+
+    let error = client
+        .query_one_scalar::<i32, _>("SELECT 1::int4 WHERE false", &[])
+        .await
+        .expect_err("no row is still an error");
+    assert!(
+        format!("{error}").contains("rows"),
+        "a one-column query with no row is a row problem, got: {error}"
+    );
+}
