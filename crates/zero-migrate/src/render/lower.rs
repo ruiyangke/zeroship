@@ -58,7 +58,7 @@ use crate::render::declarative::{
 use crate::render::plan::{AppliedPlan, DatabaseFeature, DatabaseRequirements};
 use crate::render::renderer::{Capability, DmlRenderer, MaterializedNamedTypeOp};
 use crate::render::step::{
-    AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, PlanStep, RenameStep,
+    AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, DialectScope, PlanStep, RenameStep,
     SynchronizeIdentityStep,
 };
 use crate::render::value_format::{
@@ -1695,6 +1695,170 @@ fn database_requirements_for_ir(ir: &MigrationIr, dialect: &DialectId) -> Databa
     requirements
 }
 
+/// The `Expr::Dialectal` wire spelling: its internal tag field, the tag value, and
+/// the field holding its per-dialect legs.
+///
+/// The reach walk below reads the SERIALIZED op rather than matching the closed AST,
+/// for the reason [`op_expr_dialect_reach`] states, so it has to name the node the
+/// way serde spells it.
+/// `dialect_scope_wire_spellings::the_wire_spellings_match_real_serialized_values`
+/// pins all three against a real [`Expr::Dialectal`], so a serde rename cannot
+/// quietly turn the walk into one that finds nothing.
+const EXPR_NODE_TAG: &str = "node";
+const EXPR_DIALECT_NODE: &str = "dialect";
+const DIALECT_LEGS: &str = "legs";
+
+/// The `Op::Dialectal` wire spelling — the WRAPPER the reach walk must NOT descend
+/// into. Pinned by the same test.
+const OP_TAG: &str = "op";
+const OP_DIALECTAL: &str = "dialectal";
+
+/// The plan's DIALECT REACH, derived from the ops and never authored.
+///
+/// # Why derived and not a wire field
+///
+/// A declared `dialect_scope` would be a second source of truth about the same
+/// question, and the two can disagree: an author who pins to one dialect and then
+/// edits the ops portable (or the reverse) gets a plan whose declared reach and whose
+/// actual reach are different facts, with nothing to reconcile them. The engine
+/// already knows which ops only one backend renders — it asks each registered backend
+/// for its own disposition — so the reach is a MEASUREMENT of the op list, and an
+/// artifact cannot lie about it.
+///
+/// # What narrows the reach
+///
+/// Two independent sources, intersected:
+///
+/// * **The op**, through [`crate::model::op_support::support`], which asks EVERY
+///   registered backend for its own disposition on this op kind and variant. The
+///   privileged catalog-object family and the `raw` escape are the sharp cases: one
+///   registered backend renders them, so an artifact carrying one reaches exactly
+///   that dialect.
+/// * **An [`Expr::Dialectal`] inside the op**, whose covered set is exactly its leg
+///   keys — the same scope math `crate::model::validate` applies per target, which is
+///   a LOAD-time check a pre-lowered plan never faces.
+///
+/// [`Op::Dialectal`] is deliberately NOT a narrowing source, and that asymmetry is
+/// the wire type's own: an absent EXPRESSION leg leaves no value to write in a
+/// statement that runs anyway, so it is refused; an absent OP leg just means this
+/// backend has no work here, so it emits nothing and refuses nothing. Pinning on it
+/// would refuse a deploy the IR contract promises is fine.
+///
+/// # The two arms are not the whole lattice, and this under-refuses rather than over
+///
+/// [`DialectScope`] can say "every dialect" or "exactly this one". A reach that is a
+/// PROPER SUBSET with more than one member — a `dialect()` expression carrying two of
+/// three legs — has no arm, and is reported as `Portable`. That is the pre-existing
+/// behaviour for that shape, so this is never a regression; it is the case a third
+/// arm carrying a `DialectSet` would close.
+fn dialect_scope_for_ir(ir: &MigrationIr, lowered_for: &DialectId) -> DialectScope {
+    let mut reach: Option<BTreeSet<DialectId>> = None;
+    for op in &ir.ops {
+        narrow_reach(
+            &mut reach,
+            crate::model::op_support::support(op)
+                .supported_dialects()
+                .iter()
+                .cloned()
+                .collect(),
+        );
+        for covered in op_expr_dialect_reach(op, lowered_for) {
+            narrow_reach(&mut reach, covered);
+        }
+    }
+    match reach {
+        Some(set) if set.len() == 1 => set
+            .into_iter()
+            .next()
+            .map_or(DialectScope::Portable, DialectScope::Only),
+        _ => DialectScope::Portable,
+    }
+}
+
+/// Intersect one source's covered set into the running reach. The first source SETS
+/// the reach; every later one can only shrink it.
+fn narrow_reach(reach: &mut Option<BTreeSet<DialectId>>, covered: BTreeSet<DialectId>) {
+    match reach {
+        None => *reach = Some(covered),
+        Some(current) => current.retain(|id| covered.contains(id)),
+    }
+}
+
+/// The leg-key set of every [`Expr::Dialectal`] reachable from `op`, WITHOUT
+/// descending into an [`Op::Dialectal`]'s legs.
+///
+/// # Why this walks the serialized op
+///
+/// An expression can sit in a column default, a generated-column body, an index
+/// predicate, an index element, a `CHECK` constraint, a `using` cast, a view query, a
+/// trigger statement, an `insert` row, an `update` assignment, a `delete` predicate
+/// or a backfill source — and the tree's one exhaustive op-level expression walk
+/// ([`collect_op_database_requirements`]) is a hand-written match several hundred
+/// lines long. A second hand-written copy would fail OPEN: a new op variant that
+/// forgot an arm silently reports "no dialectal expression here", and the reach
+/// widens to every dialect with nothing to notice it. A walk over the serialized form
+/// has no arm to forget, so a new op variant carrying an expression is covered the
+/// day it is added.
+///
+/// The cost of that choice is that the walk names the node the way serde spells it
+/// rather than by its variant; the consts above carry those spellings and a test pins
+/// them against a real value.
+///
+/// # A serialization failure narrows to `lowered_for`
+///
+/// `Op` is a closed derive-`Serialize` type and this is not expected to fail. But
+/// SKIPPING the op on failure would say "no dialectal expression here", which WIDENS
+/// the reach — the fail-OPEN direction, on the exact instrument this function is. So
+/// an unreadable op contributes the one dialect the plan provably renders on: the one
+/// it just lowered for.
+fn op_expr_dialect_reach(op: &Op, lowered_for: &DialectId) -> Vec<BTreeSet<DialectId>> {
+    let mut out = Vec::new();
+    match serde_json::to_value(op) {
+        Ok(value) => collect_expr_dialect_reach(&value, &mut out),
+        Err(_) => out.push(BTreeSet::from([lowered_for.clone()])),
+    }
+    out
+}
+
+fn collect_expr_dialect_reach(value: &serde_json::Value, out: &mut Vec<BTreeSet<DialectId>>) {
+    match value {
+        serde_json::Value::Object(node) => {
+            // An `Op::Dialectal` wrapper: its legs are per-backend work, not a
+            // portability claim, so nothing inside one narrows the plan's reach.
+            if node.get(OP_TAG).and_then(serde_json::Value::as_str) == Some(OP_DIALECTAL) {
+                return;
+            }
+            if node.get(EXPR_NODE_TAG).and_then(serde_json::Value::as_str)
+                == Some(EXPR_DIALECT_NODE)
+            {
+                if let Some(legs) = node
+                    .get(DIALECT_LEGS)
+                    .and_then(serde_json::Value::as_object)
+                {
+                    // Resolved through the REGISTRY rather than by manufacturing an
+                    // id from the key: a leg naming a backend this build does not
+                    // register covers nothing here, and no id is invented for it.
+                    out.push(
+                        crate::render::backends::VENDORS
+                            .dialects()
+                            .filter(|id| legs.contains_key(id.as_str()))
+                            .collect(),
+                    );
+                }
+            }
+            for nested in node.values() {
+                collect_expr_dialect_reach(nested, out);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                collect_expr_dialect_reach(nested, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn require_database_feature(requirements: &mut DatabaseRequirements, feature: FoldDatabaseFeature) {
     requirements.require(match feature {
         FoldDatabaseFeature::UuidV4Generation => DatabaseFeature::UuidV4Generation,
@@ -2564,7 +2728,10 @@ impl IrAuthor {
             // folds this override domain, so status, execution, and identity cannot
             // disagree about (for example) repeatable or timeout semantics.
             flags,
-            dialect_scope: crate::render::step::DialectScope::Portable,
+            // The plan's dialect REACH, measured from the ops rather than declared,
+            // so it cannot disagree with them. Apply refuses the whole plan against a
+            // target this does not admit, before a single step runs.
+            dialect_scope: dialect_scope_for_ir(ir, &self.dialect),
             rollbackable,
             owner_app: ir.owner_app.clone(),
             depends_on: Vec::new(),
@@ -5267,9 +5434,12 @@ impl IrAuthor {
                 self.lower_trigger_op(op, &eff_schema, &decl, live_schema)?
             }
             // VENDOR (`zero-migrate`) — render the privileged primitive to
-            // its Postgres DDL. Every vendor op is `PgOnly`: a
-            // SQLite target is refused fail-closed here (the validate gate already
-            // refuses it at load on SQLite — this is defense in depth). The
+            // its Postgres DDL. Exactly one registered backend renders these, so an
+            // artifact carrying one measures a `DialectScope::Only` reach naming it; a
+            // target without `Capability::PrivilegedCatalogObjects` is refused
+            // fail-closed here (the validate gate already refuses it at load — this is
+            // defense in depth, and the reach gate at apply covers the third case, an
+            // already-lowered plan that never passes load again). The
             // capability gate (gate 1) runs at validate AND is re-enforced
             // here before rendering, so direct lower callers cannot bypass it. The
             // rendered SQL hits the guard deny-list at `lower_guarded` (gate
@@ -9932,6 +10102,106 @@ pub(crate) fn index_method_access(m: IndexMethod) -> &'static str {
         IndexMethod::Gist => "gist",
         IndexMethod::Ivfflat => "ivfflat",
         IndexMethod::Hnsw => "hnsw",
+    }
+}
+
+#[cfg(test)]
+mod dialect_scope_wire_spellings {
+    use super::{
+        collect_expr_dialect_reach, DIALECT_LEGS, EXPR_DIALECT_NODE, EXPR_NODE_TAG, OP_DIALECTAL,
+        OP_TAG,
+    };
+    use crate::test_fixtures::{POSTGRES, SQLITE};
+    use std::collections::{BTreeMap, BTreeSet};
+    use zero_migrate_ir::expr::Expr;
+    use zero_migrate_ir::ir::{IrScalar, Op};
+
+    fn pinned_leg() -> Expr {
+        Expr::Dialectal {
+            legs: BTreeMap::from([(
+                POSTGRES,
+                Box::new(Expr::Literal {
+                    value: IrScalar::Int(1),
+                }),
+            )]),
+        }
+    }
+
+    /// An `update` whose WHERE predicate is a single-leg `dialect()` node — an
+    /// expression nested one level inside an op, which is the shape the walk exists
+    /// to see.
+    fn update_with_a_pinned_predicate() -> Op {
+        Op::Update {
+            table: "t".into(),
+            set: BTreeMap::new(),
+            r#where: Some(pinned_leg()),
+            schema: None,
+        }
+    }
+
+    /// The reach walk reads the SERIALIZED op, so its four wire spellings are the
+    /// whole instrument. Pinned against REAL values rather than restated, because a
+    /// serde rename would otherwise leave a walk that quietly finds nothing — and a
+    /// walk that finds nothing widens the reach to every dialect, which is the
+    /// fail-OPEN direction.
+    #[test]
+    fn the_wire_spellings_match_real_serialized_values() {
+        let node = serde_json::to_value(pinned_leg()).expect("a dialectal expr serializes");
+        let node = node.as_object().expect("an expr serializes to an object");
+        assert_eq!(
+            node.get(EXPR_NODE_TAG).and_then(serde_json::Value::as_str),
+            Some(EXPR_DIALECT_NODE),
+            "the expr tag field and its dialectal value must be what the walk looks for"
+        );
+        assert!(
+            node.contains_key(DIALECT_LEGS),
+            "the leg map must be under the key the walk reads"
+        );
+
+        let wrapper = Op::Dialectal {
+            legs: BTreeMap::from([(POSTGRES, Vec::new())]),
+        };
+        let wrapper = serde_json::to_value(&wrapper).expect("a dialectal op serializes");
+        assert_eq!(
+            wrapper
+                .as_object()
+                .and_then(|node| node.get(OP_TAG))
+                .and_then(serde_json::Value::as_str),
+            Some(OP_DIALECTAL),
+            "the op tag field and its dialectal value must be what the walk skips"
+        );
+    }
+
+    /// THE CENSUS FLOOR. The walk must actually FIND a leg set — a walk that returns
+    /// nothing passes every "the reach was not narrowed" assertion for the wrong
+    /// reason.
+    #[test]
+    fn the_walk_finds_a_leg_set_nested_inside_an_op() {
+        let value = serde_json::to_value(update_with_a_pinned_predicate()).expect("op serializes");
+        let mut out = Vec::new();
+        collect_expr_dialect_reach(&value, &mut out);
+        assert_eq!(
+            out,
+            vec![BTreeSet::from([POSTGRES])],
+            "a `dialect()` expression nested in an op's predicate must narrow the reach"
+        );
+    }
+
+    /// THE SKIP, measured. An `Op::Dialectal` leg is per-backend WORK, not a
+    /// portability claim — its own wire doc says an absent leg emits nothing — so
+    /// nothing inside one may narrow the plan's reach.
+    #[test]
+    fn an_op_dialectal_wrapper_contributes_nothing() {
+        let op = Op::Dialectal {
+            legs: BTreeMap::from([(SQLITE, vec![update_with_a_pinned_predicate()])]),
+        };
+        let value = serde_json::to_value(&op).expect("op serializes");
+        let mut out = Vec::new();
+        collect_expr_dialect_reach(&value, &mut out);
+        assert!(
+            out.is_empty(),
+            "a dialectal WRAPPER must not narrow the reach, however pinned its legs are: {out:?}"
+        );
     }
 }
 

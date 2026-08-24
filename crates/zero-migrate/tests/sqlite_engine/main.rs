@@ -14,6 +14,7 @@ mod alter_primary_key_sqlite;
 mod apply_plan_sqlite;
 mod backfill_sqlite;
 mod declarative_sqlite;
+mod dialect_scope_refuses_a_foreign_target;
 mod engine_sqlite;
 mod existence_guard_sqlite;
 mod hr_sqlite;

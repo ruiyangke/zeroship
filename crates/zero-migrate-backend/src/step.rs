@@ -130,19 +130,48 @@ pub struct SynchronizeIdentityStep {
     pub writes_quiesced: String,
 }
 
-/// The dialect reach of an applied plan, derived from its ops. A separate,
-/// journaled facet — **not** folded into the identity checksum.
+/// The dialect reach of an applied plan, MEASURED from its ops at lowering. A
+/// separate facet — **not** folded into the identity checksum, and not a wire field.
 ///
-/// The pinned arm carries a [`DialectId`] rather than naming a vendor in its own
-/// variant. `PgOnly` could only ever say "Postgres", so a MySQL-only or
-/// DuckDB-only artifact had no way to describe itself; `Only(id)` does, and it
-/// does so without this enum growing a variant per backend.
+/// # Derived, never declared
+///
+/// Nothing authors this. A declared reach would be a second source of truth about a
+/// question the op list already answers, and the two can disagree the moment an
+/// author edits one without the other. The engine asks every registered backend for
+/// its own disposition on each op and intersects the answers, so an artifact cannot
+/// claim a reach its ops do not have.
+///
+/// # Where it is enforced, and where it is NOT
+///
+/// [`admits`](Self::admits) is consulted at APPLY, whole-plan, before the project
+/// lock is taken and before any step executes. That placement is the point: the
+/// per-target refusals that already exist — lowering declines a privileged op on a
+/// backend without the capability, load declines a `dialect()` expression whose legs
+/// miss the target — are both checks a PRE-LOWERED plan never faces, and the engine
+/// takes the lowering dialect and the apply backend as independent inputs.
+///
+/// # Why the pinned arm carries a [`DialectId`]
+///
+/// `PgOnly` could only ever say "Postgres", so a MySQL-only or DuckDB-only artifact
+/// had no way to describe itself; `Only(id)` does, and it does so without this enum
+/// growing a variant per backend.
+///
+/// # The two arms are not the whole lattice
+///
+/// A reach that is a proper subset of the registered backends with more than one
+/// member — a `dialect()` expression carrying two legs of three — has no arm here and
+/// is carried as `Portable`, which under-refuses. Closing that takes a third arm over
+/// a `DialectSet`; it is stated rather than hidden because a reader must not take
+/// `Portable` for "proven portable everywhere".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialectScope {
-    /// Applies faithfully to every dialect the artifact's ops support.
+    /// Every registered backend renders this artifact's ops — or the reach could not
+    /// be narrowed to exactly one. See the caveat on the enum.
     Portable,
-    /// Pinned to ONE dialect (a vendor `op.raw` artifact); refused against any
-    /// other deploy target at load. Never produced by the `.sql` path.
+    /// Pinned to ONE dialect: exactly one registered backend can render these ops.
+    /// The privileged catalog-object family, the `raw` escape and a single-leg
+    /// `dialect({ ... })` expression are what produce it. Never produced by the
+    /// `.sql` path, whose text the engine cannot read either way.
     Only(DialectId),
 }
 

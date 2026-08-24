@@ -96,6 +96,36 @@ fn unsupported_expr_owned(name: String) -> ExprDialectRejection {
     }
 }
 
+/// The truthful remedy for an expression that is out of this backend's envelope,
+/// stated ONCE so the three messages below cannot drift apart.
+///
+/// # What the old text promised, and why none of it was true
+///
+/// These three rejections advised the operator to "mark the migration PG-only
+/// (`dialect_scope=PgOnly`)". `PgOnly` names no variant: the pinned arm is
+/// `DialectScope::Only(DialectId)` and has been since the enum stopped growing one
+/// variant per vendor, so a MySQL-only artifact could describe itself. `dialect_scope`
+/// names no authorable field either — it is DERIVED from the op list at lowering,
+/// precisely so a declared reach can never disagree with the ops — so there was
+/// nothing for an author to set. And it spelled another vendor's product name in a
+/// message this backend emits about itself.
+///
+/// What an author actually does is put the expression in a `dialect({ ... })` leg.
+/// The leg set IS the pin: a set covering one registered backend makes that backend
+/// the plan's whole measured reach, and every other deploy target is then refused
+/// before a step runs.
+///
+/// The dialect named is this crate's own, read from `DIALECT`.
+fn or_give_it_a_dialect_leg(instead: &str) -> String {
+    format!(
+        "{instead}, or move the expression into a dialect({{ ... }}) leg — a leg set \
+         covering ONE backend pins the migration to that dialect, and every other \
+         deploy target is refused before anything is applied (leaving {} uncovered is \
+         how this expression stops being asked of it)",
+        DIALECT.as_str()
+    )
+}
+
 fn postgres_first_aggregate(name: &'static str) -> ExprDialectRejection {
     ExprDialectRejection {
         code: CODE_DIALECT_UNSUPPORTED,
@@ -152,10 +182,9 @@ impl ExprDialectValidator for SqliteDmlRenderer {
                 reason: format!(
                     "c.fn.concatWs delimiter must be a literal on SQLite (a runtime/computed delimiter is not portable — the NULL-skip head-trim needs a fixed delimiter length); got {delimiter:?}"
                 ),
-                suggested_fix: Some(
-                    "pass a string literal as the concatWs delimiter, or mark the migration PG-only (dialect_scope=PgOnly)"
-                        .to_string(),
-                ),
+                suggested_fix: Some(or_give_it_a_dialect_leg(
+                    "pass a string literal as the concatWs delimiter",
+                )),
             }),
             ExprDialectFeature::SplitPart {
                 delimiter,
@@ -169,10 +198,9 @@ impl ExprDialectValidator for SqliteDmlRenderer {
                         reason: format!(
                             "c.fn.splitPart delimiter must be a single ASCII character (one byte, code point < 0x80); got {delimiter:?}"
                         ),
-                        suggested_fix: Some(
-                            "use a single-ASCII delimiter with 1<=n<=8, restructure to stay in-envelope (split into <=8 parts), or mark the migration PG-only (dialect_scope=PgOnly)"
-                                .to_string(),
-                        ),
+                        suggested_fix: Some(or_give_it_a_dialect_leg(
+                            "use a single-ASCII delimiter with 1<=n<=8, restructure to stay in-envelope (split into <=8 parts)",
+                        )),
                     });
                 }
                 if part_index > SPLIT_PART_MAX_N {
@@ -182,10 +210,9 @@ impl ExprDialectValidator for SqliteDmlRenderer {
                         reason: format!(
                             "c.fn.splitPart part index n must be <= {SPLIT_PART_MAX_N} (the proven inline-unroll bound); got {part_index}"
                         ),
-                        suggested_fix: Some(
-                            "use a single-ASCII delimiter with 1<=n<=8, restructure to stay in-envelope (split into <=8 parts), or mark the migration PG-only (dialect_scope=PgOnly)"
-                                .to_string(),
-                        ),
+                        suggested_fix: Some(or_give_it_a_dialect_leg(
+                            "use a single-ASCII delimiter with 1<=n<=8, restructure to stay in-envelope (split into <=8 parts)",
+                        )),
                     });
                 }
                 Ok(())
@@ -901,9 +928,10 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// `zero_migrate_postgres::render_vendor_op`. It asks whichever vendor it
     /// resolved, and this is what this one answers.
     ///
-    /// The sixteen privileged op kinds are every one of them
-    /// `dialect_scope = PgOnly` and SQLite has no analogue for any of them, so there
-    /// is nothing to render and no partial answer worth giving. The engine refuses
+    /// The sixteen privileged op kinds are rendered by exactly one registered
+    /// backend, so an artifact carrying any of them measures a `DialectScope::Only`
+    /// reach that does not name this one. SQLite has no analogue for any of them, so
+    /// there is nothing to render and no partial answer worth giving. The engine refuses
     /// earlier and more informatively — the lower seam checks
     /// `Capability::PrivilegedCatalogObjects` and reports the op KIND — so nothing in
     /// the shipping paths reaches this. It is here because

@@ -94,8 +94,15 @@ pub struct AppliedPlan {
     pub checksum: Checksum,
     /// Flags derived ∪ overridden from the artifact.
     pub flags: MigrationFlags,
-    /// The plan's dialect reach; a separate journaled facet, not folded
-    /// into the checksum.
+    /// The plan's dialect reach, MEASURED from the op list at lowering — never
+    /// authored, and not folded into the checksum.
+    ///
+    /// Apply consults it whole-plan before the project lock and before any step runs:
+    /// a plan whose ops one registered backend alone can render is refused against
+    /// every other target with
+    /// [`EngineError::DialectScopeRefused`](crate::engine::EngineError::DialectScopeRefused).
+    /// A `.sql` plan is always [`DialectScope::Portable`] — its text is opaque to the
+    /// engine, so there is nothing to measure.
     pub dialect_scope: DialectScope,
     /// `false` if ANY step is `down: None` (Backfill/Dml/incomplete OnlineRename);
     /// surfaced by status/rollback BEFORE attempt.
@@ -139,8 +146,14 @@ pub struct NotSingleStep {
 impl AppliedPlan {
     /// Build the **degenerate one-step plan** for a single pure-DDL [`Migration`]
     /// — the loader facade for a `.sql` file. The plan's identity
-    /// fields mirror the migration; `dialect_scope` is `Both` (a `.sql` plan is
-    /// not `op.raw`-pinned), and `rollbackable` follows the migration's `down`.
+    /// fields mirror the migration; `dialect_scope` is
+    /// [`DialectScope::Portable`] and `rollbackable` follows the migration's `down`.
+    ///
+    /// `Portable` here is the ONLY answer this constructor can honestly give, and it
+    /// is not a claim that the file's SQL runs anywhere: a `.sql` migration is opaque
+    /// text with no op list to measure, so there is no reach to derive. Pinning it
+    /// would invent a fact; refusing it would break every `.sql` deploy. The
+    /// engine-authored IR path is where the reach is real.
     #[must_use]
     pub fn single_step(migration: Migration) -> Self {
         let version = migration.version.clone();

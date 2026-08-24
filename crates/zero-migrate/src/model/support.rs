@@ -165,6 +165,13 @@ impl DialectSupport {
     /// suite reporting clean. Predates this shape (the same hole existed when
     /// this was `from_bools` over three fields); recorded so the next reader does
     /// not take the message for the guarantee.
+    ///
+    /// ONE MEMBER IS NOW COVERED, and only one. `dialect_scope_for_ir` derives an
+    /// artifact's dialect reach from this set, so
+    /// `dialect_scope_refuses_a_foreign_target::a_vendor_op_pins_the_plan_to_the_one_dialect_that_renders_it`
+    /// fails if `raw` reports more than the one backend that renders it. That closes
+    /// the exact mutation named above for exactly one op kind; every other row's
+    /// membership is still unmeasured.
     #[must_use]
     pub fn supported_dialects(&self) -> DialectSet {
         self.dialects()

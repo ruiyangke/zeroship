@@ -42,7 +42,7 @@ use crate::plan::manifest::{compute_manifest, verify_manifest, ManifestError, Ma
 use crate::render::fold::{fold_ops, single_fold};
 use crate::render::lower::{IrAuthor, LiveSchema, LoweredArtifact};
 use crate::render::plan::AppliedPlan;
-use crate::render::step::{PlanStep, RenameStep};
+use crate::render::step::{DialectScope, PlanStep, RenameStep};
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_policy::EffectivePolicy;
 
@@ -140,6 +140,46 @@ pub enum EngineError {
     ApprovalNotScoped {
         /// The destructive migration version-id the scope refused.
         version: String,
+    },
+    /// **Fail-closed dialect-reach refusal.** The plan's ops are renderable by ONE
+    /// registered backend, and the connected target is a different one. Refused
+    /// whole-plan before the project lock is taken and before any step executes:
+    /// NOTHING was applied.
+    ///
+    /// The reach is [`AppliedPlan::dialect_scope`](crate::render::plan::AppliedPlan),
+    /// measured from the op list at lowering rather than declared by the author, so
+    /// there is no second source of truth to disagree with the ops.
+    ///
+    /// # Why this is not covered by the lower-time gate
+    ///
+    /// Lowering refuses a privileged op against a target that cannot render it, and
+    /// load refuses a `dialect()` expression whose legs miss the target. Both are
+    /// per-target checks a PRE-LOWERED plan never faces: `deploy_envelopes` takes the
+    /// lowering dialect and the apply backend as two INDEPENDENT parameters, and
+    /// [`MigrationEngine::apply_applied_plan_with_touched_and_depends`] is public. So
+    /// a plan lowered for one server was applied against another with no refusal at
+    /// all, and portable-LOOKING raw text landed on the wrong database silently.
+    ///
+    /// # Why it carries two [`DialectId`]s and names no product
+    ///
+    /// Core resolves a dialect through the registry and never spells one. Both ends
+    /// of the mismatch are DATA — the reach the ops measured, and the identity the
+    /// connected backend reported — so a fourth backend appears on either side
+    /// without this message being edited.
+    ///
+    /// [`DialectId`]: zero_migrate_ir::dialect::DialectId
+    #[error(
+        "this plan's ops are renderable by {pinned} alone, so the plan reaches that \
+         dialect and no other; the connected target is {target}. Nothing was applied. \
+         A plan reaches one dialect when it carries a privileged catalog-object op, \
+         the `raw` escape, or a `dialect({{ … }})` expression with a leg for only that \
+         backend — author the work portably, or deploy this artifact against {pinned}"
+    )]
+    DialectScopeRefused {
+        /// The one dialect the plan's ops can be rendered for.
+        pinned: zero_migrate_ir::dialect::DialectId,
+        /// The identity the connected backend reported for itself.
+        target: zero_migrate_ir::dialect::DialectId,
     },
     /// The executor failed (DB error, checksum drift, mid-apply failure, or the
     /// executor's own re-run of the guard denied a migration — defense in depth).
@@ -1245,6 +1285,24 @@ impl MigrationEngine {
         applied_by: &str,
         lock_mode: LockMode,
     ) -> Result<DeclarativeDeployOutcome, DeclarativeApplyError> {
+        // THE DIALECT-REACH GATE. Decided from the plan and the backend's own
+        // identity, so it needs no database round-trip and runs BEFORE the project
+        // lock is taken — the same "decline without touching the database" rule the
+        // capability preflight states. A plan whose ops one backend alone can render
+        // must never reach a different server: the executor cannot read raw or
+        // vendor SQL, so a wrong-target apply is not detectable after the fact.
+        let target = backend.dialect();
+        if !plan.dialect_scope.admits(&target) {
+            let DialectScope::Only(pinned) = &plan.dialect_scope else {
+                unreachable!("only a pinned scope can decline a target")
+            };
+            return Err(DeclarativeApplyError::Plain(
+                EngineError::DialectScopeRefused {
+                    pinned: pinned.clone(),
+                    target,
+                },
+            ));
+        }
         let owns_lock = lock_mode == LockMode::Acquire;
         if owns_lock {
             backend
