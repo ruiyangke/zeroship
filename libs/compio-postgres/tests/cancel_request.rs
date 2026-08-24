@@ -12,14 +12,13 @@ use compio_postgres::{CancelToken, Client, Config, Error, NoTls};
 use std::time::Duration;
 
 #[allow(dead_code)]
-#[path = "common/env.rs"]
-mod test_env;
+mod common;
+use common::env as test_env;
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn test_url() -> String {
-    test_env::get(test_env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::test_url()
 }
 
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {

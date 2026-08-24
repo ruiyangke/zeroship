@@ -42,8 +42,7 @@ mod common;
 const WATCHDOG: Duration = Duration::from_secs(20);
 
 fn test_url() -> String {
-    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::test_url()
 }
 
 /// Kill `pid` from a second session, because the first one is busy.

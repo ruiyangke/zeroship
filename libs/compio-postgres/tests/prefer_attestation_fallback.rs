@@ -28,8 +28,7 @@ use compio_postgres::NoTls;
 mod common;
 
 fn test_url() -> String {
-    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::test_url()
 }
 
 /// A root cert is named, the connector cannot attest, and `prefer` connects
