@@ -420,17 +420,30 @@ where
     }
 }
 
-/// Push everything queued to `socket`.
+/// Push everything the session has to say to `socket`, including whatever it
+/// is still holding back.
 ///
-/// Takes the queue by value so the `RefCell` borrow ends before the write is
-/// awaited. Anything the read path appends meanwhile leaves with the next
-/// flush.
+/// Tops up from rustls on EVERY pass, not just once. That is required by
+/// [`OUTGOING_SOFT_CAP`]: `collect_outgoing` stops filling the queue at the
+/// cap and leaves the surplus inside rustls, so draining only the queue would
+/// return success with ciphertext still undelivered - `flush()` would be a
+/// lie, and the bytes would leave only if some later write happened to collect
+/// again. Topping up each pass keeps the cap as a bound on what is held AT ONE
+/// MOMENT rather than a bound on what is ever sent.
+///
+/// The queue is taken by value so the `RefCell` borrow ends before the write is
+/// awaited; anything the read path appends meanwhile is picked up by the next
+/// pass.
 async fn flush_outgoing<W>(socket: &mut W, session: &SharedSession) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
     loop {
-        let pending = session.borrow_mut().take_outgoing();
+        let pending = {
+            let mut guard = session.borrow_mut();
+            guard.collect_outgoing()?;
+            guard.take_outgoing()
+        };
         if pending.is_empty() {
             return Ok(());
         }
@@ -596,6 +609,84 @@ mod tests {
         async fn shutdown(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A sink that swallows everything and counts it.
+    struct CountingSink {
+        written: usize,
+    }
+
+    impl AsyncWrite for CountingSink {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.written += buf.buf_len();
+            let n = buf.buf_len();
+            BufResult(Ok(n), buf)
+        }
+
+        async fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A flush must leave NOTHING inside the session, including what the cap
+    /// told `collect_outgoing` to leave behind.
+    ///
+    /// The reachable shape is narrow, and worth stating exactly. A single
+    /// `collect_outgoing` on an EMPTY queue always empties rustls, because one
+    /// `write_tls` drains its whole send buffer and only then does the cap
+    /// check stop the loop. So the surplus exists only when the queue was
+    /// ALREADY at the cap when more ciphertext appeared - which is the idle
+    /// `LISTEN` case the cap was added for: the read path answers key updates
+    /// while nothing drains the queue. A flush arriving in that state used to
+    /// write the queue, find it empty, and return success with rustls still
+    /// holding bytes.
+    ///
+    /// This test does NOT prove the cap is enforced - `a_full_outbound_queue_
+    /// stops_draining_the_session` does that.
+    #[compio::test]
+    async fn a_flush_drains_what_the_cap_left_inside_the_session() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+        let mut sink = CountingSink { written: 0 };
+
+        // The state described above: a queue already at the cap, and ciphertext
+        // that arrived afterwards. `writer()` directly, not `write_plaintext`,
+        // because the latter collects and would hide the very gap under test.
+        session.borrow_mut().outgoing = vec![0u8; OUTGOING_SOFT_CAP];
+        {
+            let mut guard = session.borrow_mut();
+            guard
+                .conn
+                .writer()
+                .write_all(b"held back by the cap")
+                .expect("queue application data");
+        }
+        assert!(
+            session.borrow().conn.wants_write(),
+            "the fixture must leave ciphertext inside rustls, or this asserts nothing"
+        );
+
+        flush_outgoing(&mut sink, &session)
+            .await
+            .expect("flush the session");
+
+        assert!(
+            !session.borrow().conn.wants_write(),
+            "the flush returned success with ciphertext still inside the session"
+        );
+        assert!(
+            session.borrow().outgoing.is_empty(),
+            "the outbound queue is not empty after a flush"
+        );
+        assert!(
+            sink.written > OUTGOING_SOFT_CAP,
+            "the flush wrote only {} bytes, so it never reached what the cap held back",
+            sink.written
+        );
     }
 
     /// A peer that hands over one scripted chunk per read, then EOF.
