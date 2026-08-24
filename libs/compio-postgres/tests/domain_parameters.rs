@@ -152,3 +152,68 @@ async fn a_domain_check_constraint_still_rejects_a_bad_value() {
         .await
         .ok();
 }
+
+/// A binary COPY into a domain column accepts the base Rust type too.
+///
+/// `BinaryCopyInWriter` takes its column types from the CALLER, and the natural
+/// way to obtain them is from the catalog or from a prepared statement's
+/// `params()` -- both of which hand back the DOMAIN, not its base. So the same
+/// rejection that blocked `execute` blocked binary COPY, on a path where the
+/// driver cannot see a server-reported type to fall back on.
+///
+/// This shares `encode_parameter` with the bind path rather than repeating the
+/// fallback, so the two cannot drift.
+#[compio::test]
+async fn a_binary_copy_into_a_domain_column_accepts_its_base_type() {
+    use compio_postgres::binary_copy::BinaryCopyInWriter;
+    use futures_util::pin_mut;
+
+    let Some(url) = test_url() else {
+        eprintln!("PG_TEST_URL unset; skipping");
+        return;
+    };
+    let client = connect_client(&url).await;
+    let (domain, table) = domain_fixture(&client, "copy").await;
+
+    // Obtain the column type the way a caller would: from the statement the
+    // server described. This is what yields the domain rather than int4.
+    let statement = client
+        .prepare(&format!("INSERT INTO {table} (v) VALUES ($1)"))
+        .await
+        .expect("prepare against a domain column");
+    let column_type = statement.params()[0].clone();
+    assert!(
+        matches!(column_type.kind(), compio_postgres::types::Kind::Domain(_)),
+        "the fixture must supply a domain type, or this tests nothing"
+    );
+
+    let sink = client
+        .copy_in(&format!("COPY {table} (v) FROM STDIN BINARY"))
+        .await
+        .expect("start a binary COPY");
+    let writer = BinaryCopyInWriter::new(sink, &[column_type]);
+    pin_mut!(writer);
+    writer
+        .as_mut()
+        .write(&[&11i32])
+        .await
+        .expect("an i32 must encode for a domain over int4");
+    let rows = writer.finish().await.expect("finish the COPY");
+    assert_eq!(rows, 1);
+
+    let stored: i32 = client
+        .query_one(&format!("SELECT v FROM {table}"), &[])
+        .await
+        .expect("read the copied row")
+        .get(0);
+    assert_eq!(stored, 11);
+
+    client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .ok();
+    client
+        .batch_execute(&format!("DROP DOMAIN IF EXISTS {domain}"))
+        .await
+        .ok();
+}
