@@ -465,6 +465,16 @@ mod tests {
     /// No conforming PostgreSQL sends this: has-OIDs went away in PG12 and the
     /// server's column ceiling is 1664. It takes a hostile or broken peer,
     /// which is the threat model `tests/hostile_peer.rs` already works in.
+    /// WHAT THIS DOES NOT CATCH. Its discriminating power is DEBUG-ONLY. The
+    /// regression it guards is reverting to `raw + has_oids as i16`, and that
+    /// only aborts where overflow checks are on. In a release build the same
+    /// arithmetic wraps to -32768, which still fails the `!= expected`
+    /// comparison, so the error below still arrives and this test still passes.
+    ///
+    /// That is acceptable rather than fixed because `cargo test` builds in
+    /// debug, so the ordinary path does discriminate - but a release-profile
+    /// run of this suite would not, and nobody should read a green release run
+    /// as evidence about the overflow.
     #[test]
     fn a_tuple_field_count_at_i16_max_with_oids_errors_rather_than_overflowing() {
         let error = tuple_field_count(i16::MAX, true, 1)
