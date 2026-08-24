@@ -55,6 +55,7 @@ pub async fn simple_query(
         client: Arc::downgrade(client),
         responses,
         columns: None,
+        copy_out_refused: false,
     })
 }
 
@@ -189,9 +190,10 @@ pub(crate) async fn finish_batch_execute(
     client: &InnerClient,
     mut responses: Responses,
 ) -> Result<(), Error> {
+    let mut refused = None;
     loop {
         match responses.next().await? {
-            Message::ReadyForQuery(_) => return Ok(()),
+            Message::ReadyForQuery(_) => return refused.map_or(Ok(()), Err),
             Message::CommandComplete(_)
             | Message::EmptyQueryResponse
             | Message::RowDescription(_)
@@ -201,6 +203,21 @@ pub(crate) async fn finish_batch_execute(
             // this very stream with the copy's own error, so the loop keeps
             // draining and the caller gets that instead.
             Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Simple)?,
+            // A COPY OUT needs no abort - the server sends its own `CopyDone`
+            // and finishes unaided - but it must not RETURN here either. A
+            // batch can chain `COPY TO STDOUT; COPY FROM STDIN`, and returning
+            // at the copy-out abandons the drain BEFORE the `CopyInResponse`
+            // that does need aborting, leaving the server waiting for copy data
+            // this API cannot send. That killed the connection outright.
+            //
+            // So: remember the refusal, keep draining, and report it at
+            // `ReadyForQuery` if nothing worse arrives first. A later abort's
+            // server-side error reaches the caller through `?` above and
+            // outranks this, which is what makes the chained case report the
+            // copy's own error rather than this one.
+            Message::CopyOutResponse(_) | Message::CopyData(_) | Message::CopyDone => {
+                refused.get_or_insert_with(Error::unexpected_message);
+            }
             _ => return Err(Error::unexpected_message()),
         }
     }
@@ -224,14 +241,21 @@ pub(crate) async fn finish_batch_execute_reporting_tag(
     mut responses: Responses,
 ) -> Result<Option<String>, Error> {
     let mut tag = None;
+    let mut refused = None;
     loop {
         match responses.next().await? {
-            Message::ReadyForQuery(_) => return Ok(tag),
+            Message::ReadyForQuery(_) => return refused.map_or(Ok(tag), Err),
             Message::CommandComplete(body) => {
                 tag = Some(body.tag().map_err(Error::parse)?.to_string());
             }
             Message::EmptyQueryResponse | Message::RowDescription(_) | Message::DataRow(_) => {}
             Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Simple)?,
+            // See the twin in `finish_batch_execute`: drain the copy-out rather
+            // than returning at it, so a chained `COPY FROM STDIN` later in the
+            // same batch is still reached and aborted.
+            Message::CopyOutResponse(_) | Message::CopyData(_) | Message::CopyDone => {
+                refused.get_or_insert_with(Error::unexpected_message);
+            }
             _ => return Err(Error::unexpected_message()),
         }
     }
@@ -259,6 +283,11 @@ pin_project! {
         client: Weak<InnerClient>,
         responses: Responses,
         columns: Option<Arc<[SimpleColumn]>>,
+        // A `COPY TO STDOUT` this path cannot deliver is DRAINED rather than
+        // returned at, so a chained `COPY FROM STDIN` later in the same batch
+        // is still reached and aborted; the refusal is reported at
+        // `ReadyForQuery`. See the twin in `finish_batch_execute`.
+        copy_out_refused: bool,
     }
 }
 
@@ -297,7 +326,19 @@ impl Stream for SimpleQueryStream {
                     };
                     return Poll::Ready(Some(Ok(SimpleQueryMessage::Row(row))));
                 }
-                Message::ReadyForQuery(_) => return Poll::Ready(None),
+                Message::ReadyForQuery(_) => {
+                    // The refusal is emitted here, once, so the stream reports
+                    // it exactly like the old `return` did while still having
+                    // drained to a known frame boundary.
+                    if *this.copy_out_refused {
+                        *this.copy_out_refused = false;
+                        return Poll::Ready(Some(Err(Error::unexpected_message())));
+                    }
+                    return Poll::Ready(None);
+                }
+                Message::CopyOutResponse(_) | Message::CopyData(_) | Message::CopyDone => {
+                    *this.copy_out_refused = true;
+                }
                 Message::CopyInResponse(_) => match this.client.upgrade() {
                     Some(client) => {
                         if let Err(error) = abort_copy_in(&client, CopyAbortProtocol::Simple) {
