@@ -203,6 +203,32 @@ async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMess
     }
 }
 
+/// The other half of the escaping, and the only one with a security shape:
+/// the quoted list is embedded in a SINGLE-QUOTED literal, so a `'` inside a
+/// name closes that literal early and the rest of the name lands on the
+/// walsender as command text. Quoting each name as an identifier does not
+/// address this - `"it's"` still carries a bare `'` - which is why the two
+/// escapes compose rather than either one standing in for the other.
+///
+/// `CREATE PUBLICATION "it's"` is legal, so this is reachable without anyone
+/// being adversarial; a name with an apostrophe in it is just a name.
+#[compio::test]
+async fn a_publication_name_containing_a_quote_still_streams_its_changes() {
+    let publication = format!("{}_it's", common::test_object_name("cpg quote pub"));
+    let outcome = compio::time::timeout(WATCHDOG, stream_one_insert("cpg quote pub", &publication))
+        .await
+        .expect("the quote-named publication exchange exceeded its watchdog");
+
+    match outcome {
+        Ok(PgOutputMessage::Insert { .. }) => {}
+        Ok(other) => panic!("expected an Insert, got {other:?}"),
+        Err(error) => panic!(
+            "a publication whose name legally contains a quote must reach pgoutput \
+             whole; the quote escaped its literal instead: {error}"
+        ),
+    }
+}
+
 /// RED before the fix: the comma inside a legal publication name is read as a
 /// separator, so pgoutput is asked for two publications that do not exist.
 #[compio::test]
