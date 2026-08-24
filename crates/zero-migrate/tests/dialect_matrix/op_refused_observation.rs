@@ -94,19 +94,22 @@
 //!   destructive drop table nor in the non-destructive allowlist (only an INDEX drop
 //!   is), so the parser-backed classifier answers `Unknown`.
 //!
-//! MEASURED offline before this file existed, by classifying the four statements this
-//! fixture emits: `DROP TRIGGER` -> `Unknown`, `DROP TABLE` -> `Destructive("DROP
-//! TABLE")`, `DROP INDEX` -> `NonDestructive`, `CREATE TRIGGER ... EXECUTE FUNCTION`
-//! -> `NonDestructive`. So under the DEFAULT posture PostgreSQL refuses a
-//! `dropTrigger` that MySQL and SQLite apply - the same shape as the original defect,
-//! with the dialects on the other side of it.
+//! MEASURED offline before this file existed, by running the parser-backed
+//! classifier over the statements this fixture emits: `DROP TRIGGER` -> `Unknown`,
+//! `DROP TABLE` -> `Destructive("DROP TABLE")`, `DROP INDEX` -> `NonDestructive`,
+//! `CREATE TRIGGER ... EXECUTE FUNCTION` -> `NonDestructive`. So under the DEFAULT
+//! posture PostgreSQL refuses a `dropTrigger` that MySQL and SQLite apply - the same
+//! shape as the original defect, with the dialects on the other side of it.
 //!
-//! `dropTrigger` is the ONLY op with that property, and that is a census rather than a
-//! guess: an op splits the two rules exactly when it is (a) declared for all three
-//! dialects, (b) not `Op::is_destructive`, and (c) not in the parser's non-destructive
-//! allowlist. Every other non-destructive op renders to a statement that allowlist
-//! names; the other `Unknown` producers (`dropExtension`, `dropPolicy`) are
-//! PostgreSQL-only, so they never reach a second backend to disagree with.
+//! `dropTrigger` is believed to be the ONLY op with that property, and the belief is a
+//! READING rather than an executed census, so here is the method to re-run it. An op
+//! splits the two rules exactly when it is (a) declared for all three dialects, (b) not
+//! `Op::is_destructive`, and (c) not in the parser's non-destructive allowlist. Walking
+//! `Op::is_destructive`'s own non-destructive arm against
+//! `is_non_destructive_statement`, every other member renders to a statement that
+//! allowlist names, and the remaining `Unknown` producers (`dropExtension`,
+//! `dropPolicy`) are PostgreSQL-only, so they never reach a second backend to disagree
+//! with. If a future op is added, that walk is what has to be redone.
 //!
 //! IF THIS RED EVER GOES GREEN the gap closed, which is good news and a REQUIRED edit,
 //! not a licence to delete the test: replace the fixture with whatever still splits
