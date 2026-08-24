@@ -217,8 +217,13 @@ const MYSQL_LEG: &str = "see the module doc and this constant";
 // ---------------------------------------------------------------------------
 
 /// The layer-1 outcome vocabulary. Exactly one of these per (row, dialect).
+///
+/// `pub(crate)` because LAYER 2 records its refusals in this same vocabulary and takes
+/// the tokens FROM here rather than re-spelling them
+/// (`op_refused_observation.rs`). Two files spelling "RefusedByPolicy" independently
+/// is two vocabularies that happen to agree today.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Outcome {
+pub(crate) enum Outcome {
     /// The server accepted the engine-emitted SQL.
     Applied,
     /// The engine refused before emitting, naming the dialect's capability.
@@ -235,7 +240,7 @@ enum Outcome {
 }
 
 impl Outcome {
-    const fn token(&self) -> &'static str {
+    pub(crate) const fn token(&self) -> &'static str {
         match self {
             Self::Applied => "Applied",
             Self::RefusedByCapability => "RefusedByCapability",
@@ -294,7 +299,10 @@ const fn required_outcome(disposition: Disposition) -> Outcome {
 // ---------------------------------------------------------------------------
 
 /// Validate/lower codes that mean "this DIALECT cannot express this op".
-const CAPABILITY_CODES: &[&str] = &[
+///
+/// `pub(crate)` for the same reason [`Outcome`] is: layer 2's `op_refused` observation
+/// sorts a refusal into the SAME two classes and must sort it by the same list.
+pub(crate) const CAPABILITY_CODES: &[&str] = &[
     zero_migrate::CODE_UNSUPPORTED,
     zero_migrate::CODE_DIALECT_UNSUPPORTED,
     zero_migrate::CODE_EXPR_NOT_PORTABLE,
@@ -305,7 +313,7 @@ const CAPABILITY_CODES: &[&str] = &[
 
 /// Validate codes that mean "the CHARTER did not authorize this", which is a
 /// different question from what the dialect can do.
-const POLICY_CODES: &[&str] = &[
+pub(crate) const POLICY_CODES: &[&str] = &[
     zero_migrate::model::validate::CODE_VENDOR_OP_DENIED,
     zero_migrate::model::validate::CODE_CROSS_SCHEMA,
     zero_migrate::model::validate::CODE_TABLE_SHAPE_POLICY,

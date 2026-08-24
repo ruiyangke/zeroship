@@ -163,6 +163,30 @@ pub fn no_inject(schema: &str) -> EffectivePolicy {
 /// vendor fixtures create.
 #[must_use]
 pub fn operator_charter(schema: &str) -> EffectivePolicy {
+    operator_charter_with_destructive_ops(schema, Some("allow"))
+}
+
+/// [`operator_charter`], with the `safety.destructive_ops` posture as a parameter.
+///
+/// `None` OMITS the grant entirely, which is the case an operator gets by writing
+/// nothing about the knob: the policy registry's own default applies. That is a
+/// different thing from granting the default value explicitly, and a test about what
+/// a posture MEANS has to be able to author the silent case - it is the one an
+/// operator gets without deciding anything.
+///
+/// [`operator_charter`] is this function at `Some("allow")` and the charter text it
+/// composes is unchanged, so every suite that rides it is unaffected.
+#[must_use]
+pub fn operator_charter_with_destructive_ops(
+    schema: &str,
+    destructive_ops: Option<&str>,
+) -> EffectivePolicy {
+    let destructive = match destructive_ops {
+        Some(posture) => format!(
+            "\n[[grant]]\nkey = \"safety.destructive_ops\"\nvalue = {posture:?}\nscope = \"all\"\n"
+        ),
+        None => String::new(),
+    };
     let charter_toml = format!(
         r#"policy_version = 1
 
@@ -180,12 +204,7 @@ scope = {{ include = [{schema:?}] }}
 key = "schema.rename"
 value = true
 scope = {{ include = [{schema:?}] }}
-
-[[grant]]
-key = "safety.destructive_ops"
-value = "allow"
-scope = "all"
-
+{destructive}
 [[grant]]
 key = "access.role"
 value = true

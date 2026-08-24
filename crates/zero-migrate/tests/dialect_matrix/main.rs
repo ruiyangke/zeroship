@@ -36,6 +36,7 @@ mod gen_types_dialectal_table_shape;
 mod gen_types_drop_column_dialect_legs;
 mod mysql_type_text_lives_with_its_parser;
 mod neutral_apply_layer_names_no_vendor;
+mod op_refused_observation;
 mod op_support_matrix;
 mod partition_recording_dialect_legs;
 mod plan_vocabulary_names_strategies_not_vendors;
