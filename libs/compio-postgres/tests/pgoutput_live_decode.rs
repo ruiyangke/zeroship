@@ -89,6 +89,7 @@ async fn decoded_stream(slot: &str, publication: &str) -> Vec<PgOutputMessage> {
             start_lsn: "0/0",
             proto_version: 1,
             publication_names: &[publication],
+            ..Default::default()
         })
         .await
         .expect("START_REPLICATION failed");

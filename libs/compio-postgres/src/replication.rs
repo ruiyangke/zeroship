@@ -602,7 +602,24 @@ where
         cmd.push_str(&opts.proto_version.to_string());
         cmd.push_str("', \"publication_names\" '");
         cmd.push_str(&escape_literal_body(&publications));
-        cmd.push_str("')");
+        cmd.push('\'');
+
+        // Only options the caller actually asked for are sent. pgoutput
+        // REFUSES an option it does not know - `unrecognized pgoutput option:
+        // nonsense` - so naming every option unconditionally would make this
+        // command fail against any server whose pgoutput predates the newest
+        // one here, for callers who never wanted it. Omitting an option asks
+        // for the server's default, which is what these defaults are.
+        if opts.binary {
+            cmd.push_str(", \"binary\" 'true'");
+        }
+        if opts.messages {
+            cmd.push_str(", \"messages\" 'true'");
+        }
+        if opts.origin == OriginFilter::None {
+            cmd.push_str(", \"origin\" 'none'");
+        }
+        cmd.push(')');
 
         send_simple_query(&mut self.stream, &cmd).await?;
 
@@ -676,6 +693,48 @@ pub struct StartReplicationOptions<'a> {
     /// `&str`, and a publication named `eu,us` was streamed as the two
     /// publications `eu` and `us` - neither of which existed.
     pub publication_names: &'a [&'a str],
+    /// Send column values in each type's BINARY format instead of text.
+    ///
+    /// Values then arrive as [`pgoutput::TupleColumn::Binary`]. Until this
+    /// option existed that variant was unreachable: the decoder had an arm
+    /// for the `b` tuple kind, and no request this driver could make would
+    /// ever make a server send one.
+    pub binary: bool,
+    /// Deliver `pg_logical_emit_message` payloads as
+    /// [`pgoutput::PgOutputMessage::Message`]. Off, the server omits them
+    /// and the decoder's `M` arm never runs.
+    pub messages: bool,
+    /// Which changes to send, by replication origin.
+    pub origin: OriginFilter,
+}
+
+impl Default for StartReplicationOptions<'_> {
+    fn default() -> Self {
+        Self {
+            slot_name: "",
+            start_lsn: "0/0",
+            proto_version: 1,
+            publication_names: &[],
+            binary: false,
+            messages: false,
+            origin: OriginFilter::Any,
+        }
+    }
+}
+
+/// Whether to receive changes that arrived from another replication origin.
+///
+/// The server's default is [`OriginFilter::Any`]; a bidirectional setup sets
+/// [`OriginFilter::None`] so a change this node received from a peer is not
+/// echoed straight back to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OriginFilter {
+    /// `any` - every change, whatever origin it came from.
+    #[default]
+    Any,
+    /// `none` - only changes with no replication origin, i.e. written
+    /// locally rather than replayed from a peer.
+    None,
 }
 
 // ---------------------------------------------------------------------------
@@ -1559,9 +1618,15 @@ pub mod pgoutput {
         Toasted,
         /// Text-format value.
         Text(String),
-        /// Binary-format value (proto v1 emits text by default; binary
-        /// shows up only when the publication was created with the
-        /// `binary` option).
+        /// Binary-format value, in the column type's `send` representation.
+        ///
+        /// Sent only when the STREAM was started with
+        /// [`super::StartReplicationOptions::binary`]. It is not a property
+        /// of the publication - this doc said "when the publication was
+        /// created with the `binary` option" until 2026-08-24, and no such
+        /// publication option exists; `CREATE PUBLICATION` would reject it.
+        /// The option belongs to pgoutput, which is why it travels on
+        /// `START_REPLICATION`.
         Binary(Bytes),
     }
 

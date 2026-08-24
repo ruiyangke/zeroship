@@ -382,6 +382,7 @@ impl WalConsumer {
             start_lsn: &self.start_lsn,
             proto_version: 1,
             publication_names: &[&self.publication_name],
+            ..Default::default()
         };
         let stream = match conn.start_logical_replication(opts).await {
             Ok(stream) => stream,

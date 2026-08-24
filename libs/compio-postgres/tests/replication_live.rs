@@ -268,6 +268,7 @@ fn start_options() -> StartReplicationOptions<'static> {
         start_lsn: "0/0",
         proto_version: 1,
         publication_names: &["deadline_publication"],
+        ..Default::default()
     }
 }
 
@@ -908,6 +909,7 @@ async fn an_unrepresentable_start_lsn_is_refused_before_replication_starts() {
                 start_lsn: "0/100000000",
                 proto_version: 1,
                 publication_names: &["deadline_publication"],
+                ..Default::default()
             })
             .await
             .err()
@@ -963,6 +965,7 @@ async fn a_representable_start_lsn_still_starts_replication() {
                 start_lsn: "0/16B3750",
                 proto_version: 1,
                 publication_names: &["deadline_publication"],
+                ..Default::default()
             }),
         )
         .await
