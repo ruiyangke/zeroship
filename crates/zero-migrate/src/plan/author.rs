@@ -129,7 +129,7 @@ fn quote_ident(ident: &str, dialect: &DialectId) -> Result<String, AuthorError> 
 /// helper's uniform render can be asserted across all engine seams.
 #[cfg(test)]
 pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, AuthorError> {
-    quote_ident(ident, &zero_migrate_ir::dialect::POSTGRES)
+    quote_ident(ident, &crate::test_fixtures::POSTGRES)
 }
 
 /// Render `<schema>.<object>`, both parts quoted.
@@ -493,10 +493,10 @@ impl RawSqlAuthor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zero_migrate_ir::dialect::POSTGRES;
+    use crate::test_fixtures::POSTGRES;
 
     fn det() -> DeterministicAuthor {
-        DeterministicAuthor::new("proj_acme", "app_acme", zero_migrate_ir::dialect::POSTGRES)
+        DeterministicAuthor::new("proj_acme", "app_acme", crate::test_fixtures::POSTGRES)
     }
 
     fn col(name: &str, ty: &str, nullable: bool) -> Column {

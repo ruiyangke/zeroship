@@ -464,7 +464,7 @@ mod tests {
     use crate::model::expr::{CastTarget, Expr, ScalarFn};
     use crate::model::ir::{IrDefault, IrScalar, SequenceRef, ValueFormat};
     use crate::model::snapshot::IdDefaultSnapshot;
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
     const LOWER: &str = "0123456789abcdefghjkmnpqrstvwxyz";
     const UPPER: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";

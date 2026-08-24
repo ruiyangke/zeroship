@@ -1164,7 +1164,7 @@ fn write_rendered(out: &mut String, rendered: &[Rendered]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES};
+    use crate::test_fixtures::{MYSQL, POSTGRES};
 
     const SIMPLE_IR: &str = r#"{
       "ir_version": 1,

@@ -9171,7 +9171,7 @@ mod tests {
         AggFunc, BinaryOp, CastTarget, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
     };
     use crate::model::ir::{IndexElement, IrScalar, IrValue};
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
     fn cols() -> Vec<String> {
         vec![
@@ -10053,7 +10053,7 @@ mod tests {
         // (neither target has a leg) — the per-TARGET scope math.
         let sc = TargetScope::structural_only("t");
         let e = dialectal([(
-            zero_migrate_ir::dialect::POSTGRES,
+            crate::test_fixtures::POSTGRES,
             Expr::lit(IrScalar::Str("A".into())),
         )]);
 
@@ -10078,14 +10078,11 @@ mod tests {
         let sc = TargetScope::structural_only("t");
         let e = dialectal([
             (
-                zero_migrate_ir::dialect::POSTGRES,
+                crate::test_fixtures::POSTGRES,
                 Expr::lit(IrScalar::Str("A".into())),
             ),
-            (
-                zero_migrate_ir::dialect::SQLITE,
-                Expr::lit(IrScalar::Int(0)),
-            ),
-            (zero_migrate_ir::dialect::MYSQL, Expr::lit(IrScalar::Int(0))),
+            (crate::test_fixtures::SQLITE, Expr::lit(IrScalar::Int(0))),
+            (crate::test_fixtures::MYSQL, Expr::lit(IrScalar::Int(0))),
         ]);
         for d in [&POSTGRES, &SQLITE, &MYSQL] {
             assert!(
@@ -10105,13 +10102,13 @@ mod tests {
         let sc = scope("users", &c);
         let e = dialectal([
             (
-                zero_migrate_ir::dialect::POSTGRES,
+                crate::test_fixtures::POSTGRES,
                 Expr::StorageSize {
                     expr: Box::new(Expr::col("name")),
                 },
             ),
-            (zero_migrate_ir::dialect::SQLITE, Expr::col("name")),
-            (zero_migrate_ir::dialect::MYSQL, Expr::col("name")),
+            (crate::test_fixtures::SQLITE, Expr::col("name")),
+            (crate::test_fixtures::MYSQL, Expr::col("name")),
         ]);
         for d in [&POSTGRES, &SQLITE, &MYSQL] {
             validate_expr(&e, d, &sc, 0).unwrap_or_else(|err| {
@@ -10125,7 +10122,7 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         let e = dialectal([
-            (zero_migrate_ir::dialect::SQLITE, Expr::col("name")),
+            (crate::test_fixtures::SQLITE, Expr::col("name")),
             (
                 zero_migrate_ir::dialect::DialectId::new("duckdb"),
                 Expr::StorageSize {
@@ -10146,12 +10143,12 @@ mod tests {
         let sc = scope("users", &c);
         let e = dialectal([
             (
-                zero_migrate_ir::dialect::POSTGRES,
+                crate::test_fixtures::POSTGRES,
                 Expr::StorageSize {
                     expr: Box::new(Expr::col("name")),
                 },
             ),
-            (zero_migrate_ir::dialect::SQLITE, Expr::col("name")),
+            (crate::test_fixtures::SQLITE, Expr::col("name")),
         ]);
         assert!(validate_expr(&e, &POSTGRES, &sc, 0).is_ok());
         assert!(validate_expr(&e, &SQLITE, &sc, 0).is_ok());
@@ -10188,9 +10185,9 @@ mod tests {
         let c = cols();
         let sc = scope("users", &c);
         let e = dialectal([
-            (zero_migrate_ir::dialect::POSTGRES, Expr::col("name")),
+            (crate::test_fixtures::POSTGRES, Expr::col("name")),
             (
-                zero_migrate_ir::dialect::MYSQL,
+                crate::test_fixtures::MYSQL,
                 Expr::col("ghost"), // not a column on `users`
             ),
         ]);
@@ -11458,8 +11455,8 @@ mod tests {
     fn dialectal_legs(postgres: Option<Vec<Op>>, mysql: Option<Vec<Op>>) -> Op {
         Op::Dialectal {
             legs: [
-                (zero_migrate_ir::dialect::POSTGRES, postgres),
-                (zero_migrate_ir::dialect::MYSQL, mysql),
+                (crate::test_fixtures::POSTGRES, postgres),
+                (crate::test_fixtures::MYSQL, mysql),
             ]
             .into_iter()
             .filter_map(|(dialect, ops)| ops.map(|ops| (dialect, ops)))
@@ -11853,14 +11850,14 @@ mod tests {
         let ir = ir_with(vec![Op::Dialectal {
             legs: [
                 (
-                    zero_migrate_ir::dialect::POSTGRES,
+                    crate::test_fixtures::POSTGRES,
                     vec![
                         rename_column("users", "first", "first_name"),
                         rename_column("users", "last", "last_name"),
                     ],
                 ),
                 (
-                    zero_migrate_ir::dialect::SQLITE,
+                    crate::test_fixtures::SQLITE,
                     vec![rename_column("users", "name", "display_name")],
                 ),
             ]
@@ -13404,11 +13401,11 @@ mod tests {
         let dialectal_declaration = Op::Dialectal {
             legs: [
                 (
-                    zero_migrate_ir::dialect::POSTGRES,
+                    crate::test_fixtures::POSTGRES,
                     vec![per_row_create_op(ColType::Uuid, None)],
                 ),
                 (
-                    zero_migrate_ir::dialect::SQLITE,
+                    crate::test_fixtures::SQLITE,
                     vec![per_row_create_op(ColType::Text, None)],
                 ),
             ]

@@ -179,10 +179,10 @@ pub(crate) fn assemble_backfill_clauses_allow_empty(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
     use std::collections::BTreeMap;
     use zero_migrate_backend::dml::{render_expr_bound, BindCtx};
     use zero_migrate_backend::step::BindValue;
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
     use zero_migrate_ir::expr::{BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp};
 
     const SCHEMA: &str = "app_proj";
@@ -1347,9 +1347,9 @@ mod tests {
         // B on SQLite, and C on MySQL — each target picks its OWN leg.
         let expr = Expr::Dialectal {
             legs: [
-                (zero_migrate_ir::dialect::POSTGRES, Box::new(lit_str("A"))),
-                (zero_migrate_ir::dialect::SQLITE, Box::new(lit_str("B"))),
-                (zero_migrate_ir::dialect::MYSQL, Box::new(lit_str("C"))),
+                (crate::test_fixtures::POSTGRES, Box::new(lit_str("A"))),
+                (crate::test_fixtures::SQLITE, Box::new(lit_str("B"))),
+                (crate::test_fixtures::MYSQL, Box::new(lit_str("C"))),
             ]
             .into_iter()
             .collect(),
@@ -1380,14 +1380,14 @@ mod tests {
         let expr = Expr::Dialectal {
             legs: [
                 (
-                    zero_migrate_ir::dialect::POSTGRES,
+                    crate::test_fixtures::POSTGRES,
                     Box::new(Expr::Between {
                         operand: Box::new(Expr::col("age")),
                         low: Box::new(lit_int(1)),
                         high: Box::new(lit_int(9)),
                     }),
                 ),
-                (zero_migrate_ir::dialect::SQLITE, Box::new(Expr::col("age"))),
+                (crate::test_fixtures::SQLITE, Box::new(Expr::col("age"))),
             ]
             .into_iter()
             .collect(),
@@ -1405,7 +1405,7 @@ mod tests {
         // this per-target BEFORE assembly, but the renderer is defensively
         // fail-closed rather than silently dropping the value.
         let expr = Expr::Dialectal {
-            legs: [(zero_migrate_ir::dialect::POSTGRES, Box::new(lit_str("A")))]
+            legs: [(crate::test_fixtures::POSTGRES, Box::new(lit_str("A")))]
                 .into_iter()
                 .collect(),
         };

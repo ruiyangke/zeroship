@@ -922,7 +922,7 @@ mod alter_primary_key_tests {
     use super::*;
     use crate::model::ir::AlterPrimaryKeyAction;
     use crate::model::support::RenderMode;
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
     #[test]
     fn lifecycle_operation_is_portable_live_resolved_core() {

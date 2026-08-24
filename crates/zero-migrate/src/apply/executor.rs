@@ -1341,7 +1341,7 @@ mod order_tests {
             crate::test_fixtures::no_inject("project_acme"),
         );
 
-        guard_repeatable_batch(&cfg, &zero_migrate_ir::dialect::MYSQL, &[&repeatable])
+        guard_repeatable_batch(&cfg, &crate::test_fixtures::MYSQL, &[&repeatable])
             .expect("descriptor-generated MySQL repeatable DDL bypasses the PostgreSQL parser");
     }
 
@@ -2079,7 +2079,7 @@ mod rollback_selection_tests {
     impl crate::guard::MigrationGuard for DenyingGuard {
         fn check(&self, _up: &str) -> Result<crate::guard::GuardOutcome, crate::guard::GuardError> {
             Err(crate::guard::GuardError::RawSqlRejected {
-                dialect: zero_migrate_ir::dialect::MYSQL,
+                dialect: crate::test_fixtures::MYSQL,
             })
         }
 

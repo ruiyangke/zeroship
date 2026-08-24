@@ -46,10 +46,10 @@ use crate::model::table_shape::ResolvedInject;
 use crate::render::expand_contract::{ExpandContractAuthor, ExpandContractPlan, OnlineIntent};
 use crate::render::plan::TableRebuildSpec;
 use crate::render::renderer::{Capability, DialectSupports};
+#[cfg(test)]
+use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 use zero_migrate_backend::advisory::Advisory;
 use zero_migrate_ir::dialect::DialectId;
-#[cfg(test)]
-use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 // The per-dialect DDL emission seam. Declared below the engine so the three impls
 // can leave it for the three vendor crates without Cargo seeing a cycle.
 // The column-clause spellings moved with it, for the same reason: all three impls
@@ -6423,7 +6423,7 @@ mod snapshot_builder_refactor_safety_tests {
         CreateTableRequest, DeclarativeAuthor, FieldDescriptor, IndexDescriptor, ResolvedInject,
         TableRuntimeOptions, TableSnapshot,
     };
-    use zero_migrate_ir::dialect::{POSTGRES, SQLITE};
+    use crate::test_fixtures::{POSTGRES, SQLITE};
 
     fn rich_descriptor() -> CollectionDescriptor {
         CollectionDescriptor {
@@ -7172,8 +7172,8 @@ mod mysql_storage_agreement_tests {
     //! the refusal it depends on is pinned by
     //! [`a_bounded_case_insensitive_string_is_refused_before_this_renderer_sees_it`].
     use super::{column_snapshot_for_field, FieldDescriptor};
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
     use zero_migrate_backend::schema::KeyStorageEvidence;
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     fn field(name: &str, ty: &str) -> FieldDescriptor {
         FieldDescriptor {
@@ -7416,7 +7416,8 @@ mod inline_check_rename_tests {
     //! prefix, quoted vs bare - and the refusal that keeps a body it cannot read STALE
     //! rather than CORRUPT. Every one of them is a way a plain substring swap is wrong.
     use super::{rename_quoted_column_in_sql, SchemaRenderer};
-    use zero_migrate_ir::dialect::{DialectId, MYSQL, SQLITE};
+    use crate::test_fixtures::{MYSQL, SQLITE};
+    use zero_migrate_ir::dialect::DialectId;
 
     fn backend(dialect: &DialectId) -> &'static dyn SchemaRenderer {
         crate::render::backends::schema_renderer(dialect)
@@ -7551,8 +7552,9 @@ mod derived_index_alias_tests {
         build_table_snapshot, derived_index_aliases_for, non_unique_index_name, pair_indexes,
         CollectionDescriptor, FieldDescriptor, IndexSnapshot,
     };
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
     use std::collections::BTreeMap;
-    use zero_migrate_ir::dialect::{DialectId, MYSQL, POSTGRES, SQLITE};
+    use zero_migrate_ir::dialect::DialectId;
 
     fn effective() -> zero_migrate_policy::EffectivePolicy {
         crate::test_fixtures::no_inject("app")

@@ -1561,7 +1561,7 @@ mod tests {
     use crate::model::ir::RefAction;
     use crate::model::table_shape::ResolvedInject;
     use crate::render::declarative::{CollectionDescriptor, FieldDescriptor};
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
     fn column(name: &str, ty: ColType) -> IrColumn {
         IrColumn {
@@ -1999,9 +1999,9 @@ mod tests {
         };
         let expr = Expr::Dialectal {
             legs: [
-                (zero_migrate_ir::dialect::POSTGRES, leg("p")),
-                (zero_migrate_ir::dialect::SQLITE, leg("s")),
-                (zero_migrate_ir::dialect::MYSQL, leg("m")),
+                (crate::test_fixtures::POSTGRES, leg("p")),
+                (crate::test_fixtures::SQLITE, leg("s")),
+                (crate::test_fixtures::MYSQL, leg("m")),
             ]
             .into_iter()
             .collect(),
@@ -2026,7 +2026,7 @@ mod tests {
         }
 
         let postgres_only = Expr::Dialectal {
-            legs: [(zero_migrate_ir::dialect::POSTGRES, leg("p"))]
+            legs: [(crate::test_fixtures::POSTGRES, leg("p"))]
                 .into_iter()
                 .collect(),
         };

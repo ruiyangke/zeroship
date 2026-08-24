@@ -144,7 +144,7 @@ pub(crate) fn column_snapshot_for_type_def(
 #[cfg(test)]
 mod schema_renderer_tests {
     use super::*;
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
     #[test]
     fn dispatch_returns_expected_schema_renderer() {
@@ -2370,8 +2370,8 @@ fn def_to_constraints_for_dialect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
     use serde_json::json;
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
     fn build_add_foreign_key(
         app_id: &str,
@@ -5228,7 +5228,7 @@ columns = [
 #[cfg(test)]
 mod hostile_identifier_quoting {
     use super::renderer;
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES};
+    use crate::test_fixtures::{MYSQL, POSTGRES};
 
     /// Hostile-input coverage for the two identifier spellings this kernel can
     /// reach. It USED to say the schema kernel carries its own quoting primitives

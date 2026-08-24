@@ -115,7 +115,7 @@ use zero_migrate_ir::dialect::DialectId;
 // since that half moved out. Both halves of that coupling are gone now.)
 
 #[cfg(test)]
-use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
 /// The shipping backends, named ONCE for the whole engine.
 ///

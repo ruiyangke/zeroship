@@ -68,7 +68,8 @@ use crate::model::snapshot::{
 };
 use crate::render::fold::fold_ops;
 use crate::render::fold::single_fold;
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use crate::test_fixtures::POSTGRES;
+use zero_migrate_ir::dialect::DialectId;
 
 /// The projections still measurable here, named for the walker each must reproduce.
 ///

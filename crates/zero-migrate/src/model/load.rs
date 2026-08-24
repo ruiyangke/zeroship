@@ -182,7 +182,7 @@ pub fn load_ir_document_authorized(
 mod tests {
     use super::*;
     use crate::model::ir::{ColType, IrColumn, Op};
-    use zero_migrate_ir::dialect::{POSTGRES, SQLITE};
+    use crate::test_fixtures::{POSTGRES, SQLITE};
 
     fn registry(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs

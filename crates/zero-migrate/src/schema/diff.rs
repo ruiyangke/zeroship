@@ -1041,8 +1041,8 @@ fn classify_add_column(def: &Value, live: &LiveSchema, collection: &str) -> Chan
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::POSTGRES;
     use serde_json::json;
-    use zero_migrate_ir::dialect::POSTGRES;
 
     fn confined_inject(app_id: &str, collection: &str) -> ResolvedInject {
         ResolvedInject::for_table(

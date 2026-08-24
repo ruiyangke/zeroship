@@ -111,10 +111,10 @@ use crate::render::value_format::{
     authored_id_default, authored_text_id_default, authored_uuid_id_default, catalog_id_default,
     catalog_uuid_id_default, column_metadata as value_format_column_metadata, uuid_column_metadata,
 };
+#[cfg(test)]
+use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 use zero_migrate_backend::fold::CatalogFoldRefusal;
 use zero_migrate_ir::dialect::DialectId;
-#[cfg(test)]
-use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 use zero_migrate_policy::EffectivePolicy;
 
 fn fold_policy(dialect: &DialectId) -> &'static dyn zero_migrate_backend::fold::CatalogFoldPolicy {

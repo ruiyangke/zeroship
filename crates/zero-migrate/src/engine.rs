@@ -4148,7 +4148,7 @@ mod tests {
     fn guard_cfg() -> GuardConfig {
         GuardConfig::from_policy(
             crate::test_fixtures::no_inject("proj_acme"),
-            zero_migrate_ir::dialect::POSTGRES,
+            crate::test_fixtures::POSTGRES,
         )
     }
 
@@ -4176,7 +4176,7 @@ mod tests {
     }
 
     fn det() -> DeterministicAuthor {
-        DeterministicAuthor::new("proj_acme", "app_acme", zero_migrate_ir::dialect::POSTGRES)
+        DeterministicAuthor::new("proj_acme", "app_acme", crate::test_fixtures::POSTGRES)
     }
 
     #[test]
@@ -4266,7 +4266,7 @@ mod tests {
     fn plan_with_a_drop_is_destructive_and_requires_approval() {
         let drop = RawSqlAuthor::new(
             "app_acme",
-            zero_migrate_ir::dialect::POSTGRES,
+            crate::test_fixtures::POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
         )
         .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
@@ -4284,7 +4284,7 @@ mod tests {
         // COPY … TO PROGRAM is shell RCE — hard-denied (not merely flagged).
         let evil = RawSqlAuthor::new(
             "app_acme",
-            zero_migrate_ir::dialect::POSTGRES,
+            crate::test_fixtures::POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
         )
         .wrap(
@@ -4308,7 +4308,7 @@ mod tests {
     fn plan_collects_every_denial_not_just_the_first() {
         let raw = RawSqlAuthor::new(
             "app_acme",
-            zero_migrate_ir::dialect::POSTGRES,
+            crate::test_fixtures::POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
         );
         let a = raw
@@ -4325,7 +4325,7 @@ mod tests {
     fn expand_contract_rename_set_plans_with_zero_denials() {
         use crate::render::expand_contract::{ExpandContractAuthor, OnlineIntent};
         let plan_in =
-            ExpandContractAuthor::new("proj_acme", "app_acme", zero_migrate_ir::dialect::POSTGRES)
+            ExpandContractAuthor::new("proj_acme", "app_acme", crate::test_fixtures::POSTGRES)
                 .author(&OnlineIntent::RenameColumn {
                     table: "users".into(),
                     from: "email".into(),

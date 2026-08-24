@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::model::op_support::FEATURE_SUPPORT_REGISTRY;
 use crate::model::support::{Feature, SupportDecision};
-use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
 const REGENERATE_COMMAND: &str = "ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX=1 cargo test -p zero-migrate --lib model::support_matrix::committed_support_matrix_is_current -- --exact";
 

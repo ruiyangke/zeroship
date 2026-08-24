@@ -9940,7 +9940,7 @@ mod tests {
     use super::*;
     use crate::model::snapshot::TextStorageSnapshot;
     use crate::render::declarative::build_table_snapshot;
-    use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+    use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
     fn test_ir_author(
         project_schema: impl Into<String>,
@@ -10755,11 +10755,11 @@ mod tests {
             ops: vec![Op::Dialectal {
                 legs: [
                     (
-                        zero_migrate_ir::dialect::POSTGRES,
+                        crate::test_fixtures::POSTGRES,
                         vec![insert_uuid_expr(Expr::UuidV4)],
                     ),
                     (
-                        zero_migrate_ir::dialect::SQLITE,
+                        crate::test_fixtures::SQLITE,
                         vec![insert_uuid_expr(Expr::UuidV7)],
                     ),
                 ]
@@ -10787,8 +10787,8 @@ mod tests {
         collect_expr_database_requirements(
             &Expr::Dialectal {
                 legs: [
-                    (zero_migrate_ir::dialect::POSTGRES, Box::new(Expr::UuidV4)),
-                    (zero_migrate_ir::dialect::SQLITE, Box::new(Expr::UuidV7)),
+                    (crate::test_fixtures::POSTGRES, Box::new(Expr::UuidV4)),
+                    (crate::test_fixtures::SQLITE, Box::new(Expr::UuidV7)),
                 ]
                 .into_iter()
                 .collect(),
@@ -10805,7 +10805,7 @@ mod tests {
         let mut absent_requirements = DatabaseRequirements::default();
         collect_expr_database_requirements(
             &Expr::Dialectal {
-                legs: [(zero_migrate_ir::dialect::SQLITE, Box::new(Expr::UuidV7))]
+                legs: [(crate::test_fixtures::SQLITE, Box::new(Expr::UuidV7))]
                     .into_iter()
                     .collect(),
             },

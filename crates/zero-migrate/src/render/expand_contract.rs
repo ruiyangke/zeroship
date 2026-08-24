@@ -708,7 +708,7 @@ mod tests {
     use super::*;
 
     fn author() -> ExpandContractAuthor {
-        ExpandContractAuthor::new("proj_acme", "app_acme", zero_migrate_ir::dialect::POSTGRES)
+        ExpandContractAuthor::new("proj_acme", "app_acme", crate::test_fixtures::POSTGRES)
     }
 
     fn rename() -> OnlineIntent {

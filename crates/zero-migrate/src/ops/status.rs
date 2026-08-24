@@ -1337,7 +1337,7 @@ mod plan_status_tests {
     use crate::model::migration::{ChecksumInput, MigrationFlags};
     use crate::render::lower::{IrAuthor, LiveSchema};
     use crate::render::step::DialectScope;
-    use zero_migrate_ir::dialect::POSTGRES;
+    use crate::test_fixtures::POSTGRES;
 
     fn id(seed: &str) -> MigrationId {
         MigrationId::derive("status_test", seed.as_bytes())

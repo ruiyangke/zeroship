@@ -90,7 +90,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::ir::{MigrationIr, Op};
 use crate::render::fold::fold_ops;
-use zero_migrate_ir::dialect::{DialectId, MYSQL, POSTGRES, SQLITE};
+use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
+use zero_migrate_ir::dialect::DialectId;
 
 /// The schema unqualified objects resolve under.
 pub(super) const SCHEMA: &str = "public";

@@ -57,9 +57,9 @@ use zero_migrate_policy::EffectivePolicy;
 use crate::model::ir::{MigrationIr, Op};
 use crate::model::snapshot::SchemaSnapshot;
 use crate::render::fold::{fold_ops_onto, FoldError};
-use zero_migrate_ir::dialect::DialectId;
 #[cfg(test)]
-use zero_migrate_ir::dialect::POSTGRES;
+use crate::test_fixtures::POSTGRES;
+use zero_migrate_ir::dialect::DialectId;
 
 /// The state the plan's `n`th step will meet: the live schema at step 0, advanced by
 /// the ops the first `n` steps replay.
