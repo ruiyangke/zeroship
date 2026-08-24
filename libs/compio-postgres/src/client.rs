@@ -2565,9 +2565,22 @@ impl Client {
             };
             // H6: Don't panic on NUL in savepoint names. `frontend::query`
             // returns Err if the SQL contains an interior NUL byte; in that
-            // case we emit a log line and return an empty buffer — the
-            // connection will remain dirty (no ROLLBACK actually queued) and
-            // the pool's next-get barrier will still detect + evict it.
+            // case we emit a log line and return an empty buffer, so no
+            // ROLLBACK is queued and the connection stays dirty.
+            //
+            // This used to add "and the pool's next-get barrier will still
+            // detect + evict it". IT WILL NOT, and the same wrong claim was
+            // removed from `pool.rs` on 2026-08-23. That barrier is
+            // `simple_query("")`, which returns Ok whenever every earlier
+            // request reached its ReadyForQuery; an empty simple query
+            // SUCCEEDS inside an open or aborted transaction, so the barrier
+            // clears `dirty` on a session it never proved idle.
+            //
+            // What actually protects the next borrower is `return_client`'s
+            // rollback, which is unconditional for any session that is not
+            // provably `Idle`. Reaching this arm at all needs an interior NUL
+            // in a savepoint name, which `SAVEPOINT` creation rejects first,
+            // so no `Transaction` exists to drop.
             if let Err(e) = frontend::query(&sql, buf) {
                 log::error!("compio-postgres: failed to encode ROLLBACK: {e}");
                 buf.clear();
