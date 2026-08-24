@@ -27,9 +27,25 @@
 #    This is the invariant's own wording and the only arm that is a plain ban.
 #    It reads cargo's parse of each manifest, not the text, so a dependency
 #    renamed onto tokio (`foo = { package = "tokio" }`) is caught by the crate
-#    NAME rather than by the key, and dev- and build-dependencies count -
-#    `cargo tree -e normal` cannot see either, and a dev-dependency still links
-#    tokio into the test binaries.
+#    NAME rather than by the key, and build-dependencies count - `cargo tree
+#    -e normal` cannot see them.
+#
+#    DEV-DEPENDENCIES ARE EXEMPT, by an operator decision on 2026-08-24. They
+#    were banned until then, on the reasoning that a dev-dependency still links
+#    tokio into the test binaries. That is true and is now accepted: the point
+#    of the invariant is that NO TOKIO RUNTIME DRIVES OUR I/O IN A SHIPPED
+#    BINARY, and a test binary is not shipped. What it buys is the ability to
+#    run tokio-postgres beside compio-postgres in one process and diff their
+#    behaviour against the same server - the strongest oracle available for a
+#    port, and one this crate has been hardening without.
+#
+#    The exemption is deliberately narrow. `kind == "dev"` only: a normal or
+#    build dependency is still a hard red, and so is tokio in the root
+#    `[workspace.dependencies]`, because that table carries no kind and a
+#    member inherits it with `workspace = true` into whichever table it likes.
+#    A dev-only tokio must therefore be declared in the member's own
+#    `[dev-dependencies]` with its own version, where the kind is unambiguous
+#    and this arm can see it.
 #
 # 2. `carriers` - the exact set of THIRD-PARTY packages that reach tokio in the
 #    built graph, pinned. Fails when the set changes IN EITHER DIRECTION.
@@ -179,6 +195,7 @@ jq -r '
   | . as $p
   | $p.dependencies[]
   | select(.name == "tokio" or (.name | startswith("tokio-")))
+  | select((.kind // "normal") != "dev")
   | "\($p.name)\t\(.name)\t\(.kind // "normal")\t\($p.manifest_path)"
 ' "$TMP/meta.json" > "$TMP/declared.txt" 2>"$TMP/declared.err" || {
   echo "REFUSED: the manifest query failed." >&2; cat "$TMP/declared.err" >&2; exit 1
