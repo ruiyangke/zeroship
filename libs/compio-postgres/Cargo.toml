@@ -55,6 +55,20 @@ tls = [
 # not build the target at all unless it is asked for, so its absence is visible
 # and its presence means it really ran.
 live-tls-tests = ["tls"]
+# Run the ORDINARY suite over TLS instead of plaintext.
+#
+# `tls_live.rs` proves the handshake, the verification modes and a couple of
+# protocol claims. It does not prove that replication, the pool, portals,
+# COPY, cancellation or two-phase behave the same once encrypted - every one
+# of those tests hardcoded a plaintext transport, so both transports were
+# never measured against the same assertions. With this feature
+# `common::suite_tls()` returns a rustls connector and `common::test_url()`
+# names the encrypted server, so the same test bodies run over TLS.
+#
+# A feature rather than an env var for the reason above and one more: the
+# transport has to be chosen at COMPILE time, because the two connectors are
+# different types.
+suite-over-tls = ["tls"]
 # Test-only surface for downstream bench / unit-test crates that need to
 # synthesise `Row` / `Statement` / `Column` values without a live
 # Postgres. The feature is dev-only (consumers add it under

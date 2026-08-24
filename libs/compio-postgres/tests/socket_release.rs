@@ -13,7 +13,7 @@ fn test_url() -> String {
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, NoTls).await?;
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("connection error: {}", common::error_chain(&error));
@@ -125,7 +125,7 @@ fn arm_notice_panic() {
 #[compio::test]
 async fn dropping_an_unrun_connection_does_not_leave_the_backend_alive() {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     let pid = client.process_id();
@@ -149,7 +149,7 @@ async fn dropping_an_unrun_connection_does_not_leave_the_backend_alive() {
 #[compio::test]
 async fn cancelling_the_run_future_does_not_leave_the_backend_alive() {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     let pid = client.process_id();
@@ -175,7 +175,7 @@ async fn cancelling_the_run_future_does_not_leave_the_backend_alive() {
 #[compio::test]
 async fn panicking_run_does_not_leave_the_backend_alive() {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     let pid = client.process_id();
@@ -226,7 +226,7 @@ async fn panicking_run_does_not_leave_the_backend_alive() {
 async fn a_local_protocol_failure_does_not_leave_the_backend_alive() {
     let url = test_url();
     let (broken_client, broken_connection) =
-        compio_postgres::connect(&url, NoTls)
+        compio_postgres::connect(&url, common::suite_tls())
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     let broken_pid = broken_client.process_id();

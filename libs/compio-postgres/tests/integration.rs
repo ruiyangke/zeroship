@@ -117,7 +117,7 @@ fn execute_admin_sql_bounded(
         .map_err(|error| AdminSqlError::plain(format!("create cleanup runtime: {error}")))?;
     let outcome = runtime.block_on(compio::time::timeout(ADMIN_BATCH_TIMEOUT, async move {
         let (client, connection) = config
-            .connect(NoTls)
+            .connect(common::suite_tls())
             .await
             .map_err(|error| AdminSqlError::database("connect admin client", &error))?;
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -287,7 +287,7 @@ fn schema_scoped_url(url: &str, schema: &str) -> String {
 
 /// Open a client and spawn its driver on the compio runtime.
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, NoTls).await?;
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("connection error: {e}");
@@ -302,7 +302,7 @@ async fn connect(url: &str) -> Result<Client, Error> {
 async fn connect_with_statement_cache(url: &str, capacity: usize) -> Result<Client, Error> {
     let mut config: Config = url.parse()?;
     config.statement_cache_capacity(capacity);
-    let (client, connection) = config.connect(NoTls).await?;
+    let (client, connection) = config.connect(common::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("connection error: {e}");
@@ -324,7 +324,7 @@ async fn connect_with_statement_cache_threshold(
     config.statement_cache_execution_threshold(
         std::num::NonZeroUsize::new(threshold).expect("test thresholds are nonzero"),
     );
-    let (client, connection) = config.connect(NoTls).await?;
+    let (client, connection) = config.connect(common::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
             eprintln!("connection error: {e}");
@@ -2178,7 +2178,7 @@ async fn notify_delivered_on_idle_listener() {
 
     // Listener connection A. Register the async-message sink BEFORE spawning
     // run(), then LISTEN on a channel.
-    let (client_a, mut conn_a) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let (client_a, mut conn_a) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
     let mut notifications = conn_a.notifications();
     compio::runtime::spawn(async move {
         if let Err(e) = conn_a.run().await {
@@ -3547,7 +3547,7 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
 async fn multiplexed_clean_shutdown_completes_without_hang() {
     let Some(url) = require_pg().await else { return };
 
-    let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
     // Retain the handle so we can await the driver's own clean exit.
     let conn_handle = compio::runtime::spawn(async move { connection.run().await });
 
@@ -4199,7 +4199,7 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
     let require = format!("{url}{sep}sslmode=require");
 
     // `NoTls` explicitly: no build of this crate lets NoTls satisfy `require`.
-    let err = compio_postgres::connect(&require, NoTls)
+    let err = compio_postgres::connect(&require, common::suite_tls())
         .await
         .err()
         .expect("sslmode=require must not succeed over a plaintext connection");
@@ -4986,7 +4986,7 @@ async fn a_pool_refuses_a_configuration_it_cannot_honour() {
 async fn dropping_the_client_closes_the_connection_without_an_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
 
     client.execute("SELECT 1", &[]).await.unwrap();
@@ -5011,7 +5011,7 @@ async fn dropping_the_client_closes_the_connection_without_an_error() {
 async fn losing_the_backend_under_a_live_client_is_still_an_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
 
     // Terminating our own backend mid-statement leaves the request in the
@@ -5038,7 +5038,7 @@ async fn losing_the_backend_under_a_live_client_is_still_an_error() {
 async fn dropping_an_unfinished_transaction_and_the_client_closes_without_an_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (mut client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
 
     let transaction = client.transaction().await.unwrap();
@@ -5066,7 +5066,7 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
         .await
         .unwrap();
 
-    let (mut client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
     let backend_pid: i32 = client
         .query_one_scalar("SELECT pg_backend_pid()", &[])
@@ -5128,7 +5128,7 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
 async fn dropping_a_bound_portal_and_its_client_closes_without_an_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (mut client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
 
     let statement = client.prepare("SELECT $1::INT4").await.unwrap();
@@ -5155,7 +5155,7 @@ async fn dropping_a_bound_portal_and_its_client_closes_without_an_error() {
 async fn an_awaited_query_queued_before_client_drop_still_reports_its_write_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
     let observer = client.simple_query_raw("SELECT 1").await.unwrap();
     drop(client);
 
@@ -6684,7 +6684,7 @@ async fn fallback_application_name_names_the_session() {
     let session_name = |dsn: String| async move {
         let mut config: Config = dsn.parse().unwrap();
         config.statement_cache_capacity(0);
-        let (client, connection) = config.connect(NoTls).await.unwrap();
+        let (client, connection) = config.connect(common::suite_tls()).await.unwrap();
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
         })

@@ -13,7 +13,7 @@ fn test_url() -> String {
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, NoTls).await?;
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("connection error: {}", common::error_chain(&error));

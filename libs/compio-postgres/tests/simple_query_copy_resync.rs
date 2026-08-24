@@ -61,7 +61,7 @@ fn test_url() -> String {
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, NoTls)
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {
@@ -140,7 +140,7 @@ async fn batch_execute_of_copy_from_stdin_leaves_the_session_usable() {
 #[compio::test]
 async fn batch_copy_abort_settles_before_the_follow_up_query() {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .expect("connect the durable COPY probe client");
     let driver = compio::runtime::spawn(async move { connection.run().await });

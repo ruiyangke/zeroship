@@ -19,7 +19,7 @@ fn test_url() -> String {
 
 async fn connect() -> Client {
     let url = test_url();
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
@@ -39,7 +39,7 @@ async fn drop_test_table(table: &str) -> Result<(), String> {
     );
 
     compio::time::timeout(CLEANUP_TIMEOUT, async {
-        let (client, connection) = compio_postgres::connect(&url, NoTls)
+        let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
             .await
             .map_err(|error| common::error_chain(&error))?;
         compio::runtime::spawn(async move {

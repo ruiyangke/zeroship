@@ -50,7 +50,7 @@ fn test_url() -> String {
 /// The async sink has to be taken before `run()` is spawned, so each case
 /// builds its own connection rather than sharing one.
 async fn raise_and_collect(url: &str, level: &str, message: &str) -> AsyncMessage {
-    let (client, mut connection) = compio_postgres::connect(url, NoTls)
+    let (client, mut connection) = compio_postgres::connect(url, common::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     let mut messages = connection.notifications();
@@ -127,7 +127,7 @@ async fn a_warning_is_not_reported_as_a_notice() {
 #[compio::test]
 async fn a_notice_carries_its_sqlstate() {
     let url = test_url();
-    let (client, mut connection) = compio_postgres::connect(&url, NoTls)
+    let (client, mut connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     let mut messages = connection.notifications();

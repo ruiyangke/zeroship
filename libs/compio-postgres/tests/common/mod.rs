@@ -212,9 +212,84 @@ pub fn postgres_unreachable(dsn: &str, error: &(dyn std::error::Error + 'static)
 ///
 /// Absent is NOT "do not run" - see `TestEnvKey::PgTestUrl`. A target that
 /// cannot reach this server must fail, not skip.
+#[cfg(not(feature = "suite-over-tls"))]
 pub fn test_url() -> String {
     env::get(env::TestEnvKey::PgTestUrl)
         .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+}
+
+/// Under `--features suite-over-tls` the whole suite runs against the
+/// encrypted server instead, and `PG_TEST_URL` is deliberately ignored.
+///
+/// The point of the mode is to run the EXISTING tests over TLS, so the DSN
+/// has to name a server this crate's own setup script configured for both
+/// jobs - certificates AND logical decoding / prepared transactions. Honouring
+/// `PG_TEST_URL` here would silently run the mode against a plaintext server
+/// and report the transports as identical without having tested one of them.
+#[cfg(feature = "suite-over-tls")]
+pub fn test_url() -> String {
+    let descriptor = tls_descriptor();
+    let ca = descriptor_field(&descriptor, "ca");
+    // URL form, NOT the descriptor's key=value form. Callers append their own
+    // parameters (`schema_scoped_url` adds `options=-c search_path=...`) and
+    // they choose `?` or `&` by looking for a `?`. A key=value DSN has no `?`,
+    // so every one of those appends landed INSIDE the last value: the
+    // sslrootcert path became `/path/ca.crt?options=-c%20search_path%3D...`
+    // and 20 tests failed with "cannot read PEM: No such file or directory".
+    let base = descriptor_field(&descriptor, "tls_url");
+    let field = |key: &str| {
+        base.split_whitespace()
+            .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("the TLS descriptor's tls_url has no `{key}`"))
+            .to_string()
+    };
+    format!(
+        "postgres://{}:{}@{}:{}/{}?sslmode=verify-full&sslrootcert={ca}",
+        field("user"),
+        field("password"),
+        field("host"),
+        field("port"),
+        field("dbname"),
+    )
+}
+
+/// The transport every suite helper connects over.
+///
+/// A function rather than a constant because the TLS arm has to build a
+/// connector from the very `Config` it will be used with - `connect_raw`
+/// refuses a connector that cannot attest the requested `sslmode`.
+#[cfg(not(feature = "suite-over-tls"))]
+pub fn suite_tls() -> compio_postgres::NoTls {
+    compio_postgres::NoTls
+}
+
+#[cfg(feature = "suite-over-tls")]
+pub fn suite_tls() -> compio_postgres::MakeRustlsConnect {
+    let config: compio_postgres::Config = test_url()
+        .parse()
+        .expect("the suite-over-tls DSN did not parse");
+    compio_postgres::MakeRustlsConnect::from_config(&config)
+        .expect("could not build the suite TLS connector")
+}
+
+#[cfg(feature = "suite-over-tls")]
+fn tls_descriptor() -> String {
+    const DESCRIPTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/live/tls_live.conf");
+    std::fs::read_to_string(DESCRIPTOR).unwrap_or_else(|error| {
+        panic!(
+            "suite-over-tls needs the TLS servers. Run \
+             libs/compio-postgres/tests/tls_live_setup.sh first ({DESCRIPTOR}: {error})"
+        )
+    })
+}
+
+#[cfg(feature = "suite-over-tls")]
+fn descriptor_field(descriptor: &str, key: &str) -> String {
+    descriptor
+        .lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")))
+        .unwrap_or_else(|| panic!("the TLS descriptor has no `{key}` line"))
+        .to_string()
 }
 
 /// Drop replication slots left behind by test processes that are gone.
@@ -418,8 +493,41 @@ pub fn replication_config(application_name: &str) -> compio_postgres::Config {
     for port in parsed.get_ports() {
         config.port(*port);
     }
+    // The TLS settings are part of the endpoint, not decoration. This rebuilt
+    // config used to drop them, so under `suite-over-tls` every replication
+    // test asked for the default `sslmode=prefer` while `suite_tls()` handed
+    // it a connector attesting `verify-full` - and `connect_raw` refused the
+    // pair with `TlsUnattested` before a socket was opened. Eleven tests
+    // failed that way, none of them for a reason that had anything to do with
+    // replication.
+    config.ssl_mode(parsed.get_ssl_mode());
+    config.ssl_root_cert(parsed.get_ssl_root_cert().clone());
+    config.ssl_cert_mode(parsed.get_ssl_cert_mode());
+    if let Some(cert) = parsed.get_ssl_cert() {
+        config.ssl_cert(cert);
+    }
     config.application_name(application_name);
     config
+}
+
+/// A DSN for a client that cannot speak TLS.
+///
+/// The differential suite runs `tokio-postgres` beside this crate as an
+/// oracle, and the oracle stays on PLAINTEXT even when this crate is built
+/// with `suite-over-tls`. That is the comparison worth making: the transport
+/// must not change any observable protocol behaviour, so the reference should
+/// differ from the subject in exactly the transport and nothing else.
+///
+/// Without this the oracle would inherit `sslmode=verify-full` from
+/// [`test_url`] and fail to connect at all.
+#[cfg(feature = "suite-over-tls")]
+pub fn plaintext_url() -> String {
+    descriptor_field(&tls_descriptor(), "tls_url")
+}
+
+#[cfg(not(feature = "suite-over-tls"))]
+pub fn plaintext_url() -> String {
+    test_url()
 }
 
 #[cfg(test)]

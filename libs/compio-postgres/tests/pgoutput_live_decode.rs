@@ -26,7 +26,7 @@ const WATCHDOG: Duration = Duration::from_secs(30);
 
 async fn client() -> Client {
     let url = common::test_url();
-    match compio_postgres::connect(&url, NoTls).await {
+    match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
@@ -79,7 +79,7 @@ fn replication_config() -> Config {
 /// them, not four - and a count that guesses high simply waits forever.
 async fn decoded_stream(slot: &str, publication: &str) -> Vec<PgOutputMessage> {
     let mut replication =
-        compio_postgres::replication::connect_replication(NoTls, &replication_config())
+        compio_postgres::replication::connect_replication(common::suite_tls(), &replication_config())
             .await
             .expect("replication connect failed");
 

@@ -44,7 +44,7 @@ fn plaintext_url() -> String {
 }
 
 async fn connect(url: &str) -> Result<Client, Error> {
-    let (client, connection) = compio_postgres::connect(url, NoTls).await?;
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("connection error: {}", error_chain(&error));
@@ -256,7 +256,7 @@ async fn a_cancel_request_with_the_wrong_secret_key_is_inert() {
         );
 
         // Arm two: the same PID with the session's own key.
-        token.cancel_query(NoTls).await.expect("send CancelRequest");
+        token.cancel_query(common::suite_tls()).await.expect("send CancelRequest");
     });
 
     let (query_result, cancel_result) = compio::time::timeout(
@@ -285,7 +285,7 @@ async fn running_query_cancel_returns_57014_and_preserves_session() {
     let cancel_task = compio::runtime::spawn(async move {
         wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
         token
-            .cancel_query(NoTls)
+            .cancel_query(common::suite_tls())
             .await
             .expect("send CancelRequest");
     });
@@ -349,7 +349,7 @@ async fn cancel_after_query_finished_is_harmless() {
 async fn stale_cancel_token_completes_cleanly_without_hanging() {
     let url = plaintext_url();
     let observer = connect(&url).await.unwrap();
-    let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
     let pid = client.process_id();
     let token = client.cancel_token();
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -365,7 +365,7 @@ async fn stale_cancel_token_completes_cleanly_without_hanging() {
     // PostgreSQL sends no result for CancelRequest, so a reachable postmaster
     // cannot report that the PID/key pair is stale. Ok means the packet was
     // sent cleanly; it does not claim that a query was cancelled.
-    compio::time::timeout(OPERATION_TIMEOUT, token.cancel_query(NoTls))
+    compio::time::timeout(OPERATION_TIMEOUT, token.cancel_query(common::suite_tls()))
         .await
         .expect("stale CancelToken hung")
         .expect("stale CancelToken could not send its fire-and-forget packet");

@@ -53,7 +53,7 @@ fn test_url() -> String {
 
 async fn client() -> Client {
     let url = test_url();
-    match compio_postgres::connect(&url, NoTls).await {
+    match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
@@ -159,7 +159,7 @@ async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputM
 
 async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMessage, String> {
     let mut replication =
-        compio_postgres::replication::connect_replication(NoTls, &replication_config())
+        compio_postgres::replication::connect_replication(common::suite_tls(), &replication_config())
             .await
             .map_err(|error| {
                 format!(

@@ -47,8 +47,9 @@ fn test_url() -> String {
 /// return value and not the caller's error.
 async fn connect_keeping_driver() -> (Client, JoinHandle<Result<(), Error>>) {
     let url = test_url();
-    let (client, connection): (Client, Connection<Socket, NoTlsStream>) =
-        compio_postgres::connect(&url, NoTls)
+    // No type annotation: the transport is chosen by `suite_tls`, and naming
+    // one here would pin the file to plaintext.
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
             .await
             .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     let driver = compio::runtime::spawn(async move { connection.run().await });

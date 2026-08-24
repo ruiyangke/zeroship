@@ -28,7 +28,7 @@ fn test_url() -> String {
 }
 
 async fn connect_client(url: &str) -> Client {
-    let (client, connection) = compio_postgres::connect(url, NoTls)
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
         .await
         .expect("connect to PostgreSQL");
     compio::runtime::spawn(async move {

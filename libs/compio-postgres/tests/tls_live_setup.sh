@@ -181,9 +181,17 @@ start_pg() {
         postgres:16 "$@" >/dev/null
 }
 
+# The `tls` server is also the one the REST of the suite runs against when
+# built with `--features suite-over-tls`, so it carries the same three
+# settings the plaintext review server does: logical decoding for the
+# replication tests, prepared transactions for the two-phase ones, and enough
+# slots that a full run does not exhaust them. None of the three affects TLS;
+# without them those tests would fail on server configuration and be read as
+# a TLS divergence.
 start_pg "$tls_name" "$tls_port" \
     -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key \
-    -c ssl_min_protocol_version=TLSv1.2 -c ssl_max_protocol_version=TLSv1.2
+    -c ssl_min_protocol_version=TLSv1.2 -c ssl_max_protocol_version=TLSv1.2 \
+    -c wal_level=logical -c max_prepared_transactions=10 -c max_replication_slots=20
 start_pg "$mismatch_name" "$mismatch_port" \
     -c ssl=on -c ssl_cert_file=/certs/mismatch.crt -c ssl_key_file=/certs/mismatch.key \
     -c ssl_min_protocol_version=TLSv1.3 -c ssl_max_protocol_version=TLSv1.3

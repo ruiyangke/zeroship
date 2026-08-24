@@ -37,7 +37,7 @@ const ROWS_PER_HALF: i32 = 2000;
 
 async fn client() -> Client {
     let url = common::test_url();
-    match compio_postgres::connect(&url, NoTls).await {
+    match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
@@ -94,7 +94,7 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
 
         let mut config = common::replication_config("cpg_subtxn");
         config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
-        let mut replication = compio_postgres::replication::connect_replication(NoTls, &config)
+        let mut replication = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
             .await
             .expect("replication connect failed");
         let mut stream = replication
