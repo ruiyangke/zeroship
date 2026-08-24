@@ -616,17 +616,59 @@ pub(crate) fn encode_parameter(
         return first;
     }
 
-    // Walk the whole chain: a domain may be defined over another domain.
+    match underlying_base_type(ty) {
+        Some(base) => {
+            buf.truncate(checkpoint);
+            param.to_sql_checked(&base, buf)
+        }
+        None => first,
+    }
+}
+
+/// The type a domain reduces to, if `ty` is one or contains one.
+///
+/// ONE DEFINITION, called from both directions, because the two disagreed:
+/// the bind path unwrapped a domain and the decode path did not, so the same
+/// `d[]` column that could be written could not be read back.
+///
+/// Two shapes reduce:
+///
+/// * `d` itself - `Kind::Domain(base)`, walked to the end since a domain may be
+///   defined over another domain.
+/// * `d[]` - reported as `Kind::Array(Domain(base))`. The walk above never
+///   reaches that domain because the OUTER kind is `Array`, which is why
+///   `Vec<i32>` was refused against a column it can perfectly well fill.
+///
+/// Only the ELEMENT is substituted, never the array's own oid: the value still
+/// names the domain array on the wire, so PostgreSQL still applies the domain's
+/// constraints to every element. MEASURED against a live server - binding
+/// `[1, -5]` through the substituted type is refused with SQLSTATE 23514, so
+/// this relaxes what `accepts` will look at and nothing else.
+pub(crate) fn underlying_base_type(ty: &Type) -> Option<Type> {
     let mut base = ty;
     while let Kind::Domain(inner) = base.kind() {
         base = inner;
     }
-    if std::ptr::eq(base, ty) {
-        return first;
+    if !std::ptr::eq(base, ty) {
+        return Some(base.clone());
     }
 
-    buf.truncate(checkpoint);
-    param.to_sql_checked(base, buf)
+    if let Kind::Array(element) = ty.kind() {
+        let mut base_element = element;
+        while let Kind::Domain(inner) = base_element.kind() {
+            base_element = inner;
+        }
+        if !std::ptr::eq(base_element, element) {
+            return Some(Type::new(
+                ty.name().to_string(),
+                ty.oid(),
+                Kind::Array(base_element.clone()),
+                ty.schema().to_string(),
+            ));
+        }
+    }
+
+    None
 }
 
 fn encode_bind_raw<P, I>(
