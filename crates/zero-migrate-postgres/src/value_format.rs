@@ -119,7 +119,7 @@ fn pg_default_expr_type(expr: &Expr) -> Option<PgDefaultType> {
         },
         Expr::UuidV4 | Expr::UuidV7 => Some(PgDefaultType::Uuid),
         Expr::Cast { target, .. } => Some(pg_cast_target_type(*target)),
-        Expr::PgColumnSize { .. } => Some(PgDefaultType::Integer),
+        Expr::StorageSize { .. } => Some(PgDefaultType::Integer),
         Expr::Agg { .. }
         | Expr::Extract { .. }
         | Expr::PgExtract { .. }
@@ -138,7 +138,7 @@ fn normalize_redundant_pg_default_casts(expr: &Expr) -> Expr {
             }
             Expr::UnaryOp { operand, .. }
             | Expr::Cast { operand, .. }
-            | Expr::PgColumnSize { expr: operand }
+            | Expr::StorageSize { expr: operand }
             | Expr::Extract { from: operand, .. }
             | Expr::PgExtract { from: operand, .. } => visit(operand),
             Expr::Case { branches, r#else } => {

@@ -3804,16 +3804,16 @@
           ]
         },
         {
-          "description": "**PG-ONLY** scalar expression `pg_column_size(<expr>)`.",
+          "description": "The number of bytes the backend uses to STORE a value, as opposed to the\nvalue's logical length ([`ScalarFn::Length`]).\n\nA narrow question most engines cannot answer, so most refuse it — but\n\"narrow\" is not the same as \"belongs to one vendor\". Core asks whether the\nbackend can measure stored size\n([`ExprDialectFeature::StorageSize`](crate::validate::ExprDialectFeature::StorageSize))\nand takes whatever answer comes back, exactly as it does for\n[`Capability::MaterializedView`](crate::backend::Capability::MaterializedView)\nand the other facts only PostgreSQL currently supplies. Today PostgreSQL\naccepts (`pg_column_size(<expr>)`); SQLite and MySQL refuse.",
           "type": "object",
           "properties": {
             "expr": {
-              "description": "The expression whose on-disk size Postgres should measure.",
+              "description": "The expression whose stored size in bytes is measured.",
               "$ref": "#/$defs/Expr"
             },
             "node": {
               "type": "string",
-              "const": "pgColumnSize"
+              "const": "storageSize"
             }
           },
           "additionalProperties": false,

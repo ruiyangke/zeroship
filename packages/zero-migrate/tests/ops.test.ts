@@ -2281,7 +2281,7 @@ test("PG-first chain methods and root RLS scalar constructors record PG-only nod
   assert.deepEqual(checks[1], {
     node: "binOp",
     op: "le",
-    lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
+    lhs: { node: "storageSize", expr: { node: "colRef", name: "data" } },
     rhs: { node: "literal", value: 8192 },
   });
   assert.deepEqual(ops[1].set.setting, {
@@ -2326,7 +2326,7 @@ test("table CHECK expressions allow immutable PG nodes, record aggregates, and r
         expr: {
           node: "binOp",
           op: "lt",
-          lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
+          lhs: { node: "storageSize", expr: { node: "colRef", name: "data" } },
           rhs: { node: "literal", value: 1000 },
         },
       },
@@ -2668,7 +2668,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
   assert.deepEqual(checks[3], {
     node: "binOp",
     op: "lt",
-    lhs: { node: "pgColumnSize", expr: { node: "colRef", name: "data" } },
+    lhs: { node: "storageSize", expr: { node: "colRef", name: "data" } },
     rhs: { node: "literal", value: 262144 },
   });
   assert.deepEqual(checks[4], {

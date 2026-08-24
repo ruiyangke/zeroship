@@ -8339,7 +8339,7 @@ fn validate_default_expr(
                 Ok(())
             }
             Expr::RegexMatch { .. }
-            | Expr::PgColumnSize { .. }
+            | Expr::StorageSize { .. }
             | Expr::PgExtract { .. }
             | Expr::PgInterval { .. }
             | Expr::Dialectal { .. } => Err(mk_err(
@@ -9250,7 +9250,7 @@ mod tests {
         for e in [
             Expr::BinOp {
                 op: BinaryOp::Le,
-                lhs: Box::new(Expr::PgColumnSize {
+                lhs: Box::new(Expr::StorageSize {
                     expr: Box::new(Expr::col("name")),
                 }),
                 rhs: Box::new(Expr::lit(IrScalar::Int(8192))),
@@ -9502,11 +9502,11 @@ mod tests {
     }
 
     #[test]
-    fn pg_only_expr_nodes_reject_on_sqlite_and_mysql() {
+    fn vendor_only_expr_nodes_reject_on_sqlite_and_mysql() {
         let c = cols();
         let sc = scope("users", &c);
         for e in [
-            Expr::PgColumnSize {
+            Expr::StorageSize {
                 expr: Box::new(Expr::col("name")),
             },
             Expr::PgExtract {
@@ -9516,11 +9516,15 @@ mod tests {
         ] {
             for d in [&SQLITE, &MYSQL] {
                 let err = validate_expr(&e, d, &sc, 0)
-                    .expect_err("PG-only expression must reject on non-PG");
+                    .expect_err("a vendor-only expression must reject off its backend");
                 assert_eq!(err.code, CODE_UNSUPPORTED);
                 assert_eq!(err.kind, Some(UnsupportedKind::Expr));
                 assert_eq!(err.dialect, d.clone());
-                assert!(err.reason.contains("PostgreSQL-only"), "got: {err}");
+                // Stricter than the old `contains("PostgreSQL-only")`: the
+                // refusing backend must name ITSELF, from its own DialectId, so
+                // one shared vendor-flavoured sentence can no longer satisfy
+                // both targets.
+                assert!(err.reason.contains(d.as_str()), "got: {err}");
             }
         }
     }
@@ -10008,7 +10012,7 @@ mod tests {
         let e = dialectal([
             (
                 zero_migrate_ir::dialect::POSTGRES,
-                Expr::PgColumnSize {
+                Expr::StorageSize {
                     expr: Box::new(Expr::col("name")),
                 },
             ),
@@ -10017,7 +10021,7 @@ mod tests {
         ]);
         for d in [&POSTGRES, &SQLITE, &MYSQL] {
             validate_expr(&e, d, &sc, 0).unwrap_or_else(|err| {
-                panic!("pgColumnSize in the postgres leg must validate on covered {d:?}: {err}")
+                panic!("storageSize in the postgres leg must validate on covered {d:?}: {err}")
             });
         }
     }
@@ -10030,7 +10034,7 @@ mod tests {
             (zero_migrate_ir::dialect::SQLITE, Expr::col("name")),
             (
                 zero_migrate_ir::dialect::DialectId::new("duckdb"),
-                Expr::PgColumnSize {
+                Expr::StorageSize {
                     expr: Box::new(Expr::col("name")),
                 },
             ),
@@ -10049,7 +10053,7 @@ mod tests {
         let e = dialectal([
             (
                 zero_migrate_ir::dialect::POSTGRES,
-                Expr::PgColumnSize {
+                Expr::StorageSize {
                     expr: Box::new(Expr::col("name")),
                 },
             ),

@@ -835,7 +835,7 @@
                 "node": "binOp",
                 "op": "le",
                 "lhs": {
-                  "node": "pgColumnSize",
+                  "node": "storageSize",
                   "expr": {
                     "node": "colRef",
                     "name": "data"

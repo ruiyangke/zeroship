@@ -1063,7 +1063,7 @@ pub fn expr_column_refs_for_backend(
             }
             Expr::UnaryOp { operand, .. }
             | Expr::Cast { operand, .. }
-            | Expr::PgColumnSize { expr: operand }
+            | Expr::StorageSize { expr: operand }
             | Expr::Extract { from: operand, .. }
             | Expr::PgExtract { from: operand, .. }
             | Expr::RegexMatch { expr: operand, .. }
@@ -1264,14 +1264,9 @@ pub fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlEr
             let e = render_expr_bound(expr, ctx)?;
             ctx.backend.render_regex_match(&e, pattern)?
         }
-        Expr::PgColumnSize { expr } => {
-            if !ctx.backend.supports(Capability::PostgresVendorPrimitives) {
-                return Err(DmlError::UnrenderableExpr(
-                    "pg_column_size is PostgreSQL-only".to_string(),
-                ));
-            }
+        Expr::StorageSize { expr } => {
             let e = render_expr_bound(expr, ctx)?;
-            format!("pg_column_size({e})")
+            ctx.backend.render_storage_size(&e)?
         }
         Expr::Extract { field, from } => {
             let e = render_expr_bound(from, ctx)?;
@@ -1517,16 +1512,9 @@ where
             let e = render_expr_inline_walk_for_backend(expr, backend, col_ref)?;
             backend.render_regex_match(&e, pattern)?
         }
-        Expr::PgColumnSize { expr } => {
-            if !backend.supports(Capability::PostgresVendorPrimitives) {
-                return Err(DmlError::UnrenderableExpr(
-                    "pg_column_size is PostgreSQL-only".to_string(),
-                ));
-            }
-            format!(
-                "pg_column_size({})",
-                render_expr_inline_walk_for_backend(expr, backend, col_ref)?
-            )
+        Expr::StorageSize { expr } => {
+            let e = render_expr_inline_walk_for_backend(expr, backend, col_ref)?;
+            backend.render_storage_size(&e)?
         }
         Expr::Extract { field, from } => {
             let e = render_expr_inline_walk_for_backend(from, backend, col_ref)?;

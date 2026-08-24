@@ -178,8 +178,8 @@ const fn classify_expr(expr: &Expr) -> ExprCoverage {
             "RegexMatch",
             "Regex renders with PostgreSQL/MySQL vendor syntax; SQLite has no stock REGEXP",
         ),
-        Expr::PgColumnSize { .. } => vendor(
-            "PgColumnSize",
+        Expr::StorageSize { .. } => vendor(
+            "StorageSize",
             "pg_column_size is a PG-only storage-layout expression",
         ),
         Expr::Extract { .. } => portable(
@@ -406,7 +406,7 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
             expr: Box::new(Expr::col("name")),
             pattern: "^a".to_string(),
         },
-        Expr::PgColumnSize {
+        Expr::StorageSize {
             expr: Box::new(Expr::col("name")),
         },
         Expr::PgExtract {

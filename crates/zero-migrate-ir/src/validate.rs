@@ -478,8 +478,8 @@ pub enum ExprDialectFeature<'a> {
     RegexMatch,
     /// Whether this aggregate has a faithful native renderer.
     Aggregate(AggFunc),
-    /// The vendor-named `pg_column_size` IR node.
-    PgColumnSize,
+    /// Whether the backend can measure the STORED byte size of a value.
+    StorageSize,
     /// The vendor-named PostgreSQL `EXTRACT` IR node.
     PgExtract,
     /// The vendor-named PostgreSQL interval-literal IR node.
@@ -726,7 +726,7 @@ fn first_aggregate(expr: &Expr) -> Option<&'static str> {
         Expr::UnaryOp { operand, .. }
         | Expr::Cast { operand, .. }
         | Expr::RegexMatch { expr: operand, .. }
-        | Expr::PgColumnSize { expr: operand }
+        | Expr::StorageSize { expr: operand }
         | Expr::Extract { from: operand, .. }
         | Expr::PgExtract { from: operand, .. } => first_aggregate(operand),
         Expr::Case { branches, r#else } => branches
@@ -773,7 +773,7 @@ fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
         Expr::UnaryOp { operand, .. }
         | Expr::Cast { operand, .. }
         | Expr::RegexMatch { expr: operand, .. }
-        | Expr::PgColumnSize { expr: operand }
+        | Expr::StorageSize { expr: operand }
         | Expr::Extract { from: operand, .. }
         | Expr::PgExtract { from: operand, .. } => first_volatile_function(operand),
         Expr::Case { branches, r#else } => branches
@@ -1028,8 +1028,8 @@ impl Ctx<'_> {
                 negated: _,
             } => self.check_in_list(expr, elems, d),
             Expr::RegexMatch { expr, pattern } => self.check_regex_match(expr, pattern, d),
-            Expr::PgColumnSize { expr } => {
-                self.validate_feature(ExprDialectFeature::PgColumnSize)?;
+            Expr::StorageSize { expr } => {
+                self.validate_feature(ExprDialectFeature::StorageSize)?;
                 self.walk_depth(expr, d)
             }
             Expr::Extract { field: _, from } => self.walk_depth(from, d),

@@ -17,7 +17,7 @@ use zero_migrate::{IrAuthor, LiveSchema, SchemaScope};
 const EXPECTED_PG_ONLY_EXPR_NODES: &[&str] = &[
     "FnCall::CurrentSetting",
     "FnCall::CurrentUser",
-    "PgColumnSize",
+    "StorageSize",
     "PgExtract",
     "PgInterval",
     "UuidV7",
@@ -84,7 +84,7 @@ const fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
             ScalarFn::CurrentSetting => Some("FnCall::CurrentSetting"),
             ScalarFn::CurrentUser => Some("FnCall::CurrentUser"),
         },
-        Expr::PgColumnSize { .. } => Some("PgColumnSize"),
+        Expr::StorageSize { .. } => Some("StorageSize"),
         Expr::PgExtract { .. } => Some("PgExtract"),
         Expr::PgInterval { .. } => Some("PgInterval"),
         Expr::RegexMatch { .. } => None,
@@ -104,7 +104,7 @@ fn pg_only_expr_samples() -> Vec<Expr> {
             r#fn: ScalarFn::CurrentUser,
             args: vec![],
         },
-        Expr::PgColumnSize {
+        Expr::StorageSize {
             expr: Box::new(Expr::col("name")),
         },
         Expr::PgExtract {

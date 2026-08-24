@@ -1022,7 +1022,7 @@ function validateDefaultExpr(expr) {
         walk(n.expr);
         return;
       case "regexMatch":
-      case "pgColumnSize":
+      case "storageSize":
       case "pgExtract":
       case "pgInterval":
       case "dialect":
@@ -1700,7 +1700,7 @@ var ExprChainImpl = class {
     return chain({ node: "regexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
   }
   columnSize() {
-    return chain({ node: "pgColumnSize", expr: this.__node });
+    return chain({ node: "storageSize", expr: this.__node });
   }
   lower() {
     return chain({ node: "fnCall", fn: "lower", args: [this.__node] });
@@ -2101,8 +2101,8 @@ function validateImmutableExpr(expr, position, opts = {}) {
           rejectImmutableExpr(position, "regexMatch pattern must be a string");
         }
         return;
-      case "pgColumnSize":
-        if (!opts.allowPgImmutable) rejectPgNode("pgColumnSize");
+      case "storageSize":
+        if (!opts.allowPgImmutable) rejectPgNode("storageSize");
         walk(n.expr);
         return;
       case "extract":

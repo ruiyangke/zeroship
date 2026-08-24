@@ -12,7 +12,7 @@
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
 //! UuidV4 | UuidV7 | Cast | Between | Like | DistinctFrom | Agg | InList |
-//! RegexMatch | PgColumnSize | Extract | PgExtract | PgInterval | Dialectal`.
+//! RegexMatch | StorageSize | Extract | PgExtract | PgInterval | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -468,9 +468,19 @@ pub enum Expr {
         /// concatenated as free-form SQL.
         pattern: String,
     },
-    /// **PG-ONLY** scalar expression `pg_column_size(<expr>)`.
-    PgColumnSize {
-        /// The expression whose on-disk size Postgres should measure.
+    /// The number of bytes the backend uses to STORE a value, as opposed to the
+    /// value's logical length ([`ScalarFn::Length`]).
+    ///
+    /// A narrow question most engines cannot answer, so most refuse it — but
+    /// "narrow" is not the same as "belongs to one vendor". Core asks whether the
+    /// backend can measure stored size
+    /// ([`ExprDialectFeature::StorageSize`](crate::validate::ExprDialectFeature::StorageSize))
+    /// and takes whatever answer comes back, exactly as it does for
+    /// [`Capability::MaterializedView`](crate::backend::Capability::MaterializedView)
+    /// and the other facts only PostgreSQL currently supplies. Today PostgreSQL
+    /// accepts (`pg_column_size(<expr>)`); SQLite and MySQL refuse.
+    StorageSize {
+        /// The expression whose stored size in bytes is measured.
         expr: Box<Self>,
     },
     /// **PORTABLE** scalar expression extracting a date/time part whose numeric
@@ -619,7 +629,7 @@ mod dialectal_tests {
                 | ExprDialectFeature::UuidV7Generation
                 | ExprDialectFeature::RegexMatch
                 | ExprDialectFeature::Aggregate(_)
-                | ExprDialectFeature::PgColumnSize
+                | ExprDialectFeature::StorageSize
                 | ExprDialectFeature::PgExtract
                 | ExprDialectFeature::PgInterval => Ok(()),
             }

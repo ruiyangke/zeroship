@@ -78,7 +78,7 @@ impl ExprDialectValidator for PostgresDmlRenderer {
             | ExprDialectFeature::SplitPart { .. }
             | ExprDialectFeature::UuidV7Generation
             | ExprDialectFeature::RegexMatch
-            | ExprDialectFeature::PgColumnSize
+            | ExprDialectFeature::StorageSize
             | ExprDialectFeature::PgExtract
             | ExprDialectFeature::PgInterval => Ok(()),
         }
@@ -309,6 +309,12 @@ impl DmlRenderer for PostgresDmlRenderer {
             "({expr} ~ {})",
             dml::pg_text_literal(pattern, "PG regex pattern")?
         ))
+    }
+
+    fn render_storage_size(&self, expr: &str) -> Result<String, DmlError> {
+        // PostgreSQL measures the bytes a value actually occupies, TOAST and
+        // compression included, which is why this is not `length()`.
+        Ok(format!("pg_column_size({expr})"))
     }
 
     fn render_extract(&self, field: ExtractField, expr: &str) -> String {

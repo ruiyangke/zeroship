@@ -66,17 +66,17 @@ pub(super) struct SqliteDmlRenderer;
 
 pub(super) static RENDERER: SqliteDmlRenderer = SqliteDmlRenderer;
 
-fn postgres_only_expr(name: &'static str) -> ExprDialectRejection {
+fn unsupported_expr(name: &'static str) -> ExprDialectRejection {
     ExprDialectRejection {
         code: CODE_UNSUPPORTED,
         kind: Some(UnsupportedKind::Expr),
-        reason: format!(
-            "{name} is a PostgreSQL-only expression node and has no SQLite/MySQL renderer"
-        ),
-        suggested_fix: Some(
-            "use this node only in a PostgreSQL-targeted migration, or rewrite the predicate using portable expression nodes"
-                .to_string(),
-        ),
+        // This backend speaks only for itself, and it names itself from its own
+        // DialectId rather than from a hard-coded vendor word.
+        reason: format!("{name} has no {} renderer", DIALECT.as_str()),
+        suggested_fix: Some(format!(
+            "rewrite the predicate using portable expression nodes, or give {} its own leg with dialect({{ ... }})",
+            DIALECT.as_str()
+        )),
     }
 }
 
@@ -115,7 +115,7 @@ impl ExprDialectValidator for SqliteDmlRenderer {
                 | ScalarFn::Substr
                 | ScalarFn::Replace => Ok(()),
                 ScalarFn::CurrentSetting | ScalarFn::CurrentUser => {
-                    Err(postgres_only_expr("current_setting / current_user"))
+                    Err(unsupported_expr("current_setting / current_user"))
                 }
             },
             ExprDialectFeature::Aggregate(function) => match function {
@@ -194,9 +194,9 @@ impl ExprDialectValidator for SqliteDmlRenderer {
                         .to_string(),
                 ),
             }),
-            ExprDialectFeature::PgColumnSize => Err(postgres_only_expr("pg_column_size")),
-            ExprDialectFeature::PgExtract => Err(postgres_only_expr("PG EXTRACT")),
-            ExprDialectFeature::PgInterval => Err(postgres_only_expr("PG interval literal")),
+            ExprDialectFeature::StorageSize => Err(unsupported_expr("storageSize")),
+            ExprDialectFeature::PgExtract => Err(unsupported_expr("PG EXTRACT")),
+            ExprDialectFeature::PgInterval => Err(unsupported_expr("PG interval literal")),
         }
     }
 }
@@ -588,6 +588,13 @@ impl DmlRenderer for SqliteDmlRenderer {
     fn render_regex_match(&self, _expr: &str, _pattern: &str) -> Result<String, DmlError> {
         Err(DmlError::UnrenderableExpr(
             "regex is not supported on SQLite (no stock REGEXP); use dialect({...}) to port"
+                .to_string(),
+        ))
+    }
+
+    fn render_storage_size(&self, _expr: &str) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "SQLite exposes no per-value stored-size function; use dialect({...}) to port"
                 .to_string(),
         ))
     }

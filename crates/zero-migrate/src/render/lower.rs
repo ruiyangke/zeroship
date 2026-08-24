@@ -2130,7 +2130,7 @@ fn collect_expr_database_requirements(
         }
         Expr::InList { expr, .. }
         | Expr::RegexMatch { expr, .. }
-        | Expr::PgColumnSize { expr } => {
+        | Expr::StorageSize { expr } => {
             collect_expr_database_requirements(expr, dialect, requirements);
         }
         Expr::Extract { from, .. } | Expr::PgExtract { from, .. } => {
@@ -9764,7 +9764,7 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
             }
             Expr::InList { expr, .. }
             | Expr::RegexMatch { expr, .. }
-            | Expr::PgColumnSize { expr } => {
+            | Expr::StorageSize { expr } => {
                 collect_col_refs(expr, out);
             }
             Expr::Extract { from, .. } => {

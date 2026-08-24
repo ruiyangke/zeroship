@@ -342,6 +342,12 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// The vendor's regular-expression match operator, or a refusal if it has none.
     fn render_regex_match(&self, expr: &str, pattern: &str) -> Result<String, DmlError>;
 
+    /// The vendor's spelling for the STORED byte size of a value, or a refusal if
+    /// it cannot measure one. Fallible for the same reason
+    /// [`Self::render_regex_match`] is: most engines have no such operation, and a
+    /// backend must say so in its own crate rather than inherit a stand-in.
+    fn render_storage_size(&self, expr: &str) -> Result<String, DmlError>;
+
     /// The vendor's spelling of a portable date-part extraction.
     fn render_extract(&self, field: ExtractField, expr: &str) -> String;
 

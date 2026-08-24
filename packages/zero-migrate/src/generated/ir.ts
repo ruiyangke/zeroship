@@ -215,7 +215,7 @@ export type Expr =
   | { node: "agg"; func: AggFunc; arg?: Expr | null; delimiter?: Expr | null; distinct?: boolean }
   | { node: "inList"; expr: Expr; elems: IrScalar[]; negated: boolean }
   | { node: "regexMatch"; expr: Expr; pattern: string }
-  | { node: "pgColumnSize"; expr: Expr }
+  | { node: "storageSize"; expr: Expr }
   | { node: "extract"; field: ExtractField; from: Expr }
   | { node: "pgExtract"; field: PgExtractField; from: Expr }
   | { node: "pgInterval"; duration: Duration }

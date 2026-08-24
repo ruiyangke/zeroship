@@ -479,7 +479,7 @@ impl ExprDialectValidator for DuckDbDmlRenderer {
             | ExprDialectFeature::SplitPart { .. }
             | ExprDialectFeature::UuidV7Generation
             | ExprDialectFeature::RegexMatch
-            | ExprDialectFeature::PgColumnSize
+            | ExprDialectFeature::StorageSize
             | ExprDialectFeature::PgExtract
             | ExprDialectFeature::PgInterval => Ok(()),
         }
@@ -668,6 +668,12 @@ impl DmlRenderer for DuckDbDmlRenderer {
         Ok(format!(
             "regexp_matches({expr}, {})",
             self.inline_string_literal(pattern)
+        ))
+    }
+
+    fn render_storage_size(&self, _expr: &str) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "DuckDB exposes no per-value stored-size function".to_string(),
         ))
     }
 
