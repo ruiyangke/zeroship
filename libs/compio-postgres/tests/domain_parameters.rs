@@ -7,9 +7,11 @@
 //! executed at all -- while psql does it trivially, because libpq performs no
 //! client-side type check.
 //!
-//! The RESULT direction never had this problem and still must not regress:
-//! PostgreSQL reports the BASE type in `RowDescription`, so `SELECT 7::d` comes
-//! back as plain `int4`. Only parameters see a domain oid.
+//! The RESULT direction is problem-free ONLY FOR A SCALAR domain, and this
+//! header used to claim it was problem-free full stop. PostgreSQL reports the
+//! BASE type in `RowDescription` for `SELECT 7::d`, which is why that always
+//! worked - but for `d[]` it reports the domain ARRAY, so reading failed in
+//! exactly the way binding did. Both are covered below.
 //!
 //! This is not a theoretical shape. `sdks/migrate` can create domains, and
 //! `crates/zeroship-migrate-adapter` already carries a `resolve_domain()`
@@ -207,6 +209,126 @@ async fn a_binary_copy_into_a_domain_column_accepts_its_base_type() {
         .expect("read the copied row")
         .get(0);
     assert_eq!(stored, 11);
+
+    client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .ok();
+    client
+        .batch_execute(&format!("DROP DOMAIN IF EXISTS {domain}"))
+        .await
+        .ok();
+}
+
+/// An ARRAY OF DOMAIN binds and decodes with the base element type.
+///
+/// `d[]` is reported as `Kind::Array(Domain(base))`, so the scalar unwrap never
+/// reaches the domain - the OUTER kind is `Array` - and `Vec<i32>` was refused
+/// in BOTH directions against a column it can perfectly well fill.
+///
+/// This is also the case that corrects the header above: the result direction
+/// is NOT problem-free. `RowDescription` reports the base for a scalar domain,
+/// which is why `SELECT 7::d` always worked, but for `d[]` it reports the
+/// domain ARRAY, so reading failed exactly as binding did. Measured before the
+/// fix, both with the same message: "cannot convert between the Rust type
+/// `alloc::vec::Vec<i32>` and the Postgres type `_d`".
+#[compio::test]
+async fn a_domain_array_binds_and_reads_with_its_base_element() {
+    let Some(url) = test_url() else {
+        eprintln!("PG_TEST_URL unset; skipping");
+        return;
+    };
+    let client = connect_client(&url).await;
+    let domain = common::test_object_name("cpg_domarr_d");
+    let table = common::test_object_name("cpg_domarr_t");
+    client
+        .batch_execute(&format!("CREATE DOMAIN {domain} AS int4 CHECK (VALUE > 0)"))
+        .await
+        .expect("create the domain");
+    client
+        .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v {domain}[])"))
+        .await
+        .expect("create the probe table");
+
+    let statement = client
+        .prepare(&format!("INSERT INTO {table} (v) VALUES ($1)"))
+        .await
+        .expect("prepare against a domain-array column");
+    // The fixture is only meaningful if the parameter really is an array whose
+    // ELEMENT is a domain; otherwise this tests nothing.
+    assert!(
+        matches!(
+            statement.params()[0].kind(),
+            compio_postgres::types::Kind::Array(element)
+                if matches!(element.kind(), compio_postgres::types::Kind::Domain(_))
+        ),
+        "the parameter must be an array of domain: {:?}",
+        statement.params()[0]
+    );
+
+    let affected = client
+        .execute(&statement, &[&vec![1i32, 2i32]])
+        .await
+        .expect("a Vec<i32> must bind to an array of domain over int4");
+    assert_eq!(affected, 1);
+
+    let stored: Vec<i32> = client
+        .query_one(&format!("SELECT v FROM {table}"), &[])
+        .await
+        .expect("read the row back")
+        .get(0);
+    assert_eq!(stored, vec![1, 2], "the array must round-trip");
+
+    client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .ok();
+    client
+        .batch_execute(&format!("DROP DOMAIN IF EXISTS {domain}"))
+        .await
+        .ok();
+}
+
+/// THE CONTROL: every element still passes the domain's CHECK.
+///
+/// Substituting the element type is a CLIENT-side relaxation of what `accepts`
+/// will look at. If it had instead routed around the domain, this would insert
+/// -5 happily. It does not: SQLSTATE 23514, per element, from the server.
+#[compio::test]
+async fn a_domain_array_still_enforces_the_element_check() {
+    let Some(url) = test_url() else {
+        eprintln!("PG_TEST_URL unset; skipping");
+        return;
+    };
+    let client = connect_client(&url).await;
+    let domain = common::test_object_name("cpg_domarr_cd");
+    let table = common::test_object_name("cpg_domarr_ct");
+    client
+        .batch_execute(&format!("CREATE DOMAIN {domain} AS int4 CHECK (VALUE > 0)"))
+        .await
+        .expect("create the domain");
+    client
+        .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (v {domain}[])"))
+        .await
+        .expect("create the probe table");
+
+    let statement = client
+        .prepare(&format!("INSERT INTO {table} (v) VALUES ($1)"))
+        .await
+        .expect("prepare against a domain-array column");
+    let error = client
+        .execute(&statement, &[&vec![1i32, -5i32]])
+        .await
+        .expect_err("the domain forbids elements <= 0");
+    assert_eq!(
+        error
+            .as_db_error()
+            .expect("the refusal must come from the server")
+            .code()
+            .code(),
+        "23514",
+        "a domain CHECK violation is SQLSTATE 23514"
+    );
 
     client
         .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
