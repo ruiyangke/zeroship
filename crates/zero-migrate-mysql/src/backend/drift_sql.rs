@@ -7,7 +7,7 @@ use zero_migrate_backend::driver::SqlSession;
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,
-    MysqlPhysicalType, SchemaSnapshot, TableSnapshot, TextStorageSnapshot, ViewSnapshot,
+    SchemaSnapshot, TableSnapshot, TextStorageSnapshot, ViewSnapshot,
 };
 use zero_migrate_backend::value_format::{
     catalog_id_default, catalog_text_id_default, catalog_uuid_id_default, recover_format_check,
@@ -233,7 +233,9 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             // MySQL `DROP EXPRESSION` equivalent stays invisible.
             generated_kind: None,
             data_type: crate::schema::RENDERER.canonical_type(&raw_type),
-            mysql_physical_type: Some(MysqlPhysicalType::parse(&raw_type)),
+            vendor: crate::physical_type::carrier(crate::physical_type::MysqlPhysicalType::parse(
+                &raw_type,
+            )),
             nullable: nullable.eq_ignore_ascii_case("YES"),
             default: default.clone(),
             ddl_type_override: None,
@@ -742,7 +744,7 @@ mod tests {
     use super::{
         case_sensitive_from_collation, has_auto_increment, recover_mysql_id_default, text_storage,
     };
-    use zero_migrate_backend::snapshot::MysqlPhysicalType;
+    use crate::physical_type::MysqlPhysicalType;
 
     // Every expectation below is a spelling read back from a live MySQL 8.4.11
     // catalog after creating the column, not a guess at how MySQL renders a type.

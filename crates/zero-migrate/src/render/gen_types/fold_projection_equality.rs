@@ -584,7 +584,7 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
         authored_type,
         collation,
         text_storage,
-        mysql_physical_type,
+        vendor,
         encryption_sentinel,
         comment_sentinel,
         comment,
@@ -624,10 +624,7 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
     check("authored_type", *authored_type == theirs.authored_type);
     check("collation", *collation == theirs.collation);
     check("text_storage", *text_storage == theirs.text_storage);
-    check(
-        "mysql_physical_type",
-        *mysql_physical_type == theirs.mysql_physical_type,
-    );
+    check("vendor", *vendor == theirs.vendor);
     check(
         "encryption_sentinel",
         *encryption_sentinel == theirs.encryption_sentinel,

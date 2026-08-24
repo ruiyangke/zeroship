@@ -249,7 +249,7 @@ async fn the_engine_snapshot_of_a_mysql_column_is_lossy_against_show_create_tabl
             "the DEFAULT must reach the snapshot"
         );
         assert!(
-            label.mysql_physical_type.is_some(),
+            zero_migrate_mysql::physical_type::recorded(label).is_some(),
             "the modifier-bearing physical type must reach the snapshot"
         );
         // The exact COLLATE arrives, but NOT on `ColumnSnapshot::collation` - that

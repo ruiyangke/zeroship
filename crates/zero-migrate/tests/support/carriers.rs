@@ -199,7 +199,7 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
         authored_type,
         collation,
         text_storage,
-        mysql_physical_type,
+        vendor,
         encryption_sentinel,
         comment_sentinel,
         comment,
@@ -301,9 +301,16 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
         "a closed MySQL storage-class enum.",
     );
     never_a_column_name(
-        "TableSnapshot::columns[].mysql_physical_type",
-        mysql_physical_type,
-        "a closed MySQL physical-type enum.",
+        "TableSnapshot::columns[].vendor",
+        vendor,
+        "a dialect-keyed carrier of vendor-owned catalog facts. Core CANNOT follow a \
+         rename into one - a leg reads back only through a `downcast_ref` to a type \
+         declared in the owning vendor crate - so this classification is a claim about \
+         every leg type that will ever ride here, not just today's. It holds today: \
+         the only leg any shipping backend records is a parsed PHYSICAL TYPE identity, \
+         which spells type text and never a column name. A vendor that records a \
+         column name in a leg breaks this sweep silently, and would have to follow \
+         renames itself.",
     );
     never_a_column_name(
         "TableSnapshot::columns[].encryption_sentinel",

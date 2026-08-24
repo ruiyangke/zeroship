@@ -3293,9 +3293,9 @@ pub fn fold_ops_onto(
 /// # A carried-through base column is left ALONE, and that is not an optimization
 ///
 /// [`fold_ops_onto`] folds onto a base that is routinely a LIVE CATALOG READ (the
-/// napi lowerer hands `snapshot_schema`'s output straight in). A live MySQL column
-/// carries the contract `MysqlPhysicalType::parse` recovered from the server's own
-/// `COLUMN_TYPE`, which is strictly better information than anything re-derivable
+/// napi lowerer hands `snapshot_schema`'s output straight in). A live column carries
+/// whatever physical contract its own backend recovered from the server's raw type,
+/// which is strictly better information than anything re-derivable
 /// from a snapshot: introspection stores `data_type` "decimal" with no
 /// `ddl_type_override`, so re-rendering it would answer `Plain { kind: "decimal" }`
 /// and LOSE the precision and scale the server reported. Re-deriving a column the

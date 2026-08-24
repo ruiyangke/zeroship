@@ -84,6 +84,7 @@
 //! it could.
 
 use std::collections::BTreeMap;
+use zero_migrate_backend::dialectal::{Dialectal, VendorColumnFacts};
 
 use crate::model::ir::{
     IdentityCol, IndexSortOrder, IndexStorageParams, PartitionSpec, TableRuntimeOptions,
@@ -92,8 +93,7 @@ use crate::model::ir::{
 use crate::model::snapshot::{
     canonical_index_sort_order, index_predicates_canonically_eq, ColumnCollationSnapshot,
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot,
-    IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, TableSnapshot,
-    TextStorageSnapshot,
+    IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot, TableSnapshot, TextStorageSnapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -223,9 +223,10 @@ pub struct VendorFacts {
     pub expression_default: BTreeMap<ColumnKey, bool>,
     /// MySQL: exact character-set and collation identity.
     pub text_storage: BTreeMap<ColumnKey, TextStorageSnapshot>,
-    /// MySQL: parsed physical type identity, which the portable `data_type` cannot
-    /// carry because `mysql_canonical_type` folds every `varchar(n)` to `text`.
-    pub mysql_physical_type: BTreeMap<ColumnKey, MysqlPhysicalType>,
+    /// Whichever backend read this column: its own parsed physical identity, which
+    /// the portable `data_type` cannot carry because `canonical_type` normalizes.
+    /// Opaque here - the owning vendor is what interprets and compares it.
+    pub column_vendor: BTreeMap<ColumnKey, Dialectal<dyn VendorColumnFacts>>,
     /// PostgreSQL: `ON ONLY` on a partitioned parent's index.
     pub pg_index_only: BTreeMap<IndexKey, bool>,
     /// PostgreSQL: the ANN operator class for an `ivfflat`/`hnsw` index.
@@ -249,7 +250,7 @@ impl VendorFacts {
             catalog_uuid_format_check,
             expression_default,
             text_storage,
-            mysql_physical_type,
+            column_vendor,
             pg_index_only,
             pg_index_opclass,
             pg_index_nulls_not_distinct,
@@ -263,7 +264,7 @@ impl VendorFacts {
             .extend(catalog_uuid_format_check);
         self.expression_default.extend(expression_default);
         self.text_storage.extend(text_storage);
-        self.mysql_physical_type.extend(mysql_physical_type);
+        self.column_vendor.extend(column_vendor);
         self.pg_index_only.extend(pg_index_only);
         self.pg_index_opclass.extend(pg_index_opclass);
         self.pg_index_nulls_not_distinct
@@ -329,15 +330,12 @@ impl VendorFacts {
         if !self.column_shape_identity(left, right) {
             return false;
         }
-        match (
-            self.mysql_physical_type.get(left),
-            self.mysql_physical_type.get(right),
-        ) {
-            (Some(MysqlPhysicalType::Unknown { .. }), _)
-            | (_, Some(MysqlPhysicalType::Unknown { .. })) => true,
-            (Some(left), Some(right)) => left == right,
-            _ => true,
-        }
+        let (Some(left), Some(right)) =
+            (self.column_vendor.get(left), self.column_vendor.get(right))
+        else {
+            return true;
+        };
+        left.physical_identity(right).unwrap_or(true)
     }
 
     /// The VENDOR half of index PAIRING, of index SHAPE, and of index DRIFT - one
@@ -531,8 +529,8 @@ impl Column {
         if let Some(storage) = snapshot.text_storage.clone() {
             vendor.text_storage.insert(key.clone(), storage);
         }
-        if let Some(physical) = snapshot.mysql_physical_type.clone() {
-            vendor.mysql_physical_type.insert(key, physical);
+        if !snapshot.vendor.is_empty() {
+            vendor.column_vendor.insert(key, snapshot.vendor.clone());
         }
         Self {
             name: snapshot.name.clone(),
@@ -588,7 +586,7 @@ impl Column {
             authored_type: self.authored_type,
             collation: self.collation.clone(),
             text_storage: vendor.text_storage.get(&key).cloned(),
-            mysql_physical_type: vendor.mysql_physical_type.get(&key).cloned(),
+            vendor: vendor.column_vendor.get(&key).cloned().unwrap_or_default(),
             encryption_sentinel: self.encryption_sentinel.clone(),
             comment_sentinel: self.comment_sentinel.clone(),
             comment: self.comment.clone(),

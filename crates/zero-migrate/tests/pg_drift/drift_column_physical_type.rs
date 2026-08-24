@@ -32,7 +32,7 @@
 //!    deployed and left alone; drift must stay silent.
 //! 3. `an_untouched_postgres_table_reports_clean` /
 //!    `an_untouched_sqlite_table_reports_clean` - the same control for the two dialects
-//!    that leave `mysql_physical_type` as `None`. The contract is consulted only when
+//!    that record no MySQL leg. The contract is consulted only when
 //!    BOTH sides carry one, and these prove that rule still holds after the report
 //!    learned to print the contract.
 //!
@@ -60,11 +60,11 @@ use tempfile::TempDir;
 use zero_migrate::apply::backend::MigrationBackend;
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::snapshot::MysqlPhysicalType;
 use zero_migrate::{
     diff_snapshots, fold_ops, model::ir::Op, resolve_create_table_policy, Approval, ExecutorConfig,
     GuardConfig, IrAuthor, LiveSchema, LockMode, MigrationEngine, SchemaSnapshot, StructuralDrift,
 };
+use zero_migrate_mysql::physical_type::{recorded, MysqlPhysicalType};
 use zero_migrate_mysql::MysqlBackend;
 use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
 use zero_migrate_sqlite::SqliteBackend;
@@ -123,7 +123,7 @@ async fn apply_doc(
     Ok(resolved.ops)
 }
 
-/// `data_type` / `mysql_physical_type` per column of one table, as readable lines.
+/// `data_type` / MySQL physical contract per column of one table, as readable lines.
 fn physical_types(snapshot: &SchemaSnapshot, table: &str) -> String {
     snapshot
         .tables
@@ -132,14 +132,14 @@ fn physical_types(snapshot: &SchemaSnapshot, table: &str) -> String {
         .map(|(_, t)| {
             t.columns
                 .iter()
-                .map(|c| format!("{} {:?} / {:?}", c.name, c.data_type, c.mysql_physical_type))
+                .map(|c| format!("{} {:?} / {:?}", c.name, c.data_type, recorded(c)))
                 .collect::<Vec<_>>()
                 .join("\n    ")
         })
         .unwrap_or_default()
 }
 
-/// One column's `(data_type, mysql_physical_type)` out of a snapshot.
+/// One column's `(data_type, MySQL physical contract)` out of a snapshot.
 fn column_facts(
     snapshot: &SchemaSnapshot,
     table: &str,
@@ -151,7 +151,7 @@ fn column_facts(
         .find(|(name, _)| name.as_str() == table || name.ends_with(&format!(".{table}")))
         .and_then(|(_, t)| t.columns.iter().find(|c| c.name == column))
         .ok_or_else(|| format!("no column {table}.{column} in the snapshot"))?;
-    Ok((c.data_type.clone(), c.mysql_physical_type.clone()))
+    Ok((c.data_type.clone(), recorded(c).cloned()))
 }
 
 /// The one `data_type` drift line for a column, or `None`.
@@ -528,7 +528,7 @@ fn sqlite_corpus_columns() -> serde_json::Value {
 }
 
 /// **THE OVER-REFUSAL CONTROL for PostgreSQL.** PostgreSQL leaves
-/// `mysql_physical_type` as `None`, and the contract is consulted only when BOTH sides
+/// no MySQL leg, and the contract is consulted only when BOTH sides
 /// carry one. A deployed-and-untouched table must stay clean.
 #[compio::test]
 async fn an_untouched_postgres_table_reports_clean() {

@@ -64,6 +64,10 @@ mod dml;
 mod existence_probe;
 mod fold;
 pub mod guard;
+// This backend's own parsed type identity, and the carrier leg it rides to the
+// neutral column snapshot in. `pub` because the engine's drift comparator holds the
+// leg — it cannot read one without naming this type, which is the point.
+pub mod physical_type;
 mod schema;
 mod validation;
 mod value_format;

@@ -7,7 +7,7 @@
 //! `varchar(n)` to the literal `text`, so a declared 255 and a live 64 are the same
 //! string here."
 //!
-//! So a fold that leaves `ColumnSnapshot::mysql_physical_type` describing a type the
+//! So a fold that leaves the MySQL physical leg describing a type the
 //! column no longer has does not produce a cosmetically stale field: it produces a
 //! snapshot the differ then compares against the live column and REPORTS A DIFFERENCE
 //! THAT IS NOT THERE. The deploy succeeded, the database is exactly what was asked
@@ -146,7 +146,7 @@ async fn assert_no_drift(
     ))
 }
 
-/// `data_type` / `mysql_physical_type` per column of one table, as readable lines.
+/// `data_type` / MySQL physical contract per column of one table, as readable lines.
 fn physical_types(snapshot: &zero_migrate::SchemaSnapshot, table: &str) -> String {
     snapshot
         .tables
@@ -155,7 +155,14 @@ fn physical_types(snapshot: &zero_migrate::SchemaSnapshot, table: &str) -> Strin
         .map(|(_, t)| {
             t.columns
                 .iter()
-                .map(|c| format!("{} {:?} / {:?}", c.name, c.data_type, c.mysql_physical_type))
+                .map(|c| {
+                    format!(
+                        "{} {:?} / {:?}",
+                        c.name,
+                        c.data_type,
+                        zero_migrate_mysql::physical_type::recorded(c)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n    ")
         })
@@ -331,21 +338,25 @@ async fn a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target() {
     result.unwrap_or_else(|error| panic!("{error}"));
 }
 
-/// One column's `mysql_physical_type` out of a snapshot, or a stated failure.
+/// One column's MySQL physical contract out of a snapshot, or a stated failure.
 fn column_contract(
     snapshot: &zero_migrate::SchemaSnapshot,
     table: &str,
     column: &str,
-) -> Result<zero_migrate::model::snapshot::MysqlPhysicalType, String> {
+) -> Result<zero_migrate_mysql::physical_type::MysqlPhysicalType, String> {
     snapshot
         .tables
         .iter()
         .find(|(name, _)| name.as_str() == table || name.ends_with(&format!(".{table}")))
         .and_then(|(_, t)| t.columns.iter().find(|c| c.name == column))
-        .ok_or_else(|| format!("no column {table}.{column} in the snapshot"))?
-        .mysql_physical_type
-        .clone()
-        .ok_or_else(|| format!("column {table}.{column} carries no MySQL physical contract"))
+        .ok_or_else(|| format!("no column {table}.{column} in the snapshot"))
+        .and_then(|c| {
+            zero_migrate_mysql::physical_type::recorded(c)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("column {table}.{column} carries no MySQL physical contract")
+                })
+        })
 }
 
 /// Every column shape whose folded MySQL type is decided AFTER the shared builder

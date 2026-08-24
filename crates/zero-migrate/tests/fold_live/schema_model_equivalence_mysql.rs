@@ -6,13 +6,13 @@
 //! On PostgreSQL every family in `VendorFacts` is at its default - `sqlite_rowid` false,
 //! `catalog_uuid_format_check` false, `pg_index_only` false (PostgreSQL introspection
 //! hardcodes it), `mysql_*` absent - so a round trip that silently dropped a vendor
-//! family would still pass there. MySQL populates `mysql_physical_type`,
+//! family would still pass there. MySQL populates its physical-contract leg,
 //! `text_storage` and `expression_default` from
 //! `information_schema.COLUMNS` on every column, so the lossless claim is only actually
 //! TESTED here.
 //!
 //! It also exercises the one column family that participates in a comparator:
-//! `mysql_physical_type` is compared by `VendorFacts::column_drift_identity` and NOT by
+//! that leg is compared by `VendorFacts::column_drift_identity` and NOT by
 //! `column_shape_identity`, mirroring `apply::drift::column_data_types_eq` reading it
 //! while `ColumnSnapshot::eq` does not.
 //!
@@ -41,7 +41,7 @@ use zero_migrate_mysql::MysqlBackend;
 
 const OWNER: &str = "app_schema_model_equivalence_mysql";
 
-/// The corpus. The TYPE SPREAD is the point: `mysql_physical_type` parses
+/// The corpus. The TYPE SPREAD is the point: MySQL's physical contract parses
 /// `information_schema.COLUMNS.COLUMN_TYPE` into a family-gated value, so a corpus of
 /// one family would leave most of the parse unexercised and the round trip would only
 /// prove that one arm survives.
@@ -155,8 +155,8 @@ async fn the_neutral_model_preserves_mysql_behaviour_exactly() {
     // vendor side table, so the precondition is asserted rather than assumed.
     let vendor = zero_migrate::SchemaModel::from_tables(&measured.live.tables).vendor;
     assert!(
-        !vendor.mysql_physical_type.is_empty(),
-        "the live MySQL snapshot populated NO `mysql_physical_type`, so this leg is not \
+        !vendor.column_vendor.is_empty(),
+        "the live MySQL snapshot populated NO vendor leg, so this leg is not \
          exercising the vendor side table at all"
     );
     assert!(
@@ -185,7 +185,7 @@ async fn the_neutral_model_preserves_mysql_behaviour_exactly() {
 
     // ---- Claim 2b: every TERM, one field at a time --------------------------
     //
-    // This is where `mysql_physical_type` earns its place. Mutating it must move
+    // This is where the vendor physical leg earns its place. Mutating it must move
     // NEITHER verdict, because `ColumnSnapshot::eq` excludes it and
     // `column_shape_identity` cannot see it - and mutating `sqlite_rowid` must move
     // BOTH, because `ColumnSnapshot::eq` compares it and

@@ -82,7 +82,7 @@ fn col(name: &str, dtype: &str, nullable: bool) -> ColumnSnapshot {
         authored_type: false,
         collation: None,
         text_storage: None,
-        mysql_physical_type: None,
+        vendor: Default::default(),
         encryption_sentinel: None,
         comment_sentinel: None,
         comment: None,

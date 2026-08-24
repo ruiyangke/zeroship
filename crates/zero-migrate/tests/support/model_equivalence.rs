@@ -16,7 +16,7 @@
 //! ## Why the round trip is compared through `Debug` and not through `==`
 //!
 //! `==` is the lossy thing under test. `ColumnSnapshot::eq` ignores eleven of twenty-one
-//! fields, so a round trip that dropped `mysql_physical_type` would compare EQUAL and
+//! fields, so a round trip that dropped the vendor leg would compare EQUAL and
 //! the test would pass while the model silently lost a vendor fact. `Debug` is total on
 //! these types - `ColumnSnapshot`'s hand-written impl prints all twenty-one, hiding only
 //! ones that are at their default, and a value that went from present to lost moves from

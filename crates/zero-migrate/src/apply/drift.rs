@@ -53,9 +53,8 @@ use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot,
     FunctionIdentity, FunctionKey, GeneratedKindSnapshot, IdDefaultSnapshot, IndexElementSnapshot,
-    IndexSnapshot, MysqlPhysicalType, PolicyIdentity, PolicyKey, RoleSnapshot,
-    SchemaObjectSnapshot, SchemaSnapshot, SequenceSnapshot, TableSnapshot, TriggerIdentity,
-    TriggerKey, VendorObjectIdentities,
+    IndexSnapshot, PolicyIdentity, PolicyKey, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    SequenceSnapshot, TableSnapshot, TriggerIdentity, TriggerKey, VendorObjectIdentities,
 };
 use crate::render::value_format::{
     catalog_id_default, catalog_id_default_for_expected, catalog_text_id_default,
@@ -898,27 +897,19 @@ fn introspected_table_vendor(
 }
 
 fn column_data_types_eq(expected: &ColumnSnapshot, actual: &ColumnSnapshot) -> bool {
-    // A MySQL physical contract, when BOTH sides carry one, is the authority. The
-    // portable `data_type` cannot be: `mysql_canonical_type` folds every `varchar(n)`
-    // to the literal `text`, so a declared 255 and a live 64 are the same string here.
+    // A backend's own physical contract, when BOTH sides carry that backend's, is
+    // the authority. The portable `data_type` cannot be: `canonical_type`
+    // NORMALIZES, so a backend that folds every `varchar(n)` to one spelling makes a
+    // declared 255 and a live 64 the same string here.
     //
-    // Both sides, not either: a snapshot from another dialect carries none, and so
-    // does one written before the contract existed. Comparing a contract against an
-    // absent one would report a difference that says nothing about the database.
-    if let (Some(expected_type), Some(actual_type)) =
-        (&expected.mysql_physical_type, &actual.mysql_physical_type)
-    {
-        // An unmodelled family cannot ESTABLISH a difference, so this declines to
-        // report one. That is the differ's safe direction and not a general rule -
-        // an existence guard asking the same question must refuse to adopt instead,
-        // because being wrong costs it a silently adopted column rather than a
-        // missed drift line.
-        if matches!(expected_type, MysqlPhysicalType::Unknown { .. })
-            || matches!(actual_type, MysqlPhysicalType::Unknown { .. })
-        {
-            return true;
-        }
-        return expected_type == actual_type;
+    // Which contracts exist and what makes two of them equal is the VENDOR's
+    // question, asked through the carrier and answered in its crate; core neither
+    // names a contract type nor matches on one. Both sides, not either - a snapshot
+    // from another dialect carries no leg, and so does one written before that
+    // backend's contract existed - and `physical_identity` returns `None` unless
+    // some dialect recorded on both, which is that rule made structural.
+    if let Some(verdict) = expected.vendor.physical_identity(&actual.vendor) {
+        return verdict;
     }
     if expected.data_type == actual.data_type {
         return true;
@@ -943,39 +934,27 @@ fn column_data_types_eq(expected: &ColumnSnapshot, actual: &ColumnSnapshot) -> b
 /// The two sides of a `data_type` drift line, spelled so that they NAME the difference
 /// [`column_data_types_eq`] found.
 ///
-/// The portable `data_type` cannot do that job on MySQL, and it fails in two different
-/// directions. `fold_ops` emits the PostgreSQL `information_schema` spelling regardless
-/// of dialect while the catalog side is folded through `mysql_canonical_type`, so a
-/// `decimal(12, 2)` widened to `decimal(30, 10)` reported `expected: "numeric",
-/// actual: "decimal"` - one type spelled two ways, naming nothing a reader can act on.
-/// And when the two spellings COINCIDE - a live `TEXT` narrowed to `VARCHAR(64)` is
-/// `"text"` on both sides - `diff_attrs`'s `push` dropped the entry entirely, because
-/// its job is to skip fields whose two sides are equal. That is the case the physical
-/// contract exists for, so the report was blind exactly where the comparator was not.
+/// The portable `data_type` cannot do that job on a backend whose `canonical_type`
+/// normalizes, and it fails in two different directions. `fold_ops` emits one
+/// dialect's `information_schema` spelling regardless of target while the catalog side
+/// is folded through the target's own normalizer, so a `decimal(12, 2)` widened to
+/// `decimal(30, 10)` reported `expected: "numeric", actual: "decimal"` - one type
+/// spelled two ways, naming nothing a reader can act on. And when the two spellings
+/// COINCIDE - a live `TEXT` narrowed to `VARCHAR(64)` is `"text"` on both sides -
+/// `diff_attrs`'s `push` dropped the entry entirely, because its job is to skip fields
+/// whose two sides are equal. That is the case the physical contract exists for, so
+/// the report was blind exactly where the comparator was not.
 ///
-/// When BOTH sides carry a contract, the contract is what the comparator compared, so
-/// the contract is what the report prints. Both sides, not either, for the same reason
-/// [`column_data_types_eq`] gives: a contract against an absent one describes nothing
-/// about the database, and a PostgreSQL or SQLite snapshot carries none - so those
-/// dialects keep the portable spelling they always had.
+/// The contract is what the comparator compared, so the contract is what the report
+/// prints - in the OWNING VENDOR's spelling, produced by the vendor. Core does not and
+/// must not spell a vendor's type text: the two sides come back already written. A
+/// dialect that recorded no leg, or recorded on one side only, leaves the portable
+/// spelling it always had, for the reason [`column_data_types_eq`] gives.
 fn column_data_type_report(expected: &ColumnSnapshot, actual: &ColumnSnapshot) -> (String, String) {
-    let (Some(expected_type), Some(actual_type)) =
-        (&expected.mysql_physical_type, &actual.mysql_physical_type)
-    else {
-        return (expected.data_type.clone(), actual.data_type.clone());
-    };
-    let expected_text = expected_type.type_text();
-    let actual_text = actual_type.type_text();
-    if expected_text != actual_text {
-        return (expected_text, actual_text);
-    }
-    // Unreachable for every family `MysqlPhysicalType::parse` produces - each one
-    // renders its distinguishing values, and `MysqlPhysicalType::type_text` carries the
-    // property test that says so - but a collision here would re-lose the difference
-    // through the very `push` guard this function exists to get past, which is too
-    // quiet a failure to leave to inspection. The derived `Debug` prints every field,
-    // so two values that are not equal cannot render the same.
-    (format!("{expected_type:?}"), format!("{actual_type:?}"))
+    expected
+        .vendor
+        .type_drift_report(&actual.vendor)
+        .unwrap_or_else(|| (expected.data_type.clone(), actual.data_type.clone()))
 }
 
 /// Compare the attributes of same-name children (columns/indexes/constraints
@@ -1824,67 +1803,125 @@ fn diff_named(
 }
 
 #[cfg(test)]
-mod mysql_physical_type_tests {
-    use super::{column_data_types_eq, ColumnSnapshot, MysqlPhysicalType};
+mod physical_contract_tests {
+    //! CORE's half of the physical-contract comparison: that a vendor leg on both
+    //! sides is consulted, that anything less falls through to the portable
+    //! comparison, and that the report follows the comparator.
+    //!
+    //! The contract used here is a STAND-IN declared in this module, not a shipping
+    //! backend's. That is deliberate twice over. Core may not name a vendor crate -
+    //! `dialect_matrix/core_names_no_vendor_crate.rs` is the ratchet - and the
+    //! property under test is not any vendor's rule but the seam's: whatever the
+    //! vendor answers, core asks it exactly when a leg is present on both sides.
+    //! What makes two MySQL contracts equal is asserted where that rule lives, in
+    //! `zero_migrate_mysql::physical_type`.
 
-    /// Both sides fold to the portable `text` on MySQL, so `data_type` alone reports
-    /// agreement. The contract is what tells them apart.
-    fn column(data_type: &str, physical: Option<MysqlPhysicalType>) -> ColumnSnapshot {
+    use std::any::Any;
+    use std::sync::Arc;
+
+    use super::{column_data_types_eq, ColumnSnapshot};
+    use zero_migrate_backend::dialectal::{Dialectal, DialectalValue, VendorColumnFacts};
+    use zero_migrate_ir::dialect::DialectId;
+
+    const A_BACKEND: DialectId = DialectId::new("a_backend");
+    const ANOTHER_BACKEND: DialectId = DialectId::new("another_backend");
+
+    /// A stand-in for a backend's parsed physical identity: two of them are the same
+    /// column when they carry the same text, and they report themselves verbatim.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Contract(&'static str);
+
+    impl DialectalValue for Contract {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn dialectal_eq(&self, other: &dyn Any) -> bool {
+            other.downcast_ref::<Self>() == Some(self)
+        }
+    }
+
+    impl VendorColumnFacts for Contract {
+        fn physical_identity(&self, other: &dyn VendorColumnFacts) -> bool {
+            other.as_any().downcast_ref::<Self>() == Some(self)
+        }
+        fn type_drift_report(&self, other: &dyn VendorColumnFacts) -> Option<(String, String)> {
+            let other = other.as_any().downcast_ref::<Self>()?;
+            (self != other).then(|| (self.0.to_string(), other.0.to_string()))
+        }
+    }
+
+    /// A column whose portable `data_type` is `data_type`, optionally carrying
+    /// `contract` as `dialect`'s leg.
+    fn column(data_type: &str, leg: Option<(DialectId, &'static str)>) -> ColumnSnapshot {
+        let mut vendor: Dialectal<dyn VendorColumnFacts> = Dialectal::new();
+        if let Some((dialect, contract)) = leg {
+            vendor.insert(
+                dialect,
+                Arc::new(Contract(contract)) as Arc<dyn VendorColumnFacts>,
+            );
+        }
         ColumnSnapshot {
             name: "c".to_string(),
             data_type: data_type.to_string(),
-            mysql_physical_type: physical,
+            vendor,
             ..Default::default()
         }
     }
 
+    /// A leg on `A_BACKEND` carrying `contract`.
+    fn leg(contract: &'static str) -> Option<(DialectId, &'static str)> {
+        Some((A_BACKEND, contract))
+    }
+
     #[test]
-    fn a_varchar_length_change_is_seen_where_the_portable_type_is_blind() {
-        let expected = column("text", Some(MysqlPhysicalType::parse("varchar(255)")));
-        let actual = column("text", Some(MysqlPhysicalType::parse("varchar(64)")));
+    fn a_contract_on_both_sides_is_seen_where_the_portable_type_is_blind() {
+        // Both sides fold to the portable `text`, so `data_type` alone reports
+        // agreement. The contract is what tells them apart, and that blindness is
+        // the whole reason the leg exists.
         assert!(
             column_data_types_eq(&column("text", None), &column("text", None)),
             "without contracts the two are indistinguishable, which is the defect"
         );
         assert!(
-            !column_data_types_eq(&expected, &actual),
-            "with contracts the length change is a difference"
+            !column_data_types_eq(&column("text", leg("wide")), &column("text", leg("narrow"))),
+            "with contracts on both sides the vendor's verdict decides"
         );
-    }
-
-    #[test]
-    fn the_renderer_spelling_and_the_catalog_spelling_agree() {
-        // The renderer emits DECIMAL(65, 30); MySQL stores decimal(65,30). Reporting
-        // drift on that pair would be a false red on a database nobody touched.
-        let expected = column("numeric", Some(MysqlPhysicalType::parse("DECIMAL(65, 30)")));
-        let actual = column("numeric", Some(MysqlPhysicalType::parse("decimal(65,30)")));
-        assert!(column_data_types_eq(&expected, &actual));
+        assert!(column_data_types_eq(
+            &column("text", leg("wide")),
+            &column("text", leg("wide"))
+        ));
     }
 
     #[test]
     fn one_side_without_a_contract_keeps_the_portable_comparison() {
-        // A PostgreSQL or SQLite snapshot carries no contract, and neither does one
-        // written before it existed. Comparing present against absent must not
-        // manufacture a difference.
-        let expected = column("text", Some(MysqlPhysicalType::parse("varchar(255)")));
-        assert!(column_data_types_eq(&expected, &column("text", None)));
-        assert!(column_data_types_eq(&column("text", None), &expected));
+        // A snapshot from another dialect's catalog carries no leg, and neither does
+        // one written before that backend's contract existed. Comparing present
+        // against absent must not manufacture a difference.
+        assert!(column_data_types_eq(
+            &column("text", leg("wide")),
+            &column("text", None)
+        ));
+        assert!(column_data_types_eq(
+            &column("text", None),
+            &column("text", leg("wide"))
+        ));
     }
 
     #[test]
-    fn an_unmodelled_family_does_not_assert_a_difference_it_cannot_establish() {
-        let expected = column("point", Some(MysqlPhysicalType::parse("point")));
-        let actual = column("point", Some(MysqlPhysicalType::parse("geometry")));
-        assert!(
-            column_data_types_eq(&expected, &actual),
-            "the differ declines rather than reporting a difference from two Unknowns"
-        );
+    fn two_different_dialects_legs_are_not_paired_with_each_other() {
+        // The carrier keys by dialect, so one backend's contract is never compared
+        // against another's - a leg each is still nobody describing the same thing
+        // twice, and the portable comparison stands.
+        assert!(column_data_types_eq(
+            &column("text", leg("wide")),
+            &column("text", Some((ANOTHER_BACKEND, "narrow"))),
+        ));
     }
 
     #[test]
     fn a_dialect_without_a_contract_keeps_the_portable_spelling() {
-        // PostgreSQL and SQLite leave `mysql_physical_type` as `None`, so their reports
-        // must read exactly as they did before the contract could be printed.
+        // A backend that leaves no leg must report exactly as it did before any
+        // contract could be printed.
         let (expected, actual) = super::column_data_type_report(
             &column("character varying(255)", None),
             &column("integer", None),
@@ -1892,30 +1929,28 @@ mod mysql_physical_type_tests {
         assert_eq!(expected, "character varying(255)");
         assert_eq!(actual, "integer");
 
-        // One side only is still the portable spelling: a contract compared against an
-        // absent one describes nothing about the database.
-        let (expected, actual) = super::column_data_type_report(
-            &column("text", Some(MysqlPhysicalType::parse("varchar(255)"))),
-            &column("integer", None),
-        );
+        // One side only is still the portable spelling: a contract compared against
+        // an absent one describes nothing about the database.
+        let (expected, actual) =
+            super::column_data_type_report(&column("text", leg("wide")), &column("integer", None));
         assert_eq!(expected, "text");
         assert_eq!(actual, "integer");
     }
 
     #[test]
-    fn a_width_change_the_portable_type_cannot_see_reaches_the_report() {
-        // The defect, at the unit boundary: both sides read `text`, so the report used
-        // to print two equal strings and `diff_attrs`'s `push` dropped the entry.
+    fn a_difference_the_portable_type_cannot_see_reaches_the_report() {
+        // The defect, at the unit boundary: both sides read `text`, so the report
+        // printed two equal strings and `diff_attrs`'s `push` dropped the entry.
         let (expected, actual) = super::column_data_type_report(
-            &column("text", Some(MysqlPhysicalType::parse("text"))),
-            &column("text", Some(MysqlPhysicalType::parse("varchar(64)"))),
+            &column("text", leg("wide")),
+            &column("text", leg("narrow")),
         );
         assert_ne!(
             expected, actual,
-            "a TEXT -> VARCHAR(64) narrowing must print two sides a reader can tell apart"
+            "a narrowing must print two sides a reader can tell apart"
         );
-        assert_eq!(expected, "text");
-        assert_eq!(actual, "varchar(64)");
+        assert_eq!(expected, "wide");
+        assert_eq!(actual, "narrow");
     }
 }
 

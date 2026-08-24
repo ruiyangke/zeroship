@@ -21,10 +21,12 @@
 //! Adding a field to any of these types is a compile error here until a mutation exists
 //! for it, so neither consumer can silently stop covering it.
 
+use zero_migrate_mysql::physical_type::MysqlPhysicalType;
+
 use zero_migrate::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
     GeneratedKindSnapshot, IdDefaultSnapshot, IdentityCol, IndexElementSnapshot, IndexSnapshot,
-    IndexStorageParams, MysqlPhysicalType, TableSnapshot, TextStorageSnapshot, ValueFormat,
+    IndexStorageParams, TableSnapshot, TextStorageSnapshot, ValueFormat,
 };
 
 /// One field, and a mutation that changes ONLY that field.
@@ -137,7 +139,7 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
         authored_type,
         collation,
         text_storage,
-        mysql_physical_type,
+        vendor,
         encryption_sentinel,
         comment_sentinel,
         comment,
@@ -220,16 +222,15 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
             collation: "utf8mb4_bin".to_string(),
         });
     });
-    set.probe(
-        "ColumnSnapshot::mysql_physical_type",
-        mysql_physical_type,
-        |c| {
-            c.mysql_physical_type = Some(MysqlPhysicalType::Character {
-                fixed: false,
-                length: 40,
-            });
-        },
-    );
+    // The mutation installs a REAL vendor leg rather than a stand-in: the probe has
+    // to move a value the shipping comparators actually consult, and only a vendor
+    // crate can construct one of its own contracts.
+    set.probe("ColumnSnapshot::vendor", vendor, |c| {
+        c.vendor = zero_migrate_mysql::physical_type::carrier(MysqlPhysicalType::Character {
+            fixed: false,
+            length: 40,
+        });
+    });
     set.probe(
         "ColumnSnapshot::encryption_sentinel",
         encryption_sentinel,

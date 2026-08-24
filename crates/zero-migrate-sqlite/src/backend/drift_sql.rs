@@ -412,7 +412,7 @@ async fn introspect_columns(
             authored_type: false,
             collation: recover_column_collation(stored_create_sql, &name),
             text_storage: None,
-            mysql_physical_type: None,
+            vendor: Default::default(),
             comment: None,
         });
     }

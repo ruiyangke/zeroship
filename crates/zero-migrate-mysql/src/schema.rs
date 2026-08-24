@@ -1,12 +1,13 @@
 //! MySQL schema/DDL spelling. The future `zero-migrate-mysql`.
 
 use crate::collation::{mysql_pin_collation, mysql_type_without_collation};
+use crate::physical_type::{self, MysqlPhysicalType};
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_backend::schema::{
     char_len, decimal_precision_scale, def_case_sensitive, AddColumnIfNotExistsRequest,
     CreateIndexIfNotExistsRequest, KeyStorageEvidence, SchemaRenderer, StorageValidationRefusal,
 };
-use zero_migrate_backend::snapshot::{ColumnSnapshot, MysqlPhysicalType};
+use zero_migrate_backend::snapshot::ColumnSnapshot;
 use zero_migrate_ir::dialect::{DialectId, MYSQL};
 
 /// This module's own vendor identity.
@@ -147,7 +148,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         mysql_canonical_type(&self.column_type(c, false))
     }
 
-    /// Stamp [`ColumnSnapshot::mysql_physical_type`] from the column's FINAL rendered
+    /// Stamp this backend's [`physical_type`] leg from the column's FINAL rendered
     /// type. This is the MySQL backend's answer to the neutral
     /// `SchemaRenderer::finalize_column_snapshot` hook, so it is reached only when
     /// MySQL is the registered backend; PostgreSQL and SQLite keep no such projection
@@ -193,7 +194,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     /// filling it on either would compare a contract against an absent one.
     fn finalize_column_snapshot(&self, column: &mut ColumnSnapshot) {
         let rendered = self.column_type(column, false);
-        column.mysql_physical_type = Some(MysqlPhysicalType::parse(&rendered));
+        physical_type::record(column, MysqlPhysicalType::parse(&rendered));
         if column.type_def.is_some() {
             // `type_def` is the neutral compiler input, not durable snapshot
             // identity. MySQL needs more than its canonical `data_type` to retain
@@ -226,7 +227,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
     /// can make a `TEXT`/`BLOB` key legal; letting one reach apply produces MySQL
     /// error 1170 after earlier migration units may already have committed.
     ///
-    /// Classification reads [`ColumnSnapshot::mysql_physical_type`], never the
+    /// Classification reads this backend's [`physical_type`] leg, never the
     /// neutral `data_type`: MySQL catalog normalization deliberately folds
     /// `VARCHAR(n)` into `"text"`, while the physical contract preserves the
     /// distinction between a bounded character column and a LOB.
@@ -247,7 +248,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
                 else {
                     continue;
                 };
-                let Some(MysqlPhysicalType::Lob { tier }) = &column.mysql_physical_type else {
+                let Some(MysqlPhysicalType::Lob { tier }) = physical_type::recorded(column) else {
                     continue;
                 };
                 return Err(format!(
@@ -307,7 +308,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
                 (MysqlStorage::of(rendered), "renders as MySQL")
             }
             KeyStorageEvidence::CatalogColumn(column) => {
-                let MysqlPhysicalType::Lob { tier } = column.mysql_physical_type.as_ref()? else {
+                let MysqlPhysicalType::Lob { tier } = physical_type::recorded(column)? else {
                     return None;
                 };
                 (MysqlStorage::of(tier), "the live MySQL catalog reports as")

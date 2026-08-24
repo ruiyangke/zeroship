@@ -91,7 +91,7 @@ fn fields_invisible_to_equality<T: Clone + PartialEq + std::fmt::Debug>(
 /// equality and there are three different questions among them.
 ///
 /// Four of the fourteen are VENDOR facts (`catalog_uuid_format_check`,
-/// `expression_default`, `text_storage`, `mysql_physical_type`). In the
+/// `expression_default`, `text_storage`, `vendor`). In the
 /// neutral model those are not excluded, they are ABSENT - they live in
 /// `schema_model::VendorFacts` and a neutral comparator cannot name them.
 const SILENTLY_IGNORED_BY_COLUMN_SNAPSHOT_EQ: &[&str] = &[
@@ -106,7 +106,7 @@ const SILENTLY_IGNORED_BY_COLUMN_SNAPSHOT_EQ: &[&str] = &[
     "ColumnSnapshot::type_def",
     "ColumnSnapshot::authored_type",
     "ColumnSnapshot::text_storage",
-    "ColumnSnapshot::mysql_physical_type",
+    "ColumnSnapshot::vendor",
     "ColumnSnapshot::encryption_sentinel",
     "ColumnSnapshot::comment_sentinel",
 ];

@@ -666,7 +666,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
                 authored_type: false,
                 collation: None,
                 text_storage: None,
-                mysql_physical_type: None,
+                vendor: Default::default(),
                 encryption_sentinel: None,
                 comment_sentinel: None,
                 comment: None,
