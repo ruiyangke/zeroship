@@ -62,7 +62,7 @@ pub async fn simple_query(
 
 pub async fn batch_execute(client: &InnerClient, query: &str) -> Result<(), Error> {
     let responses = start_batch_execute(client, query)?;
-    finish_batch_execute(client, responses).await
+    finish_batch_execute(responses).await
 }
 
 /// The reason this driver gives PostgreSQL for aborting a copy it cannot feed.
@@ -126,10 +126,7 @@ fn producerless_request(buf: Bytes, may_enter_copy_in: bool) -> RequestMessages 
 /// function does before `send` - logging, encoding - can fail or unwind while
 /// the session is still untouched, and a guard armed across it would undo work
 /// the caller never did.
-pub(crate) fn start_batch_execute(
-    client: &InnerClient,
-    query: &str,
-) -> Result<Responses, Error> {
+pub(crate) fn start_batch_execute(client: &InnerClient, query: &str) -> Result<Responses, Error> {
     debug!("executing statement batch: {query}");
 
     let must_prequeue_copy_abort = may_enter_copy_in(query);
@@ -162,10 +159,7 @@ pub(crate) fn start_batch_execute_with_error_cleanup(
 }
 
 /// Drain the response stream `start_batch_execute` returned.
-pub(crate) async fn finish_batch_execute(
-    _client: &InnerClient,
-    mut responses: Responses,
-) -> Result<(), Error> {
+pub(crate) async fn finish_batch_execute(mut responses: Responses) -> Result<(), Error> {
     let mut refused = None;
     loop {
         match responses.next().await? {
@@ -211,7 +205,6 @@ pub(crate) async fn finish_batch_execute(
 /// `None` means the batch completed without any `CommandComplete` - an empty
 /// query.
 pub(crate) async fn finish_batch_execute_reporting_tag(
-    _client: &InnerClient,
     mut responses: Responses,
 ) -> Result<Option<String>, Error> {
     let mut tag = None;
@@ -346,9 +339,7 @@ fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: b
                 }) {
                     tag_end += 1;
                     while bytes.get(tag_end).is_some_and(|byte| {
-                        byte.is_ascii_alphanumeric()
-                            || *byte == b'_'
-                            || !byte.is_ascii()
+                        byte.is_ascii_alphanumeric() || *byte == b'_' || !byte.is_ascii()
                     }) {
                         tag_end += 1;
                     }
@@ -389,9 +380,7 @@ fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: b
                 let start = index;
                 index += 1;
                 while bytes.get(index).is_some_and(|byte| {
-                    byte.is_ascii_alphanumeric()
-                        || matches!(*byte, b'_' | b'$')
-                        || !byte.is_ascii()
+                    byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'$') || !byte.is_ascii()
                 }) {
                     index += 1;
                 }

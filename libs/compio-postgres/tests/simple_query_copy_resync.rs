@@ -122,14 +122,23 @@ async fn batch_execute_of_copy_from_stdin_leaves_the_session_usable() {
     .expect("batch COPY resync test exceeded its watchdog");
 }
 
-/// The COPY abort must settle before a transaction pooler releases its backend.
+/// The COPY abort must consume exactly its own responses, leaving the next
+/// query's reply for the next query.
 ///
-/// Unlike the session-local fixtures above, this table is durable so a backend
-/// handoff cannot turn the COPY into an unrelated missing-table error. That
-/// makes the watchdog measure the abort protocol itself through both a direct
-/// server and a transaction-mode pooler.
+/// Unlike the session-local fixtures above, this table is durable, so the test
+/// keeps its meaning when a backend handoff between statements would turn a
+/// temp table into an unrelated missing-table error. That is what lets the same
+/// test body run against a transaction-mode pooler.
+///
+/// WHAT IT DOES NOT CATCH: it connects to whatever `PG_TEST_URL` names, and
+/// that is normally a DIRECT server, so a plain run does not exercise a pooler
+/// at all - the name of the hazard is not the same as measuring it. Restoring
+/// the redundant `Sync` fails this test on a direct server (measured 3/3 runs),
+/// which is what makes it a regression guard; the pooler claim needs
+/// `PG_TEST_URL` pointed at one, per
+/// `docs/runbooks/compio-postgres-transaction-pooler-check.md`.
 #[compio::test]
-async fn batch_copy_abort_survives_a_transaction_pooler_handoff() {
+async fn batch_copy_abort_settles_before_the_follow_up_query() {
     let url = test_url();
     let (client, connection) = compio_postgres::connect(&url, NoTls)
         .await
