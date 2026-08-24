@@ -102,13 +102,17 @@ use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_ir::dialect::DialectId;
 
-// `SqliteSequencePolicy` used to be re-exported on this line beside `VENDOR`, for one
-// consumer: SQLite's rebuild executor, which converts the plan's neutral
-// `SequenceHighWaterPolicy` into it at its own boundary. That executor is
-// `zero_migrate_sqlite::backend::rebuild_sql` now and reads the type from its own
-// crate, so the import went away with the executor, exactly as this comment said it
-// would. Core names no SQLite type at all.
-pub(crate) use zero_migrate_sqlite::VENDOR;
+// A `pub(crate) use zero_migrate_sqlite::VENDOR;` USED TO LIVE HERE, so that the
+// `SQLITE_VENDOR` entry below could be written `&VENDOR` while its two siblings wrote
+// the vendor crate's full path. It had no other reader: nothing in core named
+// `render::backends::VENDOR`. So it was a fourth place the engine spelled a vendor
+// crate, at `pub(crate)` visibility, purely to make one of the three registry entries
+// asymmetric with the other two. The entries are now spelled the same way as each
+// other, and the composition names each vendor exactly once.
+//
+// (An earlier note here recorded that `SqliteSequencePolicy` had been re-exported on
+// the same line for SQLite's rebuild executor, which reads the type from its own crate
+// since that half moved out. Both halves of that coupling are gone now.)
 
 #[cfg(test)]
 use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
@@ -125,31 +129,74 @@ use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 /// startup, and that is deliberate — see `zero_migrate_backend::registry` for why a
 /// growable registry would trade a compile error for a runtime one.
 const POSTGRES_VENDOR: &BackendVendor = &zero_migrate_postgres::VENDOR;
-const SQLITE_VENDOR: &BackendVendor = &VENDOR;
+const SQLITE_VENDOR: &BackendVendor = &zero_migrate_sqlite::VENDOR;
 const MYSQL_VENDOR: &BackendVendor = &zero_migrate_mysql::VENDOR;
 
 static SHIPPING: [&BackendVendor; 3] = [POSTGRES_VENDOR, SQLITE_VENDOR, MYSQL_VENDOR];
 
 pub(crate) const VENDORS: VendorSet = VendorSet::new(&SHIPPING);
 
-/// The engine's stable generated-identifier byte budget, read from the registered
-/// backend that imposes the limiting byte-counted cap. Generated names are
-/// precomputed once and then handed to every emitter, so this is one composition
-/// fact rather than a per-call vendor dispatch.
+/// The engine's stable generated-identifier byte budget: the TIGHTEST cap any
+/// registered backend declares. Generated names are precomputed once and then handed
+/// to every emitter, so this is one composition fact rather than a per-call vendor
+/// dispatch — which means it has to fit the strictest target in the build, not a
+/// chosen one.
 ///
 /// This is the ONE definition. It used to be three - `plan::author`, `apply::role`
 /// and `render::expand_contract` each restated `63`, and `plan::author`'s doc
 /// promised the author's number and the backend's DECLARED number "cannot drift
 /// apart", which was true of one site and false of the other two. Reading the
 /// declared limit here makes that promise true of all of them.
-pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
-    match POSTGRES_VENDOR.descriptor.limits.identifier {
-        zero_migrate_ir::backend::IdentifierLimit::Bytes(n) => n,
-        zero_migrate_ir::backend::IdentifierLimit::Unbounded
-        | zero_migrate_ir::backend::IdentifierLimit::Characters(_) => {
-            panic!("PostgreSQL declares a BYTE identifier cap")
+///
+/// # It used to read ONE vendor's cap while claiming to read the limiting one
+///
+/// The body was `match POSTGRES_VENDOR.descriptor.limits.identifier`, with a
+/// `panic!("PostgreSQL declares a BYTE identifier cap")` on the other two arms. The
+/// doc directly above it already said "the registered backend that imposes the
+/// limiting byte-counted cap" — so the sentence was a description of the intended
+/// fold and the code was a hard-coded lookup of one vendor. Today the two agree by
+/// accident: PostgreSQL declares `Bytes(63)`, MySQL `Characters(64)` and SQLite
+/// `Unbounded`, so the tightest IS PostgreSQL's and the value below is still 63. A
+/// fourth backend declaring a cap under 63 would have been silently ignored, and the
+/// engine would have precomputed names its own registry says do not fit.
+///
+/// [`tightest_identifier_budget`] is that fold. It also removes the panic, which
+/// existed only because a one-vendor lookup had two arms it could not answer.
+pub(crate) const GENERATED_IDENT_MAX_BYTES: usize = tightest_identifier_budget(VENDORS);
+
+/// The smallest generated-name byte budget every backend in `vendors` can hold.
+///
+/// Each declared limit is converted to a BYTE budget, taking the safe direction in
+/// both cases where the two units differ:
+///
+/// * [`IdentifierLimit::Bytes(n)`] is already a byte budget.
+/// * [`IdentifierLimit::Characters(n)`] becomes `n` bytes, because a byte string of
+///   length `b` holds at most `b` characters — so `b <= n` bytes always fits an
+///   `n`-character cap, whatever encoding the name is in. Treating it as `4 * n`
+///   would be the true maximum and the WRONG direction: it would let the engine mint
+///   a name that fits only if the name happens to be ASCII.
+/// * [`IdentifierLimit::Unbounded`] imposes nothing, so it contributes `usize::MAX`
+///   and cannot be the minimum unless it is the only kind present.
+///
+/// An empty registry would yield `usize::MAX`, which cannot arise: `SHIPPING` is a
+/// fixed-size array and the registry refuses to be composed empty.
+const fn tightest_identifier_budget(vendors: VendorSet) -> usize {
+    let vendors = vendors.as_slice();
+    let mut budget = usize::MAX;
+    let mut at = 0;
+    while at < vendors.len() {
+        let declared = match vendors[at].descriptor.limits.identifier {
+            zero_migrate_ir::backend::IdentifierLimit::Bytes(n)
+            | zero_migrate_ir::backend::IdentifierLimit::Characters(n) => n,
+            zero_migrate_ir::backend::IdentifierLimit::Unbounded => usize::MAX,
+        };
+        if declared < budget {
+            budget = declared;
         }
-    };
+        at += 1;
+    }
+    budget
+}
 
 /// The vendor for a dialect.
 ///
@@ -338,6 +385,51 @@ mod tests {
                 v.descriptor.display_name
             );
         }
+    }
+
+    /// The engine's generated-name budget is the TIGHTEST cap in the registry, and
+    /// that is checked against every registrant rather than against one vendor.
+    ///
+    /// This is the assertion the previous body could not make. It read
+    /// `POSTGRES_VENDOR.descriptor.limits.identifier` directly, so "the limiting cap"
+    /// was a claim in its doc and "PostgreSQL's cap" was the code, and the two agree
+    /// today only because PostgreSQL happens to be the strictest of the three. A
+    /// register-a-tighter-backend regression would have produced generated names the
+    /// engine's own registry says do not fit, and no test in the tree would have
+    /// moved.
+    ///
+    /// Deliberately NOT `assert_eq!(GENERATED_IDENT_MAX_BYTES, 63)`. That restates
+    /// the constant instead of checking it, and it is exactly as true of the broken
+    /// one-vendor lookup as of the fold.
+    #[test]
+    fn the_generated_ident_budget_fits_every_registered_backend() {
+        let mut tightest = usize::MAX;
+        for v in VENDORS.as_slice() {
+            let declared = match v.descriptor.limits.identifier {
+                zero_migrate_ir::backend::IdentifierLimit::Bytes(n)
+                | zero_migrate_ir::backend::IdentifierLimit::Characters(n) => n,
+                zero_migrate_ir::backend::IdentifierLimit::Unbounded => usize::MAX,
+            };
+            assert!(
+                GENERATED_IDENT_MAX_BYTES <= declared,
+                "{} declares an identifier cap of {declared}, but the engine mints \
+                 generated names up to {GENERATED_IDENT_MAX_BYTES} bytes and hands \
+                 them to every emitter",
+                v.descriptor.display_name
+            );
+            tightest = tightest.min(declared);
+        }
+        assert_eq!(
+            GENERATED_IDENT_MAX_BYTES, tightest,
+            "the budget is below the tightest declared cap, so it is costing every \
+             backend name length no registrant asked for"
+        );
+        assert!(
+            VENDORS.len() >= 3,
+            "the sweep ran over {} vendors; a budget checked against an empty or \
+             truncated registry is vacuous",
+            VENDORS.len()
+        );
     }
 
     /// SQLite cannot reach a deferred `ALTER TABLE … ADD CONSTRAINT` through the
