@@ -129,7 +129,13 @@ fn lower_rls_envelope(
         resolve_create_table_policy(&authored, policy, SCHEMA).expect("table shape resolves");
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
-    let author = IrAuthor::new(SCHEMA, OWNER, &zero_migrate_postgres::DIALECT, policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        policy,
+    );
     author.load_and_lower_guarded(
         &resolved_json,
         OWNER,
@@ -255,6 +261,7 @@ fn the_load_gate_without_a_charter_still_refuses_set_rls() {
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let scope = SchemaScope::Single(SCHEMA.to_string());
     let error = load_ir_document(
+        zero_migrate::shipping_vendors(),
         &resolved_json,
         OWNER,
         &zero_migrate_postgres::DIALECT,

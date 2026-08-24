@@ -86,7 +86,12 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
 }
 
 fn validate(op: Op, dialect: &DialectId) -> Result<(), AuthoringError> {
-    validate_ir_scoped(&ir(vec![op]), dialect, Some(&SchemaScope::Unconfined))
+    validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
+        &ir(vec![op]),
+        dialect,
+        Some(&SchemaScope::Unconfined),
+    )
 }
 
 /// A name of exactly `bytes` ASCII bytes, opening with a letter.
@@ -429,7 +434,13 @@ fn a_multi_byte_name_over_63_bytes_is_refused_where_the_bound_applies() {
 
 /// Lower one op through the real `IrAuthor`, returning the rendered error text.
 fn lower_error(op: Op, dialect: &DialectId) -> Option<String> {
-    let author = IrAuthor::new("app", "app_idents", dialect, &support::no_inject("app"));
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        "app",
+        "app_idents",
+        dialect,
+        &support::no_inject("app"),
+    );
     author
         .lower(&ir(vec![op]), &LiveSchema::default())
         .err()
@@ -662,7 +673,7 @@ fn assert_ifexists_miss(
 ) {
     let mysql_constraint =
         dialect == &zero_migrate_mysql::DIALECT && matches!(probe, GuardProbe::Constraint { .. });
-    let verdict = decide(probe, live, dialect);
+    let verdict = decide(zero_migrate::shipping_vendors(), probe, live, dialect);
     if mysql_constraint {
         match verdict {
             GuardVerdict::FailDrift(divergence) => {
@@ -696,6 +707,7 @@ fn an_over_long_if_exists_name_whose_truncation_is_live_fails_closed_on_postgres
     let truncated = pg_truncation(&authored);
     for (label, probe, live) in probe_cases() {
         match decide(
+            zero_migrate::shipping_vendors(),
             &probe(&authored, GuardDir::IfExists),
             &live(&truncated),
             &POSTGRES,
@@ -728,6 +740,7 @@ fn the_derived_truncation_clips_on_a_character_boundary() {
     );
     for (label, probe, live) in probe_cases() {
         match decide(
+            zero_migrate::shipping_vendors(),
             &probe(&authored, GuardDir::IfExists),
             &live(&truncated),
             &POSTGRES,
@@ -747,6 +760,7 @@ fn an_over_long_if_exists_name_absent_in_every_spelling_still_noops() {
     for (label, probe, _live) in probe_cases() {
         assert_eq!(
             decide(
+                zero_migrate::shipping_vendors(),
                 &probe(&authored, GuardDir::IfExists),
                 &empty_live(),
                 &POSTGRES,
@@ -764,6 +778,7 @@ fn an_over_long_if_not_exists_name_fails_closed_on_postgres() {
     let authored = ascii_name(MAX + 1);
     for (label, probe, _live) in probe_cases() {
         match decide(
+            zero_migrate::shipping_vendors(),
             &probe(&authored, GuardDir::IfNotExists),
             &empty_live(),
             &POSTGRES,
@@ -789,7 +804,12 @@ fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
     ] {
         for (label, probe, live) in probe_cases() {
             assert_eq!(
-                decide(&probe(&name, GuardDir::IfExists), &live(&name), dialect,),
+                decide(
+                    zero_migrate::shipping_vendors(),
+                    &probe(&name, GuardDir::IfExists),
+                    &live(&name),
+                    dialect,
+                ),
                 GuardVerdict::RunBare,
                 "{label} ifExists on {dialect:?}: a live object still runs the drop"
             );
@@ -801,7 +821,12 @@ fn a_within_bound_name_keeps_the_truncation_backstop_invisible() {
                 "an absent object still no-ops",
             );
             assert_eq!(
-                decide(&probe(&name, GuardDir::IfNotExists), &empty_live(), dialect,),
+                decide(
+                    zero_migrate::shipping_vendors(),
+                    &probe(&name, GuardDir::IfNotExists),
+                    &empty_live(),
+                    dialect,
+                ),
                 GuardVerdict::RunBare,
                 "{label} ifNotExists on {dialect:?}: an absent object still creates"
             );
@@ -820,6 +845,7 @@ fn an_over_long_name_is_not_truncated_on_mysql_or_sqlite() {
         for (label, probe, live) in probe_cases() {
             assert_eq!(
                 decide(
+                    zero_migrate::shipping_vendors(),
                     &probe(&authored, GuardDir::IfExists),
                     &live(&authored),
                     dialect,
@@ -836,6 +862,7 @@ fn an_over_long_name_is_not_truncated_on_mysql_or_sqlite() {
             );
             assert_eq!(
                 decide(
+                    zero_migrate::shipping_vendors(),
                     &probe(&authored, GuardDir::IfNotExists),
                     &empty_live(),
                     dialect,

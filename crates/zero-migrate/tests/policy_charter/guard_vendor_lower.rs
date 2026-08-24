@@ -345,8 +345,12 @@ fn require_rls_rejects_create_table_without_same_migration_enable() {
     let cfg = platform_guard_config_with_data(true, DestructiveOps::Allow);
     let ir = ir_with(vec![create_table("users")]);
 
-    let err = check_ir_data_security_policy(&cfg, &ir, zero_migrate::guard_for(&cfg).as_ref())
-        .unwrap_err();
+    let err = check_ir_data_security_policy(
+        &cfg,
+        &ir,
+        zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+    )
+    .unwrap_err();
 
     assert_eq!(err.op_index, 0);
     assert!(matches!(
@@ -371,8 +375,12 @@ fn require_rls_accepts_create_table_with_same_migration_enable() {
         },
     ]);
 
-    check_ir_data_security_policy(&cfg, &ir, zero_migrate::guard_for(&cfg).as_ref())
-        .expect("matching setRls satisfies require_rls");
+    check_ir_data_security_policy(
+        &cfg,
+        &ir,
+        zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+    )
+    .expect("matching setRls satisfies require_rls");
 }
 
 #[test]
@@ -394,8 +402,12 @@ fn require_rls_rejects_create_enable_disable_net_off() {
         },
     ]);
 
-    let err = check_ir_data_security_policy(&cfg, &ir, zero_migrate::guard_for(&cfg).as_ref())
-        .unwrap_err();
+    let err = check_ir_data_security_policy(
+        &cfg,
+        &ir,
+        zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
+    )
+    .unwrap_err();
 
     assert_eq!(err.op_index, 2);
     assert!(matches!(
@@ -428,7 +440,7 @@ fn require_rls_rejects_standalone_disable_and_no_force() {
         let err = check_ir_data_security_policy(
             &cfg,
             &ir_with(vec![op]),
-            zero_migrate::guard_for(&cfg).as_ref(),
+            zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg).as_ref(),
         )
         .unwrap_err();
         assert_eq!(err.op_index, 0);
@@ -477,6 +489,7 @@ fn require_rls_rejects_raw_table_creation_island_fail_closed() {
 /// confinement scope from the guard config, so nothing widens the author by hand.
 fn platform_author() -> zero_migrate::render::lower::IrAuthor {
     zero_migrate::render::lower::IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "zero_migrate",
         "app_corpus",
         &POSTGRES,
@@ -1172,6 +1185,7 @@ fn vendor_raw_rce_is_denied_under_platform_guard() {
 fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
     let guard_cfg = confined_guard_config();
     let author = zero_migrate::render::lower::IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "zero_migrate",
         "app_corpus",
         &POSTGRES,
@@ -1214,6 +1228,7 @@ fn vendor_role_op_is_refused_at_lower_without_platform_capability() {
 fn benign_vendor_policy_is_refused_at_lower_without_capability() {
     let guard_cfg = confined_guard_config();
     let author = zero_migrate::render::lower::IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "zero_migrate",
         "app_corpus",
         &POSTGRES,
@@ -1329,6 +1344,7 @@ fn unconfined_operator_guard_config() -> GuardConfig {
 /// vendor capability.
 fn unconfined_operator_author() -> zero_migrate::render::lower::IrAuthor {
     zero_migrate::render::lower::IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "public",
         "app_corpus",
         &POSTGRES,
@@ -1637,7 +1653,7 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
         let guard: Box<dyn MigrationGuard> = if dialect == DialectId::new("duckdb") {
             Box::new(FourthBackendGuard)
         } else {
-            zero_migrate::guard_for(&cfg)
+            zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg)
         };
         let err = check_ir_data_security_policy(&cfg, &ir, guard.as_ref()).expect_err(
             "a trusting MigrationGuard means this IR walk is the dialect's ONLY \
@@ -1659,7 +1675,12 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
 
     let pg = GuardConfig::from_policy(policy(), POSTGRES);
     assert!(
-        check_ir_data_security_policy(&pg, &ir, zero_migrate::guard_for(&pg).as_ref()).is_ok(),
+        check_ir_data_security_policy(
+            &pg,
+            &ir,
+            zero_migrate::guard_for(zero_migrate::shipping_vendors(), &pg).as_ref()
+        )
+        .is_ok(),
         "the IR arm is for the dialects whose guard cannot read the knob; PostgreSQL's \
          denial comes from SqlGuard::check over the rendered SQL"
     );

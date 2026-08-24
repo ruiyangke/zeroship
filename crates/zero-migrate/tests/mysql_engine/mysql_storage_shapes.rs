@@ -176,13 +176,13 @@ fn assert_mysql_key_refusal(migration: &MigrationIr, position: &str, column: &st
 }
 
 fn refused(migration: &MigrationIr, dialect: &zero_migrate::DialectId, what: &str) -> String {
-    let error = validate_ir(migration, dialect).expect_err(what);
+    let error = validate_ir(zero_migrate::shipping_vendors(), migration, dialect).expect_err(what);
     assert_eq!(&error.dialect, dialect, "{what}: {error}");
     format!("{error}")
 }
 
 fn accepted(migration: &MigrationIr, dialect: &zero_migrate::DialectId, what: &str) {
-    validate_ir(migration, dialect)
+    validate_ir(zero_migrate::shipping_vendors(), migration, dialect)
         .unwrap_or_else(|error| panic!("{what} should validate on {dialect:?}: {error}"));
 }
 
@@ -551,22 +551,27 @@ fn mysql_declarative_refuses_the_live_fixture_shape_of_a_widthless_indexed_strin
     };
     let policy = support::no_inject("mysql_key_gate");
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         "mysql_key_gate",
         &[descriptor],
         &zero_migrate_mysql::DIALECT,
         &policy,
     )
     .expect("the descriptor compiles before the storage gate runs");
-    let error =
-        DeclarativeAuthor::new_for_dialect("mysql_key_gate", OWNER, zero_migrate_mysql::DIALECT)
-            .diff(
-                &desired,
-                &SchemaSnapshot::default(),
-                &HashMap::new(),
-                &[],
-                &policy,
-            )
-            .expect_err("a widthless string renders TEXT and cannot back a MySQL index");
+    let error = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        "mysql_key_gate",
+        OWNER,
+        zero_migrate_mysql::DIALECT,
+    )
+    .diff(
+        &desired,
+        &SchemaSnapshot::default(),
+        &HashMap::new(),
+        &[],
+        &policy,
+    )
+    .expect_err("a widthless string renders TEXT and cannot back a MySQL index");
     let rendered = format!("{error}");
     assert!(rendered.contains("people_id_key"), "{rendered}");
     assert!(rendered.contains("people.id"), "{rendered}");
@@ -604,22 +609,27 @@ fn mysql_declarative_refuses_an_implicit_foreign_key_index_over_widthless_string
     };
     let policy = support::no_inject("mysql_key_gate");
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         "mysql_key_gate",
         &[parent, child],
         &zero_migrate_mysql::DIALECT,
         &policy,
     )
     .expect("the descriptors compile before the storage gate runs");
-    let error =
-        DeclarativeAuthor::new_for_dialect("mysql_key_gate", OWNER, zero_migrate_mysql::DIALECT)
-            .diff(
-                &desired,
-                &SchemaSnapshot::default(),
-                &HashMap::new(),
-                &[],
-                &policy,
-            )
-            .expect_err("InnoDB would synthesize an illegal index over the TEXT child column");
+    let error = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        "mysql_key_gate",
+        OWNER,
+        zero_migrate_mysql::DIALECT,
+    )
+    .diff(
+        &desired,
+        &SchemaSnapshot::default(),
+        &HashMap::new(),
+        &[],
+        &policy,
+    )
+    .expect_err("InnoDB would synthesize an illegal index over the TEXT child column");
     let rendered = format!("{error}");
     assert!(rendered.contains("foreign key"), "{rendered}");
     assert!(rendered.contains("children.parent_id"), "{rendered}");

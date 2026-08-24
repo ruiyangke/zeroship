@@ -99,7 +99,13 @@ fn lower(
     let policy = support::no_inject(schema);
     let authored: MigrationIr =
         serde_json::from_str(&source(values)).map_err(|e| format!("parse the test IR: {e}"))?;
-    let author = IrAuthor::new(schema, OWNER, dialect, &policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        schema,
+        OWNER,
+        dialect,
+        &policy,
+    );
     Ok(author
         .lower(&authored, &LiveSchema::default())
         .map_err(|e| format!("lower the test IR: {e}"))?
@@ -123,6 +129,7 @@ async fn deploy_mysql(
     let resolved_source =
         serde_json::to_string(&resolved).map_err(|e| format!("serialize resolved IR: {e}"))?;
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -139,7 +146,7 @@ async fn deploy_mysql(
             &guard,
         )
         .map_err(|e| format!("load and lower the guarded plan: {e}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -508,6 +515,7 @@ async fn a_deployed_enum_column_does_not_drift_against_its_own_fold() {
         }
         let ops = deploy_mysql(&session, &cfg, r#"["active","archived"]"#).await?;
         let expected = fold_ops(
+            zero_migrate::shipping_vendors(),
             &ops,
             &zero_migrate_mysql::DIALECT,
             &cfg.project_schema,
@@ -520,7 +528,7 @@ async fn a_deployed_enum_column_does_not_drift_against_its_own_fold() {
                 .snapshot_schema(&cfg)
                 .await
                 .map_err(|e| format!("snapshot the deployed schema on pass {pass}: {e}"))?;
-            let drift = diff_snapshots(&expected, &actual);
+            let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
             if !drift.is_clean() {
                 return Err(format!(
                     "pass {pass}: the engine deployed this table and nobody touched it, \
@@ -565,7 +573,13 @@ fn an_ir_enum_column_cannot_declare_case_insensitivity() {
         ],"primaryKey":["id"]}}
     ]}}"#
     );
-    let author = IrAuthor::new("app", OWNER, &zero_migrate_mysql::DIALECT, &policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        "app",
+        OWNER,
+        &zero_migrate_mysql::DIALECT,
+        &policy,
+    );
     let guard = GuardConfig::from_policy(policy, zero_migrate_mysql::DIALECT);
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let refusal = author
@@ -637,21 +651,27 @@ fn descriptor_create_ddl(
 ) -> Result<String, String> {
     let effective = support::no_inject(project);
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         project,
         std::slice::from_ref(descriptor),
         &zero_migrate_mysql::DIALECT,
         &effective,
     )
     .map_err(|e| format!("build the desired snapshot: {e}"))?;
-    let plan = DeclarativeAuthor::new_for_dialect(project, OWNER, zero_migrate_mysql::DIALECT)
-        .diff(
-            &desired,
-            &SchemaSnapshot::default(),
-            &HashMap::new(),
-            &[],
-            &effective,
-        )
-        .map_err(|e| format!("diff against an empty live schema: {e}"))?;
+    let plan = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        project,
+        OWNER,
+        zero_migrate_mysql::DIALECT,
+    )
+    .diff(
+        &desired,
+        &SchemaSnapshot::default(),
+        &HashMap::new(),
+        &[],
+        &effective,
+    )
+    .map_err(|e| format!("diff against an empty live schema: {e}"))?;
     plan.migrations
         .iter()
         .map(|m| m.up.clone())

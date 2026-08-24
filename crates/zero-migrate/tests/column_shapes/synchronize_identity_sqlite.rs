@@ -48,6 +48,7 @@ fn step(name: &str, table: &str, column: &str) -> SynchronizeIdentityStep {
     }))
     .expect("synchronizeIdentity IR parses");
     let plan = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app",
         "app_test",
         &zero_migrate_sqlite::DIALECT,

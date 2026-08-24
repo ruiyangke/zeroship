@@ -424,7 +424,7 @@ pub async fn apply_ir_with_locked_backend<B: MigrationBackend>(
                 "lowering returned no plan for the current migration envelope".to_string()
             })?
         };
-        let outcome = MigrationEngine::new()
+        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_applied_plan_with_touched_and_depends(
                 &artifact.plan,
                 &artifact.touched_tables,
@@ -783,7 +783,7 @@ pub async fn rollback_with_locked_backend<B: MigrationBackend>(
         let request = zero_migrate::RollbackRequest::new(target).with_options(options);
         // The guard the engine's own apply sites use. Composing one from the same
         // charter here would drop the config's host-selected mode.
-        let guard = zero_migrate::guard_for(&cfg.guard_config_for(&backend.dialect()));
+        let guard = zero_migrate::guard_for(zero_migrate::shipping_vendors(), &cfg.guard_config_for(&backend.dialect()));
         let outcome = zero_migrate::rollback_with_lock_and_inverse_plans(
             backend,
             cfg,
@@ -1101,7 +1101,7 @@ pub async fn resolve_pending_with_locked_backend<B: MigrationBackend>(
         .map_err(|error| format!("failed to acquire project lock: {error}"))?;
 
     let result = async {
-        let outcome = MigrationEngine::new()
+        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
             .resolve_pending_contract_with_lock(
                 pending_version,
                 resolution,

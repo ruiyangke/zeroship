@@ -77,12 +77,14 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let policy = support::no_inject(&cfg.project_schema);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
         &policy,
     );
     let document = zero_migrate::model::load::load_ir_document(
+        zero_migrate::shipping_vendors(),
         ir,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -91,6 +93,7 @@ async fn apply_doc(
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         history,
         &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
@@ -102,7 +105,7 @@ async fn apply_doc(
     let plan = author
         .lower_plan(&document, &live)
         .map_err(|error| format!("lower the doc plan on PostgreSQL: {error}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             approval,
@@ -148,10 +151,13 @@ async fn sequence_exists(session: &PgDevSession, schema: &str) -> Result<bool, S
 }
 
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
-    guard_for(&GuardConfig::from_policy(
-        support::no_inject(&cfg.project_schema),
-        zero_migrate_postgres::DIALECT,
-    ))
+    guard_for(
+        zero_migrate::shipping_vendors(),
+        &GuardConfig::from_policy(
+            support::no_inject(&cfg.project_schema),
+            zero_migrate_postgres::DIALECT,
+        ),
+    )
 }
 
 #[compio::test]

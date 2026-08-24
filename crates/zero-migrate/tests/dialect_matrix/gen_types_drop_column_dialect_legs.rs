@@ -74,6 +74,7 @@ fn history(dropped_column: &str, with_check: bool) -> Vec<Op> {
 
 fn env_db_ts(dropped_column: &str, dialect: &zero_migrate::DialectId, with_check: bool) -> String {
     render_artifacts(
+        zero_migrate::shipping_vendors(),
         &history(dropped_column, with_check),
         dialect,
         SCHEMA,

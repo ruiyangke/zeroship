@@ -120,12 +120,18 @@ async fn apply<B: MigrationBackend>(
         Ok(snapshot) => LiveSchema::from_catalog_snapshot(snapshot, OWNER),
         Err(error) => return Err(format!("snapshot the live schema: {error}")),
     };
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, dialect, &policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        &cfg.project_schema,
+        OWNER,
+        dialect,
+        &policy,
+    );
     let guard = GuardConfig::from_policy(policy.clone(), (*dialect).clone());
     let artifact = author
         .load_and_lower_guarded(&source, OWNER, &registry(), &live, &guard)
         .map_err(|error| format!("lower: {error}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,

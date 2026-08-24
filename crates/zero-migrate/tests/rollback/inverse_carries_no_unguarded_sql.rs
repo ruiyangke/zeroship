@@ -70,6 +70,7 @@ fn a_raw_sql_op_in_the_inverse_does_not_load_unprivileged() {
     }]);
 
     let verdict = load_ir_document(
+        zero_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -104,6 +105,7 @@ fn control_an_ordinary_dml_inverse_still_loads() {
     }]);
 
     load_ir_document(
+        zero_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
         &zero_migrate_postgres::DIALECT,

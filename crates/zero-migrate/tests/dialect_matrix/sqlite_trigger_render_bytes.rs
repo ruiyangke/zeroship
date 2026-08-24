@@ -90,8 +90,9 @@ fn statements(ir: &str, dialect: &zero_migrate::DialectId) -> Vec<String> {
         // `policy_charter::trigger_ops_require_a_capability_grant`.
         effective_policy: crate::support::operator_charter("public"),
     };
-    let (_name, statements) = render_ir_envelope_sql_statements(ir, dialect, &opts)
-        .unwrap_or_else(|e| panic!("rendering the trigger IR on {dialect:?}: {e}"));
+    let (_name, statements) =
+        render_ir_envelope_sql_statements(zero_migrate::shipping_vendors(), ir, dialect, &opts)
+            .unwrap_or_else(|e| panic!("rendering the trigger IR on {dialect:?}: {e}"));
     statements
 }
 

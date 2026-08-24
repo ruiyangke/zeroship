@@ -11,6 +11,7 @@
 //! `crate::model::table_shape::resolve_create_table_policy`, not a `PolicyProfile`.)
 
 use std::collections::BTreeMap;
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::model::ir::MigrationIr;
 use crate::model::validate::validate_ir_authorized;
@@ -40,6 +41,7 @@ pub use zero_migrate_ir::load::*;
 /// structural-validation failure, a zero (indefinite) timeout override, an
 /// ownership violation, or a checksum-hint mismatch.
 pub fn load_ir_document(
+    vendors: VendorSet,
     bytes: &str,
     deploying_app: &str,
     target_dialect: &DialectId,
@@ -47,6 +49,7 @@ pub fn load_ir_document(
     schema_scope: Option<&crate::model::policy::SchemaScope>,
 ) -> Result<MigrationIr, IrLoadError> {
     load_ir_document_authorized(
+        vendors,
         bytes,
         deploying_app,
         target_dialect,
@@ -68,6 +71,7 @@ pub fn load_ir_document(
 /// # Errors
 /// [`IrLoadError`], on the same terms as [`load_ir_document`].
 pub fn load_ir_document_authorized(
+    vendors: VendorSet,
     bytes: &str,
     deploying_app: &str,
     target_dialect: &DialectId,
@@ -89,7 +93,7 @@ pub fn load_ir_document_authorized(
     //    threaded through a `PolicyProfile` here — that conformance is owned by the
     //    injection resolver `resolve_create_table_policy`, which the server runs
     //    over the operator's `EffectivePolicy` before this load.)
-    validate_ir_authorized(&ir, target_dialect, schema_scope, authority)?;
+    validate_ir_authorized(vendors, &ir, target_dialect, schema_scope, authority)?;
 
     // 3a. the data-migration protocol. The envelope has no phase marker, so the
     //    engine classifies the FORWARD ops themselves: DML requires exactly one
@@ -108,7 +112,7 @@ pub fn load_ir_document_authorized(
             checksum: None,
             ..ir.clone()
         };
-        validate_ir_authorized(&inverse, target_dialect, schema_scope, authority)
+        validate_ir_authorized(vendors, &inverse, target_dialect, schema_scope, authority)
             .map_err(|source| IrLoadError::InvalidInverse { source })?;
     }
 
@@ -230,7 +234,15 @@ mod tests {
     fn load_rejects_future_ir_version_before_anything_else() {
         let bytes = r#"{"ir_version": 999, "name": "m", "ops": [{"op":"dropTable","table":"t"}]}"#;
         let reg = registry(&[("t", "app_a")]);
-        let err = load_ir_document(bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, IrLoadError::Version(_)), "got: {err}");
     }
 
@@ -242,8 +254,15 @@ mod tests {
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("acct", "app_a")]);
 
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None)
-            .expect_err("forward DML must declare inverse_ops or irreversible");
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .expect_err("forward DML must declare inverse_ops or irreversible");
 
         assert_eq!(err, IrLoadError::DmlMissingReverse);
         let message = err.to_string();
@@ -262,8 +281,15 @@ mod tests {
         );
         let reg = registry(&[("acct", "app_a")]);
 
-        let loaded = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None)
-            .expect("a recorded DML inverse is itself the reverse declaration");
+        let loaded = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .expect("a recorded DML inverse is itself the reverse declaration");
 
         assert_eq!(loaded.inverse_ops.as_ref().map(Vec::len), Some(1));
     }
@@ -277,8 +303,15 @@ mod tests {
         );
         let reg = registry(&[("acct", "app_a")]);
 
-        let loaded = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None)
-            .expect("an explicit irreversible reason satisfies the data protocol");
+        let loaded = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .expect("an explicit irreversible reason satisfies the data protocol");
 
         assert_eq!(
             loaded.irreversible.as_deref(),
@@ -297,8 +330,15 @@ mod tests {
             r#", "irreversible":"splitting the phases does not invent a reverse""#,
         );
 
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &registry(&[]), None)
-            .expect_err("DDL and DML must not share a forward op list");
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &registry(&[]),
+            None,
+        )
+        .expect_err("DDL and DML must not share a forward op list");
 
         assert_eq!(err, IrLoadError::MixedDdlAndDml);
         let message = err.to_string();
@@ -314,8 +354,15 @@ mod tests {
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("acct", "app_a")]);
 
-        load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None)
-            .expect("schema migrations do not acquire a reverse requirement");
+        load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .expect("schema migrations do not acquire a reverse requirement");
     }
 
     // ── validate_ir wired as the loader's gate ──────────────────────────────
@@ -329,7 +376,15 @@ mod tests {
         let ops = r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}],"constraints":[{"kind":{"kind":"check","expr":{"node":"unaryOp","op":"isNotNull","operand":{"node":"colRef","name":"ghost"}}}}]}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         match err {
             IrLoadError::Validate(ae) => {
                 assert_eq!(ae.code, crate::model::validate::CODE_UNSUPPORTED);
@@ -350,8 +405,24 @@ mod tests {
         let bytes = envelope_json(ops, r#","irreversible":"dialect-threading fixture""#);
         let reg = registry(&[("users", "app_a")]);
         // PG accepts (validation OK), SQLite rejects.
-        assert!(load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).is_ok());
-        let err = load_ir_document(&bytes, "app_a", &SQLITE, &reg, None).unwrap_err();
+        assert!(load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None
+        )
+        .is_ok());
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &SQLITE,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, IrLoadError::Validate(_)), "got: {err}");
     }
 
@@ -365,8 +436,15 @@ mod tests {
             let ops = r#"[{"op":"dropTable","table":"t"}]"#;
             let bytes = envelope_json(ops, &format!(r#","flags":{{"{field}":0}}"#));
             let reg = registry(&[("t", "app_a")]);
-            let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None)
-                .expect_err("a zero timeout override disables the timeout it claims to set");
+            let err = load_ir_document(
+                crate::test_fixtures::VENDORS,
+                &bytes,
+                "app_a",
+                &POSTGRES,
+                &reg,
+                None,
+            )
+            .expect_err("a zero timeout override disables the timeout it claims to set");
             assert_eq!(
                 err,
                 IrLoadError::IndefiniteTimeoutFlag { field },
@@ -381,8 +459,15 @@ mod tests {
             let ops = r#"[{"op":"dropTable","table":"t"}]"#;
             let bytes = envelope_json(ops, &format!(r#","flags":{{"{field}":1}}"#));
             let reg = registry(&[("t", "app_a")]);
-            load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None)
-                .expect("the smallest expressible budget is finite and loads");
+            load_ir_document(
+                crate::test_fixtures::VENDORS,
+                &bytes,
+                "app_a",
+                &POSTGRES,
+                &reg,
+                None,
+            )
+            .expect("the smallest expressible budget is finite and loads");
         }
     }
 
@@ -391,7 +476,15 @@ mod tests {
         let ops = r#"[{"op":"delete","table":"users","where":{"node":"evilNode"}}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(err, IrLoadError::Deserialize(_)), "got: {err}");
     }
 
@@ -401,7 +494,15 @@ mod tests {
             r#"[{"op":"insert","table":"users","columns":["a"],"rows":[[9007199254740992]]}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         match err {
             IrLoadError::Deserialize(msg) => {
                 assert!(msg.contains("IrValue"), "got: {msg}");
@@ -417,7 +518,15 @@ mod tests {
         let ops = r#"[{"op":"dropColumn","table":"users","column":"x"}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_owner")]); // owned by a DIFFERENT app
-        let err = load_ir_document(&bytes, "app_intruder", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_intruder",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         match err {
             IrLoadError::NotTableOwner {
                 table,
@@ -443,7 +552,15 @@ mod tests {
             r#"[{"op":"delete","table":"never_declared","where":{"node":"literal","value":true}}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]); // no entry for `never_declared`
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         match err {
             IrLoadError::NotTableOwner { table, owner, .. } => {
                 assert_eq!(table, "never_declared");
@@ -466,7 +583,15 @@ mod tests {
         let bytes = envelope_json(ops, "");
         // The registry knows the victim app owns tables; the intruder owns nothing.
         let reg = registry(&[("victim_secrets", "app_victim")]);
-        let err = load_ir_document(&bytes, "app_intruder", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_intruder",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         match err {
             IrLoadError::Validate(ae) => {
                 assert_eq!(ae.code, crate::model::validate::CODE_UNSUPPORTED);
@@ -490,8 +615,15 @@ mod tests {
         let ops = r#"[{"op":"dropIndex","name":"mine_idx","table":"mine"}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("mine", "app_a")]);
-        load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None)
-            .expect("a table-hinted DropIndex on an owned table is allowed");
+        load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .expect("a table-hinted DropIndex on an owned table is allowed");
     }
 
     #[test]
@@ -501,7 +633,15 @@ mod tests {
         let ops = r#"[{"op":"dropIndex","name":"theirs_idx","table":"theirs"}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("theirs", "app_owner")]);
-        let err = load_ir_document(&bytes, "app_intruder", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_intruder",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         match err {
             IrLoadError::NotTableOwner { table, owner, .. } => {
                 assert_eq!(table, "theirs");
@@ -518,7 +658,15 @@ mod tests {
         let ops = r#"[{"op":"createTable","name":"fresh","columns":[{"name":"first","type":"text"}]},{"op":"addColumn","table":"fresh","column":"x","type":"int"}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[]); // `fresh` is brand new — not in the project registry
-        let ir = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap();
+        let ir = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap();
         assert_eq!(ir.owner_app, "app_a", "owner_app must be server-stamped");
     }
 
@@ -554,8 +702,15 @@ mod tests {
         let bytes = envelope_json(ops, "");
         let reg = registry(&[]);
         let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zero_migrate".into()]);
-        let ir = load_ir_document(&bytes, "platform", &POSTGRES, &reg, Some(&scope))
-            .expect("platform exact createTable must register ownership for same-file attachments");
+        let ir = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "platform",
+            &POSTGRES,
+            &reg,
+            Some(&scope),
+        )
+        .expect("platform exact createTable must register ownership for same-file attachments");
         assert_eq!(ir.owner_app, "platform");
     }
 
@@ -565,8 +720,15 @@ mod tests {
             r#"[{"op":"setRls","table":"never_declared","schema":"zero_migrate","enabled":true}]"#;
         let bytes = envelope_json(ops, "");
         let scope = crate::model::policy::SchemaScope::Allowlist(vec!["zero_migrate".into()]);
-        let err = load_ir_document(&bytes, "platform", &POSTGRES, &registry(&[]), Some(&scope))
-            .expect_err("attach to an unowned/unknown table must fail closed");
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "platform",
+            &POSTGRES,
+            &registry(&[]),
+            Some(&scope),
+        )
+        .expect_err("attach to an unowned/unknown table must fail closed");
         match err {
             IrLoadError::NotTableOwner {
                 table,
@@ -621,8 +783,15 @@ mod tests {
         )
         .expect("confined createTable resolves system fields");
         let bytes = serde_json::to_string(&resolved).expect("resolved IR serializes");
-        load_ir_document(&bytes, "app_a", &POSTGRES, &registry(&[]), None)
-            .expect("confined resolved createTable still registers ownership");
+        load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &registry(&[]),
+            None,
+        )
+        .expect("confined resolved createTable still registers ownership");
     }
 
     #[test]
@@ -640,8 +809,15 @@ mod tests {
         let ops = r#"[{"op":"insert","table":"fresh","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"fresh","columns":[{"name":"id","type":"int"}]}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[]);
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None)
-            .expect_err("DDL and DML in one migration must be refused");
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .expect_err("DDL and DML in one migration must be refused");
         assert!(matches!(err, IrLoadError::MixedDdlAndDml), "got: {err}");
     }
 
@@ -696,7 +872,15 @@ mod tests {
         let ops = r#"[{"op":"insert","table":"users","columns":["id"],"rows":[[1]]},{"op":"createTable","name":"users","columns":[{"name":"id","type":"int"}]}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_owner")]);
-        let err = load_ir_document(&bytes, "app_intruder", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_intruder",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         match err {
             IrLoadError::NotTableOwner {
                 table,
@@ -727,7 +911,15 @@ mod tests {
             r#"[{"op":"createTable","name":"users","columns":[{"name":"first","type":"text"}]}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_owner")]);
-        let err = load_ir_document(&bytes, "app_intruder", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_intruder",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, IrLoadError::NotTableOwner { .. }),
             "got: {err}"
@@ -796,8 +988,15 @@ mod tests {
             "8adb4d9360aa90f73145071a2ce0c769793beee4cc17d136af7e52098c766bb4";
         let bytes = envelope_json(ops, &format!(r#", "checksum": "{FROZEN_HINT}""#));
         let reg = registry(&[("users", "app_a")]);
-        let loaded = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None)
-            .expect("loader must accept the frozen-hex hint for this fixed IR");
+        let loaded = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .expect("loader must accept the frozen-hex hint for this fixed IR");
         assert_eq!(loaded.checksum.as_deref(), Some(FROZEN_HINT));
     }
 
@@ -828,7 +1027,15 @@ mod tests {
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = envelope_json(ops, &format!(r#", "checksum": "{}""#, correct.as_str()));
         let reg = registry(&[("users", "app_a")]);
-        let loaded = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap();
+        let loaded = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap();
         // The hint is carried through (the engine recomputes; it does not strip it).
         assert_eq!(loaded.checksum.as_deref(), Some(correct.as_str()));
     }
@@ -838,7 +1045,15 @@ mod tests {
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = envelope_json(ops, r#", "checksum": "deadbeefdeadbeef""#);
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         match err {
             IrLoadError::ChecksumHintMismatch { hint, recomputed } => {
                 assert_eq!(hint, "deadbeefdeadbeef");
@@ -854,7 +1069,15 @@ mod tests {
         let ops = r#"[{"op":"dropTable","table":"users"}]"#;
         let bytes = envelope_json(ops, "");
         let reg = registry(&[("users", "app_a")]);
-        assert!(load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).is_ok());
+        assert!(load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None
+        )
+        .is_ok());
     }
 
     // ── hint domain is not yet fully computable (deps/supersedes/flags) ──────
@@ -875,7 +1098,15 @@ mod tests {
             r#", "depends_on": ["m_0001"], "checksum": "deadbeefdeadbeef""#,
         );
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, IrLoadError::ChecksumHintNotComputable { .. }),
             "a hint over a depends_on-bearing IR must fail closed, got: {err}"
@@ -890,7 +1121,15 @@ mod tests {
             r#", "supersedes": ["m_0001"], "checksum": "deadbeefdeadbeef""#,
         );
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, IrLoadError::ChecksumHintNotComputable { .. }),
             "a hint over a supersedes-bearing IR must fail closed, got: {err}"
@@ -907,7 +1146,15 @@ mod tests {
             r#", "flags": {"transactional": false}, "checksum": "deadbeefdeadbeef""#,
         );
         let reg = registry(&[("users", "app_a")]);
-        let err = load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            &bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, IrLoadError::ChecksumHintNotComputable { .. }),
             "a hint over a non-default-flags IR must fail closed, got: {err}"
@@ -923,7 +1170,15 @@ mod tests {
         let bytes = envelope_json(ops, r#", "depends_on": ["m_0001"]"#);
         let reg = registry(&[("users", "app_a")]);
         assert!(
-            load_ir_document(&bytes, "app_a", &POSTGRES, &reg, None).is_ok(),
+            load_ir_document(
+                crate::test_fixtures::VENDORS,
+                &bytes,
+                "app_a",
+                &POSTGRES,
+                &reg,
+                None
+            )
+            .is_ok(),
             "a depends_on-bearing IR WITHOUT a hint must load"
         );
     }
@@ -937,7 +1192,15 @@ mod tests {
         // ordering.
         let bytes = r#"{"ir_version": 999, "name": "m", "ops": [{"op":"dropTable","table":"foreign"}], "checksum": "deadbeef"}"#;
         let reg = registry(&[("foreign", "other_app")]);
-        let err = load_ir_document(bytes, "app_a", &POSTGRES, &reg, None).unwrap_err();
+        let err = load_ir_document(
+            crate::test_fixtures::VENDORS,
+            bytes,
+            "app_a",
+            &POSTGRES,
+            &reg,
+            None,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, IrLoadError::Version(_)),
             "version gate must precede others, got: {err}"

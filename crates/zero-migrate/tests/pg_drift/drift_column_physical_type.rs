@@ -103,6 +103,7 @@ async fn apply_doc(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -113,7 +114,7 @@ async fn apply_doc(
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -230,6 +231,7 @@ async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see(
         .await?;
 
         let expected = fold_ops(
+            zero_migrate::shipping_vendors(),
             &ops,
             &zero_migrate_mysql::DIALECT,
             &cfg.project_schema,
@@ -243,7 +245,7 @@ async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see(
             .snapshot_schema(&cfg)
             .await
             .map_err(|error| format!("snapshot the untouched schema: {error}"))?;
-        let clean = diff_snapshots(&expected, &untouched);
+        let clean = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &untouched);
         if !clean.is_clean() {
             return Err(format!(
                 "the table was deployed by the engine and left alone, yet drift reported \
@@ -272,7 +274,7 @@ async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see(
             .snapshot_schema(&cfg)
             .await
             .map_err(|error| format!("snapshot the changed schema: {error}"))?;
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
 
         // `label` is the face that was DROPPED; `amount` is the face that survived as
         // a line naming nothing. `same_portable_type` records which is which so the
@@ -432,6 +434,7 @@ async fn assert_mysql_clean(
     stage: &str,
 ) -> Result<(), String> {
     let expected = fold_ops(
+        zero_migrate::shipping_vendors(),
         ops,
         &zero_migrate_mysql::DIALECT,
         &cfg.project_schema,
@@ -442,7 +445,7 @@ async fn assert_mysql_clean(
         .snapshot_schema(cfg)
         .await
         .map_err(|error| format!("{stage}: snapshot the live MySQL schema: {error}"))?;
-    let drift = diff_snapshots(&expected, &actual);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
     if drift.is_clean() {
         return Ok(());
     }
@@ -553,6 +556,7 @@ async fn an_untouched_postgres_table_reports_clean() {
             serde_json::json!(["id"]),
         );
         let expected = fold_ops(
+            zero_migrate::shipping_vendors(),
             &ir.ops,
             &zero_migrate_postgres::DIALECT,
             &schema,
@@ -560,6 +564,7 @@ async fn an_untouched_postgres_table_reports_clean() {
         )
         .map_err(|error| format!("fold the portable corpus: {error}"))?;
         let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -576,7 +581,7 @@ async fn an_untouched_postgres_table_reports_clean() {
         let actual = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect the postgres control schema: {error}"))?;
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
         if drift.is_clean() {
             return Ok(());
         }
@@ -607,6 +612,7 @@ async fn an_untouched_sqlite_table_reports_clean() {
         serde_json::Value::Null,
     );
     let expected = fold_ops(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &zero_migrate_sqlite::DIALECT,
         "main",
@@ -614,6 +620,7 @@ async fn an_untouched_sqlite_table_reports_clean() {
     )
     .expect("portable corpus must fold on SQLite");
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "main",
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -632,7 +639,7 @@ async fn an_untouched_sqlite_table_reports_clean() {
         .await
         .expect("introspect the sqlite control database");
 
-    let drift = diff_snapshots(&expected, &actual);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift.is_clean(),
         "a SQLite database the engine deployed and nobody touched reported drift: \

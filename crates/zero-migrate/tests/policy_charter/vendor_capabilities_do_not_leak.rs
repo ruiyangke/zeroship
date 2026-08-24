@@ -53,7 +53,14 @@ fn allowed(policy: &zero_migrate::EffectivePolicy, op: &str) -> bool {
         effective: policy,
         default_schema: "app1",
     };
-    validate_ir_authorized(&ir, &zero_migrate_postgres::DIALECT, None, Some(authority)).is_ok()
+    validate_ir_authorized(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_postgres::DIALECT,
+        None,
+        Some(authority),
+    )
+    .is_ok()
 }
 
 const CREATE_SCHEMA: &str = r#"{"op":"createSchema","name":"s"}"#;

@@ -180,6 +180,7 @@ async fn apply_create(
     let resolved_source = serde_json::to_string(resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -195,7 +196,7 @@ async fn apply_create(
             &guard,
         )
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -276,6 +277,7 @@ async fn measure() -> Measured {
         let mut ops = resolved.ops.clone();
         ops.push(rename_op());
         let folded = fold_ops(
+            zero_migrate::shipping_vendors(),
             &ops,
             &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
@@ -291,6 +293,7 @@ async fn measure() -> Measured {
             .ok_or_else(|| "the folded snapshot carries no generated body".to_string())?;
 
         let fields = single_fold::fold(
+            zero_migrate::shipping_vendors(),
             &ops,
             &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,

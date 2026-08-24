@@ -58,12 +58,18 @@ fn folded_tables(
     charter: &EffectivePolicy,
 ) -> Vec<String> {
     let ir: MigrationIr = serde_json::from_str(resolved).expect("resolved parses");
-    zero_migrate::render::fold::fold_ops(&ir.ops, dialect, "public", charter)
-        .expect("the fixture streams are coherent for the fold")
-        .tables
-        .keys()
-        .cloned()
-        .collect()
+    zero_migrate::render::fold::fold_ops(
+        zero_migrate::shipping_vendors(),
+        &ir.ops,
+        dialect,
+        "public",
+        charter,
+    )
+    .expect("the fixture streams are coherent for the fold")
+    .tables
+    .keys()
+    .cloned()
+    .collect()
 }
 
 /// What the WHOLE-IR lower — the path an apply takes — makes of the same stream.
@@ -73,7 +79,13 @@ fn whole_ir_lower(
     charter: &EffectivePolicy,
 ) -> Result<Vec<String>, String> {
     let ir: MigrationIr = serde_json::from_str(resolved).expect("resolved parses");
-    let author = IrAuthor::new("public", "app_preview", dialect, charter);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        "public",
+        "app_preview",
+        dialect,
+        charter,
+    );
     author
         .lower_steps(&ir, &LiveSchema::default())
         .map(|steps| {
@@ -187,9 +199,13 @@ fn preview_never_references_a_table_the_fold_says_was_dropped() {
         "the fold must retire a dropped table"
     );
 
-    let preview =
-        render_ir_envelope_sql(&resolved, &zero_migrate_postgres::DIALECT, &opts(&charter))
-            .expect("renders offline");
+    let preview = render_ir_envelope_sql(
+        zero_migrate::shipping_vendors(),
+        &resolved,
+        &zero_migrate_postgres::DIALECT,
+        &opts(&charter),
+    )
+    .expect("renders offline");
 
     // The defect, stated as the SQL it produced: an inline create-time FK naming a
     // table this very envelope dropped four statements earlier. PostgreSQL refuses
@@ -230,8 +246,13 @@ fn preview_reaches_a_table_under_the_name_the_fold_renamed_it_to() {
             "{dialect:?}: the fold must re-key a renamed table"
         );
 
-        let preview =
-            render_ir_envelope_sql(&resolved, dialect, &opts(&charter)).expect("renders offline");
+        let preview = render_ir_envelope_sql(
+            zero_migrate::shipping_vendors(),
+            &resolved,
+            dialect,
+            &opts(&charter),
+        )
+        .expect("renders offline");
 
         // The defect: `beta` was never recorded, so the create-time FK naming it had
         // no target and the whole `createTable` degraded to a label. PostgreSQL
@@ -265,9 +286,13 @@ fn preview_stops_reaching_a_table_under_the_name_the_fold_renamed_it_away_from()
         "the fold must retire the pre-rename name: {folded:?}"
     );
 
-    let preview =
-        render_ir_envelope_sql(&resolved, &zero_migrate_postgres::DIALECT, &opts(&charter))
-            .expect("renders offline");
+    let preview = render_ir_envelope_sql(
+        zero_migrate::shipping_vendors(),
+        &resolved,
+        &zero_migrate_postgres::DIALECT,
+        &opts(&charter),
+    )
+    .expect("renders offline");
     assert!(
         !preview.contains(r#"REFERENCES "public"."alpha""#),
         "preview rendered a create-time foreign key onto the name a rename in the \
@@ -302,9 +327,13 @@ fn preview_reaches_a_partition_the_fold_says_detach_promoted_to_a_table() {
         "the fold must record a detached partition as an ordinary table"
     );
 
-    let preview =
-        render_ir_envelope_sql(&resolved, &zero_migrate_postgres::DIALECT, &opts(&charter))
-            .expect("renders offline");
+    let preview = render_ir_envelope_sql(
+        zero_migrate::shipping_vendors(),
+        &resolved,
+        &zero_migrate_postgres::DIALECT,
+        &opts(&charter),
+    )
+    .expect("renders offline");
     assert!(
         !preview.contains(RUNTIME_RESOLVED),
         "preview deferred a createTable whose FK names a detached partition; \

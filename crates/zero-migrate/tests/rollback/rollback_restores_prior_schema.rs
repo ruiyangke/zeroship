@@ -78,7 +78,7 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
         )
         .expect("open");
         let cfg = ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT));
-        let eng = MigrationEngine::new();
+        let eng = MigrationEngine::new(zero_migrate::shipping_vendors());
         let mut live = LiveSchema::default();
         let reg: BTreeMap<String, String> = [
             ("t1".to_string(), APP.to_string()),
@@ -87,6 +87,7 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
         .into_iter()
         .collect();
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             PROJECT,
             APP,
             &zero_migrate_sqlite::DIALECT,

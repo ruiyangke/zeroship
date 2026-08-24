@@ -144,6 +144,7 @@ async fn pg_apply(
     let backend = PostgresBackend::new_generic(session);
     let policy = support::operator_charter(&cfg.project_schema);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -153,6 +154,7 @@ async fn pg_apply(
     // primitive, and the scope-derived fallback grants nothing outside an operator
     // posture, so without this the gate refuses before the trigger is reached.
     let document = zero_migrate::model::load::load_ir_document_authorized(
+        zero_migrate::shipping_vendors(),
         ir,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -165,6 +167,7 @@ async fn pg_apply(
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         history,
         &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
@@ -175,7 +178,7 @@ async fn pg_apply(
     let plan = author
         .lower_plan(&document, &live)
         .map_err(|error| format!("lower: {error}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             Approval::Approved,
@@ -309,6 +312,7 @@ async fn sqlite_apply(
 ) -> Result<(), String> {
     let policy = support::operator_charter(&cfg.project_schema);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -319,6 +323,7 @@ async fn sqlite_apply(
     // nothing outside an operator posture. Without the charter the load gate refuses
     // for want of a GRANT and this fixture's INSTEAD OF question is never reached.
     let document = zero_migrate::model::load::load_ir_document_authorized(
+        zero_migrate::shipping_vendors(),
         ir,
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -331,6 +336,7 @@ async fn sqlite_apply(
     )
     .map_err(|error| format!("load gate (sqlite): {error}"))?;
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         history,
         &zero_migrate_sqlite::DIALECT,
         &cfg.project_schema,
@@ -341,7 +347,7 @@ async fn sqlite_apply(
     let plan = author
         .lower_plan(&document, &live)
         .map_err(|error| format!("lower: {error}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             Approval::Approved,

@@ -227,11 +227,17 @@ fn create_time_composite_fk_lowers_inline_with_order_actions_and_supporting_inde
         &zero_migrate_mysql::DIALECT,
         &zero_migrate_sqlite::DIALECT,
     ] {
-        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower(&ir, &LiveSchema::default())
-            .unwrap_or_else(|error| {
-                panic!("create-time composite FK must lower on {dialect:?}: {error}")
-            });
+        let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower(&ir, &LiveSchema::default())
+        .unwrap_or_else(|error| {
+            panic!("create-time composite FK must lower on {dialect:?}: {error}")
+        });
         let child = create_sql(&migrations, dialect, "children");
 
         assert_eq!(child.matches("FOREIGN KEY").count(), 1, "{child}");
@@ -283,8 +289,14 @@ fn create_time_composite_fk_lowers_inline_with_order_actions_and_supporting_inde
             "supporting index must preserve FK order on {dialect:?}: {supporting_sql}"
         );
 
-        let folded = fold_ops(&ir.ops, dialect, PROJECT_SCHEMA, &support::no_inject("app"))
-            .unwrap_or_else(|error| panic!("composite FK must fold on {dialect:?}: {error}"));
+        let folded = fold_ops(
+            zero_migrate::shipping_vendors(),
+            &ir.ops,
+            dialect,
+            PROJECT_SCHEMA,
+            &support::no_inject("app"),
+        )
+        .unwrap_or_else(|error| panic!("composite FK must fold on {dialect:?}: {error}"));
         let index = folded.tables["children"]
             .indexes
             .iter()
@@ -326,14 +338,25 @@ fn an_exact_ordered_composite_unique_index_is_a_candidate_key_on_every_dialect()
         &zero_migrate_mysql::DIALECT,
         &zero_migrate_sqlite::DIALECT,
     ] {
-        validate_ir(&ir, validator_dialect(dialect)).unwrap_or_else(|error| {
+        validate_ir(
+            zero_migrate::shipping_vendors(),
+            &ir,
+            validator_dialect(dialect),
+        )
+        .unwrap_or_else(|error| {
             panic!("ordered unique candidate must validate on {dialect:?}: {error}")
         });
-        IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower(&ir, &LiveSchema::default())
-            .unwrap_or_else(|error| {
-                panic!("ordered unique candidate must lower on {dialect:?}: {error}")
-            });
+        IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower(&ir, &LiveSchema::default())
+        .unwrap_or_else(|error| {
+            panic!("ordered unique candidate must lower on {dialect:?}: {error}")
+        });
     }
 }
 
@@ -452,19 +475,31 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
         &zero_migrate_mysql::DIALECT,
         &zero_migrate_sqlite::DIALECT,
     ] {
-        validate_ir(&index_ir, validator_dialect(dialect)).unwrap_or_else(|error| {
+        validate_ir(
+            zero_migrate::shipping_vendors(),
+            &index_ir,
+            validator_dialect(dialect),
+        )
+        .unwrap_or_else(|error| {
             panic!("create unique index then FK must validate on {dialect:?}: {error}")
         });
-        IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower_steps(&index_ir, &LiveSchema::default())
-            .unwrap_or_else(|error| {
-                panic!("create unique index then FK must lower on {dialect:?}: {error}")
-            });
+        IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower_steps(&index_ir, &LiveSchema::default())
+        .unwrap_or_else(|error| {
+            panic!("create unique index then FK must lower on {dialect:?}: {error}")
+        });
 
         // Exercise the physical precheck too: both tables already exist in the
         // input snapshot without the key, so the later FK is valid only if the
         // preceding createIndex is replayed in artifact order.
         let base_snapshot = fold_ops(
+            zero_migrate::shipping_vendors(),
             &base_ir.ops,
             dialect,
             PROJECT_SCHEMA,
@@ -472,13 +507,25 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
         )
         .unwrap_or_else(|error| panic!("base schema folds on {dialect:?}: {error}"));
         let mut live = LiveSchema::from_catalog_snapshot(base_snapshot, OWNER);
-        live.advance_logical_columns(&base_ir, dialect, PROJECT_SCHEMA, None)
-            .unwrap_or_else(|error| panic!("base logical schema advances on {dialect:?}: {error}"));
-        IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower_steps(&index_delta_ir, &live)
-            .unwrap_or_else(|error| {
-                panic!("ordered unique-index delta then FK must lower on {dialect:?}: {error}")
-            });
+        live.advance_logical_columns(
+            zero_migrate::shipping_vendors(),
+            &base_ir,
+            dialect,
+            PROJECT_SCHEMA,
+            None,
+        )
+        .unwrap_or_else(|error| panic!("base logical schema advances on {dialect:?}: {error}"));
+        IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower_steps(&index_delta_ir, &live)
+        .unwrap_or_else(|error| {
+            panic!("ordered unique-index delta then FK must lower on {dialect:?}: {error}")
+        });
 
         // SQLite has no native ALTER TABLE ADD UNIQUE lifecycle operation. This
         // block used to assert that SQLite nonetheless CLEARED validate, and then
@@ -489,8 +536,12 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
         // keeps its executable all-target coverage from the unique-INDEX artifact
         // above, which IS portable on SQLite.
         if dialect == &zero_migrate_sqlite::DIALECT {
-            let error = validate_ir(&constraint_ir, validator_dialect(dialect))
-                .expect_err("addConstraint(unique) is not authorable on SQLite");
+            let error = validate_ir(
+                zero_migrate::shipping_vendors(),
+                &constraint_ir,
+                validator_dialect(dialect),
+            )
+            .expect_err("addConstraint(unique) is not authorable on SQLite");
             assert!(
                 error
                     .to_string()
@@ -499,14 +550,25 @@ fn ordered_unique_creation_is_visible_to_a_later_composite_fk_on_every_dialect()
                  some other reason: {error}"
             );
         } else {
-            validate_ir(&constraint_ir, validator_dialect(dialect)).unwrap_or_else(|error| {
+            validate_ir(
+                zero_migrate::shipping_vendors(),
+                &constraint_ir,
+                validator_dialect(dialect),
+            )
+            .unwrap_or_else(|error| {
                 panic!("add UNIQUE constraint then FK must validate on {dialect:?}: {error}")
             });
-            IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-                .lower_steps(&constraint_ir, &LiveSchema::default())
-                .unwrap_or_else(|error| {
-                    panic!("add UNIQUE constraint then FK must lower on {dialect:?}: {error}")
-                });
+            IrAuthor::new(
+                zero_migrate::shipping_vendors(),
+                PROJECT_SCHEMA,
+                OWNER,
+                dialect,
+                &no_inject_policy(),
+            )
+            .lower_steps(&constraint_ir, &LiveSchema::default())
+            .unwrap_or_else(|error| {
+                panic!("add UNIQUE constraint then FK must lower on {dialect:?}: {error}")
+            });
         }
     }
 }
@@ -577,7 +639,7 @@ fn dropping_the_only_ordered_candidate_key_before_a_composite_fk_is_rejected_eve
             ]
         };
         for (label, ir) in artifacts {
-            let error = validate_ir(ir, dialect)
+            let error = validate_ir(zero_migrate::shipping_vendors(), ir, dialect)
                 .expect_err("dropping the only candidate key before its FK must fail");
             assert!(
                 error
@@ -620,6 +682,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
     }))
     .expect("base fixture deserializes");
     let live_snapshot = fold_ops(
+        zero_migrate::shipping_vendors(),
         &base.ops,
         &zero_migrate_mysql::DIALECT,
         PROJECT_SCHEMA,
@@ -643,6 +706,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
     }))
     .expect("add fixture deserializes");
     let added = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -676,6 +740,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
         "MySQL FK alteration must never toggle foreign_key_checks: {added:#?}"
     );
     let folded_after = fold_ops_onto(
+        zero_migrate::shipping_vendors(),
         &live_snapshot,
         &add.ops,
         &zero_migrate_mysql::DIALECT,
@@ -695,6 +760,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
 
     let declared = canonical_fixture("mysql_drop_composite_fk_base");
     let declared_snapshot = fold_ops(
+        zero_migrate::shipping_vendors(),
         &declared.ops,
         &zero_migrate_mysql::DIALECT,
         PROJECT_SCHEMA,
@@ -714,6 +780,7 @@ fn mysql_composite_fk_add_and_drop_are_native_and_never_disable_checks() {
     }))
     .expect("drop fixture deserializes");
     let dropped = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -763,6 +830,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
     }))
     .expect("base fixture deserializes");
     let mut snapshot = fold_ops(
+        zero_migrate::shipping_vendors(),
         &base.ops,
         &zero_migrate_mysql::DIALECT,
         PROJECT_SCHEMA,
@@ -814,6 +882,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
     }))
     .expect("add fixture deserializes");
     let error = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -845,6 +914,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
 fn sqlite_drop_then_add_change_uses_the_prior_rebuild_shape() {
     let declared = canonical_fixture("sqlite_changed_fk_base");
     let live_snapshot = fold_ops(
+        zero_migrate::shipping_vendors(),
         &declared.ops,
         &zero_migrate_sqlite::DIALECT,
         PROJECT_SCHEMA,
@@ -880,6 +950,7 @@ fn sqlite_drop_then_add_change_uses_the_prior_rebuild_shape() {
     }))
     .expect("SQLite change fixture deserializes");
     let steps = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -911,7 +982,7 @@ fn assert_rejected_on_every_dialect(label: &str, ir: &MigrationIr) {
         &zero_migrate_mysql::DIALECT,
         &zero_migrate_sqlite::DIALECT,
     ] {
-        let Err(error) = validate_ir(ir, dialect) else {
+        let Err(error) = validate_ir(zero_migrate::shipping_vendors(), ir, dialect) else {
             panic!("{label} must be rejected on {dialect:?}");
         };
         assert!(
@@ -1094,6 +1165,7 @@ fn rejects_non_candidate_partial_and_reordered_target_tuples() {
 fn sqlite_observes_match_simple_for_partially_null_local_tuples() {
     let ir = canonical_fixture("sqlite_match_simple");
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -1205,9 +1277,15 @@ fn repeated_column_level_references_remain_independent_single_column_constraints
         &zero_migrate_mysql::DIALECT,
         &zero_migrate_sqlite::DIALECT,
     ] {
-        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower(&ir, &LiveSchema::default())
-            .unwrap_or_else(|error| panic!("column references lower on {dialect:?}: {error}"));
+        let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower(&ir, &LiveSchema::default())
+        .unwrap_or_else(|error| panic!("column references lower on {dialect:?}: {error}"));
         let child = create_sql(&migrations, dialect, "children");
         assert_eq!(
             child.matches("FOREIGN KEY").count(),
@@ -1252,6 +1330,7 @@ async fn live_postgres_composite_fk_introspection_and_policy_drift() {
     let result: Result<(), String> = async {
         let ir = canonical_fixture("live_pg_composite_fk");
         let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -1305,7 +1384,7 @@ async fn live_postgres_composite_fk_introspection_and_policy_drift() {
         let actual = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("re-introspect changed composite FK: {error}"))?;
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
         if !drift.altered_objects.iter().any(|altered| {
             altered.object == "constraint children_parent_fk"
                 && altered.field == "definition"

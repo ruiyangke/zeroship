@@ -81,6 +81,7 @@ async fn round_trip(
         .await
         .expect("ensure the migration journal");
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -99,7 +100,7 @@ async fn round_trip(
     let schema_artifact = author
         .load_and_lower_guarded(&ddl, OWNER, &registry, &LiveSchema::default(), &guard_cfg)
         .expect("the schema envelope lowers");
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &schema_artifact.plan.steps,
             Approval::Approved,
@@ -116,6 +117,7 @@ async fn round_trip(
     live.tables.insert("t".into());
     let declared: MigrationIr = serde_json::from_str(&ddl).expect("the schema envelope parses");
     live.advance_logical_columns(
+        zero_migrate::shipping_vendors(),
         &declared,
         &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
@@ -129,7 +131,7 @@ async fn round_trip(
     let data_artifact = author
         .load_and_lower_guarded(&dml, OWNER, &registry, &live, &guard_cfg)
         .map_err(|e| format!("{e:?}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &data_artifact.plan.steps,
             Approval::Approved,

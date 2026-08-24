@@ -39,7 +39,13 @@ fn lower(
     dialect: &zero_migrate::DialectId,
     live: &BTreeSet<String>,
 ) -> Vec<zero_migrate::Migration> {
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::no_inject("app"));
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect,
+        &support::no_inject("app"),
+    );
     author
         .lower(&ir(ops), &LiveSchema::from(live))
         .expect("lower")
@@ -220,7 +226,12 @@ fn postgres_renders_valid_descending_sequence() {
 #[test]
 fn sqlite_and_mysql_fail_closed_on_sequences() {
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-        let err = validate_ir(&ir(vec![create_sequence_op()]), dialect).unwrap_err();
+        let err = validate_ir(
+            zero_migrate::shipping_vendors(),
+            &ir(vec![create_sequence_op()]),
+            dialect,
+        )
+        .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("sequence"));
@@ -247,6 +258,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
     // table-shape gate returns Ok), so validation reaches the column-default-type
     // check — the realistic profile, since nextval defaults are used on the platform.
     let err = validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &ir(vec![text_nextval.clone()]),
         &zero_migrate_postgres::DIALECT,
         None,
@@ -263,7 +275,13 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
         // Platform profile so the createTable table-shape gate does not pre-empt the
         // dialect-level unsupported check (nextval defaults are PostgreSQL-only).
-        let err = validate_ir_scoped(&ir(vec![text_nextval.clone()]), dialect, None).unwrap_err();
+        let err = validate_ir_scoped(
+            zero_migrate::shipping_vendors(),
+            &ir(vec![text_nextval.clone()]),
+            dialect,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Op));
         assert!(err.reason.contains("nextval"));
@@ -273,6 +291,7 @@ fn nextval_default_rejects_non_integer_and_non_postgres() {
 #[test]
 fn fold_tracks_sequence_existence_and_drop() {
     let created = fold_ops(
+        zero_migrate::shipping_vendors(),
         &[create_sequence_op()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -282,6 +301,7 @@ fn fold_tracks_sequence_existence_and_drop() {
     assert!(created.sequences.contains_key("invoice_seq"));
 
     let dropped = fold_ops(
+        zero_migrate::shipping_vendors(),
         &[
             create_sequence_op(),
             Op::DropSequence {
@@ -385,6 +405,7 @@ fn postgres_renders_comment_on_all_structured_targets() {
 fn sqlite_and_mysql_fail_closed_on_comment_on() {
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
         let err = validate_ir(
+            zero_migrate::shipping_vendors(),
             &ir(vec![Op::Comment {
                 target: CommentTarget::Table {
                     schema: None,
@@ -430,6 +451,7 @@ fn fold_tracks_and_clears_table_and_column_comments() {
     });
 
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         &set_ops,
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -464,6 +486,7 @@ fn fold_tracks_and_clears_table_and_column_comments() {
         comment: None,
     });
     let cleared = fold_ops(
+        zero_migrate::shipping_vendors(),
         &cleared_ops,
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -579,6 +602,7 @@ fn postgres_and_sqlite_render_expression_index_elements() {
 #[test]
 fn mysql_fail_closes_on_expression_index_elements() {
     let err = validate_ir(
+        zero_migrate::shipping_vendors(),
         &ir(vec![Op::CreateIndex {
             table: "users".into(),
             columns: vec![IndexElement::Expr {
@@ -608,6 +632,7 @@ fn mysql_fail_closes_on_expression_index_elements() {
 #[test]
 fn mysql_fail_closes_on_partial_index_predicate() {
     let err = validate_ir(
+        zero_migrate::shipping_vendors(),
         &ir(vec![Op::CreateIndex {
             table: "users".into(),
             columns: vec![idx_col("active")],
@@ -737,6 +762,7 @@ fn postgres_parenthesizes_expression_exclusion_targets_only() {
 fn sqlite_and_mysql_fail_closed_on_exclusion_constraints() {
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
         let err = validate_ir(
+            zero_migrate::shipping_vendors(),
             &ir(vec![Op::AddConstraint {
                 table: "bookings".into(),
                 constraint: exclusion_constraint(),
@@ -807,8 +833,12 @@ fn an_over_long_index_name_is_refused() {
         nulls_not_distinct: None,
         existence_guard: None,
     };
-    let err = validate_ir(&ir(vec![op]), &zero_migrate_postgres::DIALECT)
-        .expect_err("an index name past the identifier cap must be refused");
+    let err = validate_ir(
+        zero_migrate::shipping_vendors(),
+        &ir(vec![op]),
+        &zero_migrate_postgres::DIALECT,
+    )
+    .expect_err("an index name past the identifier cap must be refused");
     assert!(
         err.reason.contains("truncates identifiers"),
         "expected the truncation reason, got {:?}",
@@ -854,6 +884,10 @@ fn an_over_long_index_name_is_refused() {
         nulls_not_distinct: None,
         existence_guard: None,
     };
-    validate_ir(&ir(vec![op_ok]), &zero_migrate_postgres::DIALECT)
-        .expect("an index name within the cap stays valid");
+    validate_ir(
+        zero_migrate::shipping_vendors(),
+        &ir(vec![op_ok]),
+        &zero_migrate_postgres::DIALECT,
+    )
+    .expect("an index name within the cap stays valid");
 }

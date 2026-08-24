@@ -98,6 +98,7 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -105,6 +106,7 @@ async fn apply_doc(
     );
     let guard = GuardConfig::from_policy(pol.clone(), zero_migrate_postgres::DIALECT);
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         history,
         &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
@@ -118,7 +120,7 @@ async fn apply_doc(
     let authored: zero_migrate::MigrationIr =
         serde_json::from_str(ir).map_err(|error| format!("parse the authored IR: {error}"))?;
     history.extend(authored.ops);
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             approval,
@@ -150,10 +152,10 @@ async fn schema_exists(session: &PgDevSession, name: &str) -> Result<bool, Strin
 }
 
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
-    guard_for(&GuardConfig::from_policy(
-        policy(&cfg.project_schema),
-        zero_migrate_postgres::DIALECT,
-    ))
+    guard_for(
+        zero_migrate::shipping_vendors(),
+        &GuardConfig::from_policy(policy(&cfg.project_schema), zero_migrate_postgres::DIALECT),
+    )
 }
 
 #[compio::test]

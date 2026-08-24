@@ -139,7 +139,7 @@ async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composi
     assert_eq!(rtrim.schema, None);
     assert_eq!(rtrim.name, "RTRIM");
 
-    let drift = diff_snapshots(&expected, &actual);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift.altered_objects.iter().any(|altered| {
             altered.object == "column parent_tenant"
@@ -152,6 +152,7 @@ async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composi
 
     let live = LiveSchema::from_catalog_snapshot(actual, OWNER);
     let error = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "main",
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -240,7 +241,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
             return Err(format!("unexpected PostgreSQL POSIX identity: {posix:?}"));
         }
 
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
         if !drift.altered_objects.iter().any(|altered| {
             altered.object == "column parent_tenant"
                 && altered.field == "collation"
@@ -254,6 +255,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
 
         let live = LiveSchema::from_catalog_snapshot(actual, OWNER);
         let error = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,

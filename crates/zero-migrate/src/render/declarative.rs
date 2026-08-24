@@ -30,6 +30,7 @@
 //! round-trip tests guard each vendor mapping against its live catalog.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use zero_migrate_backend::registry::VendorSet;
 
 use serde::Deserialize;
 
@@ -721,6 +722,7 @@ fn mask_sibling_for_field(f: &FieldDescriptor) -> Option<String> {
 /// the `TEXT` fallback (and which is not one of the engine's own text-spelled
 /// tokens) is rejected with [`DeclarativeError::UnsupportedType`].
 pub(crate) fn field_data_type(
+    vendors: VendorSet,
     f: &FieldDescriptor,
     dialect: &DialectId,
 ) -> Result<String, DeclarativeError> {
@@ -738,7 +740,7 @@ pub(crate) fn field_data_type(
     }
 
     let token = crate::schema::query::column_snapshot_for_type_def(&def);
-    Ok(crate::render::backends::schema_renderer(dialect).snapshot_data_type(&token))
+    Ok(crate::render::backends::schema_renderer(vendors, dialect).snapshot_data_type(&token))
 }
 
 /// The neutral descriptor vocabulary accepted before any backend translates it.
@@ -776,19 +778,23 @@ fn field_type_token_is_supported(f: &FieldDescriptor) -> bool {
 
 /// Single-quote a SQL string literal (double embedded quotes). Mirrors
 /// plugin-db's `'{}'` formatting in `def_to_constraints` (`s.replace('\'', "''")`).
-fn sql_str(s: &str, dialect: &DialectId) -> String {
+fn sql_str(vendors: VendorSet, s: &str, dialect: &DialectId) -> String {
     // Declarative string defaults and enum members occupy grammar positions
     // where a quoted token is required rather than a general expression.
-    crate::render::backends::schema_renderer(dialect).schema_grammar_string_literal(s)
+    crate::render::backends::schema_renderer(vendors, dialect).schema_grammar_string_literal(s)
 }
 
 /// Render a JSON scalar as a SQL literal for a CHECK / IN clause: a string is
 /// single-quoted, a number is its canonical form, a boolean is `true`/`false`.
 /// `None` for a non-scalar (null/array/object) — those never reach a literal/enum
 /// CHECK in plugin-db.
-fn json_scalar_sql(v: &serde_json::Value, dialect: &DialectId) -> Option<String> {
+fn json_scalar_sql(
+    vendors: VendorSet,
+    v: &serde_json::Value,
+    dialect: &DialectId,
+) -> Option<String> {
     match v {
-        serde_json::Value::String(s) => Some(sql_str(s, dialect)),
+        serde_json::Value::String(s) => Some(sql_str(vendors, s, dialect)),
         serde_json::Value::Number(n) => Some(n.to_string()),
         serde_json::Value::Bool(b) => Some(b.to_string()),
         _ => None,
@@ -818,6 +824,7 @@ fn json_scalar_sql(v: &serde_json::Value, dialect: &DialectId) -> Option<String>
 /// body is the leading parenthesized group of `definition`, so parsing it back out
 /// would never match and PostgreSQL's cascade of the constraint would go unmirrored.
 fn field_check_constraints(
+    vendors: VendorSet,
     table: &str,
     f: &FieldDescriptor,
     dialect: &DialectId,
@@ -849,7 +856,7 @@ fn field_check_constraints(
         if let Some(rendered) = f
             .literal_value
             .as_ref()
-            .and_then(|value| json_scalar_sql(value, dialect))
+            .and_then(|value| json_scalar_sql(vendors, value, dialect))
         {
             out.push(ConstraintSnapshot {
                 name: check_constraint_name(table, &f.name, "lit"),
@@ -865,7 +872,7 @@ fn field_check_constraints(
     if let Some(values) = &f.enum_values {
         let rendered: Vec<String> = values
             .iter()
-            .filter_map(|value| json_scalar_sql(value, dialect))
+            .filter_map(|value| json_scalar_sql(vendors, value, dialect))
             .collect();
         if !rendered.is_empty() {
             out.push(ConstraintSnapshot {
@@ -943,13 +950,14 @@ pub(crate) fn numeric_default_literal(v: &serde_json::Value) -> Option<String> {
 }
 
 fn field_default_expr(
+    vendors: VendorSet,
     f: &FieldDescriptor,
     dialect: &DialectId,
     synth_json_defaults: bool,
 ) -> Result<Option<String>, DeclarativeError> {
     if let Some(default) = &f.default {
         let rendered = match f.ty.as_str() {
-            "string" | "char" | "inet" => default.as_str().map(|s| sql_str(s, dialect)),
+            "string" | "char" | "inet" => default.as_str().map(|s| sql_str(vendors, s, dialect)),
             // `int` (`t.int()`/`t.bigInt()`) and `number` (`t.double()`/
             // `t.numeric()`) share one precision-preserving renderer — without the
             // `int` arm an integer column's DEFAULT silently dropped, and a
@@ -969,6 +977,7 @@ fn field_default_expr(
                         })?;
                     Some(
                         crate::render::dml::inline_literal(
+                            vendors,
                             &crate::model::ir::IrScalar::Bytes(bytes),
                             dialect,
                         )
@@ -977,12 +986,14 @@ fn field_default_expr(
                 }
                 None => None,
             },
-            "json" | "object" => {
-                Some(json_container_default_expr(EmptyContainerKind::Object, dialect).to_string())
-            }
-            "array" => {
-                Some(json_container_default_expr(EmptyContainerKind::Array, dialect).to_string())
-            }
+            "json" | "object" => Some(
+                json_container_default_expr(vendors, EmptyContainerKind::Object, dialect)
+                    .to_string(),
+            ),
+            "array" => Some(
+                json_container_default_expr(vendors, EmptyContainerKind::Array, dialect)
+                    .to_string(),
+            ),
             _ => None,
         };
         return Ok(rendered);
@@ -992,18 +1003,22 @@ fn field_default_expr(
     }
     // Confined "default defaults" for JSON-backed types (matches plugin-db's else arm).
     Ok(match f.ty.as_str() {
-        "json" | "object" => {
-            Some(json_container_default_expr(EmptyContainerKind::Object, dialect).to_string())
-        }
-        "array" => {
-            Some(json_container_default_expr(EmptyContainerKind::Array, dialect).to_string())
-        }
+        "json" | "object" => Some(
+            json_container_default_expr(vendors, EmptyContainerKind::Object, dialect).to_string(),
+        ),
+        "array" => Some(
+            json_container_default_expr(vendors, EmptyContainerKind::Array, dialect).to_string(),
+        ),
         _ => None,
     })
 }
 
-fn json_container_default_expr(kind: EmptyContainerKind, dialect: &DialectId) -> &'static str {
-    crate::render::backends::schema_renderer(dialect)
+fn json_container_default_expr(
+    vendors: VendorSet,
+    kind: EmptyContainerKind,
+    dialect: &DialectId,
+) -> &'static str {
+    crate::render::backends::schema_renderer(vendors, dialect)
         .empty_json_expr(matches!(kind, EmptyContainerKind::Object))
 }
 
@@ -1012,56 +1027,60 @@ fn json_container_default_expr(kind: EmptyContainerKind, dialect: &DialectId) ->
 /// helper is only for explicit `.default({})` / `.default([])` and does not affect
 /// the confined `synth_json_defaults` branch.
 pub(crate) fn empty_container_default_expr_for_col_type(
+    vendors: VendorSet,
     kind: EmptyContainerKind,
     ty: &ColType,
     dialect: &DialectId,
 ) -> Option<&'static str> {
     match (kind, ty) {
         (EmptyContainerKind::Object | EmptyContainerKind::Array, ColType::Json) => {
-            Some(json_container_default_expr(kind, dialect))
+            Some(json_container_default_expr(vendors, kind, dialect))
         }
         (EmptyContainerKind::Array, ColType::TextArray) => {
-            crate::render::backends::schema_renderer(dialect).empty_text_array_expr()
+            crate::render::backends::schema_renderer(vendors, dialect).empty_text_array_expr()
         }
         _ => None,
     }
 }
 
 pub(crate) fn empty_container_default_expr_for_data_type(
+    vendors: VendorSet,
     kind: EmptyContainerKind,
     data_type: &str,
     dialect: &DialectId,
 ) -> Option<&'static str> {
     match (kind, data_type) {
         (EmptyContainerKind::Object | EmptyContainerKind::Array, "jsonb" | "json") => {
-            Some(json_container_default_expr(kind, dialect))
+            Some(json_container_default_expr(vendors, kind, dialect))
         }
         (EmptyContainerKind::Array, "text[]") => {
-            crate::render::backends::schema_renderer(dialect).empty_text_array_expr()
+            crate::render::backends::schema_renderer(vendors, dialect).empty_text_array_expr()
         }
         _ => None,
     }
 }
 
 pub(crate) fn json_value_default_expr_for_col_type(
+    vendors: VendorSet,
     value: &IrJsonValue,
     ty: &ColType,
     dialect: &DialectId,
 ) -> Option<String> {
-    matches!(ty, ColType::Json).then(|| json_value_default_expr(value, dialect))
+    matches!(ty, ColType::Json).then(|| json_value_default_expr(vendors, value, dialect))
 }
 
 pub(crate) fn json_value_default_expr_for_data_type(
+    vendors: VendorSet,
     value: &IrJsonValue,
     data_type: &str,
     dialect: &DialectId,
 ) -> Option<String> {
-    matches!(data_type, "jsonb" | "json").then(|| json_value_default_expr(value, dialect))
+    matches!(data_type, "jsonb" | "json").then(|| json_value_default_expr(vendors, value, dialect))
 }
 
-fn json_value_default_expr(value: &IrJsonValue, dialect: &DialectId) -> String {
+fn json_value_default_expr(vendors: VendorSet, value: &IrJsonValue, dialect: &DialectId) -> String {
     let json = render_json_value_text(value);
-    crate::render::backends::schema_renderer(dialect).json_value_default_expr(&json)
+    crate::render::backends::schema_renderer(vendors, dialect).json_value_default_expr(&json)
 }
 
 fn render_json_value_text(value: &IrJsonValue) -> String {
@@ -1094,10 +1113,11 @@ fn render_json_value_text(value: &IrJsonValue) -> String {
 pub(crate) use zero_migrate_backend::snapshot::nextval_default_expr;
 
 fn generated_column_snapshot(
+    vendors: VendorSet,
     generated: &crate::model::ir::GeneratedCol,
     dialect: &DialectId,
 ) -> Result<GeneratedColumnSnapshot, DeclarativeError> {
-    if !generated.stored && !dialect.supports(Capability::VirtualGeneratedColumn) {
+    if !generated.stored && !dialect.supports(vendors, Capability::VirtualGeneratedColumn) {
         // The refusing backend is PROVENANCE: it is whichever dialect was handed
         // to this call and answered `false`, never a name baked in here. This was
         // a `const` reading `dialect: "pg"` — wrong twice over, since `pg` is not
@@ -1111,11 +1131,12 @@ fn generated_column_snapshot(
             dialect.as_str()
         )));
     }
-    let expr = crate::render::dml::render_expr_inline(&generated.expr, dialect).map_err(|e| {
-        DeclarativeError::Invalid(format!(
-            "generated column expression is not renderable: {e}"
-        ))
-    })?;
+    let expr =
+        crate::render::dml::render_expr_inline(vendors, &generated.expr, dialect).map_err(|e| {
+            DeclarativeError::Invalid(format!(
+                "generated column expression is not renderable: {e}"
+            ))
+        })?;
     Ok(GeneratedColumnSnapshot {
         expr,
         source: Some(generated.expr.clone()),
@@ -1125,17 +1146,19 @@ fn generated_column_snapshot(
 
 /// Re-render a generated body from its (possibly just-rewritten) AST.
 fn rerender_generated(
+    vendors: VendorSet,
     generated: &mut GeneratedColumnSnapshot,
     dialect: &DialectId,
 ) -> Result<(), DeclarativeError> {
     let Some(source) = generated.source.as_ref() else {
         return Ok(());
     };
-    generated.expr = crate::render::dml::render_expr_inline(source, dialect).map_err(|e| {
-        DeclarativeError::Invalid(format!(
-            "generated column expression is not renderable after a rename: {e}"
-        ))
-    })?;
+    generated.expr =
+        crate::render::dml::render_expr_inline(vendors, source, dialect).map_err(|e| {
+            DeclarativeError::Invalid(format!(
+                "generated column expression is not renderable after a rename: {e}"
+            ))
+        })?;
     Ok(())
 }
 
@@ -1158,6 +1181,7 @@ fn rerender_generated(
 /// `dialect`. A rename cannot change renderability (it swaps one identifier for
 /// another), so this is a fail-closed guard, not an expected path.
 pub(crate) fn rename_column_in_generated_columns(
+    vendors: VendorSet,
     snapshot: &mut TableSnapshot,
     table: &str,
     from: &str,
@@ -1172,7 +1196,7 @@ pub(crate) fn rename_column_in_generated_columns(
             continue;
         };
         crate::render::gen_types::rename_expr_column(source, table, from, to, true);
-        rerender_generated(generated, dialect)?;
+        rerender_generated(vendors, generated, dialect)?;
     }
     Ok(())
 }
@@ -1472,6 +1496,7 @@ pub(crate) fn rename_column_in_constraint_definitions(
 /// # Errors
 /// As [`rename_column_in_generated_columns`].
 pub(crate) fn rename_table_in_generated_columns(
+    vendors: VendorSet,
     snapshot: &mut TableSnapshot,
     from: &str,
     to: &str,
@@ -1485,7 +1510,7 @@ pub(crate) fn rename_table_in_generated_columns(
             continue;
         };
         crate::render::gen_types::rename_expr_table(source, from, to);
-        rerender_generated(generated, dialect)?;
+        rerender_generated(vendors, generated, dialect)?;
     }
     Ok(())
 }
@@ -1507,12 +1532,13 @@ pub(crate) fn is_engine_computed_column(column: &ColumnSnapshot) -> bool {
 }
 
 pub(crate) fn column_snapshot_for_field(
+    vendors: VendorSet,
     f: &FieldDescriptor,
     dialect: &DialectId,
     synth_json_defaults: bool,
 ) -> Result<ColumnSnapshot, DeclarativeError> {
-    let data_type = field_data_type(f, dialect)?;
-    let default = field_default_expr(f, dialect, synth_json_defaults)?;
+    let data_type = field_data_type(vendors, f, dialect)?;
+    let default = field_default_expr(vendors, f, dialect, synth_json_defaults)?;
     let sdk_def = field_to_sdk_def(f);
     crate::schema::query::validate_encryption_sentinel_for_field(&sdk_def)
         .map_err(|error| DeclarativeError::Invalid(error.to_string()))?;
@@ -1580,7 +1606,7 @@ pub(crate) fn column_snapshot_for_field(
         generated: f
             .generated
             .as_ref()
-            .map(|g| generated_column_snapshot(g, dialect))
+            .map(|g| generated_column_snapshot(vendors, g, dialect))
             .transpose()?,
         // The structural half of the same fact, always populated. `Some` is this
         // producer saying it LOOKED, so an ordinary column has to assert
@@ -1594,14 +1620,20 @@ pub(crate) fn column_snapshot_for_field(
         }),
         identity: f.identity,
         id_default: f.identity.map(|_| {
-            crate::render::value_format::catalog_id_default(default.as_deref(), dialect, None)
+            crate::render::value_format::catalog_id_default(
+                vendors,
+                default.as_deref(),
+                dialect,
+                None,
+            )
         }),
         case_sensitive,
         encryption_sentinel,
         comment_sentinel,
         ..Default::default()
     };
-    crate::render::backends::schema_renderer(dialect).finalize_column_snapshot(&mut column);
+    crate::render::backends::schema_renderer(vendors, dialect)
+        .finalize_column_snapshot(&mut column);
     Ok(column)
 }
 
@@ -1797,6 +1829,7 @@ impl DesiredSchema {
 /// is no `.fts()` facet to fold: the authoring surface has none, and no code path
 /// here produces either shape.
 pub fn desired_snapshot_for_dialect(
+    vendors: VendorSet,
     project_schema: &str,
     descriptors: &[CollectionDescriptor],
     dialect: &DialectId,
@@ -1835,7 +1868,7 @@ pub fn desired_snapshot_for_dialect(
         // implementations.
         let inject = ResolvedInject::for_table(effective, project_schema, &d.name)
             .map_err(|error| DeclarativeError::Invalid(error.to_string()))?;
-        let this = build_table_snapshot(project_schema, d, dialect, effective)?;
+        let this = build_table_snapshot(vendors, project_schema, d, dialect, effective)?;
         resolved_injects.insert(d.name.clone(), inject);
         declarations
             .entry(d.name.clone())
@@ -1878,6 +1911,7 @@ pub fn desired_snapshot_for_dialect(
 /// - [`DeclarativeError::Invalid`] — a `ref` field's target is not a safe ident,
 ///   or a re-declared `id` field has a non-`id` type / malformed prefix.
 pub(crate) fn build_table_snapshot(
+    vendors: VendorSet,
     project_schema: &str,
     d: &CollectionDescriptor,
     dialect: &DialectId,
@@ -1885,10 +1919,11 @@ pub(crate) fn build_table_snapshot(
 ) -> Result<TableSnapshot, DeclarativeError> {
     let inject = ResolvedInject::for_table(effective, project_schema, &d.name)
         .map_err(|error| DeclarativeError::Invalid(error.to_string()))?;
-    build_table_snapshot_with_inject(project_schema, d, dialect, &inject)
+    build_table_snapshot_with_inject(vendors, project_schema, d, dialect, &inject)
 }
 
 fn build_table_snapshot_with_inject(
+    vendors: VendorSet,
     project_schema: &str,
     d: &CollectionDescriptor,
     dialect: &DialectId,
@@ -1901,10 +1936,11 @@ fn build_table_snapshot_with_inject(
         SnapshotColumnOrder::PreserveDeclared
     };
     build_table_snapshot_impl(
+        vendors,
         project_schema,
         d,
         dialect,
-        SnapshotResolvedShape::from_inject(&d.name, inject, dialect)?,
+        SnapshotResolvedShape::from_inject(vendors, &d.name, inject, dialect)?,
         column_order,
         carries_injected_columns,
     )
@@ -1916,6 +1952,7 @@ fn build_table_snapshot_with_inject(
 /// indexes, or a primary key. Callers must stamp the resolved
 /// `primaryKey` separately with [`push_primary_key_snapshot`].
 pub(crate) fn build_resolved_table_snapshot(
+    vendors: VendorSet,
     project_schema: &str,
     d: &CollectionDescriptor,
     dialect: &DialectId,
@@ -1928,6 +1965,7 @@ pub(crate) fn build_resolved_table_snapshot(
         SnapshotColumnOrder::PreserveDeclared
     };
     build_table_snapshot_impl(
+        vendors,
         project_schema,
         d,
         dialect,
@@ -1947,14 +1985,15 @@ fn carries_resolved_inject_prefix(d: &CollectionDescriptor, inject: &ResolvedInj
 }
 
 fn injected_column_snapshot(
+    vendors: VendorSet,
     column: &IrColumn,
     dialect: &DialectId,
 ) -> Result<ColumnSnapshot, DeclarativeError> {
     let field = crate::render::lower::ir_column_to_field_resolved_create(column);
-    let mut snapshot = column_snapshot_for_field(&field, dialect, false)?;
+    let mut snapshot = column_snapshot_for_field(vendors, &field, dialect, false)?;
     if let Some(default) = &column.default {
         snapshot.default = Some(
-            crate::render::lower::render_ir_default_for_type(default, &column.ty, dialect)
+            crate::render::lower::render_ir_default_for_type(vendors, default, &column.ty, dialect)
                 .map_err(|error| DeclarativeError::Invalid(error.to_string()))?,
         );
     }
@@ -2013,6 +2052,7 @@ impl SnapshotResolvedShape {
     }
 
     fn from_inject(
+        vendors: VendorSet,
         table: &str,
         inject: &ResolvedInject,
         dialect: &DialectId,
@@ -2020,7 +2060,7 @@ impl SnapshotResolvedShape {
         let columns = inject
             .columns()
             .iter()
-            .map(|column| injected_column_snapshot(column, dialect))
+            .map(|column| injected_column_snapshot(vendors, column, dialect))
             .collect::<Result<Vec<_>, _>>()?;
         let indexes = inject
             .indexes()
@@ -2037,6 +2077,7 @@ impl SnapshotResolvedShape {
 }
 
 fn build_table_snapshot_impl(
+    vendors: VendorSet,
     project_schema: &str,
     d: &CollectionDescriptor,
     dialect: &DialectId,
@@ -2065,7 +2106,7 @@ fn build_table_snapshot_impl(
         // The DESIRED side of every structural comparison. It has to be the name the
         // selected backend will report from its own catalog, or the deploy succeeds
         // and drift reports a difference that is not there, forever after.
-        let name = crate::render::backends::vendor(dialect)
+        let name = crate::render::backends::vendor(vendors, dialect)
             .catalog_fold
             .implicit_primary_key_name(&d.name);
         constraints.push(ConstraintSnapshot {
@@ -2131,7 +2172,8 @@ fn build_table_snapshot_impl(
                         f.ty
                     )));
                 }
-                let replacement = column_snapshot_for_field(f, dialect, synth_json_defaults)?;
+                let replacement =
+                    column_snapshot_for_field(vendors, f, dialect, synth_json_defaults)?;
                 if let Some(existing) = columns.iter_mut().find(|c| c.name == "id") {
                     *existing = replacement;
                 }
@@ -2150,7 +2192,12 @@ fn build_table_snapshot_impl(
                 d.name, f.name
             )));
         }
-        columns.push(column_snapshot_for_field(f, dialect, synth_json_defaults)?);
+        columns.push(column_snapshot_for_field(
+            vendors,
+            f,
+            dialect,
+            synth_json_defaults,
+        )?);
         // A masked field (`.mask({...})`, or auto-mask on `t.encrypted`) gets a
         // hidden `<col>_masked TEXT` sibling column at CREATE time (resolved by
         // the SHARED kernel's `mask_sibling_column_for_field`). The sibling is a
@@ -2192,7 +2239,7 @@ fn build_table_snapshot_impl(
         // pg_get_constraintdef-normalised body is not byte-compared (see the
         // round-trip tests). The `definition` carries the emitted DDL clause so
         // `render_create_table` can inline it.
-        for chk in field_check_constraints(&d.name, f, dialect) {
+        for chk in field_check_constraints(vendors, &d.name, f, dialect) {
             constraints.push(chk);
         }
         // A `unique: true` field becomes a unique index (A1 rule). The
@@ -2214,7 +2261,7 @@ fn build_table_snapshot_impl(
         // the data plane caps at 60, so the two agree only below 61 bytes.
         if f.ty == "vector" {
             if let Some(spec) = vector_index_snapshot(&d.name, f) {
-                indexes.extend(fold_ann_index_for_dialect(spec, dialect));
+                indexes.extend(fold_ann_index_for_dialect(vendors, spec, dialect));
             }
         }
         // - a geoPoint field (`t.geoPoint()`) emits a PostGIS GiST
@@ -2226,7 +2273,7 @@ fn build_table_snapshot_impl(
         // `non_unique_index_name`.
         if f.ty == "geoPoint" {
             if let Some(spec) = geo_index_snapshot(&d.name, f) {
-                indexes.extend(fold_ann_index_for_dialect(spec, dialect));
+                indexes.extend(fold_ann_index_for_dialect(vendors, spec, dialect));
             }
         }
         // A reference facet declares a FOREIGN KEY constraint independently of
@@ -2258,6 +2305,7 @@ fn build_table_snapshot_impl(
                 // and default actions are omitted per dialect. Built to
                 // match live byte-for-byte so a policy FK re-diffs clean.
                 definition: fk_definition_for_dialect(
+                    vendors,
                     std::slice::from_ref(&f.name),
                     project_schema,
                     target,
@@ -2464,6 +2512,7 @@ fn has_case_insensitive_text(table: &TableSnapshot) -> bool {
 /// (user-authored) index must be synthesized — never silently dropped.
 #[must_use]
 pub fn is_system_managed_index(
+    vendors: VendorSet,
     table: &str,
     index_name: &str,
     dialect: &DialectId,
@@ -2471,7 +2520,7 @@ pub fn is_system_managed_index(
 ) -> bool {
     (inject.primary_key().is_some()
         && is_pk_index(
-            crate::render::backends::vendor(dialect).catalog_fold,
+            crate::render::backends::vendor(vendors, dialect).catalog_fold,
             table,
             index_name,
         ))
@@ -2489,6 +2538,7 @@ pub fn is_system_managed_index(
 /// same thing on two of the three shipping servers.
 #[must_use]
 pub fn is_system_managed_constraint(
+    vendors: VendorSet,
     table: &str,
     constraint_name: &str,
     dialect: &DialectId,
@@ -2496,7 +2546,7 @@ pub fn is_system_managed_constraint(
 ) -> bool {
     inject.primary_key().is_some()
         && constraint_name
-            == crate::render::backends::vendor(dialect)
+            == crate::render::backends::vendor(vendors, dialect)
                 .catalog_fold
                 .implicit_primary_key_name(table)
 }
@@ -2692,6 +2742,7 @@ fn fk_constraint_name(table: &str, field: &str, explicit_name: Option<&str>) -> 
 /// [`zero_migrate_backend::constraint_definition::fk_constraint_snapshot`] with the
 /// name they already hold, and this resolves `dialect` down to the same function.
 pub(crate) fn ir_fk_constraint_snapshot_for_columns(
+    vendors: VendorSet,
     project_schema: &str,
     table: &str,
     explicit_name: Option<&str>,
@@ -2719,7 +2770,7 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
         deferrable,
         initially_deferred,
         not_valid,
-        crate::render::backends::vendor(dialect),
+        crate::render::backends::vendor(vendors, dialect),
     )
 }
 
@@ -2900,10 +2951,11 @@ fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot>
 /// more dangerous half — a future reader could have restored a routing path for a
 /// sentinel that no longer exists.
 fn fold_ann_index_for_dialect(
+    vendors: VendorSet,
     mut idx: IndexSnapshot,
     dialect: &DialectId,
 ) -> Option<IndexSnapshot> {
-    crate::render::backends::schema_renderer(dialect)
+    crate::render::backends::schema_renderer(vendors, dialect)
         .project_derived_ann_index(&mut idx)
         .then_some(idx)
 }
@@ -2930,6 +2982,7 @@ fn validate_id_prefix(prefix: &str) -> Result<(), DeclarativeError> {
 /// line that turns a `DialectId` into the vendor that answers them, which is why a
 /// backend that already knows which vendor it is calls that function directly.
 fn fk_definition_for_dialect(
+    vendors: VendorSet,
     local_columns: &[String],
     project_schema: &str,
     target: &str,
@@ -2951,7 +3004,7 @@ fn fk_definition_for_dialect(
         deferrable,
         initially_deferred,
         not_valid,
-        crate::render::backends::vendor(dialect),
+        crate::render::backends::vendor(vendors, dialect),
     )
 }
 
@@ -2968,6 +3021,7 @@ fn fk_definition_pg(
     let local = vec![field.to_string()];
     let refs = vec!["id".to_string()];
     fk_definition_for_dialect(
+        crate::test_fixtures::VENDORS,
         &local,
         project_schema,
         target,
@@ -3180,13 +3234,13 @@ impl DeclarativePlan {
     /// [`rule::FK_WITHOUT_INDEX`]: zero_migrate_backend::advisory::rule::FK_WITHOUT_INDEX
     /// [`rule::ANALYZER_DIALECT_UNSUPPORTED`]: zero_migrate_backend::advisory::rule::ANALYZER_DIALECT_UNSUPPORTED
     #[must_use]
-    pub fn advisories(&self) -> Vec<(Migration, Vec<Advisory>)> {
+    pub fn advisories(&self, vendors: VendorSet) -> Vec<(Migration, Vec<Advisory>)> {
         let all = self.all_migrations();
 
         // Asked once, up front: a backend with no analyzer owes the operator that
         // answer for the WHOLE plan, and there is no per-migration finding to
         // aggregate under it.
-        if let Some(absent) = crate::render::backends::analyzer_absence(&self.dialect) {
+        if let Some(absent) = crate::render::backends::analyzer_absence(vendors, &self.dialect) {
             let notice = absent.advisory();
             return all.into_iter().map(|m| (m, vec![notice.clone()])).collect();
         }
@@ -3197,20 +3251,23 @@ impl DeclarativePlan {
         let mut plan_indexed: Vec<String> = Vec::new();
         for m in &all {
             plan_indexed.extend(
-                crate::render::backends::index_coverage(&self.dialect, &m.up).indexed_columns,
+                crate::render::backends::index_coverage(vendors, &self.dialect, &m.up)
+                    .indexed_columns,
             );
         }
 
         all.into_iter()
             .filter_map(|m| {
                 let mut advs =
-                    crate::render::backends::advisories_for_sql(&self.dialect, &m.up).into_report();
+                    crate::render::backends::advisories_for_sql(vendors, &self.dialect, &m.up)
+                        .into_report();
 
                 // If a migration carries a FK_WITHOUT_INDEX Notice, recompute it
                 // against the plan-wide index set: suppress it only when EVERY FK
                 // referencing column it covers is indexed somewhere in the plan.
-                let fk_cols = crate::render::backends::index_coverage(&self.dialect, &m.up)
-                    .fk_columns_needing_index;
+                let fk_cols =
+                    crate::render::backends::index_coverage(vendors, &self.dialect, &m.up)
+                        .fk_columns_needing_index;
                 if !fk_cols.is_empty() {
                     let all_covered = fk_cols
                         .iter()
@@ -3255,8 +3312,16 @@ pub struct DeclarativeAuthor {
     ///   BYTE-IDENTICAL to before this field existed.
     /// - `Sqlite` — the snapshot renderer emits
     ///   unqualified DDL into `main` (= the app file) under the `SqliteBackend`'s
-    ///   hardened authorizer.
+    ///   the app file) under the `SqliteBackend`'s hardened authorizer.
     dialect: DialectId,
+    /// The backends this build ships, carried rather than reached for.
+    ///
+    /// An author already holds the identity it renders in; the set it resolves that
+    /// identity against is the other half of the same fact, and every method below
+    /// needed one. Carrying it here is what keeps the resolution doors reachable
+    /// from a struct that has state to hold it in, instead of threading a parameter
+    /// through every render method.
+    vendors: VendorSet,
 }
 
 impl DeclarativeAuthor {
@@ -3266,6 +3331,7 @@ impl DeclarativeAuthor {
     /// the app file's `main` namespace. The PG dialect is the original path.
     #[must_use]
     pub fn new_for_dialect(
+        vendors: VendorSet,
         project_schema: impl Into<String>,
         owner_app: impl Into<String>,
         dialect: DialectId,
@@ -3274,6 +3340,7 @@ impl DeclarativeAuthor {
             project_schema: project_schema.into(),
             owner_app: owner_app.into(),
             dialect,
+            vendors,
         }
     }
 
@@ -3296,6 +3363,7 @@ impl DeclarativeAuthor {
             project_schema: schema.into(),
             owner_app: self.owner_app.clone(),
             dialect: self.dialect.clone(),
+            vendors: self.vendors,
         }
     }
 
@@ -3318,14 +3386,14 @@ impl DeclarativeAuthor {
     }
 
     /// Select the registered per-dialect DDL emission seam. The dialect choice is
-    /// made once by the [`VendorSet`](zero_migrate_backend::registry::VendorSet)
+    /// made once by the [`VendorSet`]
     /// lookup; core has no enum dispatch over vendor implementations.
     fn emitter(&self) -> Box<dyn DdlEmitter> {
-        crate::render::backends::ddl_emitter(&self.dialect, &self.project_schema)
+        crate::render::backends::ddl_emitter(self.vendors, &self.dialect, &self.project_schema)
     }
 
     fn schema_renderer(&self) -> &'static dyn SchemaRenderer {
-        crate::render::backends::schema_renderer(&self.dialect)
+        crate::render::backends::schema_renderer(self.vendors, &self.dialect)
     }
 
     /// The registered backend's catalog-fold policy, which is where the name of a
@@ -3333,7 +3401,7 @@ impl DeclarativeAuthor {
     /// index it considers emitting DDL for, because that one index is the one it
     /// must not.
     fn catalog_fold(&self) -> &'static dyn zero_migrate_backend::fold::CatalogFoldPolicy {
-        crate::render::backends::vendor(&self.dialect).catalog_fold
+        crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold
     }
 
     fn table_rebuild_policy(&self) -> &'static dyn TableRebuildPolicy {
@@ -3621,7 +3689,10 @@ impl DeclarativeAuthor {
                         inline_fks.push(c);
                     }
                     other => {
-                        if !self.dialect.supports(Capability::AlterTableAddConstraint) {
+                        if !self
+                            .dialect
+                            .supports(self.vendors, Capability::AlterTableAddConstraint)
+                        {
                             // SQLite cannot ADD CONSTRAINT later → fail closed.
                             return Err(DeclarativeError::DeferredForeignKeyUnsupported {
                                 dialect: self.dialect.clone(),
@@ -3793,6 +3864,7 @@ impl DeclarativeAuthor {
             }
 
             let ec = ExpandContractAuthor::new(
+                self.vendors,
                 &self.project_schema,
                 &self.owner_app,
                 self.dialect.clone(),
@@ -3910,6 +3982,7 @@ impl DeclarativeAuthor {
                                     table: table.clone(),
                                     column: c.name.clone(),
                                     to_type: crate::render::backends::schema_renderer(
+                                        self.vendors,
                                         &self.dialect,
                                     )
                                     .column_type(c, false),
@@ -4532,6 +4605,7 @@ impl DeclarativeAuthor {
             .retarget_self_references_in_schema(&mut schema, table, tmp_table);
         let mut create =
             crate::schema::query::build_create_table_with_fks_for_dialect_scoped_statements(
+                self.vendors,
                 &self.project_schema,
                 table,
                 &schema,
@@ -4947,6 +5021,7 @@ impl DeclarativeAuthor {
                 // the SAME `OnlineIntent` fields, so the authored E1..C2 ids +
                 // intra-chain `depends_on` match by construction.
                 let ec = ExpandContractAuthor::new(
+                    self.vendors,
                     &self.project_schema,
                     &self.owner_app,
                     self.dialect.clone(),
@@ -5019,7 +5094,7 @@ impl DeclarativeAuthor {
         known_live_tables: &BTreeSet<String>,
         effective: &zero_migrate_policy::EffectivePolicy,
     ) -> Result<TableRebuild, DeclarativeError> {
-        let backend = crate::render::backends::schema_renderer(&self.dialect);
+        let backend = crate::render::backends::schema_renderer(self.vendors, &self.dialect);
         // ---- desired snapshot: live with `from`→`to` renamed (type unchanged) ----
         let mut desired_table = live_snapshot.clone();
         let mut found = false;
@@ -5043,7 +5118,14 @@ impl DeclarativeAuthor {
         // `GENERATED ALWAYS AS (("qty_on_hand" + 1))` for a table whose only such
         // column is now `quantity` - refused by SQLite inside the rebuild
         // transaction, so the migration cannot apply at all.
-        rename_column_in_generated_columns(&mut desired_table, table, from, to, &self.dialect)?;
+        rename_column_in_generated_columns(
+            self.vendors,
+            &mut desired_table,
+            table,
+            from,
+            to,
+            &self.dialect,
+        )?;
         // The same hazard one field over, and it reaches the SAME emitter: an inline
         // CHECK body names the column it guards, so the rebuild emitted
         // `"state" TEXT NOT NULL CHECK ("status" IN (…))` for a column that is now
@@ -5359,7 +5441,8 @@ impl DeclarativeAuthor {
     /// and the fold) and the structural kind (`generated_kind`, from the fold and
     /// the PostgreSQL catalog read).
     fn render_alter_column_type(&self, table: &str, c: &ColumnSnapshot) -> Migration {
-        let ty = crate::render::backends::schema_renderer(&self.dialect).column_type(c, false);
+        let ty = crate::render::backends::schema_renderer(self.vendors, &self.dialect)
+            .column_type(c, false);
         let using = if is_engine_computed_column(c) {
             String::new()
         } else {
@@ -5763,7 +5846,10 @@ impl DeclarativeAuthor {
                         });
                     }
                 }
-            } else if !self.dialect.supports(Capability::AlterTableAddConstraint) {
+            } else if !self
+                .dialect
+                .supports(self.vendors, Capability::AlterTableAddConstraint)
+            {
                 return Err(DeclarativeError::DeferredForeignKeyUnsupported {
                     dialect: self.dialect.clone(),
                     table: table.to_string(),
@@ -5874,7 +5960,10 @@ impl DeclarativeAuthor {
                     expect: Some((idx.unique, idx.columns.clone())),
                     ownership_only: false,
                 });
-            } else if self.dialect.supports(Capability::SchemaWideIndexNames) {
+            } else if self
+                .dialect
+                .supports(self.vendors, Capability::SchemaWideIndexNames)
+            {
                 // UNGUARDED createTable. Its inline indexes render the same
                 // `IF NOT EXISTS` the guarded ones do, so where an index name is
                 // schema-wide an inline create naming an index ANOTHER table owns is
@@ -6354,13 +6443,14 @@ mod mysql_literal_safety_tests {
             };
 
             assert_eq!(
-                field_default_expr(&object_field, dialect, false)
+                field_default_expr(crate::test_fixtures::VENDORS, &object_field, dialect, false)
                     .expect("object field default")
                     .as_deref(),
                 Some(object)
             );
             assert_eq!(
                 empty_container_default_expr_for_col_type(
+                    crate::test_fixtures::VENDORS,
                     EmptyContainerKind::Object,
                     &ColType::Json,
                     dialect,
@@ -6368,13 +6458,14 @@ mod mysql_literal_safety_tests {
                 Some(object)
             );
             assert_eq!(
-                field_default_expr(&array_field, dialect, false)
+                field_default_expr(crate::test_fixtures::VENDORS, &array_field, dialect, false)
                     .expect("array field default")
                     .as_deref(),
                 Some(array)
             );
             assert_eq!(
                 empty_container_default_expr_for_data_type(
+                    crate::test_fixtures::VENDORS,
                     EmptyContainerKind::Array,
                     "json",
                     dialect,
@@ -6385,6 +6476,7 @@ mod mysql_literal_safety_tests {
 
         assert_eq!(
             empty_container_default_expr_for_col_type(
+                crate::test_fixtures::VENDORS,
                 EmptyContainerKind::Array,
                 &ColType::TextArray,
                 &POSTGRES,
@@ -6393,6 +6485,7 @@ mod mysql_literal_safety_tests {
         );
         assert_eq!(
             empty_container_default_expr_for_col_type(
+                crate::test_fixtures::VENDORS,
                 EmptyContainerKind::Array,
                 &ColType::TextArray,
                 &SQLITE,
@@ -6401,6 +6494,7 @@ mod mysql_literal_safety_tests {
         );
         assert_eq!(
             empty_container_default_expr_for_col_type(
+                crate::test_fixtures::VENDORS,
                 EmptyContainerKind::Array,
                 &ColType::TextArray,
                 &MYSQL,
@@ -6518,8 +6612,22 @@ mod snapshot_builder_refactor_safety_tests {
         }
         let d = rich_descriptor();
         let effective = confined_policy();
-        let pg = build_table_snapshot("app", &d, &POSTGRES, &effective).unwrap();
-        let sq = build_table_snapshot("app", &d, &SQLITE, &effective).unwrap();
+        let pg = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &effective,
+        )
+        .unwrap();
+        let sq = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &SQLITE,
+            &effective,
+        )
+        .unwrap();
         std::fs::write(
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -6541,8 +6649,14 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn build_table_snapshot_is_byte_stable_pg() {
         let d = rich_descriptor();
-        let snap = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
-            .expect("rich descriptor builds a snapshot");
+        let snap = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &confined_policy(),
+        )
+        .expect("rich descriptor builds a snapshot");
         // Trailing newline tolerance: the golden file ends in a newline; the debug
         // print does not.
         assert_eq!(format!("{snap:#?}"), GOLDEN_PG.trim_end_matches('\n'));
@@ -6551,8 +6665,14 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn build_table_snapshot_is_byte_stable_sqlite() {
         let d = rich_descriptor();
-        let snap = build_table_snapshot("app", &d, &SQLITE, &confined_policy())
-            .expect("rich descriptor builds a snapshot");
+        let snap = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &SQLITE,
+            &confined_policy(),
+        )
+        .expect("rich descriptor builds a snapshot");
         assert_eq!(format!("{snap:#?}"), GOLDEN_SQLITE.trim_end_matches('\n'));
     }
 
@@ -6571,8 +6691,14 @@ mod snapshot_builder_refactor_safety_tests {
             runtime_options: Default::default(),
         };
         let effective = crate::test_fixtures::no_inject("app");
-        let snap = build_table_snapshot("app", &d, &POSTGRES, &effective)
-            .expect("author-owned updated_at is valid without injection");
+        let snap = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &effective,
+        )
+        .expect("author-owned updated_at is valid without injection");
 
         assert_eq!(snap.columns.len(), 1);
         assert_eq!(snap.columns[0].name, "updated_at");
@@ -6597,8 +6723,14 @@ mod snapshot_builder_refactor_safety_tests {
             runtime_options: Default::default(),
         };
         let effective = crate::test_fixtures::no_inject("app");
-        build_table_snapshot("app", &d, &POSTGRES, &effective)
-            .expect_err("ID-prefix reservations are independent of table injection");
+        build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &effective,
+        )
+        .expect_err("ID-prefix reservations are independent of table injection");
     }
 
     /// One-field `id` descriptor with the given modifiers — mirrors what
@@ -6637,8 +6769,14 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn id_field_with_unique_is_rejected_not_silently_folded() {
         let d = id_descriptor(true, /* unique */ true, None);
-        let err = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
-            .expect_err("a unique modifier on the folded id must be rejected");
+        let err = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &confined_policy(),
+        )
+        .expect_err("a unique modifier on the folded id must be rejected");
         let msg = format!("{err:?}");
         assert!(
             msg.contains("system primary key") && msg.contains("unique"),
@@ -6651,8 +6789,14 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn id_field_with_user_default_is_rejected_not_silently_folded() {
         let d = id_descriptor(true, false, Some(serde_json::json!("hardcoded")));
-        let err = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
-            .expect_err("a user default on the folded id must be rejected");
+        let err = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &confined_policy(),
+        )
+        .expect_err("a user default on the folded id must be rejected");
         let msg = format!("{err:?}");
         assert!(
             msg.contains("system primary key") && msg.contains("default"),
@@ -6671,8 +6815,14 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn id_field_with_default_required_flag_still_folds() {
         let d = id_descriptor(/* required */ false, false, None);
-        let snap = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
-            .expect("an internal ID descriptor with required:false still folds");
+        let snap = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &confined_policy(),
+        )
+        .expect("an internal ID descriptor with required:false still folds");
         let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
         assert_eq!(
             id_cols, 1,
@@ -6688,8 +6838,14 @@ mod snapshot_builder_refactor_safety_tests {
     #[test]
     fn clean_id_field_still_folds_into_the_system_pk() {
         let d = id_descriptor(/* required */ true, false, None);
-        let snap = build_table_snapshot("app", &d, &POSTGRES, &confined_policy())
-            .expect("a clean internal ID descriptor folds cleanly");
+        let snap = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &confined_policy(),
+        )
+        .expect("a clean internal ID descriptor folds cleanly");
         let id_cols = snap.columns.iter().filter(|c| c.name == "id").count();
         assert_eq!(
             id_cols, 1,
@@ -6773,29 +6929,51 @@ mod snapshot_builder_refactor_safety_tests {
         );
 
         let pg_inject = no_inject("app", &d.name);
-        let pg_snap = build_resolved_table_snapshot("app", &d, &POSTGRES, &pg_inject)
-            .expect("PG snapshot builds");
-        let pg_sql = DeclarativeAuthor::new_for_dialect("app", "app_test", POSTGRES)
-            .render_create_table(&d.name, &pg_snap, &[]);
+        let pg_snap = build_resolved_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &pg_inject,
+        )
+        .expect("PG snapshot builds");
+        let pg_sql = DeclarativeAuthor::new_for_dialect(
+            crate::test_fixtures::VENDORS,
+            "app",
+            "app_test",
+            POSTGRES,
+        )
+        .render_create_table(&d.name, &pg_snap, &[]);
         assert!(
             pg_sql.contains("\"email\" public.citext"),
             "Postgres case-insensitive text must render public.citext:\n{pg_sql}"
         );
 
         let sqlite_inject = no_inject("app", &d.name);
-        let sqlite_snap = build_resolved_table_snapshot("app", &d, &SQLITE, &sqlite_inject)
-            .expect("SQLite snapshot builds");
+        let sqlite_snap = build_resolved_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &SQLITE,
+            &sqlite_inject,
+        )
+        .expect("SQLite snapshot builds");
         let injected_indexes = injected_index_names(&d.name, &sqlite_snap, Some(&sqlite_inject));
-        let sqlite_sql = DeclarativeAuthor::new_for_dialect("app", "app_test", SQLITE)
-            .emitter()
-            .create_table(&CreateTableRequest {
-                table: &d.name,
-                snapshot: &sqlite_snap,
-                inline_fks: &[],
-                injected_indexes: &injected_indexes,
-                enum_check_names: enum_check_names(&d.name, &sqlite_snap),
-            })
-            .join(";\n");
+        let sqlite_sql = DeclarativeAuthor::new_for_dialect(
+            crate::test_fixtures::VENDORS,
+            "app",
+            "app_test",
+            SQLITE,
+        )
+        .emitter()
+        .create_table(&CreateTableRequest {
+            table: &d.name,
+            snapshot: &sqlite_snap,
+            inline_fks: &[],
+            injected_indexes: &injected_indexes,
+            enum_check_names: enum_check_names(&d.name, &sqlite_snap),
+        })
+        .join(";\n");
         assert!(
             sqlite_sql.contains("\"email\" text COLLATE NOCASE"),
             "SQLite case-insensitive text must render text COLLATE NOCASE:\n{sqlite_sql}"
@@ -6821,8 +6999,14 @@ mod snapshot_builder_refactor_safety_tests {
             ],
         );
         let inject = no_inject("zero_migrate", &d.name);
-        let snap = build_resolved_table_snapshot("zero_migrate", &d, &POSTGRES, &inject)
-            .expect("platform-exact JSON-backed table snapshot builds");
+        let snap = build_resolved_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "zero_migrate",
+            &d,
+            &POSTGRES,
+            &inject,
+        )
+        .expect("platform-exact JSON-backed table snapshot builds");
         assert_eq!(
             snap.columns
                 .iter()
@@ -6838,8 +7022,13 @@ mod snapshot_builder_refactor_safety_tests {
             None
         );
 
-        let sql = DeclarativeAuthor::new_for_dialect("zero_migrate", "platform", POSTGRES)
-            .render_create_table(&d.name, &snap, &[]);
+        let sql = DeclarativeAuthor::new_for_dialect(
+            crate::test_fixtures::VENDORS,
+            "zero_migrate",
+            "platform",
+            POSTGRES,
+        )
+        .render_create_table(&d.name, &snap, &[]);
         assert!(
             !sql.contains("\"payload\" jsonb NOT NULL DEFAULT"),
             "platform-exact json column without explicit default must not render DEFAULT:\n{sql}"
@@ -6858,8 +7047,14 @@ mod snapshot_builder_refactor_safety_tests {
         fields.push(field("payload", "json"));
         let d = resolved_descriptor("events", fields);
         let inject = confined_inject("app", &d.name);
-        let snap = build_resolved_table_snapshot("app", &d, &POSTGRES, &inject)
-            .expect("confined-resolved JSON table snapshot builds");
+        let snap = build_resolved_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &inject,
+        )
+        .expect("confined-resolved JSON table snapshot builds");
         assert_eq!(
             snap.columns
                 .iter()
@@ -6869,8 +7064,13 @@ mod snapshot_builder_refactor_safety_tests {
             "confined-resolved json columns keep plugin-db default synthesis"
         );
 
-        let sql = DeclarativeAuthor::new_for_dialect("app", "app_test", POSTGRES)
-            .render_create_table(&d.name, &snap, &[]);
+        let sql = DeclarativeAuthor::new_for_dialect(
+            crate::test_fixtures::VENDORS,
+            "app",
+            "app_test",
+            POSTGRES,
+        )
+        .render_create_table(&d.name, &snap, &[]);
         assert!(
             sql.contains("\"payload\" jsonb DEFAULT '{}'::jsonb"),
             "confined-resolved json column must still render DEFAULT '{{}}'::jsonb:\n{sql}"
@@ -6890,8 +7090,14 @@ mod snapshot_builder_refactor_safety_tests {
             }],
         );
         let inject = no_inject("zero_migrate", &d.name);
-        let snap = build_resolved_table_snapshot("zero_migrate", &d, &POSTGRES, &inject)
-            .expect("platform-exact explicit JSON default snapshot builds");
+        let snap = build_resolved_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "zero_migrate",
+            &d,
+            &POSTGRES,
+            &inject,
+        )
+        .expect("platform-exact explicit JSON default snapshot builds");
         assert_eq!(
             snap.columns
                 .iter()
@@ -6901,8 +7107,13 @@ mod snapshot_builder_refactor_safety_tests {
             "explicit-default arm must remain unchanged"
         );
 
-        let sql = DeclarativeAuthor::new_for_dialect("zero_migrate", "platform", POSTGRES)
-            .render_create_table(&d.name, &snap, &[]);
+        let sql = DeclarativeAuthor::new_for_dialect(
+            crate::test_fixtures::VENDORS,
+            "zero_migrate",
+            "platform",
+            POSTGRES,
+        )
+        .render_create_table(&d.name, &snap, &[]);
         assert!(
             sql.contains("\"settings\" jsonb NOT NULL DEFAULT '{}'::jsonb"),
             "platform-exact explicit json default must still render:\n{sql}"
@@ -6959,7 +7170,7 @@ mod advisory_seam_tests {
             created_tables: Vec::new(),
             dialect: POSTGRES,
         };
-        let advisories = plan.advisories();
+        let advisories = plan.advisories(crate::test_fixtures::VENDORS);
         // Only the drop produced an advisory entry (the additive create is silent).
         assert_eq!(advisories.len(), 1, "only the drop should carry advisories");
         let (mig, advs) = &advisories[0];
@@ -6990,7 +7201,7 @@ mod advisory_seam_tests {
             created_tables: Vec::new(),
             dialect: POSTGRES,
         };
-        assert!(plan.advisories().is_empty());
+        assert!(plan.advisories(crate::test_fixtures::VENDORS).is_empty());
     }
 
     // ---- plan-aware FK_WITHOUT_INDEX suppression ----
@@ -7014,7 +7225,11 @@ mod advisory_seam_tests {
             created_tables: Vec::new(),
             dialect: POSTGRES,
         };
-        let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
+        let all: Vec<_> = plan
+            .advisories(crate::test_fixtures::VENDORS)
+            .into_iter()
+            .flat_map(|(_, a)| a)
+            .collect();
         assert!(
             !all.iter().any(|a| a.rule == rule::FK_WITHOUT_INDEX),
             "a covering index in a separate migration of the same plan must suppress \
@@ -7036,7 +7251,11 @@ mod advisory_seam_tests {
             created_tables: Vec::new(),
             dialect: POSTGRES,
         };
-        let all: Vec<_> = plan.advisories().into_iter().flat_map(|(_, a)| a).collect();
+        let all: Vec<_> = plan
+            .advisories(crate::test_fixtures::VENDORS)
+            .into_iter()
+            .flat_map(|(_, a)| a)
+            .collect();
         assert!(
             all.iter().any(|a| a.rule == rule::FK_WITHOUT_INDEX),
             "an FK with no covering index anywhere in the plan must still emit a Notice"
@@ -7294,9 +7513,11 @@ mod mysql_storage_agreement_tests {
         ];
 
         for (f, key_label, default_label) in cases {
-            let snapshot = column_snapshot_for_field(&f, &MYSQL, false)
-                .unwrap_or_else(|error| panic!("{:?} snapshots: {error}", f.name));
-            let backend = crate::render::backends::schema_renderer(&MYSQL);
+            let snapshot =
+                column_snapshot_for_field(crate::test_fixtures::VENDORS, &f, &MYSQL, false)
+                    .unwrap_or_else(|error| panic!("{:?} snapshots: {error}", f.name));
+            let backend =
+                crate::render::backends::schema_renderer(crate::test_fixtures::VENDORS, &MYSQL);
             let rendered = backend.column_type(&snapshot, false);
             let key = backend.unprefixed_key_storage_refusal(
                 "test key",
@@ -7403,7 +7624,7 @@ mod mysql_storage_agreement_tests {
             }))
             .expect("the hand-built envelope re-parses");
 
-            let error = validate_ir(&ir, dialect).expect_err(
+            let error = validate_ir(crate::test_fixtures::VENDORS, &ir, dialect).expect_err(
                 "a bounded case-insensitive string must be refused; \
                  the MySQL renderer would otherwise drop its width to TEXT",
             );
@@ -7452,7 +7673,7 @@ mod inline_check_rename_tests {
     use zero_migrate_ir::dialect::DialectId;
 
     fn backend(dialect: &DialectId) -> &'static dyn SchemaRenderer {
-        crate::render::backends::schema_renderer(dialect)
+        crate::render::backends::schema_renderer(crate::test_fixtures::VENDORS, dialect)
     }
 
     #[test]
@@ -7690,8 +7911,14 @@ mod derived_index_alias_tests {
             3,
             "the unique, vector and geoPoint fields each derive one name: {aliases:#?}"
         );
-        let snap =
-            build_table_snapshot("app", &d, &POSTGRES, &effective()).expect("build_table_snapshot");
+        let snap = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            "app",
+            &d,
+            &POSTGRES,
+            &effective(),
+        )
+        .expect("build_table_snapshot");
         let emitted: Vec<&str> = snap.indexes.iter().map(|i| i.name.as_str()).collect();
         for key in aliases.keys() {
             assert!(
@@ -7727,8 +7954,14 @@ mod derived_index_alias_tests {
     fn derived_ann_index_is_emitted_only_where_the_dialect_can_build_it() {
         let d = descriptor_with_derived_indexes(8);
         let derived_over_payload = |dialect: &DialectId| -> Vec<String> {
-            let snap = build_table_snapshot("app", &d, dialect, &effective())
-                .expect("build_table_snapshot");
+            let snap = build_table_snapshot(
+                crate::test_fixtures::VENDORS,
+                "app",
+                &d,
+                dialect,
+                &effective(),
+            )
+            .expect("build_table_snapshot");
             let mut methods: Vec<String> = snap
                 .indexes
                 .iter()

@@ -26,6 +26,7 @@ use crate::guard::{GuardConfig, GuardError};
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId};
 use crate::render::backends::guard_for;
 use crate::EffectivePolicy;
+use zero_migrate_backend::registry::VendorSet;
 use zero_migrate_ir::dialect::DialectId;
 
 /// A pluggable source of versioned migrations.
@@ -116,8 +117,12 @@ pub enum AuthorRequest {
 /// so author output is byte-identical to (and uniformly self-defending with) the
 /// executor/role/journal quoting — fail-closed on an empty / NUL identifier
 /// (which `"`-doubling cannot neutralise) rather than silently emitting it.
-fn quote_ident(ident: &str, dialect: &DialectId) -> Result<String, AuthorError> {
-    crate::render::dml::quote_ident_checked_for_dialect(ident, dialect).map_err(|e| {
+fn quote_ident(
+    vendors: VendorSet,
+    ident: &str,
+    dialect: &DialectId,
+) -> Result<String, AuthorError> {
+    crate::render::dml::quote_ident_checked_for_dialect(vendors, ident, dialect).map_err(|e| {
         AuthorError::Invalid(format!(
             "unquotable identifier ({}): {:?}",
             e.reason, e.value
@@ -129,25 +134,34 @@ fn quote_ident(ident: &str, dialect: &DialectId) -> Result<String, AuthorError> 
 /// helper's uniform render can be asserted across all engine seams.
 #[cfg(test)]
 pub(crate) fn quote_ident_for_test(ident: &str) -> Result<String, AuthorError> {
-    quote_ident(ident, &crate::test_fixtures::POSTGRES)
+    quote_ident(
+        crate::test_fixtures::VENDORS,
+        ident,
+        &crate::test_fixtures::POSTGRES,
+    )
 }
 
 /// Render `<schema>.<object>`, both parts quoted.
-fn qualified(schema: &str, object: &str, dialect: &DialectId) -> Result<String, AuthorError> {
+fn qualified(
+    vendors: VendorSet,
+    schema: &str,
+    object: &str,
+    dialect: &DialectId,
+) -> Result<String, AuthorError> {
     Ok(format!(
         "{}.{}",
-        quote_ident(schema, dialect)?,
-        quote_ident(object, dialect)?
+        quote_ident(vendors, schema, dialect)?,
+        quote_ident(vendors, object, dialect)?
     ))
 }
 
 /// Render one column definition for a `CREATE TABLE` / `ADD COLUMN` clause.
-fn column_def(c: &Column, dialect: &DialectId) -> Result<String, AuthorError> {
+fn column_def(vendors: VendorSet, c: &Column, dialect: &DialectId) -> Result<String, AuthorError> {
     let null = if c.nullable { "" } else { " NOT NULL" };
     // `ty` is emitted verbatim — a Postgres type, not an identifier.
     Ok(format!(
         "{} {}{}",
-        quote_ident(&c.name, dialect)?,
+        quote_ident(vendors, &c.name, dialect)?,
         c.ty,
         null
     ))
@@ -239,6 +253,8 @@ pub struct DeterministicAuthor {
     owner_app: String,
     /// The registered backend whose identifier spelling this author emits.
     dialect: DialectId,
+    /// The backends this build ships, carried rather than reached for.
+    vendors: VendorSet,
 }
 
 impl DeterministicAuthor {
@@ -246,6 +262,7 @@ impl DeterministicAuthor {
     /// and backend identity.
     #[must_use]
     pub fn new(
+        vendors: VendorSet,
         project_schema: impl Into<String>,
         owner_app: impl Into<String>,
         dialect: DialectId,
@@ -254,6 +271,7 @@ impl DeterministicAuthor {
             project_schema: project_schema.into(),
             owner_app: owner_app.into(),
             dialect,
+            vendors,
         }
     }
 
@@ -306,17 +324,17 @@ impl MigrationAuthor for DeterministicAuthor {
                 }
                 let cols = columns
                     .iter()
-                    .map(|column| column_def(column, &self.dialect))
+                    .map(|column| column_def(self.vendors, column, &self.dialect))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
                 let up = format!(
                     "CREATE TABLE {} ({cols})",
-                    qualified(schema, name, &self.dialect)?
+                    qualified(self.vendors, schema, name, &self.dialect)?
                 );
                 // A clean additive create has a precise reverse.
                 let down = Some(format!(
                     "DROP TABLE {}",
-                    qualified(schema, name, &self.dialect)?
+                    qualified(self.vendors, schema, name, &self.dialect)?
                 ));
                 self.make(
                     &format!("create_table_{name}"),
@@ -335,13 +353,13 @@ impl MigrationAuthor for DeterministicAuthor {
                 }
                 let up = format!(
                     "ALTER TABLE {} ADD COLUMN {}",
-                    qualified(schema, table, &self.dialect)?,
-                    column_def(column, &self.dialect)?,
+                    qualified(self.vendors, schema, table, &self.dialect)?,
+                    column_def(self.vendors, column, &self.dialect)?,
                 );
                 let down = Some(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
-                    qualified(schema, table, &self.dialect)?,
-                    quote_ident(&column.name, &self.dialect)?,
+                    qualified(self.vendors, schema, table, &self.dialect)?,
+                    quote_ident(self.vendors, &column.name, &self.dialect)?,
                 ));
                 self.make(
                     &format!("add_column_{table}_{}", column.name),
@@ -366,7 +384,7 @@ impl MigrationAuthor for DeterministicAuthor {
                 let idx = index_name(table, columns);
                 let cols = columns
                     .iter()
-                    .map(|c| quote_ident(c, &self.dialect))
+                    .map(|c| quote_ident(self.vendors, c, &self.dialect))
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
                 // The non-txn idempotency rule (executor) REQUIRES `CREATE INDEX
@@ -375,15 +393,15 @@ impl MigrationAuthor for DeterministicAuthor {
                 let concurrent_kw = if *concurrently { "CONCURRENTLY " } else { "" };
                 let up = format!(
                     "CREATE INDEX {concurrent_kw}IF NOT EXISTS {} ON {} ({cols})",
-                    quote_ident(&idx, &self.dialect)?,
-                    qualified(schema, table, &self.dialect)?,
+                    quote_ident(self.vendors, &idx, &self.dialect)?,
+                    qualified(self.vendors, schema, table, &self.dialect)?,
                 );
                 // A concurrent DROP mirrors a concurrent CREATE; `IF EXISTS`
                 // keeps the down idempotent too.
                 let drop_concurrent = if *concurrently { "CONCURRENTLY " } else { "" };
                 let down = Some(format!(
                     "DROP INDEX {drop_concurrent}IF EXISTS {}",
-                    qualified(schema, &idx, &self.dialect)?,
+                    qualified(self.vendors, schema, &idx, &self.dialect)?,
                 ));
                 let flags = MigrationFlags {
                     // CONCURRENTLY cannot run inside a transaction.
@@ -421,12 +439,15 @@ pub struct RawSqlAuthor {
     dialect: DialectId,
     /// The explicitly authored policy used to inspect the supplied SQL.
     effective: EffectivePolicy,
+    /// The backends this build ships, carried rather than reached for.
+    vendors: VendorSet,
 }
 
 impl RawSqlAuthor {
     /// Construct a raw-SQL author bound to an owner app, backend, and explicit policy.
     #[must_use]
     pub fn new(
+        vendors: VendorSet,
         owner_app: impl Into<String>,
         dialect: DialectId,
         effective: EffectivePolicy,
@@ -435,6 +456,7 @@ impl RawSqlAuthor {
             owner_app: owner_app.into(),
             dialect,
             effective,
+            vendors,
         }
     }
 
@@ -459,10 +481,10 @@ impl RawSqlAuthor {
         // A *denial* is not raised here (a denied-but-parseable migration is still
         // minted so `plan` can report the denial precisely); only an UNPARSEABLE `up`
         // errors at authoring time.
-        let guard = guard_for(&GuardConfig::from_policy(
-            self.effective.clone(),
-            self.dialect.clone(),
-        ));
+        let guard = guard_for(
+            self.vendors,
+            &GuardConfig::from_policy(self.effective.clone(), self.dialect.clone()),
+        );
         let flags = guard.flags_for_sql(up).map_err(AuthorError::Guard)?;
         let checksum = Checksum::of(&crate::model::migration::ChecksumInput {
             up,
@@ -496,7 +518,12 @@ mod tests {
     use crate::test_fixtures::POSTGRES;
 
     fn det() -> DeterministicAuthor {
-        DeterministicAuthor::new("proj_acme", "app_acme", crate::test_fixtures::POSTGRES)
+        DeterministicAuthor::new(
+            crate::test_fixtures::VENDORS,
+            "proj_acme",
+            "app_acme",
+            crate::test_fixtures::POSTGRES,
+        )
     }
 
     fn col(name: &str, ty: &str, nullable: bool) -> Column {
@@ -708,6 +735,7 @@ mod tests {
     #[test]
     fn raw_sql_author_wraps_safe_additive_sql_with_clean_flags() {
         let author = RawSqlAuthor::new(
+            crate::test_fixtures::VENDORS,
             "app_acme",
             POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
@@ -732,6 +760,7 @@ mod tests {
     #[test]
     fn raw_sql_author_flags_destructive_drop_requiring_approval() {
         let author = RawSqlAuthor::new(
+            crate::test_fixtures::VENDORS,
             "app_acme",
             POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
@@ -750,6 +779,7 @@ mod tests {
     #[test]
     fn raw_sql_author_rejects_unparseable_up() {
         let author = RawSqlAuthor::new(
+            crate::test_fixtures::VENDORS,
             "app_acme",
             POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
@@ -769,6 +799,7 @@ mod tests {
         // author still mints it (conservative requires_approval) so plan can
         // report the denial precisely rather than failing at authoring.
         let author = RawSqlAuthor::new(
+            crate::test_fixtures::VENDORS,
             "app_acme",
             POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),

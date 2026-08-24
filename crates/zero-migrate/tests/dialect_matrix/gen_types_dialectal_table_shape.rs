@@ -62,6 +62,7 @@ fn history() -> Vec<Op> {
 /// The emitted field names of one collection, out of `schema.runtime.json`.
 fn field_names(collection: &str) -> BTreeSet<String> {
     let artifacts = render_artifacts(
+        zero_migrate::shipping_vendors(),
         &history(),
         &zero_migrate_postgres::DIALECT,
         SCHEMA,

@@ -55,6 +55,7 @@ fn folded(ops_after_create: &str) -> serde_json::Value {
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
     let map = single_fold::fold(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &zero_migrate_postgres::DIALECT,
         "public",
@@ -148,6 +149,7 @@ fn folded_with_default(ops_after_create: &str) -> serde_json::Value {
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
     let map = single_fold::fold(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &zero_migrate_postgres::DIALECT,
         "public",
@@ -218,6 +220,7 @@ fn folded_ref(a_table: &str, rest: &str) -> serde_json::Value {
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
     let map = single_fold::fold(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &zero_migrate_postgres::DIALECT,
         "public",
@@ -297,6 +300,7 @@ fn folded_table(a_table: &str, rest: &str) -> serde_json::Value {
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
     let map = single_fold::fold(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &zero_migrate_postgres::DIALECT,
         "public",

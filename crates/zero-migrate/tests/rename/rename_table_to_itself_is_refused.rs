@@ -31,7 +31,8 @@ use zero_migrate::DialectId;
 fn verdict(op: &str, dialect: &DialectId) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, dialect).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(zero_migrate::shipping_vendors(), &ir, dialect)
+        .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 #[test]

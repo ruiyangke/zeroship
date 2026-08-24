@@ -41,6 +41,7 @@
 //! (the napi `block_on` worker + JS host) — ZERO tokio, ZERO compio.
 
 use std::collections::{HashMap, HashSet};
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::approval::Approval;
 // The orchestration below is driver-neutral AND vendor-neutral: it names the
@@ -110,6 +111,7 @@ pub(crate) use zero_migrate_backend::executor::unmet_halt_error;
 /// - [`ApplyError::MigrationFailed`] — a migration's SQL failed (rolled back).
 /// - [`ApplyError::Db`] / [`ApplyError::Journal`] — infrastructure failures.
 pub async fn apply<B: MigrationBackend>(
+    vendors: VendorSet,
     backend: &B,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
@@ -117,6 +119,7 @@ pub async fn apply<B: MigrationBackend>(
     applied_by: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
     apply_with_lock_backend(
+        vendors,
         backend,
         cfg,
         migrations,
@@ -141,6 +144,7 @@ pub async fn apply<B: MigrationBackend>(
 /// `MysqlBackend`); both were dead, and deleting them is what made core neutral
 /// here. Do not reintroduce a vendor-constructing entry point in this module.
 pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
+    vendors: VendorSet,
     backend: &B,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
@@ -220,7 +224,7 @@ pub(crate) async fn apply_with_lock_backend<B: MigrationBackend>(
             return Err(error);
         }
     };
-    let result = apply_locked(backend, cfg, migrations, applied_by).await;
+    let result = apply_locked(vendors, backend, cfg, migrations, applied_by).await;
     // RESET ROLE UNCONDITIONALLY — regardless of whether `snapshot_session`
     // succeeded. The non-txn path's `SET ROLE` mutates the session; if the
     // snapshot had failed we would otherwise skip `restore_session` entirely and
@@ -337,6 +341,7 @@ fn check_repeatable_wellformed(migrations: &[Migration]) -> Result<(), ApplyErro
 /// dialect-coupled leaf (journal reads, the checksum-drift report, the confined
 /// `up`, the non-txn idempotency parse) goes through `backend`.
 async fn apply_locked<B: MigrationBackend>(
+    vendors: VendorSet,
     backend: &B,
     cfg: &ExecutorConfig,
     migrations: &[Migration],
@@ -507,7 +512,8 @@ async fn apply_locked<B: MigrationBackend>(
     //     second-line defense is the backend authorizer applied per statement at apply).
     // The non-txn idempotency check still runs through the trait (`validate_non_txn`),
     // which for SQLite rejects `transaction:false` at the dialect boundary.
-    let guard = crate::render::backends::guard_for(&cfg.guard_config_for(&backend.dialect()));
+    let guard =
+        crate::render::backends::guard_for(vendors, &cfg.guard_config_for(&backend.dialect()));
 
     // FIRST PASS — static validation over EVERY pending migration BEFORE any
     // execution. The guard runs per-migration inside the apply loop in the
@@ -559,7 +565,15 @@ async fn apply_locked<B: MigrationBackend>(
     // is now present). Each repeatable re-applies iff its checksum differs from the
     // latest journaled `completed` checksum for its identity (or it was never
     // applied); an unchanged checksum is skipped.
-    apply_repeatables(backend, cfg, &repeatables, applied_by, &mut outcome).await?;
+    apply_repeatables(
+        vendors,
+        backend,
+        cfg,
+        &repeatables,
+        applied_by,
+        &mut outcome,
+    )
+    .await?;
 
     Ok(outcome)
 }
@@ -741,6 +755,7 @@ async fn execute_pending<B: MigrationBackend>(
 ///   (Halt) or inevaluable.
 /// - [`ApplyError::MigrationFailed`] / journal / db errors from the apply itself.
 async fn apply_repeatables<B: MigrationBackend>(
+    vendors: VendorSet,
     backend: &B,
     cfg: &ExecutorConfig,
     repeatables: &[&Migration],
@@ -785,7 +800,7 @@ async fn apply_repeatables<B: MigrationBackend>(
 
     // FIRST PASS — guard EVERY repeatable's `up` before any execution, mirroring
     // the versioned all-up-front static gate: a denial applies NOTHING.
-    guard_repeatable_batch(cfg, &backend.dialect(), &ordered)?;
+    guard_repeatable_batch(vendors, cfg, &backend.dialect(), &ordered)?;
 
     // SECOND PASS — re-apply each changed repeatable; skip the unchanged ones.
     for &m in &ordered {
@@ -838,11 +853,12 @@ async fn apply_repeatables<B: MigrationBackend>(
 /// handed to the PostgreSQL parser merely because it entered the later
 /// repeatable phase.
 fn guard_repeatable_batch(
+    vendors: VendorSet,
     cfg: &ExecutorConfig,
     dialect: &zero_migrate_ir::dialect::DialectId,
     migrations: &[&Migration],
 ) -> Result<(), ApplyError> {
-    let guard = crate::render::backends::guard_for(&cfg.guard_config_for(dialect));
+    let guard = crate::render::backends::guard_for(vendors, &cfg.guard_config_for(dialect));
     for migration in migrations {
         guard
             .check(&migration.up)
@@ -1341,8 +1357,13 @@ mod order_tests {
             crate::test_fixtures::no_inject("project_acme"),
         );
 
-        guard_repeatable_batch(&cfg, &crate::test_fixtures::MYSQL, &[&repeatable])
-            .expect("descriptor-generated MySQL repeatable DDL bypasses the PostgreSQL parser");
+        guard_repeatable_batch(
+            crate::test_fixtures::VENDORS,
+            &cfg,
+            &crate::test_fixtures::MYSQL,
+            &[&repeatable],
+        )
+        .expect("descriptor-generated MySQL repeatable DDL bypasses the PostgreSQL parser");
     }
 
     #[test]

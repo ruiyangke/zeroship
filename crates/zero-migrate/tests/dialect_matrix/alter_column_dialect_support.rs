@@ -58,7 +58,7 @@ const REFUSED: &[(&str, &[&zero_migrate::DialectId], &str)] = &[
 fn gate(op: &str, dialect: &zero_migrate::DialectId) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("envelope parses");
-    validate_ir(&ir, dialect).map_err(|e| e.code)
+    validate_ir(zero_migrate::shipping_vendors(), &ir, dialect).map_err(|e| e.code)
 }
 
 #[test]

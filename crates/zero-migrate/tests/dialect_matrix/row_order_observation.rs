@@ -229,16 +229,22 @@ async fn apply_envelope<B: MigrationBackend>(
         .map_err(|error| format!("{tag}: resolve create-table policy: {error}"))?;
     let source = serde_json::to_string(&resolved)
         .map_err(|error| format!("{tag}: re-serialize the resolved envelope: {error}"))?;
-    let artifact = IrAuthor::new(&cfg.project_schema, OWNER, dialect, policy)
-        .load_and_lower_guarded(
-            &source,
-            OWNER,
-            &registry(),
-            live,
-            &GuardConfig::from_policy(policy.clone(), dialect.clone()),
-        )
-        .map_err(|error| format!("{tag}: guarded lower: {error:?}"))?;
-    MigrationEngine::new()
+    let artifact = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        &cfg.project_schema,
+        OWNER,
+        dialect,
+        policy,
+    )
+    .load_and_lower_guarded(
+        &source,
+        OWNER,
+        &registry(),
+        live,
+        &GuardConfig::from_policy(policy.clone(), dialect.clone()),
+    )
+    .map_err(|error| format!("{tag}: guarded lower: {error:?}"))?;
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -287,8 +293,14 @@ async fn apply_fixture<B: MigrationBackend>(
         let authored: MigrationIr =
             serde_json::from_str(&ddl).map_err(|error| format!("re-parse the DDL: {error}"))?;
         let history: Vec<Op> = authored.ops;
-        if let Ok(defs) = single_fold::fold(&history, dialect, &cfg.project_schema, policy)
-            .map(|folded| folded.project_field_defs())
+        if let Ok(defs) = single_fold::fold(
+            zero_migrate::shipping_vendors(),
+            &history,
+            dialect,
+            &cfg.project_schema,
+            policy,
+        )
+        .map(|folded| folded.project_field_defs())
         {
             live.sdk_schemas = defs;
         }

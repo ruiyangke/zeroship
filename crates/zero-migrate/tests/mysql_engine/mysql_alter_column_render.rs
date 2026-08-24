@@ -83,9 +83,15 @@ fn live_with(
     dialect: &zero_migrate::DialectId,
     effective: &zero_migrate_policy::EffectivePolicy,
 ) -> SchemaSnapshot {
-    desired_snapshot_for_dialect(PROJECT, &[descriptor(ty, required)], dialect, effective)
-        .expect("live-side desired snapshot")
-        .snapshot
+    desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        &[descriptor(ty, required)],
+        dialect,
+        effective,
+    )
+    .expect("live-side desired snapshot")
+    .snapshot
 }
 
 fn one_op_ir(op: Op) -> MigrationIr {
@@ -108,7 +114,13 @@ fn lower_steps_for(
     dialect: &zero_migrate::DialectId,
     op: Op,
 ) -> Result<Vec<zero_migrate::PlanStep>, String> {
-    let author = IrAuthor::new(PROJECT, APP, dialect, &support::confined_charter());
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        dialect,
+        &support::confined_charter(),
+    );
     author
         .lower_steps(&one_op_ir(op), &LiveSchema::default())
         .map_err(|e| e.to_string())
@@ -233,6 +245,7 @@ fn the_ir_lane_refuses_a_mysql_nullability_change_and_still_lowers_it_for_postgr
 #[test]
 fn a_mysql_default_change_is_rendered_with_backticks_rather_than_refused() {
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_mysql::DIALECT,
@@ -277,6 +290,7 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
     let effective = support::confined_charter();
 
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         &[descriptor("integer", true)],
         &zero_migrate_mysql::DIALECT,
@@ -285,9 +299,14 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
     .expect("desired snapshot");
     let live = live_with("string", true, &zero_migrate_mysql::DIALECT, &effective);
 
-    let err = DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_mysql::DIALECT)
-        .diff(&desired, &live, &HashMap::new(), &[], &effective)
-        .expect_err("the differ must refuse a MySQL column change rather than plan invalid DDL");
+    let err = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_mysql::DIALECT,
+    )
+    .diff(&desired, &live, &HashMap::new(), &[], &effective)
+    .expect_err("the differ must refuse a MySQL column change rather than plan invalid DDL");
     let text = err.to_string();
     assert!(
         text.to_lowercase().contains("mysql"),
@@ -300,6 +319,7 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
 
     // The same control on the declarative side.
     let pg_desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         &[descriptor("integer", true)],
         &zero_migrate_postgres::DIALECT,
@@ -307,7 +327,12 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
     )
     .expect("desired snapshot");
     let pg_live = live_with("string", true, &zero_migrate_postgres::DIALECT, &effective);
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_postgres::DIALECT)
-        .diff(&pg_desired, &pg_live, &HashMap::new(), &[], &effective)
-        .expect("PostgreSQL still diffs a column type change");
+    DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_postgres::DIALECT,
+    )
+    .diff(&pg_desired, &pg_live, &HashMap::new(), &[], &effective)
+    .expect("PostgreSQL still diffs a column type change");
 }

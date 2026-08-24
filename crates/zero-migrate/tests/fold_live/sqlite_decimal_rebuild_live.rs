@@ -195,11 +195,24 @@ async fn stored(backend: &SqliteBackend, table: &str, column: &str) -> Vec<(Stri
 /// `fold_ops`, field maps from the projection, no `stored_create_sql`.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
-    let snapshot = fold_ops(history, &SQLITE, PROJECT, &policy).expect("the history folds");
+    let snapshot = fold_ops(
+        zero_migrate::shipping_vendors(),
+        history,
+        &SQLITE,
+        PROJECT,
+        &policy,
+    )
+    .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sdk_schemas = single_fold::fold(history, &SQLITE, PROJECT, &policy)
-        .expect("the history folds")
-        .project_field_defs();
+    live.sdk_schemas = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        history,
+        &SQLITE,
+        PROJECT,
+        &policy,
+    )
+    .expect("the history folds")
+    .project_field_defs();
     live
 }
 
@@ -209,9 +222,15 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, policy.clone());
     let raw: MigrationIr = serde_json::from_str(source).expect("test IR parses");
     let resolved = resolve_create_table_policy(&raw, &policy, PROJECT).expect("the IR resolves");
-    let author = IrAuthor::new(PROJECT, APP, &SQLITE, &policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &SQLITE,
+        &policy,
+    );
     let steps = author.lower_steps(&resolved, live).expect("the IR lowers");
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -235,7 +254,7 @@ async fn deploy(backend: &SqliteBackend, tables: &[&str], sources: &[&str]) -> R
         .iter()
         .map(|source| serde_json::from_str(source).expect("test envelope parses"))
         .collect();
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .deploy_envelopes(
             &envelopes,
             backend,
@@ -476,28 +495,44 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
     // The desired side: the SAME history, folded to the descriptor set a re-deploy of
     // the unchanged schema presents. Nothing about the schema differs between the two
     // sides - only the carrier each is spelled through.
-    let descriptors: Vec<CollectionDescriptor> =
-        single_fold::fold(&history, &SQLITE, PROJECT, &policy)
-            .expect("the history folds")
-            .project_collection_descriptors()
-            .into_values()
-            // The projection stamps a synthetic `__fold__` owner; a re-deploy presents
-            // the descriptors under the app that owns them, and the differ's
-            // cross-app guard refuses a structural change to a table it does not.
-            .map(|descriptor| CollectionDescriptor {
-                owner_app: APP.to_string(),
-                ..descriptor
-            })
-            .collect();
-    let desired = desired_snapshot_for_dialect(PROJECT, &descriptors, &SQLITE, &policy)
-        .expect("the descriptor set resolves to a desired snapshot");
+    let descriptors: Vec<CollectionDescriptor> = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        &history,
+        &SQLITE,
+        PROJECT,
+        &policy,
+    )
+    .expect("the history folds")
+    .project_collection_descriptors()
+    .into_values()
+    // The projection stamps a synthetic `__fold__` owner; a re-deploy presents
+    // the descriptors under the app that owns them, and the differ's
+    // cross-app guard refuses a structural change to a table it does not.
+    .map(|descriptor| CollectionDescriptor {
+        owner_app: APP.to_string(),
+        ..descriptor
+    })
+    .collect();
+    let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        &descriptors,
+        &SQLITE,
+        &policy,
+    )
+    .expect("the descriptor set resolves to a desired snapshot");
 
-    let plan = MigrationEngine::new()
+    let plan = MigrationEngine::new(zero_migrate::shipping_vendors())
         .plan_declarative(
             &desired,
             &live,
             &ownership,
-            &DeclarativeAuthor::new_for_dialect(PROJECT, APP, SQLITE),
+            &DeclarativeAuthor::new_for_dialect(
+                zero_migrate::shipping_vendors(),
+                PROJECT,
+                APP,
+                SQLITE,
+            ),
             &[],
             &GuardConfig::from_policy(policy.clone(), SQLITE),
             &policy,

@@ -126,6 +126,7 @@ async fn apply_doc_under(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -135,6 +136,7 @@ async fn apply_doc_under(
     // primitive's grant is read off the charter, and the plain `load_ir_document`
     // falls back to the confined creator profile, which grants none of them.
     let document = zero_migrate::model::load::load_ir_document_authorized(
+        zero_migrate::shipping_vendors(),
         ir,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -147,6 +149,7 @@ async fn apply_doc_under(
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         history,
         &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
@@ -158,7 +161,7 @@ async fn apply_doc_under(
     let plan = author
         .lower_plan(&document, &live)
         .map_err(|error| format!("lower the doc plan on PostgreSQL: {error}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             approval,
@@ -267,7 +270,7 @@ async fn rolling_back_a_dropped_view_restores_it_on_postgres() {
             &migrations,
             Approval::Approved,
             OWNER,
-            guard_for(&GuardConfig::from_policy(
+            guard_for(zero_migrate::shipping_vendors(), &GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
                 zero_migrate_postgres::DIALECT,
             ))
@@ -499,7 +502,7 @@ async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
             &migrations,
             Approval::Approved,
             OWNER,
-            guard_for(&GuardConfig::from_policy(
+            guard_for(zero_migrate::shipping_vendors(), &GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
                 zero_migrate_postgres::DIALECT,
             ))
@@ -658,10 +661,10 @@ async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refus
             &migrations,
             Approval::Approved,
             OWNER,
-            guard_for(&GuardConfig::from_policy(
-                policy.clone(),
-                zero_migrate_postgres::DIALECT,
-            ))
+            guard_for(
+                zero_migrate::shipping_vendors(),
+                &GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT),
+            )
             .as_ref(),
         )
         .await;
@@ -779,10 +782,13 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
             &migrations,
             Approval::Approved,
             OWNER,
-            guard_for(&GuardConfig::from_policy(
-                support::no_inject(&cfg.project_schema),
-                zero_migrate_postgres::DIALECT,
-            ))
+            guard_for(
+                zero_migrate::shipping_vendors(),
+                &GuardConfig::from_policy(
+                    support::no_inject(&cfg.project_schema),
+                    zero_migrate_postgres::DIALECT,
+                ),
+            )
             .as_ref(),
         )
         .await

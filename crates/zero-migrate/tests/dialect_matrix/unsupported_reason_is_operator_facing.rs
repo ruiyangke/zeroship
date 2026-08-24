@@ -64,7 +64,7 @@ fn no_unsupported_cell_shows_the_operator_an_internal_placeholder() {
             // The cell is declared unsupported, so the authoring gate must refuse.
             // This half is the tautology; it is asserted anyway so a refusal that
             // stops happening is not silently skipped by the message check below.
-            let Err(err) = validate_op(op, dialect, 0) else {
+            let Err(err) = validate_op(zero_migrate::shipping_vendors(), op, dialect, 0) else {
                 offenders.push(format!(
                     "  {kind}/{variant} [{name}] is declared `unsupported` but validate_op \
                      ACCEPTED it, so no message was produced to check"

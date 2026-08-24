@@ -71,6 +71,7 @@ fn type_id_ir(table: &str, prefix: &str) -> MigrationIr {
 
 fn lower_create(dialect: &zero_migrate::DialectId, table: &str, prefix: &str) -> String {
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app",
         "app_type_id_samples",
         dialect,
@@ -97,6 +98,7 @@ fn lower_add(dialect: &zero_migrate::DialectId, table: &str, prefix: &str) -> St
     }))
     .expect("TypeID add-column IR must deserialize");
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app",
         "app_type_id_samples",
         dialect,
@@ -235,6 +237,7 @@ async fn postgres_enforces_official_type_id_fixtures() {
         for (table, prefix) in [("bare", ""), ("prefixed", "prefix"), ("split", "pre_fix")] {
             let ir = type_id_ir(table, prefix);
             let migrations = IrAuthor::new(
+                zero_migrate::shipping_vendors(),
                 &schema,
                 "app_type_id_samples",
                 &zero_migrate_postgres::DIALECT,

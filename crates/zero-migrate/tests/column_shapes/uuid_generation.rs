@@ -57,6 +57,7 @@ fn sqlite_uuid_v4_default_generates_exact_rfc_9562_values() {
     let table = "uuid_v4_samples";
     let ir = uuid_v4_ir(table);
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "main",
         "app_uuid_samples",
         &zero_migrate_sqlite::DIALECT,
@@ -93,6 +94,7 @@ fn sqlite_uuid_v4_default_generates_exact_rfc_9562_values() {
 fn mysql_uuid_v4_default_uses_exact_random_bytes_expression() {
     let ir = uuid_v4_ir("uuid_v4_samples");
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app",
         "app_uuid_samples",
         &zero_migrate_mysql::DIALECT,
@@ -148,6 +150,7 @@ async fn postgres_uuid_v4_default_generates_exact_rfc_9562_values() {
     async {
         let ir = uuid_v4_ir(table);
         let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &schema,
             "app_uuid_samples",
             &zero_migrate_postgres::DIALECT,

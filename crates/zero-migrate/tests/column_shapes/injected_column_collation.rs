@@ -94,9 +94,15 @@ fn injected_ddl(
     let policy = charter(collation);
     let resolved = zero_migrate::resolve_create_table_policy(&authored_ir(table), &policy, schema)
         .expect("the charter's injection resolves");
-    let migrations = IrAuthor::new(schema, OWNER, dialect, &policy)
-        .lower(&resolved, &LiveSchema::default())
-        .expect("the resolved create lowers");
+    let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        schema,
+        OWNER,
+        dialect,
+        &policy,
+    )
+    .lower(&resolved, &LiveSchema::default())
+    .expect("the resolved create lowers");
     migrations
         .into_iter()
         .map(|migration| migration.up)
@@ -483,6 +489,7 @@ async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order() {
             zero_migrate::resolve_create_table_policy(&authored_ir("notes"), &policy, &schema)
                 .map_err(|error| format!("resolve the injected create: {error}"))?;
         let expected = zero_migrate::fold_ops(
+            zero_migrate::shipping_vendors(),
             &resolved.ops,
             &zero_migrate_postgres::DIALECT,
             &schema,
@@ -492,7 +499,8 @@ async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order() {
         let live = zero_migrate_postgres::backend::drift_sql::snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect the probe schema: {error}"))?;
-        let drift = zero_migrate::diff_snapshots(&expected, &live);
+        let drift =
+            zero_migrate::diff_snapshots(zero_migrate::shipping_vendors(), &expected, &live);
         if !drift.is_clean() {
             return Err(format!(
                 "a freshly created collated table must not drift: {drift:#?}"

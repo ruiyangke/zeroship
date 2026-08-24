@@ -592,6 +592,7 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
     // Author a destructive drop the way the differ / RawSqlAuthor would, then
     // run the analyzer seam over it.
     let drop = RawSqlAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app_acme",
         zero_migrate_postgres::DIALECT,
         support::no_inject("proj_acme"),
@@ -616,6 +617,7 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
         .contains("expand-contract"));
     // sanity: a benign additive migration gets no advisories.
     let add = zero_migrate::DeterministicAuthor::new(
+        zero_migrate::shipping_vendors(),
         "proj_acme",
         "app_acme",
         zero_migrate_postgres::DIALECT,

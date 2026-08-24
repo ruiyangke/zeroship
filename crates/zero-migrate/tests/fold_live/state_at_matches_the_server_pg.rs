@@ -266,6 +266,7 @@ async fn prefixes(
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -306,7 +307,7 @@ async fn prefixes(
             ));
         }
 
-        let engine = MigrationEngine::new();
+        let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
         let mut measured = Vec::with_capacity(resolved.ops.len() + 1);
 
         // ---------------------------------------------------------------
@@ -315,6 +316,7 @@ async fn prefixes(
         // ---------------------------------------------------------------
         for k in 0..=resolved.ops.len() {
             let expected = state_at(
+                zero_migrate::shipping_vendors(),
                 &live_at_0,
                 &resolved.ops,
                 k,
@@ -340,7 +342,7 @@ async fn prefixes(
                 }
             }
 
-            let drift = diff_snapshots(&expected, &actual);
+            let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
             measured.push(Prefix {
                 expected,
                 actual,

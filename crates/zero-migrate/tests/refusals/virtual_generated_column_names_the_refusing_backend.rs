@@ -88,6 +88,7 @@ fn descriptors(stored: bool) -> Vec<CollectionDescriptor> {
 /// The public declarative entry point, reduced to its verdict.
 fn desired(dialect: &DialectId, stored: bool) -> Result<(), String> {
     desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         &descriptors(stored),
         dialect,

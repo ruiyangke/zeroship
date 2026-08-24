@@ -74,6 +74,7 @@
 //! schema the live DB is introspected under for both uses.
 
 use std::collections::BTreeMap;
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::model::ir::{
     AlterPrimaryKeyAction, ColType, ColumnCollation, ColumnOrExpr, ColumnReference, CommentTarget,
@@ -117,12 +118,15 @@ use zero_migrate_backend::fold::CatalogFoldRefusal;
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_policy::EffectivePolicy;
 
-fn fold_policy(dialect: &DialectId) -> &'static dyn zero_migrate_backend::fold::CatalogFoldPolicy {
-    crate::render::backends::vendor(dialect).catalog_fold
+fn fold_policy(
+    vendors: VendorSet,
+    dialect: &DialectId,
+) -> &'static dyn zero_migrate_backend::fold::CatalogFoldPolicy {
+    crate::render::backends::vendor(vendors, dialect).catalog_fold
 }
 
-fn supports(dialect: &DialectId, capability: Capability) -> bool {
-    crate::render::backends::vendor(dialect)
+fn supports(vendors: VendorSet, dialect: &DialectId, capability: Capability) -> bool {
+    crate::render::backends::vendor(vendors, dialect)
         .descriptor
         .capabilities
         .contains(capability)
@@ -914,6 +918,7 @@ fn has_exact_unique_candidate(
 }
 
 fn folded_rowid_generation(
+    vendors: VendorSet,
     snap: &TableSnapshot,
     old_columns: &[String],
     column: &str,
@@ -929,7 +934,7 @@ fn folded_rowid_generation(
     else {
         return false;
     };
-    let policy = fold_policy(dialect);
+    let policy = fold_policy(vendors, dialect);
     if !policy.rowid_storage_generates(snap.stored_create_sql.as_deref(), &folded.data_type) {
         return false;
     }
@@ -942,6 +947,7 @@ fn folded_rowid_generation(
 /// cannot reserve a suffix they already occupy. This is the same accepted limit
 /// as implicit primary-key allocation elsewhere in the fold.
 fn allocate_implicit_relation_name(
+    vendors: VendorSet,
     default_name: &str,
     dialect: &DialectId,
     tables: &BTreeMap<String, TableSnapshot>,
@@ -949,7 +955,7 @@ fn allocate_implicit_relation_name(
     views: &BTreeMap<String, ViewSnapshot>,
     sequences: &BTreeMap<String, SequenceSnapshot>,
 ) -> String {
-    fold_policy(dialect).allocate_implicit_relation_name(
+    fold_policy(vendors, dialect).allocate_implicit_relation_name(
         default_name,
         tables,
         partitions,
@@ -970,6 +976,7 @@ fn allocate_implicit_relation_name(
 /// This covers relation kinds represented by `SchemaSnapshot`. It does not
 /// uniquify explicit constraint names or indexes adopted by `USING INDEX`.
 fn implicit_primary_key_name(
+    vendors: VendorSet,
     table: &str,
     dialect: &DialectId,
     tables: &BTreeMap<String, TableSnapshot>,
@@ -978,7 +985,8 @@ fn implicit_primary_key_name(
     sequences: &BTreeMap<String, SequenceSnapshot>,
 ) -> String {
     allocate_implicit_relation_name(
-        &fold_policy(dialect).implicit_primary_key_name(table),
+        vendors,
+        &fold_policy(vendors, dialect).implicit_primary_key_name(table),
         dialect,
         tables,
         partitions,
@@ -988,6 +996,7 @@ fn implicit_primary_key_name(
 }
 
 fn apply_fold_alter_primary_key(
+    vendors: VendorSet,
     table: &str,
     snap: &mut TableSnapshot,
     action: &AlterPrimaryKeyAction,
@@ -1009,22 +1018,23 @@ fn apply_fold_alter_primary_key(
     }
 
     if let Some(target) = action.target_columns() {
-        if supports(dialect, Capability::IntegerPrimaryKeyRowidAlias)
+        if supports(vendors, dialect, Capability::IntegerPrimaryKeyRowidAlias)
             && target.len() == 1
             && snap
                 .columns
                 .iter()
                 .find(|column| column.name == target[0])
                 .is_some_and(|column| {
-                    fold_policy(dialect).rowid_storage_generates(
+                    fold_policy(vendors, dialect).rowid_storage_generates(
                         snap.stored_create_sql.as_deref(),
                         &column.data_type,
                     )
                 })
-            && fold_policy(dialect).stored_table_allows_rowid(snap.stored_create_sql.as_deref())
+            && fold_policy(vendors, dialect)
+                .stored_table_allows_rowid(snap.stored_create_sql.as_deref())
         {
             return Err(FoldError::Unsupported(
-                fold_policy(dialect)
+                fold_policy(vendors, dialect)
                     .refusal_message(CatalogFoldRefusal::AlterPrimaryKeyRowidGeneration),
             ));
         }
@@ -1070,8 +1080,8 @@ fn apply_fold_alter_primary_key(
                 column: column.clone(),
             })?;
         let generated = folded.identity.is_some()
-            || (supports(dialect, Capability::IntegerPrimaryKeyRowidAlias)
-                && folded_rowid_generation(snap, old_columns, column, dialect));
+            || (supports(vendors, dialect, Capability::IntegerPrimaryKeyRowidAlias)
+                && folded_rowid_generation(vendors, snap, old_columns, column, dialect));
         if !generated {
             return Err(FoldError::InvalidPrimaryKeyIdentityTransition {
                 table: table.to_string(),
@@ -1093,10 +1103,10 @@ fn apply_fold_alter_primary_key(
                 });
             };
             let generated = folded.identity.is_some()
-                || (supports(dialect, Capability::IntegerPrimaryKeyRowidAlias)
-                    && folded_rowid_generation(snap, old_columns, column, dialect));
-            let keeps_identity_contract =
-                fold_policy(dialect).primary_key_keeps_identity(action.target_columns(), column);
+                || (supports(vendors, dialect, Capability::IntegerPrimaryKeyRowidAlias)
+                    && folded_rowid_generation(vendors, snap, old_columns, column, dialect));
+            let keeps_identity_contract = fold_policy(vendors, dialect)
+                .primary_key_keeps_identity(action.target_columns(), column);
             if generated && !keeps_identity_contract && !drop_identity_from.contains(column) {
                 return Err(FoldError::InvalidPrimaryKeyIdentityTransition {
                     table: table.to_string(),
@@ -1108,7 +1118,7 @@ fn apply_fold_alter_primary_key(
     }
 
     let reusable_candidate = action.target_columns().and_then(|target| {
-        fold_policy(dialect).reusable_primary_index(
+        fold_policy(vendors, dialect).reusable_primary_index(
             snap,
             target,
             current.as_ref().map(|(name, _)| name.as_str()),
@@ -1174,12 +1184,14 @@ fn apply_fold_alter_primary_key(
 /// # Errors
 /// See [`FoldError`] for the closed set of fail-closed conditions.
 pub fn fold_ops(
+    vendors: VendorSet,
     ops: &[Op],
     dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
     fold_ops_onto(
+        vendors,
         &SchemaSnapshot::default(),
         ops,
         dialect,
@@ -1221,6 +1233,9 @@ pub(crate) struct CatalogFold<'a> {
     /// that depend on what the base already said rather than on what the ops said.
     base: &'a SchemaSnapshot,
     dialect: &'a DialectId,
+    /// The backends this build ships, carried alongside the identity the fold
+    /// resolves against them.
+    vendors: VendorSet,
     project_schema: &'a str,
     effective: &'a EffectivePolicy,
     tables: BTreeMap<String, TableSnapshot>,
@@ -1253,6 +1268,7 @@ pub(crate) struct CatalogFold<'a> {
 impl<'a> CatalogFold<'a> {
     /// Start a fold that CONTINUES `base`.
     pub(crate) fn seed(
+        vendors: VendorSet,
         base: &'a SchemaSnapshot,
         dialect: &'a DialectId,
         project_schema: &'a str,
@@ -1261,6 +1277,7 @@ impl<'a> CatalogFold<'a> {
         Self {
             base,
             dialect,
+            vendors,
             project_schema,
             effective,
             tables: base.tables.clone(),
@@ -1299,6 +1316,7 @@ impl<'a> CatalogFold<'a> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn advance(&mut self, op: &Op) -> Result<(), FoldError> {
         let dialect = self.dialect;
+        let vendors = self.vendors;
         let project_schema = self.project_schema;
         let effective = self.effective;
         // Destructured rather than reached through `self.` so the match below is the
@@ -1328,7 +1346,7 @@ impl<'a> CatalogFold<'a> {
                 named_types
                     .create_enum(name, project_schema, values)
                     .map_err(fold_named_type_error)?;
-                if supports(dialect, Capability::MaterializedEnumType) {
+                if supports(vendors, dialect, Capability::MaterializedEnumType) {
                     named_type_snapshots.insert(
                         name.clone(),
                         NamedTypeSnapshot {
@@ -1360,7 +1378,7 @@ impl<'a> CatalogFold<'a> {
                         not_null.unwrap_or(false),
                     )
                     .map_err(fold_named_type_error)?;
-                if supports(dialect, Capability::MaterializedDomainType) {
+                if supports(vendors, dialect, Capability::MaterializedDomainType) {
                     named_type_snapshots.insert(
                         name.clone(),
                         NamedTypeSnapshot {
@@ -1441,7 +1459,7 @@ impl<'a> CatalogFold<'a> {
                 // POSTGRESQL ONLY. SQLite and MySQL have no row-level security and
                 // their introspection leaves the map empty, so seeding there would
                 // make the folded snapshot differ from the live one for every table.
-                if supports(dialect, Capability::PrivilegedCatalogObjects) {
+                if supports(vendors, dialect, Capability::PrivilegedCatalogObjects) {
                     table_rls.insert(name.clone(), false);
                 }
                 if tables.contains_key(name) {
@@ -1467,6 +1485,7 @@ impl<'a> CatalogFold<'a> {
                 let resolved_inject = ResolvedInject::for_table(effective, effective_schema, name)
                     .map_err(|error| FoldError::Render(error.to_string()))?;
                 let mut snap = build_resolved_table_snapshot(
+                    vendors,
                     effective_schema,
                     &desc,
                     dialect,
@@ -1475,13 +1494,18 @@ impl<'a> CatalogFold<'a> {
                 snap.partition_by = partition_by.clone();
                 if let Some(pk) = primary_key {
                     let primary_key_name = implicit_primary_key_name(
-                        name, dialect, tables, partitions, views, sequences,
+                        vendors, name, dialect, tables, partitions, views, sequences,
                     );
                     push_primary_key_snapshot(&mut snap, pk, &primary_key_name);
                 }
-                apply_fold_author_type_overrides_to_snapshot(name, columns, &mut snap, dialect)?;
-                apply_fold_structured_defaults_to_snapshot(name, columns, &mut snap, dialect)?;
+                apply_fold_author_type_overrides_to_snapshot(
+                    vendors, name, columns, &mut snap, dialect,
+                )?;
+                apply_fold_structured_defaults_to_snapshot(
+                    vendors, name, columns, &mut snap, dialect,
+                )?;
                 apply_fold_named_type_metadata(
+                    vendors,
                     name,
                     columns,
                     &mut snap,
@@ -1490,11 +1514,24 @@ impl<'a> CatalogFold<'a> {
                     effective_schema,
                     effective,
                 )?;
-                apply_fold_uuid_metadata(columns, &mut snap, dialect, effective_schema)?;
-                apply_fold_collation_metadata(columns, &mut snap, dialect)?;
-                apply_fold_value_format_metadata(columns, &mut snap, dialect, effective_schema)?;
-                apply_fold_id_default_metadata(columns, &mut snap, dialect, effective_schema)?;
+                apply_fold_uuid_metadata(vendors, columns, &mut snap, dialect, effective_schema)?;
+                apply_fold_collation_metadata(vendors, columns, &mut snap, dialect)?;
+                apply_fold_value_format_metadata(
+                    vendors,
+                    columns,
+                    &mut snap,
+                    dialect,
+                    effective_schema,
+                )?;
+                apply_fold_id_default_metadata(
+                    vendors,
+                    columns,
+                    &mut snap,
+                    dialect,
+                    effective_schema,
+                )?;
                 fold_create_table_specs(
+                    vendors,
                     name,
                     effective_schema,
                     &mut snap,
@@ -1645,14 +1682,15 @@ impl<'a> CatalogFold<'a> {
                             .map(|constraint| constraint.kind.clone());
                         let generated_name = match constraint_kind.as_deref() {
                             Some("PRIMARY KEY") => {
-                                let natural = fold_policy(dialect).implicit_primary_key_name(name);
+                                let natural =
+                                    fold_policy(vendors, dialect).implicit_primary_key_name(name);
                                 if crate::plan::author::cap_ident_name(&natural) != natural {
                                     return Err(FoldError::Unsupported(
                                         "detachPartition cannot derive an overlong created-partition clone name",
                                     ));
                                 }
                                 implicit_primary_key_name(
-                                    name, dialect, tables, partitions, views, sequences,
+                                    vendors, name, dialect, tables, partitions, views, sequences,
                                 )
                             }
                             Some("UNIQUE") => {
@@ -1664,7 +1702,7 @@ impl<'a> CatalogFold<'a> {
                                 }
                                 let base = derived_constraint_name(name, &index.columns, "key");
                                 allocate_implicit_relation_name(
-                                    &base, dialect, tables, partitions, views, sequences,
+                                    vendors, &base, dialect, tables, partitions, views, sequences,
                                 )
                             }
                             _ => {
@@ -1690,7 +1728,7 @@ impl<'a> CatalogFold<'a> {
                                     derived_constraint_name(name, &columns, "idx")
                                 };
                                 allocate_implicit_relation_name(
-                                    &base, dialect, tables, partitions, views, sequences,
+                                    vendors, &base, dialect, tables, partitions, views, sequences,
                                 )
                             }
                         };
@@ -1826,7 +1864,7 @@ impl<'a> CatalogFold<'a> {
                 // reason the column-rename arm follows a column - and through the same
                 // AST walk, which cannot touch a string literal.
                 crate::render::declarative::rename_table_in_generated_columns(
-                    &mut snap, table, to, dialect,
+                    vendors, &mut snap, table, to, dialect,
                 )
                 .map_err(|error| FoldError::Render(error.to_string()))?;
                 // MySQL is the one dialect where a table rename ALSO renames the
@@ -1851,7 +1889,7 @@ impl<'a> CatalogFold<'a> {
                 // so every MySQL deploy that renamed a table with a primary key drifted
                 // permanently from that moment on. Nothing could see it, because no
                 // Rust test had ever introspected a live MySQL server.
-                fold_policy(dialect).rename_primary_key_after_table_rename(&mut snap, to);
+                fold_policy(vendors, dialect).rename_primary_key_after_table_rename(&mut snap, to);
                 tables.insert(to.clone(), snap);
                 // Live PG/SQLite re-target every INCOMING FK to the renamed table by
                 // OID, so the FK `definition` in OTHER tables now reports the NEW
@@ -1894,6 +1932,7 @@ impl<'a> CatalogFold<'a> {
                 let resolved_ty = resolve_encrypted_inner_domain(ty, named_types);
                 let ty = resolved_ty.as_ref().unwrap_or(ty);
                 let (col, masked_sibling) = add_column_snapshot(
+                    vendors,
                     table,
                     column,
                     ty,
@@ -1926,6 +1965,7 @@ impl<'a> CatalogFold<'a> {
                 };
                 let mut col = col;
                 apply_fold_named_type_column_metadata(
+                    vendors,
                     table,
                     &source_col,
                     &mut col,
@@ -1934,14 +1974,22 @@ impl<'a> CatalogFold<'a> {
                     project_schema,
                     effective,
                 )?;
-                apply_fold_uuid_column_metadata(&source_col, &mut col, dialect, project_schema)?;
+                apply_fold_uuid_column_metadata(
+                    vendors,
+                    &source_col,
+                    &mut col,
+                    dialect,
+                    project_schema,
+                )?;
                 apply_fold_value_format_column_metadata(
+                    vendors,
                     &source_col,
                     &mut col,
                     dialect,
                     project_schema,
                 )?;
                 apply_fold_id_default_column_metadata(
+                    vendors,
                     &source_col,
                     &mut col,
                     dialect,
@@ -2077,7 +2125,7 @@ impl<'a> CatalogFold<'a> {
             Op::RenameColumn {
                 table, from, to, ..
             } => {
-                let schema_renderer = crate::render::backends::schema_renderer(dialect);
+                let schema_renderer = crate::render::backends::schema_renderer(vendors, dialect);
                 let snap = table_mut(tables, table)?;
                 // A pure rename keeps the column's type/nullable/default/sentinels;
                 // only the NAME changes (the IR carries `ty` for the live-rename type
@@ -2133,7 +2181,7 @@ impl<'a> CatalogFold<'a> {
                 // rules out the text substitution refused for the CHECK body and the
                 // index predicate below.
                 crate::render::declarative::rename_column_in_generated_columns(
-                    snap, table, from, to, dialect,
+                    vendors, snap, table, from, to, dialect,
                 )
                 .map_err(|error| FoldError::Render(error.to_string()))?;
                 // An inline CHECK body names the column it guards, so the rename has
@@ -2341,6 +2389,7 @@ impl<'a> CatalogFold<'a> {
                 //   - the TARGET type carries a sentinel (plain→encrypted/masked), OR
                 //   - the SOURCE column carries one (encrypted/masked→anything).
                 let (mut new_col, _sibling) = add_column_snapshot(
+                    vendors,
                     table,
                     column,
                     to_type,
@@ -2358,7 +2407,7 @@ impl<'a> CatalogFold<'a> {
                 if matches!(to_type, ColType::Enum { .. } | ColType::Domain { .. }) {
                     match to_type {
                         ColType::Enum { name, .. }
-                            if !supports(dialect, Capability::MaterializedEnumType) =>
+                            if !supports(vendors, dialect, Capability::MaterializedEnumType) =>
                         {
                             return Err(FoldError::NamedTypeUnsupported {
                                 kind: "enum",
@@ -2367,7 +2416,7 @@ impl<'a> CatalogFold<'a> {
                             });
                         }
                         ColType::Domain { name, .. }
-                            if !supports(dialect, Capability::MaterializedDomainType) =>
+                            if !supports(vendors, dialect, Capability::MaterializedDomainType) =>
                         {
                             return Err(FoldError::NamedTypeUnsupported {
                                 kind: "domain",
@@ -2393,6 +2442,7 @@ impl<'a> CatalogFold<'a> {
                                 identity: None,
                             };
                             apply_fold_named_type_column_metadata(
+                                vendors,
                                 table,
                                 &source_col,
                                 &mut new_col,
@@ -2473,7 +2523,7 @@ impl<'a> CatalogFold<'a> {
                     ));
                 }
                 let source_was_native_uuid =
-                    fold_policy(dialect).is_native_uuid_type(&col.data_type);
+                    fold_policy(vendors, dialect).is_native_uuid_type(&col.data_type);
                 col.data_type = new_col.data_type;
                 col.ddl_type_override = new_col.ddl_type_override;
                 // These are the rest of the target type carrier. The descriptor
@@ -2531,6 +2581,7 @@ impl<'a> CatalogFold<'a> {
                     // surface must therefore classify that existing default instead
                     // of copying `new_col`'s synthetic absent default.
                     col.id_default = Some(catalog_uuid_id_default(
+                        vendors,
                         col.default.as_deref(),
                         dialect,
                         None,
@@ -2582,21 +2633,24 @@ impl<'a> CatalogFold<'a> {
                     })?;
                 let rendered = match value {
                     IrDefault::Literal { .. } => {
-                        render_ir_default(value, dialect).map_err(fold_named_type_error)?
+                        render_ir_default(vendors, value, dialect).map_err(fold_named_type_error)?
                     }
                     IrDefault::Expr { .. } => {
-                        render_ir_default(value, dialect).map_err(fold_named_type_error)?
+                        render_ir_default(vendors, value, dialect).map_err(fold_named_type_error)?
                     }
-                    IrDefault::Container { kind } => {
-                        render_container_default_for_data_type(*kind, &col.data_type, dialect)
-                            .map_err(fold_named_type_error)?
-                    }
+                    IrDefault::Container { kind } => render_container_default_for_data_type(
+                        vendors,
+                        *kind,
+                        &col.data_type,
+                        dialect,
+                    )
+                    .map_err(fold_named_type_error)?,
                     IrDefault::Json { value } => {
-                        render_json_default_for_data_type(value, &col.data_type, dialect)
+                        render_json_default_for_data_type(vendors, value, &col.data_type, dialect)
                             .map_err(fold_named_type_error)?
                     }
                     IrDefault::Nextval { .. } => {
-                        render_ir_default(value, dialect).map_err(fold_named_type_error)?
+                        render_ir_default(vendors, value, dialect).map_err(fold_named_type_error)?
                     }
                 };
                 let tracks_id_default =
@@ -2625,6 +2679,7 @@ impl<'a> CatalogFold<'a> {
                     let data_type = col.data_type.trim().to_ascii_lowercase();
                     let default = if data_type == "uuid" {
                         authored_uuid_id_default(
+                            vendors,
                             Some(value),
                             col.default.as_deref(),
                             dialect,
@@ -2637,6 +2692,7 @@ impl<'a> CatalogFold<'a> {
                         || data_type.starts_with("char(")
                     {
                         authored_text_id_default(
+                            vendors,
                             Some(value),
                             col.default.as_deref(),
                             dialect,
@@ -2644,6 +2700,7 @@ impl<'a> CatalogFold<'a> {
                         )
                     } else {
                         authored_id_default(
+                            vendors,
                             Some(value),
                             col.default.as_deref(),
                             dialect,
@@ -2669,10 +2726,18 @@ impl<'a> CatalogFold<'a> {
                 }
             }
             Op::AlterPrimaryKey { table, action, .. } => {
-                let primary_key_name =
-                    implicit_primary_key_name(table, dialect, tables, partitions, views, sequences);
+                let primary_key_name = implicit_primary_key_name(
+                    vendors, table, dialect, tables, partitions, views, sequences,
+                );
                 let snap = table_mut(tables, table)?;
-                apply_fold_alter_primary_key(table, snap, action, dialect, &primary_key_name)?;
+                apply_fold_alter_primary_key(
+                    vendors,
+                    table,
+                    snap,
+                    action,
+                    dialect,
+                    &primary_key_name,
+                )?;
             }
             Op::SynchronizeIdentity { table, column, .. } => {
                 let snap = table_mut(tables, table)?;
@@ -2699,7 +2764,8 @@ impl<'a> CatalogFold<'a> {
                 // key alone (MySQL does not preserve constraint-vs-index provenance);
                 // CHECK deferred. Verify the target table FIRST (fail-closed) before
                 // stamping.
-                let folded = add_constraint_snapshot(table, project_schema, constraint, dialect)?;
+                let folded =
+                    add_constraint_snapshot(vendors, table, project_schema, constraint, dialect)?;
                 let fk_support = match &constraint.kind {
                     IrConstraintKind::Fk { columns, .. } if columns.len() > 1 => {
                         let name = folded
@@ -2757,7 +2823,11 @@ impl<'a> CatalogFold<'a> {
                 snap.constraints.retain(|c| &c.name != name);
                 let removed_constraint = snap.constraints.len() != before;
                 if !removed_constraint
-                    && !supports(dialect, Capability::UniqueConstraintDistinctFromIndex)
+                    && !supports(
+                        vendors,
+                        dialect,
+                        Capability::UniqueConstraintDistinctFromIndex,
+                    )
                 {
                     // MySQL's catalog collapses a named table UNIQUE and its backing
                     // unique index into one key object. A catalog-seeded fold therefore
@@ -2828,6 +2898,7 @@ impl<'a> CatalogFold<'a> {
                 ..
             } => {
                 let idx = create_index_snapshot(
+                    vendors,
                     table,
                     columns,
                     name.as_deref(),
@@ -3181,9 +3252,13 @@ impl<'a> CatalogFold<'a> {
             triggers,
             ..
         } = self;
-        if supports(dialect, Capability::IntegerPrimaryKeyRowidAlias) {
+        if supports(
+            self.vendors,
+            dialect,
+            Capability::IntegerPrimaryKeyRowidAlias,
+        ) {
             for snap in tables.values_mut() {
-                apply_fold_rowid_metadata(snap, dialect)?;
+                apply_fold_rowid_metadata(self.vendors, snap, dialect)?;
             }
         }
 
@@ -3205,7 +3280,7 @@ impl<'a> CatalogFold<'a> {
         // `synchronize_identity_fold_validates_target_without_changing_schema` folds a
         // PostgreSQL base under all three dialects and asserts the result is unchanged,
         // and the dialect test alone failed it on `None` against `Some({})`.
-        let speaks = supports(dialect, Capability::PrivilegedCatalogObjects)
+        let speaks = supports(self.vendors, dialect, Capability::PrivilegedCatalogObjects)
             || base.vendor_objects.is_some();
         let vendor_objects = speaks.then(|| VendorObjectIdentities {
             // The body comes from the SAME `functions` map the rollback history uses, so
@@ -3225,7 +3300,7 @@ impl<'a> CatalogFold<'a> {
                 .collect(),
         });
 
-        finalize_physical_types(&mut tables, base, dialect);
+        finalize_physical_types(self.vendors, &mut tables, base, dialect);
 
         Ok(SchemaSnapshot {
             tables,
@@ -3263,13 +3338,14 @@ impl<'a> CatalogFold<'a> {
 /// # Errors
 /// See [`FoldError`] for incoherent transitions relative to `base`.
 pub fn fold_ops_onto(
+    vendors: VendorSet,
     base: &SchemaSnapshot,
     ops: &[Op],
     dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
-    let mut state = CatalogFold::seed(base, dialect, project_schema, effective);
+    let mut state = CatalogFold::seed(vendors, base, dialect, project_schema, effective);
     for op in flatten_dialectal_ops(ops, dialect)? {
         state.advance(op)?;
     }
@@ -3341,12 +3417,13 @@ pub fn fold_ops_onto(
 /// that function says "would report a difference that says nothing about the
 /// database".
 fn finalize_physical_types(
+    vendors: VendorSet,
     tables: &mut BTreeMap<String, TableSnapshot>,
     base: &SchemaSnapshot,
     dialect: &DialectId,
 ) {
-    let policy = fold_policy(dialect);
-    let schema_renderer = crate::render::backends::schema_renderer(dialect);
+    let policy = fold_policy(vendors, dialect);
+    let schema_renderer = crate::render::backends::schema_renderer(vendors, dialect);
     for (name, table) in tables.iter_mut() {
         let base_table = base.tables.get(name);
         for column in &mut table.columns {
@@ -3367,6 +3444,7 @@ fn finalize_physical_types(
 }
 
 fn apply_fold_rowid_metadata(
+    vendors: VendorSet,
     snap: &mut TableSnapshot,
     dialect: &DialectId,
 ) -> Result<(), FoldError> {
@@ -3389,17 +3467,22 @@ fn apply_fold_rowid_metadata(
             column: column_name.clone(),
         });
     };
-    let storage_generates = fold_policy(dialect).rowid_storage_generates(
+    let storage_generates = fold_policy(vendors, dialect).rowid_storage_generates(
         snap.stored_create_sql.as_deref(),
         &snap.columns[column_index].data_type,
     ) || matches!(snap.columns[column_index].identity, Some(identity) if !identity.always);
-    let stored_shape_allows_rowid = fold_policy(dialect)
+    let stored_shape_allows_rowid = fold_policy(vendors, dialect)
         .stored_primary_key_allows_rowid(snap.stored_create_sql.as_deref(), column_name);
     let rowid_alias = storage_generates && stored_shape_allows_rowid;
     let column = &mut snap.columns[column_index];
     column.rowid_alias = rowid_alias;
     if column.rowid_alias {
-        column.id_default = Some(catalog_id_default(column.default.as_deref(), dialect, None));
+        column.id_default = Some(catalog_id_default(
+            vendors,
+            column.default.as_deref(),
+            dialect,
+            None,
+        ));
     }
     Ok(())
 }
@@ -3527,6 +3610,7 @@ fn create_table_descriptor(
 /// returns `(main, None)`.
 #[allow(clippy::too_many_arguments)]
 fn add_column_snapshot(
+    vendors: VendorSet,
     table: &str,
     column: &str,
     ty: &ColType,
@@ -3541,9 +3625,9 @@ fn add_column_snapshot(
     dialect: &DialectId,
     effective: &EffectivePolicy,
 ) -> Result<(ColumnSnapshot, Option<ColumnSnapshot>), FoldError> {
-    if !supports(dialect, Capability::NonPkIdentity) && identity.is_some() {
+    if !supports(vendors, dialect, Capability::NonPkIdentity) && identity.is_some() {
         return Err(FoldError::Unsupported(
-            fold_policy(dialect).refusal_message(CatalogFoldRefusal::AddColumnIdentity),
+            fold_policy(vendors, dialect).refusal_message(CatalogFoldRefusal::AddColumnIdentity),
         ));
     }
     let field = ir_column_to_field(&IrColumn {
@@ -3573,7 +3657,8 @@ fn add_column_snapshot(
     };
     let resolved_inject = ResolvedInject::for_table(effective, project_schema, table)
         .map_err(|error| FoldError::Render(error.to_string()))?;
-    let snap = build_resolved_table_snapshot(project_schema, &desc, dialect, &resolved_inject)?;
+    let snap =
+        build_resolved_table_snapshot(vendors, project_schema, &desc, dialect, &resolved_inject)?;
     let sibling_name = format!("{column}_masked");
     let mut main = snap
         .columns
@@ -3581,20 +3666,23 @@ fn add_column_snapshot(
         .find(|c| c.name == column)
         .cloned()
         .ok_or(FoldError::Unsupported("addColumn (column folded away)"))?;
-    apply_fold_author_type_override_to_column(table, column, ty, &mut main, dialect)?;
-    apply_fold_structured_default_to_column(table, column, ty, default, &mut main, dialect)?;
+    apply_fold_author_type_override_to_column(vendors, table, column, ty, &mut main, dialect)?;
+    apply_fold_structured_default_to_column(
+        vendors, table, column, ty, default, &mut main, dialect,
+    )?;
     let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
     Ok((main, sibling))
 }
 
 fn apply_fold_author_type_overrides_to_snapshot(
+    vendors: VendorSet,
     table: &str,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: &DialectId,
 ) -> Result<(), FoldError> {
     for source in columns {
-        if author_type_override(&source.ty, dialect).is_none() {
+        if author_type_override(vendors, &source.ty, dialect).is_none() {
             continue;
         }
         let col = snap
@@ -3605,19 +3693,27 @@ fn apply_fold_author_type_overrides_to_snapshot(
                 table: table.to_string(),
                 column: source.name.clone(),
             })?;
-        apply_fold_author_type_override_to_column(table, &source.name, &source.ty, col, dialect)?;
+        apply_fold_author_type_override_to_column(
+            vendors,
+            table,
+            &source.name,
+            &source.ty,
+            col,
+            dialect,
+        )?;
     }
     Ok(())
 }
 
 fn apply_fold_author_type_override_to_column(
+    vendors: VendorSet,
     table: &str,
     column: &str,
     ty: &ColType,
     col: &mut ColumnSnapshot,
     dialect: &DialectId,
 ) -> Result<(), FoldError> {
-    let Some(type_override) = author_type_override(ty, dialect) else {
+    let Some(type_override) = author_type_override(vendors, ty, dialect) else {
         return Ok(());
     };
     if col.name != column {
@@ -3638,6 +3734,7 @@ fn apply_fold_author_type_override_to_column(
 }
 
 fn apply_fold_structured_defaults_to_snapshot(
+    vendors: VendorSet,
     table: &str,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
@@ -3665,6 +3762,7 @@ fn apply_fold_structured_defaults_to_snapshot(
                 column: source.name.clone(),
             })?;
         apply_fold_structured_default_to_column(
+            vendors,
             table,
             &source.name,
             &source.ty,
@@ -3677,6 +3775,7 @@ fn apply_fold_structured_defaults_to_snapshot(
 }
 
 fn apply_fold_structured_default_to_column(
+    vendors: VendorSet,
     table: &str,
     column: &str,
     ty: &ColType,
@@ -3702,12 +3801,14 @@ fn apply_fold_structured_default_to_column(
             column: column.to_string(),
         });
     }
-    col.default =
-        Some(render_ir_default_for_type(default, ty, dialect).map_err(fold_named_type_error)?);
+    col.default = Some(
+        render_ir_default_for_type(vendors, default, ty, dialect).map_err(fold_named_type_error)?,
+    );
     Ok(())
 }
 
 fn apply_fold_named_type_metadata(
+    vendors: VendorSet,
     table: &str,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
@@ -3726,6 +3827,7 @@ fn apply_fold_named_type_metadata(
             .find(|c| c.name == source.name)
             .ok_or(FoldError::Unsupported("named type column folded away"))?;
         apply_fold_named_type_column_metadata(
+            vendors,
             table,
             source,
             col,
@@ -3750,6 +3852,7 @@ fn apply_fold_named_type_metadata(
 /// bytewise identity, so a retype that re-derives the field from the target type
 /// still clears whichever of them put it there.
 fn apply_fold_collation_metadata(
+    vendors: VendorSet,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: &DialectId,
@@ -3765,9 +3868,10 @@ fn apply_fold_collation_metadata(
             .ok_or(FoldError::Unsupported("collated column folded away"))?;
         // The type spelling the renderer would have used, so the override REPLACES
         // that decision rather than guessing beside it.
-        let rendered = crate::render::backends::schema_renderer(dialect).column_type(col, false);
+        let rendered =
+            crate::render::backends::schema_renderer(vendors, dialect).column_type(col, false);
         let (ddl_type, collation) =
-            crate::render::value_format::bytewise_column_metadata(&rendered, dialect);
+            crate::render::value_format::bytewise_column_metadata(vendors, &rendered, dialect);
         col.ddl_type_override = Some(ddl_type);
         col.collation = collation;
     }
@@ -3775,6 +3879,7 @@ fn apply_fold_collation_metadata(
 }
 
 fn apply_fold_value_format_metadata(
+    vendors: VendorSet,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: &DialectId,
@@ -3789,12 +3894,13 @@ fn apply_fold_value_format_metadata(
             .iter_mut()
             .find(|col| col.name == source.name)
             .ok_or(FoldError::Unsupported("value-format column folded away"))?;
-        apply_fold_value_format_column_metadata(source, col, dialect, project_schema)?;
+        apply_fold_value_format_column_metadata(vendors, source, col, dialect, project_schema)?;
     }
     Ok(())
 }
 
 fn apply_fold_id_default_metadata(
+    vendors: VendorSet,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: &DialectId,
@@ -3804,12 +3910,13 @@ fn apply_fold_id_default_metadata(
         let Some(col) = snap.columns.iter_mut().find(|col| col.name == source.name) else {
             return Err(FoldError::Unsupported("ID-default column folded away"));
         };
-        apply_fold_id_default_column_metadata(source, col, dialect, project_schema);
+        apply_fold_id_default_column_metadata(vendors, source, col, dialect, project_schema);
     }
     Ok(())
 }
 
 fn apply_fold_id_default_column_metadata(
+    vendors: VendorSet,
     source: &IrColumn,
     col: &mut ColumnSnapshot,
     dialect: &DialectId,
@@ -3817,6 +3924,7 @@ fn apply_fold_id_default_column_metadata(
 ) {
     if source.identity.is_some() || matches!(source.default, Some(IrDefault::Nextval { .. })) {
         col.id_default = Some(authored_id_default(
+            vendors,
             source.default.as_ref(),
             col.default.as_deref(),
             dialect,
@@ -3826,6 +3934,7 @@ fn apply_fold_id_default_column_metadata(
 }
 
 fn apply_fold_uuid_metadata(
+    vendors: VendorSet,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: &DialectId,
@@ -3840,12 +3949,13 @@ fn apply_fold_uuid_metadata(
             .iter_mut()
             .find(|col| col.name == source.name)
             .ok_or(FoldError::Unsupported("UUID column folded away"))?;
-        apply_fold_uuid_column_metadata(source, col, dialect, project_schema)?;
+        apply_fold_uuid_column_metadata(vendors, source, col, dialect, project_schema)?;
     }
     Ok(())
 }
 
 fn apply_fold_uuid_column_metadata(
+    vendors: VendorSet,
     source: &IrColumn,
     col: &mut ColumnSnapshot,
     dialect: &DialectId,
@@ -3855,12 +3965,13 @@ fn apply_fold_uuid_column_metadata(
         return Ok(());
     }
     col.id_default = Some(authored_uuid_id_default(
+        vendors,
         source.default.as_ref(),
         col.default.as_deref(),
         dialect,
         Some(project_schema),
     ));
-    let Some(metadata) = uuid_column_metadata(&source.name, dialect)
+    let Some(metadata) = uuid_column_metadata(vendors, &source.name, dialect)
         .map_err(|error| FoldError::Shape(DeclarativeError::Invalid(error)))?
     else {
         return Ok(());
@@ -3874,6 +3985,7 @@ fn apply_fold_uuid_column_metadata(
 }
 
 fn apply_fold_value_format_column_metadata(
+    vendors: VendorSet,
     source: &IrColumn,
     col: &mut ColumnSnapshot,
     dialect: &DialectId,
@@ -3882,11 +3994,12 @@ fn apply_fold_value_format_column_metadata(
     let Some(value_format) = &source.value_format else {
         return Ok(());
     };
-    let metadata = value_format_column_metadata(&source.name, value_format, dialect)
+    let metadata = value_format_column_metadata(vendors, &source.name, value_format, dialect)
         .map_err(|error| FoldError::Shape(DeclarativeError::Invalid(error)))?;
     col.collation = metadata.collation;
     col.ddl_type_override = Some(metadata.ddl_type);
     col.id_default = Some(authored_text_id_default(
+        vendors,
         source.default.as_ref(),
         col.default.as_deref(),
         dialect,
@@ -3900,6 +4013,7 @@ fn apply_fold_value_format_column_metadata(
 }
 
 fn apply_fold_named_type_column_metadata(
+    vendors: VendorSet,
     table: &str,
     source: &IrColumn,
     col: &mut ColumnSnapshot,
@@ -3911,7 +4025,7 @@ fn apply_fold_named_type_column_metadata(
     match &source.ty {
         ColType::Enum { name, .. } => {
             let registry_schema = named_types.enum_schema_or(name, project_schema);
-            if let Some((data_type, ddl_type)) = fold_policy(dialect)
+            if let Some((data_type, ddl_type)) = fold_policy(vendors, dialect)
                 .materialized_named_type_metadata(&source.ty, registry_schema)
                 .map_err(fold_named_type_error)?
             {
@@ -3920,7 +4034,7 @@ fn apply_fold_named_type_column_metadata(
                 return Ok(());
             }
             let def = named_types.enum_def(name).map_err(fold_named_type_error)?;
-            if let Some(check) = fold_policy(dialect)
+            if let Some(check) = fold_policy(vendors, dialect)
                 .inline_enum_check(&source.name, &def.values)
                 .map_err(fold_named_type_error)?
             {
@@ -3928,7 +4042,7 @@ fn apply_fold_named_type_column_metadata(
                 col.inline_checks.push(check);
                 return Ok(());
             }
-            if let Some(ty) = fold_policy(dialect).inline_enum_type(&def.values) {
+            if let Some(ty) = fold_policy(vendors, dialect).inline_enum_type(&def.values) {
                 col.data_type = ty.clone();
                 col.ddl_type_override = Some(ty);
                 return Ok(());
@@ -3938,9 +4052,9 @@ fn apply_fold_named_type_column_metadata(
             ));
         }
         ColType::Domain { name, .. } => {
-            if supports(dialect, Capability::MaterializedDomainType) {
+            if supports(vendors, dialect, Capability::MaterializedDomainType) {
                 let registry_schema = named_types.domain_schema_or(name, project_schema);
-                let (data_type, ddl_type) = fold_policy(dialect)
+                let (data_type, ddl_type) = fold_policy(vendors, dialect)
                     .materialized_named_type_metadata(&source.ty, registry_schema)
                     .map_err(fold_named_type_error)?
                     .ok_or(FoldError::Unsupported(
@@ -3961,6 +4075,7 @@ fn apply_fold_named_type_column_metadata(
                 });
             }
             let (base, _sibling) = add_column_snapshot(
+                vendors,
                 table,
                 &source.name,
                 &def.as_type,
@@ -3986,7 +4101,7 @@ fn apply_fold_named_type_column_metadata(
             if col.default.is_none() {
                 if let Some(default) = &def.default {
                     col.default = Some(
-                        render_ir_default_for_type(default, &def.as_type, dialect)
+                        render_ir_default_for_type(vendors, default, &def.as_type, dialect)
                             .map_err(fold_named_type_error)?,
                     );
                 }
@@ -3995,10 +4110,10 @@ fn apply_fold_named_type_column_metadata(
                 let value_sql = zero_migrate_backend::dml::quote_ident_for_backend(
                     "column",
                     &source.name,
-                    crate::render::backends::renderer(dialect),
+                    crate::render::backends::renderer(vendors, dialect),
                 )
                 .map_err(|e| FoldError::NamedTypeRender(e.to_string()))?;
-                let expr = render_domain_check(check, dialect, &value_sql)
+                let expr = render_domain_check(vendors, check, dialect, &value_sql)
                     .map_err(fold_named_type_error)?;
                 col.inline_checks.push(format!("CHECK ({expr})"));
             }
@@ -4051,6 +4166,7 @@ fn apply_fold_named_type_column_metadata(
 /// internally consistent, so the fold agrees with apply"). So the fold mirrors the
 /// lower's refusals exactly.
 fn fold_create_table_specs(
+    vendors: VendorSet,
     table: &str,
     project_schema: &str,
     snap: &mut TableSnapshot,
@@ -4062,9 +4178,9 @@ fn fold_create_table_specs(
     for c in constraints {
         match &c.kind {
             IrConstraintKind::Check { expr, .. } => {
-                if !fold_policy(dialect).folds_check_constraint_identity() {
+                if !fold_policy(vendors, dialect).folds_check_constraint_identity() {
                     return Err(FoldError::Unsupported(
-                        fold_policy(dialect)
+                        fold_policy(vendors, dialect)
                             .refusal_message(CatalogFoldRefusal::CreateTableCheckConstraint),
                     ));
                 }
@@ -4072,12 +4188,12 @@ fn fold_create_table_specs(
                     || derived_check_constraint_name(table, expr),
                     str::to_string,
                 );
-                let rendered = crate::render::dml::render_expr_inline(expr, dialect)
+                let rendered = crate::render::dml::render_expr_inline(vendors, expr, dialect)
                     .map_err(|e| FoldError::Render(e.to_string()))?;
                 // Record the columns the CHECK reads structurally, from the same
                 // AST the render above walked, so the `DropColumn` cascade never
                 // has to guess them back out of the rendered text.
-                let cascade_columns = crate::render::dml::expr_column_refs(expr, dialect)
+                let cascade_columns = crate::render::dml::expr_column_refs(vendors, expr, dialect)
                     .map_err(|e| FoldError::Render(e.to_string()))?;
                 push_folded_constraint(
                     table,
@@ -4104,7 +4220,7 @@ fn fold_create_table_specs(
                 initially_deferred,
                 not_valid: _,
             } => {
-                if !supports(dialect, Capability::TableLevelForeignKey) {
+                if !supports(vendors, dialect, Capability::TableLevelForeignKey) {
                     return Err(FoldError::Unsupported(
                         "createTable table-level FOREIGN KEY is unsupported by this dialect",
                     ));
@@ -4115,6 +4231,7 @@ fn fold_create_table_specs(
                     ));
                 }
                 let fk = ir_fk_constraint_snapshot_for_columns(
+                    vendors,
                     project_schema,
                     table,
                     c.name.as_deref(),
@@ -4144,9 +4261,9 @@ fn fold_create_table_specs(
                 )?;
             }
             IrConstraintKind::Unique { columns } => {
-                if !supports(dialect, Capability::TableLevelUnique) {
+                if !supports(vendors, dialect, Capability::TableLevelUnique) {
                     return Err(FoldError::Unsupported(
-                        fold_policy(dialect)
+                        fold_policy(vendors, dialect)
                             .refusal_message(CatalogFoldRefusal::CreateTableUniqueConstraint),
                     ));
                 }
@@ -4154,12 +4271,16 @@ fn fold_create_table_specs(
                     || derived_constraint_name(table, columns, "key"),
                     str::to_string,
                 );
-                push_folded_constraint(table, snap, unique_constraint(&name, columns, dialect))?;
+                push_folded_constraint(
+                    table,
+                    snap,
+                    unique_constraint(vendors, &name, columns, dialect),
+                )?;
             }
             IrConstraintKind::Exclusion { elements, .. } => {
-                if !supports(dialect, Capability::ExclusionConstraint) {
+                if !supports(vendors, dialect, Capability::ExclusionConstraint) {
                     return Err(FoldError::Unsupported(
-                        fold_policy(dialect)
+                        fold_policy(vendors, dialect)
                             .refusal_message(CatalogFoldRefusal::CreateTableExclusionConstraint),
                     ));
                 }
@@ -4167,7 +4288,8 @@ fn fold_create_table_specs(
                     || derived_exclusion_constraint_name(table, elements),
                     str::to_string,
                 );
-                render_exclusion_constraint_body(&c.kind, dialect).map_err(fold_lower_error)?;
+                render_exclusion_constraint_body(vendors, &c.kind, dialect)
+                    .map_err(fold_lower_error)?;
                 push_folded_constraint(
                     table,
                     snap,
@@ -4194,12 +4316,14 @@ fn fold_create_table_specs(
     }
     for ix in indexes {
         let access = ix.using.map_or("btree", index_method_access);
-        if !supports(dialect, Capability::NonBtreeIndexMethod) && access != "btree" {
+        if !supports(vendors, dialect, Capability::NonBtreeIndexMethod) && access != "btree" {
             return Err(FoldError::Unsupported(
-                fold_policy(dialect).refusal_message(CatalogFoldRefusal::CreateTableNonBtreeIndex),
+                fold_policy(vendors, dialect)
+                    .refusal_message(CatalogFoldRefusal::CreateTableNonBtreeIndex),
             ));
         }
         let mut snap_idx = create_index_snapshot(
+            vendors,
             table,
             &ix.columns,
             ix.name.as_deref(),
@@ -4475,16 +4599,24 @@ fn rename_definition_column_group(
 /// `STATISTICS`/`SHOW INDEX` object, so its authoritative snapshot retains only the
 /// ordered unique index. Keeping a synthetic MySQL constraint here would make a
 /// clean apply report that constraint as missing on every re-introspection.
-fn unique_constraint(name: &str, columns: &[String], dialect: &DialectId) -> FoldedConstraint {
+fn unique_constraint(
+    vendors: VendorSet,
+    name: &str,
+    columns: &[String],
+    dialect: &DialectId,
+) -> FoldedConstraint {
     FoldedConstraint {
-        constraint: supports(dialect, Capability::UniqueConstraintDistinctFromIndex).then(|| {
-            ConstraintSnapshot {
-                name: name.to_string(),
-                kind: "UNIQUE".to_string(),
-                definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
-                comment: None,
-                cascade_columns: None,
-            }
+        constraint: supports(
+            vendors,
+            dialect,
+            Capability::UniqueConstraintDistinctFromIndex,
+        )
+        .then(|| ConstraintSnapshot {
+            name: name.to_string(),
+            kind: "UNIQUE".to_string(),
+            definition: format!("UNIQUE ({})", constraintdef_cols(columns)),
+            comment: None,
+            cascade_columns: None,
         }),
         index: Some(IndexSnapshot::btree(
             name.to_string(),
@@ -4498,6 +4630,7 @@ fn unique_constraint(name: &str, columns: &[String], dialect: &DialectId) -> Fol
 /// shared `ir_fk_*` (no index); UNIQUE uses the dialect-canonical key shape from
 /// [`unique_constraint`]; CHECK is deferred.
 fn add_constraint_snapshot(
+    vendors: VendorSet,
     table: &str,
     project_schema: &str,
     constraint: &IrConstraint,
@@ -4528,6 +4661,7 @@ fn add_constraint_snapshot(
             }
             Ok(FoldedConstraint {
                 constraint: Some(ir_fk_constraint_snapshot_for_columns(
+                    vendors,
                     project_schema,
                     table,
                     name,
@@ -4549,22 +4683,23 @@ fn add_constraint_snapshot(
                 || derived_constraint_name(table, columns, "key"),
                 str::to_string,
             );
-            Ok(unique_constraint(&cname, columns, dialect))
+            Ok(unique_constraint(vendors, &cname, columns, dialect))
         }
         IrConstraintKind::Check { expr, .. } => {
-            if !fold_policy(dialect).folds_check_constraint_identity() {
+            if !fold_policy(vendors, dialect).folds_check_constraint_identity() {
                 return Err(FoldError::Unsupported(
-                    fold_policy(dialect).refusal_message(CatalogFoldRefusal::AddCheckConstraint),
+                    fold_policy(vendors, dialect)
+                        .refusal_message(CatalogFoldRefusal::AddCheckConstraint),
                 ));
             }
             let cname = name.map_or_else(
                 || derived_check_constraint_name(table, expr),
                 str::to_string,
             );
-            let rendered = crate::render::dml::render_expr_inline(expr, dialect)
+            let rendered = crate::render::dml::render_expr_inline(vendors, expr, dialect)
                 .map_err(|e| FoldError::Render(e.to_string()))?;
             // Same structural provenance as the table-level CHECK above.
-            let cascade_columns = crate::render::dml::expr_column_refs(expr, dialect)
+            let cascade_columns = crate::render::dml::expr_column_refs(vendors, expr, dialect)
                 .map_err(|e| FoldError::Render(e.to_string()))?;
             Ok(FoldedConstraint {
                 constraint: Some(ConstraintSnapshot {
@@ -4578,9 +4713,9 @@ fn add_constraint_snapshot(
             })
         }
         IrConstraintKind::Exclusion { elements, .. } => {
-            if !supports(dialect, Capability::ExclusionConstraint) {
+            if !supports(vendors, dialect, Capability::ExclusionConstraint) {
                 return Err(FoldError::Unsupported(
-                    fold_policy(dialect)
+                    fold_policy(vendors, dialect)
                         .refusal_message(CatalogFoldRefusal::AddExclusionConstraint),
                 ));
             }
@@ -4588,7 +4723,7 @@ fn add_constraint_snapshot(
                 || derived_exclusion_constraint_name(table, elements),
                 str::to_string,
             );
-            render_exclusion_constraint_body(&constraint.kind, dialect)
+            render_exclusion_constraint_body(vendors, &constraint.kind, dialect)
                 .map_err(fold_lower_error)?;
             Ok(FoldedConstraint {
                 constraint: Some(ConstraintSnapshot {
@@ -5736,6 +5871,7 @@ mod tests {
 
     fn fold(ops: &[Op]) -> Result<SchemaSnapshot, FoldError> {
         fold_ops(
+            crate::test_fixtures::VENDORS,
             ops,
             &POSTGRES,
             SCHEMA,
@@ -5757,7 +5893,13 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        validate_ir_scoped(&ir, dialect, Some(&SchemaScope::Unconfined)).unwrap_err()
+        validate_ir_scoped(
+            crate::test_fixtures::VENDORS,
+            &ir,
+            dialect,
+            Some(&SchemaScope::Unconfined),
+        )
+        .unwrap_err()
     }
 
     fn assert_validate_ops_ok(ops: Vec<Op>, dialect: &DialectId) {
@@ -5774,7 +5916,13 @@ mod tests {
             preconditions: Vec::new(),
             checksum: None,
         };
-        validate_ir_scoped(&ir, dialect, Some(&SchemaScope::Unconfined)).expect("ops validate");
+        validate_ir_scoped(
+            crate::test_fixtures::VENDORS,
+            &ir,
+            dialect,
+            Some(&SchemaScope::Unconfined),
+        )
+        .expect("ops validate");
     }
 
     fn col(name: &str, ty: ColType, nullable: bool) -> IrColumn {
@@ -5865,6 +6013,7 @@ mod tests {
             existence_guard: None,
         };
         let snap = fold_ops(
+            crate::test_fixtures::VENDORS,
             &[op],
             &POSTGRES,
             SCHEMA,
@@ -5921,6 +6070,7 @@ mod tests {
         };
 
         let snap = fold_ops(
+            crate::test_fixtures::VENDORS,
             &[create_with_id, create_then_add, add_id],
             &POSTGRES,
             SCHEMA,
@@ -5982,8 +6132,14 @@ columns = [
         let resolved = resolve_create_table_policy(&raw, &effective, SCHEMA)
             .expect("the explicit schema selects the scoped inject");
 
-        let snapshot = fold_ops(&resolved.ops, &POSTGRES, SCHEMA, &effective)
-            .expect("fold uses the create op's explicit schema");
+        let snapshot = fold_ops(
+            crate::test_fixtures::VENDORS,
+            &resolved.ops,
+            &POSTGRES,
+            SCHEMA,
+            &effective,
+        )
+        .expect("fold uses the create op's explicit schema");
         assert_eq!(
             snapshot.tables["events"]
                 .columns
@@ -6028,6 +6184,7 @@ columns = [
         ];
 
         let projected = fold_ops_onto(
+            crate::test_fixtures::VENDORS,
             &base,
             &tail,
             &POSTGRES,
@@ -6066,6 +6223,7 @@ columns = [
                 },
             ];
             let snapshot = fold_ops(
+                crate::test_fixtures::VENDORS,
                 &ops,
                 dialect,
                 SCHEMA,
@@ -6091,6 +6249,7 @@ columns = [
         });
         let decimal = "12345678901234567890123456";
         let mysql = fold_ops(
+            crate::test_fixtures::VENDORS,
             &[
                 create("type_keys", vec![type_id]),
                 Op::SetColumnDefault {
@@ -6132,6 +6291,7 @@ columns = [
 
         for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             let projected = fold_ops_onto(
+                crate::test_fixtures::VENDORS,
                 &base,
                 std::slice::from_ref(&synchronize),
                 dialect,
@@ -6153,6 +6313,7 @@ columns = [
         };
         assert!(matches!(
             fold_ops_onto(
+                crate::test_fixtures::VENDORS,
                 &base,
                 &[missing],
                 &POSTGRES,
@@ -6166,6 +6327,7 @@ columns = [
     #[test]
     fn fold_retains_fixed_decimal_storage_for_mysql_and_sqlite_replay() {
         let snap = fold_ops(
+            crate::test_fixtures::VENDORS,
             &[create(
                 "ledger",
                 vec![col(
@@ -6191,6 +6353,7 @@ columns = [
         assert_eq!(amount.ddl_type_override.as_deref(), Some("DECIMAL(30, 10)"));
 
         let sqlite = fold_ops(
+            crate::test_fixtures::VENDORS,
             &[create(
                 "ledger",
                 vec![col(
@@ -7851,6 +8014,7 @@ columns = [
     #[test]
     fn alter_primary_key_fold_matches_dialect_identity_and_candidate_adoption() {
         let pg_composite = fold_ops(
+            crate::test_fixtures::VENDORS,
             &[
                 lifecycle_table(Some(&["id"]), true),
                 create_index(
@@ -7900,6 +8064,7 @@ columns = [
             },
         ];
         let sqlite = fold_ops(
+            crate::test_fixtures::VENDORS,
             &sqlite_ops,
             &SQLITE,
             SCHEMA,
@@ -7924,6 +8089,7 @@ columns = [
         *drop_identity_from = None;
         assert!(matches!(
             fold_ops(
+                crate::test_fixtures::VENDORS,
                 &missing_drop,
                 &SQLITE,
                 SCHEMA,
@@ -8292,6 +8458,7 @@ columns = [
             create_index("a", Some("a_y_idx"), &["y"], false),
         ];
         let snap = fold_ops(
+            crate::test_fixtures::VENDORS,
             &ops,
             &POSTGRES,
             SCHEMA,
@@ -8457,6 +8624,7 @@ columns = [
         ];
         assert_validate_ops_ok(ops.clone(), &SQLITE);
         let sqlite = fold_ops(
+            crate::test_fixtures::VENDORS,
             &ops,
             &SQLITE,
             SCHEMA,
@@ -8566,6 +8734,7 @@ columns = [
             runtime_options: Default::default(),
         };
         build_table_snapshot(
+            crate::test_fixtures::VENDORS,
             SCHEMA,
             &desc,
             &POSTGRES,
@@ -8809,7 +8978,14 @@ columns = [
         schema: &str,
         effective: &EffectivePolicy,
     ) -> Result<std::collections::BTreeMap<String, serde_json::Value>, FoldError> {
-        Ok(single_fold::fold(ops, dialect, schema, effective)?.project_field_defs())
+        Ok(single_fold::fold(
+            crate::test_fixtures::VENDORS,
+            ops,
+            dialect,
+            schema,
+            effective,
+        )?
+        .project_field_defs())
     }
 
     fn defs(ops: &[Op]) -> std::collections::BTreeMap<String, serde_json::Value> {
@@ -9302,8 +9478,14 @@ indexes = [
                 ..Default::default()
             }],
         );
-        let declarative = build_table_snapshot(SCHEMA, &authored, &POSTGRES, &effective)
-            .expect("declarative snapshot builds from the custom policy");
+        let declarative = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            SCHEMA,
+            &authored,
+            &POSTGRES,
+            &effective,
+        )
+        .expect("declarative snapshot builds from the custom policy");
 
         let resolved_ops =
             descriptors_to_create_ops(std::slice::from_ref(&authored), SCHEMA, &effective)
@@ -9330,8 +9512,14 @@ indexes = [
         );
         assert_eq!(indexes, inject.indexes());
 
-        let folded = fold_ops(&resolved_ops, &POSTGRES, SCHEMA, &effective)
-            .expect("resolved migration folds under the same custom policy");
+        let folded = fold_ops(
+            crate::test_fixtures::VENDORS,
+            &resolved_ops,
+            &POSTGRES,
+            SCHEMA,
+            &effective,
+        )
+        .expect("resolved migration folds under the same custom policy");
         let migration = &folded.tables["entries"];
         assert_eq!(
             format!("{migration:#?}"),
@@ -9379,8 +9567,14 @@ indexes = [
             ],
         );
 
-        let declarative = build_table_snapshot(SCHEMA, &authored, &POSTGRES, &effective)
-            .expect("no-inject declarative snapshot builds");
+        let declarative = build_table_snapshot(
+            crate::test_fixtures::VENDORS,
+            SCHEMA,
+            &authored,
+            &POSTGRES,
+            &effective,
+        )
+        .expect("no-inject declarative snapshot builds");
         assert_eq!(
             declarative
                 .columns
@@ -9401,8 +9595,14 @@ indexes = [
         let resolved_ops =
             descriptors_to_create_ops(std::slice::from_ref(&authored), SCHEMA, &effective)
                 .expect("no-inject migration producer preserves author shape");
-        let folded = fold_ops(&resolved_ops, &POSTGRES, SCHEMA, &effective)
-            .expect("no-inject resolved migration folds");
+        let folded = fold_ops(
+            crate::test_fixtures::VENDORS,
+            &resolved_ops,
+            &POSTGRES,
+            SCHEMA,
+            &effective,
+        )
+        .expect("no-inject resolved migration folds");
         assert_eq!(
             format!("{:#?}", folded.tables["events"]),
             format!("{declarative:#?}"),
@@ -9438,8 +9638,14 @@ indexes = [
         );
 
         for (kind, authored) in [("legacy prefix", prefixed_id), ("identity", identity_id)] {
-            let declarative_error = build_table_snapshot(SCHEMA, &authored, &POSTGRES, &effective)
-                .expect_err("an ordinary injected `id` must reject author collision");
+            let declarative_error = build_table_snapshot(
+                crate::test_fixtures::VENDORS,
+                SCHEMA,
+                &authored,
+                &POSTGRES,
+                &effective,
+            )
+            .expect_err("an ordinary injected `id` must reject author collision");
             assert!(
                 declarative_error
                     .to_string()
@@ -9819,6 +10025,7 @@ columns = [
 
         // End-to-end: the author indexes appear in the emitted v1 schema.runtime.json.
         let artifacts = crate::render_artifacts_from_descriptors(
+            crate::test_fixtures::VENDORS,
             &[d],
             &POSTGRES,
             SCHEMA,

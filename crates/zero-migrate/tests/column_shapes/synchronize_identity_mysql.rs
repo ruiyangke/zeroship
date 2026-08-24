@@ -148,9 +148,15 @@ fn step(database: &str, name: &str) -> SynchronizeIdentityStep {
         }]
     }))
     .expect("synchronizeIdentity IR parses");
-    let plan = IrAuthor::new(database, OWNER, &zero_migrate_mysql::DIALECT, &policy)
-        .lower_plan(&ir, &LiveSchema::default())
-        .expect("synchronizeIdentity IR lowers for MySQL");
+    let plan = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        database,
+        OWNER,
+        &zero_migrate_mysql::DIALECT,
+        &policy,
+    )
+    .lower_plan(&ir, &LiveSchema::default())
+    .expect("synchronizeIdentity IR lowers for MySQL");
     match plan.steps.into_iter().next().expect("exactly one step") {
         PlanStep::SynchronizeIdentity(step) => step,
         other => panic!("expected SynchronizeIdentity step, got {other:?}"),

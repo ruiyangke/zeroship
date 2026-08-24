@@ -91,6 +91,7 @@ fn add_column_ir(default: IrDefault, ty: ColType) -> MigrationIr {
 
 fn rendered_up(ir: &MigrationIr) -> String {
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_mysql::DIALECT,

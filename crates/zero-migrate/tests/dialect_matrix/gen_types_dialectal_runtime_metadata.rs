@@ -76,8 +76,14 @@ fn history() -> Vec<Op> {
 }
 
 fn runtime_json(dialect: &zero_migrate::DialectId) -> Value {
-    let artifacts = render_artifacts(&history(), dialect, SCHEMA, &support::no_inject(SCHEMA))
-        .expect("the dialectal history renders artifacts");
+    let artifacts = render_artifacts(
+        zero_migrate::shipping_vendors(),
+        &history(),
+        dialect,
+        SCHEMA,
+        &support::no_inject(SCHEMA),
+    )
+    .expect("the dialectal history renders artifacts");
     serde_json::from_str(&artifacts.runtime_json).expect("schema.runtime.json parses")
 }
 

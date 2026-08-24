@@ -107,6 +107,7 @@ async fn drift_after_applying(source: &str) -> StructuralDrift {
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -123,7 +124,7 @@ async fn drift_after_applying(source: &str) -> StructuralDrift {
             )
             .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -136,6 +137,7 @@ async fn drift_after_applying(source: &str) -> StructuralDrift {
             .map_err(|error| format!("apply IR plan: {error}"))?;
 
         let expected = fold_ops(
+            zero_migrate::shipping_vendors(),
             &resolved.ops,
             &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
@@ -145,7 +147,11 @@ async fn drift_after_applying(source: &str) -> StructuralDrift {
         let actual = snapshot_schema(&session, &cfg.project_schema)
             .await
             .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
-        Ok(diff_snapshots(&expected, &actual))
+        Ok(diff_snapshots(
+            zero_migrate::shipping_vendors(),
+            &expected,
+            &actual,
+        ))
     }
     .await;
 

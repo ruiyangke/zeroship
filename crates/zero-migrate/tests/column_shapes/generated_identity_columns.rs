@@ -50,7 +50,12 @@ fn validate_platform(
     ir: &MigrationIr,
     dialect: &zero_migrate::DialectId,
 ) -> Result<(), zero_migrate::AuthoringError> {
-    zero_migrate::model::validate::validate_ir_scoped(ir, dialect, Some(&SchemaScope::Unconfined))
+    zero_migrate::model::validate::validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
+        ir,
+        dialect,
+        Some(&SchemaScope::Unconfined),
+    )
 }
 
 fn col(name: &str, ty: ColType) -> IrColumn {
@@ -106,7 +111,13 @@ fn pk(columns: &[&str]) -> Option<Vec<String>> {
 }
 
 fn lower_create(dialect: &zero_migrate::DialectId, op: Op) -> LowerResult {
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::confined_charter());
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect,
+        &support::confined_charter(),
+    );
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
         .map_err(Box::new)?;
@@ -118,7 +129,13 @@ fn lower_create(dialect: &zero_migrate::DialectId, op: Op) -> LowerResult {
 }
 
 fn lower_first(dialect: &zero_migrate::DialectId, op: Op) -> LowerResult {
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::confined_charter());
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect,
+        &support::confined_charter(),
+    );
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
         .map_err(Box::new)?;
@@ -170,6 +187,7 @@ fn sqlite_generated_stored_and_virtual_columns_render_exact_create_table_ddl() {
 #[test]
 fn pg_virtual_generated_column_is_unsupported() {
     let err = validate_ir(
+        zero_migrate::shipping_vendors(),
         &ir(generated_create(false)),
         &zero_migrate_postgres::DIALECT,
     )
@@ -187,6 +205,7 @@ fn generated_column_cannot_also_have_default() {
     });
 
     let err = validate_ir(
+        zero_migrate::shipping_vendors(),
         &ir(create_table(
             vec![
                 col("qty", ColType::Int),
@@ -280,10 +299,14 @@ fn identity_always_is_postgres_only() {
     id.identity = Some(IdentityCol { always: true });
     let op = create_table(vec![id], pk_id());
 
-    validate_ir(&ir(op.clone()), &zero_migrate_postgres::DIALECT)
-        .expect("Postgres supports identity({ always:true })");
+    validate_ir(
+        zero_migrate::shipping_vendors(),
+        &ir(op.clone()),
+        &zero_migrate_postgres::DIALECT,
+    )
+    .expect("Postgres supports identity({ always:true })");
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-        let err = validate_ir(&ir(op.clone()), dialect)
+        let err = validate_ir(zero_migrate::shipping_vendors(), &ir(op.clone()), dialect)
             .expect_err("identity({ always:true }) must be PostgreSQL-only");
         assert_eq!(err.code, CODE_UNSUPPORTED, "got: {err}");
         assert_eq!(err.kind, Some(UnsupportedKind::Identity), "got: {err}");
@@ -397,6 +420,7 @@ fn generated_and_identity_facets_render_on_add_column() {
 #[test]
 fn fold_carries_generated_and_identity_column_facets() {
     let snap = fold_ops(
+        zero_migrate::shipping_vendors(),
         &[generated_create(true)],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -420,6 +444,7 @@ fn fold_carries_generated_and_identity_column_facets() {
     let mut id = col("id", ColType::BigInt);
     id.identity = Some(IdentityCol { always: false });
     let snap = fold_ops(
+        zero_migrate::shipping_vendors(),
         &[create_table(vec![id], pk_id())],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,

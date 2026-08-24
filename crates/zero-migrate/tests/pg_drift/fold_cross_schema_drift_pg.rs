@@ -134,6 +134,7 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
         .to_string();
 
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -141,6 +142,7 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
         );
         let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
         let base = fold_ops(
+            zero_migrate::shipping_vendors(),
             &[],
             &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
@@ -151,7 +153,7 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
         let artifact = author
             .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
             .map_err(|error| format!("lower: {error}"))?;
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -177,6 +179,7 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
         let authored: MigrationIr =
             serde_json::from_str(&doc).map_err(|error| format!("parse the IR: {error}"))?;
         let expected = fold_ops(
+            zero_migrate::shipping_vendors(),
             &authored.ops,
             &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
@@ -202,7 +205,7 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
 
         // TODAY: a schema that exists is reported missing. When this is fixed the
         // assertion below fails, and this file should assert `is_clean()` instead.
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
         assert!(
             !drift.is_clean(),
             "recording today's behaviour; if the drift is now clean, invert this test"

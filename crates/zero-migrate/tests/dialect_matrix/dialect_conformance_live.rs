@@ -489,7 +489,13 @@ fn lower(
             ))
         }
     };
-    let author = IrAuthor::new(schema, OWNER, dialect, policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        schema,
+        OWNER,
+        dialect,
+        policy,
+    );
     let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
     author
         .load_and_lower_guarded(&source, OWNER, &registry(), live, &guard)
@@ -1319,7 +1325,7 @@ async fn run_row<B: MigrationBackend>(
         ) {
             Err(verdict) => prelude_failure = Some(format!("prelude lower: {}", verdict.detail)),
             Ok(artifact) => {
-                if let Err(error) = MigrationEngine::new()
+                if let Err(error) = MigrationEngine::new(zero_migrate::shipping_vendors())
                     .apply_plan(
                         &artifact.plan.steps,
                         Approval::Approved,
@@ -1354,8 +1360,14 @@ async fn run_row<B: MigrationBackend>(
             .iter()
             .filter_map(|op| serde_json::from_value(op.clone()).ok())
             .collect();
-        if let Ok(defs) = single_fold::fold(&history, dialect, &cfg.project_schema, policy)
-            .map(|folded| folded.project_field_defs())
+        if let Ok(defs) = single_fold::fold(
+            zero_migrate::shipping_vendors(),
+            &history,
+            dialect,
+            &cfg.project_schema,
+            policy,
+        )
+        .map(|folded| folded.project_field_defs())
         {
             live.sdk_schemas = defs;
         }
@@ -1367,7 +1379,7 @@ async fn run_row<B: MigrationBackend>(
     let source = envelope(&format!("{kind}_{variant}"), &[subject], is_dml);
     let verdict = match lower(&source, &cfg.project_schema, policy, dialect, &live) {
         Err(verdict) => verdict,
-        Ok(artifact) => match MigrationEngine::new()
+        Ok(artifact) => match MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,

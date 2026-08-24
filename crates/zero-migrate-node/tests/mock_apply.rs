@@ -255,6 +255,7 @@ fn one_apply_runs_through_the_host_bridge_and_records_the_sql_sequence() {
         let version_str = migration.version.as_str().to_string();
 
         let result = apply(
+            zero_migrate::shipping_vendors(),
             &PostgresBackend::new_generic(&session),
             &cfg,
             std::slice::from_ref(&migration),
@@ -353,6 +354,7 @@ fn the_recorded_verb_sequence_has_the_expected_landmarks_in_order() {
         let migration = trivial_migration();
 
         apply(
+            zero_migrate::shipping_vendors(),
             &PostgresBackend::new_generic(&session),
             &cfg,
             std::slice::from_ref(&migration),
@@ -411,7 +413,7 @@ fn data_only_plan_executes_and_journals_through_the_host_bridge() {
         let (step, dml_version) = update_step();
         let backend = PostgresBackend::new_generic(&session);
 
-        let outcome = MigrationEngine::new()
+        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan_with_touched_and_depends(
                 &[step],
                 &["mock_t".into()],
@@ -461,7 +463,7 @@ fn mixed_ddl_and_dml_plan_preserves_authored_execution_order() {
         let steps = vec![PlanStep::Ddl(create), update, PlanStep::Ddl(alter)];
         let backend = PostgresBackend::new_generic(&session);
 
-        let outcome = MigrationEngine::new()
+        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan_with_touched_and_depends(
                 &steps,
                 &["mock_t".into()],

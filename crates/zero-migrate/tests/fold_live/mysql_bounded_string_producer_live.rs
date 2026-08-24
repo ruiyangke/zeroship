@@ -156,6 +156,7 @@ async fn measure(
             .await
             .map_err(|error| format!("ensure the migration journal: {error}"))?;
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
             &zero_migrate_mysql::DIALECT,
@@ -170,7 +171,7 @@ async fn measure(
         let steps = author
             .lower_steps(&ir, &LiveSchema::default())
             .map_err(|error| format!("lower the bounded-string ops: {error}"))?;
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &steps,
                 Approval::Approved,

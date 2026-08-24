@@ -359,6 +359,7 @@ pub fn sqlite_rebuild_create(
     policy: &EffectivePolicy,
 ) -> Result<String, String> {
     build_create_table_with_fks_for_dialect_scoped_statements(
+        zero_migrate::shipping_vendors(),
         SCHEMA,
         table,
         schema,
@@ -415,7 +416,13 @@ pub fn corpus_lines(
         assert_eq!(dialect, &zero_migrate_mysql::DIALECT);
         "Mysql"
     };
-    let rendered = match render_artifacts(ops, dialect, SCHEMA, policy) {
+    let rendered = match render_artifacts(
+        zero_migrate::shipping_vendors(),
+        ops,
+        dialect,
+        SCHEMA,
+        policy,
+    ) {
         Ok(rendered) => rendered,
         Err(error) => {
             out.push(format!("{label}|{d}|refused|{error}"));

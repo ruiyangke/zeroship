@@ -78,21 +78,27 @@ fn registry() -> BTreeMap<String, String> {
 /// First deploy of `descs` through the real declarative author + real backend.
 async fn apply_first_deploy(be: &SqliteBackend, descs: &[CollectionDescriptor]) {
     let desired = zero_migrate::desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         descs,
         &zero_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
     .expect("desired snapshot");
-    let plan = DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT)
-        .diff(
-            &desired,
-            &SchemaSnapshot::default(),
-            &HashMap::new(),
-            &[],
-            &effective_policy(),
-        )
-        .expect("first-deploy diff");
+    let plan = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_sqlite::DIALECT,
+    )
+    .diff(
+        &desired,
+        &SchemaSnapshot::default(),
+        &HashMap::new(),
+        &[],
+        &effective_policy(),
+    )
+    .expect("first-deploy diff");
     for m in &plan.all_migrations() {
         be.apply_one_additive(m, "deployer")
             .await
@@ -164,7 +170,13 @@ fn drop_constraint_ir(name: &str) -> MigrationIr {
 fn load_and_lower(ir: &MigrationIr, live: &LiveSchema) -> Vec<PlanStep> {
     let policy = effective_policy();
     let source = serde_json::to_string(ir).expect("serialize IR envelope");
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &zero_migrate_sqlite::DIALECT,
+        &policy,
+    );
     let guard = GuardConfig::from_policy(effective_policy(), zero_migrate_sqlite::DIALECT);
     author
         .load_and_lower_guarded(&source, APP, &registry(), live, &guard)

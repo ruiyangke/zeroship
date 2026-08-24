@@ -92,6 +92,7 @@ pub fn load_verify(
 
     let schema_scope = SchemaScope::Single(project_schema.to_string());
     match load_ir_document(
+        zero_migrate::shipping_vendors(),
         envelope_json,
         deploying_app,
         &dialect,
@@ -176,7 +177,13 @@ pub fn gen_artifacts_from_envelopes(
     // consumes it: the fold's output no longer distinguishes an op that came from a
     // leg from one authored at the top level.
     let has_dialectal_ops = zero_migrate::history_carries_dialectal_ops(&ops);
-    match render_schema_export(&ops, &dialect, schema, &effective) {
+    match render_schema_export(
+        zero_migrate::shipping_vendors(),
+        &ops,
+        &dialect,
+        schema,
+        &effective,
+    ) {
         Ok(export) => gen_ok(export, &dialect, has_dialectal_ops),
         Err(e) => gen_err(e.to_string()),
     }
@@ -215,7 +222,13 @@ pub fn gen_artifacts_from_descriptors(
         Ok(p) => p,
         Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
     };
-    match render_schema_export_from_descriptors(descriptors, &dialect, schema, &effective) {
+    match render_schema_export_from_descriptors(
+        zero_migrate::shipping_vendors(),
+        descriptors,
+        &dialect,
+        schema,
+        &effective,
+    ) {
         // A declared descriptor set has no op stream, so it cannot carry a
         // `dialect()` wrapper. `false` here is a property of the source shape, not a
         // default standing in for an unasked question.

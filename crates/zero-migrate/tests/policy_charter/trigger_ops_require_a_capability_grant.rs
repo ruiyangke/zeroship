@@ -258,7 +258,9 @@ fn the_index_drop_is_the_last_family_member_with_no_capability_behind_it() {
 fn the_trigger_grant_did_not_pin_the_op_to_one_dialect() {
     let ir: MigrationIr =
         serde_json::from_str(&envelope("reach", vec![drop_trigger_op()])).expect("envelope parses");
-    let supported = zero_migrate::model::op_support::support(&ir.ops[0]).supported_dialects();
+    let supported =
+        zero_migrate::model::op_support::support(zero_migrate::shipping_vendors(), &ir.ops[0])
+            .supported_dialects(zero_migrate::shipping_vendors());
     for dialect in dialects() {
         assert!(
             supported.contains_id(&dialect),
@@ -271,8 +273,8 @@ fn the_trigger_grant_did_not_pin_the_op_to_one_dialect() {
         let ir: MigrationIr =
             serde_json::from_str(&envelope("reach", vec![op.clone()])).expect("envelope parses");
         assert!(
-            zero_migrate::model::op_support::support(&ir.ops[0])
-                .supported_dialects()
+            zero_migrate::model::op_support::support(zero_migrate::shipping_vendors(), &ir.ops[0])
+                .supported_dialects(zero_migrate::shipping_vendors())
                 .contains_id(&dialect),
             "{dialect}: the trigger capability must not have cost this backend its own \
              create shape: {op}"
@@ -301,11 +303,17 @@ fn validate_refuses_trigger_ops_under_the_posture_that_grants_nothing() {
         ] {
             let ir: MigrationIr = serde_json::from_str(&envelope("t", vec![create_table_op(), op]))
                 .expect("the trigger envelope parses");
-            let error =
-                validate_ir_authorized(&ir, &dialect, Some(&scope), None).expect_err(&format!(
-                    "{dialect}: {label} must need a grant, but the posture that grants nothing \
+            let error = validate_ir_authorized(
+                zero_migrate::shipping_vendors(),
+                &ir,
+                &dialect,
+                Some(&scope),
+                None,
+            )
+            .expect_err(&format!(
+                "{dialect}: {label} must need a grant, but the posture that grants nothing \
                      admitted it"
-                ));
+            ));
             assert_eq!(
                 error.code, CODE_VENDOR_OP_DENIED,
                 "{dialect}: {label} was refused for the wrong reason: {}",
@@ -331,8 +339,14 @@ fn the_same_validate_posture_still_refuses_an_op_that_needs_a_grant() {
         vec![create_table_op(), create_function_op()],
     ))
     .expect("the control envelope parses");
-    let error = validate_ir_authorized(&ir, &zero_migrate_postgres::DIALECT, Some(&scope), None)
-        .expect_err("createFunction must be refused where nothing is granted");
+    let error = validate_ir_authorized(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_postgres::DIALECT,
+        Some(&scope),
+        None,
+    )
+    .expect_err("createFunction must be refused where nothing is granted");
     assert_eq!(
         error.code, CODE_VENDOR_OP_DENIED,
         "the control was refused for the wrong reason: {}",
@@ -358,7 +372,14 @@ fn the_same_validate_posture_still_admits_an_op_that_needs_no_grant() {
         let ir: MigrationIr =
             serde_json::from_str(&envelope("i", vec![create_table_op(), drop_index_op()]))
                 .expect("the ungated control envelope parses");
-        validate_ir_authorized(&ir, &dialect, Some(&scope), None).unwrap_or_else(|e| {
+        validate_ir_authorized(
+            zero_migrate::shipping_vendors(),
+            &ir,
+            &dialect,
+            Some(&scope),
+            None,
+        )
+        .unwrap_or_else(|e| {
             panic!(
                 "{dialect}: dropIndex needs no grant, so the posture that grants nothing must \
                  still admit it: {} / {}",
@@ -487,7 +508,13 @@ fn lower(
         resolve_create_table_policy(&authored, policy, SCHEMA).expect("table shape resolves");
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect, policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect,
+        policy,
+    );
     author.load_and_lower_guarded(
         &resolved_json,
         OWNER,

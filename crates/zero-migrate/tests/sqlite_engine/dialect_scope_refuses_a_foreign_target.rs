@@ -118,7 +118,13 @@ fn raw_envelope() -> MigrationIr {
 /// way to GET a pinned plan to point at a foreign target.
 fn lower_on_postgres(json: &str) -> zero_migrate::render::lower::LoweredArtifact {
     let charter = support::operator_charter(SCHEMA);
-    let author = IrAuthor::new(SCHEMA, APP, &zero_migrate_postgres::DIALECT, &charter);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        APP,
+        &zero_migrate_postgres::DIALECT,
+        &charter,
+    );
     let guard_cfg = GuardConfig::from_policy(charter, zero_migrate_postgres::DIALECT);
     author
         .load_and_lower_guarded(
@@ -203,6 +209,7 @@ fn a_single_leg_dialect_expression_pins_the_plan_too() {
 #[test]
 fn the_out_of_envelope_remedy_names_the_escape_that_exists() {
     let error = zero_migrate::model::load::load_ir_document(
+        zero_migrate::shipping_vendors(),
         OUT_OF_ENVELOPE_ENVELOPE,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -242,7 +249,7 @@ async fn a_pinned_plan_is_refused_against_a_foreign_live_target() {
     let be = backend(&p);
     let artifact = lower_raw_probe_on_postgres();
 
-    let result = MigrationEngine::new()
+    let result = MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_applied_plan_with_touched_and_depends(
             &artifact.plan,
             &artifact.touched_tables,

@@ -51,7 +51,11 @@ const CASE_SENSITIVE: &str = "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs";
 const CASE_INSENSITIVE: &str = "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci";
 
 fn mysql_type(def: serde_json::Value) -> String {
-    def_to_column_type_for_dialect(&def, &zero_migrate_mysql::DIALECT)
+    def_to_column_type_for_dialect(
+        zero_migrate::shipping_vendors(),
+        &def,
+        &zero_migrate_mysql::DIALECT,
+    )
 }
 
 /// EVERY character spelling the field-def carrier can produce, named rather than
@@ -278,24 +282,30 @@ fn descriptor_create_ddl() -> Result<String, String> {
     };
     let effective = support::no_inject(PROJECT);
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         std::slice::from_ref(&descriptor),
         &zero_migrate_mysql::DIALECT,
         &effective,
     )
     .map_err(|e| format!("build the desired snapshot: {e}"))?;
-    DeclarativeAuthor::new_for_dialect(PROJECT, PROJECT, zero_migrate_mysql::DIALECT)
-        .diff(
-            &desired,
-            &SchemaSnapshot::default(),
-            &HashMap::new(),
-            &[],
-            &effective,
-        )
-        .map_err(|e| format!("diff against an empty live schema: {e}"))?
-        .migrations
-        .iter()
-        .map(|m| m.up.clone())
-        .find(|up| up.contains("CREATE TABLE"))
-        .ok_or_else(|| "the first-deploy plan carried no CREATE TABLE".to_string())
+    DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        PROJECT,
+        zero_migrate_mysql::DIALECT,
+    )
+    .diff(
+        &desired,
+        &SchemaSnapshot::default(),
+        &HashMap::new(),
+        &[],
+        &effective,
+    )
+    .map_err(|e| format!("diff against an empty live schema: {e}"))?
+    .migrations
+    .iter()
+    .map(|m| m.up.clone())
+    .find(|up| up.contains("CREATE TABLE"))
+    .ok_or_else(|| "the first-deploy plan carried no CREATE TABLE".to_string())
 }

@@ -33,6 +33,7 @@ fn effective_policy() -> EffectivePolicy {
 
 fn desired_sqlite(descriptors: &[CollectionDescriptor]) -> Result<DesiredSchema, DeclarativeError> {
     desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         descriptors,
         &zero_migrate_sqlite::DIALECT,
@@ -63,7 +64,12 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 /// A SQLite-dialect declarative author.
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT)
+    DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_sqlite::DIALECT,
+    )
 }
 
 /// A single-collection descriptor: a plain field + a masked field + an encrypted
@@ -969,7 +975,7 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
     assert_eq!(diff.rebuilds.len(), 1, "the diff yields a rebuild to carry");
 
     // plan_declarative now CARRIES the rebuild (no error) — the fail-close is gone.
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
     let plan = engine
         .plan_declarative(

@@ -19,6 +19,7 @@ pub mod existence_probe {
         Divergence, ExistenceProbePolicy, GuardVerdict,
     };
 
+    use zero_migrate_backend::registry::VendorSet;
     use zero_migrate_backend::snapshot::SchemaSnapshot;
     use zero_migrate_ir::dialect::DialectId;
     use zero_migrate_ir::probe::GuardProbe;
@@ -31,11 +32,16 @@ pub mod existence_probe {
     /// `BackendVendor` instead — see that function for the per-variant fail-closed
     /// rules, which is where all of them now live.
     #[must_use]
-    pub fn decide(probe: &GuardProbe, live: &SchemaSnapshot, dialect: &DialectId) -> GuardVerdict {
+    pub fn decide(
+        vendors: VendorSet,
+        probe: &GuardProbe,
+        live: &SchemaSnapshot,
+        dialect: &DialectId,
+    ) -> GuardVerdict {
         zero_migrate_backend::existence_probe::decide(
             probe,
             live,
-            crate::render::backends::vendor(dialect),
+            crate::render::backends::vendor(vendors, dialect),
         )
     }
 }
@@ -61,16 +67,17 @@ pub mod vendor;
 pub(crate) mod renderer {
     pub(crate) use zero_migrate_backend::renderer::*;
 
+    use zero_migrate_backend::registry::VendorSet;
     use zero_migrate_ir::dialect::DialectId;
 
     /// Resolve one capability through the build's open vendor registry.
     pub(crate) trait DialectSupports {
-        fn supports(self, cap: Capability) -> bool;
+        fn supports(self, vendors: VendorSet, cap: Capability) -> bool;
     }
 
     impl DialectSupports for &DialectId {
-        fn supports(self, cap: Capability) -> bool {
-            crate::render::backends::vendor(self)
+        fn supports(self, vendors: VendorSet, cap: Capability) -> bool {
+            crate::render::backends::vendor(vendors, self)
                 .descriptor
                 .capabilities
                 .contains(cap)

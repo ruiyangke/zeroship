@@ -84,7 +84,12 @@ fn validate_n(n: usize) -> f64 {
     let bytes = format!(r#"{{"ir_version":1,"name":"b","ops":[{}]}}"#, ops.join(","));
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("envelope parses");
     let start = Instant::now();
-    validate_ir(&ir, &zero_migrate_postgres::DIALECT).expect("validates");
+    validate_ir(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_postgres::DIALECT,
+    )
+    .expect("validates");
     start.elapsed().as_secs_f64()
 }
 
@@ -145,7 +150,12 @@ fn validate_ir_does_not_scale_quadratically_in_create_table_count() {
         let bytes = format!(r#"{{"ir_version":1,"name":"c","ops":[{}]}}"#, ops.join(","));
         let ir: MigrationIr = serde_json::from_str(&bytes).expect("envelope parses");
         let start = Instant::now();
-        validate_ir(&ir, &zero_migrate_postgres::DIALECT).expect("validates");
+        validate_ir(
+            zero_migrate::shipping_vendors(),
+            &ir,
+            &zero_migrate_postgres::DIALECT,
+        )
+        .expect("validates");
         start.elapsed().as_secs_f64()
     }
 
@@ -230,8 +240,12 @@ fn validate_ir_does_not_scale_quadratically_in_any_op_kind() {
         let start = Instant::now();
         // A fixture the validator REFUSES measures nothing. Fail loudly here
         // rather than silently timing an early return.
-        validate_ir(&ir, &zero_migrate_postgres::DIALECT)
-            .unwrap_or_else(|e| panic!("{kind} fixture must be valid to measure anything: {e:?}"));
+        validate_ir(
+            zero_migrate::shipping_vendors(),
+            &ir,
+            &zero_migrate_postgres::DIALECT,
+        )
+        .unwrap_or_else(|e| panic!("{kind} fixture must be valid to measure anything: {e:?}"));
         start.elapsed().as_secs_f64()
     }
 
@@ -370,8 +384,12 @@ fn validate_ir_does_not_scale_quadratically_in_any_envelope_shape() {
     fn measure(shape: &str, n: usize) -> f64 {
         let ir: MigrationIr = serde_json::from_str(&envelope(shape, n)).expect("envelope parses");
         let start = Instant::now();
-        validate_ir(&ir, &zero_migrate_postgres::DIALECT)
-            .unwrap_or_else(|e| panic!("{shape} fixture must be valid to measure anything: {e:?}"));
+        validate_ir(
+            zero_migrate::shipping_vendors(),
+            &ir,
+            &zero_migrate_postgres::DIALECT,
+        )
+        .unwrap_or_else(|e| panic!("{shape} fixture must be valid to measure anything: {e:?}"));
         start.elapsed().as_secs_f64()
     }
 

@@ -113,9 +113,15 @@ fn parse(ops: &str) -> Vec<Op> {
 }
 
 fn env_db_ts(ops: &[Op], dialect: &zero_migrate::DialectId, policy: &EffectivePolicy) -> String {
-    render_artifacts(ops, dialect, SCHEMA, policy)
-        .expect("the stream renders artifacts")
-        .env_db_ts
+    render_artifacts(
+        zero_migrate::shipping_vendors(),
+        ops,
+        dialect,
+        SCHEMA,
+        policy,
+    )
+    .expect("the stream renders artifacts")
+    .env_db_ts
 }
 
 // ---------------------------------------------------------------------------
@@ -417,6 +423,7 @@ fn a_replaced_composite_primary_key_reaches_the_table_level_clause() {
     // leg to assert. Stated rather than silently dropped from the loop.
     assert!(
         render_artifacts(
+            zero_migrate::shipping_vendors(),
             &parse(PK_REPLACE_COMPOSITE),
             &zero_migrate_sqlite::DIALECT,
             SCHEMA,
@@ -900,7 +907,13 @@ fn corpus_lines(
         assert_eq!(dialect, &zero_migrate_mysql::DIALECT);
         "Mysql"
     };
-    let rendered = match render_artifacts(ops, dialect, SCHEMA, policy) {
+    let rendered = match render_artifacts(
+        zero_migrate::shipping_vendors(),
+        ops,
+        dialect,
+        SCHEMA,
+        policy,
+    ) {
         Ok(rendered) => rendered,
         Err(error) => {
             out.push(format!("{stem}|{d}|refused|{error}"));
@@ -1288,8 +1301,20 @@ fn the_move_changed_no_refusal_that_the_old_path_already_made() {
             // the biconditional compare `render_artifacts` to the very call it makes
             // first - a control that can only ever agree with itself. `fold_ops` is the
             // half of the old gate that still exists independently.
-            let old_gate = zero_migrate::fold_ops(&resolved.ops, dialect, SCHEMA, policy);
-            let now = render_artifacts(&ops, dialect, SCHEMA, policy);
+            let old_gate = zero_migrate::fold_ops(
+                zero_migrate::shipping_vendors(),
+                &resolved.ops,
+                dialect,
+                SCHEMA,
+                policy,
+            );
+            let now = render_artifacts(
+                zero_migrate::shipping_vendors(),
+                &ops,
+                dialect,
+                SCHEMA,
+                policy,
+            );
 
             match (&old_gate, &now) {
                 (Ok(_), Ok(_)) => accepted += 1,
@@ -1365,9 +1390,15 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
             .iter()
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| panic!("probe `{name}` exists"));
-        render_artifacts(&parse(source), dialect, SCHEMA, &open)
-            .map(|_| "rendered".to_string())
-            .unwrap_or_else(|e| e.to_string())
+        render_artifacts(
+            zero_migrate::shipping_vendors(),
+            &parse(source),
+            dialect,
+            SCHEMA,
+            &open,
+        )
+        .map(|_| "rendered".to_string())
+        .unwrap_or_else(|e| e.to_string())
     };
     let pg = &zero_migrate_postgres::DIALECT;
     assert!(
@@ -1455,6 +1486,7 @@ fn the_corpus_golden_records_both_refusals_and_renders() {
 fn both_artifacts_agree_about_the_key_the_op_installed() {
     for dialect in DIALECTS {
         let rendered = render_artifacts(
+            zero_migrate::shipping_vendors(),
             &parse(PK_REPLACE_DROPS_IDENTITY),
             dialect,
             SCHEMA,

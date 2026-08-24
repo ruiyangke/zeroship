@@ -126,7 +126,7 @@ async fn live_postgres_reports_a_hand_dropped_function_policy_and_trigger() {
         let unchanged = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("re-snapshot the live schema: {error}"))?;
-        let clean = diff_snapshots(&before, &unchanged);
+        let clean = diff_snapshots(zero_migrate::shipping_vendors(), &before, &unchanged);
         if !clean.is_clean() {
             return Err(format!("an untouched schema drifted: {clean:#?}"));
         }
@@ -146,7 +146,7 @@ async fn live_postgres_reports_a_hand_dropped_function_policy_and_trigger() {
         let after = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("snapshot after the out-of-band drops: {error}"))?;
-        let drift = diff_snapshots(&before, &after);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &before, &after);
         let mut missing = drift.missing_objects.clone();
         missing.sort();
         if missing
@@ -163,7 +163,8 @@ async fn live_postgres_reports_a_hand_dropped_function_policy_and_trigger() {
 
         // (5) And the mirror: reading the pre-drop snapshot as the LIVE side reports
         //     the same three as out-of-band creations.
-        let mut unexpected = diff_snapshots(&after, &before).unexpected_objects;
+        let mut unexpected =
+            diff_snapshots(zero_migrate::shipping_vendors(), &after, &before).unexpected_objects;
         unexpected.sort();
         if unexpected
             != vec![
@@ -226,7 +227,7 @@ async fn live_postgres_reports_a_policy_narrowed_out_of_band() {
             .await
             .map_err(|error| format!("re-snapshot the live schema: {error}"))?;
 
-        let drift = diff_snapshots(&before, &after);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &before, &after);
         let reported: Vec<(String, String, String)> = drift
             .altered_objects
             .iter()

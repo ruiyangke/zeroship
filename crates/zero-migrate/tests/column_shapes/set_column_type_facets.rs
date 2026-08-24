@@ -89,13 +89,19 @@ fn envelope(create_col: &str, to_type: &str) -> MigrationIr {
 fn descriptor(create_col: &str, to_type: &str) -> serde_json::Value {
     let ir = envelope(create_col, to_type);
     let effective = support::operator_charter(SCHEMA);
-    single_fold::fold(&ir.ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the descriptor fold succeeds")
-        .get("a")
-        .and_then(|table| table.get("v"))
-        .cloned()
-        .expect("table a has column v")
+    single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        &ir.ops,
+        &zero_migrate_postgres::DIALECT,
+        SCHEMA,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the descriptor fold succeeds")
+    .get("a")
+    .and_then(|table| table.get("v"))
+    .cloned()
+    .expect("table a has column v")
 }
 
 /// The `env.db.ts` line for column `v`, from whichever producer `render_artifacts`
@@ -104,6 +110,7 @@ fn authoring(create_col: &str, to_type: &str) -> String {
     let ir = envelope(create_col, to_type);
     let effective = support::operator_charter(SCHEMA);
     zero_migrate::render::gen_types::render_artifacts(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -127,8 +134,14 @@ fn snapshot(
 ) -> Result<zero_migrate::model::snapshot::ColumnSnapshot, String> {
     let ir = envelope(create_col, to_type);
     let effective = support::operator_charter(project);
-    let folded =
-        fold_ops(&ir.ops, dialect, project, &effective).map_err(|error| error.to_string())?;
+    let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
+        &ir.ops,
+        dialect,
+        project,
+        &effective,
+    )
+    .map_err(|error| error.to_string())?;
     folded
         .tables
         .get("a")
@@ -400,8 +413,14 @@ fn a_retype_off_an_enum_column_drops_the_enum_check_it_left_behind() {
     )
     .expect("the envelope parses");
     let effective = support::operator_charter("main");
-    let folded =
-        fold_ops(&ir.ops, &zero_migrate_sqlite::DIALECT, "main", &effective).expect("fold");
+    let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
+        &ir.ops,
+        &zero_migrate_sqlite::DIALECT,
+        "main",
+        &effective,
+    )
+    .expect("fold");
     let column = folded
         .tables
         .get("a")
@@ -490,8 +509,14 @@ fn a_retype_keeps_a_user_comment_the_alter_does_not_touch() {
     )
     .expect("the envelope parses");
     let effective = support::operator_charter(SCHEMA);
-    let folded =
-        fold_ops(&ir.ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective).expect("fold");
+    let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
+        &ir.ops,
+        &zero_migrate_postgres::DIALECT,
+        SCHEMA,
+        &effective,
+    )
+    .expect("fold");
     let column = folded
         .tables
         .get("a")
@@ -531,12 +556,19 @@ fn the_value_format_refusal_reaches_both_artifact_replays() {
     // oracle, so one refusal covers `schema.runtime.json` and `env.db.ts` too.
     let ir = envelope(TYPE_ID, TO_INT);
     let effective = support::operator_charter(SCHEMA);
-    let error = single_fold::fold(&ir.ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect_err("the descriptor fold inherits the refusal");
+    let error = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        &ir.ops,
+        &zero_migrate_postgres::DIALECT,
+        SCHEMA,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect_err("the descriptor fold inherits the refusal");
     assert!(error.to_string().contains("value format"), "{error}");
 
     let error = zero_migrate::render::gen_types::render_artifacts(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -563,8 +595,14 @@ fn a_retype_that_touches_no_value_format_column_is_untouched_by_the_refusal() {
     )
     .expect("the envelope parses");
     let effective = support::operator_charter(SCHEMA);
-    let folded = fold_ops(&ir.ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
-        .expect("retyping a plain sibling is not refused");
+    let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
+        &ir.ops,
+        &zero_migrate_postgres::DIALECT,
+        SCHEMA,
+        &effective,
+    )
+    .expect("retyping a plain sibling is not refused");
     let table = folded.tables.get("a").expect("table a");
     assert_eq!(
         table

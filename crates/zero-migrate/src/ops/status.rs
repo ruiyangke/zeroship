@@ -2206,6 +2206,7 @@ mod plan_status_tests {
         )
         .expect("synchronizeIdentity IR");
         let plan = IrAuthor::new(
+            crate::test_fixtures::VENDORS,
             "app",
             "app_status",
             &POSTGRES,

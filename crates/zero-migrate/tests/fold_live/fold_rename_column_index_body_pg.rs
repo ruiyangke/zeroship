@@ -268,6 +268,7 @@ fn fold(
     let resolved = resolve_create_table_policy(&authored, policy, project_schema)
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     fold_ops(
+        zero_migrate::shipping_vendors(),
         &resolved.ops,
         &zero_migrate_postgres::DIALECT,
         project_schema,
@@ -292,6 +293,7 @@ async fn apply_through_engine(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -301,7 +303,7 @@ async fn apply_through_engine(
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -375,9 +377,11 @@ async fn measure() -> Measured {
             .await
             .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
 
-        let stale = diff_snapshots(&folded, &live);
-        let wrong_column_drift = diff_snapshots(&wrong_column, &live);
-        let no_predicate_drift = diff_snapshots(&no_predicate, &live);
+        let stale = diff_snapshots(zero_migrate::shipping_vendors(), &folded, &live);
+        let wrong_column_drift =
+            diff_snapshots(zero_migrate::shipping_vendors(), &wrong_column, &live);
+        let no_predicate_drift =
+            diff_snapshots(zero_migrate::shipping_vendors(), &no_predicate, &live);
 
         Ok(Measured {
             fold_predicate: index_predicate(&folded, PARTIAL_INDEX),

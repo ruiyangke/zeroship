@@ -238,6 +238,7 @@ pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
     let mut out = Vec::with_capacity(envelopes.len());
     for (index, envelope) in envelopes.iter().enumerate() {
         let live = zero_migrate::render::fold::fold_ops(
+            zero_migrate::shipping_vendors(),
             &history,
             &dialect,
             &opts.default_schema,
@@ -248,13 +249,18 @@ pub fn preview_sql(source: PreviewSqlSource) -> Result<Vec<String>> {
             |snapshot| zero_migrate::LiveSchema::from_catalog_snapshot(snapshot, &opts.owner_app),
         );
         out.push(
-            zero_migrate::render_ir_envelope_sql_onto(envelope, &dialect, &opts, &live).map_err(
-                |e| {
-                    Error::from_reason(format!(
-                        "previewSql: envelope[{index}] failed to render: {e}"
-                    ))
-                },
-            )?,
+            zero_migrate::render_ir_envelope_sql_onto(
+                zero_migrate::shipping_vendors(),
+                envelope,
+                &dialect,
+                &opts,
+                &live,
+            )
+            .map_err(|e| {
+                Error::from_reason(format!(
+                    "previewSql: envelope[{index}] failed to render: {e}"
+                ))
+            })?,
         );
         if let Ok(ir) = serde_json::from_str::<zero_migrate::MigrationIr>(envelope) {
             history.extend(ir.ops);
@@ -707,7 +713,7 @@ pub fn apply_ir_sqlite(
             project_schema.clone(),
             effective.clone(),
         );
-        let outcome = MigrationEngine::new()
+        let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
             .deploy_envelopes(
                 &envelopes,
                 &backend,
@@ -1290,7 +1296,8 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
     // and the vendor states its own posture, in its own crate. Asked BEFORE the
     // envelope loop, so an unchecked set is reported even when it renders to no
     // statements at all.
-    if let Some(absent) = zero_migrate::analyzer_absence(&dialect) {
+    if let Some(absent) = zero_migrate::analyzer_absence(zero_migrate::shipping_vendors(), &dialect)
+    {
         let advisory = absent.advisory();
         out.push(AdvisoryDto {
             migration: String::new(),
@@ -1307,9 +1314,12 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
         // Statement-at-a-time so each advisory keeps the statement that raised
         // it. `analyze` over a whole multi-statement `up` would return a flat
         // list with no way back to the ALTER TABLE it describes.
-        let Ok((migration, statements)) =
-            zero_migrate::render_ir_envelope_sql_statements(envelope, &dialect, &opts)
-        else {
+        let Ok((migration, statements)) = zero_migrate::render_ir_envelope_sql_statements(
+            zero_migrate::shipping_vendors(),
+            envelope,
+            &dialect,
+            &opts,
+        ) else {
             // An envelope that will not render offline yields no advisories
             // rather than failing the verb: this is enrichment, never a gate.
             continue;
@@ -1318,7 +1328,13 @@ pub fn advisories_for(source: PreviewSqlSource) -> Result<Vec<AdvisoryDto>> {
             // The registered backend's analyzer, reached through the contract. The
             // `NotAnalyzed` arm is already handled above, before this loop; asking
             // per statement here would re-ask a question whose answer cannot change.
-            for advisory in zero_migrate::advisories_for_sql(&dialect, &statement).into_report() {
+            for advisory in zero_migrate::advisories_for_sql(
+                zero_migrate::shipping_vendors(),
+                &dialect,
+                &statement,
+            )
+            .into_report()
+            {
                 out.push(AdvisoryDto {
                     migration: migration.clone(),
                     rule: advisory.rule.to_string(),

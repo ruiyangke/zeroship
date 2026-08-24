@@ -57,8 +57,14 @@ fn verdict(ops: &str) -> Result<(), String> {
         effective: &policy,
         default_schema: "public",
     };
-    validate_ir_authorized(&ir, &zero_migrate_postgres::DIALECT, None, Some(authority))
-        .map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir_authorized(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_postgres::DIALECT,
+        None,
+        Some(authority),
+    )
+    .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 /// A capability denial satisfies `expect_err` while proving nothing - the exact

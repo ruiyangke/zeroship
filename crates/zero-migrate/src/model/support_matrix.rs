@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::model::op_support::FEATURE_SUPPORT_REGISTRY;
 use crate::model::support::{Feature, SupportDecision};
@@ -69,7 +70,7 @@ fn render_cell(
     }
 }
 
-pub(crate) fn render_support_matrix() -> String {
+pub(crate) fn render_support_matrix(vendors: VendorSet) -> String {
     let mut markdown = String::new();
     writeln!(markdown, "# Feature support matrix\n").expect("writing to a String cannot fail");
     writeln!(
@@ -106,12 +107,20 @@ pub(crate) fn render_support_matrix() -> String {
                 "support-matrix feature label must not be empty"
             );
             let postgres = render_cell(
-                feature.decision(&POSTGRES),
+                feature.decision(vendors, &POSTGRES),
                 &mut footnote_ids,
                 &mut footnotes,
             );
-            let mysql = render_cell(feature.decision(&MYSQL), &mut footnote_ids, &mut footnotes);
-            let sqlite = render_cell(feature.decision(&SQLITE), &mut footnote_ids, &mut footnotes);
+            let mysql = render_cell(
+                feature.decision(vendors, &MYSQL),
+                &mut footnote_ids,
+                &mut footnotes,
+            );
+            let sqlite = render_cell(
+                feature.decision(vendors, &SQLITE),
+                &mut footnote_ids,
+                &mut footnotes,
+            );
             writeln!(markdown, "| {label} | {postgres} | {mysql} | {sqlite} |")
                 .expect("writing to a String cannot fail");
         }
@@ -132,7 +141,7 @@ fn support_matrix_path() -> PathBuf {
 
 #[test]
 fn committed_support_matrix_is_current() {
-    let rendered = render_support_matrix();
+    let rendered = render_support_matrix(crate::test_fixtures::VENDORS);
     let path = support_matrix_path();
 
     if std::env::var("ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX").as_deref() == Ok("1") {

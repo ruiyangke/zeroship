@@ -168,6 +168,7 @@ const fn sql_dialect(dialect: &zero_migrate::DialectId) -> &zero_migrate::Dialec
 
 fn validate_current(op: &Op, dialect: &zero_migrate::DialectId) -> bool {
     validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &one_op_ir(op.clone()),
         dialect,
         Some(&SchemaScope::Unconfined),
@@ -181,6 +182,7 @@ fn lower_current(op: &Op, dialect: &zero_migrate::DialectId) -> bool {
     // grants every vendor capability. Authority at lower is that grant; the unconfined
     // scope only lets the corpus name any schema.
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         default_schema,
         "app_corpus",
         sql_dialect(dialect),
@@ -214,8 +216,8 @@ fn assert_decision_well_formed(decision: SupportDecision, label: &str) {
 }
 
 fn assert_current_cell_matches(op: &Op, dialect: &zero_migrate::DialectId) {
-    let support = op_support::support(op);
-    let decision = support.decision(dialect);
+    let support = op_support::support(zero_migrate::shipping_vendors(), op);
+    let decision = support.decision(zero_migrate::shipping_vendors(), dialect);
     let label = format!("{} {dialect:?}", op_tag(op));
 
     match decision {
@@ -288,23 +290,28 @@ fn support_declarations_cover_every_op_and_dialect() {
 
     for op in &ops {
         let tag = op_tag(op);
-        let support = op_support::support(op);
+        let support = op_support::support(zero_migrate::shipping_vendors(), op);
         assert_eq!(
-            support.supported_dialects().is_empty(),
-            DIALECTS
-                .iter()
-                .all(|dialect| !support.decision(dialect).is_supported()),
+            support
+                .supported_dialects(zero_migrate::shipping_vendors())
+                .is_empty(),
+            DIALECTS.iter().all(|dialect| !support
+                .decision(zero_migrate::shipping_vendors(), dialect)
+                .is_supported()),
             "{tag}: DialectSet must agree with per-dialect decisions"
         );
 
         for dialect in DIALECTS {
-            assert_decision_well_formed(support.decision(dialect), &format!("{tag} {dialect:?}"));
+            assert_decision_well_formed(
+                support.decision(zero_migrate::shipping_vendors(), dialect),
+                &format!("{tag} {dialect:?}"),
+            );
         }
 
         for feature in support.features {
             for dialect in DIALECTS {
                 assert_decision_well_formed(
-                    feature.decision(dialect),
+                    feature.decision(zero_migrate::shipping_vendors(), dialect),
                     &format!("{tag} feature {:?} {dialect:?}", feature.feature),
                 );
             }
@@ -357,10 +364,16 @@ fn support_declarations_cover_every_op_and_dialect() {
                 );
                 assert!(
                     !support
-                        .decision(&zero_migrate_sqlite::DIALECT)
+                        .decision(
+                            zero_migrate::shipping_vendors(),
+                            &zero_migrate_sqlite::DIALECT
+                        )
                         .is_supported()
                         && !support
-                            .decision(&zero_migrate_mysql::DIALECT)
+                            .decision(
+                                zero_migrate::shipping_vendors(),
+                                &zero_migrate_mysql::DIALECT
+                            )
                             .is_supported(),
                     "{tag}: vendor-tier ops must be non-PG unsupported"
                 );
@@ -611,9 +624,11 @@ fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
             continue;
         }
         let tag = op_tag(&op);
-        let support = op_support::support(&op);
+        let support = op_support::support(zero_migrate::shipping_vendors(), &op);
         for dialect in DIALECTS {
-            let decision_supported = support.decision(dialect).is_supported();
+            let decision_supported = support
+                .decision(zero_migrate::shipping_vendors(), dialect)
+                .is_supported();
             let validates = validate_current(&op, dialect);
             assert_eq!(
                 validates, decision_supported,
@@ -636,6 +651,7 @@ fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
 
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
         let err = validate_ir_scoped(
+            zero_migrate::shipping_vendors(),
             &one_op_ir(op.clone()),
             dialect,
             Some(&SchemaScope::Unconfined),
@@ -653,9 +669,11 @@ fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
 fn identity_always_support_decision_matches_validate_and_is_pg_only() {
     for op in identity_always_ops() {
         let tag = op_tag(&op);
-        let support = op_support::support(&op);
+        let support = op_support::support(zero_migrate::shipping_vendors(), &op);
         for dialect in DIALECTS {
-            let decision_supported = support.decision(dialect).is_supported();
+            let decision_supported = support
+                .decision(zero_migrate::shipping_vendors(), dialect)
+                .is_supported();
             let validates = validate_current(&op, dialect);
             assert_eq!(
                 validates, decision_supported,
@@ -674,9 +692,11 @@ fn identity_always_support_decision_matches_validate_and_is_pg_only() {
 fn nextval_default_support_decision_matches_validate_and_is_pg_only() {
     for op in nextval_default_ops() {
         let tag = op_tag(&op);
-        let support = op_support::support(&op);
+        let support = op_support::support(zero_migrate::shipping_vendors(), &op);
         for dialect in DIALECTS {
-            let decision_supported = support.decision(dialect).is_supported();
+            let decision_supported = support
+                .decision(zero_migrate::shipping_vendors(), dialect)
+                .is_supported();
             let validates = validate_current(&op, dialect);
             assert_eq!(
                 validates, decision_supported,

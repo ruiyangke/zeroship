@@ -65,6 +65,7 @@
 
 use crate::model::backfill::BackfillSpec;
 use crate::model::migration::{Checksum, Migration, MigrationFlags, MigrationId, OnlinePhase};
+use zero_migrate_backend::registry::VendorSet;
 use zero_migrate_ir::dialect::DialectId;
 
 /// The neutral online-migration INTENT this author expands into a phased
@@ -97,8 +98,8 @@ pub use zero_migrate_backend::error::ExpandContractError;
 pub use zero_migrate_backend::capability::ExpandContractPlan;
 
 /// Quote an identifier through the explicitly selected registered backend.
-pub(crate) fn quote_ident(ident: &str, dialect: &DialectId) -> String {
-    crate::render::dml::escape_quote_ident_for_dialect(ident, dialect)
+pub(crate) fn quote_ident(vendors: VendorSet, ident: &str, dialect: &DialectId) -> String {
+    crate::render::dml::escape_quote_ident_for_dialect(vendors, ident, dialect)
 }
 
 /// Validate a bare SQL identifier: non-empty, starts with a letter/underscore,
@@ -162,11 +163,16 @@ fn validate_type(ty: &str) -> Result<(), ExpandContractError> {
 }
 
 /// Render `<schema>.<object>`, both parts quoted.
-pub(crate) fn qualified(schema: &str, object: &str, dialect: &DialectId) -> String {
+pub(crate) fn qualified(
+    vendors: VendorSet,
+    schema: &str,
+    object: &str,
+    dialect: &DialectId,
+) -> String {
     format!(
         "{}.{}",
-        quote_ident(schema, dialect),
-        quote_ident(object, dialect)
+        quote_ident(vendors, schema, dialect),
+        quote_ident(vendors, object, dialect)
     )
 }
 
@@ -276,12 +282,15 @@ pub struct ExpandContractAuthor {
     owner_app: String,
     /// The registered backend whose identifier spelling this author uses.
     dialect: DialectId,
+    /// The backends this build ships, carried rather than reached for.
+    vendors: VendorSet,
 }
 
 impl ExpandContractAuthor {
     /// Construct an author bound to a project schema, owner app, and backend identity.
     #[must_use]
     pub fn new(
+        vendors: VendorSet,
         project_schema: impl Into<String>,
         owner_app: impl Into<String>,
         dialect: DialectId,
@@ -290,6 +299,7 @@ impl ExpandContractAuthor {
             project_schema: project_schema.into(),
             owner_app: owner_app.into(),
             dialect,
+            vendors,
         }
     }
 
@@ -352,8 +362,8 @@ impl ExpandContractAuthor {
             &format!("abort_drop_column_{table}_{to}"),
             format!(
                 "ALTER TABLE {} DROP COLUMN {}",
-                qualified(&self.project_schema, table, &self.dialect),
-                quote_ident(to, &self.dialect)
+                qualified(self.vendors, &self.project_schema, table, &self.dialect),
+                quote_ident(self.vendors, to, &self.dialect)
             ),
             None,
             MigrationFlags {
@@ -405,13 +415,13 @@ impl ExpandContractAuthor {
         validate_type(ty)?;
 
         let schema = &self.project_schema;
-        let tbl_q = qualified(schema, table, &self.dialect);
-        let from_q = quote_ident(from, &self.dialect);
-        let to_q = quote_ident(to, &self.dialect);
+        let tbl_q = qualified(self.vendors, schema, table, &self.dialect);
+        let from_q = quote_ident(self.vendors, from, &self.dialect);
+        let to_q = quote_ident(self.vendors, to, &self.dialect);
         let fn_name = dual_write_fn_name(table, from, to);
         let trg_name = dual_write_trg_name(table, from, to);
-        let fn_q = qualified(schema, &fn_name, &self.dialect);
-        let trg_q = quote_ident(&trg_name, &self.dialect);
+        let fn_q = qualified(self.vendors, schema, &fn_name, &self.dialect);
+        let trg_q = quote_ident(self.vendors, &trg_name, &self.dialect);
 
         // ---- E1: ADD COLUMN <to> <ty> (nullable, transactional, additive) ----
         let e1_up = format!("ALTER TABLE {tbl_q} ADD COLUMN {to_q} {ty}");
@@ -452,7 +462,15 @@ impl ExpandContractAuthor {
         // construction; the only-from arm's IS DISTINCT FROM is the
         // amplification guard (a no-op UPDATE falls into the self-copy else arm),
         // not a recursion guard.
-        let e2_sql = dual_write_sql(&self.dialect, &fn_q, &trg_q, &tbl_q, &from_q, &to_q)?;
+        let e2_sql = dual_write_sql(
+            self.vendors,
+            &self.dialect,
+            &fn_q,
+            &trg_q,
+            &tbl_q,
+            &from_q,
+            &to_q,
+        )?;
         let e2_up = e2_sql.install.clone();
         // Structural rollback of E2 (before backfill) tears down trigger then
         // function. Idempotence is the backend's stated contract for `remove`, so
@@ -675,6 +693,7 @@ impl ExpandContractAuthor {
 // `zero-migrate-postgres/src/dual_write.rs` for the whole of it, including the body
 // that had been sitting in the CONTRACT crate.
 fn dual_write_sql(
+    vendors: VendorSet,
     dialect: &DialectId,
     fn_q: &str,
     trg_q: &str,
@@ -682,7 +701,7 @@ fn dual_write_sql(
     from_q: &str,
     to_q: &str,
 ) -> Result<zero_migrate_backend::schema::DualWriteTriggerSql, ExpandContractError> {
-    crate::render::backends::schema_renderer(dialect)
+    crate::render::backends::schema_renderer(vendors, dialect)
         .dual_write_trigger(&zero_migrate_backend::schema::DualWriteTriggerSpec {
             function: fn_q,
             trigger: trg_q,
@@ -708,7 +727,12 @@ mod tests {
     use super::*;
 
     fn author() -> ExpandContractAuthor {
-        ExpandContractAuthor::new("proj_acme", "app_acme", crate::test_fixtures::POSTGRES)
+        ExpandContractAuthor::new(
+            crate::test_fixtures::VENDORS,
+            "proj_acme",
+            "app_acme",
+            crate::test_fixtures::POSTGRES,
+        )
     }
 
     fn rename() -> OnlineIntent {

@@ -151,6 +151,7 @@ fn a_backend_that_cannot_render_the_action_says_so_about_the_action() {
     for dialect in [zero_migrate_sqlite::DIALECT, zero_migrate_mysql::DIALECT] {
         let policy = trigger_and_function_charter();
         let error = zero_migrate::model::validate::validate_ir_authorized(
+            zero_migrate::shipping_vendors(),
             &ir,
             &dialect,
             None,
@@ -231,7 +232,13 @@ fn lower(
         resolve_create_table_policy(&authored, policy, SCHEMA).expect("table shape resolves");
     let resolved_json = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect, policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect,
+        policy,
+    );
     author.load_and_lower_guarded(
         &resolved_json,
         OWNER,

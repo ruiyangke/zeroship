@@ -159,6 +159,7 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Applied {
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -174,7 +175,7 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Applied {
                 &guard,
             )
             .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -195,6 +196,7 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Applied {
         }
 
         let expected = fold_ops(
+            zero_migrate::shipping_vendors(),
             &resolved.ops,
             &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
@@ -205,7 +207,7 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Applied {
             .await
             .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
         Ok(Applied {
-            drift: diff_snapshots(&expected, &actual),
+            drift: diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual),
         })
     }
     .await;
@@ -311,7 +313,7 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> String {
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate_postgres::DIALECT, &policy);
+        let author = IrAuthor::new(zero_migrate::shipping_vendors(), &cfg.project_schema, OWNER, &zero_migrate_postgres::DIALECT, &policy);
         let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
         let artifact = author
             .load_and_lower_guarded(
@@ -322,7 +324,7 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> String {
                 &guard,
             )
             .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,

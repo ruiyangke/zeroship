@@ -91,6 +91,7 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -112,7 +113,7 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
         .ensure_journal(cfg)
         .await
         .map_err(|error| format!("ensure migration journal: {error}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -125,6 +126,7 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
         .map_err(|error| format!("apply IR plan: {error}"))?;
 
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         &resolved.ops,
         &zero_migrate_mysql::DIALECT,
         &cfg.project_schema,

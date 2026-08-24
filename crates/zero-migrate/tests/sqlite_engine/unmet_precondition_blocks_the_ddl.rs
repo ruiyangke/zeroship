@@ -102,7 +102,7 @@ async fn guarded_table_exists(backend: &SqliteBackend) -> bool {
 }
 
 async fn apply(db: &Db, cfg: &ExecutorConfig, migration: Migration, tag: &str) -> bool {
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &[PlanStep::Ddl(migration)],
             Approval::Approved,

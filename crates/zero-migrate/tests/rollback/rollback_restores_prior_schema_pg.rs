@@ -121,6 +121,7 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
             .expect("ensure the migration journal");
 
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -139,7 +140,7 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
         let seeded = author
             .load_and_lower_guarded(seed, OWNER, &registry, &LiveSchema::default(), &guard_cfg)
             .expect("the seed lowers");
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &seeded.plan.steps,
                 Approval::Approved,
@@ -174,7 +175,7 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
             "{label}: rendered no DDL to roll back"
         );
 
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -201,7 +202,7 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
             &migrations,
             Approval::Approved,
             OWNER,
-            guard_for(&guard_cfg).as_ref(),
+            guard_for(zero_migrate::shipping_vendors(), &guard_cfg).as_ref(),
         )
         .await
         .unwrap_or_else(|e| panic!("{label}: the rollback must succeed: {e}"));

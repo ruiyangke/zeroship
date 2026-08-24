@@ -188,6 +188,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
     );
 
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &zero_migrate_postgres::DIALECT,
@@ -219,7 +220,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
         expect_kind: None,
         expect_definition: None,
     };
-    match decide(&probe, &live, &POSTGRES) {
+    match decide(zero_migrate::shipping_vendors(), &probe, &live, &POSTGRES) {
         GuardVerdict::FailDrift(divergence) => assert_eq!(
             divergence.actual, truncated,
             "the verdict must name the truncated spelling the catalog holds"
@@ -241,7 +242,12 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
         .as_ref()
         .expect("the guarded drop carries a probe");
     assert_eq!(
-        decide(remedy_probe, &live, &POSTGRES),
+        decide(
+            zero_migrate::shipping_vendors(),
+            remedy_probe,
+            &live,
+            &POSTGRES
+        ),
         GuardVerdict::RunBare,
         "the catalog's own spelling matches, so the drop runs"
     );

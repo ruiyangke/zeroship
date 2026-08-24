@@ -43,6 +43,7 @@ fn artifact_created_tables(ops_json: &str) -> Vec<String> {
     let resolved_json = serde_json::to_string(&resolved).expect("resolved test IR serializes");
 
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,

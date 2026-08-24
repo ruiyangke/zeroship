@@ -222,6 +222,7 @@ async fn apply_ops(
         .await
         .map_err(|error| format!("ensure the migration journal: {error}"))?;
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -231,7 +232,7 @@ async fn apply_ops(
     let steps = author
         .lower_steps(&ir, &LiveSchema::default())
         .map_err(|error| format!("lower the bounded-string ops: {error}"))?;
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -252,9 +253,14 @@ fn descriptors_from_ops(
     schema: &str,
     policy: &EffectivePolicy,
 ) -> Result<Vec<CollectionDescriptor>, String> {
-    let export =
-        zero_migrate::render_schema_export(ops, &zero_migrate_postgres::DIALECT, schema, policy)
-            .map_err(|error| format!("render the schema export: {error}"))?;
+    let export = zero_migrate::render_schema_export(
+        zero_migrate::shipping_vendors(),
+        ops,
+        &zero_migrate_postgres::DIALECT,
+        schema,
+        policy,
+    )
+    .map_err(|error| format!("render the schema export: {error}"))?;
     Ok(export.collections.into_values().collect())
 }
 
@@ -424,6 +430,7 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
         let exported: Vec<CollectionDescriptor> =
             descriptors_from_ops(&ops, &cfg.project_schema, &policy)?;
         let reexport = render_schema_export_from_descriptors(
+            zero_migrate::shipping_vendors(),
             &exported,
             &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
@@ -442,6 +449,7 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
             })
             .collect();
         let desired = desired_snapshot_for_dialect(
+            zero_migrate::shipping_vendors(),
             &cfg.project_schema,
             &desired_descriptors,
             &zero_migrate_postgres::DIALECT,
@@ -460,12 +468,13 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
             .keys()
             .map(|table| (table.clone(), OWNER.to_string()))
             .collect();
-        let plan = MigrationEngine::new()
+        let plan = MigrationEngine::new(zero_migrate::shipping_vendors())
             .plan_declarative(
                 &desired,
                 &live,
                 &ownership,
                 &DeclarativeAuthor::new_for_dialect(
+                    zero_migrate::shipping_vendors(),
                     &cfg.project_schema,
                     OWNER,
                     zero_migrate_postgres::DIALECT,

@@ -112,7 +112,13 @@ fn rendered_sql(ops: Vec<Op>, dialect: &zero_migrate::DialectId) -> String {
     };
     let ir = resolve_create_table_policy(&ir, &support::confined_charter(), SCHEMA)
         .expect("IR resolves against the test charter");
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::confined_charter());
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect,
+        &support::confined_charter(),
+    );
     let migs = author
         .lower(&ir, &LiveSchema::from(&BTreeSet::new()))
         .expect("ir lower");
@@ -319,8 +325,14 @@ fn an_unrelated_rename_carries_the_encrypted_domain_columns_sentinel_unchanged()
             },
         ]))
         .expect("create ops deserialize");
-        let created = fold_ops(&ops, dialect, SCHEMA, &support::confined_charter())
-            .expect("snapshot fold of the create succeeds");
+        let created = fold_ops(
+            zero_migrate::shipping_vendors(),
+            &ops,
+            dialect,
+            SCHEMA,
+            &support::confined_charter(),
+        )
+        .expect("snapshot fold of the create succeeds");
         let before = created
             .tables
             .get("amounts")
@@ -342,8 +354,14 @@ fn an_unrelated_rename_carries_the_encrypted_domain_columns_sentinel_unchanged()
             }))
             .expect("rename op deserializes"),
         );
-        let renamed = fold_ops(&ops, dialect, SCHEMA, &support::confined_charter())
-            .expect("snapshot fold of the rename succeeds");
+        let renamed = fold_ops(
+            zero_migrate::shipping_vendors(),
+            &ops,
+            dialect,
+            SCHEMA,
+            &support::confined_charter(),
+        )
+        .expect("snapshot fold of the rename succeeds");
         let after = renamed
             .tables
             .get("amounts")
@@ -394,8 +412,14 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
         }
 
         // 2. The snapshot fold — the source the SQLite rebuild re-renders from.
-        let snap = fold_ops(&ops, dialect, SCHEMA, &support::confined_charter())
-            .expect("snapshot fold succeeds");
+        let snap = fold_ops(
+            zero_migrate::shipping_vendors(),
+            &ops,
+            dialect,
+            SCHEMA,
+            &support::confined_charter(),
+        )
+        .expect("snapshot fold succeeds");
         let table = snap.tables.get("amounts").expect("amounts in the snapshot");
         let amount = table
             .columns
@@ -415,9 +439,15 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
         }
 
         // 3. The field-def replay — the runtime descriptor.
-        let defs = single_fold::fold(&ops, dialect, SCHEMA, &support::confined_charter())
-            .map(|folded| folded.project_field_defs())
-            .expect("field-def fold succeeds");
+        let defs = single_fold::fold(
+            zero_migrate::shipping_vendors(),
+            &ops,
+            dialect,
+            SCHEMA,
+            &support::confined_charter(),
+        )
+        .map(|folded| folded.project_field_defs())
+        .expect("field-def fold succeeds");
         let amounts = defs.get("amounts").expect("amounts in the field defs");
         assert_eq!(
             amounts["amount"]["encrypted"]["wraps"], "number",

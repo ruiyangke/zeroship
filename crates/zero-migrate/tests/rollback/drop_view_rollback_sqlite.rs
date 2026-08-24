@@ -149,12 +149,14 @@ async fn apply_doc(
     approval: Approval,
 ) -> Vec<Migration> {
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let document = zero_migrate::model::load::load_ir_document(
+        zero_migrate::shipping_vendors(),
         ir,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -163,6 +165,7 @@ async fn apply_doc(
     )
     .expect("load gate (sqlite)");
     let folded = zero_migrate::fold_ops(
+        zero_migrate::shipping_vendors(),
         history,
         &zero_migrate_sqlite::DIALECT,
         PROJECT,
@@ -174,7 +177,7 @@ async fn apply_doc(
     let plan = author
         .lower_plan(&document, &live)
         .expect("lower the doc plan on SQLite");
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             approval,

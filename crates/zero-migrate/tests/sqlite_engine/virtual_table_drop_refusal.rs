@@ -96,6 +96,7 @@ async fn diff_with_total_ownership(
         .await
         .expect("introspect the live schema");
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         &[posts_descriptor()],
         &zero_migrate_sqlite::DIALECT,
@@ -107,13 +108,13 @@ async fn diff_with_total_ownership(
         .keys()
         .map(|t| (t.clone(), APP.to_string()))
         .collect();
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT).diff(
-        &desired,
-        &live,
-        &ownership,
-        &[],
-        &effective_policy(),
+    DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_sqlite::DIALECT,
     )
+    .diff(&desired, &live, &ownership, &[], &effective_policy())
 }
 
 /// DIRECTION 1 — a live FTS5 virtual table is REFUSED, by name and by module, even

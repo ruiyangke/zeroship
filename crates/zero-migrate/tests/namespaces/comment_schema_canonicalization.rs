@@ -38,6 +38,7 @@ fn ir(ops: Vec<Op>) -> MigrationIr {
 
 fn comment_sql(schema: Option<&str>) -> String {
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         &zero_migrate_postgres::DIALECT,

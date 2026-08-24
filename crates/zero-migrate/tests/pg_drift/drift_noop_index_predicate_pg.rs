@@ -152,6 +152,7 @@ async fn live_postgres_does_not_invent_drift_for_a_constant_true_predicate() {
     let result: Result<(), String> = async {
         let ir = fixture();
         let expected = fold_ops(
+            zero_migrate::shipping_vendors(),
             &ir.ops,
             &zero_migrate_postgres::DIALECT,
             &schema,
@@ -159,6 +160,7 @@ async fn live_postgres_does_not_invent_drift_for_a_constant_true_predicate() {
         )
         .map_err(|error| format!("fold no-op predicate fixture: {error}"))?;
         let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -213,7 +215,7 @@ async fn live_postgres_does_not_invent_drift_for_a_constant_true_predicate() {
                  never disagreed and this test proves nothing; it recorded {live_predicate:?}"
             ));
         }
-        let clean_drift = diff_snapshots(&expected, &clean);
+        let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
         if !clean_drift.is_clean() {
             return Err(format!(
                 "a `WHERE true` partial index drifted against the database that had just been \
@@ -230,7 +232,10 @@ async fn live_postgres_does_not_invent_drift_for_a_constant_true_predicate() {
             quote_ident(TABLE),
         );
         let actual = snapshot_after_mutation(&session, &schema, &mutation).await?;
-        require_predicate_drift(&diff_snapshots(&expected, &actual), "noop_predicate_kept")?;
+        require_predicate_drift(
+            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual),
+            "noop_predicate_kept",
+        )?;
 
         Ok(())
     }

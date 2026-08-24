@@ -142,12 +142,23 @@ fn exec_cfg() -> ExecutorConfig {
 /// from `fold_ops`, SDK field maps from the `FieldDef` projection, over the same ops.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::confined_charter();
-    let snapshot = fold_ops(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
-        .expect("the history folds");
-    let sdk_schemas =
-        single_fold::fold(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
-            .map(|folded| folded.project_field_defs())
-            .expect("the history folds to field defs");
+    let snapshot = fold_ops(
+        zero_migrate::shipping_vendors(),
+        history,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .expect("the history folds");
+    let sdk_schemas = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        history,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
     live.unique_indexes = BTreeSet::new();
@@ -167,8 +178,14 @@ async fn a_sqlite_rename_rebuild_emits_a_check_body_over_the_new_column_name() {
     let effective = support::confined_charter();
     let p = paths("inline_check");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &zero_migrate_sqlite::DIALECT,
+        &effective,
+    );
 
     let create = resolve_create_table_policy(&create_ir(), &effective, PROJECT)
         .expect("the create resolves under the charter");
@@ -322,8 +339,14 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
     let effective = support::confined_charter();
     let p = paths("inline_check_catalog");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &zero_migrate_sqlite::DIALECT,
+        &effective,
+    );
 
     let create = resolve_create_table_policy(&create_ir(), &effective, PROJECT)
         .expect("the create resolves under the charter");
@@ -369,6 +392,7 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = single_fold::fold(
+        zero_migrate::shipping_vendors(),
         &create.ops,
         &zero_migrate_sqlite::DIALECT,
         PROJECT,
@@ -438,8 +462,14 @@ async fn a_second_rename_starts_from_a_folded_body_the_first_rename_already_move
     let effective = support::confined_charter();
     let p = paths("inline_check_twice");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
-    let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &zero_migrate_sqlite::DIALECT,
+        &effective,
+    );
 
     let create = resolve_create_table_policy(&create_ir(), &effective, PROJECT)
         .expect("the create resolves under the charter");
@@ -479,8 +509,14 @@ async fn a_second_rename_starts_from_a_folded_body_the_first_rename_already_move
     history.extend(first.ops.iter().cloned());
 
     // The FOLD's own output, before any rebuild touches it.
-    let folded = fold_ops(&history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
-        .expect("the history folds");
+    let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
+        &history,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .expect("the history folds");
     let column = folded.tables[TABLE]
         .columns
         .iter()

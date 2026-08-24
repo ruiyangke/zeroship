@@ -115,6 +115,7 @@ fn the_fold_projects_a_drop_postgres_refuses_when_an_exclusion_expression_reads_
     let effective = support::confined_charter();
 
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         &[
             create_stays(vec![exclusion_over_an_expression()]),
             drop_column("note"),
@@ -169,6 +170,7 @@ fn a_plain_column_exclusion_still_cascades_with_the_column_it_names() {
     };
 
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         &[create_stays(vec![plain]), drop_column("lo")],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,

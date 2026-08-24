@@ -81,6 +81,7 @@
 // reaches a renderer: `render::backends::guard_for`, through the registry, by open
 // dialect id.
 pub use zero_migrate_backend::guard;
+use zero_migrate_backend::registry::VendorSet;
 pub mod apply;
 // The caller's approval decision now lives with the backend contract, whose
 // `OnlineSchemaChange::run_online` names it. Re-exported here so every
@@ -309,8 +310,8 @@ pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 /// # Errors
 /// None; registration guarantees a guard for each shipping backend.
 #[must_use]
-pub fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
-    render::backends::guard_for(cfg)
+pub fn guard_for(vendors: VendorSet, cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
+    render::backends::guard_for(vendors, cfg)
 }
 pub use model::policy::{DestructiveOps, SchemaScope, TrustProfile};
 // The policy PDP seal primitives: an HMAC over a composed `EffectivePolicy`, bound
@@ -362,6 +363,22 @@ pub use zero_migrate_ir::backend::{
 // `DialectId::new`, which is `const` and `pub` for exactly that. Re-adding them here
 // would put the engine back in the business of knowing which vendors exist.
 pub use zero_migrate_ir::dialect::{DialectId, DialectSet};
+
+/// The backends THIS BUILD ships, as the value every engine entry point takes.
+///
+/// This is the COMPOSITION, handed out rather than reached for. Nothing below the
+/// entry points reads the shipping list: an author, a fold, an engine carries the
+/// set it was constructed with, and a free function that needs one is given one.
+/// That is what lets the engine stop naming the vendor crates — the set becomes an
+/// argument the composition supplies, and the composition is the only place that
+/// has to know which backends exist.
+///
+/// [`shipping_backends`] answers the neighbouring question — what the DESCRIPTORS
+/// say — by running the leaf crate's builder over this same set.
+#[must_use]
+pub const fn shipping_vendors() -> zero_migrate_backend::registry::VendorSet {
+    render::backends::VENDORS
+}
 
 /// The backends THIS BUILD ships, validated into a [`BackendRegistry`].
 ///

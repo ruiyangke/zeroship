@@ -42,6 +42,7 @@ fn desired_snapshot(
     effective: &EffectivePolicy,
 ) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
     zero_migrate::desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         project_schema,
         descriptors,
         &zero_migrate_postgres::DIALECT,
@@ -125,6 +126,7 @@ fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
         cfg.project_schema.clone(),
         "app_test",
         zero_migrate_postgres::DIALECT,
@@ -279,7 +281,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
         "the data plane's name must be live-legal, not server-truncated"
     );
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let desc = unique_descriptor(TABLE, &field);
 
     // Deploy once so the table and its columns exist and match desired. The engine
@@ -347,6 +349,7 @@ async fn a_data_plane_named_index_re_diffs_clean() {
     // BOTH missing and unexpected while the migration plan says there is nothing to
     // do. Both surfaces are asserted together so a failure reports each one.
     let drift = diff_snapshots_with_index_aliases(
+        zero_migrate::shipping_vendors(),
         &desired.snapshot,
         &live_after,
         &desired.derived_index_aliases,
@@ -375,7 +378,12 @@ async fn a_data_plane_named_index_re_diffs_clean() {
     // The alias is PROVENANCE the caller opts into, not a global weakening of the
     // comparator: name-only diffing still sees two different names.
     assert!(
-        !diff_snapshots(&desired.snapshot, &live_after).is_clean(),
+        !diff_snapshots(
+            zero_migrate::shipping_vendors(),
+            &desired.snapshot,
+            &live_after
+        )
+        .is_clean(),
         "diff_snapshots without the alias map must stay name-only"
     );
 
@@ -399,7 +407,7 @@ async fn b_engine_named_index_still_round_trips_clean() {
 
     let field = long_unique_field();
     let natural = format!("{TABLE}_{field}_key");
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let desc = unique_descriptor(TABLE, &field);
 
     deploy(&session, &cfg, &engine, std::slice::from_ref(&desc)).await;
@@ -441,7 +449,11 @@ async fn b_engine_named_index_still_round_trips_clean() {
         "re-deploying an engine-created index must stay a no-op; plan carried: \
          {statements:#?}"
     );
-    let drift = diff_snapshots(&desired.snapshot, &live_after);
+    let drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &desired.snapshot,
+        &live_after,
+    );
     assert!(drift.is_clean(), "drift must stay clean, got {drift:#?}");
     // Population B pairs on the EXACT name. It must not be reaching clean via the
     // alias, or this arm would stop guarding the population it exists to guard.
@@ -473,7 +485,7 @@ async fn c_author_supplied_rename_still_creates_and_drops() {
     let field = "body";
     let old_name = "zz_alias_author_one_idx";
     let new_name = "zz_alias_author_two_idx";
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
 
     deploy(
         &session,
@@ -557,7 +569,7 @@ async fn d_alias_accepted_no_op_does_not_trip_ownership() {
     let field = long_unique_field();
     let natural = format!("{TABLE}_{field}_key");
     let data_plane_name = zero_migrate::schema::query::index_name(TABLE, &[field.as_str()], true);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
 
     let mut owner_desc = unique_descriptor(TABLE, &field);
     owner_desc.owner_app = "app_test".into();
@@ -595,6 +607,7 @@ async fn d_alias_accepted_no_op_does_not_trip_ownership() {
         .await
         .expect("snapshot live (after)");
     let non_owner = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
         cfg.project_schema.clone(),
         "app_zzz",
         zero_migrate_postgres::DIALECT,

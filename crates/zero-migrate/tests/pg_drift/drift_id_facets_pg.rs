@@ -514,14 +514,14 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
 
     let result: Result<(), String> = async {
         let ir = fixture(&schema);
-        let expected = fold_ops(
+        let expected = fold_ops(zero_migrate::shipping_vendors(),
             &ir.ops,
             &zero_migrate_postgres::DIALECT,
             &schema,
             &support::no_inject("app"),
         )
             .map_err(|error| format!("fold PostgreSQL drift fixture: {error}"))?;
-        let migrations = IrAuthor::new(
+        let migrations = IrAuthor::new(zero_migrate::shipping_vendors(),
             &schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -548,7 +548,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let clean = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect clean PostgreSQL fixture: {error}"))?;
-        let clean_drift = diff_snapshots(&expected, &clean);
+        let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
         if !clean_drift.is_clean() {
             return Err(format!(
                 "clean PostgreSQL ID/reference fixture drifted: {clean_drift:#?}"
@@ -578,7 +578,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         );
         let shadow_clean =
             snapshot_after_mutation(&session, &schema, &clean_shadowed_builtins).await?;
-        let mut shadow_clean_drift = diff_snapshots(&expected, &shadow_clean);
+        let mut shadow_clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &shadow_clean);
         // The shadow function created IN THE PROJECT SCHEMA is genuinely
         // out-of-band - no migration authored `nextval(regclass)` - and drift now
         // reports it, which is the point of comparing `pg_proc` at all. It is
@@ -637,7 +637,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
             let actual_snapshot =
                 snapshot_after_mutation(&session, &schema, &mutation).await?;
             require_altered(
-                &diff_snapshots(&expected, &actual_snapshot),
+                &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
                 "identity_facets",
                 &format!("column {column}"),
                 "identity",
@@ -675,7 +675,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
             let actual_snapshot =
                 snapshot_after_mutation(&session, &schema, &mutation).await?;
             require_altered(
-                &diff_snapshots(&expected, &actual_snapshot),
+                &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
                 "uuid_defaults",
                 &format!("column {column}"),
                 "default",
@@ -699,7 +699,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let actual_snapshot =
             snapshot_after_mutation(&session, &schema, &shadow_uuid_v4).await?;
         require_altered(
-            &diff_snapshots(&expected, &actual_snapshot),
+            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
             "uuid_defaults",
             "column v4_id",
             "default",
@@ -717,7 +717,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let actual_snapshot =
             snapshot_after_mutation(&session, &schema, &swap_nextval).await?;
         require_altered(
-            &diff_snapshots(&expected, &actual_snapshot),
+            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
             "sequence_defaults",
             "column counter",
             "default",
@@ -740,7 +740,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let actual_snapshot =
             snapshot_after_mutation(&session, &schema, &shadow_nextval).await?;
         require_altered(
-            &diff_snapshots(&expected, &actual_snapshot),
+            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
             "sequence_defaults",
             "column counter",
             "default",
@@ -762,7 +762,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
             let actual_snapshot =
                 snapshot_after_mutation(&session, &schema, &mutation).await?;
             require_altered(
-                &diff_snapshots(&expected, &actual_snapshot),
+                &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
                 table,
                 &format!("column {column}"),
                 "default",
@@ -788,7 +788,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let actual_snapshot =
             snapshot_after_mutation(&session, &schema, &shadowed_reference_default).await?;
         require_altered(
-            &diff_snapshots(&expected, &actual_snapshot),
+            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
             "single_child",
             "column parent_id",
             "default",
@@ -804,7 +804,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let actual_snapshot =
             snapshot_after_mutation(&session, &schema, &drop_type_check).await?;
         require_altered(
-            &diff_snapshots(&expected, &actual_snapshot),
+            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
             "type_keys",
             "column id",
             "format",
@@ -822,7 +822,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let actual_snapshot =
             snapshot_after_mutation(&session, &schema, &prefix_mismatch).await?;
         require_altered(
-            &diff_snapshots(&expected, &actual_snapshot),
+            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
             "type_keys",
             "column id",
             "format",
@@ -855,14 +855,14 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let actual_snapshot =
             snapshot_after_mutation(&session, &schema, &shadowed_type_check).await?;
         require_altered(
-            &diff_snapshots(&expected, &actual_snapshot),
+            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
             "type_keys",
             "column id",
             "format",
             "",
         )?;
         require_altered(
-            &diff_snapshots(&expected, &actual_snapshot),
+            &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
             "type_keys",
             "column id",
             "default",
@@ -896,7 +896,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
             let actual_snapshot =
                 snapshot_after_mutation(&session, &schema, &mutation).await?;
             require_altered(
-                &diff_snapshots(&expected, &actual_snapshot),
+                &diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot),
                 "ulid_keys",
                 "column id",
                 "format",
@@ -936,7 +936,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         for (mutation, expected_actual) in single_mutations {
             let actual_snapshot =
                 snapshot_after_mutation(&session, &schema, &mutation).await?;
-            let drift = diff_snapshots(&expected, &actual_snapshot);
+            let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot);
             if expected_actual == "drop" {
                 require_missing(
                     &drift,
@@ -1009,7 +1009,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         for (mutation, expected_actual) in composite_mutations {
             let actual_snapshot =
                 snapshot_after_mutation(&session, &schema, &mutation).await?;
-            let drift = diff_snapshots(&expected, &actual_snapshot);
+            let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual_snapshot);
             if expected_actual == "drop" {
                 require_missing(
                     &drift,

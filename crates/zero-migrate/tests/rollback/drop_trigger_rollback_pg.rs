@@ -112,8 +112,14 @@ fn registry(tables: &[&str]) -> BTreeMap<String, String> {
 fn lower_drop_from_history(history: &[Op], table: &str, if_exists: Option<bool>) -> Migration {
     let dialect = &zero_migrate_postgres::DIALECT;
     let pol = policy(PROJECT_SCHEMA);
-    let folded =
-        fold_ops(history, dialect, PROJECT_SCHEMA, &pol).expect("the trigger history must fold");
+    let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
+        history,
+        dialect,
+        PROJECT_SCHEMA,
+        &pol,
+    )
+    .expect("the trigger history must fold");
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     let mut drop = serde_json::json!({
         "op": "dropTrigger",
@@ -132,15 +138,21 @@ fn lower_drop_from_history(history: &[Op], table: &str, if_exists: Option<bool>)
     })
     .to_string();
     let guard = GuardConfig::from_policy(pol.clone(), (*dialect).clone());
-    let artifact = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &pol)
-        .load_and_lower_guarded(
-            &document,
-            OWNER,
-            &registry(&[ORDERS, INVOICES]),
-            &live,
-            &guard,
-        )
-        .expect("the trigger drop must lower");
+    let artifact = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT_SCHEMA,
+        OWNER,
+        dialect,
+        &pol,
+    )
+    .load_and_lower_guarded(
+        &document,
+        OWNER,
+        &registry(&[ORDERS, INVOICES]),
+        &live,
+        &guard,
+    )
+    .expect("the trigger drop must lower");
     let [PlanStep::Ddl(migration)] = artifact.plan.steps.as_slice() else {
         panic!("expected one trigger DDL step")
     };
@@ -209,6 +221,7 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -216,6 +229,7 @@ async fn apply_doc(
     );
     let guard = GuardConfig::from_policy(pol.clone(), zero_migrate_postgres::DIALECT);
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         history,
         &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
@@ -229,7 +243,7 @@ async fn apply_doc(
     let authored: zero_migrate::MigrationIr =
         serde_json::from_str(ir).map_err(|error| format!("parse the authored IR: {error}"))?;
     history.extend(authored.ops);
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             approval,
@@ -273,10 +287,10 @@ async fn live_trigger_definition(
 }
 
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
-    guard_for(&GuardConfig::from_policy(
-        policy(&cfg.project_schema),
-        zero_migrate_postgres::DIALECT,
-    ))
+    guard_for(
+        zero_migrate::shipping_vendors(),
+        &GuardConfig::from_policy(policy(&cfg.project_schema), zero_migrate_postgres::DIALECT),
+    )
 }
 
 #[compio::test]
@@ -284,10 +298,10 @@ async fn positive_unguarded_drop_trigger_from_folded_history_has_create_inverse(
     let migration = lower_drop_from_history(&[orders_trigger_op()], ORDERS, None);
 
     assert_eq!(migration.down.as_deref(), Some(orders_inverse()));
-    guard_for(&GuardConfig::from_policy(
-        policy(RECORDED_SCHEMA),
-        zero_migrate_postgres::DIALECT,
-    ))
+    guard_for(
+        zero_migrate::shipping_vendors(),
+        &GuardConfig::from_policy(policy(RECORDED_SCHEMA), zero_migrate_postgres::DIALECT),
+    )
     .as_ref()
     .check(migration.down.as_deref().expect("the inverse exists"))
     .expect("the synthesised inverse must pass the configured guard");
@@ -329,6 +343,7 @@ async fn positive_same_named_triggers_on_two_tables_restore_only_the_dropped_one
     let both = vec![orders.clone(), invoices.clone()];
 
     let folded_both = fold_ops(
+        zero_migrate::shipping_vendors(),
         &both,
         &zero_migrate_postgres::DIALECT,
         PROJECT_SCHEMA,
@@ -354,6 +369,7 @@ async fn positive_same_named_triggers_on_two_tables_restore_only_the_dropped_one
 
     let history_after_drop = vec![orders, invoices, drop_trigger_op(ORDERS, None)];
     let folded_after_drop = fold_ops(
+        zero_migrate::shipping_vendors(),
         &history_after_drop,
         &zero_migrate_postgres::DIALECT,
         PROJECT_SCHEMA,

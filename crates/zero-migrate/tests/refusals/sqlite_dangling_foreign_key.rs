@@ -82,15 +82,21 @@ fn open_db(tag: &str) -> Db {
 }
 
 fn lower_for(dialect: &DialectId, bytes: &str) -> Result<zero_migrate::LoweredArtifact, String> {
-    IrAuthor::new(PROJECT, APP, dialect, &support::confined_charter())
-        .load_and_lower_guarded(
-            bytes,
-            APP,
-            &registry(),
-            &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone()),
-        )
-        .map_err(|e| format!("{e:?}"))
+    IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        dialect,
+        &support::confined_charter(),
+    )
+    .load_and_lower_guarded(
+        bytes,
+        APP,
+        &registry(),
+        &LiveSchema::default(),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone()),
+    )
+    .map_err(|e| format!("{e:?}"))
 }
 
 #[test]
@@ -135,7 +141,7 @@ async fn a_forward_reference_still_lowers_and_applies_on_sqlite() {
         .expect("a forward reference whose target IS created later must still lower on SQLite");
 
     let db = open_db("fk-forward");
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,

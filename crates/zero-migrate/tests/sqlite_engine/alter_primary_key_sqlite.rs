@@ -49,6 +49,7 @@ fn step(name: &str, action: serde_json::Value) -> AlterPrimaryKeyStep {
     }))
     .expect("primary-key IR parses");
     let plan = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app",
         "app_test",
         &zero_migrate_sqlite::DIALECT,
@@ -149,7 +150,7 @@ async fn add_and_replace_both_directions_enforce_exact_expected_columns() {
     )
     .await;
     let add = step("add_pk", json!({"kind": "add", "columns": ["code"]}));
-    let outcome = MigrationEngine::new()
+    let outcome = MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &[PlanStep::AlterPrimaryKey(add.clone())],
             Approval::Approved,

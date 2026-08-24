@@ -258,9 +258,13 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
         .await
         .expect("create the isolated declarative-rename database");
 
-    let engine = MigrationEngine::new();
-    let author =
-        DeclarativeAuthor::new_for_dialect(database.clone(), OWNER, zero_migrate_mysql::DIALECT);
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let author = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        database.clone(),
+        OWNER,
+        zero_migrate_mysql::DIALECT,
+    );
     let guard = GuardConfig::from_policy(policy_for(&database), zero_migrate_mysql::DIALECT);
     let backend = MysqlBackend::new_generic(&session);
 
@@ -268,6 +272,7 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
     // anything, so the test would pass on a lossy implementation.
     let v1 = people(OLD_COLUMN, false);
     let desired1 = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         &database,
         std::slice::from_ref(&v1),
         &zero_migrate_mysql::DIALECT,
@@ -317,6 +322,7 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
     // a half-applied deploy is observable.
     let v2 = people(NEW_COLUMN, true);
     let desired2 = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         &database,
         std::slice::from_ref(&v2),
         &zero_migrate_mysql::DIALECT,
@@ -533,14 +539,19 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
         .await
         .expect("create the isolated declarative-rename schema");
 
-    let engine = MigrationEngine::new();
-    let author =
-        DeclarativeAuthor::new_for_dialect(schema.clone(), OWNER, zero_migrate_postgres::DIALECT);
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
+    let author = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        schema.clone(),
+        OWNER,
+        zero_migrate_postgres::DIALECT,
+    );
     let guard = GuardConfig::from_policy(policy_for(&schema), zero_migrate_postgres::DIALECT);
     let backend = PostgresBackend::new_generic(&session);
 
     let v1 = people(OLD_COLUMN, false);
     let desired1 = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         &schema,
         std::slice::from_ref(&v1),
         &zero_migrate_postgres::DIALECT,
@@ -587,6 +598,7 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
 
     let v2 = people(NEW_COLUMN, true);
     let desired2 = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         &schema,
         std::slice::from_ref(&v2),
         &zero_migrate_postgres::DIALECT,

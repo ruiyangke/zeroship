@@ -83,6 +83,7 @@ fn lower(op: &str, live: &LiveSchema) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{op}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "public",
         "f721",
         &zero_migrate_postgres::DIALECT,

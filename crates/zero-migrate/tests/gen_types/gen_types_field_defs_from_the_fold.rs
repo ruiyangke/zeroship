@@ -224,7 +224,14 @@ fn runtime_field(
     table: &str,
     column: &str,
 ) -> serde_json::Value {
-    let rendered = render_artifacts(ops, dialect, SCHEMA, policy).expect("the stream renders");
+    let rendered = render_artifacts(
+        zero_migrate::shipping_vendors(),
+        ops,
+        dialect,
+        SCHEMA,
+        policy,
+    )
+    .expect("the stream renders");
     let defs = support::field_defs_corpus::field_defs_from_runtime_json(&rendered.runtime_json);
     defs.get(table)
         .and_then(|schema| schema.get(column))
@@ -324,9 +331,15 @@ fn a_dropped_check_constraint_does_not_outlive_itself() {
     assert_eq!(membership.get("enum"), None, "and its membership with it");
 
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-        let error = render_artifacts(&carrier("check_bound_dropped"), dialect, SCHEMA, &policy)
-            .expect_err("addConstraint(check) is PostgreSQL-only")
-            .to_string();
+        let error = render_artifacts(
+            zero_migrate::shipping_vendors(),
+            &carrier("check_bound_dropped"),
+            dialect,
+            SCHEMA,
+            &policy,
+        )
+        .expect_err("addConstraint(check) is PostgreSQL-only")
+        .to_string();
         assert!(
             error.contains("addConstraint(check) is PostgreSQL-only"),
             "{dialect:?}: this family's absence off Postgres is a REFUSAL, which is why \
@@ -404,6 +417,7 @@ fn a_dropped_partition_leaves_the_field_def_map_too() {
     let policy = support::no_inject(SCHEMA);
     for dialect in DIALECTS {
         let rendered = render_artifacts(
+            zero_migrate::shipping_vendors(),
             &carrier("attached_partition_dropped"),
             dialect,
             SCHEMA,
@@ -428,6 +442,7 @@ fn a_dropped_partition_leaves_the_field_def_map_too() {
         );
 
         let rendered = render_artifacts(
+            zero_migrate::shipping_vendors(),
             &carrier("attached_partition_detached"),
             dialect,
             SCHEMA,
@@ -577,8 +592,20 @@ fn the_move_changed_no_refusal_that_the_old_path_already_made() {
                 // stream it rejects reaches neither side.
                 continue;
             };
-            let oracle = zero_migrate::fold_ops(&resolved.ops, dialect, SCHEMA, policy);
-            let now = render_artifacts(&ops, dialect, SCHEMA, policy);
+            let oracle = zero_migrate::fold_ops(
+                zero_migrate::shipping_vendors(),
+                &resolved.ops,
+                dialect,
+                SCHEMA,
+                policy,
+            );
+            let now = render_artifacts(
+                zero_migrate::shipping_vendors(),
+                &ops,
+                dialect,
+                SCHEMA,
+                policy,
+            );
 
             match (&oracle, &now) {
                 (Ok(_), Ok(_)) => accepted += 1,
@@ -652,9 +679,15 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
             .iter()
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| panic!("probe `{name}` exists"));
-        render_artifacts(&parse(source), dialect, SCHEMA, &open)
-            .map(|_| "rendered".to_string())
-            .unwrap_or_else(|e| e.to_string())
+        render_artifacts(
+            zero_migrate::shipping_vendors(),
+            &parse(source),
+            dialect,
+            SCHEMA,
+            &open,
+        )
+        .map(|_| "rendered".to_string())
+        .unwrap_or_else(|e| e.to_string())
     };
     let pg = &zero_migrate_postgres::DIALECT;
     assert!(

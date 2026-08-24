@@ -47,6 +47,7 @@
 //! collections dropped, so there is one fold behind both.
 
 use std::collections::{BTreeMap, BTreeSet};
+use zero_migrate_backend::registry::VendorSet;
 
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -262,12 +263,14 @@ fn render_runtime_descriptor_v1(
 /// # Errors
 /// [`GenTypesError::Fold`] if the schema source is structurally incoherent.
 pub fn render_artifacts(
+    vendors: VendorSet,
     ops: &[Op],
     dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
-    render_schema_export(ops, dialect, project_schema, effective).map(|export| export.artifacts)
+    render_schema_export(vendors, ops, dialect, project_schema, effective)
+        .map(|export| export.artifacts)
 }
 
 /// The two rendered artifacts PLUS the typed collection set they were rendered from.
@@ -300,6 +303,7 @@ pub struct SchemaExport {
 /// # Errors
 /// As [`render_artifacts`].
 pub fn render_schema_export(
+    vendors: VendorSet,
     ops: &[Op],
     dialect: &DialectId,
     project_schema: &str,
@@ -348,8 +352,9 @@ pub fn render_schema_export(
     //
     // The structural catalog replay runs ONCE per render, and since the extraction so
     // does `flatten_dialectal_ops`.
-    let folded = crate::render::fold::single_fold::fold(ops, dialect, project_schema, effective)
-        .map_err(GenTypesError::Fold)?;
+    let folded =
+        crate::render::fold::single_fold::fold(vendors, ops, dialect, project_schema, effective)
+            .map_err(GenTypesError::Fold)?;
     let metadata = folded.project_runtime_metadata();
     let authoring_tables = folded.project_authoring_tables();
     // ONE recovery feeds both the serialized artifact and the structured export: the
@@ -400,12 +405,13 @@ pub fn render_schema_export(
 /// (including a table-shape resolve failure under `effective`);
 /// [`GenTypesError::Fold`] if the produced ops are structurally incoherent.
 pub fn render_artifacts_from_descriptors(
+    vendors: VendorSet,
     descriptors: &[crate::render::declarative::CollectionDescriptor],
     dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<GeneratedArtifacts, GenTypesError> {
-    render_schema_export_from_descriptors(descriptors, dialect, project_schema, effective)
+    render_schema_export_from_descriptors(vendors, descriptors, dialect, project_schema, effective)
         .map(|export| export.artifacts)
 }
 
@@ -420,6 +426,7 @@ pub fn render_artifacts_from_descriptors(
 /// # Errors
 /// As [`render_artifacts_from_descriptors`].
 pub fn render_schema_export_from_descriptors(
+    vendors: VendorSet,
     descriptors: &[crate::render::declarative::CollectionDescriptor],
     dialect: &DialectId,
     project_schema: &str,
@@ -427,7 +434,7 @@ pub fn render_schema_export_from_descriptors(
 ) -> Result<SchemaExport, GenTypesError> {
     let ops = crate::descriptors_to_create_ops(descriptors, project_schema, effective)
         .map_err(GenTypesError::Produce)?;
-    render_schema_export(&ops, dialect, project_schema, effective)
+    render_schema_export(vendors, &ops, dialect, project_schema, effective)
 }
 
 /// The IR carriers the runtime `FieldDef` projection intentionally cannot represent:
@@ -1881,6 +1888,7 @@ mod tests {
         let ops = crate::descriptors_to_create_ops(&descriptors, "app", &effective)
             .expect("confined descriptor resolves");
         let folded = crate::render::fold::single_fold::fold(
+            crate::test_fixtures::VENDORS,
             &ops,
             &POSTGRES,
             DEFAULT_PROJECT_SCHEMA,
@@ -1931,6 +1939,7 @@ mod tests {
             runtime_options: Default::default(),
         }];
         let artifacts = render_artifacts_from_descriptors(
+            crate::test_fixtures::VENDORS,
             &descriptors,
             &POSTGRES,
             DEFAULT_PROJECT_SCHEMA,
@@ -1972,8 +1981,14 @@ mod tests {
             existence_guard: None,
         }];
 
-        let artifacts = render_artifacts(&ops, &POSTGRES, DEFAULT_PROJECT_SCHEMA, &effective)
-            .expect("no-inject UUID id renders");
+        let artifacts = render_artifacts(
+            crate::test_fixtures::VENDORS,
+            &ops,
+            &POSTGRES,
+            DEFAULT_PROJECT_SCHEMA,
+            &effective,
+        )
+        .expect("no-inject UUID id renders");
         let value: Value = serde_json::from_str(&artifacts.runtime_json)
             .expect("runtime descriptor is valid JSON");
 

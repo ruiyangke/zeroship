@@ -68,6 +68,7 @@ fn pg_only_ir() -> MigrationIr {
 #[test]
 fn lower_selects_postgres_leg_and_emits_nothing_for_absent_sqlite_mysql_legs() {
     let pg_steps = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_postgres::DIALECT,
@@ -94,9 +95,15 @@ fn lower_selects_postgres_leg_and_emits_nothing_for_absent_sqlite_mysql_legs() {
     // whole claim is that the op vanished, and a length check is what catches a
     // future change that emits some other step in its place.
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-        let steps = IrAuthor::new(PROJECT, APP, dialect, &support::no_inject("app"))
-            .lower_steps(&pg_only_ir(), &LiveSchema::default())
-            .expect("an absent dialectal leg contributes nothing, it does not refuse");
+        let steps = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT,
+            APP,
+            dialect,
+            &support::no_inject("app"),
+        )
+        .lower_steps(&pg_only_ir(), &LiveSchema::default())
+        .expect("an absent dialectal leg contributes nothing, it does not refuse");
         assert!(
             steps.is_empty(),
             "{dialect:?} has no leg in this op, so it must emit no steps: {steps:#?}"
@@ -196,7 +203,13 @@ fn authored_create_table_lowers_under_the_charter_that_shaped_it() {
     .expect("authored IR parses");
     let resolved =
         resolve_create_table_policy(&authored, &policy, PROJECT).expect("table shape resolves");
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_postgres::DIALECT, &policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &zero_migrate_postgres::DIALECT,
+        &policy,
+    );
     let guard_cfg = GuardConfig::from_policy(policy, zero_migrate_postgres::DIALECT);
     let (steps, _fragments) = author
         .lower_guarded(&resolved, &guard_cfg, &LiveSchema::default())
@@ -221,6 +234,7 @@ async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
     );
 
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -235,7 +249,7 @@ async fn sqlite_apply_selects_explicit_empty_leg_without_column_effect() {
         "SQLite lower should emit only createTable; its explicit dialectal leg is empty"
     );
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let guard_cfg =
         GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
     let plan = engine.plan(&migrations, &guard_cfg);
@@ -273,7 +287,12 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
             legs: BTreeMap::new(),
         }],
     );
-    let err = validate_ir(&empty, &zero_migrate_postgres::DIALECT).unwrap_err();
+    let err = validate_ir(
+        zero_migrate::shipping_vendors(),
+        &empty,
+        &zero_migrate_postgres::DIALECT,
+    )
+    .unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
 
     let nested = ir(
@@ -287,7 +306,12 @@ fn validate_rejects_empty_and_nested_dialectal_ops() {
             )]),
         }],
     );
-    let err = validate_ir(&nested, &zero_migrate_postgres::DIALECT).unwrap_err();
+    let err = validate_ir(
+        zero_migrate::shipping_vendors(),
+        &nested,
+        &zero_migrate_postgres::DIALECT,
+    )
+    .unwrap_err();
     assert_eq!(err.code, CODE_OP_INVALID);
 }
 
@@ -297,8 +321,12 @@ fn validate_accepts_absent_and_misspelled_target_dialectal_legs() {
     // so there is nothing to refuse. If validate refused while the fold skipped,
     // every migration would be rejected for ops the target was never going to run.
     let absent = pg_only_ir();
-    validate_ir(&absent, &zero_migrate_sqlite::DIALECT)
-        .expect("an absent exact target leg contributes nothing, it does not refuse");
+    validate_ir(
+        zero_migrate::shipping_vendors(),
+        &absent,
+        &zero_migrate_sqlite::DIALECT,
+    )
+    .expect("an absent exact target leg contributes nothing, it does not refuse");
 
     // A misspelled key is INDISTINGUISHABLE from a deliberate skip. That is the
     // accepted cost of emit-nothing: refusing an unrecognised key would also refuse
@@ -312,6 +340,10 @@ fn validate_accepts_absent_and_misspelled_target_dialectal_legs() {
             )]),
         }],
     );
-    validate_ir(&misspelled, &zero_migrate_postgres::DIALECT)
-        .expect("a misspelled key leaves postgres uncovered, which emits nothing");
+    validate_ir(
+        zero_migrate::shipping_vendors(),
+        &misspelled,
+        &zero_migrate_postgres::DIALECT,
+    )
+    .expect("a misspelled key leaves postgres uncovered, which emits nothing");
 }

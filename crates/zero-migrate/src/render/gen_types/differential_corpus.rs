@@ -87,6 +87,7 @@
 //! corpus into a mirror of whatever the code emits today.
 
 use std::collections::{BTreeMap, BTreeSet};
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::model::ir::{MigrationIr, Op};
 use crate::render::fold::fold_ops;
@@ -524,15 +525,15 @@ pub(super) fn policy(confined: bool) -> crate::EffectivePolicy {
 }
 
 impl Replay {
-    fn run(ops: &[Op], d: &DialectId, confined: bool) -> Self {
+    fn run(vendors: VendorSet, ops: &[Op], d: &DialectId, confined: bool) -> Self {
         let p = policy(confined);
         // ONE fold, THREE projections read off it - the same value `render_artifacts`
         // reads all three from. Folding three times would be three traversals, which is
         // the thing the proposal removes.
-        let folded =
-            crate::render::fold::single_fold::fold(ops, d, SCHEMA, &p).map_err(|e| e.to_string());
+        let folded = crate::render::fold::single_fold::fold(vendors, ops, d, SCHEMA, &p)
+            .map_err(|e| e.to_string());
         Self {
-            fo: fold_ops(ops, d, SCHEMA, &p).map_err(|e| e.to_string()),
+            fo: fold_ops(vendors, ops, d, SCHEMA, &p).map_err(|e| e.to_string()),
             ffd: folded
                 .as_ref()
                 .map(super::super::fold::single_fold::FoldedSchema::project_field_defs)
@@ -613,12 +614,17 @@ impl Reach {
 /// walker gains an arm and the table moves; a walker loses one and the table
 /// moves the other way. Counting `match` arms by eye would prove nothing about
 /// behaviour, and section A's own numbers were arm counts.
-fn sweep_reach(acc: &mut BTreeMap<(String, String), [Reach; 4]>, ops: &[Op], confined: bool) {
+fn sweep_reach(
+    vendors: VendorSet,
+    acc: &mut BTreeMap<(String, String), [Reach; 4]>,
+    ops: &[Op],
+    confined: bool,
+) {
     for d in &DIALECTS {
         let dname = dialect_label(d).to_string();
         let mut prev: Option<[Result<String, String>; 4]> = None;
         for i in 0..=ops.len() {
-            let replay = Replay::run(&ops[..i], d, confined);
+            let replay = Replay::run(vendors, &ops[..i], d, confined);
             let cur: [Result<String, String>; 4] = [
                 replay.text(Walker::Fo).map_err(ToString::to_string),
                 replay.text(Walker::Ffd).map_err(ToString::to_string),
@@ -655,16 +661,16 @@ fn sweep_reach(acc: &mut BTreeMap<(String, String), [Reach; 4]>, ops: &[Op], con
     }
 }
 
-fn measured_reach() -> BTreeMap<(String, String), [Reach; 4]> {
+fn measured_reach(vendors: VendorSet) -> BTreeMap<(String, String), [Reach; 4]> {
     let mut acc = BTreeMap::new();
     // The recorded op fixtures are real drained envelopes and are already
     // policy-resolved, so they fold under the same confined charter that
     // produced them.
     for stem in STEMS {
-        sweep_reach(&mut acc, &read_golden(stem).ops, true);
+        sweep_reach(vendors, &mut acc, &read_golden(stem).ops, true);
     }
     for s in STREAMS.iter().chain(CASES) {
-        sweep_reach(&mut acc, &parse(s.ops), false);
+        sweep_reach(vendors, &mut acc, &parse(s.ops), false);
     }
     acc
 }
@@ -1040,12 +1046,12 @@ fn classify(replay: &Replay, q: Question) -> Verdict {
     }
 }
 
-fn case_lines() -> Vec<String> {
+fn case_lines(vendors: VendorSet) -> Vec<String> {
     let mut lines = Vec::new();
     for c in CASES {
         let ops = parse(c.ops);
         for d in &DIALECTS {
-            let replay = Replay::run(&ops, d, false);
+            let replay = Replay::run(vendors, &ops, d, false);
             for q in probes_for(c.name) {
                 lines.push(format!(
                     "{}|{}|{}|{}",
@@ -1734,7 +1740,7 @@ const OP_VARIANT_COUNT: usize = 56;
 
 #[test]
 fn each_walker_reaches_exactly_the_recorded_op_variants() {
-    let measured = reach_lines(&measured_reach());
+    let measured = reach_lines(&measured_reach(crate::test_fixtures::VENDORS));
     let expected: Vec<String> = REACH.iter().map(ToString::to_string).collect();
     let report = diff_report("the op-variant reach matrix", &expected, &measured);
     assert!(report.is_empty(), "{report}");
@@ -1742,7 +1748,7 @@ fn each_walker_reaches_exactly_the_recorded_op_variants() {
 
 #[test]
 fn every_case_produces_exactly_the_recorded_verdict() {
-    let measured = case_lines();
+    let measured = case_lines(crate::test_fixtures::VENDORS);
     let map = rows_map();
     let expected: Vec<String> = ROWS
         .iter()

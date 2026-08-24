@@ -114,8 +114,11 @@ fn a_backends_two_advisory_answers_cannot_disagree() {
         let dialect = &descriptor.id;
         // A statement every dialect can be ASKED about. Whether it parses is the
         // backend's business; that it is asked is this test's.
-        let verdict = advisories_for_sql(dialect, "DROP TABLE t");
-        match (analyzer_absence(dialect), verdict) {
+        let verdict = advisories_for_sql(zero_migrate::shipping_vendors(), dialect, "DROP TABLE t");
+        match (
+            analyzer_absence(zero_migrate::shipping_vendors(), dialect),
+            verdict,
+        ) {
             (None, AdvisoryVerdict::Analyzed(_)) => analyzing += 1,
             (Some(by_absence), AdvisoryVerdict::NotAnalyzed(by_advise)) => {
                 assert_eq!(
@@ -159,11 +162,12 @@ fn a_backends_two_advisory_answers_cannot_disagree() {
 fn an_unchecked_backend_never_reports_an_empty_advisory_list() {
     for descriptor in shipping_backends().iter() {
         let dialect = &descriptor.id;
-        let Some(absent) = analyzer_absence(dialect) else {
+        let Some(absent) = analyzer_absence(zero_migrate::shipping_vendors(), dialect) else {
             continue;
         };
 
-        let report = advisories_for_sql(dialect, "DROP TABLE t").into_report();
+        let report = advisories_for_sql(zero_migrate::shipping_vendors(), dialect, "DROP TABLE t")
+            .into_report();
         assert!(
             !report.is_empty(),
             "{dialect} has no analyzer, so its report must SAY so rather than be empty"
@@ -189,9 +193,9 @@ fn a_plan_on_a_backend_without_an_analyzer_reports_the_absence() {
     for descriptor in shipping_backends().iter() {
         let dialect = &descriptor.id;
         let plan = plan_for(dialect, "DROP TABLE t");
-        let advisories = plan.advisories();
+        let advisories = plan.advisories(zero_migrate::shipping_vendors());
 
-        if analyzer_absence(dialect).is_some() {
+        if analyzer_absence(zero_migrate::shipping_vendors(), dialect).is_some() {
             assert_eq!(
                 advisories.len(),
                 1,

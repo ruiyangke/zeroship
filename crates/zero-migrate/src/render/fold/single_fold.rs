@@ -159,6 +159,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
+use zero_migrate_backend::registry::VendorSet;
 
 use indexmap::IndexMap;
 
@@ -273,13 +274,14 @@ pub struct FoldedSchema {
 /// what `render_artifacts` already does by returning the fold's error, and is the
 /// behaviour `docs/review-log.md` records for the two fold-backed walkers.
 pub fn fold(
+    vendors: VendorSet,
     ops: &[Op],
     dialect: &DialectId,
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<FoldedSchema, FoldError> {
     let empty = SchemaSnapshot::default();
-    let mut catalog = CatalogFold::seed(&empty, dialect, project_schema, effective);
+    let mut catalog = CatalogFold::seed(vendors, &empty, dialect, project_schema, effective);
     let mut state = AuthoredState {
         tables: BTreeMap::new(),
         named_types: NamedTypeRegistry::default(),

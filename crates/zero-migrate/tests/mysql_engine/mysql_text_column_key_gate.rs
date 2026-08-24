@@ -78,8 +78,12 @@ fn a_text_key_in_the_same_envelope_is_refused_at_the_gate() {
     // which is not the finding - the finding is that the ENGINE refuses one of these
     // and not the other, from the same two operations.
     let ir: MigrationIr = serde_json::from_str(SAME_ENVELOPE).expect("same-envelope IR parses");
-    let error = validate_ir(&ir, &zero_migrate_mysql::DIALECT)
-        .expect_err("a key over a bare TEXT column must not pass the MySQL load gate");
+    let error = validate_ir(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_mysql::DIALECT,
+    )
+    .expect_err("a key over a bare TEXT column must not pass the MySQL load gate");
     let rendered = format!("{error}");
     assert!(
         rendered.contains("body"),
@@ -88,8 +92,18 @@ fn a_text_key_in_the_same_envelope_is_refused_at_the_gate() {
 
     // And the same envelope is fine on the other two dialects, so the rule is scoped
     // to the server that actually refuses it.
-    validate_ir(&ir, &zero_migrate_postgres::DIALECT).expect("PostgreSQL indexes a text column");
-    validate_ir(&ir, &zero_migrate_sqlite::DIALECT).expect("SQLite indexes a text column");
+    validate_ir(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_postgres::DIALECT,
+    )
+    .expect("PostgreSQL indexes a text column");
+    validate_ir(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_sqlite::DIALECT,
+    )
+    .expect("SQLite indexes a text column");
 }
 
 #[test]
@@ -98,8 +112,12 @@ fn the_second_envelope_alone_carries_nothing_the_gate_could_key_on() {
     // not declare, and `validate_ir` is given no live schema to resolve it against.
     // This is the mechanism, provable with no database at all.
     let ir: MigrationIr = serde_json::from_str(SECOND_ENVELOPE).expect("index-only IR parses");
-    validate_ir(&ir, &zero_migrate_mysql::DIALECT)
-        .expect("the index-only envelope passes the MySQL gate - it declares no column");
+    validate_ir(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_mysql::DIALECT,
+    )
+    .expect("the index-only envelope passes the MySQL gate - it declares no column");
 }
 
 #[compio::test]
@@ -172,6 +190,7 @@ async fn apply(
 ) -> Result<(), String> {
     let policy = support::no_inject(&cfg.project_schema);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -183,7 +202,7 @@ async fn apply(
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
     let backend = MysqlBackend::new_generic(session);
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,

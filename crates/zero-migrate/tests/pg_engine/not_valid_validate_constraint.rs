@@ -41,6 +41,7 @@ fn ir(op: Op) -> MigrationIr {
 
 fn pg_sql(op: Op) -> Vec<String> {
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app",
         "app_nv",
         &zero_migrate_postgres::DIALECT,
@@ -54,7 +55,13 @@ fn pg_sql(op: Op) -> Vec<String> {
 }
 
 fn validates(op: Op, dialect: &DialectId) -> bool {
-    validate_ir_scoped(&ir(op), dialect, Some(&SchemaScope::Unconfined)).is_ok()
+    validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
+        &ir(op),
+        dialect,
+        Some(&SchemaScope::Unconfined),
+    )
+    .is_ok()
 }
 
 fn fk_not_valid(not_valid: Option<bool>) -> Op {

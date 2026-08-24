@@ -132,7 +132,7 @@ async fn deploy(backend: &SqliteBackend, tables: &[&str], sources: &[&str]) -> R
         .iter()
         .map(|source| serde_json::from_str(source).expect("test envelope parses"))
         .collect();
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .deploy_envelopes(
             &envelopes,
             backend,
@@ -481,11 +481,24 @@ const RENAME_IR: &str = r#"{"ir_version":1,"name":"rename_note","owner_app":"app
 /// through the SDK-value arm, the one that renders its `CREATE TABLE` from the map.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
-    let snapshot = fold_ops(history, &SQLITE, PROJECT, &policy).expect("the history folds");
+    let snapshot = fold_ops(
+        zero_migrate::shipping_vendors(),
+        history,
+        &SQLITE,
+        PROJECT,
+        &policy,
+    )
+    .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sdk_schemas = single_fold::fold(history, &SQLITE, PROJECT, &policy)
-        .expect("the history folds")
-        .project_field_defs();
+    live.sdk_schemas = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        history,
+        &SQLITE,
+        PROJECT,
+        &policy,
+    )
+    .expect("the history folds")
+    .project_field_defs();
     live
 }
 
@@ -495,9 +508,15 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, policy.clone());
     let raw: MigrationIr = serde_json::from_str(source).expect("test IR parses");
     let resolved = resolve_create_table_policy(&raw, &policy, PROJECT).expect("the IR resolves");
-    let author = IrAuthor::new(PROJECT, APP, &SQLITE, &policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &SQLITE,
+        &policy,
+    );
     let steps = author.lower_steps(&resolved, live).expect("the IR lowers");
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -658,7 +677,13 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
     let backend = SqliteBackend::open(&paths.app, &paths.journal).expect("open the SQLite backend");
     let history = apply(&backend, CREATE, &LiveSchema::default()).await;
     let policy = support::no_inject(PROJECT);
-    let author = IrAuthor::new(PROJECT, APP, &SQLITE, &policy);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &SQLITE,
+        &policy,
+    );
     let raw: MigrationIr = serde_json::from_str(RENAME_IR).expect("the rename IR parses");
     let resolved = resolve_create_table_policy(&raw, &policy, PROJECT).expect("it resolves");
 
@@ -685,9 +710,15 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
 
     // CONTENT is not: the same rename lowers identically whether the map is the real one
     // or a deliberately wrong one, because this arm replays SQLite's own stored text.
-    live.sdk_schemas = single_fold::fold(&history, &SQLITE, PROJECT, &policy)
-        .expect("the history folds")
-        .project_field_defs();
+    live.sdk_schemas = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        &history,
+        &SQLITE,
+        PROJECT,
+        &policy,
+    )
+    .expect("the history folds")
+    .project_field_defs();
     let real = format!(
         "{:?}",
         author.lower_steps(&resolved, &live).expect("lowers")

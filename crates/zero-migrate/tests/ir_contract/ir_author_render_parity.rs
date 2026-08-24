@@ -63,6 +63,7 @@ fn test_desired_snapshot(
     descs: &[CollectionDescriptor],
 ) -> Result<DesiredSchema, zero_migrate::DeclarativeError> {
     zero_migrate::render::declarative::desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         project_schema,
         descs,
         &zero_migrate_postgres::DIALECT,
@@ -76,6 +77,7 @@ fn test_desired_snapshot_for_dialect(
     dialect: &zero_migrate::DialectId,
 ) -> Result<DesiredSchema, zero_migrate::DeclarativeError> {
     zero_migrate::render::declarative::desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         project_schema,
         descs,
         dialect,
@@ -100,7 +102,12 @@ fn declarative_pairs_for(
 ) -> Vec<(String, Option<String>)> {
     let desired: DesiredSchema =
         test_desired_snapshot_for_dialect(SCHEMA, descs, dialect).expect("desired snapshot");
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, dialect.clone());
+    let author = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect.clone(),
+    );
     let plan = author
         .diff(
             &desired,
@@ -140,7 +147,13 @@ fn ir_pairs_for(
     };
     let ir = resolve_create_table_policy(&ir, &support::confined_charter(), SCHEMA)
         .expect("parity IR resolves");
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::confined_charter());
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect,
+        &support::confined_charter(),
+    );
     let migs = author
         .lower(&ir, &LiveSchema::from(live))
         .expect("ir lower");
@@ -296,7 +309,12 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
     let desired = test_desired_snapshot(SCHEMA, &[posts, authors]).expect("desired snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("authors".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate_postgres::DIALECT);
+    let author = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        zero_migrate_postgres::DIALECT,
+    );
     let plan = author
         .diff(
             &desired,
@@ -550,7 +568,12 @@ fn add_column_render_is_byte_identical_pg() {
     let live_full = test_desired_snapshot(SCHEMA, &[live_desc]).expect("live snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("people".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate_postgres::DIALECT);
+    let author = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        zero_migrate_postgres::DIALECT,
+    );
     let plan = author
         .diff(
             &desired,
@@ -622,7 +645,12 @@ fn create_index_render_is_byte_identical_pg() {
     let live_full = test_desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate_postgres::DIALECT);
+    let author = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        zero_migrate_postgres::DIALECT,
+    );
     let plan = author
         .diff(
             &desired,
@@ -706,9 +734,15 @@ fn ir_lower_one(
         preconditions: vec![],
         checksum: None,
     };
-    IrAuthor::new(SCHEMA, OWNER, dialect, &support::no_inject("app"))
-        .lower(&ir, &LiveSchema::from(live))
-        .expect("ir lower")
+    IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect,
+        &support::no_inject("app"),
+    )
+    .lower(&ir, &LiveSchema::from(live))
+    .expect("ir lower")
 }
 
 #[test]
@@ -743,9 +777,14 @@ fn alter_column_type_render_is_byte_identical_pg() {
     let live = test_desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut own = HashMap::new();
     own.insert("widgets".to_string(), OWNER.to_string());
-    let plan = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate_postgres::DIALECT)
-        .diff(&desired, &live.snapshot, &own, &[], &effective_policy())
-        .expect("diff");
+    let plan = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        zero_migrate_postgres::DIALECT,
+    )
+    .diff(&desired, &live.snapshot, &own, &[], &effective_policy())
+    .expect("diff");
     let decl: Vec<_> = sql_pairs(&plan.migrations)
         .into_iter()
         .filter(|(up, _)| up.contains("ALTER COLUMN"))
@@ -807,9 +846,14 @@ fn set_column_not_null_render_is_byte_identical_pg() {
     let live = test_desired_snapshot(SCHEMA, &[live_desc]).expect("live");
     let mut own = HashMap::new();
     own.insert("people".to_string(), OWNER.to_string());
-    let plan = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate_postgres::DIALECT)
-        .diff(&desired, &live.snapshot, &own, &[], &effective_policy())
-        .expect("diff");
+    let plan = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        zero_migrate_postgres::DIALECT,
+    )
+    .diff(&desired, &live.snapshot, &own, &[], &effective_policy())
+    .expect("diff");
     let decl: Vec<_> = sql_pairs(&plan.migrations)
         .into_iter()
         .filter(|(up, _)| up.contains("NOT NULL"))
@@ -864,15 +908,20 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
         runtime_options: Default::default(),
     };
     let desired = test_desired_snapshot(SCHEMA, &[posts, authors]).expect("desired");
-    let plan = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate_postgres::DIALECT)
-        .diff(
-            &desired,
-            &SchemaSnapshot::default(),
-            &HashMap::new(),
-            &[],
-            &effective_policy(),
-        )
-        .expect("diff");
+    let plan = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        zero_migrate_postgres::DIALECT,
+    )
+    .diff(
+        &desired,
+        &SchemaSnapshot::default(),
+        &HashMap::new(),
+        &[],
+        &effective_policy(),
+    )
+    .expect("diff");
     // The differ inlines `posts_author_fkey` at the `posts` CREATE and DEFERS the
     // cycle-closing `authors_pinned_fkey` (authors→posts) to a stand-alone ADD CONSTRAINT.
     // Isolate that deferred FK.
@@ -1197,6 +1246,7 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
     let mut live = BTreeSet::new();
     live.insert("widgets".to_string());
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -1483,7 +1533,12 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
             .expect("desired snapshot (sqlite)");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("authors".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate_sqlite::DIALECT);
+    let author = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        zero_migrate_sqlite::DIALECT,
+    );
     let plan = author
         .diff(
             &desired,
@@ -1722,7 +1777,12 @@ fn add_column_render_is_byte_identical_sqlite() {
             .expect("live snapshot");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("people".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate_sqlite::DIALECT);
+    let author = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        zero_migrate_sqlite::DIALECT,
+    );
     let plan = author
         .diff(
             &desired,
@@ -1797,7 +1857,12 @@ fn create_index_render_is_byte_identical_sqlite() {
             .expect("live");
     let mut live_ownership = HashMap::new();
     live_ownership.insert("events".to_string(), OWNER.to_string());
-    let author = DeclarativeAuthor::new_for_dialect(SCHEMA, OWNER, zero_migrate_sqlite::DIALECT);
+    let author = DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        zero_migrate_sqlite::DIALECT,
+    );
     let plan = author
         .diff(
             &desired,

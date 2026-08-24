@@ -289,6 +289,7 @@ fn folded_fields() -> Vec<(String, FieldDescriptor)> {
     let dialect = &POSTGRES;
 
     let from_descriptors = zero_migrate::render_schema_export_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &seed_descriptors(),
         dialect,
         SCHEMA,
@@ -311,9 +312,14 @@ fn folded_fields() -> Vec<(String, FieldDescriptor)> {
 /// fold under every dialect.
 fn folded_portable_fields(dialect: &DialectId) -> Vec<(String, FieldDescriptor)> {
     let policy = support::no_inject(SCHEMA);
-    let export =
-        zero_migrate::render_schema_export(&width_and_generated_ops(), dialect, SCHEMA, &policy)
-            .expect("the typed width/generated ops fold on every dialect");
+    let export = zero_migrate::render_schema_export(
+        zero_migrate::shipping_vendors(),
+        &width_and_generated_ops(),
+        dialect,
+        SCHEMA,
+        &policy,
+    )
+    .expect("the typed width/generated ops fold on every dialect");
     let mut out = Vec::new();
     for (table, collection) in &export.collections {
         for field in &collection.fields {
@@ -495,9 +501,14 @@ fn a_whole_collection_survives_the_export_round_trip() {
         for seed in &mut seeds {
             seed.runtime_options.strictness = strictness;
         }
-        let export =
-            zero_migrate::render_schema_export_from_descriptors(&seeds, &POSTGRES, SCHEMA, &policy)
-                .expect("the seed descriptor set folds");
+        let export = zero_migrate::render_schema_export_from_descriptors(
+            zero_migrate::shipping_vendors(),
+            &seeds,
+            &POSTGRES,
+            SCHEMA,
+            &policy,
+        )
+        .expect("the seed descriptor set folds");
 
         for (name, collection) in &export.collections {
             let back =
@@ -556,6 +567,7 @@ fn the_check_bearing_corpus_is_postgres_only() {
     for dialect in [&MYSQL, &SQLITE] {
         let dialect_label = dialect_debug_label(dialect);
         let refused = zero_migrate::render_schema_export_from_descriptors(
+            zero_migrate::shipping_vendors(),
             &seed_descriptors(),
             dialect,
             SCHEMA,
@@ -579,6 +591,7 @@ fn the_check_bearing_corpus_is_postgres_only() {
 fn unbounded_text_is_re_derived_rather_than_carried() {
     let policy = support::no_inject(SCHEMA);
     let export = zero_migrate::render_schema_export_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &seed_descriptors(),
         &POSTGRES,
         SCHEMA,
@@ -605,6 +618,7 @@ fn unbounded_text_is_re_derived_rather_than_carried() {
     );
 
     let refolded = zero_migrate::render_schema_export_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &[CollectionDescriptor {
             name: "refolded".to_string(),
             owner_app: "app_export".to_string(),
@@ -638,6 +652,7 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
 
     // Half one: the producer refuses the token, so the manual source cannot carry it.
     let refused = zero_migrate::render_schema_export_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &[CollectionDescriptor {
             name: "literals".to_string(),
             owner_app: "app_export".to_string(),
@@ -688,9 +703,14 @@ fn a_literal_field_is_unreachable_from_both_gen_artifacts_sources() {
 #[test]
 fn a_varchar_width_survives_the_wire_and_the_producer() {
     let policy = support::no_inject(SCHEMA);
-    let export =
-        zero_migrate::render_schema_export(&width_and_generated_ops(), &POSTGRES, SCHEMA, &policy)
-            .expect("the typed width ops fold");
+    let export = zero_migrate::render_schema_export(
+        zero_migrate::shipping_vendors(),
+        &width_and_generated_ops(),
+        &POSTGRES,
+        SCHEMA,
+        &policy,
+    )
+    .expect("the typed width ops fold");
 
     let first = export.collections["widths"]
         .fields
@@ -711,6 +731,7 @@ fn a_varchar_width_survives_the_wire_and_the_producer() {
     // And the PRODUCER keeps it: re-importing the crossed descriptor yields a
     // VARCHAR(64) again, not an unbounded TEXT.
     let refolded = zero_migrate::render_schema_export_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &[CollectionDescriptor {
             name: "refolded".to_string(),
             owner_app: "app_export".to_string(),

@@ -88,6 +88,7 @@ fn lower(op: Op) -> Vec<Migration> {
     let ir = resolve_create_table_policy(&ir, &support::confined_charter(), "main")
         .expect("guard test IR resolves");
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "main",
         "app_test",
         &zero_migrate_sqlite::DIALECT,

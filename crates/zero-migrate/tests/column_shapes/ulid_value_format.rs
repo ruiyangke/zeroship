@@ -92,6 +92,7 @@ fn lower_create_for_schema(
     ir: &MigrationIr,
 ) -> String {
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         schema,
         "app_ulid_samples",
         dialect,
@@ -122,6 +123,7 @@ fn lower_add(dialect: &zero_migrate::DialectId, table: &str) -> String {
     }))
     .expect("ULID add-column IR must deserialize");
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app",
         "app_ulid_samples",
         dialect,

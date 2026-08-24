@@ -28,6 +28,7 @@
 //! descriptor bridge because descriptors cannot carry apply-time functions.
 
 use std::collections::{BTreeMap, BTreeSet};
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::guard::{GuardConfig, GuardError, MigrationGuard};
 use crate::model::backfill::{
@@ -698,6 +699,7 @@ impl LiveSchema {
     /// destination is missing, ambiguous, or mismatched.
     pub fn advance_logical_columns(
         &mut self,
+        vendors: VendorSet,
         ir: &MigrationIr,
         dialect: &DialectId,
         project_schema: &str,
@@ -707,6 +709,7 @@ impl LiveSchema {
         // reference into an unmanaged target is proved against.
         let catalog = crate::model::validate::CatalogColumnEvidence::new(&self.table_snapshots);
         crate::model::validate::validate_column_references_for_lower(
+            vendors,
             ir,
             dialect,
             &self.logical_columns,
@@ -715,6 +718,7 @@ impl LiveSchema {
             catalog,
         )?;
         crate::model::validate::validate_table_foreign_keys_for_lower(
+            vendors,
             ir,
             dialect,
             &self.logical_columns,
@@ -723,6 +727,7 @@ impl LiveSchema {
             catalog,
         )?;
         self.logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
+            vendors,
             ir,
             dialect,
             &self.logical_columns,
@@ -766,12 +771,14 @@ impl LiveSchema {
     /// cannot trip them.
     pub fn absorb_logical_columns(
         &mut self,
+        vendors: VendorSet,
         ir: &MigrationIr,
         dialect: &DialectId,
         project_schema: &str,
         default_schema: Option<&str>,
     ) -> Result<(), crate::model::validate::AuthoringError> {
         self.logical_columns = crate::model::validate::accumulate_logical_declarations_for_lower(
+            vendors,
             ir,
             dialect,
             &self.logical_columns,
@@ -906,11 +913,12 @@ fn collect_table_foreign_key_sites<'a>(
 }
 
 fn canonical_reference_catalog_type(
+    vendors: VendorSet,
     dialect: &DialectId,
     data_type: &str,
     integer_width_is_logically_proven: bool,
 ) -> String {
-    crate::render::backends::vendor(dialect)
+    crate::render::backends::vendor(vendors, dialect)
         .catalog_fold
         .canonical_reference_catalog_type(data_type, integer_width_is_logically_proven)
 }
@@ -1032,6 +1040,7 @@ fn snapshot_has_reference_key(snapshot: &TableSnapshot, columns: &[String]) -> b
 /// tuple component's nullability, scalar codec, database type, and comparison
 /// semantics before an executor may capture `endCursor`.
 fn cursor_contract_for_snapshot(
+    vendors: VendorSet,
     dialect: &DialectId,
     cursor_columns: &[String],
     snapshot: &TableSnapshot,
@@ -1071,16 +1080,17 @@ fn cursor_contract_for_snapshot(
 
     let columns = columns
         .into_iter()
-        .map(|column| cursor_column_contract(dialect, column))
+        .map(|column| cursor_column_contract(vendors, dialect, column))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(CursorContract { columns })
 }
 
 fn cursor_column_contract(
+    vendors: VendorSet,
     dialect: &DialectId,
     column: &ColumnSnapshot,
 ) -> Result<CursorColumnContract, String> {
-    let policy = crate::render::backends::vendor(dialect).catalog_fold;
+    let policy = crate::render::backends::vendor(vendors, dialect).catalog_fold;
     let contract = policy.cursor_column_contract(column)?;
     let scalar_type = match contract.scalar_type {
         FoldCursorScalarType::Int64 => CursorScalarType::Int64,
@@ -1193,6 +1203,14 @@ pub struct IrAuthor {
     project_schema: String,
     decl: DeclarativeAuthor,
     dialect: DialectId,
+    /// The backends this build ships, carried rather than reached for.
+    ///
+    /// The sibling of [`backend`](Self::backend): that field is the ONE vendor
+    /// [`dialect`](Self::dialect) resolved to, this is the set it resolved against.
+    /// Lowering needs the set as well as the answer, because some questions are
+    /// asked of a dialect this author is not bound to — a reference's target
+    /// dialect, a rebuild's rendering dialect — and those still have to resolve.
+    vendors: VendorSet,
     /// The backend for [`dialect`](Self::dialect), RESOLVED ONCE in
     /// [`new`](Self::new).
     ///
@@ -1422,27 +1440,28 @@ impl NamedTypeRegistry {
 /// valid SQL identifier.
 #[doc(hidden)]
 pub fn named_type_metadata(
+    vendors: VendorSet,
     ty: &ColType,
     dialect: &DialectId,
     default_schema: &str,
 ) -> Result<Option<(String, String)>, IrLowerError> {
-    crate::render::backends::vendor(dialect)
+    crate::render::backends::vendor(vendors, dialect)
         .catalog_fold
         .materialized_named_type_metadata(ty, default_schema)
 }
 
 pub(crate) fn render_ir_default(
+    vendors: VendorSet,
     default: &IrDefault,
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
     match default {
-        IrDefault::Literal { value } => {
-            crate::render::dml::inline_literal(value, dialect).map_err(IrLowerError::DmlAssemble)
-        }
+        IrDefault::Literal { value } => crate::render::dml::inline_literal(vendors, value, dialect)
+            .map_err(IrLowerError::DmlAssemble),
         IrDefault::Expr { expr } => {
-            let sql = crate::render::dml::render_expr_inline(expr, dialect)
+            let sql = crate::render::dml::render_expr_inline(vendors, expr, dialect)
                 .map_err(IrLowerError::DmlAssemble)?;
-            Ok(crate::render::backends::vendor(dialect)
+            Ok(crate::render::backends::vendor(vendors, dialect)
                 .catalog_fold
                 .wrap_default_expr(expr, sql))
         }
@@ -1453,7 +1472,7 @@ pub(crate) fn render_ir_default(
             "json value defaults require a column type at render",
         )),
         IrDefault::Nextval { sequence } => {
-            if !crate::render::backends::vendor(dialect)
+            if !crate::render::backends::vendor(vendors, dialect)
                 .descriptor
                 .capabilities
                 .contains(Capability::Sequence)
@@ -1468,76 +1487,88 @@ pub(crate) fn render_ir_default(
 }
 
 pub(crate) fn render_ir_default_for_type(
+    vendors: VendorSet,
     default: &IrDefault,
     ty: &ColType,
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
     match default {
-        IrDefault::Container { kind } => render_container_default_for_col_type(*kind, ty, dialect),
-        IrDefault::Json { value } => render_json_default_for_col_type(value, ty, dialect),
+        IrDefault::Container { kind } => {
+            render_container_default_for_col_type(vendors, *kind, ty, dialect)
+        }
+        IrDefault::Json { value } => render_json_default_for_col_type(vendors, value, ty, dialect),
         IrDefault::Literal { .. } | IrDefault::Expr { .. } | IrDefault::Nextval { .. } => {
-            render_ir_default(default, dialect)
+            render_ir_default(vendors, default, dialect)
         }
     }
 }
 
 pub(crate) fn render_container_default_for_col_type(
+    vendors: VendorSet,
     kind: EmptyContainerKind,
     ty: &ColType,
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
-    crate::render::declarative::empty_container_default_expr_for_col_type(kind, ty, dialect)
-        .map(str::to_string)
-        .ok_or(IrLowerError::UnsupportedOp(
-            "container default is not valid for this column type",
-        ))
-}
-
-pub(crate) fn render_container_default_for_data_type(
-    kind: EmptyContainerKind,
-    data_type: &str,
-    dialect: &DialectId,
-) -> Result<String, IrLowerError> {
-    crate::render::declarative::empty_container_default_expr_for_data_type(kind, data_type, dialect)
-        .map(str::to_string)
-        .ok_or(IrLowerError::UnsupportedOp(
-            "container default is not valid for this live column type",
-        ))
-}
-
-pub(crate) fn render_json_default_for_col_type(
-    value: &crate::model::ir::IrJsonValue,
-    ty: &ColType,
-    dialect: &DialectId,
-) -> Result<String, IrLowerError> {
-    json_value_default_expr_for_col_type(value, ty, dialect).ok_or(IrLowerError::UnsupportedOp(
-        "json value default is valid only for json columns",
+    crate::render::declarative::empty_container_default_expr_for_col_type(
+        vendors, kind, ty, dialect,
+    )
+    .map(str::to_string)
+    .ok_or(IrLowerError::UnsupportedOp(
+        "container default is not valid for this column type",
     ))
 }
 
+pub(crate) fn render_container_default_for_data_type(
+    vendors: VendorSet,
+    kind: EmptyContainerKind,
+    data_type: &str,
+    dialect: &DialectId,
+) -> Result<String, IrLowerError> {
+    crate::render::declarative::empty_container_default_expr_for_data_type(
+        vendors, kind, data_type, dialect,
+    )
+    .map(str::to_string)
+    .ok_or(IrLowerError::UnsupportedOp(
+        "container default is not valid for this live column type",
+    ))
+}
+
+pub(crate) fn render_json_default_for_col_type(
+    vendors: VendorSet,
+    value: &crate::model::ir::IrJsonValue,
+    ty: &ColType,
+    dialect: &DialectId,
+) -> Result<String, IrLowerError> {
+    json_value_default_expr_for_col_type(vendors, value, ty, dialect).ok_or(
+        IrLowerError::UnsupportedOp("json value default is valid only for json columns"),
+    )
+}
+
 pub(crate) fn render_json_default_for_data_type(
+    vendors: VendorSet,
     value: &crate::model::ir::IrJsonValue,
     data_type: &str,
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
-    json_value_default_expr_for_data_type(value, data_type, dialect).ok_or(
+    json_value_default_expr_for_data_type(vendors, value, data_type, dialect).ok_or(
         IrLowerError::UnsupportedOp("json value default is valid only for json live columns"),
     )
 }
 
 pub(crate) fn render_domain_check(
+    vendors: VendorSet,
     check: &Expr,
     dialect: &DialectId,
     value_sql: &str,
 ) -> Result<String, IrLowerError> {
-    crate::render::dml::render_expr_inline_with_col(check, dialect, &|name| {
+    crate::render::dml::render_expr_inline_with_col(vendors, check, dialect, &|name| {
         if name == "VALUE" {
             Ok(value_sql.to_string())
         } else {
             zero_migrate_backend::dml::quote_ident_for_backend(
                 "column",
                 name,
-                crate::render::backends::renderer(dialect),
+                crate::render::backends::renderer(vendors, dialect),
             )
         }
     })
@@ -1691,10 +1722,14 @@ impl LoweredArtifact {
 /// requires a sufficiently new InnoDB server with row-based replication.
 /// SQLite's synthesized UUIDv4 expression has no live-server capability gate,
 /// and UUIDv7 is rejected by MySQL/SQLite structural validation before lowering.
-fn database_requirements_for_ir(ir: &MigrationIr, dialect: &DialectId) -> DatabaseRequirements {
+fn database_requirements_for_ir(
+    vendors: VendorSet,
+    ir: &MigrationIr,
+    dialect: &DialectId,
+) -> DatabaseRequirements {
     let mut requirements = DatabaseRequirements::default();
     for op in &ir.ops {
-        collect_op_database_requirements(op, dialect, &mut requirements);
+        collect_op_database_requirements(vendors, op, dialect, &mut requirements);
     }
     requirements
 }
@@ -1755,18 +1790,22 @@ const OP_DIALECTAL: &str = "dialectal";
 /// three legs — has no arm, and is reported as `Portable`. That is the pre-existing
 /// behaviour for that shape, so this is never a regression; it is the case a third
 /// arm carrying a `DialectSet` would close.
-fn dialect_scope_for_ir(ir: &MigrationIr, lowered_for: &DialectId) -> DialectScope {
+fn dialect_scope_for_ir(
+    vendors: VendorSet,
+    ir: &MigrationIr,
+    lowered_for: &DialectId,
+) -> DialectScope {
     let mut reach: Option<BTreeSet<DialectId>> = None;
     for op in &ir.ops {
         narrow_reach(
             &mut reach,
-            crate::model::op_support::support(op)
-                .supported_dialects()
+            crate::model::op_support::support(vendors, op)
+                .supported_dialects(vendors)
                 .iter()
                 .cloned()
                 .collect(),
         );
-        for covered in op_expr_dialect_reach(op, lowered_for) {
+        for covered in op_expr_dialect_reach(vendors, op, lowered_for) {
             narrow_reach(&mut reach, covered);
         }
     }
@@ -1815,16 +1854,24 @@ fn narrow_reach(reach: &mut Option<BTreeSet<DialectId>>, covered: BTreeSet<Diale
 /// the reach — the fail-OPEN direction, on the exact instrument this function is. So
 /// an unreadable op contributes the one dialect the plan provably renders on: the one
 /// it just lowered for.
-fn op_expr_dialect_reach(op: &Op, lowered_for: &DialectId) -> Vec<BTreeSet<DialectId>> {
+fn op_expr_dialect_reach(
+    vendors: VendorSet,
+    op: &Op,
+    lowered_for: &DialectId,
+) -> Vec<BTreeSet<DialectId>> {
     let mut out = Vec::new();
     match serde_json::to_value(op) {
-        Ok(value) => collect_expr_dialect_reach(&value, &mut out),
+        Ok(value) => collect_expr_dialect_reach(vendors, &value, &mut out),
         Err(_) => out.push(BTreeSet::from([lowered_for.clone()])),
     }
     out
 }
 
-fn collect_expr_dialect_reach(value: &serde_json::Value, out: &mut Vec<BTreeSet<DialectId>>) {
+fn collect_expr_dialect_reach(
+    vendors: VendorSet,
+    value: &serde_json::Value,
+    out: &mut Vec<BTreeSet<DialectId>>,
+) {
     match value {
         serde_json::Value::Object(node) => {
             // An `Op::Dialectal` wrapper: its legs are per-backend work, not a
@@ -1843,7 +1890,7 @@ fn collect_expr_dialect_reach(value: &serde_json::Value, out: &mut Vec<BTreeSet<
                     // id from the key: a leg naming a backend this build does not
                     // register covers nothing here, and no id is invented for it.
                     out.push(
-                        crate::render::backends::VENDORS
+                        vendors
                             .dialects()
                             .filter(|id| legs.contains_key(id.as_str()))
                             .collect(),
@@ -1851,12 +1898,12 @@ fn collect_expr_dialect_reach(value: &serde_json::Value, out: &mut Vec<BTreeSet<
                 }
             }
             for nested in node.values() {
-                collect_expr_dialect_reach(nested, out);
+                collect_expr_dialect_reach(vendors, nested, out);
             }
         }
         serde_json::Value::Array(values) => {
             for nested in values {
-                collect_expr_dialect_reach(nested, out);
+                collect_expr_dialect_reach(vendors, nested, out);
             }
         }
         _ => {}
@@ -1874,6 +1921,7 @@ fn require_database_feature(requirements: &mut DatabaseRequirements, feature: Fo
 }
 
 fn collect_op_database_requirements(
+    vendors: VendorSet,
     op: &Op,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
@@ -1886,13 +1934,18 @@ fn collect_op_database_requirements(
             ..
         } => {
             for column in columns {
-                collect_column_database_requirements(column, dialect, requirements);
+                collect_column_database_requirements(vendors, column, dialect, requirements);
             }
             for constraint in constraints {
-                collect_constraint_database_requirements(&constraint.kind, dialect, requirements);
+                collect_constraint_database_requirements(
+                    vendors,
+                    &constraint.kind,
+                    dialect,
+                    requirements,
+                );
             }
             for index in indexes {
-                collect_index_database_requirements(index, dialect, requirements);
+                collect_index_database_requirements(vendors, index, dialect, requirements);
             }
         }
         Op::AddColumn {
@@ -1902,44 +1955,59 @@ fn collect_op_database_requirements(
             generated,
             ..
         } => {
-            collect_uuid_database_requirement(ty, false, dialect, requirements);
+            collect_uuid_database_requirement(vendors, ty, false, dialect, requirements);
             if let Some(value_format) = value_format {
-                collect_value_format_database_requirement(value_format, dialect, requirements);
+                collect_value_format_database_requirement(
+                    vendors,
+                    value_format,
+                    dialect,
+                    requirements,
+                );
             }
             if let Some(default) = default {
-                collect_default_database_requirements(default, dialect, requirements);
+                collect_default_database_requirements(vendors, default, dialect, requirements);
             }
             if let Some(generated) = generated {
-                collect_expr_database_requirements(&generated.expr, dialect, requirements);
+                collect_expr_database_requirements(vendors, &generated.expr, dialect, requirements);
             }
         }
         Op::CreateIndex {
             columns, r#where, ..
         } => {
             for element in columns {
-                collect_index_element_database_requirements(element, dialect, requirements);
+                collect_index_element_database_requirements(
+                    vendors,
+                    element,
+                    dialect,
+                    requirements,
+                );
             }
             if let Some(predicate) = r#where {
-                collect_expr_database_requirements(predicate, dialect, requirements);
+                collect_expr_database_requirements(vendors, predicate, dialect, requirements);
             }
         }
         Op::SetColumnType { using, .. } => {
             if let Some(expr) = using {
-                collect_expr_database_requirements(expr, dialect, requirements);
+                collect_expr_database_requirements(vendors, expr, dialect, requirements);
             }
         }
         Op::SetColumnDefault { value, .. } => {
-            collect_default_database_requirements(value, dialect, requirements);
+            collect_default_database_requirements(vendors, value, dialect, requirements);
         }
         Op::AddConstraint { constraint, .. } => {
-            collect_constraint_database_requirements(&constraint.kind, dialect, requirements);
+            collect_constraint_database_requirements(
+                vendors,
+                &constraint.kind,
+                dialect,
+                requirements,
+            );
         }
         Op::Insert {
             rows, on_conflict, ..
         } => {
             for row in rows {
                 for value in row {
-                    collect_value_database_requirements(value, dialect, requirements);
+                    collect_value_database_requirements(vendors, value, dialect, requirements);
                 }
             }
             if let Some(assignments) = on_conflict
@@ -1947,66 +2015,67 @@ fn collect_op_database_requirements(
                 .and_then(|conflict| conflict.do_update.as_ref())
             {
                 for value in assignments.values() {
-                    collect_value_database_requirements(value, dialect, requirements);
+                    collect_value_database_requirements(vendors, value, dialect, requirements);
                 }
             }
         }
         Op::Update { set, r#where, .. } => {
             for value in set.values() {
-                collect_value_database_requirements(value, dialect, requirements);
+                collect_value_database_requirements(vendors, value, dialect, requirements);
             }
             if let Some(predicate) = r#where {
-                collect_expr_database_requirements(predicate, dialect, requirements);
+                collect_expr_database_requirements(vendors, predicate, dialect, requirements);
             }
         }
         Op::Delete { r#where, .. } => {
-            collect_expr_database_requirements(r#where, dialect, requirements);
+            collect_expr_database_requirements(vendors, r#where, dialect, requirements);
         }
         Op::Backfill { set, filter, .. } => {
             for value in set.values() {
                 if let crate::model::ir::BackfillSetValue::Value(value) = value {
-                    collect_value_database_requirements(value, dialect, requirements);
+                    collect_value_database_requirements(vendors, value, dialect, requirements);
                 }
             }
             if let Some(predicate) = filter {
-                collect_expr_database_requirements(predicate, dialect, requirements);
+                collect_expr_database_requirements(vendors, predicate, dialect, requirements);
             }
         }
         Op::Dialectal { legs } => {
             if let Some(selected) = crate::render::fold::selected_dialectal_leg(dialect, legs) {
                 for inner in selected {
-                    collect_op_database_requirements(inner, dialect, requirements);
+                    collect_op_database_requirements(vendors, inner, dialect, requirements);
                 }
             }
         }
         Op::CreateView { query, .. } => {
             if let ViewQuery::Structured { select } = query {
-                collect_select_database_requirements(select, dialect, requirements);
+                collect_select_database_requirements(vendors, select, dialect, requirements);
             }
         }
         Op::CreateDomain { check, default, .. } => {
             if let Some(check) = check {
-                collect_expr_database_requirements(check, dialect, requirements);
+                collect_expr_database_requirements(vendors, check, dialect, requirements);
             }
             if let Some(default) = default {
-                collect_default_database_requirements(default, dialect, requirements);
+                collect_default_database_requirements(vendors, default, dialect, requirements);
             }
         }
         Op::CreatePolicy {
             using, with_check, ..
         } => {
-            collect_expr_database_requirements(using, dialect, requirements);
+            collect_expr_database_requirements(vendors, using, dialect, requirements);
             if let Some(check) = with_check {
-                collect_expr_database_requirements(check, dialect, requirements);
+                collect_expr_database_requirements(vendors, check, dialect, requirements);
             }
         }
         Op::CreateTrigger { action, when, .. } => {
             if let Some(when) = when {
-                collect_expr_database_requirements(when, dialect, requirements);
+                collect_expr_database_requirements(vendors, when, dialect, requirements);
             }
             if let TriggerAction::Body { statements } = action {
                 for statement in statements {
                     collect_trigger_statement_database_requirements(
+                        vendors,
                         statement,
                         dialect,
                         requirements,
@@ -2059,11 +2128,13 @@ fn collect_op_database_requirements(
 }
 
 fn collect_column_database_requirements(
+    vendors: VendorSet,
     column: &IrColumn,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
     collect_uuid_database_requirement(
+        vendors,
         &column.ty,
         column.references.is_some(),
         dialect,
@@ -2071,24 +2142,25 @@ fn collect_column_database_requirements(
     );
     if column.references.is_none() {
         if let Some(value_format) = &column.value_format {
-            collect_value_format_database_requirement(value_format, dialect, requirements);
+            collect_value_format_database_requirement(vendors, value_format, dialect, requirements);
         }
     }
     if let Some(default) = &column.default {
-        collect_default_database_requirements(default, dialect, requirements);
+        collect_default_database_requirements(vendors, default, dialect, requirements);
     }
     if let Some(generated) = &column.generated {
-        collect_expr_database_requirements(&generated.expr, dialect, requirements);
+        collect_expr_database_requirements(vendors, &generated.expr, dialect, requirements);
     }
 }
 
 fn collect_uuid_database_requirement(
+    vendors: VendorSet,
     ty: &ColType,
     is_reference: bool,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
-    if let Some(feature) = crate::render::backends::vendor(dialect)
+    if let Some(feature) = crate::render::backends::vendor(vendors, dialect)
         .catalog_fold
         .database_requirement_for_column(ty, is_reference)
     {
@@ -2097,11 +2169,12 @@ fn collect_uuid_database_requirement(
 }
 
 fn collect_value_format_database_requirement(
+    vendors: VendorSet,
     value_format: &ValueFormat,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
-    if let Some(feature) = crate::render::backends::vendor(dialect)
+    if let Some(feature) = crate::render::backends::vendor(vendors, dialect)
         .catalog_fold
         .database_requirement_for_value_format(value_format)
     {
@@ -2110,33 +2183,36 @@ fn collect_value_format_database_requirement(
 }
 
 fn collect_default_database_requirements(
+    vendors: VendorSet,
     default: &IrDefault,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
     if let IrDefault::Expr { expr } = default {
-        collect_expr_database_requirements(expr, dialect, requirements);
+        collect_expr_database_requirements(vendors, expr, dialect, requirements);
     }
 }
 
 fn collect_value_database_requirements(
+    vendors: VendorSet,
     value: &crate::model::ir::IrValue,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
     if let crate::model::ir::IrValue::Expr(expr) = value {
-        collect_expr_database_requirements(expr, dialect, requirements);
+        collect_expr_database_requirements(vendors, expr, dialect, requirements);
     }
 }
 
 fn collect_constraint_database_requirements(
+    vendors: VendorSet,
     kind: &IrConstraintKind,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
     match kind {
         IrConstraintKind::Check { expr, .. } => {
-            collect_expr_database_requirements(expr, dialect, requirements);
+            collect_expr_database_requirements(vendors, expr, dialect, requirements);
         }
         IrConstraintKind::Exclusion {
             elements,
@@ -2145,11 +2221,11 @@ fn collect_constraint_database_requirements(
         } => {
             for element in elements {
                 if let ColumnOrExpr::Expr { expr } = &element.target {
-                    collect_expr_database_requirements(expr, dialect, requirements);
+                    collect_expr_database_requirements(vendors, expr, dialect, requirements);
                 }
             }
             if let Some(predicate) = where_predicate {
-                collect_expr_database_requirements(predicate, dialect, requirements);
+                collect_expr_database_requirements(vendors, predicate, dialect, requirements);
             }
         }
         IrConstraintKind::Fk { .. } | IrConstraintKind::Unique { .. } => {}
@@ -2157,60 +2233,64 @@ fn collect_constraint_database_requirements(
 }
 
 fn collect_index_database_requirements(
+    vendors: VendorSet,
     index: &IrIndex,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
     for element in &index.columns {
-        collect_index_element_database_requirements(element, dialect, requirements);
+        collect_index_element_database_requirements(vendors, element, dialect, requirements);
     }
     if let Some(predicate) = &index.r#where {
-        collect_expr_database_requirements(predicate, dialect, requirements);
+        collect_expr_database_requirements(vendors, predicate, dialect, requirements);
     }
 }
 
 fn collect_index_element_database_requirements(
+    vendors: VendorSet,
     element: &IndexElement,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
     if let IndexElement::Expr { expr } = element {
-        collect_expr_database_requirements(expr, dialect, requirements);
+        collect_expr_database_requirements(vendors, expr, dialect, requirements);
     }
 }
 
 fn collect_select_database_requirements(
+    vendors: VendorSet,
     select: &SelectAst,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
     for item in &select.projection {
         if let SelectItem::Expr { expr, .. } = item {
-            collect_expr_database_requirements(expr, dialect, requirements);
+            collect_expr_database_requirements(vendors, expr, dialect, requirements);
         }
     }
     for join in &select.joins {
-        collect_expr_database_requirements(&join.on, dialect, requirements);
+        collect_expr_database_requirements(vendors, &join.on, dialect, requirements);
     }
     if let Some(predicate) = &select.r#where {
-        collect_expr_database_requirements(predicate, dialect, requirements);
+        collect_expr_database_requirements(vendors, predicate, dialect, requirements);
     }
     for expr in &select.group_by {
-        collect_expr_database_requirements(expr, dialect, requirements);
+        collect_expr_database_requirements(vendors, expr, dialect, requirements);
     }
     if let Some(predicate) = &select.having {
-        collect_expr_database_requirements(predicate, dialect, requirements);
+        collect_expr_database_requirements(vendors, predicate, dialect, requirements);
     }
     if let Some(order_by) = &select.order_by {
         for item in order_by {
             if let OrderItem::Expr { expr, .. } = item {
-                collect_expr_database_requirements(expr, dialect, requirements);
+                collect_expr_database_requirements(vendors, expr, dialect, requirements);
             }
         }
     }
 }
 
 fn collect_trigger_statement_database_requirements(
+    vendors: VendorSet,
     statement: &TriggerStmt,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
@@ -2219,34 +2299,35 @@ fn collect_trigger_statement_database_requirements(
         TriggerStmt::Insert { rows, .. } => {
             for row in rows {
                 for value in row {
-                    collect_value_database_requirements(value, dialect, requirements);
+                    collect_value_database_requirements(vendors, value, dialect, requirements);
                 }
             }
         }
         TriggerStmt::Update { set, r#where, .. } => {
             for value in set.values() {
-                collect_value_database_requirements(value, dialect, requirements);
+                collect_value_database_requirements(vendors, value, dialect, requirements);
             }
             if let Some(predicate) = r#where {
-                collect_expr_database_requirements(predicate, dialect, requirements);
+                collect_expr_database_requirements(vendors, predicate, dialect, requirements);
             }
         }
         TriggerStmt::Delete { r#where, .. } => {
-            collect_expr_database_requirements(r#where, dialect, requirements);
+            collect_expr_database_requirements(vendors, r#where, dialect, requirements);
         }
         TriggerStmt::Select { expr } => {
-            collect_expr_database_requirements(expr, dialect, requirements);
+            collect_expr_database_requirements(vendors, expr, dialect, requirements);
         }
         TriggerStmt::Raise { .. } => {}
     }
 }
 
 fn collect_expr_database_requirements(
+    vendors: VendorSet,
     expr: &Expr,
     dialect: &DialectId,
     requirements: &mut DatabaseRequirements,
 ) {
-    if let Some(feature) = crate::render::backends::vendor(dialect)
+    if let Some(feature) = crate::render::backends::vendor(vendors, dialect)
         .catalog_fold
         .database_requirement_for_expr(expr)
     {
@@ -2255,56 +2336,56 @@ fn collect_expr_database_requirements(
     match expr {
         Expr::UuidV4 | Expr::UuidV7 => {}
         Expr::BinOp { lhs, rhs, .. } => {
-            collect_expr_database_requirements(lhs, dialect, requirements);
-            collect_expr_database_requirements(rhs, dialect, requirements);
+            collect_expr_database_requirements(vendors, lhs, dialect, requirements);
+            collect_expr_database_requirements(vendors, rhs, dialect, requirements);
         }
         Expr::UnaryOp { operand, .. } | Expr::Cast { operand, .. } => {
-            collect_expr_database_requirements(operand, dialect, requirements);
+            collect_expr_database_requirements(vendors, operand, dialect, requirements);
         }
         Expr::Case { branches, r#else } => {
             for branch in branches {
-                collect_expr_database_requirements(&branch.when, dialect, requirements);
-                collect_expr_database_requirements(&branch.then, dialect, requirements);
+                collect_expr_database_requirements(vendors, &branch.when, dialect, requirements);
+                collect_expr_database_requirements(vendors, &branch.then, dialect, requirements);
             }
             if let Some(r#else) = r#else {
-                collect_expr_database_requirements(r#else, dialect, requirements);
+                collect_expr_database_requirements(vendors, r#else, dialect, requirements);
             }
         }
         Expr::FnCall { args, .. } | Expr::FnSynth { args, .. } => {
             for arg in args {
-                collect_expr_database_requirements(arg, dialect, requirements);
+                collect_expr_database_requirements(vendors, arg, dialect, requirements);
             }
         }
         Expr::Between { operand, low, high } => {
-            collect_expr_database_requirements(operand, dialect, requirements);
-            collect_expr_database_requirements(low, dialect, requirements);
-            collect_expr_database_requirements(high, dialect, requirements);
+            collect_expr_database_requirements(vendors, operand, dialect, requirements);
+            collect_expr_database_requirements(vendors, low, dialect, requirements);
+            collect_expr_database_requirements(vendors, high, dialect, requirements);
         }
         Expr::Like { operand, pattern } => {
-            collect_expr_database_requirements(operand, dialect, requirements);
-            collect_expr_database_requirements(pattern, dialect, requirements);
+            collect_expr_database_requirements(vendors, operand, dialect, requirements);
+            collect_expr_database_requirements(vendors, pattern, dialect, requirements);
         }
         Expr::DistinctFrom { left, right } => {
-            collect_expr_database_requirements(left, dialect, requirements);
-            collect_expr_database_requirements(right, dialect, requirements);
+            collect_expr_database_requirements(vendors, left, dialect, requirements);
+            collect_expr_database_requirements(vendors, right, dialect, requirements);
         }
         Expr::Agg { arg, delimiter, .. } => {
             if let Some(arg) = arg {
-                collect_expr_database_requirements(arg, dialect, requirements);
+                collect_expr_database_requirements(vendors, arg, dialect, requirements);
             }
             if let Some(delimiter) = delimiter {
-                collect_expr_database_requirements(delimiter, dialect, requirements);
+                collect_expr_database_requirements(vendors, delimiter, dialect, requirements);
             }
         }
         Expr::InList { expr, .. } | Expr::RegexMatch { expr, .. } | Expr::StorageSize { expr } => {
-            collect_expr_database_requirements(expr, dialect, requirements);
+            collect_expr_database_requirements(vendors, expr, dialect, requirements);
         }
         Expr::Extract { from, .. } => {
-            collect_expr_database_requirements(from, dialect, requirements);
+            collect_expr_database_requirements(vendors, from, dialect, requirements);
         }
         Expr::Dialectal { legs } => {
             if let Some(selected) = legs.get(dialect) {
-                collect_expr_database_requirements(selected, dialect, requirements);
+                collect_expr_database_requirements(vendors, selected, dialect, requirements);
             }
         }
         Expr::ColRef { .. } | Expr::Literal { .. } | Expr::Interval { .. } => {}
@@ -2317,6 +2398,7 @@ impl IrAuthor {
     /// emitted migration (ownership is enforced UPSTREAM by the IR-load gate).
     #[must_use]
     pub fn new(
+        vendors: VendorSet,
         project_schema: impl Into<String>,
         owner_app: impl Into<String>,
         dialect: &DialectId,
@@ -2324,7 +2406,9 @@ impl IrAuthor {
     ) -> Self {
         let project_schema = project_schema.into();
         Self {
+            vendors,
             decl: DeclarativeAuthor::new_for_dialect(
+                vendors,
                 project_schema.clone(),
                 owner_app,
                 dialect.clone(),
@@ -2336,7 +2420,7 @@ impl IrAuthor {
             scope: crate::model::policy::SchemaScope::Single(project_schema.clone()),
             project_schema,
             dialect: dialect.clone(),
-            backend: crate::render::backends::renderer(dialect),
+            backend: crate::render::backends::renderer(vendors, dialect),
             effective: effective.clone(),
             default_schema: None,
         }
@@ -2468,6 +2552,7 @@ impl IrAuthor {
         // any caller that does not go through `load_and_lower_guarded`).
         let scope = crate::model::policy::SchemaScope::Single(self.project_schema.clone());
         let ir = crate::model::load::load_ir_document_authorized(
+            self.vendors,
             bytes,
             deploying_app,
             &self.dialect,
@@ -2513,6 +2598,7 @@ impl IrAuthor {
         // parse-guard cross-schema line-1 denial.
         let scope = guard_cfg.schema_scope();
         let ir = crate::model::load::load_ir_document_authorized(
+            self.vendors,
             bytes,
             deploying_app,
             &self.dialect,
@@ -2725,7 +2811,7 @@ impl IrAuthor {
             version,
             name: ir.name.clone(),
             steps,
-            database_requirements: database_requirements_for_ir(ir, &self.dialect),
+            database_requirements: database_requirements_for_ir(self.vendors, ir, &self.dialect),
             checksum: anchor,
             // The plan exposes the same authored overrides that were merged onto
             // every journaled DDL Migration below. The authoritative checksum also
@@ -2735,7 +2821,7 @@ impl IrAuthor {
             // The plan's dialect REACH, measured from the ops rather than declared,
             // so it cannot disagree with them. Apply refuses the whole plan against a
             // target this does not admit, before a single step runs.
-            dialect_scope: dialect_scope_for_ir(ir, &self.dialect),
+            dialect_scope: dialect_scope_for_ir(self.vendors, ir, &self.dialect),
             rollbackable,
             owner_app: ir.owner_app.clone(),
             depends_on: Vec::new(),
@@ -2872,6 +2958,7 @@ impl IrAuthor {
     ) -> Result<Vec<PlanStep>, IrLowerError> {
         self.validate_authored_identifier_lengths(ir)?;
         let logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
+            self.vendors,
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -2883,6 +2970,7 @@ impl IrAuthor {
         // still be proved by the live catalog's own format evidence.
         let catalog = crate::model::validate::CatalogColumnEvidence::new(&live.table_snapshots);
         crate::model::validate::validate_column_references_for_lower(
+            self.vendors,
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -2892,6 +2980,7 @@ impl IrAuthor {
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         crate::model::validate::validate_table_foreign_keys_for_lower(
+            self.vendors,
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -2901,6 +2990,7 @@ impl IrAuthor {
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         crate::model::validate::validate_vendor_key_storage_for_lower(
+            self.vendors,
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -2910,8 +3000,8 @@ impl IrAuthor {
         )
         .map_err(|error| IrLowerError::KeyStorage(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
-        if let Some(policy) =
-            crate::render::backends::schema_renderer(&self.dialect).table_rebuild_policy()
+        if let Some(policy) = crate::render::backends::schema_renderer(self.vendors, &self.dialect)
+            .table_rebuild_policy()
         {
             policy.refuse_repeat_column_rename_target(&self.dialect, &ir.ops)?;
         }
@@ -2955,8 +3045,12 @@ impl IrAuthor {
     /// Reported through the existing validation carrier so no new public error variant
     /// is introduced.
     fn validate_authored_identifier_lengths(&self, ir: &MigrationIr) -> Result<(), IrLowerError> {
-        crate::model::validate::validate_authored_identifier_lengths(ir, self.validation_dialect())
-            .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))
+        crate::model::validate::validate_authored_identifier_lengths(
+            self.vendors,
+            ir,
+            self.validation_dialect(),
+        )
+        .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))
     }
 
     fn validation_dialect(&self) -> &DialectId {
@@ -3038,7 +3132,8 @@ impl IrAuthor {
 
             let local_column =
                 self.authored_reference_column_snapshot(schema, site.table, site.column)?;
-            let reference_policy = crate::render::backends::vendor(&self.dialect).catalog_fold;
+            let reference_policy =
+                crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold;
             // PostgreSQL's catalog exposes the base storage family separately
             // from a column's COLLATE clause. TypeID and ULID intentionally use
             // `text COLLATE "C"`, but information_schema reports that target as
@@ -3047,11 +3142,13 @@ impl IrAuthor {
             // it carries their actual VARCHAR/TEXT storage spelling.
             let local_catalog_type = reference_policy.reference_catalog_type(&local_column);
             let local_type = canonical_reference_catalog_type(
+                self.vendors,
                 &self.dialect,
                 local_catalog_type,
                 target_is_declared,
             );
             let target_type = canonical_reference_catalog_type(
+                self.vendors,
                 &self.dialect,
                 &target_column.data_type,
                 target_is_declared,
@@ -3133,6 +3230,7 @@ impl IrAuthor {
             None,
         )?;
         apply_author_type_override_to_column(
+            self.vendors,
             table,
             &column.name,
             &column.ty,
@@ -3199,7 +3297,8 @@ impl IrAuthor {
         for (op_index, op) in ir.ops.iter().enumerate() {
             collect_table_foreign_key_sites(op, &self.dialect, op_index, &mut sites);
         }
-        let reference_policy = crate::render::backends::vendor(&self.dialect).catalog_fold;
+        let reference_policy =
+            crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold;
 
         for site in sites {
             let IrConstraintKind::Fk {
@@ -3366,12 +3465,14 @@ impl IrAuthor {
                         column: local_name.clone(),
                     });
                 let local_type = canonical_reference_catalog_type(
+                    self.vendors,
                     &self.dialect,
                     local_catalog_type,
                     logical_pair_declared,
                 );
                 let target_catalog_type = reference_policy.reference_catalog_type(target_column);
                 let target_type = canonical_reference_catalog_type(
+                    self.vendors,
                     &self.dialect,
                     target_catalog_type,
                     logical_pair_declared,
@@ -3497,6 +3598,7 @@ impl IrAuthor {
         snapshot: &mut TableSnapshot,
     ) -> Result<(), IrLowerError> {
         fn replay_ops(
+            vendors: VendorSet,
             author: &IrAuthor,
             ops: &[Op],
             stop: &Op,
@@ -3511,7 +3613,7 @@ impl IrAuthor {
                     if let Some(selected) =
                         crate::render::fold::selected_dialectal_leg(&author.dialect, legs)
                     {
-                        if replay_ops(author, selected, stop, table, snapshot)? {
+                        if replay_ops(vendors, author, selected, stop, table, snapshot)? {
                             return Ok(true);
                         }
                     }
@@ -3533,6 +3635,7 @@ impl IrAuthor {
                         ..
                     } if index_table == table => {
                         let index = create_index_snapshot(
+                            vendors,
                             table,
                             columns,
                             name.as_deref(),
@@ -3615,7 +3718,7 @@ impl IrAuthor {
             Ok(false)
         }
 
-        let _ = replay_ops(self, &ir.ops, site.op, table, snapshot)?;
+        let _ = replay_ops(self.vendors, self, &ir.ops, site.op, table, snapshot)?;
         Ok(())
     }
 
@@ -3884,10 +3987,12 @@ impl IrAuthor {
                         name: name.clone(),
                         schema: Some(eff_schema.clone()),
                     };
-                    let (_, qualified_name) = named_type_metadata(&ty, &self.dialect, &eff_schema)?
-                        .ok_or(IrLowerError::UnsupportedOp(
-                            "materialized enum metadata was not resolved",
-                        ))?;
+                    let (_, qualified_name) =
+                        named_type_metadata(self.vendors, &ty, &self.dialect, &eff_schema)?.ok_or(
+                            IrLowerError::UnsupportedOp(
+                                "materialized enum metadata was not resolved",
+                            ),
+                        )?;
                     let stmt = self.backend.render_materialized_named_type_op(
                         MaterializedNamedTypeOp::CreateEnum {
                             name,
@@ -3915,10 +4020,12 @@ impl IrAuthor {
                         name: name.clone(),
                         schema: Some(eff_schema.clone()),
                     };
-                    let (_, qualified_name) = named_type_metadata(&ty, &self.dialect, &eff_schema)?
-                        .ok_or(IrLowerError::UnsupportedOp(
-                            "materialized enum metadata was not resolved",
-                        ))?;
+                    let (_, qualified_name) =
+                        named_type_metadata(self.vendors, &ty, &self.dialect, &eff_schema)?.ok_or(
+                            IrLowerError::UnsupportedOp(
+                                "materialized enum metadata was not resolved",
+                            ),
+                        )?;
                     let stmt = self.backend.render_materialized_named_type_op(
                         MaterializedNamedTypeOp::DropEnum {
                             name,
@@ -3951,10 +4058,12 @@ impl IrAuthor {
                         name: name.clone(),
                         schema: Some(eff_schema.clone()),
                     };
-                    let (_, qualified_name) = named_type_metadata(&ty, &self.dialect, &eff_schema)?
-                        .ok_or(IrLowerError::UnsupportedOp(
-                            "materialized domain metadata was not resolved",
-                        ))?;
+                    let (_, qualified_name) =
+                        named_type_metadata(self.vendors, &ty, &self.dialect, &eff_schema)?.ok_or(
+                            IrLowerError::UnsupportedOp(
+                                "materialized domain metadata was not resolved",
+                            ),
+                        )?;
                     let base_type = self.render_materialized_domain_base_type(
                         &eff_schema,
                         as_type,
@@ -3962,11 +4071,20 @@ impl IrAuthor {
                     )?;
                     let rendered_default = default
                         .as_ref()
-                        .map(|default| render_ir_default_for_type(default, as_type, &self.dialect))
+                        .map(|default| {
+                            render_ir_default_for_type(
+                                self.vendors,
+                                default,
+                                as_type,
+                                &self.dialect,
+                            )
+                        })
                         .transpose()?;
                     let rendered_check = check
                         .as_ref()
-                        .map(|check| render_domain_check(check, &self.dialect, "VALUE"))
+                        .map(|check| {
+                            render_domain_check(self.vendors, check, &self.dialect, "VALUE")
+                        })
                         .transpose()?;
                     let stmt = self.backend.render_materialized_named_type_op(
                         MaterializedNamedTypeOp::CreateDomain {
@@ -3998,10 +4116,12 @@ impl IrAuthor {
                         name: name.clone(),
                         schema: Some(eff_schema.clone()),
                     };
-                    let (_, qualified_name) = named_type_metadata(&ty, &self.dialect, &eff_schema)?
-                        .ok_or(IrLowerError::UnsupportedOp(
-                            "materialized domain metadata was not resolved",
-                        ))?;
+                    let (_, qualified_name) =
+                        named_type_metadata(self.vendors, &ty, &self.dialect, &eff_schema)?.ok_or(
+                            IrLowerError::UnsupportedOp(
+                                "materialized domain metadata was not resolved",
+                            ),
+                        )?;
                     let stmt = self.backend.render_materialized_named_type_op(
                         MaterializedNamedTypeOp::DropDomain {
                             name,
@@ -4071,17 +4191,35 @@ impl IrAuthor {
                 let columns = &columns[..];
                 let desc = self.create_table_descriptor(name, columns, runtime_options.as_ref());
                 let inject = self.resolved_inject(&eff_schema, name)?;
-                let mut snap =
-                    build_resolved_table_snapshot(&eff_schema, &desc, &self.dialect, &inject)?;
+                let mut snap = build_resolved_table_snapshot(
+                    self.vendors,
+                    &eff_schema,
+                    &desc,
+                    &self.dialect,
+                    &inject,
+                )?;
                 snap.partition_by = partition_by.clone();
                 if let Some(pk) = primary_key {
-                    let primary_key_name = crate::render::backends::vendor(&self.dialect)
-                        .catalog_fold
-                        .implicit_primary_key_name(name);
+                    let primary_key_name =
+                        crate::render::backends::vendor(self.vendors, &self.dialect)
+                            .catalog_fold
+                            .implicit_primary_key_name(name);
                     push_primary_key_snapshot(&mut snap, pk, &primary_key_name);
                 }
-                apply_author_type_overrides_to_snapshot(name, columns, &mut snap, &self.dialect)?;
-                apply_structured_defaults_to_snapshot(name, columns, &mut snap, &self.dialect)?;
+                apply_author_type_overrides_to_snapshot(
+                    self.vendors,
+                    name,
+                    columns,
+                    &mut snap,
+                    &self.dialect,
+                )?;
+                apply_structured_defaults_to_snapshot(
+                    self.vendors,
+                    name,
+                    columns,
+                    &mut snap,
+                    &self.dialect,
+                )?;
                 self.apply_named_type_metadata(&eff_schema, name, columns, &mut snap, named_types)?;
                 self.apply_uuid_metadata(columns, &mut snap)?;
                 self.apply_collation_metadata(columns, &mut snap)?;
@@ -4330,6 +4468,7 @@ impl IrAuthor {
                 ..
             } => {
                 let idx = create_index_snapshot(
+                    self.vendors,
                     table,
                     columns,
                     name.as_deref(),
@@ -4637,7 +4776,8 @@ impl IrAuthor {
                 // dependency assertion must name that unit's column. PostgreSQL is
                 // the only backend with this evaluator; a non-empty precondition
                 // list is deliberately refused by the SQLite and MySQL backends.
-                let fold_policy = crate::render::backends::vendor(&self.dialect).catalog_fold;
+                let fold_policy =
+                    crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold;
                 if let Some(dependency_guard) = fold_policy.drop_column_precondition(table, column)
                 {
                     units[0].0.preconditions.push(dependency_guard);
@@ -4831,12 +4971,18 @@ impl IrAuthor {
                 {
                     return Err(IrLowerError::IdentityColumnTypeUnsupported {
                         dialect: self.dialect.clone(),
-                        confinement: crate::render::backends::schema_renderer(&self.dialect)
-                            .identity_column_type_confinement(),
+                        confinement: crate::render::backends::schema_renderer(
+                            self.vendors,
+                            &self.dialect,
+                        )
+                        .identity_column_type_confinement(),
                         table: table.clone(),
                         column: column.clone(),
-                        to_type: crate::render::backends::schema_renderer(&self.dialect)
-                            .column_type(&col, false),
+                        to_type: crate::render::backends::schema_renderer(
+                            self.vendors,
+                            &self.dialect,
+                        )
+                        .column_type(&col, false),
                     });
                 }
                 // A GENERATED column takes no `USING`, and the renderer decides that
@@ -4869,7 +5015,7 @@ impl IrAuthor {
                 // server itself reports, exactly the way this backend's
                 // `dropIdentityFrom` already does. See `AlterColumnTypeStep` for why
                 // the live snapshot lowering DOES have is not good enough.
-                if crate::render::backends::vendor(&self.dialect)
+                if crate::render::backends::vendor(self.vendors, &self.dialect)
                     .catalog_fold
                     .restates_column_type_at_apply()
                 {
@@ -4884,7 +5030,8 @@ impl IrAuthor {
                     // own `CHARACTER SET … COLLATE …` choice, which is right when the
                     // engine creates a column and wrong when it retypes one. The
                     // renderer strips exactly the pin it owns.
-                    let renderer = crate::render::backends::schema_renderer(&self.dialect);
+                    let renderer =
+                        crate::render::backends::schema_renderer(self.vendors, &self.dialect);
                     let rendered = renderer.column_type(&col, false);
                     let ddl_type = renderer.strip_collation(&rendered).to_string();
                     let owner_app = self.decl.owner_app().to_string();
@@ -4931,7 +5078,7 @@ impl IrAuthor {
                         ddl_type,
                     })));
                 }
-                crate::render::backends::vendor(&self.dialect)
+                crate::render::backends::vendor(self.vendors, &self.dialect)
                     .catalog_fold
                     .alter_column_refusal("setColumnType")?;
                 let mut units = vec![decl.lower_alter_column_type(table, &col)];
@@ -4960,9 +5107,10 @@ impl IrAuthor {
                 // `Precondition::ColumnTypeChangeHasNoBlockers`. PostgreSQL is the
                 // only backend with an evaluator; SQLite reconciles a type change by
                 // rebuilding the table and MySQL refuses `setColumnType` just above.
-                if let Some(precondition) = crate::render::backends::vendor(&self.dialect)
-                    .catalog_fold
-                    .column_type_change_precondition(table, column)
+                if let Some(precondition) =
+                    crate::render::backends::vendor(self.vendors, &self.dialect)
+                        .catalog_fold
+                        .column_type_change_precondition(table, column)
                 {
                     units[0].0.preconditions.push(precondition);
                 }
@@ -5013,7 +5161,12 @@ impl IrAuthor {
                             .ok_or(IrLowerError::UnsupportedOp(
                                 "setColumnDefault container defaults need live column type",
                             ))?;
-                        render_container_default_for_data_type(*kind, data_type, &self.dialect)?
+                        render_container_default_for_data_type(
+                            self.vendors,
+                            *kind,
+                            data_type,
+                            &self.dialect,
+                        )?
                     }
                     IrDefault::Json { value } => {
                         let data_type = live_schema
@@ -5024,7 +5177,12 @@ impl IrAuthor {
                             .ok_or(IrLowerError::UnsupportedOp(
                                 "setColumnDefault json value defaults need live column type",
                             ))?;
-                        render_json_default_for_data_type(value, data_type, &self.dialect)?
+                        render_json_default_for_data_type(
+                            self.vendors,
+                            value,
+                            data_type,
+                            &self.dialect,
+                        )?
                     }
                     IrDefault::Nextval { .. } => {
                         if let Some(data_type) = live_schema
@@ -5039,10 +5197,10 @@ impl IrAuthor {
                                 ));
                             }
                         }
-                        render_ir_default(value, &self.dialect)?
+                        render_ir_default(self.vendors, value, &self.dialect)?
                     }
                     IrDefault::Literal { .. } | IrDefault::Expr { .. } => {
-                        render_ir_default(value, &self.dialect)?
+                        render_ir_default(self.vendors, value, &self.dialect)?
                     }
                 };
                 if let Some(g) = guard {
@@ -5233,7 +5391,7 @@ impl IrAuthor {
                 // catalog — derive it the SAME way `lower_add_constraint` does.
                 if let Some(g) = guard {
                     let (cname, ckind) =
-                        ir_constraint_name_and_kind(table, constraint, &self.dialect);
+                        ir_constraint_name_and_kind(self.vendors, table, constraint, &self.dialect);
                     let constraint_probe = crate::model::probe::GuardProbe::Constraint {
                         schema: eff_schema.clone(),
                         table: table.clone(),
@@ -5592,7 +5750,7 @@ impl IrAuthor {
         let table_sql = self.render_partition_parent_ref(eff_schema, parent)?;
         let key_sql = self.render_partition_key(spec)?;
         let predicate = self.render_partition_bound_predicate(spec, bounds)?;
-        crate::render::backends::vendor(&self.dialect)
+        crate::render::backends::vendor(self.vendors, &self.dialect)
             .catalog_fold
             .partition_collapse_mirror_guard(&table_sql, &key_sql, &predicate)
     }
@@ -5707,13 +5865,13 @@ impl IrAuthor {
         if !matches!(from, PartitionBoundValue::MinValue) {
             terms.push(format!(
                 "{key_sql} >= {}",
-                render_partition_bound_literal(from, &self.dialect)?
+                render_partition_bound_literal(self.vendors, from, &self.dialect)?
             ));
         }
         if !matches!(to, PartitionBoundValue::MaxValue) {
             terms.push(format!(
                 "{key_sql} < {}",
-                render_partition_bound_literal(to, &self.dialect)?
+                render_partition_bound_literal(self.vendors, to, &self.dialect)?
             ));
         }
         Ok(if terms.is_empty() {
@@ -5735,7 +5893,7 @@ impl IrAuthor {
         }
         let values = values
             .iter()
-            .map(|value| render_partition_bound_literal(value, &self.dialect))
+            .map(|value| render_partition_bound_literal(self.vendors, value, &self.dialect))
             .collect::<Result<Vec<_>, _>>()?
             .join(", ");
         Ok(format!("{key_sql} IN ({values})"))
@@ -5749,6 +5907,7 @@ impl IrAuthor {
             ));
         };
         crate::render::dml::quote_bare_ident_for_dialect(
+            self.vendors,
             "partition key column",
             column,
             &self.dialect,
@@ -5816,6 +5975,7 @@ impl IrAuthor {
         live_schema: &LiveSchema,
     ) -> Result<Vec<LoweredUnit>, IrLowerError> {
         let stmt = render_view_op(
+            self.vendors,
             op,
             eff_schema,
             &self.dialect,
@@ -5872,7 +6032,7 @@ impl IrAuthor {
         // Structural gate (a)/(b)/(d) BEFORE assembly. op_index 0 is a local
         // attribution; the loader's `validate_ir` already ran with the true op
         // index for the production path — this is the lower-time defense-in-depth.
-        crate::model::validate::validate_op(op, dialect, 0)
+        crate::model::validate::validate_op(self.vendors, op, dialect, 0)
             .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
 
         // RULE (c) — resolved ColRef gate at the apply/render seam.
@@ -5883,7 +6043,7 @@ impl IrAuthor {
         // table absent from the live snapshot keeps the structural-only scope (the
         // (c) check is skipped; see the fn doc).
         let live_columns = live_schema.dml_live_columns();
-        crate::model::validate::validate_op_resolved(op, dialect, &live_columns, 0)
+        crate::model::validate::validate_op_resolved(self.vendors, op, dialect, &live_columns, 0)
             .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
 
         match op {
@@ -5902,6 +6062,7 @@ impl IrAuthor {
                     });
                 // qualify into the op's effective schema.
                 let asm = crate::render::dml::assemble_insert(
+                    self.vendors,
                     eff_schema,
                     dialect,
                     table,
@@ -5937,6 +6098,7 @@ impl IrAuthor {
                 ..
             } => {
                 let asm = crate::render::dml::assemble_update(
+                    self.vendors,
                     eff_schema,
                     dialect,
                     table,
@@ -5963,6 +6125,7 @@ impl IrAuthor {
                     None
                 };
                 let asm = crate::render::dml::assemble_delete_with_catalog_identity(
+                    self.vendors,
                     eff_schema,
                     dialect,
                     table,
@@ -6142,9 +6305,16 @@ impl IrAuthor {
             }
         }
         let clauses = if per_row.is_empty() {
-            crate::render::dml::assemble_backfill_clauses(&self.dialect, table, &ordinary, filter)
+            crate::render::dml::assemble_backfill_clauses(
+                self.vendors,
+                &self.dialect,
+                table,
+                &ordinary,
+                filter,
+            )
         } else {
             crate::render::dml::assemble_backfill_clauses_allow_empty(
+                self.vendors,
                 &self.dialect,
                 table,
                 &ordinary,
@@ -6164,7 +6334,12 @@ impl IrAuthor {
                 .table_snapshots
                 .get(table)
                 .map(|snapshot| {
-                    cursor_contract_for_snapshot(&self.dialect, cursor_columns, snapshot)
+                    cursor_contract_for_snapshot(
+                        self.vendors,
+                        &self.dialect,
+                        cursor_columns,
+                        snapshot,
+                    )
                 })
                 .transpose()
                 .map_err(|reason| IrLowerError::BackfillCursorUnavailable {
@@ -6247,6 +6422,7 @@ impl IrAuthor {
     ) -> Result<GuardedLowerParts, IrGuardedLowerError> {
         self.validate_authored_identifier_lengths(ir)?;
         let logical_columns = crate::model::validate::validate_per_row_destinations_for_lower(
+            self.vendors,
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -6258,6 +6434,7 @@ impl IrAuthor {
         // still be proved by the live catalog's own format evidence.
         let catalog = crate::model::validate::CatalogColumnEvidence::new(&live.table_snapshots);
         crate::model::validate::validate_column_references_for_lower(
+            self.vendors,
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -6267,6 +6444,7 @@ impl IrAuthor {
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         crate::model::validate::validate_table_foreign_keys_for_lower(
+            self.vendors,
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -6276,6 +6454,7 @@ impl IrAuthor {
         )
         .map_err(|error| IrLowerError::DmlValidate(Box::new(error)))?;
         crate::model::validate::validate_vendor_key_storage_for_lower(
+            self.vendors,
             ir,
             self.validation_dialect(),
             &live.logical_columns,
@@ -6285,7 +6464,7 @@ impl IrAuthor {
         )
         .map_err(|error| IrLowerError::KeyStorage(Box::new(error)))?;
         self.validate_typed_reference_catalogs(ir, live, &logical_columns)?;
-        let guard = guard_for(guard_cfg);
+        let guard = guard_for(self.vendors, guard_cfg);
         let guard_scope = guard_cfg.schema_scope();
         let mut steps: Vec<PlanStep> = Vec::new();
         let mut fragments: Vec<GuardedFragment> = Vec::new();
@@ -6687,7 +6866,7 @@ impl IrAuthor {
                             "validated createTable NOT VALID CHECK reached lower",
                         ));
                     }
-                    if !crate::render::backends::vendor(&self.dialect)
+                    if !crate::render::backends::vendor(self.vendors, &self.dialect)
                         .catalog_fold
                         .folds_check_constraint_identity()
                     {
@@ -6699,7 +6878,8 @@ impl IrAuthor {
                         || derived_check_constraint_name(table, expr),
                         str::to_string,
                     );
-                    let rendered = crate::render::dml::render_expr_inline(expr, &self.dialect)?;
+                    let rendered =
+                        crate::render::dml::render_expr_inline(self.vendors, expr, &self.dialect)?;
                     snap.constraints.push(ConstraintSnapshot {
                         name,
                         kind: "CHECK".to_string(),
@@ -6736,6 +6916,7 @@ impl IrAuthor {
                         ));
                     }
                     let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+                        self.vendors,
                         eff_schema,
                         table,
                         c.name.as_deref(),
@@ -6794,7 +6975,8 @@ impl IrAuthor {
                         || derived_exclusion_constraint_name(table, elements),
                         str::to_string,
                     );
-                    let definition = render_exclusion_constraint_body(&c.kind, &self.dialect)?;
+                    let definition =
+                        render_exclusion_constraint_body(self.vendors, &c.kind, &self.dialect)?;
                     snap.constraints.push(ConstraintSnapshot {
                         name,
                         kind: "EXCLUDE".to_string(),
@@ -6813,6 +6995,7 @@ impl IrAuthor {
                 ));
             }
             let mut snap_idx = create_index_snapshot(
+                self.vendors,
                 table,
                 &ix.columns,
                 ix.name.as_deref(),
@@ -6949,7 +7132,13 @@ impl IrAuthor {
         // select the same scoped inject rule. We then select only the authored
         // column (and optional mask sibling) from the resolved snapshot.
         let inject = self.resolved_inject(effective_schema, table)?;
-        let snap = build_resolved_table_snapshot(effective_schema, &desc, &self.dialect, &inject)?;
+        let snap = build_resolved_table_snapshot(
+            self.vendors,
+            effective_schema,
+            &desc,
+            &self.dialect,
+            &inject,
+        )?;
         let sibling_name = format!("{column}_masked");
         let mut main = snap
             .columns
@@ -6959,8 +7148,23 @@ impl IrAuthor {
             .ok_or(IrLowerError::UnsupportedOp(
                 "addColumn (column folded away)",
             ))?;
-        apply_author_type_override_to_column(table, column, ty, &mut main, &self.dialect)?;
-        apply_structured_default_to_column(table, column, ty, default, &mut main, &self.dialect)?;
+        apply_author_type_override_to_column(
+            self.vendors,
+            table,
+            column,
+            ty,
+            &mut main,
+            &self.dialect,
+        )?;
+        apply_structured_default_to_column(
+            self.vendors,
+            table,
+            column,
+            ty,
+            default,
+            &mut main,
+            &self.dialect,
+        )?;
         let sibling = snap.columns.into_iter().find(|c| c.name == sibling_name);
         Ok((main, sibling))
     }
@@ -7023,10 +7227,13 @@ impl IrAuthor {
             let Some(col) = snap.columns.iter_mut().find(|col| col.name == source.name) else {
                 return Err(IrLowerError::UnsupportedOp("collated column folded away"));
             };
-            let rendered =
-                crate::render::backends::schema_renderer(&self.dialect).column_type(col, false);
-            let (ddl_type, collation) =
-                crate::render::value_format::bytewise_column_metadata(&rendered, &self.dialect);
+            let rendered = crate::render::backends::schema_renderer(self.vendors, &self.dialect)
+                .column_type(col, false);
+            let (ddl_type, collation) = crate::render::value_format::bytewise_column_metadata(
+                self.vendors,
+                &rendered,
+                &self.dialect,
+            );
             col.ddl_type_override = Some(ddl_type);
             col.collation = collation;
         }
@@ -7059,13 +7266,14 @@ impl IrAuthor {
             return Ok(());
         }
         col.id_default = Some(authored_uuid_id_default(
+            self.vendors,
             source.default.as_ref(),
             col.default.as_deref(),
             &self.dialect,
             Some(&self.project_schema),
         ));
-        let Some(metadata) =
-            uuid_column_metadata(&source.name, &self.dialect).map_err(DeclarativeError::Invalid)?
+        let Some(metadata) = uuid_column_metadata(self.vendors, &source.name, &self.dialect)
+            .map_err(DeclarativeError::Invalid)?
         else {
             return Ok(());
         };
@@ -7094,6 +7302,7 @@ impl IrAuthor {
     fn apply_id_default_column_metadata(&self, source: &IrColumn, col: &mut ColumnSnapshot) {
         if source.identity.is_some() || matches!(source.default, Some(IrDefault::Nextval { .. })) {
             col.id_default = Some(authored_id_default(
+                self.vendors,
                 source.default.as_ref(),
                 col.default.as_deref(),
                 &self.dialect,
@@ -7110,11 +7319,13 @@ impl IrAuthor {
         let Some(value_format) = &source.value_format else {
             return Ok(());
         };
-        let metadata = value_format_column_metadata(&source.name, value_format, &self.dialect)
-            .map_err(DeclarativeError::Invalid)?;
+        let metadata =
+            value_format_column_metadata(self.vendors, &source.name, value_format, &self.dialect)
+                .map_err(DeclarativeError::Invalid)?;
         col.collation = metadata.collation;
         col.ddl_type_override = Some(metadata.ddl_type);
         col.id_default = Some(authored_text_id_default(
+            self.vendors,
             source.default.as_ref(),
             col.default.as_deref(),
             &self.dialect,
@@ -7137,7 +7348,8 @@ impl IrAuthor {
     ) -> Result<(), IrLowerError> {
         match &source.ty {
             ColType::Enum { name, .. } => {
-                let policy = crate::render::backends::vendor(&self.dialect).catalog_fold;
+                let policy =
+                    crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold;
                 let registry_schema = named_types.enum_schema_or(name, default_schema);
                 if let Some((data_type, ddl_type)) =
                     policy.materialized_named_type_metadata(&source.ty, registry_schema)?
@@ -7164,12 +7376,13 @@ impl IrAuthor {
             ColType::Domain { name, .. } => {
                 if self.backend.supports(Capability::MaterializedDomainType) {
                     let registry_schema = named_types.domain_schema_or(name, default_schema);
-                    let (data_type, ddl_type) = crate::render::backends::vendor(&self.dialect)
-                        .catalog_fold
-                        .materialized_named_type_metadata(&source.ty, registry_schema)?
-                        .ok_or(IrLowerError::UnsupportedOp(
-                            "named domain metadata was not resolved",
-                        ))?;
+                    let (data_type, ddl_type) =
+                        crate::render::backends::vendor(self.vendors, &self.dialect)
+                            .catalog_fold
+                            .materialized_named_type_metadata(&source.ty, registry_schema)?
+                            .ok_or(IrLowerError::UnsupportedOp(
+                                "named domain metadata was not resolved",
+                            ))?;
                     col.data_type = data_type;
                     col.ddl_type_override = Some(ddl_type);
                     return Ok(());
@@ -7209,6 +7422,7 @@ impl IrAuthor {
                 if col.default.is_none() {
                     if let Some(default) = &def.default {
                         col.default = Some(render_ir_default_for_type(
+                            self.vendors,
                             default,
                             &def.as_type,
                             &self.dialect,
@@ -7222,7 +7436,7 @@ impl IrAuthor {
                         self.backend,
                     )
                     .map_err(IrLowerError::DmlAssemble)?;
-                    let expr = render_domain_check(check, &self.dialect, &value_sql)?;
+                    let expr = render_domain_check(self.vendors, check, &self.dialect, &value_sql)?;
                     col.inline_checks.push(format!("CHECK ({expr})"));
                 }
             }
@@ -7245,11 +7459,10 @@ impl IrAuthor {
                     schema: Some(def.schema.clone()),
                 };
                 let (_, qualified_name) =
-                    named_type_metadata(&ty, &self.dialect, effective_schema)?.ok_or(
-                        IrLowerError::UnsupportedOp(
+                    named_type_metadata(self.vendors, &ty, &self.dialect, effective_schema)?
+                        .ok_or(IrLowerError::UnsupportedOp(
                             "materialized enum base metadata was not resolved",
-                        ),
-                    )?;
+                        ))?;
                 Ok(qualified_name)
             }
             ColType::Domain { name, .. } => Err(IrLowerError::NamedTypeUnsupported {
@@ -7277,7 +7490,7 @@ impl IrAuthor {
                 // the PostgreSQL renderer to spell that canonical token.
                 col.ddl_type_override = None;
                 Ok(
-                    crate::render::backends::schema_renderer(&self.dialect)
+                    crate::render::backends::schema_renderer(self.vendors, &self.dialect)
                         .column_type(&col, false),
                 )
             }
@@ -7354,7 +7567,7 @@ impl IrAuthor {
             None,
             None,
         )?;
-        let policy = crate::render::backends::vendor(&self.dialect).catalog_fold;
+        let policy = crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold;
         if let Some((data_type, ddl_type)) =
             policy.materialized_named_type_metadata(ty, &self.project_schema)?
         {
@@ -7397,8 +7610,8 @@ impl IrAuthor {
             .ddl_type_override
             .as_deref()
             .unwrap_or(&live_from_type);
-        let rename_strategy =
-            crate::render::backends::schema_renderer(&self.dialect).column_rename_strategy();
+        let rename_strategy = crate::render::backends::schema_renderer(self.vendors, &self.dialect)
+            .column_rename_strategy();
         let modifier_mismatch = matches!(
             rename_strategy,
             zero_migrate_backend::schema::ColumnRenameStrategy::ExpandContract
@@ -7461,7 +7674,7 @@ impl IrAuthor {
                     } else {
                         let mut render_column = live_from_column.clone();
                         render_column.data_type = ir_data_type;
-                        crate::render::backends::schema_renderer(&self.dialect)
+                        crate::render::backends::schema_renderer(self.vendors, &self.dialect)
                             .column_type(&render_column, false)
                     };
                 // The PG expand-contract author derives the dual-write from
@@ -7605,7 +7818,7 @@ impl IrAuthor {
     /// added to one op and missed on its siblings.
     fn require_alter_column_rendering(&self, op: &'static str) -> Result<(), IrLowerError> {
         self.require_capability_for(Capability::NativeAlterColumn, op)?;
-        crate::render::backends::vendor(&self.dialect)
+        crate::render::backends::vendor(self.vendors, &self.dialect)
             .catalog_fold
             .alter_column_refusal(op)
     }
@@ -7652,6 +7865,7 @@ impl IrAuthor {
                 dialect: self.dialect.clone(),
             })?;
         let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+            self.vendors,
             eff_schema,
             table,
             constraint.name.as_deref(),
@@ -7791,6 +8005,7 @@ impl IrAuthor {
                 // phantom-diff every unvalidated foreign key. `fk_policy_tail` carries
                 // the tail into the rendered `ADD CONSTRAINT … FOREIGN KEY … NOT VALID`.
                 let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+                    self.vendors,
                     eff_schema,
                     table,
                     name,
@@ -7860,7 +8075,7 @@ impl IrAuthor {
                 decl.lower_add_constraint(table, &cname, &body, true)
             }
             IrConstraintKind::Check { expr, not_valid } => {
-                if !crate::render::backends::vendor(&self.dialect)
+                if !crate::render::backends::vendor(self.vendors, &self.dialect)
                     .catalog_fold
                     .folds_check_constraint_identity()
                 {
@@ -7872,7 +8087,8 @@ impl IrAuthor {
                     || derived_check_constraint_name(table, expr),
                     str::to_string,
                 );
-                let rendered = crate::render::dml::render_expr_inline(expr, &self.dialect)?;
+                let rendered =
+                    crate::render::dml::render_expr_inline(self.vendors, expr, &self.dialect)?;
                 let mut body = format!("CHECK ({rendered})");
                 if not_valid == &Some(true) {
                     // Online constraint adoption (PG only): skip the add-time scan.
@@ -7887,7 +8103,11 @@ impl IrAuthor {
                     || derived_exclusion_constraint_name(table, elements),
                     str::to_string,
                 );
-                let body = render_exclusion_constraint_body(&constraint.kind, &self.dialect)?;
+                let body = render_exclusion_constraint_body(
+                    self.vendors,
+                    &constraint.kind,
+                    &self.dialect,
+                )?;
                 // An exclusion constraint validates existing rows and creates a
                 // backing index; gate it like UNIQUE/PK.
                 decl.lower_add_constraint(table, &cname, &body, true)
@@ -8129,9 +8349,14 @@ fn vendor_inverse_from_history(
 /// The `dialect` in the error is PROVENANCE and travels with the decision — core
 /// now supplies it from the same value it used to look the renderer up with, so
 /// the rendered message is unchanged.
-fn validate_view_materialized(dialect: &DialectId, materialized: bool) -> Result<(), IrLowerError> {
+fn validate_view_materialized(
+    vendors: VendorSet,
+    dialect: &DialectId,
+    materialized: bool,
+) -> Result<(), IrLowerError> {
     if materialized
-        && !crate::render::backends::renderer(dialect).supports(Capability::MaterializedView)
+        && !crate::render::backends::renderer(vendors, dialect)
+            .supports(Capability::MaterializedView)
     {
         return Err(IrLowerError::ViewUnsupported {
             kind: "materializedView",
@@ -8142,6 +8367,7 @@ fn validate_view_materialized(dialect: &DialectId, materialized: bool) -> Result
 }
 
 fn render_view_op(
+    vendors: VendorSet,
     op: &Op,
     eff_schema: &str,
     dialect: &DialectId,
@@ -8159,10 +8385,10 @@ fn render_view_op(
             ..
         } => {
             let materialized = materialized.unwrap_or(false);
-            validate_view_materialized(dialect, materialized)?;
+            validate_view_materialized(vendors, dialect, materialized)?;
             let qname = backend.view_object_name(name, eff_schema)?;
-            let cols = render_view_columns(columns.as_deref(), dialect)?;
-            let query_sql = render_view_query(query, eff_schema, dialect, scope)?;
+            let cols = render_view_columns(vendors, columns.as_deref(), dialect)?;
+            let query_sql = render_view_query(vendors, query, eff_schema, dialect, scope)?;
             let replace = replace.unwrap_or(false);
             let mut create = backend.view_create_prefix(materialized, replace)?;
             create.push_str(&qname);
@@ -8212,7 +8438,7 @@ fn render_view_op(
             ..
         } => {
             let materialized = materialized.unwrap_or(false);
-            validate_view_materialized(dialect, materialized)?;
+            validate_view_materialized(vendors, dialect, materialized)?;
             let qname = backend.view_object_name(name, eff_schema)?;
             let mut up = if materialized {
                 String::from("DROP MATERIALIZED VIEW ")
@@ -8248,8 +8474,9 @@ fn render_view_op(
                     .map(|(view, query)| {
                         let create_schema = view.authored_schema.as_deref().unwrap_or(eff_schema);
                         let create_name = backend.view_object_name(name, create_schema)?;
-                        let cols = render_view_columns(view.columns.as_deref(), dialect)?;
-                        let body = render_view_query(query, create_schema, dialect, scope)?;
+                        let cols = render_view_columns(vendors, view.columns.as_deref(), dialect)?;
+                        let body =
+                            render_view_query(vendors, query, create_schema, dialect, scope)?;
                         let mut create = backend.view_create_prefix(view.materialized, false)?;
                         create.push_str(&create_name);
                         create.push_str(&cols);
@@ -8289,15 +8516,22 @@ fn render_view_op(
 pub struct AuthoredViewBodyRenderer<'a> {
     /// The dialect the probe is running against.
     pub dialect: &'a DialectId,
+    /// The backends this build ships.
+    ///
+    /// A FIELD rather than a parameter because every use of it here is inside an
+    /// [`AuthoredViewBody`](zero_migrate_backend::drift::AuthoredViewBody) method,
+    /// and a trait the contract crate owns cannot grow an engine-shaped argument.
+    pub vendors: VendorSet,
 }
 
 impl zero_migrate_backend::drift::AuthoredViewBody for AuthoredViewBodyRenderer<'_> {
     fn render(&self, query: &ViewQuery, eff_schema: &str) -> Option<String> {
-        render_view_query(query, eff_schema, self.dialect, None).ok()
+        render_view_query(self.vendors, query, eff_schema, self.dialect, None).ok()
     }
 }
 
 pub(crate) fn render_view_query(
+    vendors: VendorSet,
     query: &ViewQuery,
     eff_schema: &str,
     dialect: &DialectId,
@@ -8308,13 +8542,14 @@ pub(crate) fn render_view_query(
         // down. Same arrangement as `dml::render_expr_inline_with_col` and
         // `BindCtx::new` — the caller holds a `DialectId`, the walk holds a vendor.
         ViewQuery::Structured { select } => render_select_ast(
+            vendors,
             select,
             eff_schema,
             dialect,
-            crate::render::backends::renderer(dialect),
+            crate::render::backends::renderer(vendors, dialect),
         ),
         ViewQuery::Raw { sql } => {
-            crate::model::validate::validate_raw_view_body_sql(sql, dialect, 0, scope)
+            crate::model::validate::validate_raw_view_body_sql(vendors, sql, dialect, 0, scope)
                 .map_err(|e| IrLowerError::DmlValidate(Box::new(e)))?;
             Ok(sql.trim().trim_end_matches(';').trim().to_string())
         }
@@ -8327,6 +8562,7 @@ pub(crate) fn render_view_query(
 /// calls (`render_expr_inline`, `quote_bare_ident_for_dialect`), which have callers
 /// in `apply::` and `model::` and so have not been converted.
 fn render_select_ast(
+    vendors: VendorSet,
     select: &SelectAst,
     eff_schema: &str,
     dialect: &DialectId,
@@ -8338,7 +8574,7 @@ fn render_select_ast(
         let items: Result<Vec<_>, _> = select
             .projection
             .iter()
-            .map(|item| render_select_item(item, dialect))
+            .map(|item| render_select_item(vendors, item, dialect))
             .collect();
         items?.join(", ")
     };
@@ -8348,30 +8584,34 @@ fn render_select_ast(
     );
     for join in &select.joins {
         sql.push(' ');
-        sql.push_str(&render_join(join, eff_schema, dialect, backend)?);
+        sql.push_str(&render_join(vendors, join, eff_schema, dialect, backend)?);
     }
     if let Some(pred) = &select.r#where {
         sql.push_str(" WHERE ");
-        sql.push_str(&crate::render::dml::render_expr_inline(pred, dialect)?);
+        sql.push_str(&crate::render::dml::render_expr_inline(
+            vendors, pred, dialect,
+        )?);
     }
     if !select.group_by.is_empty() {
         let items: Result<Vec<_>, _> = select
             .group_by
             .iter()
-            .map(|expr| crate::render::dml::render_expr_inline(expr, dialect))
+            .map(|expr| crate::render::dml::render_expr_inline(vendors, expr, dialect))
             .collect();
         sql.push_str(" GROUP BY ");
         sql.push_str(&items?.join(", "));
     }
     if let Some(pred) = &select.having {
         sql.push_str(" HAVING ");
-        sql.push_str(&crate::render::dml::render_expr_inline(pred, dialect)?);
+        sql.push_str(&crate::render::dml::render_expr_inline(
+            vendors, pred, dialect,
+        )?);
     }
     if let Some(order_by) = &select.order_by {
         if !order_by.is_empty() {
             let items: Result<Vec<_>, _> = order_by
                 .iter()
-                .map(|item| render_order_item(item, dialect))
+                .map(|item| render_order_item(vendors, item, dialect))
                 .collect();
             sql.push_str(" ORDER BY ");
             sql.push_str(&items?.join(", "));
@@ -8384,6 +8624,7 @@ fn render_select_ast(
 }
 
 fn render_join(
+    vendors: VendorSet,
     join: &Join,
     eff_schema: &str,
     dialect: &DialectId,
@@ -8393,23 +8634,29 @@ fn render_join(
         "{} JOIN {} ON {}",
         join.kind.as_sql(),
         render_table_ref(&join.table, eff_schema, backend)?,
-        crate::render::dml::render_expr_inline(&join.on, dialect)?
+        crate::render::dml::render_expr_inline(vendors, &join.on, dialect)?
     ))
 }
 
-fn render_select_item(item: &SelectItem, dialect: &DialectId) -> Result<String, IrLowerError> {
+fn render_select_item(
+    vendors: VendorSet,
+    item: &SelectItem,
+    dialect: &DialectId,
+) -> Result<String, IrLowerError> {
     let (mut sql, alias) = match item {
-        SelectItem::ColRef { table, name, alias } => {
-            (render_col_ref(table.as_deref(), name, dialect)?, alias)
-        }
+        SelectItem::ColRef { table, name, alias } => (
+            render_col_ref(vendors, table.as_deref(), name, dialect)?,
+            alias,
+        ),
         SelectItem::Expr { expr, alias } => (
-            crate::render::dml::render_expr_inline(expr, dialect)?,
+            crate::render::dml::render_expr_inline(vendors, expr, dialect)?,
             alias,
         ),
     };
     if let Some(alias) = alias {
         sql.push_str(" AS ");
         sql.push_str(&crate::render::dml::quote_bare_ident_for_dialect(
+            vendors,
             "column alias",
             alias,
             dialect,
@@ -8418,14 +8665,20 @@ fn render_select_item(item: &SelectItem, dialect: &DialectId) -> Result<String, 
     Ok(sql)
 }
 
-fn render_order_item(item: &OrderItem, dialect: &DialectId) -> Result<String, IrLowerError> {
+fn render_order_item(
+    vendors: VendorSet,
+    item: &OrderItem,
+    dialect: &DialectId,
+) -> Result<String, IrLowerError> {
     let (mut sql, dir): (String, Option<OrderDir>) = match item {
-        OrderItem::ColRef { table, name, dir } => {
-            (render_col_ref(table.as_deref(), name, dialect)?, *dir)
-        }
-        OrderItem::Expr { expr, dir } => {
-            (crate::render::dml::render_expr_inline(expr, dialect)?, *dir)
-        }
+        OrderItem::ColRef { table, name, dir } => (
+            render_col_ref(vendors, table.as_deref(), name, dialect)?,
+            *dir,
+        ),
+        OrderItem::Expr { expr, dir } => (
+            crate::render::dml::render_expr_inline(vendors, expr, dialect)?,
+            *dir,
+        ),
     };
     if let Some(dir) = dir {
         sql.push(' ');
@@ -8435,15 +8688,21 @@ fn render_order_item(item: &OrderItem, dialect: &DialectId) -> Result<String, Ir
 }
 
 fn render_col_ref(
+    vendors: VendorSet,
     table: Option<&str>,
     name: &str,
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
-    let qcol = crate::render::dml::quote_bare_ident_for_dialect("column", name, dialect)?;
+    let qcol = crate::render::dml::quote_bare_ident_for_dialect(vendors, "column", name, dialect)?;
     if let Some(table) = table {
         Ok(format!(
             "{}.{}",
-            crate::render::dml::quote_bare_ident_for_dialect("table alias", table, dialect)?,
+            crate::render::dml::quote_bare_ident_for_dialect(
+                vendors,
+                "table alias",
+                table,
+                dialect
+            )?,
             qcol
         ))
     } else {
@@ -8470,6 +8729,7 @@ fn render_table_ref(
 }
 
 fn render_view_columns(
+    vendors: VendorSet,
     columns: Option<&[String]>,
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
@@ -8481,7 +8741,9 @@ fn render_view_columns(
     }
     let qcols: Result<Vec<_>, _> = columns
         .iter()
-        .map(|c| crate::render::dml::quote_bare_ident_for_dialect("view column", c, dialect))
+        .map(|c| {
+            crate::render::dml::quote_bare_ident_for_dialect(vendors, "view column", c, dialect)
+        })
         .collect();
     Ok(format!(" ({})", qcols?.join(", ")))
 }
@@ -8936,11 +9198,13 @@ fn normalize_partition_string_bound_literal(value: &str) -> String {
 }
 
 fn render_partition_bound_literal(
+    vendors: VendorSet,
     value: &PartitionBoundValue,
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
     match value {
         PartitionBoundValue::String { value } => Ok(crate::render::dml::inline_string_literal(
+            vendors,
             &normalize_partition_string_bound_literal(value),
             dialect,
         )),
@@ -9040,6 +9304,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
 /// column-list index a provenance the declarative snapshot builder has no way to
 /// produce - breaking the debug-byte convergence the two paths are held to.
 pub(crate) fn create_index_snapshot(
+    vendors: VendorSet,
     table: &str,
     columns: &[IndexElement],
     name: Option<&str>,
@@ -9052,7 +9317,7 @@ pub(crate) fn create_index_snapshot(
     nulls_not_distinct: Option<bool>,
     dialect: &DialectId,
 ) -> Result<IndexSnapshot, IrLowerError> {
-    if !crate::render::backends::vendor(dialect)
+    if !crate::render::backends::vendor(vendors, dialect)
         .catalog_fold
         .supports_expression_index()
         && columns
@@ -9064,7 +9329,7 @@ pub(crate) fn create_index_snapshot(
         ));
     }
     if predicate.is_some()
-        && !crate::render::backends::vendor(dialect)
+        && !crate::render::backends::vendor(vendors, dialect)
             .descriptor
             .capabilities
             .contains(Capability::PartialIndexPredicate)
@@ -9107,11 +9372,11 @@ pub(crate) fn create_index_snapshot(
                 name_parts.push(name.clone());
             }
             IndexElement::Expr { expr } => {
-                let rendered = crate::render::dml::render_expr_inline(expr, dialect)
+                let rendered = crate::render::dml::render_expr_inline(vendors, expr, dialect)
                     .map_err(IrLowerError::DmlAssemble)?;
                 has_expr_site = true;
                 expr_cascade_columns.extend(
-                    crate::render::dml::expr_column_refs(expr, dialect)
+                    crate::render::dml::expr_column_refs(vendors, expr, dialect)
                         .map_err(IrLowerError::DmlAssemble)?,
                 );
                 elements.push(IndexElementSnapshot::expr(rendered));
@@ -9121,7 +9386,7 @@ pub(crate) fn create_index_snapshot(
     }
     if let Some(expr) = predicate {
         expr_cascade_columns.extend(
-            crate::render::dml::expr_column_refs(expr, dialect)
+            crate::render::dml::expr_column_refs(vendors, expr, dialect)
                 .map_err(IrLowerError::DmlAssemble)?,
         );
     }
@@ -9133,7 +9398,7 @@ pub(crate) fn create_index_snapshot(
     let mut idx = IndexSnapshot::btree(idx_name, unique, plain_columns);
     idx.elements = elements;
     idx.predicate = predicate
-        .map(|expr| crate::render::dml::render_expr_inline(expr, dialect))
+        .map(|expr| crate::render::dml::render_expr_inline(vendors, expr, dialect))
         .transpose()
         .map_err(IrLowerError::DmlAssemble)?;
     if let Some(m) = using {
@@ -9359,6 +9624,7 @@ pub(crate) fn apply_col_type_to_field_descriptor(field: &mut FieldDescriptor, ty
 /// Only the four facets that move the storage are taken; nullability, defaults,
 /// keys, and generation do not change the rendered type.
 pub(crate) fn rendered_storage_for_column_facets(
+    vendors: VendorSet,
     dialect: &DialectId,
     ty: &ColType,
     value_format: Option<&crate::model::ir::ValueFormat>,
@@ -9382,14 +9648,14 @@ pub(crate) fn rendered_storage_for_column_facets(
         identity: None,
     };
     let field = ir_column_to_field(&column);
-    let data_type = crate::render::declarative::field_data_type(&field, dialect).ok()?;
+    let data_type = crate::render::declarative::field_data_type(vendors, &field, dialect).ok()?;
     let snapshot = crate::model::snapshot::ColumnSnapshot {
         data_type,
         case_sensitive: field.case_sensitive,
         unbounded_text: field.unbounded_text,
         ..Default::default()
     };
-    Some(crate::render::backends::schema_renderer(dialect).column_type(&snapshot, false))
+    Some(crate::render::backends::schema_renderer(vendors, dialect).column_type(&snapshot, false))
 }
 
 /// The `DEFAULT` clause body an authored column renders on the selected backend,
@@ -9399,11 +9665,17 @@ pub(crate) fn rendered_storage_for_column_facets(
 /// `createTable` lower runs, so the load-and-validate gate reads the exact
 /// spelling the DDL will carry, including backend-required parenthesized forms
 /// and defaults the descriptor bridge drops entirely.
-pub(crate) fn rendered_column_default(dialect: &DialectId, c: &IrColumn) -> Option<String> {
+pub(crate) fn rendered_column_default(
+    vendors: VendorSet,
+    dialect: &DialectId,
+    c: &IrColumn,
+) -> Option<String> {
     let field = ir_column_to_field(c);
     let mut snapshot =
-        crate::render::declarative::column_snapshot_for_field(&field, dialect, false).ok()?;
+        crate::render::declarative::column_snapshot_for_field(vendors, &field, dialect, false)
+            .ok()?;
     apply_structured_default_to_column(
+        vendors,
         "",
         &c.name,
         &c.ty,
@@ -9567,13 +9839,14 @@ pub(crate) fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
 }
 
 fn apply_author_type_overrides_to_snapshot(
+    vendors: VendorSet,
     table: &str,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
     dialect: &DialectId,
 ) -> Result<(), IrLowerError> {
     for source in columns {
-        if author_type_override(&source.ty, dialect).is_none() {
+        if author_type_override(vendors, &source.ty, dialect).is_none() {
             continue;
         }
         let Some(col) = snap.columns.iter_mut().find(|c| c.name == source.name) else {
@@ -9581,19 +9854,27 @@ fn apply_author_type_overrides_to_snapshot(
                 "author type column folded away",
             ));
         };
-        apply_author_type_override_to_column(table, &source.name, &source.ty, col, dialect)?;
+        apply_author_type_override_to_column(
+            vendors,
+            table,
+            &source.name,
+            &source.ty,
+            col,
+            dialect,
+        )?;
     }
     Ok(())
 }
 
 fn apply_author_type_override_to_column(
+    vendors: VendorSet,
     _table: &str,
     column: &str,
     ty: &ColType,
     col: &mut ColumnSnapshot,
     dialect: &DialectId,
 ) -> Result<(), IrLowerError> {
-    let Some(type_override) = author_type_override(ty, dialect) else {
+    let Some(type_override) = author_type_override(vendors, ty, dialect) else {
         return Ok(());
     };
     if col.name != column {
@@ -9617,15 +9898,17 @@ fn apply_author_type_override_to_column(
 }
 
 pub(crate) fn author_type_override(
+    vendors: VendorSet,
     ty: &ColType,
     dialect: &DialectId,
 ) -> Option<AuthorTypeOverride> {
-    crate::render::backends::vendor(dialect)
+    crate::render::backends::vendor(vendors, dialect)
         .catalog_fold
         .author_type_override(ty)
 }
 
 fn apply_structured_defaults_to_snapshot(
+    vendors: VendorSet,
     table: &str,
     columns: &[IrColumn],
     snap: &mut TableSnapshot,
@@ -9657,6 +9940,7 @@ fn apply_structured_defaults_to_snapshot(
             ));
         };
         apply_structured_default_to_column(
+            vendors,
             table,
             &source.name,
             &source.ty,
@@ -9669,6 +9953,7 @@ fn apply_structured_defaults_to_snapshot(
 }
 
 fn apply_structured_default_to_column(
+    vendors: VendorSet,
     _table: &str,
     column: &str,
     ty: &ColType,
@@ -9697,7 +9982,7 @@ fn apply_structured_default_to_column(
             "structured default column folded away",
         ));
     }
-    col.default = Some(render_ir_default_for_type(default, ty, dialect)?);
+    col.default = Some(render_ir_default_for_type(vendors, default, ty, dialect)?);
     Ok(())
 }
 
@@ -9742,6 +10027,7 @@ pub(crate) fn ir_default_to_value(d: &IrDefault) -> Option<serde_json::Value> {
 
 /// Render an exclusion constraint body (`EXCLUDE USING …`) from the closed IR.
 pub(crate) fn render_exclusion_constraint_body(
+    vendors: VendorSet,
     kind: &IrConstraintKind,
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
@@ -9757,7 +10043,9 @@ pub(crate) fn render_exclusion_constraint_body(
             "non-exclusion kind routed to exclusion renderer",
         ));
     };
-    if !crate::render::backends::renderer(dialect).supports(Capability::ExclusionConstraint) {
+    if !crate::render::backends::renderer(vendors, dialect)
+        .supports(Capability::ExclusionConstraint)
+    {
         return Err(IrLowerError::ExclusionConstraintUnsupported {
             kind: "exclusionConstraint",
             dialect: dialect.clone(),
@@ -9771,7 +10059,7 @@ pub(crate) fn render_exclusion_constraint_body(
 
     let rendered_elements = elements
         .iter()
-        .map(|element| render_exclusion_element(element, dialect))
+        .map(|element| render_exclusion_element(vendors, element, dialect))
         .collect::<Result<Vec<_>, _>>()?
         .join(", ");
     let mut body = format!(
@@ -9779,7 +10067,7 @@ pub(crate) fn render_exclusion_constraint_body(
         exclusion_method_sql(*using_method)
     );
     if let Some(predicate) = where_predicate {
-        let pred = crate::render::dml::render_expr_inline(predicate, dialect)
+        let pred = crate::render::dml::render_expr_inline(vendors, predicate, dialect)
             .map_err(IrLowerError::DmlAssemble)?;
         body.push_str(" WHERE (");
         body.push_str(&pred);
@@ -9803,6 +10091,7 @@ pub(crate) fn render_exclusion_constraint_body(
 }
 
 fn render_exclusion_element(
+    vendors: VendorSet,
     element: &ExclusionElement,
     dialect: &DialectId,
 ) -> Result<String, IrLowerError> {
@@ -9810,11 +10099,11 @@ fn render_exclusion_element(
         ColumnOrExpr::Column { name } => zero_migrate_backend::dml::quote_ident_for_backend(
             "column",
             name,
-            crate::render::backends::renderer(dialect),
+            crate::render::backends::renderer(vendors, dialect),
         )
         .map_err(IrLowerError::DmlAssemble)?,
         ColumnOrExpr::Expr { expr } => {
-            let expr = crate::render::dml::render_expr_inline(expr, dialect)
+            let expr = crate::render::dml::render_expr_inline(vendors, expr, dialect)
                 .map_err(IrLowerError::DmlAssemble)?;
             format!("({expr})")
         }
@@ -9971,6 +10260,7 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
 /// `PRIMARY KEY` / `FOREIGN KEY` / `UNIQUE` / `CHECK`. Validate rejects user
 /// PRIMARY KEY before lower, but it is handled for totality.
 fn ir_constraint_name_and_kind(
+    vendors: VendorSet,
     table: &str,
     constraint: &IrConstraint,
     dialect: &DialectId,
@@ -9990,6 +10280,7 @@ fn ir_constraint_name_and_kind(
             // neutral flags keep the derived `<table>_<col>_fkey` byte-identical to the
             // lowered FK's name.
             let snap = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
+                vendors,
                 "",
                 table,
                 explicit,
@@ -10118,7 +10409,7 @@ mod dialect_scope_wire_spellings {
     fn the_walk_finds_a_leg_set_nested_inside_an_op() {
         let value = serde_json::to_value(update_with_a_pinned_predicate()).expect("op serializes");
         let mut out = Vec::new();
-        collect_expr_dialect_reach(&value, &mut out);
+        collect_expr_dialect_reach(crate::test_fixtures::VENDORS, &value, &mut out);
         assert_eq!(
             out,
             vec![BTreeSet::from([POSTGRES])],
@@ -10136,7 +10427,7 @@ mod dialect_scope_wire_spellings {
         };
         let value = serde_json::to_value(&op).expect("op serializes");
         let mut out = Vec::new();
-        collect_expr_dialect_reach(&value, &mut out);
+        collect_expr_dialect_reach(crate::test_fixtures::VENDORS, &value, &mut out);
         assert!(
             out.is_empty(),
             "a dialectal WRAPPER must not narrow the reach, however pinned its legs are: {out:?}"
@@ -10157,7 +10448,13 @@ mod tests {
         dialect: DialectId,
     ) -> IrAuthor {
         let effective = crate::test_fixtures::confined_charter();
-        IrAuthor::new(project_schema, owner_app, &dialect, &effective)
+        IrAuthor::new(
+            crate::test_fixtures::VENDORS,
+            project_schema,
+            owner_app,
+            &dialect,
+            &effective,
+        )
     }
 
     /// An `IrAuthor` RESOLVES its backend once, at construction, and carries the
@@ -10172,8 +10469,11 @@ mod tests {
         for dialect in [POSTGRES, SQLITE, MYSQL] {
             let author = test_ir_author("app", "app_a", dialect.clone());
             let carried = std::ptr::from_ref(author.backend).cast::<u8>();
-            let registry =
-                std::ptr::from_ref(crate::render::backends::renderer(&dialect)).cast::<u8>();
+            let registry = std::ptr::from_ref(crate::render::backends::renderer(
+                crate::test_fixtures::VENDORS,
+                &dialect,
+            ))
+            .cast::<u8>();
             assert_eq!(
                 carried, registry,
                 "IrAuthor::new(.., {dialect:?}, ..) must carry the registry's backend"
@@ -10223,8 +10523,13 @@ mod tests {
             }],
             vec![],
         );
-        let contract = cursor_contract_for_snapshot(&POSTGRES, &["id".to_string()], &single)
-            .expect("single primary key cursor");
+        let contract = cursor_contract_for_snapshot(
+            crate::test_fixtures::VENDORS,
+            &POSTGRES,
+            &["id".to_string()],
+            &single,
+        )
+        .expect("single primary key cursor");
         assert_eq!(contract.columns.len(), 1);
         assert_eq!(contract.columns[0].scalar_type, CursorScalarType::Int64);
 
@@ -10255,6 +10560,7 @@ mod tests {
             )],
         );
         let contract = cursor_contract_for_snapshot(
+            crate::test_fixtures::VENDORS,
             &POSTGRES,
             &["tenant".to_string(), "slug".to_string()],
             &composite,
@@ -10287,14 +10593,24 @@ mod tests {
             vec![],
         );
 
-        let sqlite = cursor_contract_for_snapshot(&SQLITE, &["id".to_string()], &table)
-            .expect("SQLite bigint cursor contract");
+        let sqlite = cursor_contract_for_snapshot(
+            crate::test_fixtures::VENDORS,
+            &SQLITE,
+            &["id".to_string()],
+            &table,
+        )
+        .expect("SQLite bigint cursor contract");
         assert_eq!(sqlite.columns[0].scalar_type, CursorScalarType::Int64);
         assert_eq!(sqlite.columns[0].database_type, "integer");
 
         for dialect in [POSTGRES, MYSQL] {
-            let contract = cursor_contract_for_snapshot(&dialect, &["id".to_string()], &table)
-                .expect("non-SQLite bigint cursor contract");
+            let contract = cursor_contract_for_snapshot(
+                crate::test_fixtures::VENDORS,
+                &dialect,
+                &["id".to_string()],
+                &table,
+            )
+            .expect("non-SQLite bigint cursor contract");
             assert_eq!(contract.columns[0].scalar_type, CursorScalarType::Int64);
             assert_eq!(
                 contract.columns[0].database_type, "bigint",
@@ -10350,10 +10666,20 @@ mod tests {
             )],
         );
         let cursor_columns = ["id".to_string(), "code".to_string()];
-        let desired_contract =
-            cursor_contract_for_snapshot(&SQLITE, &cursor_columns, &desired).unwrap();
-        let live_contract =
-            cursor_contract_for_snapshot(&SQLITE, &cursor_columns, &unmanaged_live).unwrap();
+        let desired_contract = cursor_contract_for_snapshot(
+            crate::test_fixtures::VENDORS,
+            &SQLITE,
+            &cursor_columns,
+            &desired,
+        )
+        .unwrap();
+        let live_contract = cursor_contract_for_snapshot(
+            crate::test_fixtures::VENDORS,
+            &SQLITE,
+            &cursor_columns,
+            &unmanaged_live,
+        )
+        .unwrap();
 
         assert_eq!(desired_contract, live_contract);
         assert_eq!(desired_contract.columns[0].database_type, "integer");
@@ -10385,6 +10711,7 @@ mod tests {
             )],
         );
         let nullable = cursor_contract_for_snapshot(
+            crate::test_fixtures::VENDORS,
             &POSTGRES,
             &["tenant".to_string(), "id".to_string()],
             &table,
@@ -10392,14 +10719,20 @@ mod tests {
         .expect_err("nullable cursor component");
         assert!(nullable.contains("NOT NULL"), "{nullable}");
 
-        let incomplete = cursor_contract_for_snapshot(&POSTGRES, &["tenant".to_string()], &table)
-            .expect_err("unique-key prefix is not a candidate key");
+        let incomplete = cursor_contract_for_snapshot(
+            crate::test_fixtures::VENDORS,
+            &POSTGRES,
+            &["tenant".to_string()],
+            &table,
+        )
+        .expect_err("unique-key prefix is not a candidate key");
         assert!(incomplete.contains("exact ordered tuple"), "{incomplete}");
     }
 
     #[test]
     fn mysql_unsigned_cursor_uses_arbitrary_precision_tagged_scalar() {
         let integer = cursor_column_contract(
+            crate::test_fixtures::VENDORS,
             &MYSQL,
             &ColumnSnapshot {
                 name: "id".into(),
@@ -10413,6 +10746,7 @@ mod tests {
         assert_eq!(integer.database_type, "int");
 
         let timestamp = cursor_column_contract(
+            crate::test_fixtures::VENDORS,
             &MYSQL,
             &ColumnSnapshot {
                 name: "created_at".into(),
@@ -10426,6 +10760,7 @@ mod tests {
         assert_eq!(timestamp.database_type, "datetime");
 
         let unsigned = cursor_column_contract(
+            crate::test_fixtures::VENDORS,
             &MYSQL,
             &ColumnSnapshot {
                 name: "sequence".into(),
@@ -10439,6 +10774,7 @@ mod tests {
         assert_eq!(unsigned.database_type, "bigint unsigned");
 
         let character = cursor_column_contract(
+            crate::test_fixtures::VENDORS,
             &MYSQL,
             &ColumnSnapshot {
                 name: "token".into(),
@@ -10481,11 +10817,12 @@ mod tests {
             value: "a\\b'; DROP TABLE users; --".to_string(),
         };
         assert_eq!(
-            render_partition_bound_literal(&value, &MYSQL).unwrap(),
+            render_partition_bound_literal(crate::test_fixtures::VENDORS, &value, &MYSQL).unwrap(),
             "_utf8mb4 X'615c62273b2044524f50205441424c452075736572733b202d2d'"
         );
         assert_eq!(
-            render_partition_bound_literal(&value, &POSTGRES).unwrap(),
+            render_partition_bound_literal(crate::test_fixtures::VENDORS, &value, &POSTGRES)
+                .unwrap(),
             "'a\\b''; DROP TABLE users; --'",
             "the PostgreSQL golden remains standard quote doubling"
         );
@@ -10636,7 +10973,7 @@ mod tests {
         }))
         .expect("backfill-only IR parses");
 
-        crate::model::validate::validate_ir(&backfill, &POSTGRES)
+        crate::model::validate::validate_ir(crate::test_fixtures::VENDORS, &backfill, &POSTGRES)
             .expect("load-time validation defers a declaration from an earlier artifact");
 
         let author = test_ir_author("app", "app_a", POSTGRES);
@@ -10650,8 +10987,14 @@ mod tests {
 
         let mut live = LiveSchema::default();
         live.tables.insert("orders".into());
-        live.advance_logical_columns(&declaration, &POSTGRES, "app", None)
-            .expect("the prior artifact advances the logical project schema");
+        live.advance_logical_columns(
+            crate::test_fixtures::VENDORS,
+            &declaration,
+            &POSTGRES,
+            "app",
+            None,
+        )
+        .expect("the prior artifact advances the logical project schema");
         let steps = author
             .lower_steps(&backfill, &live)
             .expect("the same backfill lowers with its declared TypeID contract");
@@ -10724,6 +11067,7 @@ mod tests {
             foreign_declared.tables.insert("orders".into());
             foreign_declared
                 .advance_logical_columns(
+                    crate::test_fixtures::VENDORS,
                     &logical_type_id_declaration(Some("foreign")),
                     &POSTGRES,
                     "app",
@@ -10741,7 +11085,13 @@ mod tests {
             let mut project_declared = LiveSchema::default();
             project_declared.tables.insert("orders".into());
             project_declared
-                .advance_logical_columns(&logical_type_id_declaration(None), &POSTGRES, "app", None)
+                .advance_logical_columns(
+                    crate::test_fixtures::VENDORS,
+                    &logical_type_id_declaration(None),
+                    &POSTGRES,
+                    "app",
+                    None,
+                )
                 .expect("project declaration advances");
             let error = author
                 .lower_steps(
@@ -10761,6 +11111,7 @@ mod tests {
         let mut live = LiveSchema::default();
         live.tables.insert("orders".into());
         live.advance_logical_columns(
+            crate::test_fixtures::VENDORS,
             &logical_type_id_declaration(None),
             &POSTGRES,
             "app",
@@ -10994,6 +11345,7 @@ mod tests {
 
         let mut expression_requirements = DatabaseRequirements::default();
         collect_expr_database_requirements(
+            crate::test_fixtures::VENDORS,
             &Expr::Dialectal {
                 legs: [
                     (crate::test_fixtures::POSTGRES, Box::new(Expr::UuidV4)),
@@ -11013,6 +11365,7 @@ mod tests {
 
         let mut absent_requirements = DatabaseRequirements::default();
         collect_expr_database_requirements(
+            crate::test_fixtures::VENDORS,
             &Expr::Dialectal {
                 legs: [(crate::test_fixtures::SQLITE, Box::new(Expr::UuidV7))]
                     .into_iter()
@@ -11044,7 +11397,13 @@ mod tests {
     /// authority is the charter's capability grant, and the guarded lower derives its
     /// confinement scope from the guard config on its own.
     fn platform_author(owner: &str) -> IrAuthor {
-        IrAuthor::new("zero_migrate", owner, &POSTGRES, &platform_policy())
+        IrAuthor::new(
+            crate::test_fixtures::VENDORS,
+            "zero_migrate",
+            owner,
+            &POSTGRES,
+            &platform_policy(),
+        )
     }
 
     fn validate_ir_platform(
@@ -11052,6 +11411,7 @@ mod tests {
         dialect: DialectId,
     ) -> Result<(), crate::model::validate::AuthoringError> {
         crate::model::validate::validate_ir_scoped(
+            crate::test_fixtures::VENDORS,
             ir,
             &dialect,
             Some(&crate::model::policy::SchemaScope::Unconfined),
@@ -11372,10 +11732,12 @@ mod tests {
     fn sqlite_non_pk_identity_reject_is_capability_gated() {
         use crate::render::renderer::Capability;
 
-        assert!(!crate::render::backends::vendor(&SQLITE)
-            .descriptor
-            .capabilities
-            .contains(Capability::NonPkIdentity));
+        assert!(
+            !crate::render::backends::vendor(crate::test_fixtures::VENDORS, &SQLITE)
+                .descriptor
+                .capabilities
+                .contains(Capability::NonPkIdentity)
+        );
 
         let ir = MigrationIr {
             inverse_ops: None,
@@ -13245,8 +13607,14 @@ mod tests {
                 indexes: vec![],
                 runtime_options: Default::default(),
             };
-            let differ_snap =
-                build_table_snapshot("app", &desc, &dialect, &effective).expect("differ snapshot");
+            let differ_snap = build_table_snapshot(
+                crate::test_fixtures::VENDORS,
+                "app",
+                &desc,
+                &dialect,
+                &effective,
+            )
+            .expect("differ snapshot");
             let differ_col = differ_snap
                 .columns
                 .iter()
@@ -13282,7 +13650,13 @@ columns = [
 "#,
         )
         .expect("schema-scoped inject policy composes");
-        let author = IrAuthor::new("app", "app_a", &POSTGRES, &effective);
+        let author = IrAuthor::new(
+            crate::test_fixtures::VENDORS,
+            "app",
+            "app_a",
+            &POSTGRES,
+            &effective,
+        );
 
         let scoped_error = author
             .add_column_snapshot(
@@ -13355,8 +13729,14 @@ columns = [
             // IrAuthor's createTable snapshot (its real lowering seam: the private
             // descriptor mapping → shared builder).
             let ir_desc = author.create_table_descriptor("notes", &user_cols, None);
-            let ir_snap =
-                build_table_snapshot("app", &ir_desc, &dialect, &effective).expect("ir snapshot");
+            let ir_snap = build_table_snapshot(
+                crate::test_fixtures::VENDORS,
+                "app",
+                &ir_desc,
+                &dialect,
+                &effective,
+            )
+            .expect("ir snapshot");
 
             // The differ's snapshot for the SAME user-facing table.
             let differ_desc = CollectionDescriptor {
@@ -13371,8 +13751,14 @@ columns = [
                 indexes: vec![],
                 runtime_options: Default::default(),
             };
-            let differ_snap = build_table_snapshot("app", &differ_desc, &dialect, &effective)
-                .expect("differ snapshot");
+            let differ_snap = build_table_snapshot(
+                crate::test_fixtures::VENDORS,
+                "app",
+                &differ_desc,
+                &dialect,
+                &effective,
+            )
+            .expect("differ snapshot");
 
             // The full TableSnapshot (columns + indexes + constraints) is byte-equal
             // — system fields injected identically. `TableSnapshot`'s `==` covers
@@ -13774,7 +14160,8 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&ir_add, &POSTGRES).expect("an addColumn synth default validates on PG");
+        validate_ir(crate::test_fixtures::VENDORS, &ir_add, &POSTGRES)
+            .expect("an addColumn synth default validates on PG");
         let add_migrations = test_ir_author("app", "app_a", POSTGRES)
             .lower(&ir_add, &LiveSchema::default())
             .expect("an addColumn synth default lowers on PG");
@@ -13849,7 +14236,7 @@ columns = [
             checksum: None,
         };
 
-        let err = validate_ir(&ir, &POSTGRES)
+        let err = validate_ir(crate::test_fixtures::VENDORS, &ir, &POSTGRES)
             .expect_err("setColumnType.using must be refused before render");
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert_eq!(err.kind, Some(UnsupportedKind::Expr));
@@ -13882,7 +14269,8 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&literal_ir, &POSTGRES).expect("literal setColumnDefault validates");
+        validate_ir(crate::test_fixtures::VENDORS, &literal_ir, &POSTGRES)
+            .expect("literal setColumnDefault validates");
         let migrations = test_ir_author("app", "app_a", POSTGRES)
             .lower(&literal_ir, &LiveSchema::default())
             .expect("literal setColumnDefault lowers");
@@ -13914,7 +14302,8 @@ columns = [
             preconditions: vec![],
             checksum: None,
         };
-        validate_ir(&synth_ir, &POSTGRES).expect("synth expr setColumnDefault validates");
+        validate_ir(crate::test_fixtures::VENDORS, &synth_ir, &POSTGRES)
+            .expect("synth expr setColumnDefault validates");
         let migrations = test_ir_author("app", "app_a", POSTGRES)
             .lower(&synth_ir, &LiveSchema::default())
             .expect("synth expr setColumnDefault lowers");

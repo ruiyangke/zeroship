@@ -74,6 +74,7 @@ async fn apply_doc(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -85,7 +86,7 @@ async fn apply_doc(
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
     let backend = MysqlBackend::new_generic(session);
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             approval,
@@ -108,6 +109,7 @@ async fn assert_matches_live(
     stage: &str,
 ) -> Result<(), String> {
     let expected = fold_ops(
+        zero_migrate::shipping_vendors(),
         ops,
         &zero_migrate_mysql::DIALECT,
         &cfg.project_schema,
@@ -118,7 +120,7 @@ async fn assert_matches_live(
         .snapshot_schema(cfg)
         .await
         .map_err(|error| format!("{stage}: snapshot the live MySQL schema: {error}"))?;
-    let drift = diff_snapshots(&expected, &actual);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
     if drift.is_clean() {
         Ok(())
     } else {

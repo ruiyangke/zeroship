@@ -145,6 +145,7 @@ fn a_reverse_and_a_reason_it_has_none_cannot_both_be_declared() {
     ir.irreversible = Some("the source rows are gone".to_string());
 
     let error = load_ir_document(
+        zero_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -173,6 +174,7 @@ fn an_inverse_reaching_a_table_the_app_does_not_own_is_refused() {
     ir.inverse_ops = Some(vec![delete_from("someone_elses")]);
 
     let error = load_ir_document(
+        zero_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -211,6 +213,7 @@ fn an_inverse_that_could_never_apply_is_refused_when_the_migration_is_authored()
     }]);
 
     let error = load_ir_document(
+        zero_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -239,6 +242,7 @@ fn a_valid_reverse_loads_and_survives_the_round_trip() {
     let bytes = serde_json::to_string(&ir).expect("envelope serializes");
 
     let loaded = load_ir_document(
+        zero_migrate::shipping_vendors(),
         &bytes,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -279,6 +283,7 @@ fn an_irreversible_reason_survives_the_boundary() {
     ir.irreversible = Some("the pre-image is not recoverable".to_string());
 
     let loaded = load_ir_document(
+        zero_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("serializes"),
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -306,6 +311,7 @@ fn a_declared_reverse_makes_an_advisory_hint_refuse_rather_than_compare() {
     ir.checksum = Some("0".repeat(64));
 
     let error = load_ir_document(
+        zero_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("serializes"),
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -357,6 +363,7 @@ fn the_create_table_ownership_rule_still_applies_with_a_reverse_present() {
     ir.irreversible = Some("dropping the table would take the rows with it".to_string());
 
     load_ir_document(
+        zero_migrate::shipping_vendors(),
         &serde_json::to_string(&ir).expect("serializes"),
         OWNER,
         &zero_migrate_postgres::DIALECT,

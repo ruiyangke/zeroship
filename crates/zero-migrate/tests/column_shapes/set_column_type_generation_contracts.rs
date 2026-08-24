@@ -110,8 +110,14 @@ fn live_after_create(create_col: &str) -> LiveSchema {
         ]}}"#
     ));
     let effective = support::operator_charter(SCHEMA);
-    let folded = fold_ops(&ir.ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
-        .expect("the create folds to a snapshot");
+    let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
+        &ir.ops,
+        &zero_migrate_postgres::DIALECT,
+        SCHEMA,
+        &effective,
+    )
+    .expect("the create folds to a snapshot");
     LiveSchema::from_catalog_snapshot(folded, "app")
 }
 
@@ -123,7 +129,13 @@ fn alter_statement(
     live: &LiveSchema,
 ) -> Result<String, String> {
     let effective = support::operator_charter(SCHEMA);
-    let author = IrAuthor::new(SCHEMA, "app", dialect, &effective);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        "app",
+        dialect,
+        &effective,
+    );
     let steps = author
         .lower_steps(ir, live)
         .map_err(|error| error.to_string())?;
@@ -164,6 +176,7 @@ fn differ_alters(facet: &str, live_ty: &str, desired_ty: &str) -> Result<Vec<Str
         ))
         .expect("the descriptor parses");
         zero_migrate::desired_snapshot_for_dialect(
+            zero_migrate::shipping_vendors(),
             SCHEMA,
             std::slice::from_ref(&descriptor),
             &zero_migrate_postgres::DIALECT,
@@ -176,6 +189,7 @@ fn differ_alters(facet: &str, live_ty: &str, desired_ty: &str) -> Result<Vec<Str
     let ownership: std::collections::HashMap<String, String> =
         [("a".to_string(), "app".to_string())].into_iter().collect();
     let plan = zero_migrate::DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
         SCHEMA,
         "app",
         zero_migrate_postgres::DIALECT,
@@ -469,7 +483,13 @@ fn sqlite_refuses_the_whole_op_before_either_verdict_applies() {
 fn mysql_lowers_every_column_shape_to_a_restate_step_instead_of_refusing() {
     for create_col in [IDENTITY_COL, GENERATED_COL, ORDINARY_COL] {
         let effective = support::operator_charter(SCHEMA);
-        let author = IrAuthor::new(SCHEMA, "app", &zero_migrate_mysql::DIALECT, &effective);
+        let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            SCHEMA,
+            "app",
+            &zero_migrate_mysql::DIALECT,
+            &effective,
+        );
         let steps = author
             .lower_steps(
                 &declared_in_envelope(create_col, r#""bigInt""#),

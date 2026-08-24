@@ -40,6 +40,7 @@
 //! row stamped `kind = 'squash'` + immutable supersession edges).
 
 use std::collections::HashSet;
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::apply::backend::MigrationBackend;
 use crate::apply::executor::ApplyError;
@@ -170,6 +171,7 @@ pub enum SquashError {
 /// The PG path is byte-identical: the PG lock SQL, guard, and `record_baseline`
 /// write are the EXACT pre-seam code, now reached through the backend.
 pub async fn squash<B: MigrationBackend>(
+    vendors: VendorSet,
     backend: &B,
     cfg: &ExecutorConfig,
     squash_migration: &Migration,
@@ -189,7 +191,7 @@ pub async fn squash<B: MigrationBackend>(
     // dialect-correct guard is selected from the backend's dialect: PG runs
     // the libpg_query deny-list (`SqlGuard::new(confined(project_schema))`); a
     // non-PG engine runs its own dialect's guard.
-    let guard = guard_for(&cfg.guard_config_for(&backend.dialect()));
+    let guard = guard_for(vendors, &cfg.guard_config_for(&backend.dialect()));
     guard
         .check(&squash_migration.up)
         .map_err(|source| SquashError::Guard {

@@ -60,16 +60,26 @@ fn verdict(ops: &str) -> Result<(), String> {
         effective: &policy,
         default_schema: "public",
     };
-    validate_ir_authorized(&ir, &zero_migrate_postgres::DIALECT, None, Some(authority))
-        .map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir_authorized(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_postgres::DIALECT,
+        None,
+        Some(authority),
+    )
+    .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 /// The unauthorised probe, kept for the one test that is ABOUT the capability gate.
 fn confined_verdict(ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    zero_migrate::model::validate::validate_ir(&ir, &zero_migrate_postgres::DIALECT)
-        .map_err(|e| format!("{}: {}", e.code, e.reason))
+    zero_migrate::model::validate::validate_ir(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        &zero_migrate_postgres::DIALECT,
+    )
+    .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 const A: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":"int","nullable":true}],"primaryKey":["c0"]}"#;

@@ -83,7 +83,7 @@ async fn hr_migrations_apply_in_sequence_on_real_sqlite() {
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, support::no_inject(PROJECT));
     let registry = registry();
     let no_inject = support::no_inject(PROJECT);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
 
     let envelopes: Vec<MigrationIr> =
         serde_json::from_str(HR_PREVIEW_IR).expect("preview fixture is valid migration IR");

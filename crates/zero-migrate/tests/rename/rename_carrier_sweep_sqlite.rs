@@ -195,12 +195,23 @@ const RENAME_FORMAT_IR: &str = r#"{
 /// snapshot, which is exactly the consumer this sweep is about.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::no_inject(APP);
-    let snapshot = fold_ops(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
-        .expect("the history folds");
-    let sdk_schemas =
-        single_fold::fold(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
-            .map(|folded| folded.project_field_defs())
-            .expect("the history folds to field defs");
+    let snapshot = fold_ops(
+        zero_migrate::shipping_vendors(),
+        history,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .expect("the history folds");
+    let sdk_schemas = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        history,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
     live
@@ -217,12 +228,14 @@ async fn apply_doc(
         .expect("test IR resolves");
     let ir = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
         &support::no_inject(APP),
     );
     let document = zero_migrate::model::load::load_ir_document(
+        zero_migrate::shipping_vendors(),
         &ir,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -234,7 +247,7 @@ async fn apply_doc(
     let plan = author
         .lower_plan(&document, &live)
         .expect("lower the doc plan on SQLite");
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &plan.steps,
             Approval::Approved,
@@ -279,6 +292,7 @@ async fn measure(tag: &str) -> Measured {
         .await
         .expect("introspect live SQLite schema");
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         &ops,
         &zero_migrate_sqlite::DIALECT,
         PROJECT,
@@ -316,6 +330,7 @@ fn baseline_fold() -> SchemaSnapshot {
     let resolved = resolve_create_table_policy(&raw, &support::no_inject(APP), PROJECT)
         .expect("the create IR resolves");
     fold_ops(
+        zero_migrate::shipping_vendors(),
         &resolved.ops,
         &zero_migrate_sqlite::DIALECT,
         PROJECT,
@@ -469,6 +484,7 @@ async fn does_the_sqlite_inline_check_keep_its_literals_while_its_reference_move
     // a far stronger statement than "the literals survived", because it also catches a
     // rewrite that dropped, doubled or re-quoted anything else in the body.
     let never_renamed = fold_ops(
+        zero_migrate::shipping_vendors(),
         &{
             let raw: MigrationIr =
                 serde_json::from_str(&CREATE_IR.replace(OLD_FORMAT_COLUMN, NEW_FORMAT_COLUMN))

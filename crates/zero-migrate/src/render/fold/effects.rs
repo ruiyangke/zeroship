@@ -50,6 +50,7 @@
 //! `Option` on a step: a step with no op provenance carries no effect at all, which
 //! is a different question with the same fail-closed answer.
 
+use zero_migrate_backend::registry::VendorSet;
 use zero_migrate_ir::effect::Effect;
 
 use zero_migrate_policy::EffectivePolicy;
@@ -79,6 +80,7 @@ use zero_migrate_ir::dialect::DialectId;
 /// Any [`FoldError`] the structural catalog replay reports, unchanged - a stream the
 /// catalog refuses yields no state rather than a partial one.
 pub fn state_at(
+    vendors: VendorSet,
     base: &SchemaSnapshot,
     ops: &[Op],
     n: usize,
@@ -87,7 +89,7 @@ pub fn state_at(
     effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
     let prefix = &ops[..n.min(ops.len())];
-    fold_ops_onto(base, prefix, dialect, project_schema, effective)
+    fold_ops_onto(vendors, base, prefix, dialect, project_schema, effective)
 }
 
 /// [`state_at`] for a whole lowered artifact's op list.
@@ -98,6 +100,7 @@ pub fn state_at(
 /// # Errors
 /// See [`state_at`].
 pub fn ir_state_at(
+    vendors: VendorSet,
     base: &SchemaSnapshot,
     ir: &MigrationIr,
     n: usize,
@@ -105,7 +108,15 @@ pub fn ir_state_at(
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<SchemaSnapshot, FoldError> {
-    state_at(base, &ir.ops, n, dialect, project_schema, effective)
+    state_at(
+        vendors,
+        base,
+        &ir.ops,
+        n,
+        dialect,
+        project_schema,
+        effective,
+    )
 }
 
 /// What ONE op does to the catalog facts an obstruction assertion reads.
@@ -365,8 +376,14 @@ mod tests {
         ))
     }
 
-    fn fold_prefix(base: &SchemaSnapshot, ops: &[Op], n: usize) -> SchemaSnapshot {
+    fn fold_prefix(
+        vendors: VendorSet,
+        base: &SchemaSnapshot,
+        ops: &[Op],
+        n: usize,
+    ) -> SchemaSnapshot {
         state_at(
+            vendors,
             base,
             ops,
             n,
@@ -382,7 +399,10 @@ mod tests {
     #[test]
     fn state_at_zero_is_the_live_schema_it_was_seeded_with() {
         let base = SchemaSnapshot::default();
-        assert_eq!(fold_prefix(&base, &[table("t")], 0), base);
+        assert_eq!(
+            fold_prefix(crate::test_fixtures::VENDORS, &base, &[table("t")], 0),
+            base
+        );
     }
 
     /// The prefix delta is EXACT for objects the model names - which is what makes
@@ -396,19 +416,21 @@ mod tests {
         ];
         let base = SchemaSnapshot::default();
 
-        assert!(!fold_prefix(&base, &ops, 0).tables.contains_key("t"));
+        assert!(!fold_prefix(crate::test_fixtures::VENDORS, &base, &ops, 0)
+            .tables
+            .contains_key("t"));
 
-        let one = fold_prefix(&base, &ops, 1);
+        let one = fold_prefix(crate::test_fixtures::VENDORS, &base, &ops, 1);
         assert!(one.tables.contains_key("t"), "the first op has run");
         assert!(
             !one.tables["t"].columns.iter().any(|c| c.name == "later"),
             "the SECOND op has not run at state_at(1) - a prefix, not the whole plan"
         );
 
-        let two = fold_prefix(&base, &ops, 2);
+        let two = fold_prefix(crate::test_fixtures::VENDORS, &base, &ops, 2);
         assert!(two.tables["t"].columns.iter().any(|c| c.name == "later"));
         assert_eq!(
-            fold_prefix(&base, &ops, 99),
+            fold_prefix(crate::test_fixtures::VENDORS, &base, &ops, 99),
             two,
             "a prefix past the end saturates at the final state rather than erroring"
         );
@@ -423,8 +445,13 @@ mod tests {
     /// includes objects that never appear in any op stream at all.
     #[test]
     fn state_at_carries_the_base_it_did_not_create() {
-        let seeded = fold_prefix(&SchemaSnapshot::default(), &[table("pre")], 1);
-        let later = fold_prefix(&seeded, &[table("fresh")], 1);
+        let seeded = fold_prefix(
+            crate::test_fixtures::VENDORS,
+            &SchemaSnapshot::default(),
+            &[table("pre")],
+            1,
+        );
+        let later = fold_prefix(crate::test_fixtures::VENDORS, &seeded, &[table("fresh")], 1);
 
         assert!(
             later.tables.contains_key("pre"),

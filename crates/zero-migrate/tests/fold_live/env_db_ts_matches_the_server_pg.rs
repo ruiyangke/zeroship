@@ -254,6 +254,7 @@ async fn apply_ir(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -270,7 +271,7 @@ async fn apply_ir(
         )
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -318,6 +319,7 @@ async fn measure(label: &str, charter: Charter, ops: &str) -> Measured {
         // The SAME resolved ops and the SAME charter the server just applied, through
         // the real artifact entry point.
         let env_db_ts = render_artifacts(
+            zero_migrate::shipping_vendors(),
             &ir.ops,
             &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,

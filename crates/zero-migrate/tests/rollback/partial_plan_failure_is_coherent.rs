@@ -54,6 +54,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
     .into_iter()
     .collect();
     let artifact = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -73,7 +74,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
         "the fixture needs two steps for one of them to fail halfway"
     );
 
-    let applied = MigrationEngine::new()
+    let applied = MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -115,7 +116,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
     // THE RESUME. Re-applying must not trip over the step already journaled: it
     // fails again on the same conflicting table, and the journal still holds one
     // entry rather than gaining a duplicate.
-    let retried = MigrationEngine::new()
+    let retried = MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,

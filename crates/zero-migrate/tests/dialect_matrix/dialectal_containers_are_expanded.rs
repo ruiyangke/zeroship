@@ -43,8 +43,14 @@ fn verdict_on(dialect: &zero_migrate::DialectId, ops: &str) -> Result<(), String
         effective: &policy,
         default_schema: "public",
     };
-    validate_ir_authorized(&ir, dialect, None, Some(authority))
-        .map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir_authorized(
+        zero_migrate::shipping_vendors(),
+        &ir,
+        dialect,
+        None,
+        Some(authority),
+    )
+    .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 fn verdict(ops: &str) -> Result<(), String> {

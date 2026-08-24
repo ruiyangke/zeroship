@@ -100,6 +100,7 @@ fn field_defs() -> serde_json::Value {
 /// Render the `CREATE TABLE` for `field_defs()` through the real emitter.
 fn create_table_sql(schema: &str) -> Vec<String> {
     build_create_table_with_fks_for_dialect_scoped_statements(
+        zero_migrate::shipping_vendors(),
         schema,
         "facets",
         &field_defs(),

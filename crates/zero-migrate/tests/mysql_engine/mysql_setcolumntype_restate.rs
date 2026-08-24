@@ -407,6 +407,7 @@ async fn an_authored_set_column_type_applies_on_mysql_and_keeps_every_facet() {
         ]}"#;
         let policy = support::no_inject(&cfg.project_schema);
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &cfg.project_schema,
             OWNER,
             &zero_migrate_mysql::DIALECT,
@@ -420,7 +421,7 @@ async fn an_authored_set_column_type_applies_on_mysql_and_keeps_every_facet() {
             .load_and_lower_guarded(source, OWNER, &registry, &live, &guard)
             .map_err(|error| format!("load and lower the authored setColumnType: {error}"))?;
 
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,

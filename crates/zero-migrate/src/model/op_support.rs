@@ -21,6 +21,7 @@ use crate::model::ir::{
     IrColumn, IrConstraintKind, IrDefault, IrIndex, Op, PartitionSpec, RaiseLevel, TriggerAction,
     TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
 };
+use zero_migrate_backend::registry::VendorSet;
 
 pub fn is_vendor(op: &Op) -> bool {
     !vendor_capabilities(op).is_empty()
@@ -32,19 +33,19 @@ pub fn is_vendor(op: &Op) -> bool {
 /// This is the support matrix the authoring validator consumes for dialect
 /// and feature refusals before lowering.
 #[must_use]
-pub fn support(op: &Op) -> crate::model::support::Support {
+pub fn support(vendors: VendorSet, op: &Op) -> crate::model::support::Support {
     use crate::model::support::Support;
 
     let (kind, variant) = op_kind_and_variant(op);
     let dialects = crate::model::support::DialectSupport::from_cells(
-        crate::render::backends::VENDORS
-            .as_slice()
-            .iter()
-            .map(|vendor| {
-                let id = &vendor.descriptor.id;
-                let disposition = vendor.validation.op_disposition(kind, variant);
-                (id.clone(), support_cell(op, disposition, id, variant))
-            }),
+        vendors.as_slice().iter().map(|vendor| {
+            let id = &vendor.descriptor.id;
+            let disposition = vendor.validation.op_disposition(kind, variant);
+            (
+                id.clone(),
+                support_cell(vendors, op, disposition, id, variant),
+            )
+        }),
     );
     Support::new(support_tier(op), dialects, support_features(op))
 }
@@ -56,19 +57,20 @@ pub fn support(op: &Op) -> crate::model::support::Support {
 /// parity artifact.
 #[must_use]
 pub fn support_for_target(
+    vendors: VendorSet,
     op: &Op,
     target: &zero_migrate_ir::dialect::DialectId,
 ) -> crate::model::support::Support {
     use crate::model::support::Support;
 
     let (kind, variant) = op_kind_and_variant(op);
-    let vendor = crate::render::backends::VENDORS
+    let vendor = vendors
         .get(target)
         .unwrap_or_else(|| panic!("no registered backend vendor for {target}"));
     let disposition = vendor.validation.op_disposition(kind, variant);
     let dialects = crate::model::support::DialectSupport::from_cells([(
         target.clone(),
-        support_cell(op, disposition, target, variant),
+        support_cell(vendors, op, disposition, target, variant),
     )]);
     Support::new(support_tier(op), dialects, support_features(op))
 }
@@ -105,6 +107,7 @@ const NEVER_REFUSED: &str = INTERNAL_NO_REFUSAL_REASON;
 /// owned by the backend that registered the selected id; only the render
 /// strategy and diagnostic wording remain in core.
 fn support_cell(
+    vendors: VendorSet,
     op: &Op,
     disposition: zero_migrate_backend::validation::Disposition,
     dialect: &zero_migrate_ir::dialect::DialectId,
@@ -114,7 +117,7 @@ fn support_cell(
     use zero_migrate_backend::validation::Disposition;
     match disposition {
         Disposition::Unsupported => {
-            let reason = unsupported_reason(op, dialect, variant);
+            let reason = unsupported_reason(vendors, op, dialect, variant);
             // The backend table and `unsupported_reason` are edited in different files
             // and have already drifted apart once, shipping the placeholder to
             // operators. Debug builds - which is every test run - refuse to
@@ -133,7 +136,7 @@ fn support_cell(
             unsupported(crate::model::validate::CODE_UNSUPPORTED, reason)
         }
         Disposition::Portable | Disposition::Vendor | Disposition::TransparentDegradable => {
-            supported(render_mode(op, dialect, variant))
+            supported(render_mode(vendors, op, dialect, variant))
         }
     }
 }
@@ -143,12 +146,14 @@ fn support_cell(
 /// offline, or only once the live schema is resolved), NOT a dialect-support
 /// decision — so it is derived here, not from the generated dialect table.
 fn render_mode(
+    vendors: VendorSet,
     op: &Op,
     dialect: &zero_migrate_ir::dialect::DialectId,
     variant: &'static str,
 ) -> crate::model::support::RenderMode {
     use crate::model::support::RenderMode;
-    let alter_live = crate::render::backends::renderer(dialect).alter_ops_require_live_schema();
+    let alter_live =
+        crate::render::backends::renderer(vendors, dialect).alter_ops_require_live_schema();
     match op {
         // Backfill, column-rename, primary-key lifecycle, and identity
         // synchronization are live-rendered
@@ -189,12 +194,13 @@ fn render_mode(
 /// divergence on combined payloads) mirrors the previous hand-written arms
 /// exactly, preserving the author-facing diagnostics.
 fn unsupported_reason(
+    vendors: VendorSet,
     op: &Op,
     dialect: &zero_migrate_ir::dialect::DialectId,
     variant: &'static str,
 ) -> &'static str {
     let backend_refusal = || {
-        crate::render::backends::renderer(dialect)
+        crate::render::backends::renderer(vendors, dialect)
             .op_support_refusal(op, variant)
             .unwrap_or(NEVER_REFUSED)
     };
@@ -992,9 +998,9 @@ mod alter_primary_key_tests {
         assert_eq!(op_variant(&op), "base");
         assert!(!is_vendor(&op));
         assert!(vendor_capabilities(&op).is_empty());
-        let support = support(&op);
+        let support = support(crate::test_fixtures::VENDORS, &op);
         for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
-            let decision = support.decision(dialect);
+            let decision = support.decision(crate::test_fixtures::VENDORS, dialect);
             assert!(decision.is_supported(), "{dialect:?}: {decision:?}");
             assert_eq!(decision.render_mode(), Some(RenderMode::LiveResolved));
         }

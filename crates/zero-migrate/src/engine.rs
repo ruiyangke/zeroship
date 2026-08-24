@@ -26,6 +26,7 @@
 //! dangerous surface and confines execution. The engine never disables those.
 
 use std::collections::BTreeMap;
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::apply::backend::MigrationBackend;
 use crate::apply::drift::DriftError;
@@ -304,8 +305,16 @@ pub enum RollbackEngineError {
 }
 
 /// The public migration engine — the `MigrationEngine` seam.
-#[derive(Debug, Clone, Default)]
-pub struct MigrationEngine;
+#[derive(Debug, Clone, Copy)]
+pub struct MigrationEngine {
+    /// The backends this build ships.
+    ///
+    /// The engine used to be a unit struct, and every question it asked about a
+    /// dialect resolved through a registry it reached for by name. This field is
+    /// that reach made explicit: the composition hands the set in, and the engine
+    /// carries it the way it already carries nothing else.
+    vendors: VendorSet,
+}
 
 /// Combined executor result for an ordered IR-envelope deploy.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -419,6 +428,7 @@ fn lower_completed_historical(
 
 #[allow(clippy::too_many_arguments)]
 fn refresh_historical_live(
+    vendors: VendorSet,
     historical_live: &mut LiveSchema,
     resolved: &MigrationIr,
     cumulative_ops: &[Op],
@@ -431,13 +441,13 @@ fn refresh_historical_live(
 ) -> Result<(), String> {
     if preserves_authored_logical_columns {
         historical_live
-            .advance_logical_columns(resolved, dialect, project, None)
+            .advance_logical_columns(vendors, resolved, dialect, project, None)
             .map_err(|error| error.to_string())?;
     }
     let logical_columns =
         preserves_authored_logical_columns.then(|| historical_live.logical_columns.clone());
-    let snapshot =
-        fold_ops(cumulative_ops, dialect, project, policy).map_err(|error| error.to_string())?;
+    let snapshot = fold_ops(vendors, cumulative_ops, dialect, project, policy)
+        .map_err(|error| error.to_string())?;
     *historical_live = LiveSchema::from_catalog_snapshot(snapshot, app);
     if let Some(logical_columns) = logical_columns {
         historical_live.logical_columns = logical_columns;
@@ -447,19 +457,21 @@ fn refresh_historical_live(
         // as a PROJECTION of the single fold rather than a fourth replay of the op
         // stream (step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
         // section G).
-        historical_live.sdk_schemas = single_fold::fold(cumulative_ops, dialect, project, policy)
-            .map_err(|error| error.to_string())?
-            .project_field_defs();
+        historical_live.sdk_schemas =
+            single_fold::fold(vendors, cumulative_ops, dialect, project, policy)
+                .map_err(|error| error.to_string())?
+                .project_field_defs();
     }
     Ok(())
 }
 
 impl MigrationEngine {
-    /// Construct the engine. (Stateless; the executor + guard config are passed
-    /// per call so one engine serves every project.)
+    /// Construct the engine over the backends this build ships. (Otherwise
+    /// stateless; the executor + guard config are passed per call so one engine
+    /// serves every project.)
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub const fn new(vendors: VendorSet) -> Self {
+        Self { vendors }
     }
 
     /// Resolve, guarded-lower, and apply an ordered set of migration IR envelopes.
@@ -546,7 +558,7 @@ impl MigrationEngine {
         let mut cumulative_ops: Vec<Op> = Vec::new();
         let mut effective_registry = registry.clone();
         let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
-        let author = IrAuthor::new(project, app, dialect, policy);
+        let author = IrAuthor::new(self.vendors, project, app, dialect, policy);
         let mut aggregate = AggregateOutcome::default();
         let preserves_authored_logical_columns = backend.preserves_authored_logical_columns();
         let projects_sdk_field_defs = backend.projects_sdk_field_defs();
@@ -643,6 +655,7 @@ impl MigrationEngine {
             cumulative_ops.extend(resolved.ops.iter().cloned());
             if preserves_authored_logical_columns || projects_sdk_field_defs {
                 refresh_historical_live(
+                    self.vendors,
                     &mut historical_live,
                     &resolved,
                     &cumulative_ops,
@@ -658,7 +671,7 @@ impl MigrationEngine {
                 })?;
             }
             if preserves_authored_logical_columns {
-                live.advance_logical_columns(&resolved, dialect, project, None)
+                live.advance_logical_columns(self.vendors, &resolved, dialect, project, None)
                     .map_err(|error| {
                         envelope_deploy_error(&migration_name, "logical-column advance", error)
                     })?;
@@ -681,15 +694,16 @@ impl MigrationEngine {
                 // consumer 3; `tests/sqlite_rebuild_field_defs_live.rs` deploys through
                 // this function against a real SQLite file and reads the server's own
                 // `PRAGMA`s back across the rebuild.
-                live.sdk_schemas = single_fold::fold(&cumulative_ops, dialect, project, policy)
-                    .map_err(|error| {
-                        envelope_deploy_error(
-                            &migration_name,
-                            "rebuild-facet supplementation",
-                            error,
-                        )
-                    })?
-                    .project_field_defs();
+                live.sdk_schemas =
+                    single_fold::fold(self.vendors, &cumulative_ops, dialect, project, policy)
+                        .map_err(|error| {
+                            envelope_deploy_error(
+                                &migration_name,
+                                "rebuild-facet supplementation",
+                                error,
+                            )
+                        })?
+                        .project_field_defs();
             }
         }
 
@@ -715,7 +729,7 @@ impl MigrationEngine {
         // at the author boundary, the line-2 defense the `SqliteBackend` authorizer
         // at apply). The destructive / approval combination with the migration's OWN
         // author flags stays here (engine logic), identical for both dialects.
-        let guard = crate::render::backends::guard_for(cfg);
+        let guard = crate::render::backends::guard_for(self.vendors, cfg);
         let mut items = Vec::new();
         let mut denied = Vec::new();
         let mut destructive = false;
@@ -1632,6 +1646,7 @@ impl MigrationEngine {
                 ty: obligation.ty.clone(),
             };
             let author = crate::render::expand_contract::ExpandContractAuthor::new(
+                self.vendors,
                 exec_cfg.project_schema.clone(),
                 owner_app,
                 backend.dialect(),
@@ -1849,6 +1864,7 @@ impl MigrationEngine {
             } else {
                 vec![PlanStep::Ddl(
                     atomic_pending_resolution_migration(
+                        self.vendors,
                         &exec_cfg.project_schema,
                         &obligation,
                         &templates,
@@ -2112,6 +2128,7 @@ impl MigrationEngine {
             // re-author-compare — no drift between the bundle-level pre-check and
             // the per-file apply.
             recognizes_contract_apply(
+                self.vendors,
                 &exec_cfg.project_schema,
                 pc,
                 &ddl_up_by_version,
@@ -2449,6 +2466,7 @@ impl MigrationEngine {
                                     };
                                 let templates =
                                     crate::render::expand_contract::ExpandContractAuthor::new(
+                                        self.vendors,
                                         exec_cfg.project_schema.clone(),
                                         owner,
                                         backend.dialect(),
@@ -2459,6 +2477,7 @@ impl MigrationEngine {
                                     })?
                                     .contract;
                                 let atomic = atomic_pending_resolution_migration(
+                                    self.vendors,
                                     &exec_cfg.project_schema,
                                     contract,
                                     &templates,
@@ -2483,6 +2502,7 @@ impl MigrationEngine {
                         continue;
                     }
                     let outcome = crate::apply::executor::apply_with_lock_backend(
+                        self.vendors,
                         backend,
                         exec_cfg,
                         &batch,
@@ -2677,6 +2697,7 @@ impl MigrationEngine {
                         )));
                     };
                     let mut outcome = crate::apply::executor::apply_with_lock_backend(
+                        self.vendors,
                         backend,
                         exec_cfg,
                         structural,
@@ -3560,6 +3581,7 @@ impl MigrationEngine {
         // (`apply_verified_scoped`) passes the operator's reviewed version set so a
         // co-bundled destructive `.sql` migration outside the set is refused.
         let outcome = executor::apply_with_lock_backend(
+            self.vendors,
             backend,
             exec_cfg,
             &migrations,
@@ -3880,6 +3902,7 @@ fn enforce_online_scope_if_pending(
 /// the destructive column drop then commit with one journal row, eliminating
 /// the old gap between separate C1 and C2 transactions.
 fn atomic_pending_resolution_migration(
+    vendors: VendorSet,
     project_schema: &str,
     obligation: &crate::apply::journal::PendingContract,
     templates: &[Migration],
@@ -3906,11 +3929,16 @@ fn atomic_pending_resolution_migration(
         }
     };
     let constraint_name = format!("zs_sync_{}", version.as_str().trim_start_matches("mig_"));
-    let table =
-        crate::render::expand_contract::qualified(project_schema, &obligation.table, dialect);
-    let from = crate::render::expand_contract::quote_ident(&obligation.from_col, dialect);
-    let to = crate::render::expand_contract::quote_ident(&obligation.to_col, dialect);
-    let constraint = crate::render::expand_contract::quote_ident(&constraint_name, dialect);
+    let table = crate::render::expand_contract::qualified(
+        vendors,
+        project_schema,
+        &obligation.table,
+        dialect,
+    );
+    let from = crate::render::expand_contract::quote_ident(vendors, &obligation.from_col, dialect);
+    let to = crate::render::expand_contract::quote_ident(vendors, &obligation.to_col, dialect);
+    let constraint =
+        crate::render::expand_contract::quote_ident(vendors, &constraint_name, dialect);
     let mut statements = vec![
         format!(
             "ALTER TABLE {table} ADD CONSTRAINT {constraint} \
@@ -3968,6 +3996,7 @@ fn atomic_pending_resolution_migration(
 /// and a legitimate contract-apply both exempt.
 #[must_use]
 pub fn recognizes_contract_apply(
+    vendors: VendorSet,
     project_schema: &str,
     pc: &crate::apply::journal::PendingContract,
     ddl_up_by_version: &std::collections::BTreeMap<&str, &str>,
@@ -3981,6 +4010,7 @@ pub fn recognizes_contract_apply(
     // `owner_app` does not affect the contract `up` text, so any stable value is
     // fine for the comparison.
     let author = crate::render::expand_contract::ExpandContractAuthor::new(
+        vendors,
         project_schema.to_string(),
         "discharge-recognize",
         dialect.clone(),
@@ -4234,7 +4264,12 @@ mod tests {
     }
 
     fn det() -> DeterministicAuthor {
-        DeterministicAuthor::new("proj_acme", "app_acme", crate::test_fixtures::POSTGRES)
+        DeterministicAuthor::new(
+            crate::test_fixtures::VENDORS,
+            "proj_acme",
+            "app_acme",
+            crate::test_fixtures::POSTGRES,
+        )
     }
 
     #[test]
@@ -4312,7 +4347,7 @@ mod tests {
             .unwrap();
         let set: Vec<Migration> = create.into_iter().chain(add).collect();
 
-        let plan = MigrationEngine::new().plan(&set, &guard_cfg());
+        let plan = MigrationEngine::new(crate::test_fixtures::VENDORS).plan(&set, &guard_cfg());
         assert_eq!(plan.items.len(), 2);
         assert!(plan.denied.is_empty());
         assert!(!plan.destructive);
@@ -4323,13 +4358,14 @@ mod tests {
     #[test]
     fn plan_with_a_drop_is_destructive_and_requires_approval() {
         let drop = RawSqlAuthor::new(
+            crate::test_fixtures::VENDORS,
             "app_acme",
             crate::test_fixtures::POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
         )
         .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
         .unwrap();
-        let plan = MigrationEngine::new().plan(&[drop], &guard_cfg());
+        let plan = MigrationEngine::new(crate::test_fixtures::VENDORS).plan(&[drop], &guard_cfg());
         assert!(plan.denied.is_empty(), "DROP is flagged, not denied");
         assert!(plan.destructive);
         assert!(plan.requires_approval);
@@ -4341,6 +4377,7 @@ mod tests {
     fn plan_with_a_dangerous_up_records_a_denial() {
         // COPY … TO PROGRAM is shell RCE — hard-denied (not merely flagged).
         let evil = RawSqlAuthor::new(
+            crate::test_fixtures::VENDORS,
             "app_acme",
             crate::test_fixtures::POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
@@ -4351,7 +4388,8 @@ mod tests {
             None,
         )
         .unwrap();
-        let plan = MigrationEngine::new().plan(std::slice::from_ref(&evil), &guard_cfg());
+        let plan = MigrationEngine::new(crate::test_fixtures::VENDORS)
+            .plan(std::slice::from_ref(&evil), &guard_cfg());
         assert_eq!(
             plan.items.len(),
             0,
@@ -4365,6 +4403,7 @@ mod tests {
     #[test]
     fn plan_collects_every_denial_not_just_the_first() {
         let raw = RawSqlAuthor::new(
+            crate::test_fixtures::VENDORS,
             "app_acme",
             crate::test_fixtures::POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
@@ -4375,27 +4414,31 @@ mod tests {
         let b = raw
             .wrap("xtenant", "SELECT * FROM control.users", None)
             .unwrap();
-        let plan = MigrationEngine::new().plan(&[a, b], &guard_cfg());
+        let plan = MigrationEngine::new(crate::test_fixtures::VENDORS).plan(&[a, b], &guard_cfg());
         assert_eq!(plan.denied.len(), 2, "both denials surface");
     }
 
     #[test]
     fn expand_contract_rename_set_plans_with_zero_denials() {
         use crate::render::expand_contract::{ExpandContractAuthor, OnlineIntent};
-        let plan_in =
-            ExpandContractAuthor::new("proj_acme", "app_acme", crate::test_fixtures::POSTGRES)
-                .author(&OnlineIntent::RenameColumn {
-                    table: "users".into(),
-                    from: "email".into(),
-                    to: "email_address".into(),
-                    ty: "text".into(),
-                })
-                .expect("author");
+        let plan_in = ExpandContractAuthor::new(
+            crate::test_fixtures::VENDORS,
+            "proj_acme",
+            "app_acme",
+            crate::test_fixtures::POSTGRES,
+        )
+        .author(&OnlineIntent::RenameColumn {
+            table: "users".into(),
+            from: "email".into(),
+            to: "email_address".into(),
+            ty: "text".into(),
+        })
+        .expect("author");
         // The whole expand+contract set passes the guard with NO denials — the
         // dual-write fn (INVOKER plpgsql, project-qualified), the trigger, the
         // backfill marker, and the gated drops are all guard-safe.
         let set = plan_in.all();
-        let plan = MigrationEngine::new().plan(&set, &guard_cfg());
+        let plan = MigrationEngine::new(crate::test_fixtures::VENDORS).plan(&set, &guard_cfg());
         assert!(
             plan.denied.is_empty(),
             "expand-contract set must have zero denials, got {:?}",

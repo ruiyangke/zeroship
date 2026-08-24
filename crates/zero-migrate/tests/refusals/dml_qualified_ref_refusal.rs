@@ -42,6 +42,7 @@ fn refusal_for(op: Op) -> Option<String> {
         checksum: None,
     };
     validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &ir,
         &zero_migrate_postgres::DIALECT,
         Some(&SchemaScope::Unconfined),
@@ -131,6 +132,7 @@ fn a_view_that_joins_keeps_its_lenient_pass() {
     .expect("the joined-view fixture parses");
 
     let outcome = validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &create_view,
         &zero_migrate_postgres::DIALECT,
         Some(&SchemaScope::Unconfined),

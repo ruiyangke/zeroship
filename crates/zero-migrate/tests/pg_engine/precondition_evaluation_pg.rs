@@ -138,7 +138,7 @@ async fn run_case(
         .await
         .expect("ensure the migration journal");
 
-    let applied = MigrationEngine::new()
+    let applied = MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &[PlanStep::Ddl(migration(
                 &cfg.project_schema,

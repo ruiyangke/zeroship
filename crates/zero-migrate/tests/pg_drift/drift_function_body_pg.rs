@@ -251,6 +251,7 @@ async fn live_postgres_reports_function_body_drift() {
         // policy load with VENDOR_OP_DENIED - above the fold, before anything this
         // file measures runs.
         let expected = fold_ops(
+            zero_migrate::shipping_vendors(),
             &ir.ops,
             &zero_migrate_postgres::DIALECT,
             &schema,
@@ -258,6 +259,7 @@ async fn live_postgres_reports_function_body_drift() {
         )
         .map_err(|error| format!("fold function-body fixture: {error}"))?;
         let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -281,7 +283,7 @@ async fn live_postgres_reports_function_body_drift() {
         let clean = snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect clean function-body fixture: {error}"))?;
-        let clean_drift = diff_snapshots(&expected, &clean);
+        let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
         if !clean_drift.is_clean() {
             return Err(format!(
                 "clean function-body fixture drifted: {clean_drift:#?}"
@@ -337,7 +339,7 @@ async fn live_postgres_reports_function_body_drift() {
             ),
         ] {
             let actual = snapshot_after_mutation(&session, &schema, &mutation).await?;
-            let drift = diff_snapshots(&expected, &actual);
+            let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
             require_function_still_paired(&drift, &schema, function, arg_types)?;
             require_body_drift(
                 &drift,
@@ -363,7 +365,7 @@ async fn live_postgres_reports_function_body_drift() {
             ),
         )
         .await?;
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
         require_function_still_paired(&drift, &schema, "plain_sql", "integer")?;
         require_no_body_drift(
             &drift,
@@ -395,7 +397,7 @@ async fn live_postgres_reports_function_body_drift() {
             ),
         )
         .await?;
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
         require_function_still_paired(&drift, &schema, "plain_sql", "integer")?;
         require_no_body_drift(
             &drift,

@@ -49,7 +49,12 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT)
+    DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_sqlite::DIALECT,
+    )
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -66,6 +71,7 @@ fn desired_snapshot(
     effective: &zero_migrate::EffectivePolicy,
 ) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
     zero_migrate::desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         project_schema,
         descriptors,
         &zero_migrate_sqlite::DIALECT,
@@ -171,7 +177,7 @@ async fn sqlite_online_rename_executes_via_rebuild_one_through_apply_plan() {
     let steps = vec![PlanStep::OnlineRename(RenameStep::TableRebuild(
         rebuild.clone(),
     ))];
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let out = engine
         .apply_plan(
             &steps,
@@ -334,7 +340,7 @@ async fn rebuild_first_plan_against_fresh_journal_bootstraps_it() {
     // The FIRST (and only) step is the TableRebuild; the `_mig` journal does not
     // exist yet — the rebuild arm's net-applied-skip lookup reads it first.
     let steps = vec![PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))];
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let out = engine
         .apply_plan(
             &steps,
@@ -410,7 +416,7 @@ async fn sqlite_rename_opens_no_obligation_and_never_gates_a_follow_on_deploy() 
         )
         .expect("rename diff");
     let rebuild = plan.rebuilds.into_iter().next().unwrap();
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     engine
         .apply_plan(
             &[PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))],
@@ -533,7 +539,7 @@ async fn sqlite_applies_a_zero_lock_budget_the_server_dialects_refuse() {
         effect: None,
     };
 
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &[PlanStep::Ddl(add)],
             Approval::None,
@@ -626,14 +632,19 @@ async fn a_plan_ending_in_an_unsupported_online_rename_commits_none_of_its_earli
     // A PostgreSQL expand-contract rename, routed at a backend whose `online()` is
     // `None`. The SQLite differ never authors this shape; it is constructed
     // directly because the defect is that nothing REFUSES such a plan up front.
-    let rename = ExpandContractAuthor::new(PROJECT, APP, zero_migrate_postgres::DIALECT)
-        .author(&OnlineIntent::RenameColumn {
-            table: "people".into(),
-            from: "nickname".into(),
-            to: "handle".into(),
-            ty: "text".into(),
-        })
-        .expect("author the PG rename");
+    let rename = ExpandContractAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_postgres::DIALECT,
+    )
+    .author(&OnlineIntent::RenameColumn {
+        table: "people".into(),
+        from: "nickname".into(),
+        to: "handle".into(),
+        ty: "text".into(),
+    })
+    .expect("author the PG rename");
 
     let steps = vec![
         PlanStep::Ddl(city),
@@ -641,7 +652,7 @@ async fn a_plan_ending_in_an_unsupported_online_rename_commits_none_of_its_earli
         PlanStep::OnlineRename(RenameStep::ExpandContract(rename)),
     ];
 
-    let err = MigrationEngine::new()
+    let err = MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,

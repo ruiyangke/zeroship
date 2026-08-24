@@ -121,6 +121,7 @@ fn render_create(
     );
     let policy = support::no_inject(schema_name);
     build_create_table_with_fks_for_dialect_scoped_statements(
+        zero_migrate::shipping_vendors(),
         schema_name,
         table,
         &schema,
@@ -502,6 +503,7 @@ async fn a_case_insensitive_field_gets_the_case_insensitive_collation() {
             "label": { "type": "string", "maxLength": 64, "caseSensitive": false },
         });
         let create = build_create_table_with_fks_for_dialect_scoped_statements(
+            zero_migrate::shipping_vendors(),
             &database,
             "ci_probe",
             &schema,

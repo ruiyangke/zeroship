@@ -17,6 +17,7 @@ use crate::model::expr::{Expr, SynthFn};
 use crate::model::ir::{ColType, IndexElement, IrColumn, IrDefault, IrIndex};
 use crate::model::table_shape::ResolvedInject;
 use crate::render::renderer::{Capability, DialectSupports};
+use zero_migrate_backend::registry::VendorSet;
 use zero_migrate_backend::schema::{
     AddColumnDefinition, AddColumnIfNotExistsRequest, CreateIndexIfNotExistsRequest,
 };
@@ -150,9 +151,18 @@ mod schema_renderer_tests {
     fn dispatch_returns_expected_schema_renderer() {
         // The renderer answers with an open `DialectId`, so compare it directly
         // with the canonical IDs. No reverse identity conversion is needed.
-        assert_eq!(renderer(&POSTGRES).dialect(), POSTGRES);
-        assert_eq!(renderer(&SQLITE).dialect(), SQLITE);
-        assert_eq!(renderer(&MYSQL).dialect(), MYSQL);
+        assert_eq!(
+            renderer(crate::test_fixtures::VENDORS, &POSTGRES).dialect(),
+            POSTGRES
+        );
+        assert_eq!(
+            renderer(crate::test_fixtures::VENDORS, &SQLITE).dialect(),
+            SQLITE
+        );
+        assert_eq!(
+            renderer(crate::test_fixtures::VENDORS, &MYSQL).dialect(),
+            MYSQL
+        );
     }
 
     #[test]
@@ -163,7 +173,8 @@ mod schema_renderer_tests {
         // diverging from the `t.numeric()` SQLite override (also TEXT).
         let def = serde_json::json!({ "type": "literal", "literalValue": 2.5 });
         let render = |dialect: &DialectId, def: &serde_json::Value| {
-            renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
+            renderer(crate::test_fixtures::VENDORS, dialect)
+                .column_type(&column_snapshot_for_type_def(def), false)
         };
         assert_eq!(render(&SQLITE, &def), "TEXT");
         // MySQL keeps exact fixed-precision; PG keeps `numeric`.
@@ -200,7 +211,8 @@ mod schema_renderer_tests {
     #[test]
     fn a_number_field_carrying_precision_renders_as_a_decimal_on_every_dialect() {
         let render = |dialect: &DialectId, def: &serde_json::Value| {
-            renderer(dialect).column_type(&column_snapshot_for_type_def(def), false)
+            renderer(crate::test_fixtures::VENDORS, dialect)
+                .column_type(&column_snapshot_for_type_def(def), false)
         };
         let decimal = serde_json::json!({ "type": "number", "precision": 20, "scale": 4 });
         assert_eq!(render(&POSTGRES, &decimal), "numeric(20, 4)");
@@ -227,7 +239,7 @@ mod schema_renderer_tests {
 
     #[test]
     fn sqlite_numeric_and_decimal_canonicalise_to_text_affinity() {
-        let backend = renderer(&SQLITE);
+        let backend = renderer(crate::test_fixtures::VENDORS, &SQLITE);
         // The model's logical `numeric`/`decimal` type and a live SQLite column
         // (now declared TEXT) must canonicalise to the SAME affinity token, so a
         // numeric column no longer shows phantom snapshot<->introspection drift.
@@ -264,7 +276,7 @@ mod schema_renderer_tests {
 ///   system catalogs.
 /// - Must not start with `__zero_migrate` (case-insensitive) — reserved for the
 ///   platform's own internal tables (e.g. `__zero_migrate_migrations`).
-pub fn validate_collection(name: &str) -> Result<(), QueryError> {
+pub fn validate_collection(vendors: VendorSet, name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
             "collection name cannot be empty".to_string(),
@@ -288,7 +300,7 @@ pub fn validate_collection(name: &str) -> Result<(), QueryError> {
     // Every REGISTERED backend's catalog reservations. This was a hard-coded `pg_`
     // comparison; the prefix and the catalog that claims it are both the backend's
     // answer now, so the refusal still names whose namespace was hit.
-    for (prefix, owner) in crate::render::backends::reserved_catalog_prefixes() {
+    for (prefix, owner) in crate::render::backends::reserved_catalog_prefixes(vendors) {
         let claimed = prefix.as_bytes();
         if bytes.len() >= claimed.len() && bytes[..claimed.len()].eq_ignore_ascii_case(claimed) {
             return Err(QueryError::InvalidCollection(format!(
@@ -399,7 +411,7 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
 /// names injected by an active table policy. Those names are reserved only at
 /// schema-declaration time, not at filter time. Declaration paths must call
 /// [`validate_field_name_for_declaration`] instead of this function.
-pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
+pub fn validate_field_name(vendors: VendorSet, name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidIdent(
             "field name cannot be empty".to_string(),
@@ -455,7 +467,7 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
     }
     // The BACKEND reservations, which the table above no longer holds. Run after it so
     // a platform hit keeps its own, more specific hint.
-    for (prefix, owner) in crate::render::backends::reserved_catalog_prefixes() {
+    for (prefix, owner) in crate::render::backends::reserved_catalog_prefixes(vendors) {
         if name.len() >= prefix.len()
             && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
         {
@@ -484,10 +496,11 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
 /// field; the hint enumerates the active injected set so the creator knows which
 /// names this table's policy owns.
 pub fn validate_field_name_for_declaration(
+    vendors: VendorSet,
     name: &str,
     inject: &ResolvedInject,
 ) -> Result<(), QueryError> {
-    validate_field_name(name)?;
+    validate_field_name(vendors, name)?;
     if inject.contains_column(name) {
         let active_names = inject
             .columns()
@@ -655,6 +668,7 @@ pub enum FkEmission<'a> {
 /// Foreign-key column types continue to come from the author schema — see
 /// `def_to_pg_type`.
 pub fn build_create_table_with_fks_for_dialect(
+    vendors: VendorSet,
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
@@ -665,7 +679,7 @@ pub fn build_create_table_with_fks_for_dialect(
     // The stable entry point keeps the historical data-plane namespacing. The
     // engine calls the scoped form with `unqualified = true` instead.
     build_create_table_with_fks_for_dialect_scoped(
-        app_id, collection, schema, fk_emit, dialect, false, effective,
+        vendors, app_id, collection, schema, fk_emit, dialect, false, effective,
     )
 }
 
@@ -684,6 +698,7 @@ pub fn build_create_table_with_fks_for_dialect(
 /// # Errors
 /// Same as [`build_create_table_with_fks_for_dialect`].
 pub fn build_create_table_with_fks_for_dialect_scoped(
+    vendors: VendorSet,
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
@@ -698,6 +713,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
     // [`build_create_table_with_fks_for_dialect_scoped_statements`]. `join(";\n")`
     // over that list reproduces this string byte-for-byte.
     Ok(build_create_table_with_fks_for_dialect_scoped_statements(
+        vendors,
         app_id,
         collection,
         schema,
@@ -720,6 +736,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
 /// DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`) is NEVER
 /// split mid-statement — the split is structural, not a textual `;\n` heuristic.
 pub fn build_create_table_with_fks_for_dialect_scoped_statements(
+    vendors: VendorSet,
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
@@ -728,14 +745,14 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     unqualified: bool,
     effective: &EffectivePolicy,
 ) -> Result<Vec<String>, QueryError> {
-    validate_collection(collection)?;
+    validate_collection(vendors, collection)?;
     validate_schema(app_id)?;
 
     // The ONE dialect->backend resolution for this whole emit. Everything below
     // that needs a vendor spelling receives THIS value; nothing under here asks
     // the registry again. `dialect` stays in scope for the remaining neutral
     // normalization keys, not for vendor spelling dispatch.
-    let backend = renderer(dialect);
+    let backend = renderer(vendors, dialect);
     let inject = ResolvedInject::for_table(effective, app_id, collection).map_err(|error| {
         QueryError::InvalidFilter(format!(
             "active table injection for {app_id}.{collection} is not renderable: {error}"
@@ -744,7 +761,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
 
     let table = backend.create_table_target(app_id, collection, unqualified);
 
-    let mut columns = build_injected_columns(collection, &inject, dialect, backend)?;
+    let mut columns = build_injected_columns(vendors, collection, &inject, dialect, backend)?;
 
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut union_checks: Vec<String> = Vec::new();
@@ -781,7 +798,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             {
                 continue;
             }
-            let col_def = field_to_column_for_dialect(field, def, backend, &inject)?;
+            let col_def = field_to_column_for_dialect(vendors, field, def, backend, &inject)?;
             columns.push(col_def);
 
             // Path B sibling-column emission. When the
@@ -844,7 +861,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                     };
                     if should_inline {
                         if let Ok(fk_clause) = build_fk_clause(
-                            app_id, collection, field, def, target, dialect, backend,
+                            vendors, app_id, collection, field, def, target, dialect, backend,
                         ) {
                             deferred_fks.push(fk_clause);
                         }
@@ -953,6 +970,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
 /// The policy resolver has already mapped opaque inject tokens into closed IR;
 /// this function only applies dialect spelling. Empty injection emits no prefix.
 fn build_injected_columns(
+    vendors: VendorSet,
     table: &str,
     inject: &ResolvedInject,
     // TAKEN rather than derived from `backend`. It used to read
@@ -988,7 +1006,7 @@ fn build_injected_columns(
             .default
             .as_ref()
             .map(|default| {
-                render_injected_default(default, &column.ty, dialect, backend)
+                render_injected_default(vendors, default, &column.ty, dialect, backend)
                     .map(|rendered| format!(" DEFAULT {rendered}"))
                     .map_err(|error| {
                         QueryError::InvalidFilter(format!(
@@ -1026,7 +1044,7 @@ fn build_injected_columns(
         // The same name the desired snapshot carries, from the same backend, so the
         // constraint this CREATE emits is the one the differ later recognises as
         // implicit rather than a stray it must reconcile.
-        let name = crate::render::backends::vendor(dialect)
+        let name = crate::render::backends::vendor(vendors, dialect)
             .catalog_fold
             .implicit_primary_key_name(table);
         let rendered_columns = primary_key
@@ -1043,6 +1061,7 @@ fn build_injected_columns(
 }
 
 fn render_injected_default(
+    vendors: VendorSet,
     default: &IrDefault,
     ty: &ColType,
     // Threaded for `render_ir_default_for_type`, which is core and still
@@ -1061,7 +1080,7 @@ fn render_injected_default(
     ) {
         return Ok(backend.current_timestamp_expr().to_string());
     }
-    crate::render::lower::render_ir_default_for_type(default, ty, dialect)
+    crate::render::lower::render_ir_default_for_type(vendors, default, ty, dialect)
 }
 
 fn injected_column_type(
@@ -1164,22 +1183,25 @@ fn render_injected_index(
 /// from `<collection>_<field>_fkey` and truncated to 63 bytes via the
 /// same hash strategy as A1 index names.
 pub fn build_add_foreign_key(
+    vendors: VendorSet,
     app_id: &str,
     collection: &str,
     field: &str,
     def: &serde_json::Value,
     dialect: &DialectId,
 ) -> Result<String, QueryError> {
-    validate_collection(collection)?;
+    validate_collection(vendors, collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(dialect);
+    let backend = renderer(vendors, dialect);
 
     let target = def
         .get("refTarget")
         .and_then(|v| v.as_str())
         .ok_or_else(|| QueryError::InvalidFilter("ref field missing refTarget".to_string()))?;
 
-    let fk_clause = build_fk_clause(app_id, collection, field, def, target, dialect, backend)?;
+    let fk_clause = build_fk_clause(
+        vendors, app_id, collection, field, def, target, dialect, backend,
+    )?;
     backend
         .add_foreign_key_statement(app_id, collection, &fk_clause)
         .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))
@@ -1188,14 +1210,15 @@ pub fn build_add_foreign_key(
 /// Build `ALTER TABLE … DROP CONSTRAINT` for an existing FK (B2 diff
 /// engine — `DropForeignKey` op).
 pub fn build_drop_foreign_key(
+    vendors: VendorSet,
     app_id: &str,
     collection: &str,
     constraint_name: &str,
     dialect: &DialectId,
 ) -> Result<String, QueryError> {
-    validate_collection(collection)?;
+    validate_collection(vendors, collection)?;
     validate_schema(app_id)?;
-    renderer(dialect)
+    renderer(vendors, dialect)
         .drop_foreign_key_if_exists_statement(app_id, collection, constraint_name)
         .map_err(|reason| QueryError::InvalidFilter(reason.to_string()))
 }
@@ -1219,6 +1242,7 @@ pub fn fk_constraint_name(table: &str, field: &str, explicit_name: Option<&str>)
 /// Absent an explicit `refName`, the constraint name is the shared
 /// `<table>_<field>_fkey` derivation.
 fn build_fk_clause(
+    vendors: VendorSet,
     app_id: &str,
     collection: &str,
     field: &str,
@@ -1228,7 +1252,7 @@ fn build_fk_clause(
     dialect: &DialectId,
     backend: &'static dyn SchemaRenderer,
 ) -> Result<String, QueryError> {
-    validate_collection(target)?;
+    validate_collection(vendors, target)?;
     let constraint_name = fk_constraint_name(
         collection,
         field,
@@ -1251,17 +1275,18 @@ fn build_fk_clause(
         .get("refColumn")
         .and_then(|value| value.as_str())
         .unwrap_or("id");
-    validate_field_name(target_column)?;
+    validate_field_name(vendors, target_column)?;
     let rendered_target_column = if target_column == "id" {
         "id".to_string()
     } else {
         backend.quote_ident(target_column)
     };
-    let deferrable_clause = if deferrable && dialect.supports(Capability::DeferrableConstraint) {
-        " DEFERRABLE INITIALLY DEFERRED"
-    } else {
-        ""
-    };
+    let deferrable_clause =
+        if deferrable && dialect.supports(vendors, Capability::DeferrableConstraint) {
+            " DEFERRABLE INITIALLY DEFERRED"
+        } else {
+            ""
+        };
 
     let mut clause = format!(
         "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
@@ -1309,24 +1334,29 @@ pub fn normalize_fk_action(s: Option<&str>) -> &'static str {
 /// [`zero_migrate_backend::constraint_definition::normalize_fk_action_for_vendor`].
 /// `render::declarative` used to carry a byte-identical private duplicate of this;
 /// the move that took the FK body below the vendors deleted it.
-pub fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: &DialectId) -> &'static str {
+pub fn normalize_fk_action_for_dialect(
+    vendors: VendorSet,
+    s: Option<&str>,
+    dialect: &DialectId,
+) -> &'static str {
     zero_migrate_backend::constraint_definition::normalize_fk_action_for_vendor(
         s,
-        crate::render::backends::vendor(dialect),
+        crate::render::backends::vendor(vendors, dialect),
     )
 }
 
 /// Build ALTER TABLE ADD COLUMN IF NOT EXISTS for a single field.
 pub fn build_add_column(
+    vendors: VendorSet,
     app_id: &str,
     collection: &str,
     field: &str,
     def: &serde_json::Value,
     dialect: &DialectId,
 ) -> Result<String, QueryError> {
-    validate_collection(collection)?;
+    validate_collection(vendors, collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(dialect);
+    let backend = renderer(vendors, dialect);
     let data_type = backend.column_type(&column_snapshot_for_type_def(def), false);
     let constraints = def_to_constraints_for_dialect(field, def, backend);
 
@@ -1493,14 +1523,15 @@ fn create_index_if_not_exists(
 /// (effectively impossible since a field is either indexed or unique, but the
 /// rule keeps the contract obvious).
 pub fn build_create_indexes(
+    vendors: VendorSet,
     app_id: &str,
     collection: &str,
     schema: &serde_json::Value,
     dialect: &DialectId,
 ) -> Result<Vec<IndexSpec>, QueryError> {
-    validate_collection(collection)?;
+    validate_collection(vendors, collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(dialect);
+    let backend = renderer(vendors, dialect);
 
     let mut out = Vec::new();
 
@@ -1729,14 +1760,15 @@ pub fn build_create_indexes(
 /// the schema. Here we re-check the wire-format shape so a hand-rolled
 /// caller can't slip a malformed entry past the orchestrator.
 pub fn build_named_indexes(
+    vendors: VendorSet,
     app_id: &str,
     collection: &str,
     indexes: &serde_json::Value,
     dialect: &DialectId,
 ) -> Result<Vec<IndexSpec>, QueryError> {
-    validate_collection(collection)?;
+    validate_collection(vendors, collection)?;
     validate_schema(app_id)?;
-    let backend = renderer(dialect);
+    let backend = renderer(vendors, dialect);
 
     let mut out = Vec::new();
     let Some(arr) = indexes.as_array() else {
@@ -1982,12 +2014,13 @@ pub(crate) fn validate_encryption_sentinel_for_field(
 /// this table's active policy; filter-time call sites stay on the underlying
 /// [`validate_field_name`].
 fn field_to_column_for_dialect(
+    vendors: VendorSet,
     field: &str,
     def: &serde_json::Value,
     backend: &'static dyn SchemaRenderer,
     inject: &ResolvedInject,
 ) -> Result<String, QueryError> {
-    validate_field_name_for_declaration(field, inject)?;
+    validate_field_name_for_declaration(vendors, field, inject)?;
     validate_encryption_sentinel_for_field(def)?;
     // `t.encrypted(...)`-declared columns always store the
     // ciphertext wire blob (`[version_flag | nonce | ct+tag]`) as BYTEA
@@ -2041,8 +2074,12 @@ fn field_to_column_for_dialect(
 /// rejects those types again. The returned spelling is DDL (`vector(N)`,
 /// `DOUBLE PRECISION`, `TIMESTAMPTZ`, …); callers that need the
 /// `information_schema.data_type` spelling translate it themselves.
-pub fn def_to_column_type_for_dialect(def: &serde_json::Value, dialect: &DialectId) -> String {
-    def_to_column_type_for_backend(def, renderer(dialect))
+pub fn def_to_column_type_for_dialect(
+    vendors: VendorSet,
+    def: &serde_json::Value,
+    dialect: &DialectId,
+) -> String {
+    def_to_column_type_for_backend(def, renderer(vendors, dialect))
 }
 
 pub(crate) fn def_to_column_type_for_backend(
@@ -2379,50 +2416,68 @@ mod tests {
     use serde_json::json;
 
     fn build_add_foreign_key(
+        vendors: VendorSet,
         app_id: &str,
         collection: &str,
         field: &str,
         def: &serde_json::Value,
     ) -> Result<String, QueryError> {
-        super::build_add_foreign_key(app_id, collection, field, def, &POSTGRES)
+        super::build_add_foreign_key(vendors, app_id, collection, field, def, &POSTGRES)
     }
 
     fn build_drop_foreign_key(
+        vendors: VendorSet,
         app_id: &str,
         collection: &str,
         constraint_name: &str,
     ) -> Result<String, QueryError> {
-        super::build_drop_foreign_key(app_id, collection, constraint_name, &POSTGRES)
+        super::build_drop_foreign_key(vendors, app_id, collection, constraint_name, &POSTGRES)
     }
 
     fn build_add_column(
+        vendors: VendorSet,
         app_id: &str,
         collection: &str,
         field: &str,
         def: &serde_json::Value,
     ) -> Result<String, QueryError> {
-        super::build_add_column(app_id, collection, field, def, &POSTGRES)
+        super::build_add_column(vendors, app_id, collection, field, def, &POSTGRES)
     }
 
     fn build_create_indexes(
+        vendors: VendorSet,
         app_id: &str,
         collection: &str,
         schema: &serde_json::Value,
     ) -> Result<Vec<IndexSpec>, QueryError> {
-        super::build_create_indexes(app_id, collection, schema, &POSTGRES)
+        super::build_create_indexes(vendors, app_id, collection, schema, &POSTGRES)
     }
 
     #[test]
     fn additive_schema_builder_routes_to_the_selected_backend() {
         let def = json!({ "type": "string" });
-        let sqlite = super::build_add_column("app1", "users", "name", &def, &SQLITE)
-            .expect_err("SQLite writes its own refusal");
+        let sqlite = super::build_add_column(
+            crate::test_fixtures::VENDORS,
+            "app1",
+            "users",
+            "name",
+            &def,
+            &SQLITE,
+        )
+        .expect_err("SQLite writes its own refusal");
         assert_eq!(
             sqlite.to_string(),
             "invalid filter: SQLite has no ADD COLUMN IF NOT EXISTS grammar"
         );
-        let mysql = super::build_add_column("app1", "users", "name", &def, &MYSQL)
-            .expect_err("MySQL writes its own refusal");
+        let mysql = super::build_add_column(
+            crate::test_fixtures::VENDORS,
+            "app1",
+            "users",
+            "name",
+            &def,
+            &MYSQL,
+        )
+        .expect_err("MySQL writes its own refusal");
         assert_eq!(
             mysql.to_string(),
             "invalid filter: MySQL register-model column changes are not live-rendered"
@@ -2436,8 +2491,14 @@ mod tests {
             "fields": ["email", "tenant"],
             "unique": true
         }]);
-        let rendered = super::build_named_indexes("app1", "users", &indexes, &POSTGRES)
-            .expect("PostgreSQL renders the online index request");
+        let rendered = super::build_named_indexes(
+            crate::test_fixtures::VENDORS,
+            "app1",
+            "users",
+            &indexes,
+            &POSTGRES,
+        )
+        .expect("PostgreSQL renders the online index request");
         assert_eq!(rendered.len(), 1);
         assert_eq!(
             rendered[0].sql,
@@ -2515,6 +2576,7 @@ columns = [
         // `super::` is load-bearing: the wrapper below shadows the production
         // name inside this module.
         super::build_create_table_with_fks_for_dialect(
+            crate::test_fixtures::VENDORS,
             app_id,
             collection,
             schema,
@@ -2532,6 +2594,7 @@ columns = [
         dialect: &DialectId,
     ) -> Result<String, QueryError> {
         super::build_create_table_with_fks_for_dialect(
+            crate::test_fixtures::VENDORS,
             app_id,
             collection,
             schema,
@@ -2550,6 +2613,7 @@ columns = [
         unqualified: bool,
     ) -> Result<String, QueryError> {
         super::build_create_table_with_fks_for_dialect_scoped(
+            crate::test_fixtures::VENDORS,
             app_id,
             collection,
             schema,
@@ -2561,7 +2625,11 @@ columns = [
     }
 
     fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError> {
-        super::validate_field_name_for_declaration(name, &confined_inject("posts"))
+        super::validate_field_name_for_declaration(
+            crate::test_fixtures::VENDORS,
+            name,
+            &confined_inject("posts"),
+        )
     }
 
     fn field_to_column_for_dialect(
@@ -2571,7 +2639,13 @@ columns = [
     ) -> Result<String, QueryError> {
         // A test names the dialect it is testing; the wrapper resolves it so the
         // cases below stay written in the dialect they mean.
-        super::field_to_column_for_dialect(field, def, renderer(dialect), &confined_inject("posts"))
+        super::field_to_column_for_dialect(
+            crate::test_fixtures::VENDORS,
+            field,
+            def,
+            renderer(crate::test_fixtures::VENDORS, dialect),
+            &confined_inject("posts"),
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -2643,7 +2717,8 @@ columns = [
     #[test]
     fn test_build_indexes_empty_schema() {
         let schema = json!({});
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out =
+            build_create_indexes(crate::test_fixtures::VENDORS, "app1", "users", &schema).unwrap();
         assert!(out.is_empty(), "expected no indexes, got: {out:?}");
     }
 
@@ -2653,7 +2728,8 @@ columns = [
             "email": {"type": "string", "required": true},
             "age": {"type": "number"},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out =
+            build_create_indexes(crate::test_fixtures::VENDORS, "app1", "users", &schema).unwrap();
         assert!(out.is_empty(), "expected no indexes when no markers set");
     }
 
@@ -2662,7 +2738,8 @@ columns = [
         let schema = json!({
             "handle": {"type": "string", "index": true},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out =
+            build_create_indexes(crate::test_fixtures::VENDORS, "app1", "users", &schema).unwrap();
         assert_eq!(out.len(), 1);
         let spec = &out[0];
         assert!(!spec.unique);
@@ -2688,7 +2765,8 @@ columns = [
         let schema = json!({
             "email": {"type": "string", "unique": true, "index": true},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out =
+            build_create_indexes(crate::test_fixtures::VENDORS, "app1", "users", &schema).unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].unique);
         assert_eq!(out[0].name, "users_email_key");
@@ -2701,7 +2779,8 @@ columns = [
             "name": {"type": "string"},
             "tenant_id": {"type": "string", "index": true},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out =
+            build_create_indexes(crate::test_fixtures::VENDORS, "app1", "users", &schema).unwrap();
         assert_eq!(out.len(), 2, "expected 2 indexes, got: {out:?}");
         let names: Vec<_> = out.iter().map(|s| s.name.clone()).collect();
         assert!(names.contains(&"users_email_key".to_string()), "{names:?}");
@@ -2720,7 +2799,8 @@ columns = [
         let schema = json!({
             "user": {"type": "string", "index": true},
         });
-        let out = build_create_indexes("app1", "accounts", &schema).unwrap();
+        let out = build_create_indexes(crate::test_fixtures::VENDORS, "app1", "accounts", &schema)
+            .unwrap();
         assert_eq!(out.len(), 1);
         let spec = &out[0];
         assert!(spec.sql.contains(r#"("user")"#), "sql: {}", spec.sql);
@@ -2738,7 +2818,8 @@ columns = [
             let schema = json!({
                 "embedding": {"type": "vector", "vectorDims": 768, "vectorMetric": input},
             });
-            let out = build_create_indexes("app1", "docs", &schema).unwrap();
+            let out = build_create_indexes(crate::test_fixtures::VENDORS, "app1", "docs", &schema)
+                .unwrap();
             assert_eq!(out.len(), 1, "input {input}: {out:?}");
             match &out[0].kind {
                 IndexKind::Vector { dims, metric } => {
@@ -2756,7 +2837,8 @@ columns = [
         let schema = json!({
             "embedding": {"type": "vector", "vectorDims": 768},
         });
-        let out = build_create_indexes("app1", "docs", &schema).unwrap();
+        let out =
+            build_create_indexes(crate::test_fixtures::VENDORS, "app1", "docs", &schema).unwrap();
         assert_eq!(out.len(), 1);
         match &out[0].kind {
             IndexKind::Vector { metric, .. } => {
@@ -2774,7 +2856,8 @@ columns = [
         let schema = json!({
             "embedding": {"type": "vector", "vectorDims": 768, "vectorMetric": "manhatten"},
         });
-        let err = build_create_indexes("app1", "docs", &schema).unwrap_err();
+        let err = build_create_indexes(crate::test_fixtures::VENDORS, "app1", "docs", &schema)
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown vectorMetric"), "msg: {msg}");
         assert!(msg.contains("manhatten"), "msg: {msg}");
@@ -2783,14 +2866,21 @@ columns = [
     #[test]
     fn test_build_indexes_rejects_bad_collection() {
         let schema = json!({"x": {"type": "string", "index": true}});
-        let err = build_create_indexes("app1", "users; DROP TABLE", &schema).unwrap_err();
+        let err = build_create_indexes(
+            crate::test_fixtures::VENDORS,
+            "app1",
+            "users; DROP TABLE",
+            &schema,
+        )
+        .unwrap_err();
         assert!(matches!(err, QueryError::InvalidCollection(_)));
     }
 
     #[test]
     fn test_build_indexes_rejects_bad_schema() {
         let schema = json!({"x": {"type": "string", "index": true}});
-        let err = build_create_indexes("app; --", "users", &schema).unwrap_err();
+        let err = build_create_indexes(crate::test_fixtures::VENDORS, "app; --", "users", &schema)
+            .unwrap_err();
         assert!(matches!(err, QueryError::InvalidCollection(_)));
     }
 
@@ -2882,7 +2972,8 @@ columns = [
         let schema = json!({
             "email": {"type": "string", "required": true, "unique": true},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out =
+            build_create_indexes(crate::test_fixtures::VENDORS, "app1", "users", &schema).unwrap();
         assert_eq!(
             out.len(),
             1,
@@ -2928,6 +3019,7 @@ columns = [
         );
 
         let alter = build_add_column(
+            crate::test_fixtures::VENDORS,
             "app1",
             "users",
             "email",
@@ -2988,6 +3080,7 @@ columns = [
     fn no_inject_policy_still_rejects_reserved_id_prefix() {
         let schema = json!({ "id": {"type": "id", "idPrefix": "usr"} });
         let err = super::build_create_table_with_fks_for_dialect(
+            crate::test_fixtures::VENDORS,
             "app1",
             "posts",
             &schema,
@@ -3200,7 +3293,14 @@ columns = [
             "refTarget": "users",
             "onDelete": "cascade",
         });
-        let sql = build_add_foreign_key("app1", "posts", "authorId", &def).unwrap();
+        let sql = build_add_foreign_key(
+            crate::test_fixtures::VENDORS,
+            "app1",
+            "posts",
+            "authorId",
+            &def,
+        )
+        .unwrap();
         assert!(
             sql.starts_with("ALTER TABLE \"app1\".\"posts\" ADD"),
             "{sql}"
@@ -3212,7 +3312,13 @@ columns = [
 
     #[test]
     fn b2_build_drop_foreign_key() {
-        let sql = build_drop_foreign_key("app1", "posts", "authorId_fkey").unwrap();
+        let sql = build_drop_foreign_key(
+            crate::test_fixtures::VENDORS,
+            "app1",
+            "posts",
+            "authorId_fkey",
+        )
+        .unwrap();
         assert_eq!(
             sql,
             "ALTER TABLE \"app1\".\"posts\" DROP CONSTRAINT IF EXISTS \"authorId_fkey\""
@@ -3283,8 +3389,8 @@ columns = [
     #[test]
     fn fk_ref_field_emits_text_column_type_pg() {
         let def = json!({"type": "ref", "refTarget": "users"});
-        let pg_type =
-            renderer(&POSTGRES).column_type(&super::column_snapshot_for_type_def(&def), false);
+        let pg_type = renderer(crate::test_fixtures::VENDORS, &POSTGRES)
+            .column_type(&super::column_snapshot_for_type_def(&def), false);
         assert_eq!(
             pg_type, "TEXT",
             "ref column type must cascade to TEXT to match the id TEXT PRIMARY KEY"
@@ -3297,7 +3403,14 @@ columns = [
     #[test]
     fn fk_ref_field_build_add_column_emits_text() {
         let def = json!({"type": "ref", "refTarget": "users"});
-        let sql = build_add_column("app1", "posts", "authorId", &def).expect("build_add_column");
+        let sql = build_add_column(
+            crate::test_fixtures::VENDORS,
+            "app1",
+            "posts",
+            "authorId",
+            &def,
+        )
+        .expect("build_add_column");
         assert!(
             sql.contains("ADD COLUMN IF NOT EXISTS \"authorId\" TEXT"),
             "expected ADD COLUMN ... TEXT, got: {sql}"
@@ -3429,6 +3542,7 @@ columns = [
         // ALTER TABLE ADD COLUMN for a calendarDate field must also
         // emit DATE so subsequent migrations stay consistent.
         let sql = build_add_column(
+            crate::test_fixtures::VENDORS,
             "app1",
             "users",
             "birthday",
@@ -3830,7 +3944,7 @@ columns = [
     fn validate_collection_accepts_valid_names() {
         for name in &["users", "todos", "order_items", "a", "A1_b"] {
             assert!(
-                validate_collection(name).is_ok(),
+                validate_collection(crate::test_fixtures::VENDORS, name).is_ok(),
                 "expected '{name}' to be valid"
             );
         }
@@ -3839,7 +3953,7 @@ columns = [
     /// Empty string must be rejected.
     #[test]
     fn validate_collection_rejects_empty() {
-        let err = validate_collection("").unwrap_err();
+        let err = validate_collection(crate::test_fixtures::VENDORS, "").unwrap_err();
         match err {
             QueryError::InvalidCollection(msg) => assert!(msg.contains("empty"), "{msg}"),
             other => panic!("expected InvalidCollection, got {other:?}"),
@@ -3850,7 +3964,7 @@ columns = [
     #[test]
     fn validate_collection_rejects_pg_prefix() {
         for name in &["pg_indexes", "PG_stat", "Pg_Class"] {
-            let err = validate_collection(name).unwrap_err();
+            let err = validate_collection(crate::test_fixtures::VENDORS, name).unwrap_err();
             match err {
                 QueryError::InvalidCollection(msg) => assert!(
                     msg.contains("pg_") || msg.contains("reserved"),
@@ -3869,7 +3983,7 @@ columns = [
             "__ZERO_MIGRATE_audit",
             "__zero_migrate",
         ] {
-            let err = validate_collection(name).unwrap_err();
+            let err = validate_collection(crate::test_fixtures::VENDORS, name).unwrap_err();
             match err {
                 QueryError::InvalidCollection(msg) => assert!(
                     msg.contains("__zero_migrate") || msg.contains("reserved"),
@@ -3884,7 +3998,7 @@ columns = [
     #[test]
     fn validate_collection_rejects_name_exceeding_63_bytes() {
         let name = "a".repeat(64);
-        let err = validate_collection(&name).unwrap_err();
+        let err = validate_collection(crate::test_fixtures::VENDORS, &name).unwrap_err();
         match err {
             QueryError::InvalidCollection(msg) => {
                 assert!(msg.contains("63") || msg.contains("limit"), "{msg}");
@@ -3893,7 +4007,7 @@ columns = [
         }
         // 63 bytes is exactly the limit — must pass.
         assert!(
-            validate_collection(&"a".repeat(63)).is_ok(),
+            validate_collection(crate::test_fixtures::VENDORS, &"a".repeat(63)).is_ok(),
             "63-byte name should pass"
         );
     }
@@ -3902,7 +4016,7 @@ columns = [
     #[test]
     fn validate_collection_rejects_null_byte() {
         let name = "users\0evil";
-        let err = validate_collection(name).unwrap_err();
+        let err = validate_collection(crate::test_fixtures::VENDORS, name).unwrap_err();
         match err {
             QueryError::InvalidCollection(msg) => {
                 assert!(msg.contains("null"), "unexpected message: {msg}");
@@ -3921,7 +4035,7 @@ columns = [
         let long_ok = "f".repeat(63);
         for name in &["id", "user_id", "createdAt", long_ok.as_str()] {
             assert!(
-                validate_field_name(name).is_ok(),
+                validate_field_name(crate::test_fixtures::VENDORS, name).is_ok(),
                 "field name should be valid"
             );
         }
@@ -3931,7 +4045,7 @@ columns = [
     #[test]
     fn validate_field_name_rejects_name_exceeding_63_bytes() {
         let name = "f".repeat(64);
-        let err = validate_field_name(&name).unwrap_err();
+        let err = validate_field_name(crate::test_fixtures::VENDORS, &name).unwrap_err();
         match err {
             QueryError::InvalidIdent(msg) => {
                 assert!(msg.contains("63") || msg.contains("limit"), "{msg}");
@@ -3943,7 +4057,7 @@ columns = [
     /// Field names with null bytes must be rejected.
     #[test]
     fn validate_field_name_rejects_null_byte() {
-        let err = validate_field_name("col\0name").unwrap_err();
+        let err = validate_field_name(crate::test_fixtures::VENDORS, "col\0name").unwrap_err();
         assert!(
             matches!(err, QueryError::InvalidIdent(_)),
             "expected InvalidIdent"
@@ -3957,7 +4071,7 @@ columns = [
     #[test]
     fn validate_field_name_rejects_non_ascii() {
         for name in &["café", "naïve", "日本", "user—id", "field name"] {
-            let err = validate_field_name(name).unwrap_err();
+            let err = validate_field_name(crate::test_fixtures::VENDORS, name).unwrap_err();
             assert!(
                 matches!(err, QueryError::InvalidIdent(_)),
                 "expected InvalidIdent for {name:?}, got {err:?}"
@@ -3974,7 +4088,7 @@ columns = [
     fn validate_field_name_accepts_ascii_allowlist() {
         for name in &["id", "user_id", "createdAt", "v2", "first_name"] {
             assert!(
-                validate_field_name(name).is_ok(),
+                validate_field_name(crate::test_fixtures::VENDORS, name).is_ok(),
                 "ASCII allowlist should accept {name:?}",
             );
         }
@@ -3998,7 +4112,7 @@ columns = [
     #[test]
     fn validate_field_name_rejects_reserved_masked_suffix() {
         for name in &["ssn_masked", "card_pan_masked", "email_masked", "_masked"] {
-            let err = validate_field_name(name).unwrap_err();
+            let err = validate_field_name(crate::test_fixtures::VENDORS, name).unwrap_err();
             match err {
                 QueryError::InvalidIdent(msg) => {
                     assert!(
@@ -4017,7 +4131,7 @@ columns = [
     #[test]
     fn validate_field_name_rejects_reserved_classification_names() {
         for name in &["public", "pii", "spi", "phi", "pci", "internal"] {
-            let err = validate_field_name(name).unwrap_err();
+            let err = validate_field_name(crate::test_fixtures::VENDORS, name).unwrap_err();
             match err {
                 QueryError::InvalidIdent(msg) => {
                     assert!(
@@ -4035,7 +4149,7 @@ columns = [
     #[test]
     fn validate_field_name_rejects_reserved_underscore_prefix() {
         for name in &["_rank", "_distance", "_score", "_anything"] {
-            let err = validate_field_name(name).unwrap_err();
+            let err = validate_field_name(crate::test_fixtures::VENDORS, name).unwrap_err();
             assert!(
                 matches!(err, QueryError::InvalidIdent(_)),
                 "expected InvalidIdent for {name:?}, got {err:?}"
@@ -4104,7 +4218,7 @@ columns = [
     fn system_field_names_allowed_in_filter_path() {
         for name in confined_injected_names("posts") {
             assert!(
-                validate_field_name(&name).is_ok(),
+                validate_field_name(crate::test_fixtures::VENDORS, &name).is_ok(),
                 "system field {name:?} must be accepted by the filter-time validator"
             );
         }
@@ -4277,6 +4391,7 @@ columns = [
     fn create_table_emits_created_at_default_now_pg() {
         let schema = serde_json::json!({});
         let sql = super::build_create_table_with_fks_for_dialect(
+            crate::test_fixtures::VENDORS,
             "app1",
             "posts",
             &schema,
@@ -4300,6 +4415,7 @@ columns = [
     fn create_table_emits_created_at_default_current_timestamp_sqlite() {
         let schema = serde_json::json!({});
         let sql = super::build_create_table_with_fks_for_dialect(
+            crate::test_fixtures::VENDORS,
             "app1",
             "posts",
             &schema,
@@ -4332,6 +4448,7 @@ columns = [
     fn create_table_emits_version_default_one() {
         for dialect in [&POSTGRES, &SQLITE] {
             let sql = super::build_create_table_with_fks_for_dialect(
+                crate::test_fixtures::VENDORS,
                 "app1",
                 "posts",
                 &serde_json::json!({}),
@@ -4408,7 +4525,9 @@ columns = [
                 );
                 let rendered_columns = refs
                     .iter()
-                    .map(|column| renderer(dialect).quote_ident(column))
+                    .map(|column| {
+                        renderer(crate::test_fixtures::VENDORS, dialect).quote_ident(column)
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 assert!(sql.contains(&format!("({rendered_columns})")), "{sql}");
@@ -4677,9 +4796,15 @@ columns = [
         assert!(inject.columns().is_empty());
         assert!(inject.indexes().is_empty());
         assert!(inject.primary_key().is_none());
-        assert!(super::validate_field_name_for_declaration("updated_at", &inject).is_ok());
+        assert!(super::validate_field_name_for_declaration(
+            crate::test_fixtures::VENDORS,
+            "updated_at",
+            &inject
+        )
+        .is_ok());
 
         let sql = super::build_create_table_with_fks_for_dialect(
+            crate::test_fixtures::VENDORS,
             "app1",
             "posts",
             &serde_json::json!({ "updated_at": { "type": "string" } }),
@@ -4732,6 +4857,7 @@ columns = [
             ),
         ] {
             let sql = super::build_create_table_with_fks_for_dialect(
+                crate::test_fixtures::VENDORS,
                 "app1",
                 "posts",
                 &serde_json::json!({}),
@@ -4915,7 +5041,8 @@ columns = [
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
         });
-        let sql = build_add_column("app1", "users", "ssn", &def).expect("build_add_column ok");
+        let sql = build_add_column(crate::test_fixtures::VENDORS, "app1", "users", "ssn", &def)
+            .expect("build_add_column ok");
         assert!(
             sql.contains("ADD COLUMN IF NOT EXISTS \"ssn\""),
             "parent: {sql}"
@@ -4939,7 +5066,8 @@ columns = [
     #[test]
     fn build_add_column_no_sibling_when_unmasked() {
         let def = serde_json::json!({ "type": "string" });
-        let sql = build_add_column("app1", "users", "name", &def).expect("build_add_column ok");
+        let sql = build_add_column(crate::test_fixtures::VENDORS, "app1", "users", "name", &def)
+            .expect("build_add_column ok");
         assert!(!sql.contains("_masked"), "no sibling for unmasked: {sql}");
         assert!(!sql.contains("COMMENT ON COLUMN"), "no comment: {sql}");
     }
@@ -5262,15 +5390,22 @@ mod hostile_identifier_quoting {
     /// inert inside backticks and a backtick is inert inside double quotes.
     #[test]
     fn a_quote_bearing_identifier_is_doubled_not_left_bare() {
-        assert_eq!(renderer(&POSTGRES).quote_ident(r#"a"b"#), r#""a""b""#);
-        assert_eq!(renderer(&MYSQL).quote_ident("a`b"), "`a``b`");
+        assert_eq!(
+            renderer(crate::test_fixtures::VENDORS, &POSTGRES).quote_ident(r#"a"b"#),
+            r#""a""b""#
+        );
+        assert_eq!(
+            renderer(crate::test_fixtures::VENDORS, &MYSQL).quote_ident("a`b"),
+            "`a``b`"
+        );
     }
 
     #[test]
     fn an_injecting_identifier_stays_inside_its_quoting() {
         // The payload's own quote is doubled, so the `);` and everything after it
         // remain part of the identifier rather than becoming syntax.
-        let pg = renderer(&POSTGRES).quote_ident(r#"x"); DROP TABLE victim; --"#);
+        let pg = renderer(crate::test_fixtures::VENDORS, &POSTGRES)
+            .quote_ident(r#"x"); DROP TABLE victim; --"#);
         assert_eq!(pg, r#""x""); DROP TABLE victim; --""#);
         assert_eq!(
             pg.matches('"').count() % 2,
@@ -5278,7 +5413,8 @@ mod hostile_identifier_quoting {
             "an odd number of quotes means one of them closes the identifier: {pg}"
         );
 
-        let my = renderer(&MYSQL).quote_ident("x`); DROP TABLE victim; -- ");
+        let my = renderer(crate::test_fixtures::VENDORS, &MYSQL)
+            .quote_ident("x`); DROP TABLE victim; -- ");
         assert_eq!(my, "`x``); DROP TABLE victim; -- `");
         assert_eq!(
             my.matches('`').count() % 2,
@@ -5291,7 +5427,13 @@ mod hostile_identifier_quoting {
     fn the_other_dialects_quote_character_needs_no_escaping() {
         // Each primitive must leave the OTHER dialect's quote alone: doubling it
         // would corrupt the name for no safety gain.
-        assert_eq!(renderer(&POSTGRES).quote_ident("a`b"), r#""a`b""#);
-        assert_eq!(renderer(&MYSQL).quote_ident(r#"a"b"#), r#"`a"b`"#);
+        assert_eq!(
+            renderer(crate::test_fixtures::VENDORS, &POSTGRES).quote_ident("a`b"),
+            r#""a`b""#
+        );
+        assert_eq!(
+            renderer(crate::test_fixtures::VENDORS, &MYSQL).quote_ident(r#"a"b"#),
+            r#"`a"b`"#
+        );
     }
 }

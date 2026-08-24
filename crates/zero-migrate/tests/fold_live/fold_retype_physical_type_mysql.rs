@@ -88,6 +88,7 @@ async fn apply_doc(
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -98,7 +99,7 @@ async fn apply_doc(
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
 
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -127,6 +128,7 @@ async fn assert_no_drift(
     stage: &str,
 ) -> Result<(), String> {
     let expected = fold_ops(
+        zero_migrate::shipping_vendors(),
         ops,
         &zero_migrate_mysql::DIALECT,
         &cfg.project_schema,
@@ -137,7 +139,7 @@ async fn assert_no_drift(
         .snapshot_schema(cfg)
         .await
         .map_err(|error| format!("{stage}: snapshot the live MySQL schema: {error}"))?;
-    let drift = diff_snapshots(&expected, &actual);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
     if drift.is_clean() {
         return Ok(());
     }
@@ -320,6 +322,7 @@ async fn a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target() {
         // is exactly the stream that ran.
         let policy = support::no_inject(&cfg.project_schema);
         let folded = fold_ops(
+            zero_migrate::shipping_vendors(),
             &all_ops,
             &zero_migrate_mysql::DIALECT,
             &cfg.project_schema,
@@ -510,6 +513,7 @@ async fn folding_onto_a_live_mysql_base_keeps_the_contracts_the_server_reported(
         .await?;
 
         let expected = fold_ops_onto(
+            zero_migrate::shipping_vendors(),
             &base,
             &added,
             &zero_migrate_mysql::DIALECT,
@@ -546,7 +550,7 @@ async fn folding_onto_a_live_mysql_base_keeps_the_contracts_the_server_reported(
         }
 
         // HALF TWO: the ADDED column got a contract, and it is the one the server holds.
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
         if drift.is_clean() {
             return Ok(());
         }

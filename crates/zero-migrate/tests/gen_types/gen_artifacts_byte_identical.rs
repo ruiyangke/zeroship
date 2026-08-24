@@ -154,6 +154,7 @@ fn people_ops_generated() -> Vec<Op> {
 fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
     let effective = support::confined_charter();
     let generated = render_artifacts(
+        zero_migrate::shipping_vendors(),
         &people_ops_generated(),
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -161,6 +162,7 @@ fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
     )
     .expect("generated render");
     let manual = render_artifacts_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &[people_descriptor()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -184,6 +186,7 @@ fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
 #[test]
 fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     let artifacts = render_artifacts_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &[people_descriptor()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -244,6 +247,7 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
 #[test]
 fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
     let artifacts = render_artifacts_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &[people_descriptor()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -301,6 +305,7 @@ fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
 #[test]
 fn check_reports_drift_when_committed_differs_and_clean_when_identical() {
     let artifacts = render_artifacts_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &[people_descriptor()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,

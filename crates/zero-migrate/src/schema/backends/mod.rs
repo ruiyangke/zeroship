@@ -47,6 +47,7 @@
 //! crate, one file apart, this warning matters more than it did.
 
 use crate::schema::query::SchemaRenderer;
+use zero_migrate_backend::registry::VendorSet;
 use zero_migrate_ir::dialect::DialectId;
 
 /// The schema renderer for a dialect.
@@ -71,6 +72,6 @@ use zero_migrate_ir::dialect::DialectId;
 /// composition, while a point-of-use lookup could not — it is the engine reaching for
 /// a vendor list it no longer has. Adding one back inside an emitter re-creates the
 /// blocker.
-pub fn renderer(dialect: &DialectId) -> &'static dyn SchemaRenderer {
-    crate::render::backends::schema_renderer(dialect)
+pub fn renderer(vendors: VendorSet, dialect: &DialectId) -> &'static dyn SchemaRenderer {
+    crate::render::backends::schema_renderer(vendors, dialect)
 }

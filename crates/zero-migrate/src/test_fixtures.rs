@@ -1,6 +1,7 @@
 //! TEST-ONLY fixtures for this crate's own unit tests. `lib.rs` declares this module
 //! `#[cfg(test)]`, so none of it ships.
 
+use zero_migrate_backend::registry::VendorSet;
 use zero_migrate_ir::dialect::DialectId;
 
 use crate::model::policy::DestructiveOps;
@@ -37,6 +38,14 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 // module answers it once, and `core_names_no_vendor_at_all.rs` already resolves a
 // parent's `#[cfg(test)] mod` to its file and excludes the whole file from the
 // production count.
+
+/// The shipping registry, for core's `#[cfg(test)]` modules.
+///
+/// One place, for the same reason the three ids above are one place: core's unit
+/// tests need a vendor set to hand the resolution doors, and a test module that
+/// reached for the composition directly would be a second name for it in every file
+/// that has one.
+pub(crate) const VENDORS: VendorSet = crate::render::backends::VENDORS;
 
 /// The PostgreSQL id. The declaration that SHIPS is `zero_migrate_postgres::DIALECT`.
 pub(crate) const POSTGRES: DialectId = DialectId::new("postgres");

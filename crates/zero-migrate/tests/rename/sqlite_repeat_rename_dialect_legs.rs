@@ -34,6 +34,7 @@ fn lower_error(ops_json: &str) -> Option<String> {
     let raw = format!(r#"{{"ir_version":1,"name":"renames","ops":{ops_json}}}"#);
     let ir: MigrationIr = serde_json::from_str(&raw).expect("the rename test IR parses");
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,

@@ -46,6 +46,7 @@ fn desired_snapshot(
     effective: &EffectivePolicy,
 ) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
     zero_migrate::desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         project_schema,
         descriptors,
         &zero_migrate_postgres::DIALECT,
@@ -169,6 +170,7 @@ fn guard_cfg(policy: &EffectivePolicy) -> GuardConfig {
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
         cfg.project_schema.clone(),
         "app_test",
         zero_migrate_postgres::DIALECT,
@@ -230,7 +232,7 @@ async fn require_rls_over_the_created_schema_refuses_the_declarative_create() {
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let policy = charter_obligating(&cfg.project_schema, &cfg.project_schema);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     let desc = descriptor("widgets", "title", "string", true);
@@ -315,7 +317,7 @@ scope = {{ include = [{:?}] }}
             format!("{}.widgets", cfg.project_schema)
         ),
     );
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     let descs = vec![
@@ -367,7 +369,7 @@ async fn require_rls_over_another_schema_still_plans_the_create() {
 
     let elsewhere = format!("other_{tok}");
     let policy = charter_obligating(&cfg.project_schema, &elsewhere);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     let desc = descriptor("widgets", "title", "string", true);
@@ -412,7 +414,7 @@ async fn require_rls_admits_an_alter_only_and_a_no_op_diff() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     // Deploy v1 under a charter with no obligation, so the table is live before the
@@ -511,7 +513,7 @@ async fn a_charter_without_require_rls_plans_the_create() {
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
     let policy = charter_without_obligation(&cfg.project_schema);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     let desc = descriptor("widgets", "title", "string", true);

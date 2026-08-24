@@ -88,6 +88,7 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
 fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
     let effective = support::confined_charter();
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         descriptors,
         &zero_migrate_sqlite::DIALECT,
@@ -152,12 +153,13 @@ fn rename_ir(table: &str, from: &str, to: &str, ty: ColType) -> MigrationIr {
 async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) {
     // Lower each table's createTable IR and apply it.
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     for d in descriptors {
         let cols: Vec<zero_migrate::model::ir::IrColumn> = d
             .fields
@@ -266,6 +268,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
 
     // Lower the rename `nickname → handle` on the SQLite leg.
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -303,7 +306,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
 
     // Apply THROUGH the single shared apply_plan (a rebuild on a populated table is
     // destructive ⇒ Approval::Approved).
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let out = engine
         .apply_plan(
             &steps,
@@ -410,12 +413,13 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
     // Create it for real with an int column.
     {
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             PROJECT,
             APP,
             &zero_migrate_sqlite::DIALECT,
             &support::confined_charter(),
         );
-        let engine = MigrationEngine::new();
+        let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
         let ir = MigrationIr {
             inverse_ops: None,
             irreversible: None,
@@ -474,6 +478,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
 
     let live = live_schema_for(&v1);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -519,6 +524,7 @@ fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
     let v1 = vec![descriptor("people", "nickname", "string")];
     let live = live_schema_for(&v1);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -559,6 +565,7 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
 
     // The IrAuthor deploys as `APP` (≠ app_other) — a non-owner rename.
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -595,6 +602,7 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
 #[test]
 fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -628,6 +636,7 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
 fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
     use zero_migrate::{ColumnSnapshot, TableSnapshot};
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -758,6 +767,7 @@ fn renamecolumn_sqlite_retains_fk_to_another_known_live_table() {
     let child = referencing_descriptor("employees", "departments");
     let live = live_schema_for(&[parent, child]);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -794,6 +804,7 @@ fn renamecolumn_sqlite_rejects_fk_to_table_missing_from_live_table_set() {
     let mut live = live_schema_for(&[parent, child]);
     assert!(live.tables.remove("departments"));
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -827,6 +838,7 @@ fn renamecolumn_sqlite_rejects_fk_to_table_missing_from_live_table_set() {
 #[test]
 fn renamecolumn_sqlite_rejects_rename_to_existing_column() {
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -885,6 +897,7 @@ async fn two_renames_of_one_table_in_one_migration_are_refused_on_sqlite() {
     live.table_snapshots = catalog.tables;
 
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,

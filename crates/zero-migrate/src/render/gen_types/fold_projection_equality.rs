@@ -58,6 +58,7 @@
 //! refusal change by construction.
 
 use std::collections::BTreeMap;
+use zero_migrate_backend::registry::VendorSet;
 
 use super::differential_corpus::{
     dialect_label, parse, policy, read_golden, CASES, DIALECTS, SCHEMA, STEMS, STREAMS,
@@ -104,6 +105,7 @@ impl Projection {
 type Answer = Result<String, String>;
 
 fn walker_answer(
+    vendors: VendorSet,
     projection: Projection,
     ops: &[Op],
     dialect: &DialectId,
@@ -111,7 +113,7 @@ fn walker_answer(
 ) -> Answer {
     let effective = policy(confined);
     match projection {
-        Projection::Snapshot => fold_ops(ops, dialect, SCHEMA, &effective)
+        Projection::Snapshot => fold_ops(vendors, ops, dialect, SCHEMA, &effective)
             .map(|v| format!("{v:#?}"))
             .map_err(|e| e.to_string()),
     }
@@ -206,7 +208,7 @@ struct Measured {
     first_difference: Option<(usize, String)>,
 }
 
-fn measure() -> Vec<Measured> {
+fn measure(vendors: VendorSet) -> Vec<Measured> {
     let mut out = Vec::new();
     for (name, ops, confined) in corpus_streams() {
         for dialect in &DIALECTS {
@@ -215,7 +217,7 @@ fn measure() -> Vec<Measured> {
             // projection would be four traversals, which is the thing being removed.
             let folded: Vec<Result<single_fold::FoldedSchema, String>> = (0..=ops.len())
                 .map(|i| {
-                    single_fold::fold(&ops[..i], dialect, SCHEMA, &effective)
+                    single_fold::fold(vendors, &ops[..i], dialect, SCHEMA, &effective)
                         .map_err(|e| e.to_string())
                 })
                 .collect();
@@ -230,7 +232,7 @@ fn measure() -> Vec<Measured> {
                     first_difference: None,
                 };
                 for (i, folded) in folded.iter().enumerate() {
-                    let theirs = walker_answer(projection, &ops[..i], dialect, confined);
+                    let theirs = walker_answer(vendors, projection, &ops[..i], dialect, confined);
                     let mine = projection_answer(projection, folded);
                     let verdict = match (&mine, &theirs) {
                         (Ok(mine), Ok(theirs)) if mine == theirs => Verdict::Equal,
@@ -348,7 +350,7 @@ const DIVERGENCES: &[Divergence] = &[
 
 #[test]
 fn every_projection_reproduces_its_walker_byte_for_byte() {
-    let measured = measure();
+    let measured = measure(crate::test_fixtures::VENDORS);
     let recorded: BTreeMap<&str, &Divergence> = DIVERGENCES.iter().map(|d| (d.key, d)).collect();
     assert_eq!(
         recorded.len(),
@@ -435,7 +437,7 @@ fn every_recorded_divergence_names_the_side_it_believes() {
 /// against itself. This one says how much was compared.
 #[test]
 fn the_gate_has_the_shape_it_claims() {
-    let measured = measure();
+    let measured = measure(crate::test_fixtures::VENDORS);
     let total = |f: fn(&Measured) -> usize| measured.iter().map(f).sum::<usize>();
 
     assert_eq!(
@@ -778,10 +780,22 @@ fn the_neutral_vendor_split_loses_no_field_on_a_folded_shape() {
     for (name, ops, confined) in corpus_streams() {
         for dialect in &DIALECTS {
             let effective = policy(confined);
-            let Ok(folded) = single_fold::fold(&ops, dialect, SCHEMA, &effective) else {
+            let Ok(folded) = single_fold::fold(
+                crate::test_fixtures::VENDORS,
+                &ops,
+                dialect,
+                SCHEMA,
+                &effective,
+            ) else {
                 continue;
             };
-            let Ok(walker) = fold_ops(&ops, dialect, SCHEMA, &effective) else {
+            let Ok(walker) = fold_ops(
+                crate::test_fixtures::VENDORS,
+                &ops,
+                dialect,
+                SCHEMA,
+                &effective,
+            ) else {
                 continue;
             };
             let projected: SchemaSnapshot = folded.project_snapshot();
@@ -854,8 +868,20 @@ fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
             let effective = policy(confined);
             for i in 0..=ops.len() {
                 let prefix = &ops[..i];
-                let mine = single_fold::fold(prefix, dialect, SCHEMA, &effective);
-                let catalog = fold_ops(prefix, dialect, SCHEMA, &effective);
+                let mine = single_fold::fold(
+                    crate::test_fixtures::VENDORS,
+                    prefix,
+                    dialect,
+                    SCHEMA,
+                    &effective,
+                );
+                let catalog = fold_ops(
+                    crate::test_fixtures::VENDORS,
+                    prefix,
+                    dialect,
+                    SCHEMA,
+                    &effective,
+                );
                 match (mine, catalog) {
                     (Err(mine), Err(catalog)) => {
                         refused += 1;
@@ -985,7 +1011,14 @@ fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint(
     let ops = &stream[..5];
     let effective = policy(false);
 
-    let catalog = fold_ops(ops, &POSTGRES, SCHEMA, &effective).expect("fold_ops");
+    let catalog = fold_ops(
+        crate::test_fixtures::VENDORS,
+        ops,
+        &POSTGRES,
+        SCHEMA,
+        &effective,
+    )
+    .expect("fold_ops");
     assert!(
         !catalog.tables["users"]
             .constraints
@@ -995,7 +1028,14 @@ fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint(
          evidence of anything"
     );
 
-    let folded = single_fold::fold(ops, &POSTGRES, SCHEMA, &effective).expect("fold");
+    let folded = single_fold::fold(
+        crate::test_fixtures::VENDORS,
+        ops,
+        &POSTGRES,
+        SCHEMA,
+        &effective,
+    )
+    .expect("fold");
     assert_eq!(
         folded.project_field_defs()["users"]["email"].get("unique"),
         None,
@@ -1006,8 +1046,14 @@ fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint(
     // The SHIPPED consequence, not just the intermediate. `schema.runtime.json` is what
     // a deployed app installs its `env.db` types from, and - on SQLite - the same map
     // is what a table rebuild renders its `CREATE TABLE` from.
-    let artifacts =
-        super::render_artifacts(ops, &POSTGRES, SCHEMA, &effective).expect("render artifacts");
+    let artifacts = super::render_artifacts(
+        crate::test_fixtures::VENDORS,
+        ops,
+        &POSTGRES,
+        SCHEMA,
+        &effective,
+    )
+    .expect("render artifacts");
     let runtime: serde_json::Value =
         serde_json::from_str(&artifacts.runtime_json).expect("runtime.json parses");
     assert_eq!(
@@ -1047,16 +1093,29 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
     // The bound is really recovered while the constraint is live, or the drop below
     // proves nothing. Measured through the projection, since the walker that used to
     // answer this is gone.
-    let with_check = single_fold::fold(&ops[..2], &POSTGRES, SCHEMA, &effective)
-        .expect("fold")
-        .project_field_defs();
+    let with_check = single_fold::fold(
+        crate::test_fixtures::VENDORS,
+        &ops[..2],
+        &POSTGRES,
+        SCHEMA,
+        &effective,
+    )
+    .expect("fold")
+    .project_field_defs();
     assert_eq!(
         with_check["scores"]["score"].get("min"),
         Some(&serde_json::json!(1.0)),
         "the CHECK's lower bound reaches the FieldDef map while the constraint exists"
     );
 
-    let catalog = fold_ops(&ops, &POSTGRES, SCHEMA, &effective).expect("fold_ops");
+    let catalog = fold_ops(
+        crate::test_fixtures::VENDORS,
+        &ops,
+        &POSTGRES,
+        SCHEMA,
+        &effective,
+    )
+    .expect("fold_ops");
     assert!(
         !catalog.tables["scores"]
             .constraints
@@ -1065,7 +1124,14 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
         "the catalog oracle must agree the constraint is gone"
     );
 
-    let folded = single_fold::fold(&ops, &POSTGRES, SCHEMA, &effective).expect("fold");
+    let folded = single_fold::fold(
+        crate::test_fixtures::VENDORS,
+        &ops,
+        &POSTGRES,
+        SCHEMA,
+        &effective,
+    )
+    .expect("fold");
     let projected = folded.project_field_defs();
     assert_eq!(
         projected["scores"]["score"].get("min"),
@@ -1099,7 +1165,14 @@ fn the_catalog_and_the_authoring_artifact_agree_about_an_altered_primary_key() {
     let ops = &stream[..2];
     let effective = policy(false);
 
-    let catalog = fold_ops(ops, &POSTGRES, SCHEMA, &effective).expect("fold_ops");
+    let catalog = fold_ops(
+        crate::test_fixtures::VENDORS,
+        ops,
+        &POSTGRES,
+        SCHEMA,
+        &effective,
+    )
+    .expect("fold_ops");
     let primary_key = catalog.tables["orders"]
         .constraints
         .iter()
@@ -1112,7 +1185,14 @@ fn the_catalog_and_the_authoring_artifact_agree_about_an_altered_primary_key() {
          anything: {primary_key}"
     );
 
-    let folded = single_fold::fold(ops, &POSTGRES, SCHEMA, &effective).expect("fold");
+    let folded = single_fold::fold(
+        crate::test_fixtures::VENDORS,
+        ops,
+        &POSTGRES,
+        SCHEMA,
+        &effective,
+    )
+    .expect("fold");
     assert_eq!(
         folded.project_authoring_tables()["orders"]
             .primary_key
@@ -1124,8 +1204,14 @@ fn the_catalog_and_the_authoring_artifact_agree_about_an_altered_primary_key() {
 
     // The shipped consequence, not just the intermediate. `env.db.ts` is what an app
     // is regenerated from.
-    let artifacts =
-        super::render_artifacts(ops, &POSTGRES, SCHEMA, &effective).expect("render artifacts");
+    let artifacts = super::render_artifacts(
+        crate::test_fixtures::VENDORS,
+        ops,
+        &POSTGRES,
+        SCHEMA,
+        &effective,
+    )
+    .expect("render artifacts");
     // A single-column key renders as a COLUMN modifier (`render_table`'s
     // `single_primary_key` path), so the key is visible as `.primaryKey()` on a column
     // rather than as a table-level clause.

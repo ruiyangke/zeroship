@@ -73,7 +73,7 @@ async fn uuid_v4_capability_failure_precedes_authored_sql() {
     plan.database_requirements
         .require(DatabaseFeature::UuidV4Generation);
 
-    let error = zero_migrate::MigrationEngine::new()
+    let error = zero_migrate::MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_applied_plan_with_touched_and_depends(
             &plan,
             &[],
@@ -291,7 +291,7 @@ async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
         "FOREIGN KEY (tenant_id, email) REFERENCES proj_x.users(tenant_id, email) ON UPDATE CASCADE ON DELETE SET NULL"
     );
     assert!(
-        diff_snapshots(&snapshot, &snapshot).is_clean(),
+        diff_snapshots(zero_migrate::shipping_vendors(), &snapshot, &snapshot).is_clean(),
         "the exact single/composite FK catalog must stay clean"
     );
     let assert_fk_drop = |constraint_name: &str, scenario: &str| {
@@ -302,7 +302,7 @@ async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
             .expect("users table")
             .constraints
             .retain(|constraint| constraint.name != constraint_name);
-        let drift = diff_snapshots(&snapshot, &changed);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &snapshot, &changed);
         assert!(
             drift
                 .missing_objects
@@ -322,7 +322,7 @@ async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
             .find(|constraint| constraint.name == constraint_name)
             .expect("foreign key")
             .definition = definition.to_string();
-        let drift = diff_snapshots(&snapshot, &changed);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &snapshot, &changed);
         assert!(
             drift.altered_objects.iter().any(|altered| {
                 altered.object == format!("constraint {constraint_name}")
@@ -496,11 +496,11 @@ async fn mysql_single_and_composite_fk_mutations_drift_through_catalog_rows() {
     let expected = snapshot(baseline_rows()).await;
     let clean = snapshot(baseline_rows()).await;
     assert!(
-        diff_snapshots(&expected, &clean).is_clean(),
+        diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean).is_clean(),
         "unchanged catalog FK rows must stay clean"
     );
     let assert_missing = |actual: &SchemaSnapshot, constraint: &str, label: &str| {
-        let drift = diff_snapshots(&expected, actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, actual);
         assert!(
             drift
                 .missing_objects
@@ -510,7 +510,7 @@ async fn mysql_single_and_composite_fk_mutations_drift_through_catalog_rows() {
         );
     };
     let assert_altered = |actual: &SchemaSnapshot, constraint: &str, label: &str| {
-        let drift = diff_snapshots(&expected, actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, actual);
         assert!(
             drift.altered_objects.iter().any(|altered| {
                 altered.object == format!("constraint {constraint}")
@@ -658,6 +658,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     ulid.value_format = Some(ValueFormat::Ulid);
     let ordinary = id_column("ordinary", ColType::Text);
     let expected = zero_migrate::render::fold::fold_ops(
+        zero_migrate::shipping_vendors(),
         &[Op::CreateTable {
             name: "ids".to_string(),
             columns: vec![
@@ -734,7 +735,7 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     assert_eq!(column("ulid").value_format, Some(ValueFormat::Ulid));
     assert_eq!(column("ulid").id_default, Some(IdDefaultSnapshot::Absent));
     assert_eq!(column("ordinary").id_default, None);
-    let clean_drift = diff_snapshots(&expected, &snapshot);
+    let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &snapshot);
     assert!(
         clean_drift.is_clean(),
         "the portable auto-increment and exact format/default catalog shape must stay clean: {clean_drift:?}"
@@ -780,7 +781,11 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         ))
         .await
         .expect("altered format snapshot");
-    let format_drift = diff_snapshots(&snapshot, &altered_formats);
+    let format_drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &snapshot,
+        &altered_formats,
+    );
     assert!(
         format_drift.altered_objects.iter().any(|altered| {
             altered.object == "column type_id"
@@ -817,7 +822,11 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         ))
         .await
         .expect("altered default snapshot");
-    let default_drift = diff_snapshots(&snapshot, &altered_defaults);
+    let default_drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &snapshot,
+        &altered_defaults,
+    );
     for name in ["generated_uuid", "supplied_uuid", "type_id", "ulid"] {
         assert!(
             default_drift.altered_objects.iter().any(|altered| {
@@ -841,7 +850,11 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         ))
         .await
         .expect("swapped default snapshot");
-    let swapped_default_drift = diff_snapshots(&snapshot, &swapped_default);
+    let swapped_default_drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &snapshot,
+        &swapped_default,
+    );
     assert!(
         swapped_default_drift.altered_objects.iter().any(|altered| {
             altered.object == "column generated_uuid"
@@ -879,7 +892,11 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
             ))
             .await
             .expect("same-text literal UUID default without format CHECK");
-    let marker_drift = diff_snapshots(&snapshot, &literal_generator_without_check);
+    let marker_drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &snapshot,
+        &literal_generator_without_check,
+    );
     assert!(
         marker_drift.altered_objects.iter().any(|altered| {
             altered.object == "column generated_uuid"
@@ -909,7 +926,11 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
     };
     let lowercase_literal = literal_uuid_snapshot("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").await;
     let uppercase_literal = literal_uuid_snapshot("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA").await;
-    let case_drift = diff_snapshots(&lowercase_literal, &uppercase_literal);
+    let case_drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &lowercase_literal,
+        &uppercase_literal,
+    );
     assert!(
         case_drift.altered_objects.iter().any(|altered| {
             altered.object == "column generated_uuid" && altered.field == "default"
@@ -931,7 +952,11 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         .find(|column| column.name == "ordinary")
         .expect("ordinary")
         .identity = Some(IdentityCol { always: false });
-    let identity_drift = diff_snapshots(&snapshot, &altered_identity);
+    let identity_drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &snapshot,
+        &altered_identity,
+    );
     for name in ["auto_id", "ordinary"] {
         assert!(
             identity_drift.altered_objects.iter().any(|altered| {
@@ -950,10 +975,14 @@ async fn snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks()
         .expect("auto_id")
         .identity = Some(IdentityCol { always: true });
     assert!(
-        diff_snapshots(&snapshot, &altered_identity)
-            .altered_objects
-            .iter()
-            .any(|altered| { altered.object == "column auto_id" && altered.field == "identity" }),
+        diff_snapshots(
+            zero_migrate::shipping_vendors(),
+            &snapshot,
+            &altered_identity
+        )
+        .altered_objects
+        .iter()
+        .any(|altered| { altered.object == "column auto_id" && altered.field == "identity" }),
         "an always/by-default identity flip must drift"
     );
 }
@@ -978,6 +1007,7 @@ async fn mysql_auto_increment_add_and_drop_are_recovered_from_catalog_extra() {
     };
     let expected = |identity| {
         zero_migrate::render::fold::fold_ops(
+            zero_migrate::shipping_vendors(),
             &[Op::CreateTable {
                 name: "identity_probe".to_string(),
                 columns: vec![column(identity)],
@@ -1039,17 +1069,21 @@ async fn mysql_auto_increment_add_and_drop_are_recovered_from_catalog_extra() {
     let expected_auto = expected(Some(IdentityCol { always: false }));
     let expected_plain = expected(None);
     assert!(
-        diff_snapshots(&expected_auto, &auto).is_clean(),
+        diff_snapshots(zero_migrate::shipping_vendors(), &expected_auto, &auto).is_clean(),
         "portable AUTO_INCREMENT must match catalog EXTRA"
     );
     assert!(
-        diff_snapshots(&expected_plain, &plain).is_clean(),
+        diff_snapshots(zero_migrate::shipping_vendors(), &expected_plain, &plain).is_clean(),
         "portable non-identity key must remain clean"
     );
     for (expected_snapshot, actual_snapshot, label) in
         [(&auto, &plain, "drop"), (&plain, &auto, "add")]
     {
-        let drift = diff_snapshots(expected_snapshot, actual_snapshot);
+        let drift = diff_snapshots(
+            zero_migrate::shipping_vendors(),
+            expected_snapshot,
+            actual_snapshot,
+        );
         assert!(
             drift
                 .altered_objects
@@ -1107,6 +1141,7 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
     }))
     .expect("typed-reference literal fixture must deserialize");
     let expected = zero_migrate::render::fold::fold_ops(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &DIALECT,
         "proj_x",
@@ -1225,7 +1260,7 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
         )),
         "a non-expression MySQL COLUMN_DEFAULT must recover as a string literal"
     );
-    let drift = diff_snapshots(&expected, &clean);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
     assert!(
         drift.is_clean(),
         "bare MySQL COLUMN_DEFAULT literals must match authored typed literals: {drift:#?}"
@@ -1247,7 +1282,7 @@ async fn snapshot_schema_compares_mysql_literal_defaults_on_format_typed_referen
             ))
             .await
             .unwrap_or_else(|error| panic!("{label} literal snapshot: {error}"));
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
         assert!(
             drift.altered_objects.iter().any(|altered| {
                 altered.object == "column parent_id" && altered.field == "default"
@@ -1344,7 +1379,7 @@ async fn snapshot_schema_preserves_mysql_expression_markers_on_fk_columns() {
                 .expect("literal generator spelling serializes")
         ))
     );
-    let drift = diff_snapshots(&expression, &literal);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expression, &literal);
     assert!(
         drift
             .altered_objects
@@ -1391,6 +1426,7 @@ async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catal
     }))
     .expect("MySQL key-format fixture must deserialize");
     let expected = zero_migrate::render::fold::fold_ops(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &DIALECT,
         "proj_x",
@@ -1482,7 +1518,7 @@ async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catal
         check("ulid_keys", &ulid_check),
     ])
     .await;
-    let clean_drift = diff_snapshots(&expected, &clean);
+    let clean_drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &clean);
     assert!(
         clean_drift.is_clean(),
         "authored key formats must match MySQL catalog CHECKs: {clean_drift:#?}"
@@ -1521,7 +1557,11 @@ async fn mysql_key_format_checks_drop_prefix_and_clause_changes_drift_from_catal
         ),
     ] {
         let actual_snapshot = snapshot(checks).await;
-        let drift = diff_snapshots(&expected, &actual_snapshot);
+        let drift = diff_snapshots(
+            zero_migrate::shipping_vendors(),
+            &expected,
+            &actual_snapshot,
+        );
         assert!(
             drift.altered_objects.iter().any(|altered| {
                 altered.table == table
@@ -1559,6 +1599,7 @@ async fn snapshot_schema_rejects_semantically_regrouped_mysql_format_check() {
     }))
     .expect("regrouped TypeID fixture must deserialize");
     let expected = zero_migrate::render::fold::fold_ops(
+        zero_migrate::shipping_vendors(),
         &ir.ops,
         &DIALECT,
         "proj_x",
@@ -1622,7 +1663,7 @@ async fn snapshot_schema_rejects_semantically_regrouped_mysql_format_check() {
         actual.tables["ids"].columns[0].value_format, None,
         "a regrouped nullable guard is not the canonical TypeID contract"
     );
-    let drift = diff_snapshots(&expected, &actual);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift
             .altered_objects
@@ -1702,9 +1743,14 @@ async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() 
             existence_guard: None,
         },
     ];
-    let expected =
-        zero_migrate::render::fold::fold_ops(&ops, &DIALECT, "proj_x", &support::no_inject("app"))
-            .expect("named table UNIQUE and composite FK fold for MySQL");
+    let expected = zero_migrate::render::fold::fold_ops(
+        zero_migrate::shipping_vendors(),
+        &ops,
+        &DIALECT,
+        "proj_x",
+        &support::no_inject("app"),
+    )
+    .expect("named table UNIQUE and composite FK fold for MySQL");
 
     let parent_candidate = expected.tables["parents"]
         .indexes
@@ -1826,7 +1872,7 @@ async fn named_table_unique_candidate_and_composite_fk_have_clean_mysql_drift() 
         ["tenant_id", "external_id"],
         "candidate-key tuple order must survive MySQL introspection"
     );
-    let drift = diff_snapshots(&expected, &actual);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &expected, &actual);
     assert!(
         drift.is_clean(),
         "named table UNIQUE + composite FK must round-trip without false MySQL drift: {drift:?}"
@@ -1841,6 +1887,7 @@ async fn snapshot_failure_aborts_before_author_sql_and_releases_lock() {
     let migration = trivial_migration();
 
     let result = zero_migrate::apply::executor::apply(
+        zero_migrate::shipping_vendors(),
         &backend,
         &cfg,
         &[migration],
@@ -1870,6 +1917,7 @@ async fn active_caller_transaction_is_rejected_before_autocommit_or_author_sql()
     let migration = trivial_migration();
 
     let result = zero_migrate::apply::executor::apply(
+        zero_migrate::shipping_vendors(),
         &backend,
         &cfg,
         &[migration],
@@ -1906,6 +1954,7 @@ async fn successful_apply_surfaces_restore_failure_after_releasing_lock() {
     let migration = trivial_migration();
 
     let result = zero_migrate::apply::executor::apply(
+        zero_migrate::shipping_vendors(),
         &backend,
         &cfg,
         &[migration],
@@ -1939,7 +1988,7 @@ async fn whole_plan_preflight_refuses_delete_before_earlier_insert() {
     let (insert, _) = plan_dml_step("insert user", false);
     let (delete, delete_version) = plan_dml_step("delete user", true);
 
-    let result = zero_migrate::MigrationEngine::new()
+    let result = zero_migrate::MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan_with_touched_and_depends_scoped(
             &[insert, delete],
             &["users".into()],

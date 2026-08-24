@@ -143,6 +143,7 @@ async fn empty_ir_plan_anchor_applies_once_and_then_skips() {
     }))
     .expect("empty IR parses");
     let plan = zero_migrate::IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app",
         "app_test",
         &zero_migrate_sqlite::DIALECT,

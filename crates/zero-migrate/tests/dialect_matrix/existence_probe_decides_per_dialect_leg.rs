@@ -27,17 +27,17 @@ use zero_migrate_sqlite::DIALECT as SQLITE;
 
 /// `decide` on the PG leg (raw `information_schema` compare).
 fn decide_pg(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
-    decide(probe, live, &POSTGRES)
+    decide(zero_migrate::shipping_vendors(), probe, live, &POSTGRES)
 }
 
 /// `decide` on the SQLite leg (affinity-fold compare — F1).
 fn decide_sqlite(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
-    decide(probe, live, &SQLITE)
+    decide(zero_migrate::shipping_vendors(), probe, live, &SQLITE)
 }
 
 /// `decide` on the MySQL leg (constraint-first catalog resolution).
 fn decide_mysql(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {
-    decide(probe, live, &MYSQL)
+    decide(zero_migrate::shipping_vendors(), probe, live, &MYSQL)
 }
 
 /// PostgreSQL's own catalog normalization, taken from PostgreSQL's own vendor
@@ -438,7 +438,12 @@ fn index_ownership_only_ignores_a_foreign_owner_where_names_are_per_table() {
     let mut live = snapshot_with("users", table_owning("idx_shared"));
     live.tables.insert("orders".to_string(), empty_table());
     assert_eq!(
-        decide(&ownership_probe("orders", "idx_shared"), &live, &MYSQL),
+        decide(
+            zero_migrate::shipping_vendors(),
+            &ownership_probe("orders", "idx_shared"),
+            &live,
+            &MYSQL
+        ),
         GuardVerdict::RunBare
     );
 }

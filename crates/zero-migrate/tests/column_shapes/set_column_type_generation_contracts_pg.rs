@@ -220,6 +220,7 @@ impl<'a> Deployment<'a> {
             .map_err(|error| format!("introspect the live PostgreSQL schema: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(catalog, OWNER);
         let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             &self.cfg.project_schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -238,7 +239,7 @@ impl<'a> Deployment<'a> {
                 _ => None,
             })
             .collect();
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -285,6 +286,7 @@ impl<'a> Deployment<'a> {
     /// The fold of every op applied so far, compared against the live catalog.
     async fn drift(&self, ops: &[zero_migrate::model::ir::Op]) -> Result<StructuralDrift, String> {
         let expected = fold_ops(
+            zero_migrate::shipping_vendors(),
             ops,
             &zero_migrate_postgres::DIALECT,
             &self.cfg.project_schema,
@@ -294,7 +296,11 @@ impl<'a> Deployment<'a> {
         let actual = snapshot_schema(self.session, &self.cfg.project_schema)
             .await
             .map_err(|error| format!("snapshot the live PostgreSQL schema: {error}"))?;
-        Ok(diff_snapshots(&expected, &actual))
+        Ok(diff_snapshots(
+            zero_migrate::shipping_vendors(),
+            &expected,
+            &actual,
+        ))
     }
 
     async fn close(&self) -> Result<(), String> {

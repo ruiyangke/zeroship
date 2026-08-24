@@ -586,18 +586,24 @@ async fn apply_envelope<B: MigrationBackend>(
         .map_err(|error| format!("{tag}: resolve create-table policy: {error}"))?;
     let source = serde_json::to_string(&resolved)
         .map_err(|error| format!("{tag}: re-serialize the resolved envelope: {error}"))?;
-    let artifact = match IrAuthor::new(&cfg.project_schema, OWNER, dialect, policy)
-        .load_and_lower_guarded(
-            &source,
-            OWNER,
-            &registry(),
-            live,
-            &GuardConfig::from_policy(policy.clone(), dialect.clone()),
-        ) {
+    let artifact = match IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        &cfg.project_schema,
+        OWNER,
+        dialect,
+        policy,
+    )
+    .load_and_lower_guarded(
+        &source,
+        OWNER,
+        &registry(),
+        live,
+        &GuardConfig::from_policy(policy.clone(), dialect.clone()),
+    ) {
         Ok(artifact) => artifact,
         Err(error) => return Ok(Err(error)),
     };
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -630,8 +636,14 @@ async fn live_schema_now<B: MigrationBackend>(
         .map_err(|error| format!("read the applied schema back: {error}"))?;
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
     if dialect == &zero_migrate_sqlite::DIALECT {
-        if let Ok(defs) = single_fold::fold(history, dialect, &cfg.project_schema, policy)
-            .map(|folded| folded.project_field_defs())
+        if let Ok(defs) = single_fold::fold(
+            zero_migrate::shipping_vendors(),
+            history,
+            dialect,
+            &cfg.project_schema,
+            policy,
+        )
+        .map(|folded| folded.project_field_defs())
         {
             live.sdk_schemas = defs;
         }

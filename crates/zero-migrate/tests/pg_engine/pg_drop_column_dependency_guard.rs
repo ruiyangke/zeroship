@@ -98,6 +98,7 @@ async fn lower_drop_steps(
     let policy = support::no_inject(&cfg.project_schema);
     let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -121,7 +122,7 @@ async fn apply_steps(
     steps: &[PlanStep],
 ) -> Result<(), DeclarativeApplyError> {
     let backend = PostgresBackend::new_generic(session);
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             steps,
             Approval::Approved,

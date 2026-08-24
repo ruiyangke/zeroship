@@ -43,6 +43,7 @@ fn desired_snapshot(
     effective: &EffectivePolicy,
 ) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
     zero_migrate::desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         project_schema,
         descriptors,
         &zero_migrate_sqlite::DIALECT,
@@ -72,7 +73,12 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT)
+    DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_sqlite::DIALECT,
+    )
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -269,7 +275,7 @@ fn rename_plan(
 
 #[compio::test]
 async fn golden_b_sqlite_rename_rebuild() {
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let cfg = exec_cfg();
 
     async fn run_one(engine: &MigrationEngine, cfg: &ExecutorConfig, leg: &str) -> String {
@@ -349,7 +355,7 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
     use zero_migrate::OnlineIntent;
     use zero_migrate::{PlanStep, RenameStep};
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let cfg = exec_cfg();
     let p = paths("golden_g");
     let be = backend(&p);
@@ -359,14 +365,19 @@ async fn golden_g_sqlite_pg_rename_fails_closed() {
     // backend (online() == None). The differ never produces this on SQLite; we
     // construct it directly to prove the apply_plan dispatch fails closed rather
     // than silently dropping the rename (the fail-closed invariant).
-    let rename = ExpandContractAuthor::new(PROJECT, APP, zero_migrate_postgres::DIALECT)
-        .author(&OnlineIntent::RenameColumn {
-            table: "people".into(),
-            from: "nickname".into(),
-            to: "handle".into(),
-            ty: "text".into(),
-        })
-        .expect("author rename");
+    let rename = ExpandContractAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_postgres::DIALECT,
+    )
+    .author(&OnlineIntent::RenameColumn {
+        table: "people".into(),
+        from: "nickname".into(),
+        to: "handle".into(),
+        ty: "text".into(),
+    })
+    .expect("author rename");
     let rename_version = rename.group_version().as_str().to_string();
     let steps = vec![PlanStep::OnlineRename(RenameStep::ExpandContract(rename))];
     let res = engine

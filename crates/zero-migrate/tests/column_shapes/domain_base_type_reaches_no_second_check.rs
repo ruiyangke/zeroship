@@ -71,16 +71,22 @@ fn amounts_ir() -> MigrationIr {
 }
 
 fn lowered_sql(dialect: &zero_migrate::DialectId) -> String {
-    IrAuthor::new(PROJECT, APP, dialect, &support::no_inject(PROJECT))
-        .lower_steps(&amounts_ir(), &LiveSchema::default())
-        .unwrap_or_else(|error| panic!("{dialect:?} lowers the domain table: {error}"))
-        .iter()
-        .filter_map(|step| match step {
-            PlanStep::Ddl(migration) => Some(migration.up.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        dialect,
+        &support::no_inject(PROJECT),
+    )
+    .lower_steps(&amounts_ir(), &LiveSchema::default())
+    .unwrap_or_else(|error| panic!("{dialect:?} lowers the domain table: {error}"))
+    .iter()
+    .filter_map(|step| match step {
+        PlanStep::Ddl(migration) => Some(migration.up.clone()),
+        _ => None,
+    })
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 /// PostgreSQL: the column IS the native domain type and the constraint lives on the
@@ -160,7 +166,14 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
         // name is a domain OVER.
         (&zero_migrate_postgres::DIALECT, "public.positive_number"),
     ] {
-        let snapshot = fold_ops(&ops, dialect, PROJECT, &effective).expect("the history folds");
+        let snapshot = fold_ops(
+            zero_migrate::shipping_vendors(),
+            &ops,
+            dialect,
+            PROJECT,
+            &effective,
+        )
+        .expect("the history folds");
         let column = snapshot.tables["amounts"]
             .columns
             .iter()
@@ -171,9 +184,15 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
             "{dialect:?}: the snapshot fold's storage for the domain column"
         );
 
-        let defs = single_fold::fold(&ops, dialect, PROJECT, &effective)
-            .map(|folded| folded.project_field_defs())
-            .expect("the field-def replay folds");
+        let defs = single_fold::fold(
+            zero_migrate::shipping_vendors(),
+            &ops,
+            dialect,
+            PROJECT,
+            &effective,
+        )
+        .map(|folded| folded.project_field_defs())
+        .expect("the field-def replay folds");
         assert_eq!(
             defs["amounts"]["amount"]["type"], "int",
             "{dialect:?}: and the field-def replay agrees it is an integer, instead of \
@@ -206,13 +225,25 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
 fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
     let ops = amounts_ir().ops;
     let effective = support::no_inject(PROJECT);
-    let snapshot = fold_ops(&ops, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
-        .expect("the history folds");
+    let snapshot = fold_ops(
+        zero_migrate::shipping_vendors(),
+        &ops,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
-    live.sdk_schemas = single_fold::fold(&ops, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the field-def replay folds");
+    live.sdk_schemas = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        &ops,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the field-def replay folds");
 
     let rename = MigrationIr {
         inverse_ops: None,
@@ -235,9 +266,15 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
         checksum: None,
     };
 
-    let steps = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective)
-        .lower_steps(&rename, &live)
-        .expect("the rename lowers to a rebuild");
+    let steps = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        &zero_migrate_sqlite::DIALECT,
+        &effective,
+    )
+    .lower_steps(&rename, &live)
+    .expect("the rename lowers to a rebuild");
     let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {
         panic!("a SQLite renameColumn lowers to one rebuild step: {steps:#?}");
     };

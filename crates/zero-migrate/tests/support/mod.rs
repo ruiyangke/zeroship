@@ -138,10 +138,13 @@ pub fn confined_charter() -> EffectivePolicy {
 /// the charter. The dialect is the only field that selects anything.
 #[must_use]
 pub fn sqlite_line1_guard() -> Box<dyn zero_migrate::guard::MigrationGuard> {
-    zero_migrate::guard_for(&zero_migrate::guard::GuardConfig::from_policy(
-        no_inject("main"),
-        zero_migrate_sqlite::DIALECT,
-    ))
+    zero_migrate::guard_for(
+        zero_migrate::shipping_vendors(),
+        &zero_migrate::guard::GuardConfig::from_policy(
+            no_inject("main"),
+            zero_migrate_sqlite::DIALECT,
+        ),
+    )
 }
 
 #[must_use]
@@ -971,6 +974,7 @@ pub async fn apply_pg<D: zero_migrate::driver::SqlSession>(
     applied_by: &str,
 ) -> Result<zero_migrate::ApplyOutcome, zero_migrate::ApplyError> {
     zero_migrate::apply(
+        zero_migrate::shipping_vendors(),
         &zero_migrate_postgres::PostgresBackend::new_generic(conn),
         cfg,
         migrations,

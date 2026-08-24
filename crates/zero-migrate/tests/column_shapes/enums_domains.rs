@@ -91,7 +91,13 @@ fn create_domain() -> Op {
 }
 
 fn lower_all(dialect: &zero_migrate::DialectId, ops: Vec<Op>) -> Vec<String> {
-    let author = IrAuthor::new(SCHEMA, OWNER, dialect, &support::no_inject("app"));
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        OWNER,
+        dialect,
+        &support::no_inject("app"),
+    );
     author
         .lower(&ir(ops), &LiveSchema::default())
         .unwrap()
@@ -250,6 +256,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
         ..Default::default()
     };
     let folded = zero_migrate::fold_ops_onto(
+        zero_migrate::shipping_vendors(),
         &base,
         &ops,
         &zero_migrate_postgres::DIALECT,
@@ -359,6 +366,7 @@ fn mysql_enum_and_domain_inline_at_column_use_site() {
 #[test]
 fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -397,6 +405,7 @@ fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
 #[test]
 fn pg_guarded_type_drops_stamp_named_type_probes() {
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         SCHEMA,
         OWNER,
         &zero_migrate_postgres::DIALECT,

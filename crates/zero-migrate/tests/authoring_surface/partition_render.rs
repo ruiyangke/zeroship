@@ -68,6 +68,7 @@ fn ir_ops(ops: Vec<Op>) -> MigrationIr {
 
 fn pg_sql(op: Op) -> Vec<String> {
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "app",
         "app_partition",
         &zero_migrate_postgres::DIALECT,
@@ -171,6 +172,7 @@ fn insert_events(rows: &[(i64, &str)]) -> Op {
 
 fn partition_live_from_fold(ops: &[Op]) -> LiveSchema {
     let snap = fold_ops(
+        zero_migrate::shipping_vendors(),
         ops,
         &zero_migrate_sqlite::DIALECT,
         "prj_partition",
@@ -199,6 +201,7 @@ fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zero_mig
     let mut migration = ir_ops(ops);
     migration.name = format!("partition_render_{}", std::panic::Location::caller().line());
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "prj_partition",
         "app_partition",
         &zero_migrate_sqlite::DIALECT,
@@ -226,7 +229,7 @@ async fn apply_sqlite_partition_steps(
     approval: Approval,
 ) -> Result<zero_migrate::DeclarativeDeployOutcome, zero_migrate::DeclarativeApplyError> {
     let cfg = partition_exec_cfg();
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             steps,
             approval,
@@ -327,10 +330,16 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
 
     let ops = collapse_events_ops();
     let migration_ir = ir_ops(ops);
-    validate_ir_scoped(&migration_ir, &zero_migrate_sqlite::DIALECT, None)
-        .expect("collapse-affirmed partition recording validates on SQLite");
+    validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
+        &migration_ir,
+        &zero_migrate_sqlite::DIALECT,
+        None,
+    )
+    .expect("collapse-affirmed partition recording validates on SQLite");
 
     let steps = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         "prj_partition",
         "app_partition",
         &zero_migrate_sqlite::DIALECT,
@@ -772,7 +781,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
     for (label, op) in cases {
         let migration = ir(op);
         for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-            let err = validate_ir(&migration, dialect)
+            let err = validate_ir(zero_migrate::shipping_vendors(), &migration, dialect)
                 .expect_err(&format!("{label} must be refused on {dialect:?}"));
             assert_eq!(
                 err.code, CODE_UNSUPPORTED,
@@ -780,8 +789,12 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
             );
         }
         // The same op validates cleanly on PostgreSQL.
-        validate_ir(&migration, &zero_migrate_postgres::DIALECT)
-            .unwrap_or_else(|e| panic!("{label} must validate on Postgres: {e:?}"));
+        validate_ir(
+            zero_migrate::shipping_vendors(),
+            &migration,
+            &zero_migrate_postgres::DIALECT,
+        )
+        .unwrap_or_else(|e| panic!("{label} must validate on Postgres: {e:?}"));
     }
 }
 
@@ -849,7 +862,7 @@ fn attach_partition_refused_fail_closed_off_pg() {
         int_bound(200),
     ));
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
-        let err = validate_ir_scoped(&migration, dialect, None)
+        let err = validate_ir_scoped(zero_migrate::shipping_vendors(), &migration, dialect, None)
             .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
         assert!(
             matches!(err.code.as_str(), CODE_UNSUPPORTED | CODE_VENDOR_OP_DENIED),

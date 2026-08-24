@@ -80,12 +80,14 @@ async fn apply_doc(
         .expect("test IR resolves");
     let ir = serde_json::to_string(&resolved).expect("resolved IR serializes");
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         APP,
         &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let document = zero_migrate::model::load::load_ir_document(
+        zero_migrate::shipping_vendors(),
         &ir,
         APP,
         &zero_migrate_sqlite::DIALECT,
@@ -98,7 +100,7 @@ async fn apply_doc(
     let plan = author
         .lower_plan(&document, &live)
         .expect("lower the doc plan on SQLite");
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     engine
         .apply_plan(
             &plan.steps,
@@ -169,8 +171,11 @@ async fn apply_doc(
 fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
     for t in snap.tables.values_mut() {
         for c in &mut t.columns {
-            c.data_type = zero_migrate::schema::query::renderer(&zero_migrate_sqlite::DIALECT)
-                .canonical_type(&c.data_type);
+            c.data_type = zero_migrate::schema::query::renderer(
+                zero_migrate::shipping_vendors(),
+                &zero_migrate_sqlite::DIALECT,
+            )
+            .canonical_type(&c.data_type);
         }
         // Drop every PRIMARY KEY constraint + its implicit same-named index.
         let pk_names: Vec<String> = t
@@ -203,6 +208,7 @@ async fn assert_matches_live(be: &SqliteBackend, ops: &[Op], stage: &str) {
         .await
         .unwrap_or_else(|error| panic!("{stage}: introspect live SQLite schema: {error}"));
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         ops,
         &zero_migrate_sqlite::DIALECT,
         PROJECT,

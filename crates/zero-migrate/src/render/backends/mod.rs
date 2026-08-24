@@ -128,6 +128,27 @@ use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 /// The set is still a compile-time constant rather than a global the host fills at
 /// startup, and that is deliberate — see `zero_migrate_backend::registry` for why a
 /// growable registry would trade a compile error for a runtime one.
+///
+/// # It is READ here and nowhere else, and that is the point
+///
+/// Every resolver below takes the set as its first argument, and every caller of one
+/// takes it from its own caller — as a parameter, or as a field on a struct that
+/// already carries the dialect it is about to resolve. `IrAuthor`,
+/// `DeclarativeAuthor`, `ExpandContractAuthor`, `CatalogFold`, `MigrationEngine` and
+/// the raw/deterministic authors all carry it, so their methods pay no signature for
+/// it at all.
+///
+/// The set used to be named directly from all over the engine — validation, folding,
+/// lowering, drift, support — because it was a `const` in the same crate and there
+/// was nothing to stop it. Each of those was the engine reaching past its own caller
+/// to the one place that knows which vendor crates exist, which is exactly the
+/// dependency the composition is supposed to be the ONLY holder of. Threading it
+/// makes that dependency an argument, and an argument can be supplied from outside
+/// the crate.
+///
+/// [`crate::shipping_vendors`] is how a host asks for the same value, and
+/// `tests/dialect_matrix/the_registry_travels_as_a_value.rs` is what keeps the list
+/// of places that may name it from growing back.
 const POSTGRES_VENDOR: &BackendVendor = &zero_migrate_postgres::VENDOR;
 const SQLITE_VENDOR: &BackendVendor = &zero_migrate_sqlite::VENDOR;
 const MYSQL_VENDOR: &BackendVendor = &zero_migrate_mysql::VENDOR;
@@ -162,6 +183,19 @@ pub(crate) const VENDORS: VendorSet = VendorSet::new(&SHIPPING);
 ///
 /// [`tightest_identifier_budget`] is that fold. It also removes the panic, which
 /// existed only because a one-vendor lookup had two arms it could not answer.
+///
+/// # It is the one reader of the set that cannot take it as an argument
+///
+/// Every other reader was threaded: the resolvers take a [`VendorSet`], and their
+/// callers carry one. This is a `const`, so it is evaluated where the composition is
+/// visible and consumed by callers who never see the set at all — five files spell
+/// `GENERATED_IDENT_MAX_BYTES` and none of them holds a registry.
+///
+/// That is a real property and not an oversight: the budget is a COMPILE-TIME fact
+/// about the build, checked before any name is minted rather than recomputed per
+/// call. Turning it into a runtime fold would buy neutrality at the cost of the
+/// evaluation, which is a trade worth making deliberately rather than absorbing as a
+/// side effect of moving the composition out.
 pub(crate) const GENERATED_IDENT_MAX_BYTES: usize = tightest_identifier_budget(VENDORS);
 
 /// The smallest generated-name byte budget every backend in `vendors` can hold.
@@ -203,37 +237,40 @@ const fn tightest_identifier_budget(vendors: VendorSet) -> usize {
 /// Resolved by the open [`DialectId`] filed in
 /// each [`BackendVendor`], never by an enum match in core. The shipping list above is
 /// the one composition point that names backend crates.
-pub(crate) fn vendor(dialect: &DialectId) -> &'static BackendVendor {
-    VENDORS
+pub(crate) fn vendor(vendors: VendorSet, dialect: &DialectId) -> &'static BackendVendor {
+    vendors
         .get(dialect)
         .unwrap_or_else(|| panic!("no registered backend vendor for {dialect}"))
 }
 
 /// The DML renderer for a dialect.
-pub(crate) fn renderer(dialect: &DialectId) -> &'static dyn DmlRenderer {
-    vendor(dialect).dml
+pub(crate) fn renderer(vendors: VendorSet, dialect: &DialectId) -> &'static dyn DmlRenderer {
+    vendor(vendors, dialect).dml
 }
 
 /// The schema renderer for a dialect. Re-exported as `schema::query::renderer`.
 pub(crate) fn schema_renderer(
+    vendors: VendorSet,
     dialect: &DialectId,
 ) -> &'static dyn zero_migrate_backend::schema::SchemaRenderer {
-    vendor(dialect).schema
+    vendor(vendors, dialect).schema
 }
 
 /// The value-format renderer and catalog normalizer registered by a dialect's vendor.
 pub(crate) fn value_format_renderer(
+    vendors: VendorSet,
     dialect: &DialectId,
 ) -> &'static dyn zero_migrate_backend::value_format::ValueFormatRenderer {
-    vendor(dialect).value_format
+    vendor(vendors, dialect).value_format
 }
 
 /// Every shipping value-format renderer, used only when a legacy snapshot has
 /// no backend provenance and the neutral comparator must compose the vendors'
 /// explicitly declared normalization rules.
 pub(crate) fn value_format_renderers(
+    vendors: VendorSet,
 ) -> impl Iterator<Item = &'static dyn zero_migrate_backend::value_format::ValueFormatRenderer> {
-    VENDORS.as_slice().iter().map(|vendor| vendor.value_format)
+    vendors.as_slice().iter().map(|vendor| vendor.value_format)
 }
 
 /* `pub(crate) fn stored_ddl(dialect)` USED TO LIVE HERE. Its only caller was
@@ -247,8 +284,12 @@ pub(crate) fn value_format_renderers(
  */
 
 /// The schema-bound DDL emitter registered by a dialect's vendor crate.
-pub(crate) fn ddl_emitter(dialect: &DialectId, project_schema: &str) -> Box<dyn DdlEmitter> {
-    (vendor(dialect).ddl)(project_schema)
+pub(crate) fn ddl_emitter(
+    vendors: VendorSet,
+    dialect: &DialectId,
+    project_schema: &str,
+) -> Box<dyn DdlEmitter> {
+    (vendor(vendors, dialect).ddl)(project_schema)
 }
 
 /// The LINE-1 guard for a config's dialect — this vendor's, built by this vendor.
@@ -268,8 +309,8 @@ pub(crate) fn ddl_emitter(dialect: &DialectId, project_schema: &str) -> Box<dyn 
 /// SQLite and MySQL no longer share a guard TYPE either; each writes its own trusting
 /// impl, so a change to one dialect's posture cannot silently become a change to the
 /// other's.
-pub(crate) fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
-    (vendor(cfg.dialect()).guard)(cfg)
+pub(crate) fn guard_for(vendors: VendorSet, cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
+    (vendor(vendors, cfg.dialect()).guard)(cfg)
 }
 
 /// The OPERATIONAL analyzer for a dialect — this vendor's, run by this vendor.
@@ -280,8 +321,8 @@ pub(crate) fn guard_for(cfg: &GuardConfig) -> Box<dyn MigrationGuard> {
 /// engine ran the PostgreSQL parser over every backend's DDL and reported the
 /// resulting parse failures as a clean, empty advisory list. That was the whole of
 /// the engine's advisory routing, and it named a parser rather than a vendor.
-pub(crate) fn advisor(dialect: &DialectId) -> &'static dyn OperationalAdvisor {
-    vendor(dialect).advisor
+pub(crate) fn advisor(vendors: VendorSet, dialect: &DialectId) -> &'static dyn OperationalAdvisor {
+    vendor(vendors, dialect).advisor
 }
 
 /// The operational advisories the backend registered for `dialect` finds in `sql`.
@@ -290,8 +331,8 @@ pub(crate) fn advisor(dialect: &DialectId) -> &'static dyn OperationalAdvisor {
 /// [`AdvisoryVerdict`] for why a
 /// backend with no analyzer must not answer with an empty vector.
 #[must_use]
-pub fn advisories_for_sql(dialect: &DialectId, sql: &str) -> AdvisoryVerdict {
-    advisor(dialect).advise(sql)
+pub fn advisories_for_sql(vendors: VendorSet, dialect: &DialectId, sql: &str) -> AdvisoryVerdict {
+    advisor(vendors, dialect).advise(sql)
 }
 
 /// Whether the backend registered for `dialect` ships an operational analyzer at
@@ -301,8 +342,8 @@ pub fn advisories_for_sql(dialect: &DialectId, sql: &str) -> AdvisoryVerdict {
 /// tell an operator the whole set is unchecked before it renders the first statement
 /// — and still say so when the set renders to nothing.
 #[must_use]
-pub fn analyzer_absence(dialect: &DialectId) -> Option<AnalyzerAbsent> {
-    advisor(dialect).analyzer_absence()
+pub fn analyzer_absence(vendors: VendorSet, dialect: &DialectId) -> Option<AnalyzerAbsent> {
+    advisor(vendors, dialect).analyzer_absence()
 }
 
 /// Every identifier prefix any REGISTERED backend reserves for its own catalog,
@@ -321,8 +362,10 @@ pub fn analyzer_absence(dialect: &DialectId) -> Option<AnalyzerAbsent> {
 /// platform reserved-name table. Between them they made two backends' catalog
 /// conventions part of the neutral name validator, and left a fourth backend's
 /// reservation with nowhere to be declared.
-pub(crate) fn reserved_catalog_prefixes() -> impl Iterator<Item = (&'static str, &'static str)> {
-    VENDORS.as_slice().iter().flat_map(|vendor| {
+pub(crate) fn reserved_catalog_prefixes(
+    vendors: VendorSet,
+) -> impl Iterator<Item = (&'static str, &'static str)> {
+    vendors.as_slice().iter().flat_map(|vendor| {
         vendor
             .descriptor
             .limits
@@ -348,9 +391,10 @@ pub(crate) fn reserved_catalog_prefixes() -> impl Iterator<Item = (&'static str,
 /// says "target one of: " has told the operator nothing. Callers spell that case
 /// themselves.
 pub(crate) fn targets_declaring(
+    vendors: VendorSet,
     capability: zero_migrate_ir::backend::Capability,
 ) -> Option<String> {
-    let able: Vec<&str> = VENDORS
+    let able: Vec<&str> = vendors
         .as_slice()
         .iter()
         .filter(|vendor| vendor.descriptor.capabilities.contains(capability))
@@ -365,8 +409,8 @@ pub(crate) fn targets_declaring(
 
 /// The index-coverage facts `dialect`'s backend reads out of `sql`, for the
 /// plan-wide `FK_WITHOUT_INDEX` suppression.
-pub(crate) fn index_coverage(dialect: &DialectId, sql: &str) -> IndexCoverage {
-    advisor(dialect).index_coverage(sql)
+pub(crate) fn index_coverage(vendors: VendorSet, dialect: &DialectId, sql: &str) -> IndexCoverage {
+    advisor(vendors, dialect).index_coverage(sql)
 }
 
 #[cfg(test)]
@@ -375,9 +419,12 @@ mod tests {
 
     #[test]
     fn dispatch_returns_expected_dml_renderer() {
-        assert_eq!(renderer(&POSTGRES).synth_now(), "now()");
-        assert_eq!(renderer(&SQLITE).synth_now(), "CURRENT_TIMESTAMP");
-        assert_eq!(renderer(&MYSQL).synth_now(), "CURRENT_TIMESTAMP(6)");
+        assert_eq!(renderer(VENDORS, &POSTGRES).synth_now(), "now()");
+        assert_eq!(renderer(VENDORS, &SQLITE).synth_now(), "CURRENT_TIMESTAMP");
+        assert_eq!(
+            renderer(VENDORS, &MYSQL).synth_now(),
+            "CURRENT_TIMESTAMP(6)"
+        );
     }
 
     /// The registry composes, and it composes through the LEAF crate's builder
@@ -505,8 +552,8 @@ mod tests {
         };
         let expected = "CONSTRAINT \"fk\"\"child\" FOREIGN KEY (\"child\"\"col\") REFERENCES \"project\"\"schema\".\"parents\" (id, \"parent\"\"col\") ON DELETE CASCADE";
 
-        let sqlite = ddl_emitter(&SQLITE, "project\"schema").fk_clause(&fk);
-        let postgres = ddl_emitter(&POSTGRES, "project\"schema").fk_clause(&fk);
+        let sqlite = ddl_emitter(VENDORS, &SQLITE, "project\"schema").fk_clause(&fk);
+        let postgres = ddl_emitter(VENDORS, &POSTGRES, "project\"schema").fk_clause(&fk);
         assert_eq!(sqlite, expected);
         assert_eq!(sqlite, postgres);
     }

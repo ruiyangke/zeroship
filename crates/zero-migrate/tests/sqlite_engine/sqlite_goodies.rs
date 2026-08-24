@@ -54,7 +54,12 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT)
+    DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        zero_migrate_sqlite::DIALECT,
+    )
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
@@ -109,6 +114,7 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
     };
 
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
         &zero_migrate_sqlite::DIALECT,
@@ -149,6 +155,7 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
     let desired2 = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
         &zero_migrate_sqlite::DIALECT,
@@ -195,6 +202,7 @@ async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
         runtime_options: Default::default(),
     };
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
         &zero_migrate_sqlite::DIALECT,
@@ -246,6 +254,7 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
         runtime_options: Default::default(),
     };
     let desired = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
         &zero_migrate_sqlite::DIALECT,
@@ -298,6 +307,7 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
     let desired2 = desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         PROJECT,
         &[mk()],
         &zero_migrate_sqlite::DIALECT,

@@ -50,15 +50,21 @@ fn lower_create_table(raw: &str, dialect: &DialectId) -> Result<Vec<String>, Str
     let bytes = format!(
         r#"{{"ir_version":1,"name":"hostile","ops":[{{"op":"createTable","name":"{raw}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}]}}"#
     );
-    let artifact = IrAuthor::new(PROJECT, APP, dialect, &support::confined_charter())
-        .load_and_lower_guarded(
-            &bytes,
-            APP,
-            &BTreeMap::new(),
-            &LiveSchema::default(),
-            &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone()),
-        )
-        .map_err(|e| format!("{e:?}"))?;
+    let artifact = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT,
+        APP,
+        dialect,
+        &support::confined_charter(),
+    )
+    .load_and_lower_guarded(
+        &bytes,
+        APP,
+        &BTreeMap::new(),
+        &LiveSchema::default(),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone()),
+    )
+    .map_err(|e| format!("{e:?}"))?;
     Ok(artifact
         .plan
         .steps
@@ -184,7 +190,7 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
             .await
             .expect("seed the table the payload tries to drop");
 
-        let artifact = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &support::confined_charter())
+        let artifact = IrAuthor::new(zero_migrate::shipping_vendors(), PROJECT, APP, &zero_migrate_sqlite::DIALECT, &support::confined_charter())
             .load_and_lower_guarded(
                 &format!(
                     r#"{{"ir_version":1,"name":"hostile","ops":[{{"op":"createTable","name":"{raw}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}]}}"#
@@ -207,7 +213,7 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
             )
         });
 
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,
@@ -292,7 +298,7 @@ async fn an_awkward_identifier_survives_a_real_database_unchanged() {
             .unwrap_or_else(|e| panic!("{label}: a legal identifier must lower: {e}"));
         assert!(!statements.is_empty(), "{label}: nothing was rendered");
 
-        let artifact = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &support::confined_charter())
+        let artifact = IrAuthor::new(zero_migrate::shipping_vendors(), PROJECT, APP, &zero_migrate_sqlite::DIALECT, &support::confined_charter())
             .load_and_lower_guarded(
                 &format!(
                     r#"{{"ir_version":1,"name":"hostile","ops":[{{"op":"createTable","name":"{raw}","columns":[{{"name":"c0","type":"bigInt","nullable":false}}],"primaryKey":["c0"]}}]}}"#
@@ -304,7 +310,7 @@ async fn an_awkward_identifier_survives_a_real_database_unchanged() {
             )
             .expect("lower for apply");
 
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .apply_plan(
                 &artifact.plan.steps,
                 Approval::Approved,

@@ -263,7 +263,13 @@ fn lower_envelope_to_plan_with_live_and_resolved_ir(
     let resolved_bytes = serde_json::to_string(&resolved)
         .map_err(|e| format!("resolved IR failed to serialize: {e}"))?;
 
-    let author = IrAuthor::new(project_schema, owner_app, &dialect, &effective);
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        project_schema,
+        owner_app,
+        &dialect,
+        &effective,
+    );
 
     // Use the GUARDED lower — the SAME entry the IR envelope deploy path uses
     // (`load_and_lower_guarded` in `render/lower.rs`). This matters for JOURNAL
@@ -444,8 +450,14 @@ fn merge_recovered_definitions(
     // Onto an EXPLICITLY empty snapshot, which is what makes this a reconstruction of what the
     // history created rather than a second application of it over the catalog.
     let empty = zero_migrate::model::snapshot::SchemaSnapshot::default();
-    let Ok(recovered) = fold_ops_onto(&empty, history_ops, dialect, project_schema, effective)
-    else {
+    let Ok(recovered) = fold_ops_onto(
+        zero_migrate::shipping_vendors(),
+        &empty,
+        history_ops,
+        dialect,
+        project_schema,
+        effective,
+    ) else {
         return;
     };
     for (name, view) in recovered.views {
@@ -623,6 +635,7 @@ fn lower_ordered_envelopes_to_plans_inner(
                 let mut candidate = pending_ops.clone();
                 candidate.push(op.clone());
                 match fold_ops_onto(
+                    zero_migrate::shipping_vendors(),
                     &base_snapshot,
                     &candidate,
                     &dialect,
@@ -746,6 +759,7 @@ fn lower_ordered_envelopes_to_plans_inner(
                 );
             }
             let projected = fold_ops_onto(
+                zero_migrate::shipping_vendors(),
                 &base_snapshot,
                 &pending_ops,
                 &dialect,
@@ -762,13 +776,19 @@ fn lower_ordered_envelopes_to_plans_inner(
             live = live_schema_with_ownership(projected, owner_app, &registry);
             live.logical_columns = logical_columns;
         }
-        live.advance_logical_columns(&resolved, &dialect, project_schema, None)
-            .map_err(|error| {
-                format!(
-                    "failed to advance logical project schema after envelope {:?}: {error}",
-                    resolved.name
-                )
-            })?;
+        live.advance_logical_columns(
+            zero_migrate::shipping_vendors(),
+            &resolved,
+            &dialect,
+            project_schema,
+            None,
+        )
+        .map_err(|error| {
+            format!(
+                "failed to advance logical project schema after envelope {:?}: {error}",
+                resolved.name
+            )
+        })?;
         artifacts.push(artifact);
     }
 
@@ -1118,9 +1138,13 @@ fn synthetic_rename_source_column(
     project_schema: &str,
     effective: &EffectivePolicy,
 ) -> Result<zero_migrate::model::snapshot::ColumnSnapshot, String> {
-    if let Some((data_type, _authored_ddl_type)) =
-        zero_migrate::render::lower::named_type_metadata(ty, dialect, project_schema)
-            .map_err(|error| format!("failed to reconstruct historical named type: {error}"))?
+    if let Some((data_type, _authored_ddl_type)) = zero_migrate::render::lower::named_type_metadata(
+        zero_migrate::shipping_vendors(),
+        ty,
+        dialect,
+        project_schema,
+    )
+    .map_err(|error| format!("failed to reconstruct historical named type: {error}"))?
     {
         return Ok(zero_migrate::model::snapshot::ColumnSnapshot {
             name: from.to_string(),
@@ -1151,8 +1175,15 @@ fn synthetic_rename_source_column(
         schema: None,
         existence_guard: None,
     };
-    let projected = fold_ops_onto(&base, &[add], dialect, project_schema, effective)
-        .map_err(|error| format!("failed to reconstruct historical rename type: {error}"))?;
+    let projected = fold_ops_onto(
+        zero_migrate::shipping_vendors(),
+        &base,
+        &[add],
+        dialect,
+        project_schema,
+        effective,
+    )
+    .map_err(|error| format!("failed to reconstruct historical rename type: {error}"))?;
     let mut column = projected
         .tables
         .get(table)
@@ -1355,7 +1386,9 @@ fn projection_guard_verdict(
                 zero_migrate::PlanStep::Ddl(migration) => migration.existence_guard.as_ref(),
                 _ => None,
             };
-            match probe.map(|probe| decide(probe, snapshot, dialect)) {
+            match probe
+                .map(|probe| decide(zero_migrate::shipping_vendors(), probe, snapshot, dialect))
+            {
                 Some(GuardVerdict::SatisfiedNoop) => {}
                 Some(GuardVerdict::FailDrift(found)) => {
                     all_satisfied = false;
@@ -1866,8 +1899,14 @@ scope = "all"
         let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
         let effective =
             effective_policy_from_charter_layers(charter).expect("the function charter composes");
-        let history = zero_migrate::fold_ops(&create_ir.ops, &POSTGRES, owner, &effective)
-            .expect("the function create folds");
+        let history = zero_migrate::fold_ops(
+            zero_migrate::shipping_vendors(),
+            &create_ir.ops,
+            &POSTGRES,
+            owner,
+            &effective,
+        )
+        .expect("the function create folds");
         let drop_artifact = lower_envelope_to_plan_with_live(
             &drop,
             owner,
@@ -1953,8 +1992,14 @@ scope = "all"
         let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
         let effective =
             effective_policy_from_charter_layers(charter).expect("the policy charter composes");
-        let history = zero_migrate::fold_ops(&create_ir.ops, &POSTGRES, owner, &effective)
-            .expect("the policy create folds");
+        let history = zero_migrate::fold_ops(
+            zero_migrate::shipping_vendors(),
+            &create_ir.ops,
+            &POSTGRES,
+            owner,
+            &effective,
+        )
+        .expect("the policy create folds");
         let drop_artifact = lower_envelope_to_plan_with_live(
             &drop,
             owner,
@@ -2040,8 +2085,14 @@ scope = "all"
         let create_ir: MigrationIr = serde_json::from_str(&create).expect("the create IR parses");
         let effective =
             effective_policy_from_charter_layers(charter).expect("the trigger charter composes");
-        let history = zero_migrate::fold_ops(&create_ir.ops, &POSTGRES, owner, &effective)
-            .expect("the trigger create folds");
+        let history = zero_migrate::fold_ops(
+            zero_migrate::shipping_vendors(),
+            &create_ir.ops,
+            &POSTGRES,
+            owner,
+            &effective,
+        )
+        .expect("the trigger create folds");
         let drop_artifact = lower_envelope_to_plan_with_live(
             &drop,
             owner,
@@ -3354,6 +3405,7 @@ scope = "all"
         let declaration_ir: MigrationIr =
             serde_json::from_str(&declaration).expect("the declaration IR parses");
         let live_snapshot = zero_migrate::fold_ops(
+            zero_migrate::shipping_vendors(),
             &declaration_ir.ops,
             &POSTGRES,
             owner,
@@ -3444,9 +3496,14 @@ scope = "all"
         let envelopes = ordered_status_envelopes(zero_migrate::model::ir::CURRENT_IR_VERSION);
         let create_ir: MigrationIr =
             serde_json::from_str(&envelopes[0]).expect("create envelope parses");
-        let live_snapshot =
-            zero_migrate::fold_ops(&create_ir.ops, &MYSQL, owner, &no_inject_policy(owner))
-                .expect("the inflight create is reflected in the catalog");
+        let live_snapshot = zero_migrate::fold_ops(
+            zero_migrate::shipping_vendors(),
+            &create_ir.ops,
+            &MYSQL,
+            owner,
+            &no_inject_policy(owner),
+        )
+        .expect("the inflight create is reflected in the catalog");
         let create = lower_envelope_to_plan(
             &envelopes[0],
             owner,
@@ -3516,6 +3573,7 @@ scope = "all"
         let create_ir: MigrationIr =
             serde_json::from_str(&envelopes[0]).expect("create envelope parses");
         let live_snapshot = zero_migrate::fold_ops(
+            zero_migrate::shipping_vendors(),
             &create_ir.ops,
             &POSTGRES,
             "app_status_ordered",
@@ -3613,6 +3671,7 @@ scope = "all"
 
         let mixed_ir: MigrationIr = serde_json::from_str(&mixed).expect("mixed envelope parses");
         let live_snapshot = zero_migrate::fold_ops(
+            zero_migrate::shipping_vendors(),
             &mixed_ir.ops[..2],
             &POSTGRES,
             owner,

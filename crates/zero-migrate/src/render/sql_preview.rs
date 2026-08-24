@@ -60,6 +60,7 @@
 //! resolve nothing.
 
 use std::fmt::Write as _;
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::model::ir::{CommentTarget, CursorStability, ExistenceGuard, MigrationIr, Op};
 use crate::render::lower::{op_kind_tag, IrAuthor, IrLowerError, LiveSchema};
@@ -167,17 +168,22 @@ impl Rendered {
 /// produced. The plan's steps were already lowered for a dialect by the caller;
 /// `dialect` selects the header label and the MySQL session envelope.
 #[must_use]
-pub fn render_plan_sql(plan: &AppliedPlan, dialect: &DialectId, _opts: &PreviewOpts) -> String {
-    let rendered = render_plan_steps(plan, dialect);
-    let wrap_session = needs_preview_session_envelope(dialect, &rendered);
+pub fn render_plan_sql(
+    vendors: VendorSet,
+    plan: &AppliedPlan,
+    dialect: &DialectId,
+    _opts: &PreviewOpts,
+) -> String {
+    let rendered = render_plan_steps(vendors, plan, dialect);
+    let wrap_session = needs_preview_session_envelope(vendors, dialect, &rendered);
     let mut out = String::new();
     write_plan_header(&mut out, plan, DialectCaption::Lowered(dialect));
     if wrap_session {
-        write_preview_session_prologue(&mut out, dialect);
+        write_preview_session_prologue(vendors, &mut out, dialect);
     }
     write_rendered(&mut out, &rendered);
     if wrap_session {
-        write_preview_session_epilogue(&mut out, dialect);
+        write_preview_session_epilogue(vendors, &mut out, dialect);
     }
     out
 }
@@ -192,11 +198,16 @@ pub fn render_plan_sql(plan: &AppliedPlan, dialect: &DialectId, _opts: &PreviewO
 /// misled into thinking PG-only verbatim SQL was lowered for SQLite. `dialect` does
 /// not transform the raw body; MySQL uses it to add the safe session envelope.
 #[must_use]
-pub fn render_set_sql(plans: &[AppliedPlan], dialect: &DialectId, _opts: &PreviewOpts) -> String {
+pub fn render_set_sql(
+    vendors: VendorSet,
+    plans: &[AppliedPlan],
+    dialect: &DialectId,
+    _opts: &PreviewOpts,
+) -> String {
     let caption = DialectCaption::VerbatimRawSql { requested: dialect };
     let rendered_plans = plans
         .iter()
-        .map(|plan| render_plan_steps(plan, dialect))
+        .map(|plan| render_plan_steps(vendors, plan, dialect))
         .collect::<Vec<Vec<Rendered>>>();
     let total_statements = rendered_plans
         .iter()
@@ -208,12 +219,12 @@ pub fn render_set_sql(plans: &[AppliedPlan], dialect: &DialectId, _opts: &Previe
         .flatten()
         .filter(|r| r.runtime_resolved)
         .count();
-    let wrap_session = total_statements > 0 && preview_has_session_envelope(dialect);
+    let wrap_session = total_statements > 0 && preview_has_session_envelope(vendors, dialect);
 
     let mut out = String::new();
     write_doc_header(&mut out, caption);
     if wrap_session {
-        write_preview_session_prologue(&mut out, dialect);
+        write_preview_session_prologue(vendors, &mut out, dialect);
     }
     for (plan, rendered) in plans.iter().zip(&rendered_plans) {
         out.push('\n');
@@ -221,7 +232,7 @@ pub fn render_set_sql(plans: &[AppliedPlan], dialect: &DialectId, _opts: &Previe
         write_rendered(&mut out, rendered);
     }
     if wrap_session {
-        write_preview_session_epilogue(&mut out, dialect);
+        write_preview_session_epilogue(vendors, &mut out, dialect);
     }
     let _ = writeln!(
         out,
@@ -243,11 +254,12 @@ pub fn render_set_sql(plans: &[AppliedPlan], dialect: &DialectId, _opts: &Previe
 /// rejected by the load gate (a hard, clear non-zero for the CLI). A single op that
 /// merely cannot be lowered offline is NOT an error — it degrades to a label.
 pub fn render_ir_envelope_sql(
+    vendors: VendorSet,
     bytes: &str,
     dialect: &DialectId,
     opts: &PreviewOpts,
 ) -> Result<String, String> {
-    render_ir_envelope_sql_onto(bytes, dialect, opts, &LiveSchema::default())
+    render_ir_envelope_sql_onto(vendors, bytes, dialect, opts, &LiveSchema::default())
 }
 
 /// [`render_ir_envelope_sql`] against a schema the CALLER has already folded from
@@ -267,13 +279,14 @@ pub fn render_ir_envelope_sql(
 /// # Errors
 /// As [`render_ir_envelope_sql`].
 pub fn render_ir_envelope_sql_onto(
+    vendors: VendorSet,
     bytes: &str,
     dialect: &DialectId,
     opts: &PreviewOpts,
     live: &LiveSchema,
 ) -> Result<String, String> {
-    let (name, rendered) = render_ir_envelope_rendered(bytes, dialect, opts, live)?;
-    let wrap_session = needs_preview_session_envelope(dialect, &rendered);
+    let (name, rendered) = render_ir_envelope_rendered(vendors, bytes, dialect, opts, live)?;
+    let wrap_session = needs_preview_session_envelope(vendors, dialect, &rendered);
     let mut out = String::new();
     // Synthesize a plan header from the IR identity (no full AppliedPlan needed —
     // a single un-lowerable op would otherwise make `lower_plan` abort).
@@ -292,11 +305,11 @@ pub fn render_ir_envelope_sql_onto(
         "-- ============================================================"
     );
     if wrap_session {
-        write_preview_session_prologue(&mut out, dialect);
+        write_preview_session_prologue(vendors, &mut out, dialect);
     }
     write_rendered(&mut out, &rendered);
     if wrap_session {
-        write_preview_session_epilogue(&mut out, dialect);
+        write_preview_session_epilogue(vendors, &mut out, dialect);
     }
     let statements = rendered.iter().filter(|r| r.statement).count();
     let runtime = rendered.iter().filter(|r| r.runtime_resolved).count();
@@ -338,22 +351,24 @@ pub fn render_ir_envelope_sql_onto(
 /// Returns an error when the IR document cannot be parsed or structurally
 /// validated for offline rendering.
 pub fn render_ir_envelope_sql_statements(
+    vendors: VendorSet,
     bytes: &str,
     dialect: &DialectId,
     opts: &PreviewOpts,
 ) -> Result<(String, Vec<String>), String> {
     let (name, rendered) =
-        render_ir_envelope_rendered(bytes, dialect, opts, &LiveSchema::default())?;
+        render_ir_envelope_rendered(vendors, bytes, dialect, opts, &LiveSchema::default())?;
     let statements = rendered
         .into_iter()
         .filter(|r| r.statement)
         .map(|r| r.text)
         .collect::<Vec<_>>();
-    let statements = wrap_preview_statements(dialect, statements);
+    let statements = wrap_preview_statements(vendors, dialect, statements);
     Ok((name, statements))
 }
 
 fn render_ir_envelope_rendered(
+    vendors: VendorSet,
     bytes: &str,
     dialect: &DialectId,
     opts: &PreviewOpts,
@@ -406,7 +421,7 @@ fn render_ir_envelope_rendered(
         effective: &opts.effective_policy,
         default_schema: &opts.default_schema,
     };
-    crate::model::validate::validate_ir_authorized(&ir, dialect, None, Some(authority))
+    crate::model::validate::validate_ir_authorized(vendors, &ir, dialect, None, Some(authority))
         .map_err(|e| format!("validate IR envelope: {e}"))?;
 
     // The general operator preview renders into the chosen default schema:
@@ -416,13 +431,14 @@ fn render_ir_envelope_rendered(
     // labeled `[runtime-resolved]` "not offline-renderable" rather than rendered
     // into the wrong schema (honest, fail-closed). NEVER requires a DB to pick.
     let author = IrAuthor::new(
+        vendors,
         opts.default_schema.clone(),
         opts.owner_app.clone(),
         dialect,
         &opts.effective_policy,
     );
 
-    let rendered = render_ir_ops(&author, &ir, live, dialect, &opts.default_schema)?;
+    let rendered = render_ir_ops(vendors, &author, &ir, live, dialect, &opts.default_schema)?;
     Ok((ir.name, rendered))
 }
 
@@ -458,6 +474,7 @@ const fn is_author_error(error: &IrLowerError) -> bool {
 /// of aborting the whole preview. Mirrors the per-op iteration `lower_steps` does,
 /// but tolerant: a `lower_plan` error on a one-op IR ⇒ a runtime-resolved label.
 fn render_ir_ops(
+    vendors: VendorSet,
     author: &IrAuthor,
     ir: &MigrationIr,
     live: &LiveSchema,
@@ -477,7 +494,7 @@ fn render_ir_ops(
         match author.lower_plan(&one, &working_live) {
             Ok(plan) => {
                 for step in &plan.steps {
-                    render_step(op, guard, step, dialect, &mut out);
+                    render_step(vendors, op, guard, step, dialect, &mut out);
                 }
             }
             Err(e) if is_author_error(&e) => {
@@ -506,7 +523,7 @@ fn render_ir_ops(
         // dropped table stayed referenceable and a renamed one vanished. The preview
         // is a surfacing layer, and the lower it surfaces reads the same rule from
         // the same place (`render::lower::lower_one_op`), so the two cannot drift.
-        let _ = working_live.advance_logical_columns(&one, dialect, project_schema, None);
+        let _ = working_live.advance_logical_columns(vendors, &one, dialect, project_schema, None);
         crate::render::fold::advance_referenceable_tables(op, dialect, &mut working_live.tables);
         // The same reason, for the same envelope: a `createTable` here is what tells
         // a later `setColumnType` that the column it names is an identity or a
@@ -545,12 +562,12 @@ fn single_op_ir(parent: &MigrationIr, op: Op) -> MigrationIr {
 /// is the dialect the plan was lowered for; it selects the guard label's apply
 /// story (see [`guard_label`]) and is REQUIRED rather than defaulted, so a caller
 /// cannot silently inherit one dialect's apply semantics for another's preview.
-fn render_plan_steps(plan: &AppliedPlan, dialect: &DialectId) -> Vec<Rendered> {
+fn render_plan_steps(vendors: VendorSet, plan: &AppliedPlan, dialect: &DialectId) -> Vec<Rendered> {
     let mut out = Vec::new();
     for step in &plan.steps {
         // On the AppliedPlan path we have no `Op`; pass `None` for the op + read the
         // guard off the migration when present.
-        render_step_no_op(step, dialect, &mut out);
+        render_step_no_op(vendors, step, dialect, &mut out);
     }
     out
 }
@@ -559,6 +576,7 @@ fn render_plan_steps(plan: &AppliedPlan, dialect: &DialectId) -> Vec<Rendered> {
 /// guards and online renames are labeled with the op's subject. `dialect` reaches
 /// [`guard_label`] only; it changes no rendered statement.
 fn render_step(
+    vendors: VendorSet,
     op: &Op,
     guard: Option<ExistenceGuard>,
     step: &PlanStep,
@@ -568,7 +586,7 @@ fn render_step(
     match step {
         PlanStep::Ddl(m) => {
             if let Some(g) = guard.or_else(|| authored_probe(m).map(|_| guard_dir(m))) {
-                out.push(Rendered::label(guard_label(op, g, dialect)));
+                out.push(Rendered::label(guard_label(vendors, op, g, dialect)));
             }
             push_statement(&m.up, out);
         }
@@ -601,12 +619,17 @@ fn render_step(
 /// Render one step with NO op context (the `.sql` / AppliedPlan path). `dialect` is
 /// the dialect the plan was lowered for and selects the guard label's apply story,
 /// exactly as on the op-carrying path.
-fn render_step_no_op(step: &PlanStep, dialect: &DialectId, out: &mut Vec<Rendered>) {
+fn render_step_no_op(
+    vendors: VendorSet,
+    step: &PlanStep,
+    dialect: &DialectId,
+    out: &mut Vec<Rendered>,
+) {
     match step {
         PlanStep::Ddl(m) => {
             if let Some(p) = authored_probe(m) {
                 let kind = probe_kind(p);
-                let limitation = crate::render::backends::renderer(dialect)
+                let limitation = crate::render::backends::renderer(vendors, dialect)
                     .guarded_ddl_preview_limitation()
                     .unwrap_or("");
                 out.push(Rendered::label(format!(
@@ -802,7 +825,7 @@ fn runtime_resolved_for_lower_error(op: &Op, err: &IrLowerError) -> String {
 ///
 /// Does NOT change the statement rendered beneath the label on any dialect, and
 /// does NOT change apply behaviour - this is preview text only.
-fn guard_label(op: &Op, g: ExistenceGuard, dialect: &DialectId) -> String {
+fn guard_label(vendors: VendorSet, op: &Op, g: ExistenceGuard, dialect: &DialectId) -> String {
     let kind = op_kind_tag(op);
     let subject = op_subject(op);
     let dir = match g {
@@ -810,7 +833,7 @@ fn guard_label(op: &Op, g: ExistenceGuard, dialect: &DialectId) -> String {
         ExistenceGuard::IfExists => "ifExists",
     };
     let newly_live = newly_live_drop_note(op, g);
-    let limitation = crate::render::backends::renderer(dialect)
+    let limitation = crate::render::backends::renderer(vendors, dialect)
         .guarded_ddl_preview_limitation()
         .unwrap_or("");
     format!(
@@ -1109,26 +1132,32 @@ fn write_doc_header(out: &mut String, caption: DialectCaption) {
 
 /// Whether this preview needs its backend's session envelope. A label-only
 /// preview stays comment-only: it must not gain executable SQL solely from formatting.
-fn needs_preview_session_envelope(dialect: &DialectId, rendered: &[Rendered]) -> bool {
-    preview_has_session_envelope(dialect) && rendered.iter().any(|r| r.statement)
+fn needs_preview_session_envelope(
+    vendors: VendorSet,
+    dialect: &DialectId,
+    rendered: &[Rendered],
+) -> bool {
+    preview_has_session_envelope(vendors, dialect) && rendered.iter().any(|r| r.statement)
 }
 
-fn preview_has_session_envelope(dialect: &DialectId) -> bool {
-    let renderer = crate::render::backends::renderer(dialect);
+fn preview_has_session_envelope(vendors: VendorSet, dialect: &DialectId) -> bool {
+    let renderer = crate::render::backends::renderer(vendors, dialect);
     !renderer.preview_session_prologue().is_empty()
         || !renderer.preview_session_epilogue().is_empty()
 }
 
 /// Write this backend's session setup before any author SQL.
-fn write_preview_session_prologue(out: &mut String, dialect: &DialectId) {
-    for statement in crate::render::backends::renderer(dialect).preview_session_prologue() {
+fn write_preview_session_prologue(vendors: VendorSet, out: &mut String, dialect: &DialectId) {
+    for statement in crate::render::backends::renderer(vendors, dialect).preview_session_prologue()
+    {
         write_preview_statement(out, statement);
     }
 }
 
 /// Restore any session state captured before the preview ran.
-fn write_preview_session_epilogue(out: &mut String, dialect: &DialectId) {
-    for statement in crate::render::backends::renderer(dialect).preview_session_epilogue() {
+fn write_preview_session_epilogue(vendors: VendorSet, out: &mut String, dialect: &DialectId) {
+    for statement in crate::render::backends::renderer(vendors, dialect).preview_session_epilogue()
+    {
         write_preview_statement(out, statement);
     }
 }
@@ -1140,12 +1169,16 @@ fn write_preview_statement(out: &mut String, statement: &str) {
 
 /// Apply the same session contract to the programmatic executable-statement
 /// preview. An empty author stream remains empty.
-fn wrap_preview_statements(dialect: &DialectId, statements: Vec<String>) -> Vec<String> {
-    if statements.is_empty() || !preview_has_session_envelope(dialect) {
+fn wrap_preview_statements(
+    vendors: VendorSet,
+    dialect: &DialectId,
+    statements: Vec<String>,
+) -> Vec<String> {
+    if statements.is_empty() || !preview_has_session_envelope(vendors, dialect) {
         return statements;
     }
 
-    let renderer = crate::render::backends::renderer(dialect);
+    let renderer = crate::render::backends::renderer(vendors, dialect);
     let mut wrapped = Vec::with_capacity(
         statements.len()
             + renderer.preview_session_prologue().len()
@@ -1219,8 +1252,13 @@ mod tests {
             ),
             ..opts()
         };
-        let (_name, statements) = render_ir_envelope_sql_statements(IR, &POSTGRES, &granted)
-            .expect("a charter granting code.function must preview a createFunction");
+        let (_name, statements) = render_ir_envelope_sql_statements(
+            crate::test_fixtures::VENDORS,
+            IR,
+            &POSTGRES,
+            &granted,
+        )
+        .expect("a charter granting code.function must preview a createFunction");
         assert!(
             statements
                 .iter()
@@ -1231,8 +1269,13 @@ mod tests {
         // The control: the SAME call under a charter that grants no vendor capability
         // still refuses. Without it the arm above would pass on a build where the
         // preview had stopped asking the capability question at all.
-        let error = render_ir_envelope_sql_statements(IR, &POSTGRES, &opts())
-            .expect_err("a charter granting nothing must still refuse a createFunction");
+        let error = render_ir_envelope_sql_statements(
+            crate::test_fixtures::VENDORS,
+            IR,
+            &POSTGRES,
+            &opts(),
+        )
+        .expect_err("a charter granting nothing must still refuse a createFunction");
         assert!(
             error.contains(crate::model::validate::CODE_VENDOR_OP_DENIED),
             "the control was refused for the wrong reason: {error}"
@@ -1250,7 +1293,7 @@ mod tests {
     }
 
     fn mysql_preview_envelope() -> (&'static str, &'static str, &'static str) {
-        let renderer = crate::render::backends::renderer(&MYSQL);
+        let renderer = crate::render::backends::renderer(crate::test_fixtures::VENDORS, &MYSQL);
         let [save, pin] = renderer.preview_session_prologue() else {
             panic!("MySQL preview prologue must contain save then pin")
         };
@@ -1263,8 +1306,8 @@ mod tests {
     #[test]
     fn mysql_human_preview_saves_pins_and_restores_sql_mode() {
         let (save, pin, restore) = mysql_preview_envelope();
-        let out =
-            render_ir_envelope_sql(SIMPLE_IR, &MYSQL, &opts()).expect("MySQL IR renders offline");
+        let out = render_ir_envelope_sql(crate::test_fixtures::VENDORS, SIMPLE_IR, &MYSQL, &opts())
+            .expect("MySQL IR renders offline");
 
         assert_appears_in_order(&out, &[save, pin, "DROP TABLE", restore]);
         assert_eq!(out.matches(save).count(), 1, "{out}");
@@ -1278,8 +1321,13 @@ mod tests {
     #[test]
     fn mysql_executable_statement_preview_includes_session_envelope() {
         let (save, pin, restore) = mysql_preview_envelope();
-        let (name, statements) = render_ir_envelope_sql_statements(SIMPLE_IR, &MYSQL, &opts())
-            .expect("MySQL executable preview renders offline");
+        let (name, statements) = render_ir_envelope_sql_statements(
+            crate::test_fixtures::VENDORS,
+            SIMPLE_IR,
+            &MYSQL,
+            &opts(),
+        )
+        .expect("MySQL executable preview renders offline");
 
         assert_eq!(name, "preview_mode");
         assert_eq!(statements.len(), 4, "{statements:#?}");
@@ -1294,14 +1342,20 @@ mod tests {
         let (save, pin, restore) = mysql_preview_envelope();
         let ir: MigrationIr = serde_json::from_str(SIMPLE_IR).expect("fixture parses");
         let effective = crate::test_fixtures::no_inject("public");
-        let author = IrAuthor::new("public", "app_preview", &MYSQL, &effective);
+        let author = IrAuthor::new(
+            crate::test_fixtures::VENDORS,
+            "public",
+            "app_preview",
+            &MYSQL,
+            &effective,
+        );
         let plan = author
             .lower_plan(&ir, &LiveSchema::default())
             .expect("fixture lowers offline");
 
         for out in [
-            render_plan_sql(&plan, &MYSQL, &opts()),
-            render_set_sql(&[plan], &MYSQL, &opts()),
+            render_plan_sql(crate::test_fixtures::VENDORS, &plan, &MYSQL, &opts()),
+            render_set_sql(crate::test_fixtures::VENDORS, &[plan], &MYSQL, &opts()),
         ] {
             assert_appears_in_order(&out, &[save, pin, "DROP TABLE", restore]);
             assert_eq!(out.matches(save).count(), 1, "{out}");
@@ -1311,12 +1365,19 @@ mod tests {
 
     #[test]
     fn non_mysql_and_empty_statement_previews_do_not_gain_an_envelope() {
-        let (_, postgres) = render_ir_envelope_sql_statements(SIMPLE_IR, &POSTGRES, &opts())
-            .expect("Postgres executable preview renders offline");
+        let (_, postgres) = render_ir_envelope_sql_statements(
+            crate::test_fixtures::VENDORS,
+            SIMPLE_IR,
+            &POSTGRES,
+            &opts(),
+        )
+        .expect("Postgres executable preview renders offline");
         assert_eq!(postgres.len(), 1, "{postgres:#?}");
         assert!(!postgres.iter().any(|s| s.contains("sql_mode")));
 
-        assert!(wrap_preview_statements(&MYSQL, Vec::new()).is_empty());
+        assert!(
+            wrap_preview_statements(crate::test_fixtures::VENDORS, &MYSQL, Vec::new()).is_empty()
+        );
     }
 
     #[test]
@@ -1335,7 +1396,7 @@ mod tests {
             }
           }]
         }"#;
-        let out = render_ir_envelope_sql(ir, &POSTGRES, &opts())
+        let out = render_ir_envelope_sql(crate::test_fixtures::VENDORS, ir, &POSTGRES, &opts())
             .expect("runtime-resolved lifecycle preview renders");
         for fact in [
             "expectedColumns=[\"id\"]",

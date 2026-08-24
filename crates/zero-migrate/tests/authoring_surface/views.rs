@@ -251,8 +251,14 @@ fn lower_up(dialect: &zero_migrate::DialectId, op: Op) -> Result<String, Box<IrL
     // The operator charter grants the vendor capabilities a materialized view / raw
     // view body needs; the widened scope stays because the view body's table
     // references are confined against it.
-    let author = IrAuthor::new(SCHEMA, "app_a", dialect, &support::operator_charter("app"))
-        .with_schema_scope(SchemaScope::Allowlist(vec![SCHEMA.to_string()]));
+    let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        SCHEMA,
+        "app_a",
+        dialect,
+        &support::operator_charter("app"),
+    )
+    .with_schema_scope(SchemaScope::Allowlist(vec![SCHEMA.to_string()]));
     let migrations = author
         .lower(&ir(op), &LiveSchema::default())
         .map_err(Box::new)?;
@@ -284,6 +290,7 @@ fn structured_select_supports_group_by_and_having_on_all_dialects() {
 fn structured_select_allows_aggregates_in_projection_and_having() {
     let trusted = SchemaScope::Unconfined;
     validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &ir(grouped_order_totals_view()),
         &zero_migrate_postgres::DIALECT,
         Some(&trusted),
@@ -306,6 +313,7 @@ fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
     let trusted = SchemaScope::Unconfined;
     for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
         let err = validate_ir_scoped(
+            zero_migrate::shipping_vendors(),
             &ir(pg_first_aggregate_rollup_view()),
             dialect,
             Some(&trusted),
@@ -332,8 +340,13 @@ fn structured_select_rejects_aggregate_group_by_item() {
     select.group_by = vec![count(Expr::col("id"))];
 
     let trusted = SchemaScope::Unconfined;
-    let err =
-        validate_ir_scoped(&ir(op), &zero_migrate_postgres::DIALECT, Some(&trusted)).unwrap_err();
+    let err = validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
+        &ir(op),
+        &zero_migrate_postgres::DIALECT,
+        Some(&trusted),
+    )
+    .unwrap_err();
     assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
     assert!(
         err.reason.contains("GROUP BY") && err.reason.contains("count"),
@@ -404,6 +417,7 @@ fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
 
     let trusted = SchemaScope::Unconfined;
     let err = validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &ir(create_structured_view(None, Some(true))),
         &zero_migrate_sqlite::DIALECT,
         Some(&trusted),
@@ -421,6 +435,7 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
     // (which would drop the `replace` request) or destructively DROP+CREATE.
     let trusted = SchemaScope::Unconfined;
     let err = validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &ir(create_structured_view(Some(true), Some(true))),
         &zero_migrate_postgres::DIALECT,
         Some(&trusted),
@@ -447,6 +462,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     let structured = ir(create_structured_view(None, None));
     let confined = SchemaScope::Single(SCHEMA.to_string());
     validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &structured,
         &zero_migrate_postgres::DIALECT,
         Some(&confined),
@@ -456,6 +472,7 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     let guard_cfg =
         GuardConfig::from_policy(support::no_inject(SCHEMA), zero_migrate_postgres::DIALECT);
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         SCHEMA,
         "app_a",
         &zero_migrate_postgres::DIALECT,
@@ -465,11 +482,17 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     .expect("plain structured view is core under confined lower_guarded");
 
     let raw = ir(raw_view("SELECT id FROM app.users", None));
-    let err =
-        validate_ir_scoped(&raw, &zero_migrate_postgres::DIALECT, Some(&confined)).unwrap_err();
+    let err = validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
+        &raw,
+        &zero_migrate_postgres::DIALECT,
+        Some(&confined),
+    )
+    .unwrap_err();
     assert_eq!(err.code, CODE_VENDOR_OP_DENIED);
 
     let err = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         SCHEMA,
         "app_a",
         &zero_migrate_postgres::DIALECT,
@@ -486,10 +509,17 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     ));
 
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
-    validate_ir_scoped(&raw, &zero_migrate_postgres::DIALECT, Some(&operator)).unwrap();
+    validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
+        &raw,
+        &zero_migrate_postgres::DIALECT,
+        Some(&operator),
+    )
+    .unwrap();
     // The `sql.raw_view_body` GRANT is what admits this at lower - the same charter
     // the guard above would compose, not the widened scope beside it.
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         SCHEMA,
         "app_a",
         &zero_migrate_postgres::DIALECT,
@@ -505,6 +535,7 @@ fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     for sql in ["DROP TABLE x", "SELECT 1; DROP TABLE x"] {
         let err = validate_ir_scoped(
+            zero_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),
             &zero_migrate_postgres::DIALECT,
             Some(&operator),
@@ -523,6 +554,7 @@ fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
 fn raw_view_body_runs_function_body_deny_list_scan() {
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     let err = validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &ir(raw_view("SELECT pg_read_file('/etc/passwd')", None)),
         &zero_migrate_postgres::DIALECT,
         Some(&operator),
@@ -552,17 +584,22 @@ fn raw_view_body_native_quoting_is_not_judged_by_the_postgres_parser() {
         (&zero_migrate_mysql::DIALECT, "SELECT `id` FROM app.users"),
         (&zero_migrate_sqlite::DIALECT, "SELECT [id] FROM app.users"),
     ] {
-        validate_ir_scoped(&ir(raw_view(sql, None)), dialect, Some(&operator)).unwrap_or_else(
-            |err| {
-                panic!(
-                    "{} must vet its own view-body grammar, but was refused: {err:?}",
-                    dialect.as_str()
-                )
-            },
-        );
+        validate_ir_scoped(
+            zero_migrate::shipping_vendors(),
+            &ir(raw_view(sql, None)),
+            dialect,
+            Some(&operator),
+        )
+        .unwrap_or_else(|err| {
+            panic!(
+                "{} must vet its own view-body grammar, but was refused: {err:?}",
+                dialect.as_str()
+            )
+        });
         // PostgreSQL still refuses both — it is not that the check was deleted, it
         // is that the check belongs to whichever backend owns the grammar.
         let err = validate_ir_scoped(
+            zero_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),
             &zero_migrate_postgres::DIALECT,
             Some(&operator),
@@ -612,6 +649,7 @@ fn postgres_raw_view_body_gate_is_unchanged_behind_the_vendor_seam() {
         ),
     ] {
         let err = validate_ir_scoped(
+            zero_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),
             &zero_migrate_postgres::DIALECT,
             Some(&operator),
@@ -628,6 +666,7 @@ fn postgres_raw_view_body_gate_is_unchanged_behind_the_vendor_seam() {
 
     // Cross-schema confinement is part of the same gate and is still enforced.
     let err = validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &ir(raw_view("SELECT id FROM other_tenant.users", None)),
         &zero_migrate_postgres::DIALECT,
         Some(&operator),
@@ -659,6 +698,7 @@ fn mysql_and_sqlite_bypass_the_raw_view_body_gate_for_now() {
     for sql in bypassed {
         // Refused on PostgreSQL...
         validate_ir_scoped(
+            zero_migrate::shipping_vendors(),
             &ir(raw_view(sql, None)),
             &zero_migrate_postgres::DIALECT,
             Some(&operator),
@@ -667,7 +707,13 @@ fn mysql_and_sqlite_bypass_the_raw_view_body_gate_for_now() {
         // ...and admitted, unchecked, on both bypassing backends.
         for dialect in [&zero_migrate_mysql::DIALECT, &zero_migrate_sqlite::DIALECT] {
             assert!(
-                validate_ir_scoped(&ir(raw_view(sql, None)), dialect, Some(&operator)).is_ok(),
+                validate_ir_scoped(
+                    zero_migrate::shipping_vendors(),
+                    &ir(raw_view(sql, None)),
+                    dialect,
+                    Some(&operator)
+                )
+                .is_ok(),
                 "{} is documented as bypassing the raw-view-body gate, so {sql:?} is admitted \
                  unchecked; if this now fails, a real gate landed and this test should be \
                  UPDATED to assert it, never weakened",
@@ -725,6 +771,7 @@ fn structured_select_supports_order_limit_and_closed_expr_projection() {
 fn fold_records_views_and_drop_removes_them() {
     let create = create_structured_view(None, None);
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         std::slice::from_ref(&create),
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -774,6 +821,7 @@ fn fold_records_views_and_drop_removes_them() {
         materialized: None,
     };
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         &[create, drop],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,

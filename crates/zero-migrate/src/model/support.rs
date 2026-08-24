@@ -5,6 +5,7 @@
 //! dialect/refusal diagnostics are sourced from this support matrix.
 
 use std::borrow::Cow;
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::model::capability::VendorCapability;
 use zero_migrate_backend::renderer::FeatureSupportKey;
@@ -110,9 +111,9 @@ impl DialectSupport {
     /// Callers needing a verdict must choose which they mean; [`Self::decision`]
     /// panics rather than pick one silently.
     #[must_use]
-    pub fn decision_for(&self, id: &DialectId) -> Option<SupportDecision> {
+    pub fn decision_for(&self, vendors: VendorSet, id: &DialectId) -> Option<SupportDecision> {
         if let Some(policy) = self.backend_feature {
-            let vendor = crate::render::backends::VENDORS.get(id)?;
+            let vendor = vendors.get(id)?;
             return Some(match vendor.dml.feature_support_refusal(policy.feature) {
                 Some(reason) => unsupported(crate::model::validate::CODE_UNSUPPORTED, reason),
                 None => supported(policy.render),
@@ -131,8 +132,8 @@ impl DialectSupport {
     /// supported fails open into a render that was never declared, and treating it
     /// as unsupported invents a refusal with no reason to show anyone.
     #[must_use]
-    pub fn decision(&self, dialect: &DialectId) -> SupportDecision {
-        self.decision_for(dialect)
+    pub fn decision(&self, vendors: VendorSet, dialect: &DialectId) -> SupportDecision {
+        self.decision_for(vendors, dialect)
             .unwrap_or_else(|| panic!("support declaration states no decision for {dialect}"))
     }
 
@@ -145,9 +146,9 @@ impl DialectSupport {
     /// binary-searches it. Callers must not treat this iterator as sorted: this
     /// doc previously claimed ascending order for both, and an ordering assertion
     /// written against that claim failed on a correct tree.
-    pub fn dialects(&self) -> Box<dyn Iterator<Item = DialectId> + '_> {
+    pub fn dialects(&self, vendors: VendorSet) -> Box<dyn Iterator<Item = DialectId> + '_> {
         if self.backend_feature.is_some() {
-            Box::new(crate::render::backends::VENDORS.dialects())
+            Box::new(vendors.dialects())
         } else {
             Box::new(self.decisions.iter().map(|(id, _)| id.clone()))
         }
@@ -173,9 +174,9 @@ impl DialectSupport {
     /// the exact mutation named above for exactly one op kind; every other row's
     /// membership is still unmeasured.
     #[must_use]
-    pub fn supported_dialects(&self) -> DialectSet {
-        self.dialects()
-            .filter(|id| self.decision(id).is_supported())
+    pub fn supported_dialects(&self, vendors: VendorSet) -> DialectSet {
+        self.dialects(vendors)
+            .filter(|id| self.decision(vendors, id).is_supported())
             .collect()
     }
 }
@@ -291,8 +292,8 @@ impl FeatureSupport {
     }
 
     #[must_use]
-    pub fn decision(&self, dialect: &DialectId) -> SupportDecision {
-        self.dialects.decision(dialect)
+    pub fn decision(&self, vendors: VendorSet, dialect: &DialectId) -> SupportDecision {
+        self.dialects.decision(vendors, dialect)
     }
 }
 
@@ -332,13 +333,13 @@ impl Support {
     }
 
     #[must_use]
-    pub fn decision(&self, dialect: &DialectId) -> SupportDecision {
-        self.dialects.decision(dialect)
+    pub fn decision(&self, vendors: VendorSet, dialect: &DialectId) -> SupportDecision {
+        self.dialects.decision(vendors, dialect)
     }
 
     #[must_use]
-    pub fn supported_dialects(&self) -> DialectSet {
-        self.dialects.supported_dialects()
+    pub fn supported_dialects(&self, vendors: VendorSet) -> DialectSet {
+        self.dialects.supported_dialects(vendors)
     }
 }
 
@@ -499,7 +500,7 @@ mod tests {
 
     #[test]
     fn the_shipping_census_is_derived_from_the_vendor_registry() {
-        let ids: Vec<DialectId> = crate::render::backends::VENDORS.dialects().collect();
+        let ids: Vec<DialectId> = crate::test_fixtures::VENDORS.dialects().collect();
         let census: BTreeSet<DialectId> = ids.iter().cloned().collect();
         assert_eq!(
             ids.len(),
@@ -536,7 +537,7 @@ mod tests {
             declarations.len()
         );
 
-        let census: BTreeSet<DialectId> = crate::render::backends::VENDORS.dialects().collect();
+        let census: BTreeSet<DialectId> = crate::test_fixtures::VENDORS.dialects().collect();
         assert!(
             census.len() >= 3,
             "the shipping vendor registry collapsed to {} ({census:?})",
@@ -544,7 +545,10 @@ mod tests {
         );
 
         for (label, feature) in &declarations {
-            let cells: Vec<DialectId> = feature.dialects.dialects().collect();
+            let cells: Vec<DialectId> = feature
+                .dialects
+                .dialects(crate::test_fixtures::VENDORS)
+                .collect();
             assert_eq!(
                 cells.iter().cloned().collect::<BTreeSet<_>>(),
                 census,
@@ -567,7 +571,7 @@ mod tests {
             // assertion goes RED on a tree with no defect. If sortedness ever
             // needs a guard again, the thing to guard is `from_cells`.
             for dialect in &census {
-                let _ = feature.decision(dialect);
+                let _ = feature.decision(crate::test_fixtures::VENDORS, dialect);
             }
         }
     }
@@ -576,12 +580,14 @@ mod tests {
     fn a_dialect_the_engine_does_not_ship_gets_no_claim_not_a_verdict() {
         let duckdb = DialectId::new("duckdb");
         assert!(
-            crate::render::backends::VENDORS.get(&duckdb).is_none(),
+            crate::test_fixtures::VENDORS.get(&duckdb).is_none(),
             "this test needs an id the engine does not ship"
         );
         for (label, feature) in declarations() {
             assert_eq!(
-                feature.dialects.decision_for(&duckdb),
+                feature
+                    .dialects
+                    .decision_for(crate::test_fixtures::VENDORS, &duckdb),
                 None,
                 "{label} answers for a dialect it never declared; NO CLAIM and a \
                  refusal are different answers and only one of them is honest here"

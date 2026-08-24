@@ -45,6 +45,7 @@ fn desired_snapshot(
     effective: &EffectivePolicy,
 ) -> Result<zero_migrate::DesiredSchema, DeclarativeError> {
     zero_migrate::desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         project_schema,
         descriptors,
         &zero_migrate_postgres::DIALECT,
@@ -132,6 +133,7 @@ fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
         cfg.project_schema.clone(),
         "app_test",
         zero_migrate_postgres::DIALECT,
@@ -310,7 +312,7 @@ async fn a_access_method_change_is_surfaced() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     deploy(&session, &cfg, &engine).await;
     assert_eq!(
         live_access_method(&session, &cfg).await,
@@ -344,7 +346,7 @@ async fn b_predicate_change_is_surfaced() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     deploy(&session, &cfg, &engine).await;
 
     recreate_index(
@@ -371,7 +373,7 @@ async fn c_include_change_is_surfaced() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     deploy(&session, &cfg, &engine).await;
 
     recreate_index(
@@ -398,7 +400,7 @@ async fn d_unchanged_index_still_plans_nothing() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     deploy(&session, &cfg, &engine).await;
 
     let plan = replan(&session, &cfg, &engine)

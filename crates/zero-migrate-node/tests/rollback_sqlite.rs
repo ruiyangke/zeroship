@@ -151,7 +151,7 @@ async fn deploy(be: &SqliteBackend, envelopes: &[&str]) -> Vec<String> {
         .map(|envelope| serde_json::from_str(envelope).expect("envelope parses as MigrationIr"))
         .collect();
     let policy = support::no_inject(PROJECT_SCHEMA);
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .deploy_envelopes(
             &parsed,
             be,

@@ -232,9 +232,15 @@ fn typed_integer_uuid_type_id_and_ulid_references_lower_on_every_dialect() {
         &zero_migrate_mysql::DIALECT,
         &zero_migrate_sqlite::DIALECT,
     ] {
-        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower(&ir, &LiveSchema::default())
-            .unwrap_or_else(|error| panic!("{dialect:?} typed references must lower: {error}"));
+        let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower(&ir, &LiveSchema::default())
+        .unwrap_or_else(|error| panic!("{dialect:?} typed references must lower: {error}"));
         let child = create_sql(&migrations, dialect, "children");
 
         assert_eq!(
@@ -316,8 +322,14 @@ fn offline_fold_keeps_uuid_checks_on_keys_and_off_references() {
     let ir = typed_reference_matrix_ir();
 
     for dialect in [&zero_migrate_mysql::DIALECT, &zero_migrate_sqlite::DIALECT] {
-        let snapshot = fold_ops(&ir.ops, dialect, PROJECT_SCHEMA, &support::no_inject("app"))
-            .unwrap_or_else(|error| panic!("{dialect:?} typed references must fold: {error}"));
+        let snapshot = fold_ops(
+            zero_migrate::shipping_vendors(),
+            &ir.ops,
+            dialect,
+            PROJECT_SCHEMA,
+            &support::no_inject("app"),
+        )
+        .unwrap_or_else(|error| panic!("{dialect:?} typed references must fold: {error}"));
         let parent = snapshot.tables["uuid_parents"]
             .columns
             .iter()
@@ -344,6 +356,7 @@ fn offline_fold_keeps_uuid_checks_on_keys_and_off_references() {
 fn mysql_format_typed_references_accept_delete_and_update_actions_without_checks() {
     let ir = typed_reference_matrix_ir();
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -426,6 +439,7 @@ fn sqlite_inlines_a_typed_reference_to_a_later_declared_parent() {
     );
 
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -456,7 +470,7 @@ fn assert_declared_mismatch(ir: &MigrationIr, expected: &[&str]) {
         &zero_migrate_mysql::DIALECT,
         &zero_migrate_sqlite::DIALECT,
     ] {
-        let error = validate_ir(ir, dialect)
+        let error = validate_ir(zero_migrate::shipping_vendors(), ir, dialect)
             .expect_err("each dialect must reject the declared reference mismatch");
         let rendered = error.to_string();
         for expected in expected {
@@ -549,7 +563,7 @@ fn declared_reference_targets_must_be_single_column_keys() {
             &zero_migrate_mysql::DIALECT,
             &zero_migrate_sqlite::DIALECT,
         ] {
-            validate_ir(&ir, dialect).unwrap_or_else(|error| {
+            validate_ir(zero_migrate::shipping_vendors(), &ir, dialect).unwrap_or_else(|error| {
                 panic!("{name} must be a valid reference key on {dialect:?}: {error}")
             });
         }
@@ -559,7 +573,7 @@ fn declared_reference_targets_must_be_single_column_keys() {
         &zero_migrate_postgres::DIALECT,
         &zero_migrate_mysql::DIALECT,
     ] {
-        validate_ir(&ir, dialect).unwrap_or_else(|error| {
+        validate_ir(zero_migrate::shipping_vendors(), &ir, dialect).unwrap_or_else(|error| {
             panic!("table UNIQUE must be a valid reference key on {dialect:?}: {error}")
         });
     }
@@ -617,9 +631,15 @@ fn explicit_non_id_reference_column_is_preserved() {
         &zero_migrate_mysql::DIALECT,
         &zero_migrate_sqlite::DIALECT,
     ] {
-        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower(&ir, &LiveSchema::default())
-            .unwrap_or_else(|error| panic!("{dialect:?} non-id reference must lower: {error}"));
+        let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower(&ir, &LiveSchema::default())
+        .unwrap_or_else(|error| panic!("{dialect:?} non-id reference must lower: {error}"));
         let child = create_sql(&migrations, dialect, "children");
         assert!(
             child.contains("external_key"),
@@ -810,6 +830,7 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
         );
         let mut live = LiveSchema::from_catalog_snapshot(snapshot, "external_owner");
         live.advance_logical_columns(
+            zero_migrate::shipping_vendors(),
             &target,
             &zero_migrate_postgres::DIALECT,
             PROJECT_SCHEMA,
@@ -817,7 +838,7 @@ fn postgres_live_catalog_compares_formatted_reference_base_storage_separately_fr
         )
         .expect("record the authored formatted key contract");
 
-        let migrations = IrAuthor::new(
+        let migrations = IrAuthor::new(zero_migrate::shipping_vendors(),
             PROJECT_SCHEMA,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -884,7 +905,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                 ),
             ],
         );
-        let parent_migrations = IrAuthor::new(
+        let parent_migrations = IrAuthor::new(zero_migrate::shipping_vendors(),
             &schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -917,7 +938,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
         }
 
         let mut live = LiveSchema::from_catalog_snapshot(parent_snapshot, OWNER);
-        live.advance_logical_columns(&targets, &zero_migrate_postgres::DIALECT, &schema, None)
+        live.advance_logical_columns(zero_migrate::shipping_vendors(), &targets, &zero_migrate_postgres::DIALECT, &schema, None)
             .map_err(|error| format!("record formatted parent contracts: {error}"))?;
         let children = ir(
             "live_pg_formatted_children",
@@ -944,7 +965,7 @@ async fn live_postgres_introspection_validates_type_id_and_ulid_reference_storag
                 None,
             )],
         );
-        let child_migrations = IrAuthor::new(
+        let child_migrations = IrAuthor::new(zero_migrate::shipping_vendors(),
             &schema,
             OWNER,
             &zero_migrate_postgres::DIALECT,
@@ -1022,9 +1043,15 @@ fn format_bearing_reference_to_unmanaged_target_without_authored_metadata_is_rej
             &zero_migrate_mysql::DIALECT,
             &zero_migrate_sqlite::DIALECT,
         ] {
-            let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-                .lower(&ir, &unmanaged_live("text"))
-                .expect_err("a catalog type cannot supply missing authored format metadata");
+            let error = IrAuthor::new(
+                zero_migrate::shipping_vendors(),
+                PROJECT_SCHEMA,
+                OWNER,
+                dialect,
+                &no_inject_policy(),
+            )
+            .lower(&ir, &unmanaged_live("text"))
+            .expect_err("a catalog type cannot supply missing authored format metadata");
             let rendered = error.to_string();
             assert!(
                 rendered.contains("no authored value-format metadata"),
@@ -1074,6 +1101,7 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
     );
     let live = LiveSchema::from_catalog_snapshot(snapshot, "external_owner");
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -1103,6 +1131,7 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
         collation: "utf8mb4_bin".to_string(),
     });
     let error = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -1136,11 +1165,17 @@ fn primitive_unmanaged_reference_is_catalog_validated_without_type_inference() {
             "\"parent_id\" INTEGER",
         ),
     ] {
-        let migrations = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower(&ir, &unmanaged_live(live_type))
-            .unwrap_or_else(|error| {
-                panic!("matching unmanaged primitive target must lower on {dialect:?}: {error}")
-            });
+        let migrations = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower(&ir, &unmanaged_live(live_type))
+        .unwrap_or_else(|error| {
+            panic!("matching unmanaged primitive target must lower on {dialect:?}: {error}")
+        });
         let child = create_sql(&migrations, dialect, "children");
         assert!(
             child.contains(local_storage),
@@ -1148,9 +1183,15 @@ fn primitive_unmanaged_reference_is_catalog_validated_without_type_inference() {
         );
         assert_reference_target(child, dialect, "unmanaged_parents");
 
-        let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower(&ir, &unmanaged_live("text"))
-            .expect_err("an incompatible live primitive target must be rejected");
+        let error = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower(&ir, &unmanaged_live("text"))
+        .expect_err("an incompatible live primitive target must be rejected");
         let rendered = error.to_string();
         assert!(
             rendered.to_ascii_lowercase().contains("catalog")
@@ -1183,9 +1224,15 @@ fn primitive_unmanaged_reference_requires_a_live_single_column_candidate_key() {
         target.constraints.clear();
         target.indexes.clear();
 
-        let error = IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-            .lower(&ir, &live)
-            .expect_err("an ordinary live column is not independently referenceable");
+        let error = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            PROJECT_SCHEMA,
+            OWNER,
+            dialect,
+            &no_inject_policy(),
+        )
+        .lower(&ir, &live)
+        .expect_err("an ordinary live column is not independently referenceable");
         let rendered = error.to_string();
         assert!(
             rendered.contains("not an eligible single-column primary or unique key"),
@@ -1199,6 +1246,7 @@ fn sqlite_unmanaged_integer_reference_keeps_declared_width() {
     for (local_type, live_type) in [("int", "bigint"), ("bigInt", "integer")] {
         let ir = unmanaged_child_ir("sqlite_integer_width_mismatch", local_type, None);
         let error = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
             PROJECT_SCHEMA,
             OWNER,
             &zero_migrate_sqlite::DIALECT,
@@ -1215,6 +1263,7 @@ fn sqlite_unmanaged_integer_reference_keeps_declared_width() {
 
     let bigint = unmanaged_child_ir("sqlite_bigint_width_match", "bigInt", None);
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -1278,10 +1327,17 @@ fn sqlite_declared_bigint_reference_matches_managed_integer_storage() {
         },
     );
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
-    live.advance_logical_columns(&target, &zero_migrate_sqlite::DIALECT, PROJECT_SCHEMA, None)
-        .expect("record the managed BIGINT key contract");
+    live.advance_logical_columns(
+        zero_migrate::shipping_vendors(),
+        &target,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT_SCHEMA,
+        None,
+    )
+    .expect("record the managed BIGINT key contract");
 
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_sqlite::DIALECT,
@@ -1313,6 +1369,7 @@ fn mysql_unbounded_text_reference_is_refused_before_collation_comparison() {
     );
 
     let error = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_mysql::DIALECT,
@@ -1423,6 +1480,7 @@ fn absorb_logical_columns_carries_an_applied_file_contract_into_a_later_foreign_
         }],
     );
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -1444,6 +1502,7 @@ fn absorb_logical_columns_carries_an_applied_file_contract_into_a_later_foreign_
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
     live.absorb_logical_columns(
+        zero_migrate::shipping_vendors(),
         &applied,
         &zero_migrate_postgres::DIALECT,
         PROJECT_SCHEMA,
@@ -1523,6 +1582,7 @@ fn absorb_logical_columns_replays_the_candidate_key_lifecycle_of_an_applied_file
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
     live.absorb_logical_columns(
+        zero_migrate::shipping_vendors(),
         &applied,
         &zero_migrate_postgres::DIALECT,
         PROJECT_SCHEMA,
@@ -1535,6 +1595,7 @@ fn absorb_logical_columns_replays_the_candidate_key_lifecycle_of_an_applied_file
     );
 
     let migrations = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         PROJECT_SCHEMA,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -1577,6 +1638,7 @@ fn absorb_logical_columns_accumulates_what_strict_advance_rejects() {
 
     let error = LiveSchema::default()
         .advance_logical_columns(
+            zero_migrate::shipping_vendors(),
             &applied,
             &zero_migrate_postgres::DIALECT,
             PROJECT_SCHEMA,
@@ -1593,6 +1655,7 @@ fn absorb_logical_columns_accumulates_what_strict_advance_rejects() {
     let mut lenient = LiveSchema::default();
     lenient
         .absorb_logical_columns(
+            zero_migrate::shipping_vendors(),
             &applied,
             &zero_migrate_postgres::DIALECT,
             PROJECT_SCHEMA,

@@ -216,7 +216,7 @@ async fn measure_qualified_ref(url: &str, other_present: bool) -> BoundaryResult
     }
     let policy = support::no_inject(&cfg.project_schema);
     classify(
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .deploy_envelopes(
                 &[ir],
                 &backend,
@@ -283,7 +283,7 @@ async fn measure_aggregate_update(url: &str) -> BoundaryResult {
     let registry = BTreeMap::from([("users".to_string(), OWNER.to_string())]);
     let policy = support::no_inject(&cfg.project_schema);
     classify(
-        MigrationEngine::new()
+        MigrationEngine::new(zero_migrate::shipping_vendors())
             .deploy_envelopes(
                 &[ir],
                 &backend,

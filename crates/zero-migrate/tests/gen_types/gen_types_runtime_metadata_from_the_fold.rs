@@ -95,8 +95,14 @@ fn artifacts(
     dialect: &zero_migrate::DialectId,
     policy: &EffectivePolicy,
 ) -> (Value, String) {
-    let rendered =
-        render_artifacts(ops, dialect, SCHEMA, policy).expect("the stream renders artifacts");
+    let rendered = render_artifacts(
+        zero_migrate::shipping_vendors(),
+        ops,
+        dialect,
+        SCHEMA,
+        policy,
+    )
+    .expect("the stream renders artifacts");
     let runtime =
         serde_json::from_str(&rendered.runtime_json).expect("`schema.runtime.json` parses");
     (runtime, rendered.env_db_ts)
@@ -666,7 +672,13 @@ fn corpus_lines(
         assert_eq!(dialect, &zero_migrate_mysql::DIALECT);
         "Mysql"
     };
-    let rendered = match render_artifacts(ops, dialect, SCHEMA, policy) {
+    let rendered = match render_artifacts(
+        zero_migrate::shipping_vendors(),
+        ops,
+        dialect,
+        SCHEMA,
+        policy,
+    ) {
         Ok(rendered) => rendered,
         Err(error) => {
             out.push(format!("{stem}|{d}|refused|{error}"));
@@ -1036,8 +1048,20 @@ fn the_move_added_no_refusal_that_the_old_path_did_not_already_make() {
             // the biconditional compare `render_artifacts` to the very call it makes
             // first - a control that can only ever agree with itself. `fold_ops` is the
             // half of the old gate that still exists independently.
-            let old_gate = zero_migrate::fold_ops(&resolved.ops, dialect, SCHEMA, policy);
-            let now = render_artifacts(ops, dialect, SCHEMA, policy);
+            let old_gate = zero_migrate::fold_ops(
+                zero_migrate::shipping_vendors(),
+                &resolved.ops,
+                dialect,
+                SCHEMA,
+                policy,
+            );
+            let now = render_artifacts(
+                zero_migrate::shipping_vendors(),
+                ops,
+                dialect,
+                SCHEMA,
+                policy,
+            );
 
             match (&old_gate, &now) {
                 (Ok(_), Ok(_)) => accepted += 1,
@@ -1092,6 +1116,7 @@ fn the_refusal_probes_still_exercise_the_named_type_arms() {
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| panic!("probe `{name}` exists"));
         render_artifacts(
+            zero_migrate::shipping_vendors(),
             &parse(source),
             &zero_migrate_postgres::DIALECT,
             SCHEMA,

@@ -58,6 +58,7 @@ fn posts_descriptor() -> CollectionDescriptor {
 #[test]
 fn descriptor_reference_field_emits_one_foreign_key() {
     let artifacts = render_artifacts_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &[users_descriptor(), posts_descriptor()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -190,6 +191,7 @@ fn envelope_ops(ir: &MigrationIr) -> Vec<Op> {
 #[test]
 fn envelope_ref_brand_emits_one_foreign_key() {
     let artifacts = render_artifacts(
+        zero_migrate::shipping_vendors(),
         &envelope_ops(&ref_brand_envelope()),
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -212,6 +214,7 @@ fn envelope_ref_brand_emits_one_foreign_key() {
 fn descriptor_and_envelope_reference_sources_are_byte_identical() {
     let effective = support::confined_charter();
     let manual = render_artifacts_from_descriptors(
+        zero_migrate::shipping_vendors(),
         &[users_descriptor(), posts_descriptor()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -219,6 +222,7 @@ fn descriptor_and_envelope_reference_sources_are_byte_identical() {
     )
     .expect("manual render");
     let generated = render_artifacts(
+        zero_migrate::shipping_vendors(),
         &envelope_ops(&ref_brand_envelope()),
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -245,6 +249,7 @@ fn envelope_declaring_the_same_foreign_key_twice_is_still_refused() {
     // same name is a second declaration of one constraint. Fixing the producer must
     // not soften this.
     let error = render_artifacts(
+        zero_migrate::shipping_vendors(),
         &envelope_ops(&doubly_declared_reference_envelope()),
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -261,6 +266,7 @@ fn envelope_declaring_the_same_foreign_key_twice_is_still_refused() {
 #[test]
 fn envelope_typed_column_reference_emits_one_foreign_key() {
     let artifacts = render_artifacts(
+        zero_migrate::shipping_vendors(),
         &envelope_ops(&typed_reference_envelope()),
         &zero_migrate_postgres::DIALECT,
         SCHEMA,

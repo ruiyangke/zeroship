@@ -121,9 +121,15 @@ fn col_refs(value: &serde_json::Value, found: &mut Vec<String>) {
 fn a_rename_follows_the_generated_expressions_that_read_the_column() {
     let effective = support::confined_charter();
     let ops = vec![create_line_items(), rename_qty_to_quantity()];
-    let fields = single_fold::fold(&ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the op stream folds");
+    let fields = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        &ops,
+        &zero_migrate_postgres::DIALECT,
+        SCHEMA,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the op stream folds");
 
     let table = &fields["line_items"];
     assert!(
@@ -240,9 +246,14 @@ fn a_table_rename_carries_a_qualified_generated_reference_in_both_artifacts() {
         },
     ];
 
-    let artifacts =
-        zero_migrate::render_artifacts(&ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
-            .expect("the op stream renders both artifacts");
+    let artifacts = zero_migrate::render_artifacts(
+        zero_migrate::shipping_vendors(),
+        &ops,
+        &zero_migrate_postgres::DIALECT,
+        SCHEMA,
+        &effective,
+    )
+    .expect("the op stream renders both artifacts");
 
     let runtime: serde_json::Value =
         serde_json::from_str(&artifacts.runtime_json).expect("the runtime descriptor is JSON");
@@ -320,6 +331,7 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
     let effective = support::confined_charter();
 
     let before = single_fold::fold(
+        zero_migrate::shipping_vendors(),
         &[create_bounded()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -340,6 +352,7 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
     );
 
     let after = single_fold::fold(
+        zero_migrate::shipping_vendors(),
         &[create_bounded(), rename_qty_to_quantity()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -386,6 +399,7 @@ fn the_snapshot_lane_follows_the_rename_and_the_differ_still_ignores_the_body() 
     let effective = support::confined_charter();
 
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         &[create_line_items(), rename_qty_to_quantity()],
         &zero_migrate_postgres::DIALECT,
         SCHEMA,
@@ -463,7 +477,7 @@ fn the_snapshot_lane_follows_the_rename_and_the_differ_still_ignores_the_body() 
             generated.expr = "(\"something\" * \"else\")".to_string();
         }
     }
-    let drift = diff_snapshots(&folded, &other);
+    let drift = diff_snapshots(zero_migrate::shipping_vendors(), &folded, &other);
     assert!(
         drift.is_clean(),
         "a rewritten generated body reports no drift: the comparison is off by design, \

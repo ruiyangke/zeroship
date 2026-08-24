@@ -202,10 +202,16 @@ fn lower(
     dialect: &zero_migrate::DialectId,
     live: &LiveSchema,
 ) -> Result<(), String> {
-    IrAuthor::new(PROJECT_SCHEMA, OWNER, dialect, &no_inject_policy())
-        .lower(ir, live)
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        PROJECT_SCHEMA,
+        OWNER,
+        dialect,
+        &no_inject_policy(),
+    )
+    .lower(ir, live)
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 const DIALECTS: [&zero_migrate::DialectId; 3] = [

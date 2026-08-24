@@ -33,6 +33,7 @@ use crate::model::expr::Expr;
 use crate::model::ir::{IrDefault, IrScalar, SequenceRef, ValueFormat};
 use crate::model::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot};
 use crate::render::backends::{renderer, value_format_renderer, value_format_renderers};
+use zero_migrate_backend::registry::VendorSet;
 use zero_migrate_backend::value_format as seam;
 use zero_migrate_backend::value_format::{
     id_default_from_literal_fingerprint, CatalogRules, CatalogSqlContext, LiteralCastKind,
@@ -57,44 +58,45 @@ pub(crate) use zero_migrate_backend::value_format::RecoveredFormatCheck;
 /// The per-method composition — `any` versus first-match versus apply-all — is a
 /// COMPARISON decision, which is why it is stated here rather than pushed down with
 /// the algorithm that consults it.
-struct AllRegisteredVendors;
+struct AllRegisteredVendors(VendorSet);
 
 impl CatalogRules for AllRegisteredVendors {
     fn literal_cast_kind(&self, compact_target: &str) -> Option<LiteralCastKind> {
-        value_format_renderers().find_map(|backend| backend.literal_cast_kind(compact_target))
+        value_format_renderers(self.0).find_map(|backend| backend.literal_cast_kind(compact_target))
     }
 
     fn is_catalog_cast_target(&self, compact_target: &str) -> bool {
-        value_format_renderers().any(|backend| backend.is_catalog_cast_target(compact_target))
+        value_format_renderers(self.0).any(|backend| backend.is_catalog_cast_target(compact_target))
     }
 
     fn canonical_catalog_cast_target(&self, compact_target: &str) -> String {
-        value_format_renderers()
+        value_format_renderers(self.0)
             .find_map(|backend| backend.canonical_unattributed_catalog_cast_target(compact_target))
             .unwrap_or_else(|| compact_target.to_string())
     }
 
     fn catalog_literal_hex_carrier<'a>(&self, tokens: &'a [String]) -> Option<&'a str> {
-        value_format_renderers().find_map(|backend| backend.catalog_literal_hex_carrier(tokens))
+        value_format_renderers(self.0)
+            .find_map(|backend| backend.catalog_literal_hex_carrier(tokens))
     }
 
     fn is_catalog_string_introducer(&self, word: &str, followed_by_quote: bool) -> bool {
-        value_format_renderers()
+        value_format_renderers(self.0)
             .any(|backend| backend.is_catalog_string_introducer(word, followed_by_quote))
     }
 
     fn normalize_catalog_tokens(&self, context: CatalogSqlContext, tokens: &mut Vec<String>) {
-        for backend in value_format_renderers() {
+        for backend in value_format_renderers(self.0) {
             backend.normalize_catalog_tokens(context, tokens);
         }
     }
 
     fn normalizes_trim_both_from(&self) -> bool {
-        value_format_renderers().any(|backend| backend.normalizes_trim_both_from())
+        value_format_renderers(self.0).any(|backend| backend.normalizes_trim_both_from())
     }
 
     fn canonical_catalog_function_name<'a>(&self, name: &'a str) -> &'a str {
-        value_format_renderers()
+        value_format_renderers(self.0)
             .find_map(|backend| backend.canonical_unattributed_catalog_function_name(name))
             .unwrap_or(name)
     }
@@ -102,12 +104,13 @@ impl CatalogRules for AllRegisteredVendors {
 
 /// Project a structured authored default into the narrow ID-default drift key.
 pub(crate) fn authored_id_default(
+    vendors: VendorSet,
     default: Option<&IrDefault>,
     rendered: Option<&str>,
     dialect: &DialectId,
     default_schema: Option<&str>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(vendors, dialect);
     match default {
         None => IdDefaultSnapshot::Absent,
         Some(IrDefault::Literal {
@@ -125,7 +128,7 @@ pub(crate) fn authored_id_default(
             expr: Expr::Literal { value },
         }) => IdDefaultSnapshot::Literal(
             rendered
-                .and_then(|rendered| sql_literal_fingerprint_in_dialect(rendered, dialect))
+                .and_then(|rendered| sql_literal_fingerprint_in_dialect(vendors, rendered, dialect))
                 .unwrap_or_else(|| authored_literal_fingerprint(value)),
         ),
         Some(IrDefault::Expr { expr: Expr::UuidV4 }) => IdDefaultSnapshot::UuidV4,
@@ -144,15 +147,18 @@ pub(crate) fn authored_id_default(
             let normalized_rendered = match default {
                 Some(IrDefault::Expr { expr }) => backend
                     .normalize_authored_default_expr(expr)
-                    .and_then(|expr| crate::render::dml::render_expr_inline(&expr, dialect).ok()),
+                    .and_then(|expr| {
+                        crate::render::dml::render_expr_inline(vendors, &expr, dialect).ok()
+                    }),
                 _ => None,
             };
             let rendered = normalized_rendered.as_deref().or(rendered);
             rendered
-                .and_then(|rendered| sql_literal_fingerprint_in_dialect(rendered, dialect))
+                .and_then(|rendered| sql_literal_fingerprint_in_dialect(vendors, rendered, dialect))
                 .map_or_else(
                     || {
                         IdDefaultSnapshot::Expression(catalog_expression_fingerprint_in_dialect(
+                            vendors,
                             rendered.unwrap_or_default(),
                             dialect,
                         ))
@@ -168,14 +174,16 @@ pub(crate) fn authored_id_default(
 /// semantic normalization only on the UUID-typed default surface; TypeID/ULID
 /// text literals remain byte-exact.
 pub(crate) fn authored_uuid_id_default(
+    vendors: VendorSet,
     default: Option<&IrDefault>,
     rendered: Option<&str>,
     dialect: &DialectId,
     default_schema: Option<&str>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(vendors, dialect);
     let snapshot = authored_storage_literal_snapshot(
-        authored_id_default(default, rendered, dialect, default_schema),
+        vendors,
+        authored_id_default(vendors, default, rendered, dialect, default_schema),
         rendered,
         dialect,
     );
@@ -189,14 +197,16 @@ pub(crate) fn authored_uuid_id_default(
 /// dialects. MySQL additionally reports a non-expression `COLUMN_DEFAULT` in
 /// its coerced character form, without SQL quotes.
 pub(crate) fn authored_text_id_default(
+    vendors: VendorSet,
     default: Option<&IrDefault>,
     rendered: Option<&str>,
     dialect: &DialectId,
     default_schema: Option<&str>,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(vendors, dialect);
     let snapshot = authored_storage_literal_snapshot(
-        authored_id_default(default, rendered, dialect, default_schema),
+        vendors,
+        authored_id_default(vendors, default, rendered, dialect, default_schema),
         rendered,
         dialect,
     );
@@ -221,60 +231,64 @@ fn authored_literal_fingerprint(value: &IrScalar) -> String {
 }
 
 fn authored_storage_literal_snapshot(
+    vendors: VendorSet,
     snapshot: IdDefaultSnapshot,
     rendered: Option<&str>,
     dialect: &DialectId,
 ) -> IdDefaultSnapshot {
-    let backend = crate::render::backends::value_format_renderer(dialect);
+    let backend = crate::render::backends::value_format_renderer(vendors, dialect);
     if !backend.authored_storage_uses_rendered_literal()
         || !matches!(snapshot, IdDefaultSnapshot::Literal(_))
     {
         return snapshot;
     }
     rendered
-        .and_then(|rendered| sql_literal_fingerprint_in_dialect(rendered, dialect))
+        .and_then(|rendered| sql_literal_fingerprint_in_dialect(vendors, rendered, dialect))
         .map_or(snapshot, id_default_from_literal_fingerprint)
 }
 
 /// Project a live catalog default into the same semantic key as
 /// [`authored_id_default`].
 pub(crate) fn catalog_id_default(
+    vendors: VendorSet,
     default: Option<&str>,
     dialect: &DialectId,
     expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
     seam::catalog_id_default(
         default,
-        value_format_renderer(dialect),
-        renderer(dialect),
+        value_format_renderer(vendors, dialect),
+        renderer(vendors, dialect),
         expression_default,
     )
 }
 
 /// [`catalog_id_default`] with the UUID surface's semantic normalization applied.
 pub(crate) fn catalog_uuid_id_default(
+    vendors: VendorSet,
     default: Option<&str>,
     dialect: &DialectId,
     expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
     seam::catalog_uuid_id_default(
         default,
-        value_format_renderer(dialect),
-        renderer(dialect),
+        value_format_renderer(vendors, dialect),
+        renderer(vendors, dialect),
         expression_default,
     )
 }
 
 /// [`catalog_id_default`] with the TypeID/ULID text surface's normalization applied.
 pub(crate) fn catalog_text_id_default(
+    vendors: VendorSet,
     default: Option<&str>,
     dialect: &DialectId,
     expression_default: Option<bool>,
 ) -> IdDefaultSnapshot {
     seam::catalog_text_id_default(
         default,
-        value_format_renderer(dialect),
-        renderer(dialect),
+        value_format_renderer(vendors, dialect),
+        renderer(vendors, dialect),
         expression_default,
     )
 }
@@ -288,6 +302,7 @@ pub(crate) fn catalog_text_id_default(
 /// engine's rather than the contract crate's: an absent dialect is the
 /// no-provenance case, and answering it means composing every registered vendor.
 pub(crate) fn catalog_id_default_for_expected(
+    vendors: VendorSet,
     expected: &IdDefaultSnapshot,
     default: Option<&str>,
     dialect: Option<&DialectId>,
@@ -302,17 +317,22 @@ pub(crate) fn catalog_id_default_for_expected(
                 serde_json::to_string(default).expect("string serialization is infallible"),
             );
         };
-        return catalog_uuid_id_default(Some(default), dialect, expression_default);
+        return catalog_uuid_id_default(vendors, Some(default), dialect, expression_default);
     }
     if let Some(dialect) = dialect {
-        if value_format_renderer(dialect).catalog_default_marker_is_authoritative() {
+        if value_format_renderer(vendors, dialect).catalog_default_marker_is_authoritative() {
             if let Some(expression_default) = expression_default {
-                return catalog_id_default(Some(default), dialect, Some(expression_default));
+                return catalog_id_default(
+                    vendors,
+                    Some(default),
+                    dialect,
+                    Some(expression_default),
+                );
             }
         }
     }
     if matches!(expected, IdDefaultSnapshot::Literal(_)) {
-        if let Some(literal) = sql_literal_fingerprint(default, dialect) {
+        if let Some(literal) = sql_literal_fingerprint(vendors, default, dialect) {
             return IdDefaultSnapshot::Literal(literal);
         }
         // MySQL information_schema returns literal text without SQL quotes.
@@ -321,11 +341,11 @@ pub(crate) fn catalog_id_default_for_expected(
         );
     }
     if let Some(dialect) = dialect {
-        let recovered = catalog_id_default(Some(default), dialect, None);
+        let recovered = catalog_id_default(vendors, Some(default), dialect, None);
         if !matches!(recovered, IdDefaultSnapshot::Expression(_)) {
             return recovered;
         }
-    } else if let Some(literal) = sql_literal_fingerprint(default, None) {
+    } else if let Some(literal) = sql_literal_fingerprint(vendors, default, None) {
         // No dialect claims this snapshot, but a LITERAL is not a dialect's opinion:
         // every registered vendor agrees on one, which is exactly what
         // `AllRegisteredVendors` asks. Without this the arm below spells a plain `7`
@@ -338,38 +358,57 @@ pub(crate) fn catalog_id_default_for_expected(
         // here is compared against a non-literal expectation either way.
         return IdDefaultSnapshot::Literal(literal);
     }
-    IdDefaultSnapshot::Expression(catalog_expression_fingerprint_for(default, dialect))
+    IdDefaultSnapshot::Expression(catalog_expression_fingerprint_for(
+        vendors, default, dialect,
+    ))
 }
 
 /// The literal comparison key for catalog SQL, under one dialect's rules or —
 /// when the snapshot has no provenance — every registered vendor's, composed.
-fn sql_literal_fingerprint(expression: &str, dialect: Option<&DialectId>) -> Option<String> {
+fn sql_literal_fingerprint(
+    vendors: VendorSet,
+    expression: &str,
+    dialect: Option<&DialectId>,
+) -> Option<String> {
     match dialect {
-        Some(dialect) => {
-            seam::sql_literal_fingerprint(expression, &VendorRules(value_format_renderer(dialect)))
-        }
-        None => seam::sql_literal_fingerprint(expression, &AllRegisteredVendors),
+        Some(dialect) => seam::sql_literal_fingerprint(
+            expression,
+            &VendorRules(value_format_renderer(vendors, dialect)),
+        ),
+        None => seam::sql_literal_fingerprint(expression, &AllRegisteredVendors(vendors)),
     }
 }
 
-fn sql_literal_fingerprint_in_dialect(expression: &str, dialect: &DialectId) -> Option<String> {
-    sql_literal_fingerprint(expression, Some(dialect))
+fn sql_literal_fingerprint_in_dialect(
+    vendors: VendorSet,
+    expression: &str,
+    dialect: &DialectId,
+) -> Option<String> {
+    sql_literal_fingerprint(vendors, expression, Some(dialect))
 }
 
 /// Catalog-stable fingerprint for the closed expression-default subset, composed
 /// across every registered vendor when the snapshot has no provenance.
-pub(crate) fn catalog_expression_fingerprint(sql: &str) -> String {
-    seam::catalog_expression_fingerprint(sql, &AllRegisteredVendors)
+pub(crate) fn catalog_expression_fingerprint(vendors: VendorSet, sql: &str) -> String {
+    seam::catalog_expression_fingerprint(sql, &AllRegisteredVendors(vendors))
 }
 
-pub(crate) fn catalog_expression_fingerprint_in_dialect(sql: &str, dialect: &DialectId) -> String {
-    seam::catalog_expression_fingerprint(sql, &VendorRules(value_format_renderer(dialect)))
+pub(crate) fn catalog_expression_fingerprint_in_dialect(
+    vendors: VendorSet,
+    sql: &str,
+    dialect: &DialectId,
+) -> String {
+    seam::catalog_expression_fingerprint(sql, &VendorRules(value_format_renderer(vendors, dialect)))
 }
 
-fn catalog_expression_fingerprint_for(sql: &str, dialect: Option<&DialectId>) -> String {
+fn catalog_expression_fingerprint_for(
+    vendors: VendorSet,
+    sql: &str,
+    dialect: Option<&DialectId>,
+) -> String {
     dialect.map_or_else(
-        || catalog_expression_fingerprint(sql),
-        |dialect| catalog_expression_fingerprint_in_dialect(sql, dialect),
+        || catalog_expression_fingerprint(vendors, sql),
+        |dialect| catalog_expression_fingerprint_in_dialect(vendors, sql, dialect),
     )
 }
 
@@ -392,8 +431,8 @@ pub(crate) fn recover_format_check(
     seam::recover_format_check(
         column,
         check_sql,
-        value_format_renderer(dialect),
-        renderer(dialect),
+        value_format_renderer(crate::test_fixtures::VENDORS, dialect),
+        renderer(crate::test_fixtures::VENDORS, dialect),
     )
 }
 
@@ -401,14 +440,20 @@ pub(crate) fn recover_format_check(
 /// and SQLite. PostgreSQL's native `uuid` type enforces the representation, so
 /// it needs neither an override nor a duplicate `CHECK`.
 pub(crate) fn uuid_column_metadata(
+    vendors: VendorSet,
     column: &str,
     dialect: &DialectId,
 ) -> Result<Option<ValueFormatColumnMetadata>, String> {
-    seam::uuid_column_metadata(column, value_format_renderer(dialect), renderer(dialect))
+    seam::uuid_column_metadata(
+        column,
+        value_format_renderer(vendors, dialect),
+        renderer(vendors, dialect),
+    )
 }
 
 /// Lower one logical value format to its dialect-specific text representation.
 pub(crate) fn column_metadata(
+    vendors: VendorSet,
     column: &str,
     format: &ValueFormat,
     dialect: &DialectId,
@@ -416,8 +461,8 @@ pub(crate) fn column_metadata(
     seam::column_metadata(
         column,
         format,
-        value_format_renderer(dialect),
-        renderer(dialect),
+        value_format_renderer(vendors, dialect),
+        renderer(vendors, dialect),
     )
 }
 
@@ -447,10 +492,11 @@ pub(crate) fn column_metadata(
 /// Returns `None` when the dialect needs no override, which is never today but keeps
 /// the caller from assuming one exists.
 pub(crate) fn bytewise_column_metadata(
+    vendors: VendorSet,
     rendered_type: &str,
     dialect: &DialectId,
 ) -> (String, Option<ColumnCollationSnapshot>) {
-    value_format_renderer(dialect).bytewise_column_metadata(rendered_type)
+    value_format_renderer(vendors, dialect).bytewise_column_metadata(rendered_type)
 }
 
 #[cfg(test)]
@@ -482,9 +528,16 @@ mod tests {
             (r#"("note" || 'x')"#, "(note || 'x'::text)"),
             (r#"("qty" + 1)"#, "(qty + 1)"),
         ] {
-            let authored_key =
-                catalog_expression_fingerprint_in_dialect(&authored.replace('"', ""), &POSTGRES);
-            let catalog_key = catalog_expression_fingerprint_in_dialect(catalog, &POSTGRES);
+            let authored_key = catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                &authored.replace('"', ""),
+                &POSTGRES,
+            );
+            let catalog_key = catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                catalog,
+                &POSTGRES,
+            );
             assert_eq!(
                 authored_key, catalog_key,
                 "the injected cast and the added parentheses must already normalise away; \
@@ -492,8 +545,16 @@ mod tests {
             );
         }
         assert_ne!(
-            catalog_expression_fingerprint_in_dialect(r#"("qty" + 1)"#, &POSTGRES),
-            catalog_expression_fingerprint_in_dialect("(qty + 1)", &POSTGRES),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                r#"("qty" + 1)"#,
+                &POSTGRES
+            ),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "(qty + 1)",
+                &POSTGRES
+            ),
             "identifier QUOTING is the one thing left between the two sides, so a body \
              comparison would need a rule for it before the rename problem even comes up"
         );
@@ -573,6 +634,7 @@ mod tests {
     #[test]
     fn a_foreign_vendors_catalog_decoration_does_not_normalise_away() {
         let pristine = column_metadata(
+            crate::test_fixtures::VENDORS,
             "id",
             &ValueFormat::TypeId {
                 prefix: "account".to_string(),
@@ -612,7 +674,13 @@ mod tests {
             },
         };
         assert_eq!(
-            authored_id_default(Some(&default), None, &POSTGRES, Some("app")),
+            authored_id_default(
+                crate::test_fixtures::VENDORS,
+                Some(&default),
+                None,
+                &POSTGRES,
+                Some("app")
+            ),
             IdDefaultSnapshot::Nextval(crate::render::declarative::nextval_default_expr(
                 &SequenceRef {
                     name: "event_ids".to_string(),
@@ -626,6 +694,7 @@ mod tests {
     fn catalog_literal_normalization_matches_authored_id_literals() {
         let uuid = "00000000-0000-4000-8000-000000000000";
         let authored_uuid = authored_id_default(
+            crate::test_fixtures::VENDORS,
             Some(&IrDefault::Literal {
                 value: IrScalar::Str(uuid.to_string()),
             }),
@@ -635,10 +704,16 @@ mod tests {
         );
         assert_eq!(
             authored_uuid,
-            catalog_id_default(Some(&format!("'{uuid}'::uuid")), &POSTGRES, None,)
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some(&format!("'{uuid}'::uuid")),
+                &POSTGRES,
+                None,
+            )
         );
 
         let authored_int64 = authored_id_default(
+            crate::test_fixtures::VENDORS,
             Some(&IrDefault::Literal {
                 value: IrScalar::Int64(i64::MAX),
             }),
@@ -648,15 +723,35 @@ mod tests {
         );
         assert_eq!(
             authored_int64,
-            catalog_id_default(Some("'9223372036854775807'::bigint"), &POSTGRES, None,)
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("'9223372036854775807'::bigint"),
+                &POSTGRES,
+                None
+            )
         );
         assert_eq!(
             authored_uuid,
-            catalog_id_default(Some(uuid), &MYSQL, Some(false))
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some(uuid),
+                &MYSQL,
+                Some(false)
+            )
         );
         assert_ne!(
-            catalog_id_default(Some("uuid()"), &MYSQL, Some(false)),
-            catalog_id_default(Some("uuid()"), &MYSQL, Some(true)),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("uuid()"),
+                &MYSQL,
+                Some(false)
+            ),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("uuid()"),
+                &MYSQL,
+                Some(true)
+            ),
             "MySQL's DEFAULT_GENERATED marker must distinguish a string literal from a call"
         );
 
@@ -667,6 +762,7 @@ mod tests {
         };
         assert_eq!(
             authored_id_default(
+                crate::test_fixtures::VENDORS,
                 Some(&expression_literal),
                 Some(&format!("'{uuid}'")),
                 &POSTGRES,
@@ -687,21 +783,32 @@ mod tests {
             },
         ] {
             assert_eq!(
-                authored_id_default(Some(&null_default), Some("NULL"), &POSTGRES, Some("app")),
+                authored_id_default(
+                    crate::test_fixtures::VENDORS,
+                    Some(&null_default),
+                    Some("NULL"),
+                    &POSTGRES,
+                    Some("app")
+                ),
                 IdDefaultSnapshot::Absent,
                 "DEFAULT NULL is semantically the same as omitting an ID default"
             );
         }
         assert_eq!(
-            catalog_id_default(Some("NULL::text"), &POSTGRES, None),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("NULL::text"),
+                &POSTGRES,
+                None
+            ),
             IdDefaultSnapshot::Absent
         );
         assert_eq!(
-            catalog_id_default(Some("(NULL)"), &SQLITE, None),
+            catalog_id_default(crate::test_fixtures::VENDORS, Some("(NULL)"), &SQLITE, None),
             IdDefaultSnapshot::Absent
         );
         assert_eq!(
-            catalog_id_default(None, &MYSQL, Some(false)),
+            catalog_id_default(crate::test_fixtures::VENDORS, None, &MYSQL, Some(false)),
             IdDefaultSnapshot::Absent
         );
     }
@@ -713,11 +820,21 @@ mod tests {
         let default = IrDefault::Literal {
             value: IrScalar::Str(upper.to_string()),
         };
-        let postgres_expected =
-            authored_uuid_id_default(Some(&default), None, &POSTGRES, Some("app"));
+        let postgres_expected = authored_uuid_id_default(
+            crate::test_fixtures::VENDORS,
+            Some(&default),
+            None,
+            &POSTGRES,
+            Some("app"),
+        );
         assert_eq!(
             postgres_expected,
-            catalog_uuid_id_default(Some(&format!("'{lower}'::uuid")), &POSTGRES, None,)
+            catalog_uuid_id_default(
+                crate::test_fixtures::VENDORS,
+                Some(&format!("'{lower}'::uuid")),
+                &POSTGRES,
+                None,
+            )
         );
 
         for dialect in [&MYSQL, &SQLITE] {
@@ -727,8 +844,15 @@ mod tests {
                 format!("'{lower}'")
             };
             assert_ne!(
-                authored_uuid_id_default(Some(&default), None, dialect, Some("app")),
+                authored_uuid_id_default(
+                    crate::test_fixtures::VENDORS,
+                    Some(&default),
+                    None,
+                    dialect,
+                    Some("app")
+                ),
                 catalog_uuid_id_default(
+                    crate::test_fixtures::VENDORS,
                     Some(&catalog),
                     dialect,
                     (dialect == &MYSQL).then_some(false),
@@ -764,13 +888,25 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                authored_text_id_default(Some(&decimal), Some(rendered), dialect, Some("app")),
-                catalog_id_default(Some(catalog), dialect, expression_marker),
+                authored_text_id_default(
+                    crate::test_fixtures::VENDORS,
+                    Some(&decimal),
+                    Some(rendered),
+                    dialect,
+                    Some("app")
+                ),
+                catalog_id_default(
+                    crate::test_fixtures::VENDORS,
+                    Some(catalog),
+                    dialect,
+                    expression_marker
+                ),
                 "{dialect:?} must compare the text value actually stored for a decimal ID default"
             );
         }
 
         column_metadata(
+            crate::test_fixtures::VENDORS,
             "type_key",
             &ValueFormat::TypeId {
                 prefix: String::new(),
@@ -785,20 +921,36 @@ mod tests {
         };
         assert_eq!(
             authored_text_id_default(
+                crate::test_fixtures::VENDORS,
                 Some(&expression_decimal),
                 Some("12345678901234567890123456"),
                 &MYSQL,
                 Some("app")
             ),
-            catalog_id_default(Some("12345678901234567890123456"), &MYSQL, Some(false)),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("12345678901234567890123456"),
+                &MYSQL,
+                Some(false)
+            ),
             "a MySQL expression-wrapped literal is emitted and stored as a scalar TypeID default"
         );
 
         let cast_a = "CAST(12345678901234567890123456 AS CHAR)";
         let cast_b = "CAST(12345678901234567890123457 AS CHAR)";
         assert_ne!(
-            catalog_id_default(Some(cast_a), &MYSQL, Some(true)),
-            catalog_id_default(Some(cast_b), &MYSQL, Some(true)),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some(cast_a),
+                &MYSQL,
+                Some(true)
+            ),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some(cast_b),
+                &MYSQL,
+                Some(true)
+            ),
             "adjacent arbitrary-precision decimal CAST defaults must not collide"
         );
 
@@ -811,6 +963,7 @@ mod tests {
             },
         };
         let rendered_numeric_cast = crate::render::dml::render_expr_inline(
+            crate::test_fixtures::VENDORS,
             match &numeric_cast {
                 IrDefault::Expr { expr } => expr,
                 _ => unreachable!("fixture is an expression default"),
@@ -820,12 +973,18 @@ mod tests {
         .expect("numeric cast renders");
         assert_eq!(
             authored_text_id_default(
+                crate::test_fixtures::VENDORS,
                 Some(&numeric_cast),
                 Some(&rendered_numeric_cast),
                 &MYSQL,
                 Some("app")
             ),
-            catalog_text_id_default(Some("cast(42 as signed)"), &MYSQL, Some(true)),
+            catalog_text_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("cast(42 as signed)"),
+                &MYSQL,
+                Some(true)
+            ),
             "MySQL coerces a numeric expression default through TypeID character storage"
         );
 
@@ -839,6 +998,7 @@ mod tests {
             },
         };
         let rendered_uuid_cast = crate::render::dml::render_expr_inline(
+            crate::test_fixtures::VENDORS,
             match &uuid_cast {
                 IrDefault::Expr { expr } => expr,
                 _ => unreachable!("fixture is an expression default"),
@@ -848,12 +1008,14 @@ mod tests {
         .expect("UUID cast renders");
         assert_eq!(
             authored_uuid_id_default(
+                crate::test_fixtures::VENDORS,
                 Some(&uuid_cast),
                 Some(&rendered_uuid_cast),
                 &MYSQL,
                 Some("app")
             ),
             catalog_uuid_id_default(
+                crate::test_fixtures::VENDORS,
                 Some(&format!("cast(_latin1'{uuid}' as char(36) charset latin1)")),
                 &MYSQL,
                 Some(true)
@@ -879,6 +1041,7 @@ mod tests {
 
         for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             let rendered = crate::render::dml::render_expr_inline(
+                crate::test_fixtures::VENDORS,
                 match &default {
                     IrDefault::Expr { expr } => expr,
                     _ => unreachable!("fixture is an expression default"),
@@ -887,7 +1050,13 @@ mod tests {
             )
             .expect("render literal cast");
             assert_eq!(
-                authored_id_default(Some(&default), Some(&rendered), dialect, Some("app")),
+                authored_id_default(
+                    crate::test_fixtures::VENDORS,
+                    Some(&default),
+                    Some(&rendered),
+                    dialect,
+                    Some("app")
+                ),
                 expected,
                 "authored {dialect:?} literal cast"
             );
@@ -898,7 +1067,12 @@ mod tests {
                 rendered
             };
             assert_eq!(
-                catalog_id_default(Some(&catalog), dialect, (dialect == &MYSQL).then_some(true),),
+                catalog_id_default(
+                    crate::test_fixtures::VENDORS,
+                    Some(&catalog),
+                    dialect,
+                    (dialect == &MYSQL).then_some(true),
+                ),
                 expected,
                 "catalog {dialect:?} literal cast"
             );
@@ -908,15 +1082,30 @@ mod tests {
     #[test]
     fn literal_cast_normalization_preserves_value_semantics_and_null() {
         assert_eq!(
-            catalog_id_default(Some("CAST('42' AS text)"), &POSTGRES, None,),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("CAST('42' AS text)"),
+                &POSTGRES,
+                None
+            ),
             IdDefaultSnapshot::Literal("\"42\"".to_string())
         );
         assert_eq!(
-            catalog_id_default(Some("CAST('42' AS integer)"), &POSTGRES, None,),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("CAST('42' AS integer)"),
+                &POSTGRES,
+                None
+            ),
             IdDefaultSnapshot::Literal("42".to_string())
         );
         assert_eq!(
-            catalog_id_default(Some("(CAST('42' AS integer))::text"), &POSTGRES, None,),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("(CAST('42' AS integer))::text"),
+                &POSTGRES,
+                None
+            ),
             IdDefaultSnapshot::Literal("\"42\"".to_string()),
             "nested casts must be applied from the inside out"
         );
@@ -931,6 +1120,7 @@ mod tests {
         };
         for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
             let rendered = crate::render::dml::render_expr_inline(
+                crate::test_fixtures::VENDORS,
                 match &null_cast {
                     IrDefault::Expr { expr } => expr,
                     _ => unreachable!("fixture is an expression default"),
@@ -939,12 +1129,19 @@ mod tests {
             )
             .expect("render NULL cast");
             assert_eq!(
-                authored_id_default(Some(&null_cast), Some(&rendered), dialect, Some("app")),
+                authored_id_default(
+                    crate::test_fixtures::VENDORS,
+                    Some(&null_cast),
+                    Some(&rendered),
+                    dialect,
+                    Some("app")
+                ),
                 IdDefaultSnapshot::Absent,
                 "authored typed NULL is absence-equivalent on {dialect:?}"
             );
             assert_eq!(
                 catalog_id_default(
+                    crate::test_fixtures::VENDORS,
                     Some(&rendered),
                     dialect,
                     (dialect == &MYSQL).then_some(true),
@@ -958,83 +1155,128 @@ mod tests {
     #[test]
     fn expression_fingerprint_preserves_semantic_bitwise_grouping() {
         assert_ne!(
-            catalog_expression_fingerprint("(ord(random_bytes(1)) & 15) | 64"),
-            catalog_expression_fingerprint("ord(random_bytes(1)) & (15 | 64)")
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "(ord(random_bytes(1)) & 15) | 64"
+            ),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "ord(random_bytes(1)) & (15 | 64)"
+            )
         );
         assert_eq!(
-            catalog_expression_fingerprint("((ord(random_bytes(1)) & 15) | 64)"),
-            catalog_expression_fingerprint("(ord(random_bytes(1)) & 15) | 64")
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "((ord(random_bytes(1)) & 15) | 64)"
+            ),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "(ord(random_bytes(1)) & 15) | 64"
+            )
         );
         assert_eq!(
-            catalog_expression_fingerprint("lower('X')"),
-            catalog_expression_fingerprint("lower('X'::text)"),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "lower('X')"),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "lower('X'::text)"),
             "PostgreSQL's implicit text argument cast is catalog decoration"
         );
         assert_eq!(
-            catalog_expression_fingerprint("lower('X')"),
-            catalog_expression_fingerprint("pg_catalog.lower('X'::text)"),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "lower('X')"),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "pg_catalog.lower('X'::text)"
+            ),
             "explicit pg_catalog qualification is deparser decoration"
         );
         assert_eq!(
-            catalog_expression_fingerprint("lower('X')"),
-            catalog_expression_fingerprint("pg_catalog.lower(('X')::text)"),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "lower('X')"),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "pg_catalog.lower(('X')::text)"
+            ),
             "parenthesized typed call arguments retain call structure"
         );
         assert_eq!(
-            catalog_expression_fingerprint("lower(_utf8mb4 X'58')"),
-            catalog_expression_fingerprint("lower(_utf8mb4'X')"),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "lower(_utf8mb4 X'58')"),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "lower(_utf8mb4'X')"),
             "MySQL charset-qualified hex and quoted string carriers are equivalent"
         );
         assert_eq!(
             catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
                 "CASE WHEN true THEN 'account_00' ELSE 'account_01' END"
             ),
             catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
                 "CASE WHEN true THEN 'account_00'::text ELSE 'account_01'::text END"
             ),
             "typed literals must normalize inside CASE branches"
         );
         assert_eq!(
-            catalog_expression_fingerprint("CASE WHEN true THEN 'account_00' END"),
             catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "CASE WHEN true THEN 'account_00' END"
+            ),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
                 "CASE WHEN true THEN 'account_00'::text ELSE NULL::text END"
             ),
             "PostgreSQL's implicit searched-CASE ELSE NULL is deparser decoration"
         );
         assert_eq!(
-            catalog_expression_fingerprint("'a' || 'b'"),
-            catalog_expression_fingerprint("'a'::text || 'b'::text"),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "'a' || 'b'"),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "'a'::text || 'b'::text"),
             "typed literals must normalize inside concatenation"
         );
         assert_eq!(
-            catalog_expression_fingerprint("CAST(('a' = 'a') AS text)"),
-            catalog_expression_fingerprint("(('a'::text = 'a'::text))::text"),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "CAST(('a' = 'a') AS text)"
+            ),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "(('a'::text = 'a'::text))::text"
+            ),
             "typed literals must normalize inside a value-changing outer cast"
         );
         assert_eq!(
-            catalog_expression_fingerprint("trim(' X ')"),
-            catalog_expression_fingerprint("TRIM(BOTH FROM ' X '::text)"),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "trim(' X ')"),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "TRIM(BOTH FROM ' X '::text)"
+            ),
             "PostgreSQL's SQL-standard TRIM deparse must match the authored scalar call"
         );
         assert_eq!(
             catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
                 "substr('account_01arz3ndektsv4rrffq69g5fav', abs(-1), 34)"
             ),
             catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
                 "substr(_latin1'account_01arz3ndektsv4rrffq69g5fav',abs(-(1)),34)"
             ),
             "MySQL's parenthesized unary numeric literal is catalog decoration"
         );
         assert_eq!(
-            catalog_expression_fingerprint("CAST(lower('ACCOUNT_00') AS char)"),
             catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "CAST(lower('ACCOUNT_00') AS char)"
+            ),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
                 "cast(lower(_utf8mb4'ACCOUNT_00') as char charset utf8mb4)"
             ),
             "MySQL's resolved character set on CAST AS CHAR is catalog decoration"
         );
         assert_eq!(
-            catalog_expression_fingerprint("CAST(lower('A') AS char(36))"),
-            catalog_expression_fingerprint("cast(lower(_latin1'A') as char(36) charset latin1)"),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "CAST(lower('A') AS char(36))"
+            ),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "cast(lower(_latin1'A') as char(36) charset latin1)"
+            ),
             "resolved charset normalization retains an authored CAST length"
         );
     }
@@ -1046,29 +1288,69 @@ mod tests {
             ("ceil(1.25)", "ceiling(1.25)"),
         ] {
             assert_eq!(
-                catalog_expression_fingerprint_in_dialect(authored, &MYSQL),
-                catalog_expression_fingerprint_in_dialect(catalog, &MYSQL),
+                catalog_expression_fingerprint_in_dialect(
+                    crate::test_fixtures::VENDORS,
+                    authored,
+                    &MYSQL
+                ),
+                catalog_expression_fingerprint_in_dialect(
+                    crate::test_fixtures::VENDORS,
+                    catalog,
+                    &MYSQL
+                ),
                 "MySQL's information_schema function alias must stay clean"
             );
             assert_ne!(
-                catalog_expression_fingerprint_in_dialect(authored, &SQLITE),
-                catalog_expression_fingerprint_in_dialect(catalog, &SQLITE),
+                catalog_expression_fingerprint_in_dialect(
+                    crate::test_fixtures::VENDORS,
+                    authored,
+                    &SQLITE
+                ),
+                catalog_expression_fingerprint_in_dialect(
+                    crate::test_fixtures::VENDORS,
+                    catalog,
+                    &SQLITE
+                ),
                 "MySQL-only aliases must remain distinct SQLite expressions"
             );
         }
 
         assert_eq!(
-            catalog_expression_fingerprint_in_dialect("trim(' x ')", &POSTGRES),
-            catalog_expression_fingerprint_in_dialect("btrim(' x ')", &POSTGRES),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "trim(' x ')",
+                &POSTGRES
+            ),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "btrim(' x ')",
+                &POSTGRES
+            ),
         );
         assert_ne!(
-            catalog_expression_fingerprint_in_dialect("trim(' x ')", &SQLITE),
-            catalog_expression_fingerprint_in_dialect("btrim(' x ')", &SQLITE),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "trim(' x ')",
+                &SQLITE
+            ),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "btrim(' x ')",
+                &SQLITE
+            ),
             "PostgreSQL's btrim deparse alias must not hide a SQLite generator change"
         );
         assert_ne!(
-            catalog_expression_fingerprint_in_dialect("uuid()", &MYSQL),
-            catalog_expression_fingerprint_in_dialect("pg_catalog.uuid()", &MYSQL),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "uuid()",
+                &MYSQL
+            ),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "pg_catalog.uuid()",
+                &MYSQL
+            ),
             "PostgreSQL catalog qualification is not decoration on MySQL"
         );
     }
@@ -1103,13 +1385,28 @@ mod tests {
         ] {
             let default = IrDefault::Expr { expr };
             let rendered = match &default {
-                IrDefault::Expr { expr } => crate::render::dml::render_expr_inline(expr, &POSTGRES)
-                    .expect("render structured default"),
+                IrDefault::Expr { expr } => crate::render::dml::render_expr_inline(
+                    crate::test_fixtures::VENDORS,
+                    expr,
+                    &POSTGRES,
+                )
+                .expect("render structured default"),
                 _ => unreachable!("fixture is an expression default"),
             };
             assert_eq!(
-                authored_id_default(Some(&default), Some(&rendered), &POSTGRES, Some("app")),
-                catalog_id_default(Some(catalog), &POSTGRES, None),
+                authored_id_default(
+                    crate::test_fixtures::VENDORS,
+                    Some(&default),
+                    Some(&rendered),
+                    &POSTGRES,
+                    Some("app")
+                ),
+                catalog_id_default(
+                    crate::test_fixtures::VENDORS,
+                    Some(catalog),
+                    &POSTGRES,
+                    None
+                ),
                 "a redundant authored cast must match PostgreSQL's deparsed form"
             );
         }
@@ -1129,27 +1426,43 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                catalog_expression_fingerprint(authored),
-                catalog_expression_fingerprint(catalog),
+                catalog_expression_fingerprint(crate::test_fixtures::VENDORS, authored),
+                catalog_expression_fingerprint(crate::test_fixtures::VENDORS, catalog),
                 "PostgreSQL cast deparsing must normalize {authored:?} and {catalog:?}"
             );
         }
         assert_ne!(
-            catalog_expression_fingerprint("CAST(octet_length('abc') AS text)"),
-            catalog_expression_fingerprint("octet_length('abc')"),
+            catalog_expression_fingerprint(
+                crate::test_fixtures::VENDORS,
+                "CAST(octet_length('abc') AS text)"
+            ),
+            catalog_expression_fingerprint(crate::test_fixtures::VENDORS, "octet_length('abc')"),
             "a value-changing integer-to-text cast must remain semantic"
         );
         assert_ne!(
             catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
                 "CAST(CAST(1.9 AS integer) AS text)",
                 &POSTGRES,
             ),
-            catalog_expression_fingerprint_in_dialect("CAST(CAST(1.9 AS real) AS text)", &POSTGRES,),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "CAST(CAST(1.9 AS real) AS text)",
+                &POSTGRES
+            ),
             "value-changing numeric cast targets must remain part of the drift key"
         );
         assert_ne!(
-            catalog_expression_fingerprint_in_dialect("CAST('abc' AS text)", &POSTGRES,),
-            catalog_expression_fingerprint_in_dialect("CAST('abc' AS character(2))", &POSTGRES,),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "CAST('abc' AS text)",
+                &POSTGRES
+            ),
+            catalog_expression_fingerprint_in_dialect(
+                crate::test_fixtures::VENDORS,
+                "CAST('abc' AS character(2))",
+                &POSTGRES
+            ),
             "value-changing text typmods must remain part of the drift key"
         );
 
@@ -1163,6 +1476,7 @@ mod tests {
             },
         };
         let rendered = crate::render::dml::render_expr_inline(
+            crate::test_fixtures::VENDORS,
             match &current_user {
                 IrDefault::Expr { expr } => expr,
                 _ => unreachable!("fixture is an expression default"),
@@ -1171,8 +1485,19 @@ mod tests {
         )
         .expect("CURRENT_USER cast renders");
         assert_eq!(
-            authored_id_default(Some(&current_user), Some(&rendered), &POSTGRES, Some("app")),
-            catalog_id_default(Some("(CURRENT_USER)::text"), &POSTGRES, None),
+            authored_id_default(
+                crate::test_fixtures::VENDORS,
+                Some(&current_user),
+                Some(&rendered),
+                &POSTGRES,
+                Some("app")
+            ),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("(CURRENT_USER)::text"),
+                &POSTGRES,
+                None
+            ),
             "PostgreSQL retains an explicit cast around special CURRENT_USER syntax"
         );
 
@@ -1185,6 +1510,7 @@ mod tests {
             },
         };
         let rendered = crate::render::dml::render_expr_inline(
+            crate::test_fixtures::VENDORS,
             match &leading_zero_decimal {
                 IrDefault::Expr { expr } => expr,
                 _ => unreachable!("fixture is an expression default"),
@@ -1194,12 +1520,18 @@ mod tests {
         .expect("decimal text cast renders");
         assert_eq!(
             authored_id_default(
+                crate::test_fixtures::VENDORS,
                 Some(&leading_zero_decimal),
                 Some(&rendered),
                 &POSTGRES,
                 Some("app")
             ),
-            catalog_id_default(Some("(1.00)::text"), &POSTGRES, None),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("(1.00)::text"),
+                &POSTGRES,
+                None
+            ),
             "numeric parser canonicalization must not drift a leading-zero decimal literal"
         );
 
@@ -1212,6 +1544,7 @@ mod tests {
             },
         };
         let rendered = crate::render::dml::render_expr_inline(
+            crate::test_fixtures::VENDORS,
             match &negative_zero {
                 IrDefault::Expr { expr } => expr,
                 _ => unreachable!("fixture is an expression default"),
@@ -1221,12 +1554,18 @@ mod tests {
         .expect("negative-zero text cast renders");
         assert_eq!(
             authored_id_default(
+                crate::test_fixtures::VENDORS,
                 Some(&negative_zero),
                 Some(&rendered),
                 &POSTGRES,
                 Some("app")
             ),
-            catalog_id_default(Some("(0.00)::text"), &POSTGRES, None),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("(0.00)::text"),
+                &POSTGRES,
+                None
+            ),
             "PostgreSQL canonicalizes negative numeric zero before a text cast"
         );
     }
@@ -1234,16 +1573,27 @@ mod tests {
     #[test]
     fn qualified_postgres_generators_and_dialect_specific_fallbacks_are_exact() {
         assert_eq!(
-            catalog_id_default(Some("pg_catalog.gen_random_uuid()"), &POSTGRES, None,),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("pg_catalog.gen_random_uuid()"),
+                &POSTGRES,
+                None
+            ),
             IdDefaultSnapshot::UuidV4
         );
         assert_eq!(
-            catalog_id_default(Some("pg_catalog.uuidv7()"), &POSTGRES, None,),
+            catalog_id_default(
+                crate::test_fixtures::VENDORS,
+                Some("pg_catalog.uuidv7()"),
+                &POSTGRES,
+                None
+            ),
             IdDefaultSnapshot::UuidV7
         );
         for dialect in [&MYSQL, &SQLITE] {
             assert_ne!(
                 catalog_id_default_for_expected(
+                    crate::test_fixtures::VENDORS,
                     &IdDefaultSnapshot::UuidV4,
                     Some("gen_random_uuid()"),
                     Some(dialect),
@@ -1274,8 +1624,13 @@ mod tests {
     /// in the database.
     #[test]
     fn an_unattributed_literal_is_spelled_as_a_literal_not_an_expression() {
-        let unattributed =
-            catalog_id_default_for_expected(&IdDefaultSnapshot::Absent, Some("7"), None, None);
+        let unattributed = catalog_id_default_for_expected(
+            crate::test_fixtures::VENDORS,
+            &IdDefaultSnapshot::Absent,
+            Some("7"),
+            None,
+            None,
+        );
         assert_eq!(
             unattributed,
             IdDefaultSnapshot::Literal("7".to_string()),
@@ -1285,6 +1640,7 @@ mod tests {
         for dialect in [&POSTGRES, &MYSQL, &SQLITE] {
             assert_eq!(
                 catalog_id_default_for_expected(
+                    crate::test_fixtures::VENDORS,
                     &IdDefaultSnapshot::Absent,
                     Some("7"),
                     Some(dialect),
@@ -1300,6 +1656,7 @@ mod tests {
     #[test]
     fn moving_sqlite_format_parentheses_changes_the_contract() {
         let expected = column_metadata(
+            crate::test_fixtures::VENDORS,
             "id",
             &ValueFormat::TypeId {
                 prefix: "account".to_string(),

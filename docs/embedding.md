@@ -97,7 +97,7 @@ async fn apply_postgres<S: SqlSession>(
         .map_err(std::io::Error::other)?;
     let guard = GuardConfig::from_policy(policy.clone(), POSTGRES);
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let plan = engine.plan(migrations, &guard);
     if !plan.is_appliable() {
         return Err(format!("{} migrations denied", plan.denied.len()).into());

@@ -45,6 +45,7 @@
 //! DDL.
 
 use std::collections::BTreeMap;
+use zero_migrate_backend::registry::VendorSet;
 
 use crate::model::ir::{
     IndexSortOrder, IndexStorageParams, SafeI64, SequenceOwnedBy, TriggerEvent,
@@ -129,8 +130,12 @@ pub(crate) use zero_migrate_backend::drift::partition_divergences;
 /// [`crate::render::fold`] carries the mechanism and why the fold cannot simply stop
 /// recording the child.
 #[must_use]
-pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> StructuralDrift {
-    diff_snapshots_with_index_aliases(expected, actual, &BTreeMap::new())
+pub fn diff_snapshots(
+    vendors: VendorSet,
+    expected: &SchemaSnapshot,
+    actual: &SchemaSnapshot,
+) -> StructuralDrift {
+    diff_snapshots_with_index_aliases(vendors, expected, actual, &BTreeMap::new())
 }
 
 /// [`diff_snapshots`], plus the derived-index-name provenance that lets a live index
@@ -150,6 +155,7 @@ pub fn diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot) -> Str
 /// up as one missing and one unexpected object.
 #[must_use]
 pub fn diff_snapshots_with_index_aliases(
+    vendors: VendorSet,
     expected: &SchemaSnapshot,
     actual: &SchemaSnapshot,
     index_aliases: &BTreeMap<String, BTreeMap<String, String>>,
@@ -450,7 +456,7 @@ pub fn diff_snapshots_with_index_aliases(
         );
 
         // Attribute diff for same-name objects on both sides.
-        diff_attrs(name, exp_t, act_t, &mut altered);
+        diff_attrs(vendors, name, exp_t, act_t, &mut altered);
     }
 
     missing.sort_unstable();
@@ -612,6 +618,7 @@ fn format_generated_kind(kind: GeneratedKindSnapshot) -> &'static str {
 }
 
 fn comparable_column_default(
+    vendors: VendorSet,
     raw: Option<&str>,
     vendor: Option<&zero_migrate_backend::registry::BackendVendor>,
     expression_default: Option<bool>,
@@ -634,9 +641,9 @@ fn comparable_column_default(
         .value_format
         .catalog_default_marker_is_authoritative()
     {
-        catalog_text_id_default(Some(raw), dialect, expression_default)
+        catalog_text_id_default(vendors, Some(raw), dialect, expression_default)
     } else {
-        catalog_id_default(Some(raw), dialect, None)
+        catalog_id_default(vendors, Some(raw), dialect, None)
     };
     (!matches!(key, IdDefaultSnapshot::Expression(_))).then_some(key)
 }
@@ -887,9 +894,10 @@ fn format_id_default(default: Option<&crate::model::snapshot::IdDefaultSnapshot>
 }
 
 fn introspected_table_vendor(
+    vendors: VendorSet,
     table: &TableSnapshot,
 ) -> Option<&'static zero_migrate_backend::registry::BackendVendor> {
-    crate::render::backends::VENDORS
+    vendors
         .as_slice()
         .iter()
         .copied()
@@ -973,6 +981,7 @@ fn column_data_type_report(expected: &ColumnSnapshot, actual: &ColumnSnapshot) -
 /// field. Added/removed children are NOT this function's concern (they go to the
 /// missing/unexpected buckets via [`diff_named`]); only matched names are compared.
 fn diff_attrs(
+    vendors: VendorSet,
     table: &str,
     exp_t: &TableSnapshot,
     act_t: &TableSnapshot,
@@ -1029,7 +1038,7 @@ fn diff_attrs(
     // value format, recoverable text collation, and catalog comment.
     let act_cols: BTreeMap<&str, &ColumnSnapshot> =
         act_t.columns.iter().map(|c| (c.name.as_str(), c)).collect();
-    let actual_vendor = introspected_table_vendor(act_t);
+    let actual_vendor = introspected_table_vendor(vendors, act_t);
     let actual_dialect = actual_vendor.map(|vendor| &vendor.descriptor.id);
     for ec in &exp_t.columns {
         if let Some(ac) = act_cols.get(ec.name.as_str()) {
@@ -1094,12 +1103,14 @@ fn diff_attrs(
                     }) && ac.text_storage.is_some()
                     {
                         return catalog_text_id_default(
+                            vendors,
                             ac.default.as_deref(),
                             actual_dialect.expect("an actual vendor supplies its own dialect id"),
                             ac.expression_default,
                         );
                     }
                     catalog_id_default_for_expected(
+                        vendors,
                         expected_default,
                         ac.default.as_deref(),
                         actual_dialect,
@@ -1129,8 +1140,9 @@ fn diff_attrs(
                 // is all either side holds. `comparable_column_default` documents
                 // which spellings that text can be compared through and which it
                 // cannot; a `None` on either side is that refusal, not an absence.
-                comparable_column_default(ec.default.as_deref(), actual_vendor, None),
+                comparable_column_default(vendors, ec.default.as_deref(), actual_vendor, None),
                 comparable_column_default(
+                    vendors,
                     ac.default.as_deref(),
                     actual_vendor,
                     ac.expression_default,
@@ -2018,7 +2030,7 @@ mod constraint_definition_tests {
         )]);
 
         assert!(
-            diff_snapshots(&expected, &actual).is_clean(),
+            diff_snapshots(crate::test_fixtures::VENDORS, &expected, &actual).is_clean(),
             "a CHECK body that differs only in deparse spelling must not report drift"
         );
     }
@@ -2038,7 +2050,7 @@ mod constraint_definition_tests {
             "CHECK ((quantity > 0))",
         )]);
 
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(crate::test_fixtures::VENDORS, &expected, &actual);
         assert!(
             !drift.is_clean(),
             "a CHECK constraint present under a different name must report drift: {drift:#?}"
@@ -2058,7 +2070,7 @@ mod constraint_definition_tests {
             "UNIQUE (quantity)",
         )]);
 
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(crate::test_fixtures::VENDORS, &expected, &actual);
         assert!(
             !drift.is_clean(),
             "a constraint whose kind changed must report drift: {drift:#?}"
@@ -2080,7 +2092,7 @@ mod constraint_definition_tests {
             "UNIQUE (code, tenant)",
         )]);
 
-        let drift = diff_snapshots(&expected, &actual);
+        let drift = diff_snapshots(crate::test_fixtures::VENDORS, &expected, &actual);
         assert!(
             !drift.is_clean(),
             "a UNIQUE body change must still report drift: {drift:#?}"
@@ -2174,7 +2186,7 @@ mod unattributed_snapshot_tests {
 
     /// The one `default` line for `accounts.id`, or a report of why there is none.
     fn default_line(actual: &SchemaSnapshot) -> Result<super::AlteredObject, String> {
-        let drift = diff_snapshots(&expected(), actual);
+        let drift = diff_snapshots(crate::test_fixtures::VENDORS, &expected(), actual);
         drift
             .altered_objects
             .iter()
@@ -2189,7 +2201,11 @@ mod unattributed_snapshot_tests {
     /// recover.
     #[test]
     fn a_postgres_marked_snapshot_recovers_the_generator_it_carries() {
-        let drift = diff_snapshots(&expected(), &actual(Some("uuid")));
+        let drift = diff_snapshots(
+            crate::test_fixtures::VENDORS,
+            &expected(),
+            &actual(Some("uuid")),
+        );
         assert!(
             drift.is_clean(),
             "a snapshot carrying PostgreSQL's own provenance marker must recover \

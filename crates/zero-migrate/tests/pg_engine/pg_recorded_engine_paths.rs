@@ -38,7 +38,7 @@ async fn apply_recorded_plan(
     scope: &ApprovalScope,
 ) -> Result<zero_migrate::engine::DeclarativeDeployOutcome, DeclarativeApplyError> {
     let backend = PostgresBackend::<'_, RecordingSession>::new_generic(rec);
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan_with_touched_and_depends_scoped(
             steps,
             &["users".into()],
@@ -212,7 +212,7 @@ async fn plan_requirement_refuses_before_authored_sql_runs() {
     plan.database_requirements
         .require(DatabaseFeature::UuidV7Generation);
 
-    let result = MigrationEngine::new()
+    let result = MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_applied_plan_with_touched_and_depends(
             &plan,
             &[],

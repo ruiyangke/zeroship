@@ -76,7 +76,12 @@ fn pg_expand_contract_author(
     project_schema: impl Into<String>,
     owner_app: impl Into<String>,
 ) -> ExpandContractAuthor {
-    ExpandContractAuthor::new(project_schema, owner_app, POSTGRES)
+    ExpandContractAuthor::new(
+        zero_migrate::shipping_vendors(),
+        project_schema,
+        owner_app,
+        POSTGRES,
+    )
 }
 
 /// A unique token so each test gets isolated meta + project schemas in the shared DB.
@@ -599,6 +604,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
             .expect("resolve no-inject table policy");
     let ir = serde_json::to_string(&resolved).expect("serialize resolved per-row IR");
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
@@ -614,7 +620,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
             &guard_cfg,
         )
         .expect("the declaring schema envelope must lower on PostgreSQL");
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::Approved,
@@ -634,7 +640,13 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let mut declared_live = LiveSchema::default();
     declared_live.tables.insert("samples".into());
     declared_live
-        .advance_logical_columns(&resolved, &POSTGRES, &cfg.project_schema, None)
+        .advance_logical_columns(
+            zero_migrate::shipping_vendors(),
+            &resolved,
+            &POSTGRES,
+            &cfg.project_schema,
+            None,
+        )
         .expect("the applied schema envelope seeds its logical column contracts");
 
     let data_ir = r#"{"ir_version":1,"name":"pg_per_row_generators_data","irreversible":"overwrites generated identifiers in place without recording their pre-images","ops":[
@@ -656,7 +668,7 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let data_artifact = author
         .load_and_lower_guarded(data_ir, "app_test", &registry, &declared_live, &guard_cfg)
         .expect("declared perRow destination formats must lower on PostgreSQL");
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &data_artifact.plan.steps,
             Approval::Approved,
@@ -711,7 +723,13 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
     let mut logical_live = LiveSchema::default();
     logical_live.tables.insert("samples".into());
     logical_live
-        .advance_logical_columns(&resolved, &POSTGRES, &cfg.project_schema, None)
+        .advance_logical_columns(
+            zero_migrate::shipping_vendors(),
+            &resolved,
+            &POSTGRES,
+            &cfg.project_schema,
+            None,
+        )
         .expect("the applied artifact seeds its declared logical column contracts");
     let invalid_backfill: MigrationIr = serde_json::from_str(
         r#"{"ir_version":1,"name":"reject_generic_text_per_row","ops":[
@@ -2127,7 +2145,7 @@ async fn online_rename_backfill_rejects_replica_only_and_body_tampered_dual_writ
         .expect("create online-rename trigger proof target");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let rename = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "rename_guard_items".into(),
@@ -2331,15 +2349,21 @@ async fn interrupt_online_rename_deploy(
         .expect("resolve rename policy");
     let resolved_rename_json =
         serde_json::to_string(&resolved_rename).expect("serialize resolved rename");
-    let authored = IrAuthor::new(&cfg.project_schema, "app_test", &POSTGRES, &policy)
-        .load_and_lower_guarded(
-            &resolved_rename_json,
-            "app_test",
-            &registry,
-            &initial_live,
-            &GuardConfig::from_policy(policy.clone(), POSTGRES),
-        )
-        .expect("lower rename before interruption");
+    let authored = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
+        &cfg.project_schema,
+        "app_test",
+        &POSTGRES,
+        &policy,
+    )
+    .load_and_lower_guarded(
+        &resolved_rename_json,
+        "app_test",
+        &registry,
+        &initial_live,
+        &GuardConfig::from_policy(policy.clone(), POSTGRES),
+    )
+    .expect("lower rename before interruption");
     let rename_plan = authored
         .plan
         .steps
@@ -2360,7 +2384,7 @@ async fn interrupt_online_rename_deploy(
         zero_migrate::fault::points::APPLY_AFTER_UP_BEFORE_COMPLETED,
         2,
     );
-    let interrupted = MigrationEngine::new()
+    let interrupted = MigrationEngine::new(zero_migrate::shipping_vendors())
         .deploy_envelopes(
             &envelopes,
             &backend,
@@ -2463,7 +2487,7 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
         ),
     );
     let touching_version = touching.version.as_str().to_string();
-    let touch_error = MigrationEngine::new()
+    let touch_error = MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan_with_touched_and_depends(
             &[PlanStep::Ddl(touching)],
             &["same_deploy_users".to_string()],
@@ -2519,8 +2543,10 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
     )
     .await
     .expect("apply a contract version for the rollback interlock proof");
-    let rollback_guard =
-        zero_migrate::guard_for(&cfg.guard_config_for(&zero_migrate_postgres::DIALECT));
+    let rollback_guard = zero_migrate::guard_for(
+        zero_migrate::shipping_vendors(),
+        &cfg.guard_config_for(&zero_migrate_postgres::DIALECT),
+    );
     let rollback_error = zero_migrate::rollback(
         &backend,
         &cfg,
@@ -2545,7 +2571,7 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
         other => panic!("expected the typed pending-contract rollback refusal, got {other:?}"),
     }
 
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .resolve_pending_contract(
             &obligation.pending_version,
             Resolution::Applied,
@@ -2598,7 +2624,7 @@ async fn interrupted_online_rename_is_automatically_recovered_on_same_deploy_ret
     let interrupted = interrupt_online_rename_deploy(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
 
-    let _retried = MigrationEngine::new()
+    let _retried = MigrationEngine::new(zero_migrate::shipping_vendors())
         .deploy_envelopes(
             &interrupted.envelopes,
             &backend,
@@ -4043,6 +4069,7 @@ async fn limited_delete_honors_its_cap_across_partitions() {
     }))
     .expect("parse delete predicate");
     let assembled = zero_migrate::render::dml::assemble_delete(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         &POSTGRES,
         "events",
@@ -4135,7 +4162,7 @@ async fn pending_online_renames_can_be_completed_or_aborted_safely() {
         .expect("create rename fixtures");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let apply_plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "apply_users".into(),
@@ -4842,7 +4869,7 @@ async fn a_partially_journaled_resolution_cannot_switch_actions() {
         .expect("create legacy partial-resolution fixtures");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = pg_expand_contract_author(cfg.project_schema.clone(), "app_test");
 
     let apply_intent = OnlineIntent::RenameColumn {
@@ -5052,7 +5079,7 @@ async fn a_failed_resolution_tombstone_append_retries_without_repeating_cleanup(
         .expect("create tombstone retry fixture");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let plan = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "tombstone_retry_users".into(),
@@ -5265,6 +5292,7 @@ fn lower_masked_add_column(cfg: &ExecutorConfig, ir_name: &str, guarded: bool) -
         resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
             .expect("resolve the no-inject table policy");
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
@@ -5545,6 +5573,7 @@ fn lower_partition_plan(
         resolve_create_table_policy(&authored, &support::no_inject("app"), &cfg.project_schema)
             .expect("resolve the no-inject table policy");
     IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
@@ -5559,6 +5588,7 @@ fn lower_partition_plan(
 /// and the `events_0` child bound.
 fn partition_live_after_setup(cfg: &ExecutorConfig) -> LiveSchema {
     let snap = zero_migrate::fold_ops(
+        zero_migrate::shipping_vendors(),
         &partition_setup_ops(),
         &POSTGRES,
         &cfg.project_schema,
@@ -5629,7 +5659,7 @@ async fn drop_partition_outcome(
 
     let setup_ops = serde_json::to_string(&partition_setup_ops()).expect("serialize setup ops");
     let setup = lower_partition_plan(cfg, "partition_setup", &setup_ops, &LiveSchema::default());
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &setup,
             Approval::Approved,
@@ -5654,7 +5684,7 @@ async fn drop_partition_outcome(
         "partition_drop_unguarded"
     };
     let drop_plan = lower_partition_plan(cfg, name, &drop_ops, &partition_live_after_setup(cfg));
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &drop_plan,
             Approval::Approved,
@@ -5758,7 +5788,7 @@ async fn apply_second_partition_plan(
     backend.ensure_journal(cfg).await.expect("ensure journal");
     let setup_ops = serde_json::to_string(&partition_setup_ops()).expect("serialize setup ops");
     let setup = lower_partition_plan(cfg, "partition_setup", &setup_ops, &LiveSchema::default());
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &setup,
             Approval::Approved,
@@ -5771,7 +5801,7 @@ async fn apply_second_partition_plan(
         .expect("the partitioned parent, its child, and the row apply");
 
     let steps = lower_partition_plan(cfg, ir_name, ops_json, live);
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -5982,7 +6012,7 @@ async fn a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_star
         .expect("create a table whose generated column reads the rename source");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let rename = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "dep_rename_items".into(),
@@ -6130,7 +6160,7 @@ async fn a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps() {
         PlanStep::Ddl(last),
     ];
 
-    let error = MigrationEngine::new()
+    let error = MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &steps,
             Approval::Approved,
@@ -6220,7 +6250,7 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
 
     let set = vec![parent.clone(), child.clone()];
     let guard_cfg = GuardConfig::from_policy(support::no_inject(&schema), POSTGRES);
-    let guard = zero_migrate::guard_for(&guard_cfg);
+    let guard = zero_migrate::guard_for(zero_migrate::shipping_vendors(), &guard_cfg);
     let outcome = zero_migrate::rollback(
         &backend,
         &cfg,
@@ -6293,7 +6323,7 @@ async fn a_pg_rename_whose_old_column_carries_a_check_is_not_refused() {
         .expect("create a table whose rename source carries a CHECK constraint");
 
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let rename = pg_expand_contract_author(cfg.project_schema.clone(), "app_test")
         .author(&OnlineIntent::RenameColumn {
             table: "chk_rename_items".into(),
@@ -6546,6 +6576,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
             .expect("resolve no-inject table policy");
     let ir = serde_json::to_string(&resolved).expect("serialize resolved IR");
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         "app_test",
         &POSTGRES,
@@ -6565,7 +6596,7 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
     // The DDL and the DML are separate envelopes under the schema()/data() split.
     // Only the DATA plan is re-applied below: re-running it is the resume this
     // test measures, and the table must already exist for that to mean anything.
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     engine
         .apply_plan(
             &schema_artifact.plan.steps,
@@ -6581,7 +6612,13 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
     let mut declared_live = LiveSchema::default();
     declared_live.tables.insert("samples".into());
     declared_live
-        .advance_logical_columns(&resolved, &POSTGRES, &cfg.project_schema, None)
+        .advance_logical_columns(
+            zero_migrate::shipping_vendors(),
+            &resolved,
+            &POSTGRES,
+            &cfg.project_schema,
+            None,
+        )
         .expect("the applied schema envelope seeds its logical column contracts");
     let registry: BTreeMap<String, String> = [("samples".to_string(), "app_test".to_string())]
         .into_iter()
@@ -6987,7 +7024,7 @@ async fn a_plan_carrying_the_contract_ids_with_other_sql_does_not_discharge() {
     let _schemas = ensure_project_schema(&session, &cfg).await;
     use zero_migrate::driver::SqlSession;
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
 
     let base = mig(
         MigrationId::derive("forge_base", tok.as_bytes()),
@@ -7285,7 +7322,7 @@ async fn a_rename_whose_source_has_dependents_is_declined_before_the_expand() {
     let _schemas = ensure_project_schema(&session, &cfg).await;
     use zero_migrate::driver::SqlSession;
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
 
     let base = mig(
         MigrationId::derive("dep_base", tok.as_bytes()),
@@ -7606,7 +7643,7 @@ async fn a_contract_whose_expand_never_landed_is_refused() {
 
     // THE CONTROL. Apply the expand, then the very same contract steps that were
     // refused twice above. Now they are safe, and they run.
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let backend = PostgresBackend::new_generic(&session);
     engine
         .apply_plan_with_touched_and_depends(
@@ -8261,7 +8298,7 @@ async fn re_supplying_settled_work_is_a_no_op_rather_than_a_refusal() {
     drop_schemas(&session, &cfg).await;
     let _guard = ensure_project_schema(&session, &cfg).await;
     let backend = PostgresBackend::new_generic(&session);
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
 
     let base = mig(
         MigrationId::derive("live_base", tok.as_bytes()),

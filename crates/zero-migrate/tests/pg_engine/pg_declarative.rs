@@ -30,6 +30,7 @@ fn desired_snapshot(
     effective: &EffectivePolicy,
 ) -> Result<zero_migrate::DesiredSchema, zero_migrate::DeclarativeError> {
     zero_migrate::desired_snapshot_for_dialect(
+        zero_migrate::shipping_vendors(),
         project_schema,
         descriptors,
         &zero_migrate_postgres::DIALECT,
@@ -118,6 +119,7 @@ fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
+        zero_migrate::shipping_vendors(),
         cfg.project_schema.clone(),
         "app_test",
         zero_migrate_postgres::DIALECT,
@@ -165,7 +167,7 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     // Desired: one collection `widgets` with a required `title` string field.
@@ -223,7 +225,11 @@ async fn declarative_deploy_creates_table_and_round_trips_with_zero_drift() {
     let live_after = snapshot_schema(&session, &cfg.project_schema)
         .await
         .expect("snapshot live (after)");
-    let drift = diff_snapshots(&desired.snapshot, &live_after);
+    let drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &desired.snapshot,
+        &live_after,
+    );
     assert!(
         drift.is_clean(),
         "the created table must round-trip to desired with zero drift: \
@@ -268,7 +274,7 @@ async fn declarative_add_column_diff_applies() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     // Deploy v1: widgets(title).
@@ -373,7 +379,11 @@ async fn declarative_add_column_diff_applies() {
         table.columns.iter().any(|c| c.name == "subtitle"),
         "the added column is live after the additive declarative deploy"
     );
-    let drift = diff_snapshots(&desired_v2.snapshot, &live2);
+    let drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &desired_v2.snapshot,
+        &live2,
+    );
     assert!(
         drift.is_clean(),
         "after the add-column deploy, live round-trips to desired_v2 with zero drift: \
@@ -413,7 +423,7 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     // A collection with a required field AND a declared UNIQUE index, so the
@@ -463,7 +473,11 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
     let live_after = snapshot_schema(&session, &cfg.project_schema)
         .await
         .expect("snapshot live (after deploy)");
-    let clean = diff_snapshots(&desired.snapshot, &live_after);
+    let clean = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &desired.snapshot,
+        &live_after,
+    );
     assert!(
         clean.is_clean(),
         "baseline must be clean before tampering: missing={:?} unexpected={:?} altered={:?}",
@@ -487,7 +501,11 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
     let tampered = snapshot_schema(&session, &cfg.project_schema)
         .await
         .expect("snapshot live (tampered)");
-    let drift = diff_snapshots(&desired.snapshot, &tampered);
+    let drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &desired.snapshot,
+        &tampered,
+    );
     assert!(
         !drift.altered_objects.is_empty(),
         "a nullability change must surface in altered_objects, not vanish: {drift:?}"
@@ -520,7 +538,11 @@ async fn an_out_of_band_alter_lands_in_altered_objects() {
     let tampered2 = snapshot_schema(&session, &cfg.project_schema)
         .await
         .expect("snapshot live (tampered 2)");
-    let drift2 = diff_snapshots(&desired.snapshot, &tampered2);
+    let drift2 = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &desired.snapshot,
+        &tampered2,
+    );
     assert!(
         !drift2.altered_objects.is_empty(),
         "a same-name index that lost its uniqueness must surface in \
@@ -547,7 +569,7 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
     let desc = descriptor("sprockets", "label", "string", true);
     let desired = desired_snapshot(
@@ -589,7 +611,12 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
         .await
         .expect("snapshot live (after deploy)");
     assert!(
-        diff_snapshots(&desired.snapshot, &live_after).is_clean(),
+        diff_snapshots(
+            zero_migrate::shipping_vendors(),
+            &desired.snapshot,
+            &live_after
+        )
+        .is_clean(),
         "baseline must be clean before tampering"
     );
 
@@ -608,7 +635,11 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
     let after_create = snapshot_schema(&session, &cfg.project_schema)
         .await
         .expect("snapshot live (after create)");
-    let drift = diff_snapshots(&desired.snapshot, &after_create);
+    let drift = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &desired.snapshot,
+        &after_create,
+    );
     assert!(
         !drift.unexpected_objects.is_empty(),
         "a hand-made table must surface as UNEXPECTED, not vanish: {drift:?}"
@@ -630,7 +661,11 @@ async fn the_name_buckets_fill_on_out_of_band_create_and_drop() {
     let after_drop = snapshot_schema(&session, &cfg.project_schema)
         .await
         .expect("snapshot live (after drop)");
-    let drift2 = diff_snapshots(&desired.snapshot, &after_drop);
+    let drift2 = diff_snapshots(
+        zero_migrate::shipping_vendors(),
+        &desired.snapshot,
+        &after_drop,
+    );
     assert!(
         !drift2.missing_objects.is_empty(),
         "a declared table dropped out of band must surface as MISSING: {drift2:?}"
@@ -662,7 +697,7 @@ async fn a_rename_hint_on_postgres_produces_a_rename_not_a_drop_and_recreate() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
 
     // v1: deploy `contacts` with an `email` field.
@@ -780,7 +815,7 @@ async fn rows_survive_a_postgres_online_rename() {
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 
-    let engine = MigrationEngine::new();
+    let engine = MigrationEngine::new(zero_migrate::shipping_vendors());
     let author = author_for(&cfg);
     let backend = PostgresBackend::new_generic(&session);
 

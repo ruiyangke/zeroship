@@ -80,9 +80,15 @@ fn a_fixed_precision_decimal_survives_descriptors_to_ops_and_back() {
     // GENERATED side: descriptors -> ops -> fold -> recovered FieldDef.
     let effective = support::confined_charter();
     let ops = descriptors_to_create_ops(&[descriptor], SCHEMA, &effective).expect("producer");
-    let generated = single_fold::fold(&ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("fold");
+    let generated = single_fold::fold(
+        zero_migrate::shipping_vendors(),
+        &ops,
+        &zero_migrate_postgres::DIALECT,
+        SCHEMA,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("fold");
 
     assert_eq!(
         generated["ledger"]["amount"], authored["amount"],

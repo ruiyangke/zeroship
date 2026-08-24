@@ -49,6 +49,7 @@ fn refusal_for(op: Op) -> Option<String> {
         checksum: None,
     };
     validate_ir_scoped(
+        zero_migrate::shipping_vendors(),
         &ir,
         &zero_migrate_postgres::DIALECT,
         Some(&SchemaScope::Unconfined),

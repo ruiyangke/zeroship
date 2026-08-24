@@ -94,6 +94,7 @@ async fn apply_doc(
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
     let author = IrAuthor::new(
+        zero_migrate::shipping_vendors(),
         &cfg.project_schema,
         OWNER,
         &zero_migrate_postgres::DIALECT,
@@ -101,6 +102,7 @@ async fn apply_doc(
     );
     let guard = GuardConfig::from_policy(pol.clone(), zero_migrate_postgres::DIALECT);
     let folded = fold_ops(
+        zero_migrate::shipping_vendors(),
         history,
         &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
@@ -114,7 +116,7 @@ async fn apply_doc(
     let authored: zero_migrate::MigrationIr =
         serde_json::from_str(ir).map_err(|error| format!("parse the authored IR: {error}"))?;
     history.extend(authored.ops);
-    MigrationEngine::new()
+    MigrationEngine::new(zero_migrate::shipping_vendors())
         .apply_plan(
             &artifact.plan.steps,
             Approval::None,
@@ -303,9 +305,15 @@ async fn squashing_a_fully_applied_prefix_records_a_supersession_and_is_idempote
             versions.clone(),
         );
 
-        let outcome = squash(&backend, &cfg, &s, "operator")
-            .await
-            .map_err(|error| format!("squash a fully-applied prefix: {error}"))?;
+        let outcome = squash(
+            zero_migrate::shipping_vendors(),
+            &backend,
+            &cfg,
+            &s,
+            "operator",
+        )
+        .await
+        .map_err(|error| format!("squash a fully-applied prefix: {error}"))?;
         assert!(
             !outcome.already_present,
             "the first squash records a new supersession"
@@ -355,9 +363,15 @@ async fn squashing_a_fully_applied_prefix_records_a_supersession_and_is_idempote
         assert_eq!(edges, expected, "one edge per superseded version");
 
         // Re-squashing is idempotent, and writes nothing further.
-        let again = squash(&backend, &cfg, &s, "operator")
-            .await
-            .map_err(|error| format!("re-squash the same migration: {error}"))?;
+        let again = squash(
+            zero_migrate::shipping_vendors(),
+            &backend,
+            &cfg,
+            &s,
+            "operator",
+        )
+        .await
+        .map_err(|error| format!("re-squash the same migration: {error}"))?;
         assert!(
             again.already_present,
             "a re-squash must report the supersession as already present"
@@ -423,9 +437,15 @@ async fn squashing_a_partially_applied_prefix_is_refused_and_writes_nothing() {
             supersedes,
         );
 
-        let error = squash(&backend, &cfg, &s, "operator")
-            .await
-            .expect_err("a partial overlap must be refused");
+        let error = squash(
+            zero_migrate::shipping_vendors(),
+            &backend,
+            &cfg,
+            &s,
+            "operator",
+        )
+        .await
+        .expect_err("a partial overlap must be refused");
         match error {
             SquashError::PartialOverlap { applied, total, .. } => {
                 assert_eq!(applied, 1, "one of the superseded versions was applied");
@@ -501,9 +521,15 @@ async fn squashing_an_unapplied_prefix_is_refused_as_not_applied() {
             ),
             vec![MigrationId::generate(), MigrationId::generate()],
         );
-        let error = squash(&backend, &cfg, &s, "operator")
-            .await
-            .expect_err("an unapplied prefix must be refused");
+        let error = squash(
+            zero_migrate::shipping_vendors(),
+            &backend,
+            &cfg,
+            &s,
+            "operator",
+        )
+        .await
+        .expect_err("an unapplied prefix must be refused");
         match error {
             SquashError::NotAllApplied { applied, total, .. } => {
                 assert_eq!(applied, 0, "none of the superseded versions were applied");
@@ -522,9 +548,15 @@ async fn squashing_an_unapplied_prefix_is_refused_as_not_applied() {
         // migration alone, so their refusals are about applied STATE and not about
         // the migration being malformed.
         let empty = squash_migration("squash_empty", "SELECT 1", Vec::new());
-        match squash(&backend, &cfg, &empty, "operator")
-            .await
-            .expect_err("a squash superseding nothing must be refused")
+        match squash(
+            zero_migrate::shipping_vendors(),
+            &backend,
+            &cfg,
+            &empty,
+            "operator",
+        )
+        .await
+        .expect_err("a squash superseding nothing must be refused")
         {
             SquashError::NoSupersedes { .. } => {}
             other => return Err(format!("expected NoSupersedes, got: {other}")),
@@ -626,9 +658,15 @@ async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
             quote_ident(&cfg.project_schema)
         );
         let s = squash_migration("squash_all", &combined, versions.clone());
-        squash(&backend, &cfg, &s, "operator")
-            .await
-            .map_err(|error| format!("record the squash: {error}"))?;
+        squash(
+            zero_migrate::shipping_vendors(),
+            &backend,
+            &cfg,
+            &s,
+            "operator",
+        )
+        .await
+        .map_err(|error| format!("record the squash: {error}"))?;
 
         let before_events = journal_events(&session, &cfg).await?;
         let before_edges = supersession_edges(&session, &cfg).await?;
@@ -638,10 +676,10 @@ async fn a_rollback_may_not_force_skip_an_irreversible_squash() {
         // The set an operator still has on disk right after a squash.
         let mut set = applied.clone();
         set.push(s.clone());
-        let guard = guard_for(&GuardConfig::from_policy(
-            policy(&cfg.project_schema),
-            zero_migrate_postgres::DIALECT,
-        ));
+        let guard = guard_for(
+            zero_migrate::shipping_vendors(),
+            &GuardConfig::from_policy(policy(&cfg.project_schema), zero_migrate_postgres::DIALECT),
+        );
         let forced = RollbackRequest::new(RollbackTarget::All).with_options(RollbackOptions {
             force: true,
             backup_acknowledged: true,
@@ -753,16 +791,22 @@ async fn a_squash_that_can_reverse_itself_still_rolls_back_under_force() {
             &format!("DROP TABLE IF EXISTS {quoted}.t2; DROP TABLE IF EXISTS {quoted}.t1;"),
             versions,
         );
-        squash(&backend, &cfg, &reversible, "operator")
-            .await
-            .map_err(|error| format!("record the reversible squash: {error}"))?;
+        squash(
+            zero_migrate::shipping_vendors(),
+            &backend,
+            &cfg,
+            &reversible,
+            "operator",
+        )
+        .await
+        .map_err(|error| format!("record the reversible squash: {error}"))?;
 
         let mut set = applied.clone();
         set.push(reversible.clone());
-        let guard = guard_for(&GuardConfig::from_policy(
-            policy(&cfg.project_schema),
-            zero_migrate_postgres::DIALECT,
-        ));
+        let guard = guard_for(
+            zero_migrate::shipping_vendors(),
+            &GuardConfig::from_policy(policy(&cfg.project_schema), zero_migrate_postgres::DIALECT),
+        );
         let outcome = rollback(
             &backend,
             &cfg,
