@@ -250,7 +250,7 @@ pub fn effect_of(op: &Op) -> Effect {
 
         // The one genuine escape: SQL this engine did not generate and cannot
         // enumerate. Undecidable, permanently, exactly like `Precondition::SqlBoolean`.
-        Op::PgRaw { .. } => Effect::MayRemove,
+        Op::Raw { .. } => Effect::MayRemove,
 
         // Never reached: `flatten_dialectal_ops` selects the leg before any
         // consumer sees an op, and `lower_one_op` refuses a wrapper outright. Fail

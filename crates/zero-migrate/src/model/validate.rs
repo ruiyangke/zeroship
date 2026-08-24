@@ -82,7 +82,7 @@ pub use zero_migrate_ir::validate::{
     CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED, CODE_PARTITION_BOUNDS_NOT_TOTAL,
     CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, CODE_PARTITION_HASH_DROP_UNDERIVABLE,
     CODE_PARTITION_KEY_COVERAGE, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
-    CODE_PGRAW_REASON_REQUIRED, CODE_PRIMARY_KEY_INVALID, CODE_SEQUENCE_OPTION_INVALID,
+    CODE_RAW_REASON_REQUIRED, CODE_PRIMARY_KEY_INVALID, CODE_SEQUENCE_OPTION_INVALID,
     CODE_TABLE_SHAPE_POLICY, CODE_UNSUPPORTED, CODE_VECTOR_METRIC_MISPLACED, CODE_VENDOR_OP_DENIED,
     MAX_EXPR_DEPTH, MAX_ID_PREFIX_LEN,
 };
@@ -4110,7 +4110,7 @@ fn expression_column_references<'a>(
         | Op::DropTrigger { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. } => Vec::new(),
+        | Op::Raw { .. } => Vec::new(),
     }
 }
 
@@ -4278,7 +4278,7 @@ fn plain_column_references<'a>(op: &'a crate::model::ir::Op) -> Vec<(&'a str, &'
         | Op::DropTrigger { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. } => Vec::new(),
+        | Op::Raw { .. } => Vec::new(),
     }
 }
 
@@ -6666,12 +6666,12 @@ pub fn validate_op_authorized(
             }
             Ok(())
         }
-        Op::PgRaw { reason, .. } if reason.trim().is_empty() => Err(AuthoringError {
-            code: CODE_PGRAW_REASON_REQUIRED.to_string(),
+        Op::Raw { reason, .. } if reason.trim().is_empty() => Err(AuthoringError {
+            code: CODE_RAW_REASON_REQUIRED.to_string(),
             kind: Some(UnsupportedKind::Op),
             op_index,
             dialect: target_dialect.clone(),
-            reason: "pgRaw requires a non-empty reason for auditability".to_string(),
+            reason: "raw requires a non-empty reason for auditability".to_string(),
             suggested_fix: Some(
                 "pass pg.raw({ sql, reason }) with a short explanation for why raw SQL is required"
                     .to_string(),
@@ -6842,7 +6842,7 @@ pub fn validate_op_authorized(
         | Op::DropView { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. } => Ok(()),
+        | Op::Raw { .. } => Ok(()),
         // Unreachable: the early return at the top of this function hands every
         // dialectal op to `validate_dialectal_op`, which authorizes each leg's inner
         // ops and requires an exact leg for the target. Listing it
@@ -7409,7 +7409,7 @@ fn validate_op_support(
         Op::CreateSequence { .. } | Op::AlterSequence { .. } | Op::DropSequence { .. } => {
             check(Feature::Sequence)?;
         }
-        Op::PgRaw { .. } => check(Feature::RawSql)?,
+        Op::Raw { .. } => check(Feature::RawSql)?,
         _ => {}
     }
 
@@ -11458,7 +11458,7 @@ mod tests {
                 ),
                 (
                     DialectId::new("duckdb"),
-                    vec![Op::PgRaw {
+                    vec![Op::Raw {
                         sql: "SELECT 1".to_string(),
                         reason: "the owning backend validates this leg".to_string(),
                     }],

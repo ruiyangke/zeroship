@@ -160,7 +160,7 @@ impl DialectSupport {
     /// this and says "DialectSet must agree with per-dialect decisions", which
     /// reads like a cross-check of the membership. It is not, and that was
     /// MEASURED, not inferred: returning every registered dialect for each op that
-    /// supports anything — wrong members for `pgRaw` and every other PG-only op,
+    /// supports anything — wrong members for `raw` and every other PG-only op,
     /// right emptiness bit — leaves the lib suite and the whole `dialect_matrix`
     /// suite reporting clean. Predates this shape (the same hole existed when
     /// this was `from_bools` over three fields); recorded so the next reader does

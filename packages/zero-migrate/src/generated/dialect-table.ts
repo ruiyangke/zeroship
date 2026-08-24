@@ -106,7 +106,7 @@ export const DIALECT_TABLE: readonly DispositionRow[] = [
   { kind: "insert", variant: "base", dispositions: { mysql: "portable", postgres: "portable", sqlite: "portable" } },
   { kind: "insert", variant: "onConflictDoNothing", dispositions: { mysql: "unsupported", postgres: "portable", sqlite: "portable" } },
   { kind: "insert", variant: "onConflictDoUpdate", dispositions: { mysql: "portable", postgres: "portable", sqlite: "portable" } },
-  { kind: "pgRaw", variant: "base", dispositions: { mysql: "unsupported", postgres: "vendor", sqlite: "unsupported" } },
+  { kind: "raw", variant: "base", dispositions: { mysql: "unsupported", postgres: "vendor", sqlite: "unsupported" } },
   { kind: "renameColumn", variant: "base", dispositions: { mysql: "unsupported", postgres: "portable", sqlite: "portable" } },
   { kind: "renameColumn", variant: "existenceGuard", dispositions: { mysql: "unsupported", postgres: "unsupported", sqlite: "unsupported" } },
   { kind: "renameTable", variant: "base", dispositions: { mysql: "portable", postgres: "portable", sqlite: "portable" } },

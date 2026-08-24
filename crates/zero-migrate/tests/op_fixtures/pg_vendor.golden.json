@@ -262,7 +262,7 @@
       "ifExists": true
     },
     {
-      "op": "pgRaw",
+      "op": "raw",
       "sql": "SELECT set_config('zero_migrate.tenant_app', 'app_demo', false)",
       "reason": "set tenant app GUC for pg vendor fixture"
     }

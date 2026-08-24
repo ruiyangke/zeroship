@@ -56,7 +56,7 @@ pub enum Effect {
     /// The step can remove one of those facts, so a pre-plan answer may be stale by
     /// the time the later step runs. Also the reading for an op whose SQL the engine
     /// does not generate itself
-    /// ([`Op::PgRaw`](crate::ir::Op::PgRaw)) and for a step with no op provenance.
+    /// ([`Op::Raw`](crate::ir::Op::Raw)) and for a step with no op provenance.
     MayRemove,
 }
 

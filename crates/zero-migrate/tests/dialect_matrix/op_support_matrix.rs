@@ -78,7 +78,7 @@ const EXPECTED_OPS: &[&str] = &[
     "dropPolicy",
     "createFunction",
     "dropFunction",
-    "pgRaw",
+    "raw",
 ];
 
 fn fixtures_dir() -> PathBuf {
@@ -742,7 +742,7 @@ fn selected_cells_match_current_validate_and_lower_behavior() {
     }
 
     for dialect in DIALECTS {
-        assert_current_cell_matches(first(&ops, "pgRaw"), dialect);
+        assert_current_cell_matches(first(&ops, "raw"), dialect);
     }
 
     let exclusion_constraint = ops

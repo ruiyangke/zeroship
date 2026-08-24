@@ -350,7 +350,7 @@ impl DmlRenderer for MysqlDmlRenderer {
             Op::CreateFunction { .. } | Op::DropFunction { .. } => {
                 Some("function vendor primitives are PostgreSQL-only")
             }
-            Op::PgRaw { .. } => Some("pgRaw statements are PostgreSQL-only"),
+            Op::Raw { .. } => Some("raw statements are PostgreSQL-only"),
             Op::CreateTrigger {
                 timing,
                 events,
@@ -483,7 +483,7 @@ impl DmlRenderer for MysqlDmlRenderer {
             FeatureSupportKey::TriggerStatementForEach => {
                 Some("SQLite/MySQL triggers are row-level only")
             }
-            FeatureSupportKey::RawSql => Some("pgRaw statements are PostgreSQL-only"),
+            FeatureSupportKey::RawSql => Some("raw statements are PostgreSQL-only"),
         }
     }
 
@@ -980,7 +980,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// inherited.
     ///
     /// The sixteen privileged op kinds — roles, grants, RLS, policies, functions,
-    /// extensions, schemas, `pgRaw` — are every one of them `dialect_scope = PgOnly`.
+    /// extensions, schemas, `raw` — are every one of them `dialect_scope = PgOnly`.
     /// MySQL has no analogue for any of them, so there is nothing to render. The
     /// engine refuses earlier and more informatively (the lower seam checks
     /// `Capability::PostgresVendorPrimitives` and reports the op KIND), so nothing in

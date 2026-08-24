@@ -208,7 +208,7 @@ test("vendor exports and policy selectors record every vendor op shape", () => {
       ifExists: true,
     },
     {
-      op: "pgRaw",
+      op: "raw",
       sql: "SELECT set_config('a', 'x', false)",
       reason: "set a test GUC in raw SQL",
     },
@@ -273,7 +273,7 @@ test("raw requires reason and never records binds", () => {
   const [op] = record(() => {
     raw({ sql: "SELECT 1", reason: "raw smoke test", binds: ["x"] } as any);
   });
-  assert.deepEqual(op, { op: "pgRaw", sql: "SELECT 1", reason: "raw smoke test" });
+  assert.deepEqual(op, { op: "raw", sql: "SELECT 1", reason: "raw smoke test" });
   assert.equal("binds" in op, false);
 });
 

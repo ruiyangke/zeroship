@@ -1599,7 +1599,7 @@ impl FunctionIdentity {
 ///
 /// TRIMMED RATHER THAN UN-PADDED. Asserting `prosrc == format!("\n{body}\n")` is
 /// tighter but pins drift to one renderer's padding: a function created by
-/// `Op::PgRaw` or by hand chooses its own delimiter spacing, and a later change to
+/// `Op::Raw` or by hand chooses its own delimiter spacing, and a later change to
 /// the tag would turn every function permanently red. Trimming both sides is the
 /// smallest reduction that survives all of them.
 ///

@@ -673,7 +673,7 @@ impl SqlGuard {
         })
     }
 
-    /// Backstop for the two IR raw islands (`pgRaw` and `createFunction.body`)
+    /// Backstop for the two IR raw islands (`raw` and `createFunction.body`)
     /// under the Trusted operator profile. Trusted still skips project-schema
     /// confinement for general SQL files, but arbitrary SQL strings embedded inside
     /// otherwise structured IR must not bypass the deny-list for host-reaching or

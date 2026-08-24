@@ -4,7 +4,7 @@
 //!
 //! `zero_migrate::render::vendor` used to re-export `zero_migrate_postgres::render_vendor_op`,
 //! and the engine called it BY NAME at three sites covering sixteen privileged op
-//! kinds — roles, grants, RLS, policies, functions, extensions, schemas, `pgRaw` —
+//! kinds — roles, grants, RLS, policies, functions, extensions, schemas, `raw` —
 //! none of which touch `DmlRenderer`. `render/vendor.rs` recorded that honestly as
 //! "the vendor-op surface is not behind the contract", and
 //! `zero-migrate-sqlite/src/dml.rs` recorded the mirror image: "PostgreSQL is STILL

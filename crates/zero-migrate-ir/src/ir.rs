@@ -19,7 +19,7 @@
 //!   live-schema binding. Validation that those identifiers exist / are safe is
 //!   the apply/render-time structural validator ([`crate::validate`]), not here.
 //! - **Raw SQL is admitted only in the three operator-gated islands**:
-//!   [`Op::CreateFunction`] carries a PL/pgSQL/SQL `body`, [`Op::PgRaw`] carries a
+//!   [`Op::CreateFunction`] carries a PL/pgSQL/SQL `body`, [`Op::Raw`] carries a
 //!   last-resort raw statement, and [`ViewQuery::Raw`] carries a read-only raw view
 //!   SELECT body. Everything else is the CLOSED expression/query AST
 //!   ([`Expr`]/[`SelectAst`]) and every raw island is capability-gated +
@@ -3882,7 +3882,15 @@ pub enum Op {
     /// **VENDOR** — the gated raw-statement escape. Records
     /// the verbatim SQL plus required audit metadata. Operator-only and STILL
     /// parse-scanned by the guard deny-list at lower.
-    PgRaw {
+    ///
+    /// The NODE is dialect-neutral; the `sql` it carries is not. Raw text is
+    /// written against one server, and nothing here can check that, so the op is
+    /// admitted only on a backend answering
+    /// [`Capability::PostgresVendorPrimitives`](crate::backend::Capability::PostgresVendorPrimitives)
+    /// and the rendered statement still faces the guard's parse-time deny-list.
+    /// To scope raw text to a target explicitly, put it in a leg:
+    /// `dialect({ postgres: [raw(...)] })` ([`Op::Dialectal`]).
+    Raw {
         /// The verbatim SQL statement (no trailing `;`).
         sql: String,
         /// Required author-supplied audit reason for using raw SQL.
@@ -3966,7 +3974,7 @@ impl Op {
             | Self::Revoke { .. }
             | Self::CreateFunction { .. }
             | Self::DropFunction { .. }
-            | Self::PgRaw { .. } => None,
+            | Self::Raw { .. } => None,
         }
     }
 
@@ -3994,7 +4002,7 @@ impl Op {
     /// separately via [`crate::migration::MigrationFlags`], not here), `DROP ROLE`,
     /// `DROP EXTENSION`, `DROP POLICY`, `DROP TRIGGER`, `REVOKE`, and every additive
     /// op. `Dialectal` is destructive iff ANY present leg has a destructive op; a
-    /// `PgRaw` island carries opaque SQL the guard classifies at parse time, so at
+    /// `Raw` island carries opaque SQL the guard classifies at parse time, so at
     /// the Op level it is treated as destructive (fail-closed — it may drop/delete).
     #[must_use]
     pub fn is_destructive(&self) -> bool {
@@ -4026,7 +4034,7 @@ impl Op {
             | Self::Delete { .. }
             | Self::Backfill { .. }
             // ── opaque raw SQL — fail closed ───────────────────────────────────
-            | Self::PgRaw { .. } => true,
+            | Self::Raw { .. } => true,
             // `Dialectal` is destructive iff any present leg is.
             Self::Dialectal { legs } => legs
                 .values()
@@ -4162,7 +4170,7 @@ impl Op {
             | Self::DropOwnedBy { .. }
             | Self::Grant { .. }
             | Self::Revoke { .. }
-            | Self::PgRaw { .. }
+            | Self::Raw { .. }
             | Self::Dialectal { .. } => None,
         }
     }
@@ -4275,7 +4283,7 @@ impl Op {
             | Self::DropTrigger { .. }
             | Self::CreateFunction { .. }
             | Self::DropFunction { .. }
-            | Self::PgRaw { .. } => None,
+            | Self::Raw { .. } => None,
         }
     }
 
@@ -4343,7 +4351,7 @@ impl Op {
             | Self::DropTrigger { .. }
             | Self::CreateFunction { .. }
             | Self::DropFunction { .. }
-            | Self::PgRaw { .. } => None,
+            | Self::Raw { .. } => None,
         }
     }
 }

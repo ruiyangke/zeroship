@@ -727,7 +727,7 @@ fn prelude(
         | ("createExtension", _)
         | ("createRole", _)
         | ("createFunction", _)
-        | ("pgRaw", _)
+        | ("raw", _)
         | ("dialectal", _) => vec![],
 
         ("createDomain", "nextvalDefault") => vec![create_sequence()],

@@ -1886,7 +1886,7 @@ fn collect_op_database_requirements(
         | Op::DropTrigger { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. } => {}
+        | Op::Raw { .. } => {}
     }
 }
 
@@ -2206,7 +2206,7 @@ impl IrAuthor {
     /// qualifiers against. The default is the Confined `Single(project_schema)`.
     ///
     /// This widens CONFINEMENT only - which schemas an op may name. It grants no
-    /// vendor capability: `setRls`, `pgRaw` and their peers are authorized by the
+    /// vendor capability: `setRls`, `raw` and their peers are authorized by the
     /// charter's own capability grant, read at the object the op targets. No
     /// production caller sets this; [`lower_guarded`](Self::lower_guarded) takes its
     /// confinement scope from [`crate::guard::GuardConfig::schema_scope`], the same
@@ -5277,7 +5277,7 @@ impl IrAuthor {
             | Op::DropPolicy { .. }
             | Op::CreateFunction { .. }
             | Op::DropFunction { .. }
-            | Op::PgRaw { .. } => {
+            | Op::Raw { .. } => {
                 if !self.backend.supports(Capability::PostgresVendorPrimitives) {
                     return Err(IrLowerError::VendorPgOnly(op_kind_tag(op)));
                 }
@@ -6161,7 +6161,7 @@ impl IrAuthor {
             let mut advisories = Vec::new();
             if skips_static_guard {
                 match op {
-                    Op::PgRaw { .. } => guard
+                    Op::Raw { .. } => guard
                         .check_raw_island_sql(statement)
                         .map_err(|source| FragmentGuardDenied {
                             op_index,
@@ -8868,7 +8868,7 @@ pub const fn op_kind_tag(op: &Op) -> &'static str {
         Op::DropTrigger { .. } => "dropTrigger",
         Op::CreateFunction { .. } => "createFunction",
         Op::DropFunction { .. } => "dropFunction",
-        Op::PgRaw { .. } => "pgRaw",
+        Op::Raw { .. } => "raw",
     }
 }
 

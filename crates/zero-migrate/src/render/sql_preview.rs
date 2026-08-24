@@ -936,7 +936,7 @@ fn op_subject(op: &Op) -> String {
         | Op::DropPolicy { name, table, .. }
         | Op::CreateTrigger { name, table, .. }
         | Op::DropTrigger { name, table, .. } => quote_dotted(&[table, name]),
-        Op::PgRaw { .. } => quote_dotted(&["<pgRaw>"]),
+        Op::Raw { .. } => quote_dotted(&["<raw>"]),
     }
 }
 

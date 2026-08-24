@@ -18,7 +18,7 @@
 //!   2. the rollback planner refuses any inverse step that is not transactional
 //!      DML, up front, before an earlier down can commit.
 //!
-//! `pgRaw` is the adversarial op precisely because it is the one that renders
+//! `raw` is the adversarial op precisely because it is the one that renders
 //! author-supplied SQL text. If a reverse could smuggle it past both barriers,
 //! `inverse()` would be a hole in the guard rather than a feature.
 //!
@@ -64,7 +64,7 @@ fn envelope_with_inverse(inverse: Vec<Op>) -> MigrationIr {
 /// privileged primitive in the reverse is refused on the same terms.
 #[test]
 fn a_raw_sql_op_in_the_inverse_does_not_load_unprivileged() {
-    let ir = envelope_with_inverse(vec![Op::PgRaw {
+    let ir = envelope_with_inverse(vec![Op::Raw {
         sql: "GRANT ALL ON SCHEMA public TO PUBLIC".to_string(),
         reason: "smuggle raw SQL through the reverse".to_string(),
     }]);

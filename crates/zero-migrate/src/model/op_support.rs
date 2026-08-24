@@ -287,7 +287,7 @@ fn unsupported_reason(
         | Op::DropPolicy { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. }
+        | Op::Raw { .. }
         | Op::CreateTrigger { .. } => backend_refusal(),
         // Every remaining op is portable on all three dialects, so no cell is
         // ever `Unsupported` and this reason is never surfaced.
@@ -317,7 +317,7 @@ fn support_tier(op: &Op) -> crate::model::support::SupportTier {
         Op::SetRls { .. } => SupportTier::Vendor(CAP_RLS),
         Op::CreatePolicy { .. } | Op::DropPolicy { .. } => SupportTier::Vendor(CAP_POLICY),
         Op::CreateFunction { .. } | Op::DropFunction { .. } => SupportTier::Vendor(CAP_FUNCTION),
-        Op::PgRaw { .. } => SupportTier::Vendor(CAP_RAW_SQL),
+        Op::Raw { .. } => SupportTier::Vendor(CAP_RAW_SQL),
         Op::CreateView {
             query,
             materialized,
@@ -469,10 +469,10 @@ feature_support_registry! {
         features: crate::model::support::CREATE_TRIGGER_FEATURES,
         ops: [Op::CreateTrigger { .. }],
     }
-    PgRaw {
-        label: "PostgreSQL raw SQL",
+    Raw {
+        label: "Raw SQL",
         features: crate::model::support::RAW_SQL_FEATURES,
-        ops: [Op::PgRaw { .. }],
+        ops: [Op::Raw { .. }],
     }
 }
 
@@ -662,7 +662,7 @@ pub(crate) fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
         Op::DropPolicy { .. } => ("dropPolicy", "base"),
         Op::CreateFunction { .. } => ("createFunction", "base"),
         Op::DropFunction { .. } => ("dropFunction", "base"),
-        Op::PgRaw { .. } => ("pgRaw", "base"),
+        Op::Raw { .. } => ("raw", "base"),
     }
 }
 
@@ -913,7 +913,7 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
         Op::SetRls { .. } => vec![C::Rls],
         Op::CreatePolicy { .. } | Op::DropPolicy { .. } => vec![C::Policy],
         Op::CreateFunction { .. } | Op::DropFunction { .. } => vec![C::Function],
-        Op::PgRaw { .. } => vec![C::RawSql],
+        Op::Raw { .. } => vec![C::RawSql],
     }
 }
 

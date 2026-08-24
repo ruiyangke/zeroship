@@ -310,7 +310,7 @@ fn op_target_table(op: &Op) -> Option<&str> {
         | Op::DropView { .. }
         | Op::CreateFunction { .. }
         | Op::DropFunction { .. }
-        | Op::PgRaw { .. }
+        | Op::Raw { .. }
         | Op::Dialectal { .. } => None,
     }
 }

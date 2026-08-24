@@ -857,7 +857,7 @@ impl AuthoredState<'_> {
             | Op::DropTrigger { .. }
             | Op::CreateFunction { .. }
             | Op::DropFunction { .. }
-            | Op::PgRaw { .. } => {}
+            | Op::Raw { .. } => {}
         }
         Ok(())
     }

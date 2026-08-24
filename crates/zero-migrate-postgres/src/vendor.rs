@@ -1,5 +1,5 @@
 //! The VENDOR (`zero-migrate`) PostgreSQL render seam — the privileged `Op`
-//! variants (roles, grants, policies, functions, triggers, RLS, `pgRaw`) lowered to
+//! variants (roles, grants, policies, functions, triggers, RLS, `raw`) lowered to
 //! structured PostgreSQL DDL.
 //!
 //! # Why this file is HERE and its two TYPES are not
@@ -719,11 +719,11 @@ pub(crate) fn render_vendor_op(
             }]
         }
         // ── The gated raw escape ──────────────────────────────────────────────
-        Op::PgRaw { sql, .. } => {
+        Op::Raw { sql, .. } => {
             // The verbatim SQL is embedded as-is and the WHOLE statement is
             // `pg_query`-parsed + deny-scanned by the guard.
             vec![VendorStatement {
-                name: "pg_raw".to_string(),
+                name: "raw".to_string(),
                 up: sql.clone(),
                 down: None,
             }]

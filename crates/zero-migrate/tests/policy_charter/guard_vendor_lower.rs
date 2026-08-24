@@ -440,10 +440,10 @@ fn require_rls_rejects_standalone_disable_and_no_force() {
 }
 
 #[test]
-fn require_rls_rejects_pg_raw_table_creation_island_fail_closed() {
+fn require_rls_rejects_raw_table_creation_island_fail_closed() {
     let cfg = platform_guard_config_with_data(true, DestructiveOps::Allow);
     let author = platform_author();
-    let op = Op::PgRaw {
+    let op = Op::Raw {
         sql: "CREATE TABLE zero_migrate.raw_users AS SELECT 1 AS id".into(),
         reason: "require_rls raw table creation regression".into(),
     };
@@ -454,7 +454,7 @@ fn require_rls_rejects_pg_raw_table_creation_island_fail_closed() {
         &zero_migrate::render::lower::LiveSchema::default(),
     ) {
         Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
-            assert_eq!(denial.op_kind, "pgRaw");
+            assert_eq!(denial.op_kind, "raw");
             assert!(matches!(
                 denial.source,
                 GuardError::DataSecurityPolicy {
@@ -1177,10 +1177,10 @@ fn vendor_create_function_benign_body_is_allowed_under_platform_guard() {
 }
 
 #[test]
-fn vendor_pg_raw_rce_is_denied_under_platform_guard() {
+fn vendor_raw_rce_is_denied_under_platform_guard() {
     let guard_cfg = platform_guard_config();
     let author = platform_author();
-    let op = zero_migrate_ir::ir::Op::PgRaw {
+    let op = zero_migrate_ir::ir::Op::Raw {
         sql: "COPY zero_migrate.audit_events TO PROGRAM 'sh -c id'".into(),
         reason: "raw COPY PROGRAM denial regression".into(),
     };
@@ -1191,7 +1191,7 @@ fn vendor_pg_raw_rce_is_denied_under_platform_guard() {
         &zero_migrate::render::lower::LiveSchema::default(),
     ) {
         Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
-            assert_eq!(denial.op_kind, "pgRaw");
+            assert_eq!(denial.op_kind, "raw");
             assert!(
                 matches!(
                     denial.source,
@@ -1200,11 +1200,11 @@ fn vendor_pg_raw_rce_is_denied_under_platform_guard() {
                         ..
                     }
                 ),
-                "pgRaw COPY PROGRAM should be caught by the AST deny-list, got: {:?}",
+                "raw COPY PROGRAM should be caught by the AST deny-list, got: {:?}",
                 denial.source
             );
         }
-        other => panic!("vendor pgRaw COPY PROGRAM must be denied; got {other:?}"),
+        other => panic!("vendor raw COPY PROGRAM must be denied; got {other:?}"),
     }
 }
 
@@ -1423,10 +1423,10 @@ fn trusted_still_derives_destructive_flag_at_guard_level() {
 }
 
 #[test]
-fn trusted_pg_raw_still_runs_raw_island_denylist_backstop() {
+fn trusted_raw_still_runs_raw_island_denylist_backstop() {
     let cfg = trusted_guard_config();
     let author = trusted_author();
-    let bad = zero_migrate_ir::ir::Op::PgRaw {
+    let bad = zero_migrate_ir::ir::Op::Raw {
         sql: "CREATE ROLE zsmig_raw_evil SUPERUSER".into(),
         reason: "raw SUPERUSER denial regression".into(),
     };
@@ -1437,7 +1437,7 @@ fn trusted_pg_raw_still_runs_raw_island_denylist_backstop() {
         &zero_migrate::render::lower::LiveSchema::default(),
     ) {
         Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
-            assert_eq!(denial.op_kind, "pgRaw");
+            assert_eq!(denial.op_kind, "raw");
             assert!(
                 matches!(
                     denial.source,
@@ -1446,14 +1446,14 @@ fn trusted_pg_raw_still_runs_raw_island_denylist_backstop() {
                         ..
                     }
                 ),
-                "Trusted pgRaw must still hit the SUPERUSER deny-list backstop, got {:?}",
+                "Trusted raw must still hit the SUPERUSER deny-list backstop, got {:?}",
                 denial.source
             );
         }
-        other => panic!("Trusted pgRaw SUPERUSER must be denied; got {other:?}"),
+        other => panic!("Trusted raw SUPERUSER must be denied; got {other:?}"),
     }
 
-    let clean = zero_migrate_ir::ir::Op::PgRaw {
+    let clean = zero_migrate_ir::ir::Op::Raw {
         sql: "SELECT 1".into(),
         reason: "trusted raw smoke test".into(),
     };
@@ -1463,7 +1463,7 @@ fn trusted_pg_raw_still_runs_raw_island_denylist_backstop() {
             &cfg,
             &zero_migrate::render::lower::LiveSchema::default(),
         )
-        .expect("clean Trusted pgRaw should pass the raw-island backstop");
+        .expect("clean Trusted raw should pass the raw-island backstop");
 }
 
 #[test]

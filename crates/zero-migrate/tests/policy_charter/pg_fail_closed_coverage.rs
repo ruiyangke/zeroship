@@ -40,7 +40,7 @@ const EXPECTED_PG_VENDOR_OP_KINDS: &[&str] = &[
     "DropSchema",
     "DropView::Materialized",
     "Grant",
-    "PgRaw",
+    "Raw",
     "Revoke",
     "SetRls",
 ];
@@ -307,7 +307,7 @@ fn pg_vendor_op_kind(op: &Op) -> Option<&'static str> {
         Op::DropPolicy { .. } => Some("DropPolicy"),
         Op::CreateFunction { .. } => Some("CreateFunction"),
         Op::DropFunction { .. } => Some("DropFunction"),
-        Op::PgRaw { .. } => Some("PgRaw"),
+        Op::Raw { .. } => Some("Raw"),
         // Dialectal is a portable wrapper — per-target leg selection + fail-closed
         // behavior lives in its legs (checked at lower/validate), not here.
         Op::Dialectal { .. } => None,
@@ -433,7 +433,7 @@ fn pg_vendor_op_samples() -> Vec<Op> {
             arg_types: None,
             if_exists: Some(true),
         },
-        Op::PgRaw {
+        Op::Raw {
             sql: "SELECT 1".to_string(),
             reason: "coverage gate sample".to_string(),
         },

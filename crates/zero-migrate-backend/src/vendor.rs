@@ -5,7 +5,7 @@
 //! (`quote_ident_checked`), policy/trigger predicates rendered from the CLOSED
 //! [`Expr`](zero_migrate_ir::expr::Expr) AST via the existing inline renderer
 //! (`render_predicate_pg`) — **never string concatenation**. The function `body`
-//! and the `pgRaw` escape are the two raw-string fields: they are embedded
+//! and the `raw` escape are the two raw-string fields: they are embedded
 //! VERBATIM and the WHOLE rendered statement is then `pg_query`-parsed by the
 //! guard at the lower seam (so the body is scanned).
 //!

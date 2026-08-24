@@ -86,7 +86,7 @@ const OP_DISPOSITIONS: &[((&str, &str), Disposition)] = &[
     (("insert", "base"), Disposition::Portable),
     (("insert", "onConflictDoNothing"), Disposition::Unsupported),
     (("insert", "onConflictDoUpdate"), Disposition::Portable),
-    (("pgRaw", "base"), Disposition::Unsupported),
+    (("raw", "base"), Disposition::Unsupported),
     (("renameColumn", "base"), Disposition::Unsupported),
     (("renameColumn", "existenceGuard"), Disposition::Unsupported),
     (("renameTable", "base"), Disposition::Portable),

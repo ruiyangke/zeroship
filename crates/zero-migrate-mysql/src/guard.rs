@@ -53,7 +53,7 @@ impl MigrationGuard for MysqlGuard {
 
     /// REFUSED, not waved through.
     ///
-    /// A raw island is `Op::PgRaw` — PostgreSQL text. Reaching MySQL with it is a
+    /// A raw island is `Op::Raw` — PostgreSQL text. Reaching MySQL with it is a
     /// mis-dispatch, not a trusted operation, so this refuses with MySQL's own id
     /// rather than returning `Ok`. Returning `Ok` here would grant MySQL an unchecked
     /// raw door that no MySQL author can even open.
@@ -74,7 +74,7 @@ impl MigrationGuard for MysqlGuard {
     /// `false` because MySQL HAS NO RAW DOOR, not because raw SQL is trusted here.
     ///
     /// This is the "I have no raw door" answer the neutral net-state walk asks for.
-    /// `Op::PgRaw` cannot reach a MySQL apply: [`MysqlGuard::check_raw_island_sql`]
+    /// `Op::Raw` cannot reach a MySQL apply: [`MysqlGuard::check_raw_island_sql`]
     /// above refuses it, and there is no MySQL raw author to emit one. So there is no
     /// island whose net table state could escape the walk, and nothing needs parsing
     /// to establish that.

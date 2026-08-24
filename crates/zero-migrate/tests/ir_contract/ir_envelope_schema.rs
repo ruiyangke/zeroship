@@ -137,7 +137,7 @@ fn op_variant_names_from_schema() {
         "dropPolicy",
         "createFunction",
         "dropFunction",
-        "pgRaw",
+        "raw",
     ]
     .iter()
     .map(|s| (*s).to_string())

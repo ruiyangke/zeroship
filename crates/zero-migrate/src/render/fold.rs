@@ -1534,7 +1534,7 @@ impl<'a> CatalogFold<'a> {
             // enforcing layer regardless of how much the fold learns to model.
             //
             // Rejecting here was considered and declined. A fold-side identity check
-            // would refuse a history PostgreSQL accepts, because `Op::PgRaw` folds to
+            // would refuse a history PostgreSQL accepts, because `Op::Raw` folds to
             // nothing and `ALTER TABLE ... ALTER COLUMN ... DROP IDENTITY` is the only
             // way to clear identity from a column that is not part of a primary-key
             // change - `drop_identity_from` rides on `AlterPrimaryKeyAction` alone. The
@@ -3145,7 +3145,7 @@ impl<'a> CatalogFold<'a> {
             | Op::DropOwnedBy { .. }
             | Op::Grant { .. }
             | Op::Revoke { .. }
-            | Op::PgRaw { .. } => {}
+            | Op::Raw { .. } => {}
             Op::Dialectal { .. } => {}
         }
         Ok(())

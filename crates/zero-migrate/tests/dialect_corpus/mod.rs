@@ -673,9 +673,9 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
         },
     ));
     c.push((
-        "pgRaw",
+        "raw",
         "base",
-        Op::PgRaw {
+        Op::Raw {
             sql: "SELECT 1".into(),
             reason: "test".into(),
         },

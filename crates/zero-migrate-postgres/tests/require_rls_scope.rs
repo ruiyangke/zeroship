@@ -89,7 +89,7 @@ fn set_rls(schema: Option<&str>, table: &str, enabled: Option<bool>, forced: Opt
 }
 
 fn raw(sql: &str) -> Op {
-    Op::PgRaw {
+    Op::Raw {
         sql: sql.to_string(),
         reason: "require_rls scope probe".to_string(),
     }

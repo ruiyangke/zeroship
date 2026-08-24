@@ -113,7 +113,7 @@ pub const CODE_AGGREGATE_IN_SCALAR_CONTEXT: &str = "AGGREGATE_IN_SCALAR_CONTEXT"
 /// `cache < 1`, or `minValue > maxValue`).
 pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
 /// **VENDOR (`zero-migrate`)** — a privileged vendor op (role/grant/RLS/
-/// policy/trigger/function/extension/schema/`pgRaw`) whose required
+/// policy/trigger/function/extension/schema/`raw`) whose required
 /// [`VendorCapability`](crate::capability::VendorCapability) is NOT granted by the
 /// active capability set. The Confined creator/AI posture
 /// grants NO vendor capability, so EVERY vendor op is refused fail-closed at
@@ -121,8 +121,8 @@ pub const CODE_SEQUENCE_OPTION_INVALID: &str = "SEQUENCE_OPTION_INVALID";
 /// (the rendered SQL hits the Confined deny-list) means a future refactor
 /// that drops this gate still fails closed.
 pub const CODE_VENDOR_OP_DENIED: &str = "VENDOR_OP_DENIED";
-/// A `pgRaw` op must carry a non-empty audit reason for using the raw SQL escape.
-pub const CODE_PGRAW_REASON_REQUIRED: &str = "PGRAW_REASON_REQUIRED";
+/// A `raw` op must carry a non-empty audit reason for using the raw SQL escape.
+pub const CODE_RAW_REASON_REQUIRED: &str = "RAW_REASON_REQUIRED";
 /// A primary-key tuple is structurally invalid. This covers both a resolved
 /// `createTable.primaryKey` and an explicit [`AlterPrimaryKeyAction`]: empty or
 /// duplicated ordered tuples, a no-op replacement, or an invalid declared

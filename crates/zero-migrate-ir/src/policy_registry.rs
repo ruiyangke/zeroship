@@ -151,7 +151,7 @@ fn grant_only_draft_toml(charter_toml: &str) -> Result<String, String> {
 
 // ── sql — the raw-text escape hatch ─────────────────────────────────────────────
 
-/// The gated raw-statement escape (`pgRaw`) (object-scoped Bool grant; still
+/// The gated raw-statement escape (`raw`) (object-scoped Bool grant; still
 /// deny-list-guarded). Object set = all referenced objects (II.2.5).
 pub const KEY_SQL_RAW: &str = "sql.raw";
 /// The gated raw view-body SELECT escape (Global Bool grant).
@@ -489,7 +489,7 @@ pub fn builtin_registry() -> PolicyRegistry {
             // statement-level referenced-object containment guarantee, and the guard's
             // scoped-raw-SQL rules (unqualified name / SET search_path / opaque body)
             // hinge on ⊤ vs a narrower grant — so it is PerTable, not Global.
-            bool_grant(KEY_SQL_RAW, ObjectModel::PerTable, false, "The gated raw-statement escape (pgRaw); object-scoped (II.2.5)."),
+            bool_grant(KEY_SQL_RAW, ObjectModel::PerTable, false, "The gated raw-statement escape (raw); object-scoped (II.2.5)."),
             bool_grant(KEY_SQL_RAW_VIEW_BODY, ObjectModel::Global, false, "The gated raw view-body SELECT escape."),
             // ── runtime — op-timeout upper bounds + index/rewrite postures ──────
             // Every `runtime` knob is DECLARED ONLY: no guard, executor or validator

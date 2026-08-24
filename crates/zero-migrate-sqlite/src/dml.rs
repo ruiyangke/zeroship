@@ -340,7 +340,7 @@ impl DmlRenderer for SqliteDmlRenderer {
             Op::CreateFunction { .. } | Op::DropFunction { .. } => {
                 Some("function vendor primitives are PostgreSQL-only")
             }
-            Op::PgRaw { .. } => Some("pgRaw statements are PostgreSQL-only"),
+            Op::Raw { .. } => Some("raw statements are PostgreSQL-only"),
             Op::CreateTrigger {
                 events,
                 for_each,
@@ -448,7 +448,7 @@ impl DmlRenderer for SqliteDmlRenderer {
             FeatureSupportKey::TriggerStatementForEach => {
                 Some("SQLite/MySQL triggers are row-level only")
             }
-            FeatureSupportKey::RawSql => Some("pgRaw statements are PostgreSQL-only"),
+            FeatureSupportKey::RawSql => Some("raw statements are PostgreSQL-only"),
         }
     }
 

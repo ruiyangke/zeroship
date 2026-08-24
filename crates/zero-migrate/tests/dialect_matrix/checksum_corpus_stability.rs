@@ -11,7 +11,7 @@
 //! spot check. This file pins the checksum of EVERY `(op-kind, variant)` row of
 //! the shared dialect corpus — the same corpus `dialect_table_faithfulness.rs`
 //! and `dialect_conformance_live.rs` drive — so a rename anywhere in the op
-//! surface is caught, not only a rename inside `createTable`/`insert`/`pgRaw`.
+//! surface is caught, not only a rename inside `createTable`/`insert`/`raw`.
 //!
 //! Two assertions, deliberately:
 //!
@@ -106,8 +106,18 @@ fn corpus_checksums_are_byte_stable() {
     // from closed `default`/`pg`/`sqlite`/`mysql` fields to a canonical
     // `DialectId`-keyed `legs` map. There is no deployed-journal compatibility
     // requirement, but every later wire change remains an explicit review gate.
+    // Re-recorded again when the gated raw-statement escape was renamed
+    // `Op::PgRaw` -> `Op::Raw` (wire tag `"pgRaw"` -> `"raw"`). The review this
+    // assertion asks for was done with `ZM_CHECKSUM_CORPUS_DUMP` on both sides:
+    // of the 92 rows, EXACTLY ONE moved --
+    //   -pgRaw|base|0d8096e44299459958f5667cc82d61b69b86b13b953faf0b9455c286d214b529
+    //   +raw|base|7d09edb22e3b80abdfbe36ace97cac8d49c39d488a9d16bf3115b0224af85e81
+    // -- and the other 91 are byte-identical, which is what makes this a scoped
+    // rename rather than a wire-format drift. Aggregate:
+    // 0590adee7a3048a19689e2f2632c860d59797afc5e72c3d19705dbc85f360471 ->
+    // 7b960d132e2487c27567e906cec97834bf12222a9ca429b375d006072835b7c3.
     const EXPECTED_AGGREGATE: &str =
-        "0590adee7a3048a19689e2f2632c860d59797afc5e72c3d19705dbc85f360471";
+        "7b960d132e2487c27567e906cec97834bf12222a9ca429b375d006072835b7c3";
     assert_eq!(
         aggregate,
         EXPECTED_AGGREGATE,

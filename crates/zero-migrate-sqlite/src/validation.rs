@@ -86,7 +86,7 @@ const OP_DISPOSITIONS: &[((&str, &str), Disposition)] = &[
     (("insert", "base"), Disposition::Portable),
     (("insert", "onConflictDoNothing"), Disposition::Portable),
     (("insert", "onConflictDoUpdate"), Disposition::Portable),
-    (("pgRaw", "base"), Disposition::Unsupported),
+    (("raw", "base"), Disposition::Unsupported),
     (("renameColumn", "base"), Disposition::Portable),
     (("renameColumn", "existenceGuard"), Disposition::Unsupported),
     (("renameTable", "base"), Disposition::Portable),
@@ -184,7 +184,7 @@ impl ValidationPolicy for SqliteValidationPolicy {
             | VendorCapability::Function
             | VendorCapability::RawSql) => Some(refusal(
                 format!(
-                    "the zero-migrate vendor op (capability {:?}) is Postgres-only — roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/pgRaw have no SQLite analogue (PgOnly)",
+                    "the zero-migrate vendor op (capability {:?}) is Postgres-only — roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/raw have no SQLite analogue (PgOnly)",
                     capability.as_token()
                 ),
                 "vendor primitives target Postgres only — deploy this migration against a Postgres backend, or remove the privileged Postgres op".to_string(),

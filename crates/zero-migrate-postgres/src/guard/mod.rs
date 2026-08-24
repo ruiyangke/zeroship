@@ -92,7 +92,7 @@ impl MigrationGuard for PgGuard {
         self.0.check_raw_island_body_backstop(body, raw)
     }
 
-    /// PostgreSQL HAS a raw door (`Op::PgRaw`), so it must answer this from the
+    /// PostgreSQL HAS a raw door (`Op::Raw`), so it must answer this from the
     /// parser: an island is attributed to the relations its parse names, and one
     /// naming only unobligated relations is admitted. Unparseable text, an unpinnable
     /// schema, and a statement naming no relation at all are all treated as inside the

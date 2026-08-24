@@ -395,7 +395,7 @@ sqlite = "unsupported"
 mysql = "unsupported"
 
 [[row]]
-kind = "pgRaw"
+kind = "raw"
 variant = "base"
 postgres = "vendor"
 sqlite = "unsupported"

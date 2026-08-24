@@ -91,7 +91,7 @@ fn checksum_of_byte_stable_golden() {
 #[test]
 fn checksum_of_ir_byte_stable_golden() {
     // A fixed, fully-populated tuple: three ops (a createTable + an insert whose
-    // row folds a typed IrScalar + a pgRaw whose reason folds as audit metadata),
+    // row folds a typed IrScalar + a raw whose reason folds as audit metadata),
     // non-default flags, a frozen owner, one dep, one supersedes, and no
     // preconditions. Frozen literals only — no
     // generate() — so the hash is reproducible across runs.
@@ -142,9 +142,9 @@ fn checksum_of_ir_byte_stable_golden() {
             on_conflict: None,
             schema: None,
         },
-        Op::PgRaw {
+        Op::Raw {
             sql: "SELECT set_config('zero_migrate.tenant_app', 'app_golden', false)".into(),
-            reason: "pin pgRaw reason in checksum golden".into(),
+            reason: "pin raw reason in checksum golden".into(),
         },
     ];
     let deps = [dep()];
@@ -156,7 +156,13 @@ fn checksum_of_ir_byte_stable_golden() {
     // every golden updated in the SAME patch. NB: `typed_checksum` (the JS-builder
     // anchor) reuses this same Rust serialization, so there is no separate JS
     // serializer to bump.
-    const EXPECTED: &str = "be51301392288399d3622b7a5156b48931dfd1a8472049299a783b017623f64f";
+    // Re-captured again when the gated raw-statement escape was renamed
+    // `Op::PgRaw` -> `Op::Raw` and its wire tag `"pgRaw"` -> `"raw"`, so the op
+    // list this golden folds serializes differently by construction:
+    // be51301392288399d3622b7a5156b48931dfd1a8472049299a783b017623f64f ->
+    // 2cabce5ae58f72938e4eecd3c8de9618a8819ec264c8e052f331cddb41f60751.
+    // The INPUT changed; the assertion did not.
+    const EXPECTED: &str = "2cabce5ae58f72938e4eecd3c8de9618a8819ec264c8e052f331cddb41f60751";
     assert_eq!(
         Checksum::of_ir(
             &CanonicalOpList(&ops),
@@ -462,10 +468,10 @@ fn checksum_of_ir_folds_scalars_and_ast_literals() {
 }
 
 #[test]
-fn checksum_of_ir_folds_pg_raw_reason() {
+fn checksum_of_ir_folds_raw_reason() {
     let flags = MigrationFlags::default();
     let mk_raw = |reason: &str| {
-        vec![Op::PgRaw {
+        vec![Op::Raw {
             sql: "SELECT 1".into(),
             reason: reason.into(),
         }]
@@ -487,7 +493,7 @@ fn checksum_of_ir_folds_pg_raw_reason() {
             &[],
             &[],
         ),
-        "a PgRaw reason change must be checksum drift"
+        "a Raw reason change must be checksum drift"
     );
 }
 

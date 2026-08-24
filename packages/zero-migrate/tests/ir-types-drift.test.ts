@@ -63,7 +63,7 @@ const TS = {
     "createSchema", "dropSchema", "createExtension", "dropExtension", "createRole",
     "alterRole", "dropRole", "dropOwnedBy", "grant", "revoke", "setRls",
     "createPolicy", "dropPolicy", "createFunction",
-    "dropFunction", "comment", "pgRaw",
+    "dropFunction", "comment", "raw",
   ].sort(),
   // Expr node tags.
   Expr: [
@@ -200,7 +200,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   createFunction: ["args", "body", "language", "name", "replace", "returns", "schema", "volatility"].sort(),
   dropFunction: ["argTypes", "ifExists", "name", "schema"].sort(),
   comment: ["comment", "target"].sort(),
-  pgRaw: ["reason", "sql"].sort(),
+  raw: ["reason", "sql"].sort(),
 };
 
 const TS_ALTER_PRIMARY_KEY_FIELDS: Record<string, string[]> = {

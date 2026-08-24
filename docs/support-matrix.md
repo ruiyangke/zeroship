@@ -129,7 +129,7 @@
 | Trigger `WHEN` predicate | Yes | No[^30] | Yes |
 | Trigger `RAISE IGNORE` | No[^31] | No[^32] | Yes |
 
-## PostgreSQL raw SQL
+## Raw SQL
 
 | Feature | PostgreSQL 18 | MySQL 8 | SQLite |
 | --- | --- | --- | --- |
@@ -169,4 +169,4 @@
 [^30]: MySQL triggers do not support WHEN predicates
 [^31]: Postgres trigger bodies are unsupported; named functions must be used
 [^32]: MySQL cannot render RAISE IGNORE
-[^33]: pgRaw statements are PostgreSQL-only
+[^33]: raw statements are PostgreSQL-only

@@ -2024,7 +2024,7 @@ export function raw(args: PgRawArgs): Node {
   requireString(args.sql, "raw({ sql })");
   requireString(args.reason, "raw({ reason })");
   return recordVendor({
-    op: "pgRaw",
+    op: "raw",
     sql: args.sql,
     reason: args.reason,
   });

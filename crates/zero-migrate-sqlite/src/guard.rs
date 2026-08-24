@@ -56,7 +56,7 @@ impl MigrationGuard for SqliteGuard {
 
     /// REFUSED, not waved through.
     ///
-    /// A raw island is `Op::PgRaw` — PostgreSQL text. `libpg_query` cannot parse
+    /// A raw island is `Op::Raw` — PostgreSQL text. `libpg_query` cannot parse
     /// SQLite and SQLite has no raw author, so an island arriving here is a
     /// mis-dispatch rather than a trusted operation. Returning `Ok` would grant SQLite
     /// an unchecked raw door that no SQLite author can open, so this refuses with

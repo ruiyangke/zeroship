@@ -32,7 +32,7 @@
 //!   gate is literally `if cfg.dialect() != &POSTGRES`, because the descriptor guard
 //!   those two dialects run is constructed without the policy and cannot read the
 //!   knob at all.
-//! - Yet it reached `pg_query::parse` for `Op::PgRaw` islands, because a raw island's
+//! - Yet it reached `pg_query::parse` for `Op::Raw` islands, because a raw island's
 //!   net table state is not enumerable without a parser.
 //!
 //! So the function enforcing SQLite's and MySQL's posture needed PostgreSQL's parser.
@@ -832,7 +832,7 @@ fn table_key_for_policy(
 ///
 /// Every decision below is read off a structured [`Op`] — a create, a drop, a rename,
 /// a `setRls` — which every dialect emits and none of them needs a parser to
-/// understand. The single exception is the raw island: `Op::PgRaw` carries text, and
+/// understand. The single exception is the raw island: `Op::Raw` carries text, and
 /// text's net table state is not derivable from the IR. That one question is asked of
 /// `guard` through [`MigrationGuard::raw_island_escapes_rls_net_state`], so the vendor
 /// that owns the raw door answers it and a descriptor-only vendor answers "I have no
@@ -902,13 +902,13 @@ pub fn check_ir_data_security_policy(
     // regression, not parity. Row DML is therefore excluded, leaving the
     // object-drop and lossy-DDL family that PostgreSQL's guard does deny.
     //
-    // `PgRaw` is excluded because it cannot reach these dialects at all: PostgreSQL's
+    // `Raw` is excluded because it cannot reach these dialects at all: PostgreSQL's
     // line-1 refuses non-Postgres raw text outright.
     let posture_denies = |op: &Op| {
         op.is_destructive()
             && !matches!(
                 op,
-                Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } | Op::PgRaw { .. }
+                Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } | Op::Raw { .. }
             )
     };
     if cfg.dialect() != &POSTGRES && matches!(cfg.destructive_ops(), DestructiveOps::Forbid) {
@@ -1024,7 +1024,7 @@ pub fn check_ir_data_security_policy(
                     tables.insert(to_key, state);
                 }
             }
-            Op::PgRaw { sql, .. }
+            Op::Raw { sql, .. }
                 if cfg.require_rls_authored_anywhere()
                     && guard.raw_island_escapes_rls_net_state(sql) =>
             {
@@ -1032,7 +1032,7 @@ pub fn check_ir_data_security_policy(
                     op_index,
                     source: GuardError::DataSecurityPolicy {
                         rule: data_security_rule::REQUIRE_RLS,
-                        statement: "pgRaw is forbidden while data_security.require_rls=true because raw SQL can create tables outside the structured RLS net-state check".to_string(),
+                        statement: "raw is forbidden while data_security.require_rls=true because raw SQL can create tables outside the structured RLS net-state check".to_string(),
                     },
                 });
             }
