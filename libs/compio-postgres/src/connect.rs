@@ -563,6 +563,21 @@ where
             None
         },
         require_peer: config.get_require_peer().map(str::to_owned),
+        // Recorded, not re-derived at cancel time: see the field's doc.
+        //
+        // Keyed off what this session NEGOTIATED, not off `sslmode` alone. A
+        // plaintext session has no certificate for anyone to verify, and
+        // `ServerVerification::select` REFUSES `sslmode=disable` outright
+        // ("does not use TLS, so no verification policy applies") - so asking
+        // it unconditionally turns every `disable` connection into a TLS error.
+        server_verification: if negotiated == crate::connect_tls::Encryption::Plaintext {
+            crate::tls::ServerVerification::None
+        } else {
+            crate::tls::ServerVerification::demanded_by(
+                config.get_ssl_mode(),
+                config.get_ssl_root_cert(),
+            )?
+        },
         // `negotiated`, not `encryption`: the argument above is what this leg
         // ATTEMPTED. A cancel has to reproduce what the session got.
         encryption: negotiated,
