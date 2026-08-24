@@ -1710,6 +1710,46 @@ value = "allow"
 scope = "all"
 "#;
 
+    /// [`NO_INJECT_CHARTER_TOML`] plus the two grants a trigger that binds a function
+    /// needs: `code.trigger` for the trigger itself, and `code.function` because
+    /// `action.executeFunction` arranges for existing code to run on every affected row.
+    ///
+    /// Local to the one test here that authors a trigger, rather than widened into the
+    /// shared charter above. The other tests riding that one do not author triggers and
+    /// must not silently acquire the authority to.
+    const TRIGGER_CHARTER_TOML: &str = r#"policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = "all"
+
+[[grant]]
+key = "schema.rename"
+value = true
+scope = "all"
+
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
+
+[[grant]]
+key = "code.trigger"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.function"
+value = true
+scope = "all"
+"#;
+
     const FUNCTION_CHARTER_TOML: &str = r#"policy_version = 1
 
 [[grant]]
@@ -1992,7 +2032,7 @@ scope = "all"
             }]
         })
         .to_string();
-        let charter = &[NO_INJECT_CHARTER_TOML];
+        let charter = &[TRIGGER_CHARTER_TOML];
         let registry = r#"{"events":"app_trigger_history"}"#;
         let create_artifact =
             lower_envelope_to_plan(&create, owner, owner, "postgres", registry, charter)
