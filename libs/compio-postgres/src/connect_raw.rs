@@ -2400,12 +2400,20 @@ mod tests {
         let mut config = scram_config();
         config.channel_binding(crate::config::ChannelBinding::Prefer);
 
-        if let Err(error) = config.connect_raw(stream, NoTls).await {
-            let chain = authentication_error_chain(error);
-            assert!(
-                !chain.contains("SCRAM-SHA-256-PLUS"),
-                "prefer must not raise the channel-binding downgrade refusal: {chain}"
-            );
-        }
+        // `expect_err`, not `if let Err`: the stub never continues the SCRAM
+        // exchange, so failing is this test's PREMISE. Written as a conditional,
+        // a future change that let this connect would skip the assertion and
+        // the test would keep passing while checking nothing.
+        // A match, not `expect_err`: `Connection` is not `Debug`, which is very
+        // likely why this began life as `if let Err`.
+        let error = match config.connect_raw(stream, NoTls).await {
+            Ok(_) => panic!("the stub never completes SCRAM, so the connection must fail"),
+            Err(error) => error,
+        };
+        let chain = authentication_error_chain(error);
+        assert!(
+            !chain.contains("SCRAM-SHA-256-PLUS"),
+            "prefer must not raise the channel-binding downgrade refusal: {chain}"
+        );
     }
 }
