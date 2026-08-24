@@ -37,7 +37,10 @@
 //! drain, which would couple one pool's shutdown to unrelated pools.
 //!
 //! Lifecycle callbacks are part of [`PoolConfig`]. `after_connect` and
-//! `before_acquire` are asynchronous and run before a candidate becomes active.
+//! `before_acquire` are asynchronous and run before a candidate becomes active,
+//! and they divide the candidates between them rather than both seeing every
+//! one: `after_connect` owns connections the pool has just opened, and
+//! `before_acquire` owns connections being recycled out of the idle set.
 //! `after_release` is a synchronous keep-or-discard predicate because return
 //! happens through `Drop`; a rejected session is closed instead of being made
 //! visible to another borrower.
@@ -301,12 +304,17 @@ impl PoolConfig {
         self
     }
 
-    /// Run an asynchronous callback before each checkout.
+    /// Run an asynchronous callback before handing out a RECYCLED connection.
     ///
-    /// This includes newly opened connections, immediately after their
-    /// `after_connect` callback. `Ok(true)` accepts the connection. `Ok(false)`
-    /// discards it and retries checkout with another connection. An error
-    /// discards it and fails the checkout.
+    /// This is **not** invoked for connections the pool has just opened; use
+    /// [`PoolConfig::after_connect`] for those. The split is what keeps a
+    /// rejecting hook from turning one checkout into a reconnect storm: with no
+    /// idle connection left to fall back on, a rejected fresh connection would
+    /// only be replaced by another fresh connection, until `acquire_timeout`.
+    ///
+    /// `Ok(true)` accepts the connection. `Ok(false)` discards it and retries
+    /// with the next idle candidate. An error discards it and fails the
+    /// checkout.
     pub fn before_acquire<F>(&mut self, hook: F) -> &mut Self
     where
         F: for<'a> Fn(&'a Client) -> PoolHookFuture<'a, Result<bool, Error>> + 'static,
@@ -1233,19 +1241,27 @@ impl Pool {
                     // slot; this connection is never made active or idle.
                     return Err(e);
                 }
-                let before_acquire = self.config.run_before_acquire(&entry.client).await;
-                self.ensure_open()?;
-                match before_acquire {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        self.metrics.inc_evictions();
-                        continue;
-                    }
-                    Err(e) => {
-                        self.metrics.inc_evictions();
-                        return Err(e);
-                    }
-                }
+                // `before_acquire` is deliberately NOT run here. It is a
+                // recycling check -- "is this idle connection still fit to
+                // hand out" -- and this connection was opened microseconds ago
+                // and already vetted by `after_connect`, which is the hook that
+                // owns new connections.
+                //
+                // Consulting it here was also actively harmful. `Ok(false)`
+                // reaches the loop's `continue`, and with no idle entry to fall
+                // back on the next iteration opens ANOTHER connection, is
+                // refused again, and repeats until `acquire_timeout` -- a full
+                // TCP connect plus startup handshake each time. Measured before
+                // this change: ~3 connections per 300ms, extrapolating to
+                // roughly 300 for a single `get()` at the 30s default. A hook
+                // like "reject if the server is in recovery" answers false for
+                // every connection during a failover and turns one checkout
+                // into sustained load on an already-struggling server.
+                //
+                // This matches sqlx ("This is _not_ invoked for new
+                // connections. Use `after_connect` for those.") and deadpool,
+                // whose `recycle` structurally cannot see a new object.
+                // Pinned by `before_acquire_is_not_consulted_for_a_freshly_connected_client`.
                 self.ensure_open()?;
                 entry.touch();
                 self.active.set(self.active.get() + 1);
