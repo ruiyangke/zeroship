@@ -207,7 +207,7 @@ export interface DropFunctionArgs {
   ifExists?: boolean;
 }
 
-export interface PgRawArgs {
+export interface RawArgs {
   sql: string;
   reason: string;
 }
@@ -2019,7 +2019,7 @@ export function dropFunction(args: DropFunctionArgs): Node {
   });
 }
 
-export function raw(args: PgRawArgs): Node {
+export function raw(args: RawArgs): Node {
   requireString(args.sql, "raw({ sql })");
   requireString(args.reason, "raw({ reason })");
   return recordVendor({

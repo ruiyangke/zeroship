@@ -94,7 +94,7 @@ export type {
   DropFunctionArgs,
   DropOwnedByArgs,
   GrantArgs,
-  PgRawArgs,
+  RawArgs,
   RevokeArgs,
 } from "./ops.js";
 
