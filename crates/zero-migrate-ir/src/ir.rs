@@ -2585,12 +2585,19 @@ pub struct FuncArg {
     pub mode: Option<FuncArgMode>,
 }
 
-/// Validate the conservative PG type-reference subset admitted in function
-/// signatures. This is intentionally a type *reference* grammar, not a SQL
-/// fragment grammar: no whitespace, no semicolons, no clauses such as `SECURITY
-/// DEFINER`, and at most one schema qualifier.
+/// Validate the conservative type-reference subset admitted in function signatures.
+/// This is intentionally a type *reference* grammar, not a SQL fragment grammar: no
+/// whitespace, no semicolons, no clauses such as `SECURITY DEFINER`, and at most one
+/// schema qualifier.
+///
+/// It was `is_valid_pg_type_ref`, and the name was the only thing about it that named
+/// a vendor. The grammar it accepts is an identifier, at most one schema qualifier, an
+/// optional `(n)` / `(n,m)` precision and any number of `[]` suffixes — no keyword, no
+/// spelling and no catalog of any backend appears in it, which is why the PostgreSQL
+/// vendor crate and the neutral engine both call it. What made it look vendor-specific
+/// is that `CREATE FUNCTION` is currently a PostgreSQL-only op; the CHECK is not.
 #[must_use]
-pub fn is_valid_pg_type_ref(input: &str) -> bool {
+pub fn is_conservative_type_ref(input: &str) -> bool {
     if input.is_empty() || input.trim() != input || input.chars().any(char::is_whitespace) {
         return false;
     }

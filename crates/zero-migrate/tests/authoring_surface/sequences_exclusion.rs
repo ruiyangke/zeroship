@@ -814,6 +814,22 @@ fn an_over_long_index_name_is_refused() {
         "expected the truncation reason, got {:?}",
         err.reason
     );
+    // The refusal must name the target it ASKED, not a vendor compiled into the
+    // message. This sentence used to read "PostgreSQL truncates identifiers to 63
+    // bytes" on EVERY target, including the two that do not truncate; it is now the
+    // answer `existence_probe.truncated_identifier` gave for this backend, so the
+    // dialect appearing here is the one under test rather than a coincidence.
+    assert!(
+        err.reason.contains(zero_migrate::POSTGRES.as_str()),
+        "the truncation reason must name the target that truncates, got {:?}",
+        err.reason
+    );
+    assert!(
+        !err.reason.contains("PostgreSQL"),
+        "the target is named from its DialectId, not from a compiled-in product name; \
+         got {:?}",
+        err.reason
+    );
 
     // A name that fits is still accepted.
     let ok = format!("idx_{}", "a".repeat(50));

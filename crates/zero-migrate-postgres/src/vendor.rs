@@ -40,7 +40,7 @@
 
 use zero_migrate_backend::dml::{quote_ident_checked_for_backend, render_predicate, DmlError};
 use zero_migrate_backend::vendor::{VendorError, VendorStatement};
-use zero_migrate_ir::ir::{is_valid_pg_type_ref, GrantTarget, Op, Privilege, TriggerAction};
+use zero_migrate_ir::ir::{is_conservative_type_ref, GrantTarget, Op, Privilege, TriggerAction};
 
 /// Quote an identifier through the crate's single seam, mapping the error.
 fn qid(ident: &str) -> Result<String, VendorError> {
@@ -161,7 +161,7 @@ fn predicate(expr: &zero_migrate_ir::expr::Expr) -> Result<String, VendorError> 
 }
 
 fn type_ref_sql<'a>(value: &'a str, slot: &'static str) -> Result<&'a str, VendorError> {
-    if is_valid_pg_type_ref(value) {
+    if is_conservative_type_ref(value) {
         Ok(value)
     } else {
         Err(VendorError::InvalidTypeRef {

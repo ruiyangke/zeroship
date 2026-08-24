@@ -436,9 +436,18 @@ fn validate_authored_identifier_lengths_op(
 /// Bound one author-supplied identifier at
 /// [`crate::plan::author::GENERATED_IDENT_MAX_BYTES`].
 ///
-/// The bound is BYTES, not characters, because PostgreSQL's NAMEDATALEN is a byte
-/// budget: a name short in characters but long in bytes is truncated exactly as an
-/// over-long ASCII name is.
+/// The bound is BYTES, not characters, because the tightest cap in the registry is a
+/// byte budget: a name short in characters but long in bytes is truncated exactly as an
+/// over-long ASCII name is. `render::backends::tightest_identifier_budget` takes the
+/// safe direction for a CHARACTER-capped backend for the same reason.
+///
+/// The bound is the engine's, not the selected target's, and that is deliberate on the
+/// CREATED side: an authored name is refused here if it would not survive on the
+/// strictest registered backend, so a schema authored against a permissive target can
+/// be re-pointed at a strict one without names silently merging. The DROPPED side is
+/// different and is gated per-vendor by the caller, through
+/// `existence_probe.truncated_identifier` — a backend that does NOT truncate must not
+/// be stopped from dropping a catalog object that legitimately carries a long name.
 fn authored_name_within_bound(
     kind: &str,
     name: &str,
@@ -450,23 +459,46 @@ fn authored_name_within_bound(
     if name.len() <= max {
         return Ok(());
     }
+    // Does THIS target silently truncate THIS name? The backend answers; core does not
+    // decide it from an id. The two sentences below are different facts, and the old
+    // single sentence — "PostgreSQL truncates identifiers to 63 bytes" — was the first
+    // one, emitted unconditionally, including on the two shipping backends for which it
+    // is false.
+    let truncates_here = registered_vendor(target_dialect, op_index)?
+        .existence_probe
+        .truncated_identifier(name)
+        .is_some();
     let (reason, fix) = match position {
-        NamePosition::Created => (
+        NamePosition::Created if truncates_here => (
             format!(
-                "{kind} name {name:?} is {} bytes; PostgreSQL truncates identifiers to {max} \
+                "{kind} name {name:?} is {} bytes; {} truncates identifiers to {max} \
                  bytes, so it would silently collide with any other name sharing its first \
                  {max} bytes",
-                name.len()
+                name.len(),
+                target_dialect.as_str()
+            ),
+            format!("use a {kind} name of at most {max} bytes"),
+        ),
+        NamePosition::Created => (
+            format!(
+                "{kind} name {name:?} is {} bytes; {} does not truncate it, but authored \
+                 names are bounded at {max} bytes — the tightest identifier cap any \
+                 registered backend declares — so re-pointing this schema at a stricter \
+                 target would silently collide it with any other name sharing its first \
+                 {max} bytes",
+                name.len(),
+                target_dialect.as_str()
             ),
             format!("use a {kind} name of at most {max} bytes"),
         ),
         NamePosition::Dropped => (
             format!(
-                "{kind} name {name:?} is {} bytes; PostgreSQL truncates identifiers to {max} \
+                "{kind} name {name:?} is {} bytes; {} truncates identifiers to {max} \
                  bytes, so no catalog object can carry it: the guarded probe would find no \
                  match, the statement would be skipped, and the journal would record it \
                  completed while the object remained",
-                name.len()
+                name.len(),
+                target_dialect.as_str()
             ),
             format!("name the {kind} as the catalog holds it, at most {max} bytes"),
         ),
@@ -3152,9 +3184,9 @@ fn validate_no_name_is_claimed_twice(
                         $op_index,
                         &format!(
                             "this {} claims the name {:?}, but an earlier operation in this \
-                             migration already created a {held_by} with that name, and \
-                             PostgreSQL keeps both in one type namespace",
-                            $what, $name
+                             migration already created a {held_by} with that name, and {} \
+                             keeps both in one type namespace",
+                            $what, $name, target_dialect.as_str()
                         ),
                         "drop the existing object first, or use a different name",
                     ));
@@ -5381,6 +5413,40 @@ struct PartitionParentFold {
     children: std::collections::BTreeMap<String, (usize, crate::model::ir::PartitionBounds)>,
 }
 
+/// The two ways out of a COLLAPSE-rule refusal: satisfy the rule, or stop asking for
+/// collapse and take a target that partitions natively.
+///
+/// The second half used to be the literal `"or omit whenUnsupported and target Postgres
+/// only"`, repeated at three sites. It named the one backend that declared
+/// [`Capability::PartitionRelationDdl`] when it was written, in core, where the registry
+/// already answers the question — so it was a cached answer with no invalidation, and a
+/// fourth backend declaring native partitioning would have been left out of its own
+/// advice.
+/// "…, or target X for `what`" — where X is whichever registered backends actually
+/// declare [`Capability::PartitionRelationDdl`], asked at the moment of the refusal.
+///
+/// Same defect as [`collapse_or_native_target`], different sentence: the advice beside
+/// a partition refusal named PostgreSQL as a literal while the gate that produced the
+/// refusal was already a capability lookup.
+fn native_partition_alternative(satisfy: &str, what: &str) -> String {
+    match crate::render::backends::targets_declaring(Capability::PartitionRelationDdl) {
+        Some(able) => format!("{satisfy}, or target {able} for {what}"),
+        None => format!("{satisfy}; no registered backend declares {what}"),
+    }
+}
+
+fn collapse_or_native_target(satisfy: &str) -> String {
+    match crate::render::backends::targets_declaring(Capability::PartitionRelationDdl) {
+        Some(able) => {
+            format!("{satisfy}, or omit whenUnsupported and target {able} only")
+        }
+        None => format!(
+            "{satisfy}; no registered backend partitions natively, so collapse is the only \
+             form available"
+        ),
+    }
+}
+
 fn partition_error(
     code: &'static str,
     op_index: usize,
@@ -5626,7 +5692,10 @@ fn validate_partition_recording(
                         format!(
                             "createPartition {name:?} targets parent {of:?}, but this recording does not contain a collapse-affirmed partitioned parent to authorize the no-DDL leg"
                         ),
-                        "record the partitioned parent with partitionBy.whenUnsupported: \"collapse\" in the same fold, or target Postgres for native partition DDL",
+                        &native_partition_alternative(
+                            "record the partitioned parent with partitionBy.whenUnsupported: \"collapse\" in the same fold",
+                            "native partition DDL",
+                        ),
                     ));
                 }
             }
@@ -5646,9 +5715,13 @@ fn validate_partition_recording(
                         op_index,
                         target_dialect,
                         format!(
-                            "attachPartition {name:?} targets parent {parent:?}, but attachPartition is PostgreSQL-only"
+                            "attachPartition {name:?} targets parent {parent:?}, but {} does not declare native partition DDL",
+                            target_dialect.as_str()
                         ),
-                        "target Postgres for native partition attach",
+                        &native_partition_alternative(
+                            "record the parent with partitionBy.whenUnsupported: \"collapse\" instead",
+                            "native partition attach",
+                        ),
                     ));
                 }
             }
@@ -5756,7 +5829,7 @@ fn validate_partition_recording(
                         "collapse-affirmed range partitioning on table {table:?} has {} partition key columns; v1 collapse supports exactly one",
                         key_columns.len()
                     ),
-                    "use a single range partition key for collapse, or omit whenUnsupported and target Postgres only",
+                    &collapse_or_native_target("use a single range partition key for collapse"),
                 ));
             }
             for key in key_columns {
@@ -5768,7 +5841,7 @@ fn validate_partition_recording(
                         format!(
                             "collapse-affirmed partitioned table {table:?} has nullable partition key column {key:?}"
                         ),
-                        "mark every partition key column notNull, or omit whenUnsupported and target Postgres only",
+                        &collapse_or_native_target("mark every partition key column notNull"),
                     ));
                 }
             }
@@ -5995,7 +6068,7 @@ fn validate_partition_bounds_total(
                         "collapse-affirmed {} partitioned table {table:?} has no default child",
                         partition_spec_label(&parent.spec)
                     ),
-                    "add a .partition(...).create({ default: true }) child, or omit whenUnsupported and target Postgres only",
+                    &collapse_or_native_target("add a .partition(...).create({ default: true }) child"),
                 ));
             }
         }
@@ -6686,12 +6759,12 @@ pub fn validate_op_authorized(
                 op_index,
                 dialect: target_dialect.clone(),
                 reason: "createRole cannot combine superuser:true with ifNotExists:true; \
-                         the idempotent form requires a PL/pgSQL DO wrapper and SUPERUSER \
-                         must never be hidden inside an opaque body"
+                         the idempotent form requires a procedural-language wrapper and \
+                         SUPERUSER must never be hidden inside an opaque body"
                     .to_string(),
                 suggested_fix: Some(
                     "remove superuser:true; Platform migrations may create bounded \
-                     roles, but must not mint Postgres superusers"
+                     roles, but must not mint superusers"
                         .to_string(),
                 ),
             })
@@ -7145,11 +7218,14 @@ fn validate_op_support(
                 op_index,
                 dialect: target_dialect.clone(),
                 reason: format!(
-                    "partitioned table {name:?} is native only on Postgres unless partitionBy.whenUnsupported is affirmed as \"collapse\""
+                    "partitioned table {name:?} is native only where the backend declares partition DDL, and {} does not, unless partitionBy.whenUnsupported is affirmed as \"collapse\"",
+                    target_dialect.as_str()
                 ),
                 suggested_fix: Some(
-                    "add partitionBy.whenUnsupported: \"collapse\" and satisfy the partition collapse validation rules, or target Postgres only"
-                        .to_string(),
+                    native_partition_alternative(
+                        "add partitionBy.whenUnsupported: \"collapse\" and satisfy the partition collapse validation rules",
+                        "native partitioning",
+                    ),
                 ),
             });
         }
@@ -7534,9 +7610,8 @@ fn validate_function_type_refs(
         op_index,
         dialect: target_dialect.clone(),
         reason: format!(
-            "{slot} must be a conservative PostgreSQL type reference (bare or \
-             schema-qualified name with optional precision and [] suffixes), not \
-             a SQL fragment: {value:?}"
+            "{slot} must be a conservative type reference (bare or schema-qualified \
+             name with optional precision and [] suffixes), not a SQL fragment: {value:?}"
         ),
         suggested_fix: Some(
             "use a type like text, int[], numeric(10,2), or myschema.mytype; \
@@ -7548,12 +7623,12 @@ fn validate_function_type_refs(
 
     match op {
         crate::model::ir::Op::CreateFunction { args, returns, .. } => {
-            if !crate::model::ir::is_valid_pg_type_ref(returns) {
+            if !crate::model::ir::is_conservative_type_ref(returns) {
                 return Err(reject("createFunction.returns", returns));
             }
             if let Some(args) = args {
                 for arg in args {
-                    if !crate::model::ir::is_valid_pg_type_ref(&arg.ty) {
+                    if !crate::model::ir::is_conservative_type_ref(&arg.ty) {
                         return Err(reject("createFunction.args[].type", &arg.ty));
                     }
                 }
@@ -7564,7 +7639,7 @@ fn validate_function_type_refs(
             ..
         } => {
             for ty in arg_types {
-                if !crate::model::ir::is_valid_pg_type_ref(ty) {
+                if !crate::model::ir::is_conservative_type_ref(ty) {
                     return Err(reject("dropFunction.argTypes[]", ty));
                 }
             }
@@ -7890,7 +7965,7 @@ fn validate_sequence_numeric_options(
                     min.get(),
                     max.get()
                 ),
-                "set minValue <= maxValue, or use null to request the PostgreSQL default bound"
+                "set minValue <= maxValue, or use null to request the target's default bound"
                     .to_string(),
             ));
         }
@@ -7995,9 +8070,16 @@ fn validate_trigger_dialect(
             target_dialect,
             op_index,
             format!("{dialect_name} has no TRUNCATE trigger event"),
-            format!(
-                "remove the truncate event for {dialect_name}, or target Postgres for this trigger"
-            ),
+            match crate::render::backends::targets_declaring(Capability::TriggerTruncateEvent) {
+                Some(able) => format!(
+                    "remove the truncate event for {dialect_name}, or target {able} for this \
+                     trigger"
+                ),
+                None => format!(
+                    "remove the truncate event for {dialect_name}; no registered backend \
+                     declares a TRUNCATE trigger event"
+                ),
+            },
         ));
     }
 
@@ -8026,7 +8108,16 @@ fn validate_trigger_dialect(
             target_dialect,
             op_index,
             format!("{dialect_name} triggers are row-level only"),
-            format!("use forEach: \"row\" for {dialect_name}, or target Postgres for statement-level triggers"),
+            match crate::render::backends::targets_declaring(Capability::TriggerStatementForEach) {
+                Some(able) => format!(
+                    "use forEach: \"row\" for {dialect_name}, or target {able} for \
+                     statement-level triggers"
+                ),
+                None => format!(
+                    "use forEach: \"row\" for {dialect_name}; no registered backend declares \
+                     statement-level triggers"
+                ),
+            },
         ));
     }
 
@@ -8698,7 +8789,8 @@ fn validate_column_facets(
                 col.name
             ),
             "drop the caseSensitive facet, or declare the column as t.text({ caseSensitive: \
-             false }) - which renders public.citext on PostgreSQL and needs the citext extension \
+             false }) - which each backend renders in its own case-insensitive text form, and \
+             a backend that reaches that form through a catalog extension needs the extension \
              created first"
                 .to_string(),
         ));

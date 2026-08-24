@@ -305,6 +305,37 @@ pub fn analyzer_absence(dialect: &DialectId) -> Option<AnalyzerAbsent> {
     advisor(dialect).analyzer_absence()
 }
 
+/// The registered targets that DO declare `capability`, spelled for an operator who
+/// was just refused for want of it.
+///
+/// This exists because a capability refusal has two halves and only one of them was
+/// ever neutral. "This target cannot do X" already named the target from its own
+/// [`DialectId`]. The advice beside it — "target Postgres" — was a compiled-in vendor
+/// string, in core, restating a fact the registry already holds and would keep holding
+/// after it stopped being true. Every one of those strings was written when three
+/// backends shipped and PostgreSQL was the only one with the capability in question; a
+/// fourth backend that declared it would have been told to go somewhere else.
+///
+/// Returns `None` when NO registered backend declares it, which is a different
+/// sentence and must not be rendered as an empty list of alternatives — a fix that
+/// says "target one of: " has told the operator nothing. Callers spell that case
+/// themselves.
+pub(crate) fn targets_declaring(
+    capability: zero_migrate_ir::backend::Capability,
+) -> Option<String> {
+    let able: Vec<&str> = VENDORS
+        .as_slice()
+        .iter()
+        .filter(|vendor| vendor.descriptor.capabilities.contains(capability))
+        .map(|vendor| vendor.descriptor.id.as_str())
+        .collect();
+    match able.as_slice() {
+        [] => None,
+        [only] => Some((*only).to_string()),
+        [rest @ .., last] => Some(format!("{} or {last}", rest.join(", "))),
+    }
+}
+
 /// The index-coverage facts `dialect`'s backend reads out of `sql`, for the
 /// plan-wide `FK_WITHOUT_INDEX` suppression.
 pub(crate) fn index_coverage(dialect: &DialectId, sql: &str) -> IndexCoverage {
