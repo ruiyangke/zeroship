@@ -162,7 +162,7 @@ fn set_column_not_null_op() -> Op {
 /// facet back from a live server.
 #[test]
 fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postgres() {
-    let steps = lower_steps_for(&zero_migrate::MYSQL, set_column_type_op())
+    let steps = lower_steps_for(&zero_migrate_mysql::DIALECT, set_column_type_op())
         .expect("MySQL lowers a retype to a restate step rather than refusing");
     assert_eq!(
         steps
@@ -181,7 +181,7 @@ fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postg
 
     // The control. A change that stopped PostgreSQL rendering its own retype would
     // satisfy the assertions above while breaking the dialect that has the statement.
-    lower_for(&zero_migrate::POSTGRES, set_column_type_op())
+    lower_for(&zero_migrate_postgres::DIALECT, set_column_type_op())
         .expect("PostgreSQL still lowers a column type change");
 }
 
@@ -190,8 +190,11 @@ fn the_ir_lane_restates_a_mysql_column_type_change_and_still_lowers_it_for_postg
 /// author did not mention. The structured step therefore carries only the bare type.
 #[test]
 fn a_mysql_bounded_string_retype_strips_only_the_renderer_owned_collation() {
-    let steps = lower_steps_for(&zero_migrate::MYSQL, set_bounded_string_column_type_op())
-        .expect("MySQL lowers a bounded-string retype");
+    let steps = lower_steps_for(
+        &zero_migrate_mysql::DIALECT,
+        set_bounded_string_column_type_op(),
+    )
+    .expect("MySQL lowers a bounded-string retype");
     let restate = steps
         .iter()
         .find_map(|step| match step {
@@ -207,14 +210,14 @@ fn a_mysql_bounded_string_retype_strips_only_the_renderer_owned_collation() {
 
 #[test]
 fn the_ir_lane_refuses_a_mysql_nullability_change_and_still_lowers_it_for_postgres() {
-    let refused = lower_for(&zero_migrate::MYSQL, set_column_not_null_op())
+    let refused = lower_for(&zero_migrate_mysql::DIALECT, set_column_not_null_op())
         .expect_err("MySQL must refuse rather than emit PostgreSQL SET NOT NULL");
     assert!(
         refused.contains("setColumnNotNull"),
         "the refusal names the authored op: {refused}"
     );
 
-    lower_for(&zero_migrate::POSTGRES, set_column_not_null_op())
+    lower_for(&zero_migrate_postgres::DIALECT, set_column_not_null_op())
         .expect("PostgreSQL still lowers a nullability change");
 }
 
@@ -232,7 +235,7 @@ fn a_mysql_default_change_is_rendered_with_backticks_rather_than_refused() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &support::confined_charter(),
     );
     let steps = author
@@ -276,13 +279,13 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
     let desired = desired_snapshot_for_dialect(
         PROJECT,
         &[descriptor("integer", true)],
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &effective,
     )
     .expect("desired snapshot");
-    let live = live_with("string", true, &zero_migrate::MYSQL, &effective);
+    let live = live_with("string", true, &zero_migrate_mysql::DIALECT, &effective);
 
-    let err = DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::MYSQL)
+    let err = DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_mysql::DIALECT)
         .diff(&desired, &live, &HashMap::new(), &[], &effective)
         .expect_err("the differ must refuse a MySQL column change rather than plan invalid DDL");
     let text = err.to_string();
@@ -299,12 +302,12 @@ fn the_declarative_differ_refuses_a_mysql_column_change_and_still_diffs_for_post
     let pg_desired = desired_snapshot_for_dialect(
         PROJECT,
         &[descriptor("integer", true)],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &effective,
     )
     .expect("desired snapshot");
-    let pg_live = live_with("string", true, &zero_migrate::POSTGRES, &effective);
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::POSTGRES)
+    let pg_live = live_with("string", true, &zero_migrate_postgres::DIALECT, &effective);
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_postgres::DIALECT)
         .diff(&pg_desired, &pg_live, &HashMap::new(), &[], &effective)
         .expect("PostgreSQL still diffs a column type change");
 }

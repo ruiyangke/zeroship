@@ -102,8 +102,13 @@ async fn apply_doc(
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_mysql::DIALECT,
+        &policy,
+    );
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
@@ -226,7 +231,7 @@ async fn live_mysql_reports_a_physical_type_change_the_portable_type_cannot_see(
 
         let expected = fold_ops(
             &ops,
-            &zero_migrate::MYSQL,
+            &zero_migrate_mysql::DIALECT,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -428,7 +433,7 @@ async fn assert_mysql_clean(
 ) -> Result<(), String> {
     let expected = fold_ops(
         ops,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &cfg.project_schema,
         &support::no_inject(&cfg.project_schema),
     )
@@ -549,7 +554,7 @@ async fn an_untouched_postgres_table_reports_clean() {
         );
         let expected = fold_ops(
             &ir.ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &schema,
             &support::no_inject(&schema),
         )
@@ -557,7 +562,7 @@ async fn an_untouched_postgres_table_reports_clean() {
         let migrations = IrAuthor::new(
             &schema,
             OWNER,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())
@@ -603,7 +608,7 @@ async fn an_untouched_sqlite_table_reports_clean() {
     );
     let expected = fold_ops(
         &ir.ops,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         "main",
         &support::no_inject("main"),
     )
@@ -611,7 +616,7 @@ async fn an_untouched_sqlite_table_reports_clean() {
     let migrations = IrAuthor::new(
         "main",
         OWNER,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject("main"),
     )
     .lower(&ir, &LiveSchema::default())

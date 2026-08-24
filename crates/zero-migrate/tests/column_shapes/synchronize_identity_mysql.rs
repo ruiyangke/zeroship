@@ -148,7 +148,7 @@ fn step(database: &str, name: &str) -> SynchronizeIdentityStep {
         }]
     }))
     .expect("synchronizeIdentity IR parses");
-    let plan = IrAuthor::new(database, OWNER, &zero_migrate::MYSQL, &policy)
+    let plan = IrAuthor::new(database, OWNER, &zero_migrate_mysql::DIALECT, &policy)
         .lower_plan(&ir, &LiveSchema::default())
         .expect("synchronizeIdentity IR lowers for MySQL");
     match plan.steps.into_iter().next().expect("exactly one step") {

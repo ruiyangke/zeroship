@@ -133,10 +133,20 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
         })
         .to_string();
 
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
-        let base = fold_ops(&[], &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
-            .map_err(|error| format!("fold the empty base: {error}"))?;
+        let author = IrAuthor::new(
+            &cfg.project_schema,
+            OWNER,
+            &zero_migrate_postgres::DIALECT,
+            &policy,
+        );
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+        let base = fold_ops(
+            &[],
+            &zero_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+            &policy,
+        )
+        .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
         let artifact = author
             .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
@@ -168,7 +178,7 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
             serde_json::from_str(&doc).map_err(|error| format!("parse the IR: {error}"))?;
         let expected = fold_ops(
             &authored.ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )

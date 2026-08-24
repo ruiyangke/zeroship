@@ -78,18 +78,23 @@ async fn apply_doc(
 ) -> Result<Vec<String>, String> {
     let backend = PostgresBackend::new_generic(session);
     let policy = support::no_inject(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        &policy,
+    );
     let document = zero_migrate::model::load::load_ir_document(
         ir,
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &BTreeMap::new(),
         None,
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
         history,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
         &policy,
     )
@@ -129,18 +134,23 @@ fn lower_only(
     history: &[Op],
 ) -> Result<Result<Vec<String>, String>, String> {
     let policy = support::no_inject(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        &policy,
+    );
     let document = zero_migrate::model::load::load_ir_document(
         ir,
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &BTreeMap::new(),
         None,
     )
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
         history,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
         &policy,
     )

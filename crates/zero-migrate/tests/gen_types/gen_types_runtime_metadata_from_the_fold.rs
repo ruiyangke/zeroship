@@ -81,9 +81,9 @@ use zero_migrate::{render_artifacts, EffectivePolicy};
 const SCHEMA: &str = "public";
 
 const DIALECTS: [&zero_migrate::DialectId; 3] = [
-    &zero_migrate::POSTGRES,
-    &zero_migrate::SQLITE,
-    &zero_migrate::MYSQL,
+    &zero_migrate_postgres::DIALECT,
+    &zero_migrate_sqlite::DIALECT,
+    &zero_migrate_mysql::DIALECT,
 ];
 
 fn parse(ops: &str) -> Vec<Op> {
@@ -658,12 +658,12 @@ fn corpus_lines(
 ) {
     // Preserve the closed enum's historical debug labels because these strings
     // are part of the corpus golden wire, not merely assertion context.
-    let d = if dialect == &zero_migrate::POSTGRES {
+    let d = if dialect == &zero_migrate_postgres::DIALECT {
         "Postgres"
-    } else if dialect == &zero_migrate::SQLITE {
+    } else if dialect == &zero_migrate_sqlite::DIALECT {
         "Sqlite"
     } else {
-        assert_eq!(dialect, &zero_migrate::MYSQL);
+        assert_eq!(dialect, &zero_migrate_mysql::DIALECT);
         "Mysql"
     };
     let rendered = match render_artifacts(ops, dialect, SCHEMA, policy) {
@@ -1091,9 +1091,14 @@ fn the_refusal_probes_still_exercise_the_named_type_arms() {
             .iter()
             .find(|(n, _)| *n == name)
             .unwrap_or_else(|| panic!("probe `{name}` exists"));
-        render_artifacts(&parse(source), &zero_migrate::POSTGRES, SCHEMA, &open)
-            .map(|_| "rendered".to_string())
-            .unwrap_or_else(|e| e.to_string())
+        render_artifacts(
+            &parse(source),
+            &zero_migrate_postgres::DIALECT,
+            SCHEMA,
+            &open,
+        )
+        .map(|_| "rendered".to_string())
+        .unwrap_or_else(|e| e.to_string())
     };
     assert!(
         outcome("duplicate_enum").contains("enum") && outcome("duplicate_enum").contains("tier"),

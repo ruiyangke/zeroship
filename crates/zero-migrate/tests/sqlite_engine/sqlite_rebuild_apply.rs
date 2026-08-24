@@ -58,7 +58,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE)
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT)
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
@@ -73,7 +73,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         effective,
     )
 }
@@ -196,7 +196,7 @@ fn lower_sqlite_rebuild(ir: &MigrationIr, live: &LiveSchema) -> TableRebuild {
     let steps = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_steps(ir, live)

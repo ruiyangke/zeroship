@@ -125,14 +125,19 @@ async fn apply_doc_under(
     approval: Approval,
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, policy);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        policy,
+    );
     // Through the AUTHORIZED entry, the same one `IrAuthor` uses: a privileged
     // primitive's grant is read off the charter, and the plain `load_ir_document`
     // falls back to the confined creator profile, which grants none of them.
     let document = zero_migrate::model::load::load_ir_document_authorized(
         ir,
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         reg,
         None,
         Some(zero_migrate::model::validate::VendorAuthority {
@@ -143,7 +148,7 @@ async fn apply_doc_under(
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
         history,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
         policy,
     )
@@ -264,7 +269,7 @@ async fn rolling_back_a_dropped_view_restores_it_on_postgres() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                zero_migrate::POSTGRES,
+                zero_migrate_postgres::DIALECT,
             ))
             .as_ref(),
         )
@@ -496,7 +501,7 @@ async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                zero_migrate::POSTGRES,
+                zero_migrate_postgres::DIALECT,
             ))
             .as_ref(),
         )
@@ -655,7 +660,7 @@ async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refus
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 policy.clone(),
-                zero_migrate::POSTGRES,
+                zero_migrate_postgres::DIALECT,
             ))
             .as_ref(),
         )
@@ -776,7 +781,7 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
             OWNER,
             guard_for(&GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                zero_migrate::POSTGRES,
+                zero_migrate_postgres::DIALECT,
             ))
             .as_ref(),
         )

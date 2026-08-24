@@ -56,7 +56,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
     let artifact = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     )
     .load_and_lower_guarded(
@@ -64,7 +64,7 @@ async fn a_plan_that_fails_halfway_leaves_the_journal_agreeing_with_the_database
         APP,
         &registry,
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT),
     )
     .expect("the two-step plan lowers");
     assert_eq!(

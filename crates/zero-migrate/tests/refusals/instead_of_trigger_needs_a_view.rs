@@ -143,14 +143,19 @@ async fn pg_apply(
 ) -> Result<(), String> {
     let backend = PostgresBackend::new_generic(session);
     let policy = support::operator_charter(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        &policy,
+    );
     // The charter is threaded as vendor authority: `createFunction` is a privileged
     // primitive, and the scope-derived fallback grants nothing outside an operator
     // posture, so without this the gate refuses before the trigger is reached.
     let document = zero_migrate::model::load::load_ir_document_authorized(
         ir,
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &registry(),
         None,
         Some(zero_migrate::model::validate::VendorAuthority {
@@ -161,7 +166,7 @@ async fn pg_apply(
     .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
         history,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
         &policy,
     )
@@ -303,17 +308,27 @@ async fn sqlite_apply(
     history: &mut Vec<Op>,
 ) -> Result<(), String> {
     let policy = support::operator_charter(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::SQLITE, &policy);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_sqlite::DIALECT,
+        &policy,
+    );
     let document = zero_migrate::model::load::load_ir_document(
         ir,
         OWNER,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &registry(),
         None,
     )
     .map_err(|error| format!("load gate (sqlite): {error}"))?;
-    let folded = fold_ops(history, &zero_migrate::SQLITE, &cfg.project_schema, &policy)
-        .map_err(|error| format!("fold the applied history: {error}"))?;
+    let folded = fold_ops(
+        history,
+        &zero_migrate_sqlite::DIALECT,
+        &cfg.project_schema,
+        &policy,
+    )
+    .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     let plan = author
         .lower_plan(&document, &live)

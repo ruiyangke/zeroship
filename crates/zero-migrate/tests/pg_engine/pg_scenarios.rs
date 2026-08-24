@@ -60,13 +60,13 @@ use zero_migrate::{
     ApprovalScope, BackfillSpec, BindValue, DeclarativeApplyError, EngineError, ExecutorConfig,
     ExpandContractAuthor, GuardConfig, IrAuthor, LiveSchema, LockMode, Migration, MigrationEngine,
     MigrationFlags, MigrationId, MigrationIr, OnlineIntent, PlanStep, RenameStep, Resolution,
-    POSTGRES,
 };
 use zero_migrate_postgres::backend::drift_sql::check_checksum_drift;
 use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
 use zero_migrate_postgres::backend::journal_sql::ensure_journal;
 use zero_migrate_postgres::backend::status_sql::status;
 use zero_migrate_postgres::PostgresBackend;
+use zero_migrate_postgres::DIALECT as POSTGRES;
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -2498,7 +2498,7 @@ async fn interrupted_online_rename_is_guarded_until_explicitly_resolved() {
     .await
     .expect("apply a contract version for the rollback interlock proof");
     let rollback_guard =
-        zero_migrate::guard_for(&cfg.guard_config_for(&zero_migrate_ir::dialect::POSTGRES));
+        zero_migrate::guard_for(&cfg.guard_config_for(&zero_migrate_postgres::DIALECT));
     let rollback_error = zero_migrate::rollback(
         &backend,
         &cfg,

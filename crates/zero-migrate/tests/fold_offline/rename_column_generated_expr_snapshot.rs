@@ -160,11 +160,12 @@ fn exec_cfg() -> ExecutorConfig {
 /// from `fold_ops`, SDK field maps from the `FieldDef` projection, over the same ops.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::confined_charter();
-    let snapshot =
-        fold_ops(history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
-    let sdk_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the history folds to field defs");
+    let snapshot = fold_ops(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+        .expect("the history folds");
+    let sdk_schemas =
+        single_fold::fold(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+            .map(|folded| folded.project_field_defs())
+            .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
     live.unique_indexes = BTreeSet::new();
@@ -182,7 +183,7 @@ async fn a_sqlite_rename_rebuild_emits_a_generated_body_over_the_new_column_name
     let p = paths("gen_rename");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
 
     // Deploy the table for real, and keep the RESOLVED ops as the fold's history —
     // the same cumulative-op list the engine folds.

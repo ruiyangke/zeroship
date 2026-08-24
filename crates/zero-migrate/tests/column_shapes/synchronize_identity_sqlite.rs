@@ -50,7 +50,7 @@ fn step(name: &str, table: &str, column: &str) -> SynchronizeIdentityStep {
     let plan = IrAuthor::new(
         "app",
         "app_test",
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_plan(&ir, &LiveSchema::default())

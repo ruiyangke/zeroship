@@ -55,7 +55,10 @@ fn raw_split_funcs_rejected_at_load_both_dialects() {
                       {{"node":"colRef","name":"v"}},{{"node":"literal","value":","}}]}}}}}}
             ]}}"#
         );
-        for dialect in [&zero_migrate::POSTGRES, &zero_migrate::SQLITE] {
+        for dialect in [
+            &zero_migrate_postgres::DIALECT,
+            &zero_migrate_sqlite::DIALECT,
+        ] {
             let err = load_ir_document(&ir, APP, dialect, &registry(), None).expect_err(&format!(
                 "raw `{raw_fn}` must be rejected at load on {dialect:?}"
             ));
@@ -82,7 +85,10 @@ fn in_envelope_split_part_helper_accepted() {
              {"node":"colRef","name":"v"},{"node":"literal","value":","},{"node":"literal","value":1}]}}}
     ],
     "irreversible":"grammar-boundary fixture: the pre-image of the overwritten column is not recorded"}"#;
-    for dialect in [&zero_migrate::POSTGRES, &zero_migrate::SQLITE] {
+    for dialect in [
+        &zero_migrate_postgres::DIALECT,
+        &zero_migrate_sqlite::DIALECT,
+    ] {
         load_ir_document(ir, APP, dialect, &registry(), None)
             .unwrap_or_else(|e| panic!("in-envelope .splitPart must load on {dialect:?}: {e}"));
     }
@@ -99,9 +105,9 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
              {"node":"colRef","name":"v"},{"node":"literal","value":", "},{"node":"literal","value":1}]}}}
     ],
     "irreversible":"grammar-boundary fixture: the pre-image of the overwritten column is not recorded"}"#;
-    load_ir_document(ir, APP, &zero_migrate::POSTGRES, &registry(), None)
+    load_ir_document(ir, APP, &zero_migrate_postgres::DIALECT, &registry(), None)
         .expect("out-of-envelope splitPart is PG-renderable → loads on PG");
-    let err = load_ir_document(ir, APP, &zero_migrate::SQLITE, &registry(), None)
+    let err = load_ir_document(ir, APP, &zero_migrate_sqlite::DIALECT, &registry(), None)
         .expect_err("out-of-envelope splitPart must reject on SQLite");
     assert!(
         err.to_string().contains("EXPR_NOT_PORTABLE")
@@ -119,12 +125,12 @@ fn out_of_envelope_split_part_pg_loads_sqlite_rejected() {
 fn out_of_envelope_split_part_lowers_native_on_pg_rejects_on_sqlite() {
     // multi-char delimiter, the grammar-boundary example.
     let set = BTreeMap::from([("x".to_string(), IrValue::Expr(split("v", ", ", 1)))]);
-    let c = assemble_backfill_clauses(&zero_migrate::POSTGRES, "t", &set, None)
+    let c = assemble_backfill_clauses(&zero_migrate_postgres::DIALECT, "t", &set, None)
         .expect("out-of-envelope splitPart must LOWER to native split_part on PG");
     assert_eq!(c.set_clause, "\"x\" = split_part(\"v\", ', ', 1)");
 
     // the same node is unrenderable on the SQLite leg (out of the byte-wise envelope).
-    let err = assemble_backfill_clauses(&zero_migrate::SQLITE, "t", &set, None)
+    let err = assemble_backfill_clauses(&zero_migrate_sqlite::DIALECT, "t", &set, None)
         .expect_err("out-of-envelope splitPart must reject at lower on SQLite");
     assert!(
         err.to_string().to_lowercase().contains("sqlite")

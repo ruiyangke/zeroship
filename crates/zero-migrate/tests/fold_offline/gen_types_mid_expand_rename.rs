@@ -68,7 +68,7 @@ fn mid_expand_ops() -> Vec<Op> {
 fn generated_types_name_only_the_destination_column() {
     let artifacts = render_artifacts(
         &mid_expand_ops(),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject(SCHEMA),
     )
@@ -106,7 +106,7 @@ fn generated_types_name_only_the_destination_column() {
 fn the_destination_carries_the_source_constraints_which_is_what_writes_obey() {
     let artifacts = render_artifacts(
         &mid_expand_ops(),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject(SCHEMA),
     )

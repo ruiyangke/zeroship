@@ -65,8 +65,11 @@ fn tbl(n: &str) -> String {
 
 #[test]
 fn a_table_may_not_take_a_live_index_name_on_postgres() {
-    let refusal = verdict(&zero_migrate::POSTGRES, &format!("{A},{IX},{}", tbl("ix")))
-        .expect_err("an index and a table share the relation namespace");
+    let refusal = verdict(
+        &zero_migrate_postgres::DIALECT,
+        &format!("{A},{IX},{}", tbl("ix")),
+    )
+    .expect_err("an index and a table share the relation namespace");
     assert!(
         refusal.to_lowercase().contains("already"),
         "the refusal must say the name is already taken: {refusal}"
@@ -77,7 +80,7 @@ fn a_table_may_not_take_a_live_index_name_on_postgres() {
 fn an_index_may_not_take_a_live_table_name_on_postgres() {
     // The reverse direction, and the one a createTable-only rule would miss.
     expect_refusal_mentioning(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &format!(
             r#"{A},{{"op":"createIndex","name":"a","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#
         ),
@@ -89,7 +92,7 @@ fn an_index_may_not_take_a_live_table_name_on_postgres() {
 #[test]
 fn an_index_may_not_take_a_live_view_name_on_postgres() {
     expect_refusal_mentioning(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &format!(
             r#"{A},{{"op":"createView","name":"vw","query":{{"kind":"structured","select":{{"from":{{"name":"a"}},"projection":[{{"kind":"colRef","name":"c0"}}]}}}}}},{{"op":"createIndex","name":"vw","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#
         ),
@@ -101,7 +104,7 @@ fn an_index_may_not_take_a_live_view_name_on_postgres() {
 #[test]
 fn an_index_may_not_take_a_live_sequence_name_on_postgres() {
     expect_refusal_mentioning(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &format!(
             r#"{A},{{"op":"createSequence","name":"sq"}},{{"op":"createIndex","name":"sq","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#
         ),
@@ -114,7 +117,7 @@ fn an_index_may_not_take_a_live_sequence_name_on_postgres() {
 fn sqlite_refuses_it_too() {
     // MEASURED: `there is already a table named a`.
     expect_refusal_mentioning(
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &format!(
             r#"{A},{{"op":"createIndex","name":"a","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#
         ),
@@ -133,7 +136,7 @@ fn mysql_still_accepts_what_mysql_accepts() {
     // the engine must not refuse it. Without this control the natural "tidy" fix
     // is a dialect-uniform rule that rejects migrations MySQL runs.
     verdict(
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &format!(
             r#"{A},{{"op":"createIndex","name":"a","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#
         ),
@@ -146,7 +149,7 @@ fn index_vs_index_keeps_its_own_better_message() {
     // `validate_index_names_across_ops` explains that the second render is
     // `CREATE INDEX IF NOT EXISTS` and is silently SKIPPED. This check must not
     // preempt that with a vaguer one.
-    let refusal = verdict(&zero_migrate::POSTGRES, &format!("{A},{IX},{IX}"))
+    let refusal = verdict(&zero_migrate_postgres::DIALECT, &format!("{A},{IX},{IX}"))
         .expect_err("creating one index name twice is still refused");
     assert!(
         refusal.contains("IF NOT EXISTS") || refusal.contains("skipped"),
@@ -156,14 +159,14 @@ fn index_vs_index_keeps_its_own_better_message() {
 
 #[test]
 fn distinct_names_are_still_allowed() {
-    verdict(&zero_migrate::POSTGRES, &format!("{A},{IX}"))
+    verdict(&zero_migrate_postgres::DIALECT, &format!("{A},{IX}"))
         .expect("an index whose name collides with nothing is ordinary");
 }
 
 #[test]
 fn dropping_an_index_frees_its_name() {
     verdict(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &format!(
             r#"{A},{IX},{{"op":"dropIndex","name":"ix","table":"a"}},{}"#,
             tbl("ix")
@@ -175,7 +178,7 @@ fn dropping_an_index_frees_its_name() {
 #[test]
 fn dropping_a_table_frees_the_name_for_an_index() {
     verdict(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &format!(
             r#"{A},{},{{"op":"dropTable","table":"z"}},{{"op":"createIndex","name":"z","table":"a","columns":[{{"kind":"column","name":"v"}}]}}"#,
             tbl("z")
@@ -205,7 +208,7 @@ fn dropping_a_table_frees_the_name_for_an_index() {
 #[test]
 fn dropping_a_table_frees_the_names_of_its_indexes() {
     verdict(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &format!(r#"{A},{IX},{{"op":"dropTable","table":"a"}},{}"#, tbl("ix")),
     )
     .expect("the index went with its table, so the name is free");
@@ -216,7 +219,7 @@ fn dropping_an_unrelated_table_does_not_free_an_index_name() {
     // THE CONTROL. Releasing every index on any drop would pass the test above
     // and lose what F715 added.
     expect_refusal_mentioning(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &format!(
             r#"{A},{IX},{},{{"op":"dropTable","table":"other"}},{}"#,
             tbl("other"),
@@ -247,7 +250,7 @@ fn dropping_an_unrelated_table_does_not_free_an_index_name() {
 #[test]
 fn a_rename_carries_the_index_parentage_so_a_later_drop_still_frees_it() {
     verdict(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &format!(
             r#"{A},{IX},{{"op":"renameTable","table":"a","to":"b"}},{{"op":"dropTable","table":"b"}},{}"#,
             tbl("ix")

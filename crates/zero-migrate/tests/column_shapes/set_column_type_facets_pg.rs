@@ -158,8 +158,13 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Applied {
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
+        let author = IrAuthor::new(
+            &cfg.project_schema,
+            OWNER,
+            &zero_migrate_postgres::DIALECT,
+            &policy,
+        );
+        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,
@@ -191,7 +196,7 @@ async fn deploy(tag: &str, source: &str, native_sql: &[&str]) -> Applied {
 
         let expected = fold_ops(
             &resolved.ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -306,8 +311,8 @@ async fn server_verdict(tag: &str, rendered_type: &str) -> String {
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate_postgres::DIALECT, &policy);
+        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,

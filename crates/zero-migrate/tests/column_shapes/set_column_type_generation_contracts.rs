@@ -110,7 +110,7 @@ fn live_after_create(create_col: &str) -> LiveSchema {
         ]}}"#
     ));
     let effective = support::operator_charter(SCHEMA);
-    let folded = fold_ops(&ir.ops, &zero_migrate::POSTGRES, SCHEMA, &effective)
+    let folded = fold_ops(&ir.ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
         .expect("the create folds to a snapshot");
     LiveSchema::from_catalog_snapshot(folded, "app")
 }
@@ -166,7 +166,7 @@ fn differ_alters(facet: &str, live_ty: &str, desired_ty: &str) -> Result<Vec<Str
         zero_migrate::desired_snapshot_for_dialect(
             SCHEMA,
             std::slice::from_ref(&descriptor),
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &effective,
         )
         .expect("the descriptor set resolves")
@@ -175,10 +175,13 @@ fn differ_alters(facet: &str, live_ty: &str, desired_ty: &str) -> Result<Vec<Str
     let desired = desired_of(desired_ty);
     let ownership: std::collections::HashMap<String, String> =
         [("a".to_string(), "app".to_string())].into_iter().collect();
-    let plan =
-        zero_migrate::DeclarativeAuthor::new_for_dialect(SCHEMA, "app", zero_migrate::POSTGRES)
-            .diff(&desired, &live, &ownership, &[], &effective)
-            .map_err(|error| error.to_string())?;
+    let plan = zero_migrate::DeclarativeAuthor::new_for_dialect(
+        SCHEMA,
+        "app",
+        zero_migrate_postgres::DIALECT,
+    )
+    .diff(&desired, &live, &ownership, &[], &effective)
+    .map_err(|error| error.to_string())?;
     Ok(plan
         .all_migrations()
         .into_iter()
@@ -194,7 +197,7 @@ fn both_routes(create_col: &str, to_type: &str) -> BTreeMap<&'static str, Result
     out.insert(
         "declared-in-envelope",
         alter_statement(
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &declared_in_envelope(create_col, to_type),
             &LiveSchema::default(),
         ),
@@ -202,7 +205,7 @@ fn both_routes(create_col: &str, to_type: &str) -> BTreeMap<&'static str, Result
     out.insert(
         "live",
         alter_statement(
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &retype_only(to_type),
             &live_after_create(create_col),
         ),
@@ -277,7 +280,7 @@ fn a_retype_of_an_ordinary_column_beside_an_identity_column_is_untouched() {
             {"op":"setColumnType","table":"a","column":"v","toType":"text"}
         ]}"#,
     );
-    let up = alter_statement(&zero_migrate::POSTGRES, &ir, &LiveSchema::default())
+    let up = alter_statement(&zero_migrate_postgres::DIALECT, &ir, &LiveSchema::default())
         .expect("a plain column beside an identity column retypes freely");
     assert!(
         up.contains(" USING ") && up.contains("TYPE text"),
@@ -347,7 +350,7 @@ fn a_column_added_in_this_envelope_carries_its_generation_contract_to_a_later_re
     // record kept at all. `addColumn` publishes nothing, so this is the shape that
     // proves `declared_column_generation` does work rather than duplicating work.
     let refusal = alter_statement(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &added_in_envelope(
             r#""type":"int","nullable":false,"identity":{"always":false}"#,
             r#""text""#,
@@ -362,7 +365,7 @@ fn a_column_added_in_this_envelope_carries_its_generation_contract_to_a_later_re
     );
 
     let up = alter_statement(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &added_in_envelope(
             r#""type":"int","generated":{"expr":{"node":"colRef","name":"c0"},"stored":true}"#,
             r#""bigInt""#,
@@ -432,7 +435,7 @@ fn the_declarative_differ_refuses_an_identity_column_retype_the_same_way() {
 fn sqlite_refuses_the_whole_op_before_either_verdict_applies() {
     for create_col in [IDENTITY_COL, GENERATED_COL, ORDINARY_COL] {
         let error = alter_statement(
-            &zero_migrate::SQLITE,
+            &zero_migrate_sqlite::DIALECT,
             &declared_in_envelope(create_col, r#""bigInt""#),
             &LiveSchema::default(),
         )
@@ -466,7 +469,7 @@ fn sqlite_refuses_the_whole_op_before_either_verdict_applies() {
 fn mysql_lowers_every_column_shape_to_a_restate_step_instead_of_refusing() {
     for create_col in [IDENTITY_COL, GENERATED_COL, ORDINARY_COL] {
         let effective = support::operator_charter(SCHEMA);
-        let author = IrAuthor::new(SCHEMA, "app", &zero_migrate::MYSQL, &effective);
+        let author = IrAuthor::new(SCHEMA, "app", &zero_migrate_mysql::DIALECT, &effective);
         let steps = author
             .lower_steps(
                 &declared_in_envelope(create_col, r#""bigInt""#),

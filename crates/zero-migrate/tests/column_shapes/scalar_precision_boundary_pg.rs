@@ -83,12 +83,12 @@ async fn round_trip(
     let author = IrAuthor::new(
         &cfg.project_schema,
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::confined_charter(),
     );
     let guard_cfg = GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
     );
     let registry: BTreeMap<String, String> =
         [("t".to_string(), OWNER.to_string())].into_iter().collect();
@@ -117,7 +117,7 @@ async fn round_trip(
     let declared: MigrationIr = serde_json::from_str(&ddl).expect("the schema envelope parses");
     live.advance_logical_columns(
         &declared,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
         None,
     )

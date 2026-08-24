@@ -31,7 +31,9 @@ use zero_migrate::model::ir::{
     RaiseLevel, SafeI64, SafeU64, SelectAst, SequenceRef, TableRef, TableRuntimeOptionsPatch,
     TriggerAction, TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
 };
-use zero_migrate::{MYSQL, POSTGRES, SQLITE};
+use zero_migrate_mysql::DIALECT as MYSQL;
+use zero_migrate_postgres::DIALECT as POSTGRES;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 fn col_ref() -> Expr {
     Expr::ColRef {

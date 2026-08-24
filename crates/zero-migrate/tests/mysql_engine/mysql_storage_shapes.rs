@@ -162,7 +162,7 @@ fn fk_constraint(
 fn assert_mysql_key_refusal(migration: &MigrationIr, position: &str, column: &str) {
     let rendered = refused(
         migration,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         "MySQL 1170: an unbounded TEXT key needs a prefix length",
     );
     assert!(
@@ -199,7 +199,7 @@ fn mysql_refuses_a_bare_literal_default_on_a_text_column() {
 
     let rendered = refused(
         &migration,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         "a literal DEFAULT on TEXT is fatal on MySQL",
     );
     assert!(
@@ -207,8 +207,12 @@ fn mysql_refuses_a_bare_literal_default_on_a_text_column() {
         "the refusal should name the column: {rendered}"
     );
 
-    accepted(&migration, &zero_migrate::POSTGRES, "a text default");
-    accepted(&migration, &zero_migrate::SQLITE, "a text default");
+    accepted(
+        &migration,
+        &zero_migrate_postgres::DIALECT,
+        "a text default",
+    );
+    accepted(&migration, &zero_migrate_sqlite::DIALECT, "a text default");
 }
 
 // (b) A bytes default renders `DEFAULT (X'..')`, an EXPRESSION MySQL accepts.
@@ -220,7 +224,7 @@ fn mysql_accepts_a_bytes_default_that_renders_as_an_expression() {
     });
     let migration = ir(vec![create_table("widgets", vec![blob])]);
 
-    accepted(&migration, &zero_migrate::MYSQL, "a bytes default");
+    accepted(&migration, &zero_migrate_mysql::DIALECT, "a bytes default");
 }
 
 // (c) A JSON container default renders `DEFAULT (JSON_OBJECT())`.
@@ -232,7 +236,11 @@ fn mysql_accepts_a_json_container_default_that_renders_as_an_expression() {
     });
     let migration = ir(vec![create_table("widgets", vec![doc])]);
 
-    accepted(&migration, &zero_migrate::MYSQL, "a json container default");
+    accepted(
+        &migration,
+        &zero_migrate_mysql::DIALECT,
+        "a json container default",
+    );
 }
 
 // (d) A bounded string renders VARCHAR(50), which takes a literal DEFAULT.
@@ -244,7 +252,11 @@ fn mysql_accepts_a_literal_default_on_a_bounded_string_column() {
     });
     let migration = ir(vec![create_table("widgets", vec![label])]);
 
-    accepted(&migration, &zero_migrate::MYSQL, "a bounded string default");
+    accepted(
+        &migration,
+        &zero_migrate_mysql::DIALECT,
+        "a bounded string default",
+    );
 }
 
 // (e) A case-insensitive text column also renders a bare MySQL TEXT.
@@ -259,7 +271,7 @@ fn mysql_refuses_a_literal_default_on_a_case_insensitive_text_column() {
 
     let rendered = refused(
         &migration,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         "caseInsensitive renders bare TEXT, so the literal DEFAULT is fatal",
     );
     assert!(
@@ -267,8 +279,16 @@ fn mysql_refuses_a_literal_default_on_a_case_insensitive_text_column() {
         "the refusal should name the column: {rendered}"
     );
 
-    accepted(&migration, &zero_migrate::POSTGRES, "a citext default");
-    accepted(&migration, &zero_migrate::SQLITE, "a NOCASE text default");
+    accepted(
+        &migration,
+        &zero_migrate_postgres::DIALECT,
+        "a citext default",
+    );
+    accepted(
+        &migration,
+        &zero_migrate_sqlite::DIALECT,
+        "a NOCASE text default",
+    );
 }
 
 // (e') The rule keys on RENDERED storage, not the authored type name: a value
@@ -284,7 +304,7 @@ fn mysql_accepts_a_literal_default_on_a_value_formatted_text_column() {
 
     accepted(
         &migration,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         "a value-formatted text default",
     );
 }
@@ -300,7 +320,7 @@ fn mysql_refuses_an_index_over_a_bare_text_column() {
 
     let rendered = refused(
         &migration,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         "MySQL 1170: a TEXT key needs a prefix length",
     );
     assert!(
@@ -308,8 +328,8 @@ fn mysql_refuses_an_index_over_a_bare_text_column() {
         "the refusal should name the column: {rendered}"
     );
 
-    accepted(&migration, &zero_migrate::POSTGRES, "a text index");
-    accepted(&migration, &zero_migrate::SQLITE, "a text index");
+    accepted(&migration, &zero_migrate_postgres::DIALECT, "a text index");
+    accepted(&migration, &zero_migrate_sqlite::DIALECT, "a text index");
 }
 
 // (g) A bounded string renders VARCHAR(50), which indexes without a prefix.
@@ -323,7 +343,11 @@ fn mysql_accepts_an_index_over_a_bounded_string_column() {
         create_index("gadgets", "gadgets_sku_idx", "sku"),
     ]);
 
-    accepted(&migration, &zero_migrate::MYSQL, "a bounded string index");
+    accepted(
+        &migration,
+        &zero_migrate_mysql::DIALECT,
+        "a bounded string index",
+    );
 }
 
 // (g') An authored `t.text()` carrying a legacy id prefix renders VARCHAR(191),
@@ -339,7 +363,7 @@ fn mysql_accepts_an_index_over_an_id_prefixed_text_column() {
 
     accepted(
         &migration,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         "an id-prefixed text index",
     );
 }
@@ -529,19 +553,20 @@ fn mysql_declarative_refuses_the_live_fixture_shape_of_a_widthless_indexed_strin
     let desired = desired_snapshot_for_dialect(
         "mysql_key_gate",
         &[descriptor],
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &policy,
     )
     .expect("the descriptor compiles before the storage gate runs");
-    let error = DeclarativeAuthor::new_for_dialect("mysql_key_gate", OWNER, zero_migrate::MYSQL)
-        .diff(
-            &desired,
-            &SchemaSnapshot::default(),
-            &HashMap::new(),
-            &[],
-            &policy,
-        )
-        .expect_err("a widthless string renders TEXT and cannot back a MySQL index");
+    let error =
+        DeclarativeAuthor::new_for_dialect("mysql_key_gate", OWNER, zero_migrate_mysql::DIALECT)
+            .diff(
+                &desired,
+                &SchemaSnapshot::default(),
+                &HashMap::new(),
+                &[],
+                &policy,
+            )
+            .expect_err("a widthless string renders TEXT and cannot back a MySQL index");
     let rendered = format!("{error}");
     assert!(rendered.contains("people_id_key"), "{rendered}");
     assert!(rendered.contains("people.id"), "{rendered}");
@@ -581,19 +606,20 @@ fn mysql_declarative_refuses_an_implicit_foreign_key_index_over_widthless_string
     let desired = desired_snapshot_for_dialect(
         "mysql_key_gate",
         &[parent, child],
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &policy,
     )
     .expect("the descriptors compile before the storage gate runs");
-    let error = DeclarativeAuthor::new_for_dialect("mysql_key_gate", OWNER, zero_migrate::MYSQL)
-        .diff(
-            &desired,
-            &SchemaSnapshot::default(),
-            &HashMap::new(),
-            &[],
-            &policy,
-        )
-        .expect_err("InnoDB would synthesize an illegal index over the TEXT child column");
+    let error =
+        DeclarativeAuthor::new_for_dialect("mysql_key_gate", OWNER, zero_migrate_mysql::DIALECT)
+            .diff(
+                &desired,
+                &SchemaSnapshot::default(),
+                &HashMap::new(),
+                &[],
+                &policy,
+            )
+            .expect_err("InnoDB would synthesize an illegal index over the TEXT child column");
     let rendered = format!("{error}");
     assert!(rendered.contains("foreign key"), "{rendered}");
     assert!(rendered.contains("children.parent_id"), "{rendered}");

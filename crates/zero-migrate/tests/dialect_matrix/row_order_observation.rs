@@ -283,7 +283,7 @@ async fn apply_fixture<B: MigrationBackend>(
         .await
         .map_err(|error| format!("read the applied schema back: {error}"))?;
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, OWNER);
-    if dialect == &zero_migrate::SQLITE {
+    if dialect == &zero_migrate_sqlite::DIALECT {
         let authored: MigrationIr =
             serde_json::from_str(&ddl).map_err(|error| format!("re-parse the DDL: {error}"))?;
         let history: Vec<Op> = authored.ops;
@@ -386,7 +386,14 @@ async fn pg_row_order(url: &str, pin: Pin) -> Result<Vec<String>, String> {
         .ensure_journal(&cfg)
         .await
         .map_err(|error| format!("create the journal: {error}"))?;
-    apply_fixture(pin, &backend, &cfg, &policy, &zero_migrate::POSTGRES).await?;
+    apply_fixture(
+        pin,
+        &backend,
+        &cfg,
+        &policy,
+        &zero_migrate_postgres::DIALECT,
+    )
+    .await?;
 
     let rows = session
         .query(
@@ -427,7 +434,7 @@ async fn mysql_row_order(url: &str, pin: Pin) -> Result<Vec<String>, String> {
         .ensure_journal(&cfg)
         .await
         .map_err(|error| format!("create the journal: {error}"))?;
-    apply_fixture(pin, &backend, &cfg, &policy, &zero_migrate::MYSQL).await?;
+    apply_fixture(pin, &backend, &cfg, &policy, &zero_migrate_mysql::DIALECT).await?;
 
     let rows = session
         .query(
@@ -458,7 +465,7 @@ async fn sqlite_row_order(pin: Pin) -> Result<Vec<String>, String> {
         .map_err(|error| format!("open the probe database: {error}"))?;
     let policy = support::operator_charter(SQLITE_PROJECT);
     let cfg = ExecutorConfig::new(SQLITE_PROJECT, SQLITE_PROJECT, policy.clone());
-    apply_fixture(pin, &backend, &cfg, &policy, &zero_migrate::SQLITE).await?;
+    apply_fixture(pin, &backend, &cfg, &policy, &zero_migrate_sqlite::DIALECT).await?;
 
     backend
         .actor()

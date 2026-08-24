@@ -121,7 +121,7 @@ fn col_refs(value: &serde_json::Value, found: &mut Vec<String>) {
 fn a_rename_follows_the_generated_expressions_that_read_the_column() {
     let effective = support::confined_charter();
     let ops = vec![create_line_items(), rename_qty_to_quantity()];
-    let fields = single_fold::fold(&ops, &zero_migrate::POSTGRES, SCHEMA, &effective)
+    let fields = single_fold::fold(&ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the op stream folds");
 
@@ -241,7 +241,7 @@ fn a_table_rename_carries_a_qualified_generated_reference_in_both_artifacts() {
     ];
 
     let artifacts =
-        zero_migrate::render_artifacts(&ops, &zero_migrate::POSTGRES, SCHEMA, &effective)
+        zero_migrate::render_artifacts(&ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
             .expect("the op stream renders both artifacts");
 
     let runtime: serde_json::Value =
@@ -321,7 +321,7 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
 
     let before = single_fold::fold(
         &[create_bounded()],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -341,7 +341,7 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
 
     let after = single_fold::fold(
         &[create_bounded(), rename_qty_to_quantity()],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -387,7 +387,7 @@ fn the_snapshot_lane_follows_the_rename_and_the_differ_still_ignores_the_body() 
 
     let folded = fold_ops(
         &[create_line_items(), rename_qty_to_quantity()],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )

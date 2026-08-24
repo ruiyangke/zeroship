@@ -151,15 +151,20 @@ async fn apply_doc(
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
-    let document =
-        zero_migrate::model::load::load_ir_document(ir, APP, &zero_migrate::SQLITE, reg, None)
-            .expect("load gate (sqlite)");
+    let document = zero_migrate::model::load::load_ir_document(
+        ir,
+        APP,
+        &zero_migrate_sqlite::DIALECT,
+        reg,
+        None,
+    )
+    .expect("load gate (sqlite)");
     let folded = zero_migrate::fold_ops(
         history,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         PROJECT,
         &support::confined_charter(),
     )

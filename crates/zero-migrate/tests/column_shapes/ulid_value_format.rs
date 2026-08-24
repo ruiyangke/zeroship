@@ -136,15 +136,15 @@ fn lower_add(dialect: &zero_migrate::DialectId, table: &str) -> String {
 #[test]
 fn ulid_create_table_ddl_is_exact_on_all_dialects() {
     assert_eq!(
-        lower_create(&zero_migrate::POSTGRES, "ulids"),
+        lower_create(&zero_migrate_postgres::DIALECT, "ulids"),
         "CREATE TABLE \"app\".\"ulids\" (\"id\" text COLLATE \"C\" CHECK (\"id\" IS NULL OR (octet_length(\"id\") = 26 AND (\"id\" COLLATE \"C\") ~ '^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$')))"
     );
     assert_eq!(
-        lower_create(&zero_migrate::MYSQL, "ulids"),
+        lower_create(&zero_migrate_mysql::DIALECT, "ulids"),
         "CREATE TABLE `app`.`ulids` (`id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin CHECK (`id` IS NULL OR (CHAR_LENGTH(`id`) = 26 AND REGEXP_LIKE(`id`, '^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$', 'c'))))"
     );
     assert_eq!(
-        lower_create(&zero_migrate::SQLITE, "ulids"),
+        lower_create(&zero_migrate_sqlite::DIALECT, "ulids"),
         "CREATE TABLE \"ulids\" (\"id\" TEXT COLLATE BINARY CHECK (\"id\" IS NULL OR (typeof(\"id\") = 'text' AND length(\"id\") = 26 AND length(CAST(\"id\" AS BLOB)) = 26 AND substr(\"id\", 1, 1) GLOB '[0-7]' AND substr(\"id\", 1, 26) NOT GLOB '*[^0123456789ABCDEFGHJKMNPQRSTVWXYZ]*')))"
     );
 }
@@ -152,15 +152,15 @@ fn ulid_create_table_ddl_is_exact_on_all_dialects() {
 #[test]
 fn ulid_add_column_ddl_keeps_the_same_storage_and_check() {
     assert_eq!(
-        lower_add(&zero_migrate::POSTGRES, "ulids"),
+        lower_add(&zero_migrate_postgres::DIALECT, "ulids"),
         "ALTER TABLE \"app\".\"ulids\" ADD COLUMN \"public_id\" text COLLATE \"C\" CHECK (\"public_id\" IS NULL OR (octet_length(\"public_id\") = 26 AND (\"public_id\" COLLATE \"C\") ~ '^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$'))"
     );
     assert_eq!(
-        lower_add(&zero_migrate::MYSQL, "ulids"),
+        lower_add(&zero_migrate_mysql::DIALECT, "ulids"),
         "ALTER TABLE `app`.`ulids` ADD COLUMN `public_id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin CHECK (`public_id` IS NULL OR (CHAR_LENGTH(`public_id`) = 26 AND REGEXP_LIKE(`public_id`, '^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$', 'c')))"
     );
     assert_eq!(
-        lower_add(&zero_migrate::SQLITE, "ulids"),
+        lower_add(&zero_migrate_sqlite::DIALECT, "ulids"),
         "ALTER TABLE \"ulids\" ADD COLUMN \"public_id\" TEXT COLLATE BINARY CHECK (\"public_id\" IS NULL OR (typeof(\"public_id\") = 'text' AND length(\"public_id\") = 26 AND length(CAST(\"public_id\" AS BLOB)) = 26 AND substr(\"public_id\", 1, 1) GLOB '[0-7]' AND substr(\"public_id\", 1, 26) NOT GLOB '*[^0123456789ABCDEFGHJKMNPQRSTVWXYZ]*'))"
     );
 }
@@ -168,7 +168,7 @@ fn ulid_add_column_ddl_keeps_the_same_storage_and_check() {
 #[test]
 fn sqlite_enforces_ulid_spelling_storage_and_bytewise_order() {
     let conn = rusqlite::Connection::open_in_memory().expect("open SQLite");
-    conn.execute_batch(&lower_create(&zero_migrate::SQLITE, "ulids"))
+    conn.execute_batch(&lower_create(&zero_migrate_sqlite::DIALECT, "ulids"))
         .expect("apply SQLite ULID table");
 
     for value in VALID_ULIDS_IN_BYTEWISE_ORDER.iter().rev() {
@@ -225,10 +225,10 @@ fn sqlite_enforces_ulid_spelling_storage_and_bytewise_order() {
 #[test]
 fn sqlite_ulid_and_empty_prefix_type_id_checks_are_case_distinct() {
     let conn = rusqlite::Connection::open_in_memory().expect("open SQLite");
-    conn.execute_batch(&lower_create(&zero_migrate::SQLITE, "ulids"))
+    conn.execute_batch(&lower_create(&zero_migrate_sqlite::DIALECT, "ulids"))
         .expect("apply SQLite ULID table");
     conn.execute_batch(&lower_create_for_schema(
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         "app",
         &bare_type_id_ir("type_ids"),
     ))
@@ -292,7 +292,7 @@ async fn postgres_enforces_ulid_fixtures_order_and_case_distinction() {
 
     async {
         for ir in [ulid_ir("ulids"), bare_type_id_ir("type_ids")] {
-            let ddl = lower_create_for_schema(&zero_migrate::POSTGRES, &schema, &ir);
+            let ddl = lower_create_for_schema(&zero_migrate_postgres::DIALECT, &schema, &ir);
             session
                 .batch(&ddl)
                 .await

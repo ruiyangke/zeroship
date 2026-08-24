@@ -87,10 +87,11 @@ use zero_migrate::model::ir::Op;
 use zero_migrate::render::fold::single_fold;
 use zero_migrate::{
     fold_ops, resolve_create_table_policy, Approval, ExecutorConfig, IrAuthor, LiveSchema,
-    MigrationEngine, MigrationIr, SQLITE,
+    MigrationEngine, MigrationIr,
 };
 use zero_migrate_sqlite::backend::Mode;
 use zero_migrate_sqlite::SqliteBackend;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 const PROJECT: &str = "prj_rebuild_field_defs";
 const APP: &str = "app_rebuild_field_defs";

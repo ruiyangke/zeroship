@@ -49,7 +49,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE)
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT)
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -68,7 +68,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         effective,
     )
 }
@@ -626,7 +626,7 @@ async fn a_plan_ending_in_an_unsupported_online_rename_commits_none_of_its_earli
     // A PostgreSQL expand-contract rename, routed at a backend whose `online()` is
     // `None`. The SQLite differ never authors this shape; it is constructed
     // directly because the defect is that nothing REFUSES such a plan up front.
-    let rename = ExpandContractAuthor::new(PROJECT, APP, zero_migrate::POSTGRES)
+    let rename = ExpandContractAuthor::new(PROJECT, APP, zero_migrate_postgres::DIALECT)
         .author(&OnlineIntent::RenameColumn {
             table: "people".into(),
             from: "nickname".into(),

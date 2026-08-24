@@ -90,8 +90,13 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_mysql::DIALECT,
+        &policy,
+    );
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -121,7 +126,7 @@ async fn measure(session: &MysqlDevSession, cfg: &ExecutorConfig) -> Result<Meas
 
     let folded = fold_ops(
         &resolved.ops,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &cfg.project_schema,
         &policy,
     )

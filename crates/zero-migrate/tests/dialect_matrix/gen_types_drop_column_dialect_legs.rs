@@ -87,7 +87,7 @@ fn env_db_ts(dropped_column: &str, dialect: &zero_migrate::DialectId, with_check
 /// PostgreSQL objects never referenced it and PostgreSQL keeps both.
 #[test]
 fn dropping_a_column_named_only_by_an_inactive_leg_keeps_the_postgres_objects() {
-    let generated = env_db_ts("b", &zero_migrate::POSTGRES, true);
+    let generated = env_db_ts("b", &zero_migrate_postgres::DIALECT, true);
     assert!(
         generated.contains("legs_leg_ck"),
         "PostgreSQL renders CHECK ((\"a\" > 0)) and keeps it when `b` is dropped; the \
@@ -105,7 +105,7 @@ fn dropping_a_column_named_only_by_an_inactive_leg_keeps_the_postgres_objects() 
 /// the fix above would also pass by never cascading a dialectal expression at all.
 #[test]
 fn dropping_the_column_the_selected_leg_reads_cascades_on_postgres() {
-    let generated = env_db_ts("a", &zero_migrate::POSTGRES, true);
+    let generated = env_db_ts("a", &zero_migrate_postgres::DIALECT, true);
     assert!(
         !generated.contains("legs_leg_ck"),
         "dropping the column the PostgreSQL leg reads cascades the CHECK: {generated}"
@@ -123,13 +123,13 @@ fn dropping_the_column_the_selected_leg_reads_cascades_on_postgres() {
 /// cascades". No CHECK here - a table-level CHECK is PostgreSQL-only.
 #[test]
 fn the_same_index_cascades_on_the_target_whose_leg_reads_the_column() {
-    let dropped_b = env_db_ts("b", &zero_migrate::SQLITE, false);
+    let dropped_b = env_db_ts("b", &zero_migrate_sqlite::DIALECT, false);
     assert!(
         !dropped_b.contains("legs_partial_idx"),
         "the SQLite leg reads `b`, so dropping `b` cascades the partial index there: \
          {dropped_b}"
     );
-    let dropped_a = env_db_ts("a", &zero_migrate::SQLITE, false);
+    let dropped_a = env_db_ts("a", &zero_migrate_sqlite::DIALECT, false);
     assert!(
         dropped_a.contains("legs_partial_idx"),
         "the SQLite leg never reads `a`, so dropping `a` leaves the partial index: \

@@ -61,7 +61,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE)
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT)
 }
 
 fn exec_cfg() -> ExecutorConfig {
@@ -71,7 +71,7 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE)
+    GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT)
 }
 
 fn effective_policy() -> EffectivePolicy {
@@ -86,7 +86,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         effective,
     )
 }

@@ -112,7 +112,12 @@ fn injected_ddl(
 
 #[test]
 fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
-    let pg = injected_ddl(&zero_migrate::POSTGRES, "app", "notes", Some("bytewise"));
+    let pg = injected_ddl(
+        &zero_migrate_postgres::DIALECT,
+        "app",
+        "notes",
+        Some("bytewise"),
+    );
     assert!(
         pg.contains(r#""id" character varying(255) COLLATE "C""#),
         "PostgreSQL must pin C on the injected id; SQL was:\n{pg}"
@@ -126,7 +131,12 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
         "a column the charter did not name must be untouched; SQL was:\n{pg}"
     );
 
-    let sqlite = injected_ddl(&zero_migrate::SQLITE, "app", "notes", Some("bytewise"));
+    let sqlite = injected_ddl(
+        &zero_migrate_sqlite::DIALECT,
+        "app",
+        "notes",
+        Some("bytewise"),
+    );
     assert!(
         sqlite.contains(r#""id" TEXT COLLATE BINARY"#),
         "SQLite must spell the same intent as BINARY; SQL was:\n{sqlite}"
@@ -144,7 +154,12 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
     // facet has no equivalent of - `created_by` may hold a non-ascii name, and an
     // ascii column would REJECT it. Trading a silent ordering bug for a loud
     // insert failure is not a fix.
-    let mysql = injected_ddl(&zero_migrate::MYSQL, "app", "notes", Some("bytewise"));
+    let mysql = injected_ddl(
+        &zero_migrate_mysql::DIALECT,
+        "app",
+        "notes",
+        Some("bytewise"),
+    );
     assert!(
         mysql.contains("`id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin"),
         "MySQL must spell the same intent as utf8mb4_0900_bin; SQL was:\n{mysql}"
@@ -159,12 +174,12 @@ fn a_pinned_bytewise_collation_is_spelled_per_dialect() {
 fn an_unpinned_injected_column_emits_exactly_what_it_emitted_before() {
     // The facet is opt-in. A charter that does not name it must emit the same DDL
     // it emitted before the facet existed, on every dialect.
-    let pg = injected_ddl(&zero_migrate::POSTGRES, "app", "notes", None);
+    let pg = injected_ddl(&zero_migrate_postgres::DIALECT, "app", "notes", None);
     assert!(
         !pg.contains("COLLATE"),
         "an unpinned charter must emit no collation on PostgreSQL; SQL was:\n{pg}"
     );
-    let sqlite = injected_ddl(&zero_migrate::SQLITE, "app", "notes", None);
+    let sqlite = injected_ddl(&zero_migrate_sqlite::DIALECT, "app", "notes", None);
     assert!(
         !sqlite.contains("COLLATE"),
         "an unpinned charter must emit no collation on SQLite; SQL was:\n{sqlite}"
@@ -172,7 +187,7 @@ fn an_unpinned_injected_column_emits_exactly_what_it_emitted_before() {
     // MySQL is the exception, and not because of this facet: every character column
     // there already carries an explicit `utf8mb4_0900_as_cs` so equality matches the
     // other two dialects. What must not appear is the bytewise one.
-    let mysql = injected_ddl(&zero_migrate::MYSQL, "app", "notes", None);
+    let mysql = injected_ddl(&zero_migrate_mysql::DIALECT, "app", "notes", None);
     assert!(
         mysql.contains("`id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs"),
         "an unpinned MySQL charter must keep the case-sensitive default; SQL was:\n{mysql}"
@@ -190,7 +205,7 @@ fn sqlite_orders_an_injected_id_by_creation_with_and_without_the_pin() {
     for (label, collation) in [("unpinned", None), ("pinned", Some("bytewise"))] {
         let conn = rusqlite::Connection::open_in_memory().expect("open SQLite");
         conn.execute_batch(&injected_ddl(
-            &zero_migrate::SQLITE,
+            &zero_migrate_sqlite::DIALECT,
             "app",
             "notes",
             collation,
@@ -391,7 +406,7 @@ async fn live_order(
         .batch(&format!("CREATE SCHEMA {quoted_schema}"))
         .await
         .map_err(|error| format!("create the probe schema: {error}"))?;
-    let ddl = injected_ddl(&zero_migrate::POSTGRES, schema, "notes", collation);
+    let ddl = injected_ddl(&zero_migrate_postgres::DIALECT, schema, "notes", collation);
     session
         .batch(&ddl)
         .await
@@ -467,9 +482,13 @@ async fn injected_id_with_a_pinned_bytewise_collation_keeps_creation_order() {
         let resolved =
             zero_migrate::resolve_create_table_policy(&authored_ir("notes"), &policy, &schema)
                 .map_err(|error| format!("resolve the injected create: {error}"))?;
-        let expected =
-            zero_migrate::fold_ops(&resolved.ops, &zero_migrate::POSTGRES, &schema, &policy)
-                .map_err(|error| format!("fold the injected create: {error}"))?;
+        let expected = zero_migrate::fold_ops(
+            &resolved.ops,
+            &zero_migrate_postgres::DIALECT,
+            &schema,
+            &policy,
+        )
+        .map_err(|error| format!("fold the injected create: {error}"))?;
         let live = zero_migrate_postgres::backend::drift_sql::snapshot_schema(&session, &schema)
             .await
             .map_err(|error| format!("introspect the probe schema: {error}"))?;
@@ -518,7 +537,7 @@ async fn live_order_mysql(
         .batch(&format!("CREATE DATABASE {quoted}"))
         .await
         .map_err(|error| format!("create the probe database: {error}"))?;
-    let ddl = injected_ddl(&zero_migrate::MYSQL, database, "notes", collation);
+    let ddl = injected_ddl(&zero_migrate_mysql::DIALECT, database, "notes", collation);
     session
         .batch(&ddl)
         .await

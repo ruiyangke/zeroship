@@ -694,7 +694,7 @@ fn prelude(
     // FIXTURE half of the answer; the ungated standalone lane is an engine finding,
     // recorded in `docs/review-log.md`, not something this fixture can repair.
     let keyable = || {
-        if dialect == &zero_migrate::MYSQL {
+        if dialect == &zero_migrate_mysql::DIALECT {
             json!({ "string": { "length": 24 } })
         } else {
             json!("text")
@@ -807,7 +807,7 @@ fn prelude(
         // from it. What this row asks is whether `dropTrigger` drops a trigger, not
         // what the trigger's body says.
         ("dropTrigger", _) => {
-            if dialect == &zero_migrate::MYSQL {
+            if dialect == &zero_migrate_mysql::DIALECT {
                 vec![
                     text(),
                     json!({ "op": "createTable", "name": "t2",
@@ -820,7 +820,7 @@ fn prelude(
                             { "stmt": "delete", "table": "t2",
                               "where": { "node": "colRef", "name": "x" } }] } }),
                 ]
-            } else if dialect == &zero_migrate::POSTGRES {
+            } else if dialect == &zero_migrate_postgres::DIALECT {
                 vec![
                     text(),
                     create_function(),
@@ -828,7 +828,7 @@ fn prelude(
                             "timing": "before", "events": ["insert"], "forEach": "row",
                             "action": { "kind": "executeFunction", "name": "f" } }),
                 ]
-            } else if dialect == &zero_migrate::SQLITE {
+            } else if dialect == &zero_migrate_sqlite::DIALECT {
                 vec![
                     text(),
                     json!({ "op": "createTrigger", "name": "tg", "table": "t",
@@ -1115,7 +1115,7 @@ async fn pg_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict {
         kind,
         variant,
         op,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &probe,
         &policy,
         &cfg,
@@ -1191,7 +1191,7 @@ async fn mysql_verdict(url: &str, kind: &str, variant: &str, op: &Op) -> Verdict
         kind,
         variant,
         op,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &probe,
         &policy,
         &cfg,
@@ -1275,7 +1275,7 @@ async fn sqlite_verdict(kind: &str, variant: &str, op: &Op) -> Verdict {
         kind,
         variant,
         op,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &probe,
         &policy,
         &cfg,
@@ -1342,7 +1342,7 @@ async fn run_row<B: MigrationBackend>(
         Ok(snapshot) => LiveSchema::from_catalog_snapshot(snapshot, OWNER),
         Err(_) => LiveSchema::from_tables(BTreeSet::new()),
     };
-    if dialect == &zero_migrate::SQLITE && !prelude_ops.is_empty() {
+    if dialect == &zero_migrate_sqlite::DIALECT && !prelude_ops.is_empty() {
         let history: Vec<Op> = prelude_ops
             .iter()
             .filter_map(|op| serde_json::from_value(op.clone()).ok())

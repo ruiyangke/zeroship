@@ -51,7 +51,7 @@ const CASE_SENSITIVE: &str = "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs";
 const CASE_INSENSITIVE: &str = "CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci";
 
 fn mysql_type(def: serde_json::Value) -> String {
-    def_to_column_type_for_dialect(&def, &zero_migrate::MYSQL)
+    def_to_column_type_for_dialect(&def, &zero_migrate_mysql::DIALECT)
 }
 
 /// EVERY character spelling the field-def carrier can produce, named rather than
@@ -280,11 +280,11 @@ fn descriptor_create_ddl() -> Result<String, String> {
     let desired = desired_snapshot_for_dialect(
         PROJECT,
         std::slice::from_ref(&descriptor),
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &effective,
     )
     .map_err(|e| format!("build the desired snapshot: {e}"))?;
-    DeclarativeAuthor::new_for_dialect(PROJECT, PROJECT, zero_migrate::MYSQL)
+    DeclarativeAuthor::new_for_dialect(PROJECT, PROJECT, zero_migrate_mysql::DIALECT)
         .diff(
             &desired,
             &SchemaSnapshot::default(),

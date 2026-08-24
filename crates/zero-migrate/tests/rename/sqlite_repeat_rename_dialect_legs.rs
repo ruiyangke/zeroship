@@ -36,7 +36,7 @@ fn lower_error(ops_json: &str) -> Option<String> {
     IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_steps(&ir, &LiveSchema::default())

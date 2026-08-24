@@ -110,7 +110,7 @@ fn lower_create_table(dialect: &zero_migrate::DialectId, ops: Vec<Op>) -> String
 #[test]
 fn pg_enum_and_domain_render_standalone_types_and_column_refs() {
     let sql = lower_all(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         vec![
             create_enum(),
             create_domain(),
@@ -159,7 +159,7 @@ fn pg_enum_and_domain_render_standalone_types_and_column_refs() {
 #[test]
 fn pg_domain_over_enum_uses_the_materialized_enum_qname() {
     let sql = lower_all(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         vec![
             create_enum(),
             Op::CreateDomain {
@@ -218,7 +218,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
             existence_guard: None,
         },
     ];
-    let sql = lower_all(&zero_migrate::POSTGRES, ops.clone());
+    let sql = lower_all(&zero_migrate_postgres::DIALECT, ops.clone());
 
     assert_eq!(
         sql[0],
@@ -252,7 +252,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
     let folded = zero_migrate::fold_ops_onto(
         &base,
         &ops,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -281,7 +281,7 @@ fn pg_named_type_column_operations_honor_explicit_reference_schema() {
 #[test]
 fn sqlite_enum_and_domain_inline_at_column_use_site() {
     let sql = lower_create_table(
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         vec![
             create_enum(),
             create_domain(),
@@ -320,7 +320,7 @@ fn sqlite_enum_and_domain_inline_at_column_use_site() {
 #[test]
 fn mysql_enum_and_domain_inline_at_column_use_site() {
     let sql = lower_create_table(
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         vec![
             create_enum(),
             create_domain(),
@@ -361,7 +361,7 @@ fn mysql_named_type_reference_outside_inline_create_add_fails_closed() {
     let author = IrAuthor::new(
         SCHEMA,
         OWNER,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &support::no_inject("app"),
     );
     let err = author
@@ -399,7 +399,7 @@ fn pg_guarded_type_drops_stamp_named_type_probes() {
     let author = IrAuthor::new(
         SCHEMA,
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     );
     let migrations = author

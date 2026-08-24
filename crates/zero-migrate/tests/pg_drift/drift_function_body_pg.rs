@@ -252,7 +252,7 @@ async fn live_postgres_reports_function_body_drift() {
         // file measures runs.
         let expected = fold_ops(
             &ir.ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &schema,
             &support::operator_charter("app"),
         )
@@ -260,7 +260,7 @@ async fn live_postgres_reports_function_body_drift() {
         let migrations = IrAuthor::new(
             &schema,
             OWNER,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &support::operator_charter(&schema),
         )
         .lower(&ir, &LiveSchema::default())

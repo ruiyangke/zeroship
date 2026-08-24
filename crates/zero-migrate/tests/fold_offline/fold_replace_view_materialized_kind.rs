@@ -49,7 +49,7 @@ fn a_plain_replace_over_a_materialized_view_is_refused_at_the_fold() {
             create_view("totals", Some(true), None),
             create_view("totals", None, Some(true)),
         ],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -74,7 +74,7 @@ fn a_plain_replace_over_a_plain_view_still_applies() {
             create_view("totals", None, None),
             create_view("totals", None, Some(true)),
         ],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -97,7 +97,7 @@ fn a_materialized_replace_over_a_materialized_view_is_not_refused_by_this_check(
             create_view("totals", Some(true), None),
             create_view("totals", Some(true), Some(true)),
         ],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )

@@ -45,7 +45,7 @@ fn artifact_created_tables(ops_json: &str) -> Vec<String> {
     IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .load_and_lower_guarded(
@@ -53,7 +53,7 @@ fn artifact_created_tables(ops_json: &str) -> Vec<String> {
         APP,
         &BTreeMap::new(),
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT),
     )
     .expect("the dialectal create lowers under SQLite")
     .created_tables

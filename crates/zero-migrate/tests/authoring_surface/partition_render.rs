@@ -70,7 +70,7 @@ fn pg_sql(op: Op) -> Vec<String> {
     IrAuthor::new(
         "app",
         "app_partition",
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     )
     .lower(&ir(op), &LiveSchema::default())
@@ -172,7 +172,7 @@ fn insert_events(rows: &[(i64, &str)]) -> Op {
 fn partition_live_from_fold(ops: &[Op]) -> LiveSchema {
     let snap = fold_ops(
         ops,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         "prj_partition",
         &support::no_inject("app"),
     )
@@ -201,7 +201,7 @@ fn lower_sqlite_partition_steps(ops: Vec<Op>, live: &LiveSchema) -> Vec<zero_mig
     IrAuthor::new(
         "prj_partition",
         "app_partition",
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_steps(&migration, live)
@@ -327,13 +327,13 @@ async fn collapse_affirmed_events_apply_as_plain_table_on_sqlite() {
 
     let ops = collapse_events_ops();
     let migration_ir = ir_ops(ops);
-    validate_ir_scoped(&migration_ir, &zero_migrate::SQLITE, None)
+    validate_ir_scoped(&migration_ir, &zero_migrate_sqlite::DIALECT, None)
         .expect("collapse-affirmed partition recording validates on SQLite");
 
     let steps = IrAuthor::new(
         "prj_partition",
         "app_partition",
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_steps(&migration_ir, &LiveSchema::default())
@@ -771,7 +771,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
 
     for (label, op) in cases {
         let migration = ir(op);
-        for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
+        for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
             let err = validate_ir(&migration, dialect)
                 .expect_err(&format!("{label} must be refused on {dialect:?}"));
             assert_eq!(
@@ -780,7 +780,7 @@ fn pg_vendor_index_features_refused_fail_closed_off_pg() {
             );
         }
         // The same op validates cleanly on PostgreSQL.
-        validate_ir(&migration, &zero_migrate::POSTGRES)
+        validate_ir(&migration, &zero_migrate_postgres::DIALECT)
             .unwrap_or_else(|e| panic!("{label} must validate on Postgres: {e:?}"));
     }
 }
@@ -848,7 +848,7 @@ fn attach_partition_refused_fail_closed_off_pg() {
         int_bound(100),
         int_bound(200),
     ));
-    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
+    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
         let err = validate_ir_scoped(&migration, dialect, None)
             .expect_err(&format!("attachPartition must be refused on {dialect:?}"));
         assert!(

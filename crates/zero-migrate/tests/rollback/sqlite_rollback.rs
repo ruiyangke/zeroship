@@ -218,7 +218,7 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
             version,
             reason,
         } => {
-            assert_eq!(dialect, zero_migrate_ir::dialect::SQLITE);
+            assert_eq!(dialect, zero_migrate_sqlite::DIALECT);
             assert_eq!(version, m.version.as_str());
             assert!(
                 reason.contains("type or constraint change"),

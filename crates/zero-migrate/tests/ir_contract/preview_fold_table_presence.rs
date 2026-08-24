@@ -182,13 +182,14 @@ fn preview_never_references_a_table_the_fold_says_was_dropped() {
 
     // The fold's verdict: `alpha` is gone, only `gamma` survives.
     assert_eq!(
-        folded_tables(&resolved, &zero_migrate::POSTGRES, &charter),
+        folded_tables(&resolved, &zero_migrate_postgres::DIALECT, &charter),
         vec!["gamma".to_string()],
         "the fold must retire a dropped table"
     );
 
-    let preview = render_ir_envelope_sql(&resolved, &zero_migrate::POSTGRES, &opts(&charter))
-        .expect("renders offline");
+    let preview =
+        render_ir_envelope_sql(&resolved, &zero_migrate_postgres::DIALECT, &opts(&charter))
+            .expect("renders offline");
 
     // The defect, stated as the SQL it produced: an inline create-time FK naming a
     // table this very envelope dropped four statements earlier. PostgreSQL refuses
@@ -201,7 +202,7 @@ fn preview_never_references_a_table_the_fold_says_was_dropped() {
 
     // And the lower an apply takes must not author it either — the preview is only
     // ever as right as what it surfaces.
-    if let Ok(statements) = whole_ir_lower(&resolved, &zero_migrate::POSTGRES, &charter) {
+    if let Ok(statements) = whole_ir_lower(&resolved, &zero_migrate_postgres::DIALECT, &charter) {
         assert!(
             !statements
                 .iter()
@@ -214,7 +215,10 @@ fn preview_never_references_a_table_the_fold_says_was_dropped() {
 #[test]
 fn preview_reaches_a_table_under_the_name_the_fold_renamed_it_to() {
     let charter = support::confined_charter();
-    for dialect in [&zero_migrate::POSTGRES, &zero_migrate::SQLITE] {
+    for dialect in [
+        &zero_migrate_postgres::DIALECT,
+        &zero_migrate_sqlite::DIALECT,
+    ] {
         let resolved = resolve(RENAME_THEN_FK, &charter);
 
         // The fold's verdict: the rename MOVED the relation; `beta` exists.
@@ -255,14 +259,15 @@ fn preview_stops_reaching_a_table_under_the_name_the_fold_renamed_it_away_from()
     let resolved = resolve(RENAME_THEN_STALE_FK, &charter);
 
     // The fold's verdict: `alpha` no longer names anything.
-    let folded = folded_tables(&resolved, &zero_migrate::POSTGRES, &charter);
+    let folded = folded_tables(&resolved, &zero_migrate_postgres::DIALECT, &charter);
     assert!(
         !folded.contains(&"alpha".to_string()),
         "the fold must retire the pre-rename name: {folded:?}"
     );
 
-    let preview = render_ir_envelope_sql(&resolved, &zero_migrate::POSTGRES, &opts(&charter))
-        .expect("renders offline");
+    let preview =
+        render_ir_envelope_sql(&resolved, &zero_migrate_postgres::DIALECT, &opts(&charter))
+            .expect("renders offline");
     assert!(
         !preview.contains(r#"REFERENCES "public"."alpha""#),
         "preview rendered a create-time foreign key onto the name a rename in the \
@@ -270,7 +275,7 @@ fn preview_stops_reaching_a_table_under_the_name_the_fold_renamed_it_away_from()
          not exist`:\n{preview}"
     );
 
-    if let Ok(statements) = whole_ir_lower(&resolved, &zero_migrate::POSTGRES, &charter) {
+    if let Ok(statements) = whole_ir_lower(&resolved, &zero_migrate_postgres::DIALECT, &charter) {
         assert!(
             !statements
                 .iter()
@@ -285,7 +290,7 @@ fn preview_reaches_a_partition_the_fold_says_detach_promoted_to_a_table() {
     let charter = support::confined_charter();
     let resolved = resolve(DETACH_THEN_FK, &charter);
 
-    let mut folded = folded_tables(&resolved, &zero_migrate::POSTGRES, &charter);
+    let mut folded = folded_tables(&resolved, &zero_migrate_postgres::DIALECT, &charter);
     folded.sort();
     assert_eq!(
         folded,
@@ -297,15 +302,16 @@ fn preview_reaches_a_partition_the_fold_says_detach_promoted_to_a_table() {
         "the fold must record a detached partition as an ordinary table"
     );
 
-    let preview = render_ir_envelope_sql(&resolved, &zero_migrate::POSTGRES, &opts(&charter))
-        .expect("renders offline");
+    let preview =
+        render_ir_envelope_sql(&resolved, &zero_migrate_postgres::DIALECT, &opts(&charter))
+            .expect("renders offline");
     assert!(
         !preview.contains(RUNTIME_RESOLVED),
         "preview deferred a createTable whose FK names a detached partition; \
          PostgreSQL accepts a foreign key onto one:\n{preview}"
     );
 
-    whole_ir_lower(&resolved, &zero_migrate::POSTGRES, &charter)
+    whole_ir_lower(&resolved, &zero_migrate_postgres::DIALECT, &charter)
         .unwrap_or_else(|e| panic!("the whole-IR lower REFUSED a detach PostgreSQL accepts: {e}"));
 }
 
@@ -366,7 +372,7 @@ fn an_attached_partition_stays_referenceable_even_though_the_fold_unkeys_it() {
     let resolved = resolve(ATTACH_THEN_FK, &charter);
 
     // The fold DOES un-key it — this is the divergence we are choosing to keep.
-    let folded = folded_tables(&resolved, &zero_migrate::POSTGRES, &charter);
+    let folded = folded_tables(&resolved, &zero_migrate_postgres::DIALECT, &charter);
     assert!(
         !folded.contains(&"childp".to_string()),
         "the fold is expected to re-home an attached child out of its tables map; \
@@ -375,8 +381,8 @@ fn an_attached_partition_stays_referenceable_even_though_the_fold_unkeys_it() {
 
     // The referenceable-name set must still reach it, because PostgreSQL does: the
     // create-time FK inlines rather than deferring onto a target that never arrives.
-    let statements =
-        whole_ir_lower(&resolved, &zero_migrate::POSTGRES, &charter).unwrap_or_else(|e| {
+    let statements = whole_ir_lower(&resolved, &zero_migrate_postgres::DIALECT, &charter)
+        .unwrap_or_else(|e| {
             panic!(
                 "the lower refused a foreign key onto an attached partition, which \
              PostgreSQL accepts: {e}"

@@ -145,7 +145,7 @@ async fn empty_ir_plan_anchor_applies_once_and_then_skips() {
     let plan = zero_migrate::IrAuthor::new(
         "app",
         "app_test",
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject("app"),
     )
     .lower_plan(&ir, &zero_migrate::LiveSchema::default())
@@ -623,7 +623,7 @@ async fn is_autocommit_detects_open_transaction() {
 async fn reports_sqlite_dialect() {
     let p = paths("dialect");
     let be = backend(&p);
-    assert_eq!(MigrationBackend::dialect(&be), zero_migrate::SQLITE);
+    assert_eq!(MigrationBackend::dialect(&be), zero_migrate_sqlite::DIALECT);
     // ensure_journal through the trait works and applied() is empty initially.
     let c = cfg();
     MigrationBackend::ensure_journal(&be, &c)

@@ -104,7 +104,7 @@ fn create_table_sql(schema: &str) -> Vec<String> {
         "facets",
         &field_defs(),
         &FkEmission::Inline,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         false,
         &support::no_inject(schema),
     )

@@ -82,7 +82,7 @@ fn lowered_sql(dialect: &zero_migrate::DialectId, ir: &MigrationIr, live: &LiveS
 #[test]
 fn a_native_enum_column_gets_no_membership_check() {
     let sql = lowered_sql(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &issues_ir(),
         &LiveSchema::default(),
     );
@@ -103,7 +103,11 @@ fn a_native_enum_column_gets_no_membership_check() {
 /// descriptor's `enum_values` must not add a second.
 #[test]
 fn an_inlined_enum_column_gets_exactly_one_membership_check() {
-    let sql = lowered_sql(&zero_migrate::SQLITE, &issues_ir(), &LiveSchema::default());
+    let sql = lowered_sql(
+        &zero_migrate_sqlite::DIALECT,
+        &issues_ir(),
+        &LiveSchema::default(),
+    );
     assert_eq!(
         sql.matches(r#"CHECK ("status" IN ("#).count(),
         1,
@@ -146,11 +150,11 @@ fn an_inlined_enum_column_gets_exactly_one_membership_check() {
 fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
     let ops = issues_ir().ops;
     let effective = support::no_inject(PROJECT);
-    let snapshot =
-        fold_ops(&ops, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
+    let snapshot = fold_ops(&ops, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+        .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     // Seeded EXACTLY as `engine::refresh_historical_live` seeds it.
-    live.sdk_schemas = single_fold::fold(&ops, &zero_migrate::SQLITE, PROJECT, &effective)
+    live.sdk_schemas = single_fold::fold(&ops, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("the field-def replay folds");
 
@@ -175,7 +179,7 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
         checksum: None,
     };
 
-    let steps = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective)
+    let steps = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective)
         .lower_steps(&rename, &live)
         .expect("the rename lowers to a rebuild");
     let [PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild))] = steps.as_slice() else {

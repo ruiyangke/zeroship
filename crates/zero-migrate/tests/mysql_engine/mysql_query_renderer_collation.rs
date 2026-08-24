@@ -218,7 +218,7 @@ async fn show_create_table(
 /// Create the probe database and the probe table in it.
 async fn deploy_probe(session: &MysqlDevSession, database: &str) -> Result<(), String> {
     fresh_database(session, database).await?;
-    let create = render_create(&zero_migrate::MYSQL, database, "probe")?;
+    let create = render_create(&zero_migrate_mysql::DIALECT, database, "probe")?;
     session
         .batch(&create)
         .await
@@ -401,7 +401,7 @@ async fn postgres_keeps_the_same_two_cases_apart() {
             .batch(&format!("CREATE SCHEMA \"{schema}\""))
             .await
             .map_err(|e| format!("create the probe schema: {e}"))?;
-        let create = render_create(&zero_migrate::POSTGRES, &schema, "probe")?;
+        let create = render_create(&zero_migrate_postgres::DIALECT, &schema, "probe")?;
         session
             .batch(&create)
             .await
@@ -506,7 +506,7 @@ async fn a_case_insensitive_field_gets_the_case_insensitive_collation() {
             "ci_probe",
             &schema,
             &FkEmission::Inline,
-            &zero_migrate::MYSQL,
+            &zero_migrate_mysql::DIALECT,
             false,
             &support::no_inject(&database),
         )

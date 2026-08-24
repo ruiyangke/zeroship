@@ -21,7 +21,9 @@ use zero_migrate::model::snapshot::{
     TableSnapshot,
 };
 use zero_migrate::render::existence_probe::{decide, GuardVerdict};
-use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
+use zero_migrate_mysql::DIALECT as MYSQL;
+use zero_migrate_postgres::DIALECT as POSTGRES;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 /// `decide` on the PG leg (raw `information_schema` compare).
 fn decide_pg(probe: &GuardProbe, live: &SchemaSnapshot) -> GuardVerdict {

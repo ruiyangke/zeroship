@@ -47,7 +47,7 @@ use crate::support;
 /// backend's `DIALECT` const, which is `pub(crate)` to `zero-migrate-mysql` and stays
 /// that way: exactly one line in that crate names the vendor, and a test on this side
 /// of the boundary is not a reason to make it two.
-const DIALECT: zero_migrate_ir::dialect::DialectId = zero_migrate_ir::dialect::MYSQL;
+const DIALECT: zero_migrate_ir::dialect::DialectId = zero_migrate_mysql::DIALECT;
 
 /// This vendor's own renderers, for the value-format doors these tests call.
 ///

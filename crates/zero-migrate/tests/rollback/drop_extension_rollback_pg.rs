@@ -125,10 +125,20 @@ async fn apply_doc(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &pol);
-    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate::POSTGRES);
-    let folded = fold_ops(history, &zero_migrate::POSTGRES, &cfg.project_schema, &pol)
-        .map_err(|error| format!("fold the applied history: {error}"))?;
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        &pol,
+    );
+    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate_postgres::DIALECT);
+    let folded = fold_ops(
+        history,
+        &zero_migrate_postgres::DIALECT,
+        &cfg.project_schema,
+        &pol,
+    )
+    .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     // Go through the guarded deploy entry rather than hand-rolling load + lower.
     // A vendor op needs the author's own `VendorAuthority`, which only these
@@ -177,7 +187,7 @@ async fn live_extension(
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         policy(&cfg.project_schema),
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
     ))
 }
 
@@ -190,7 +200,7 @@ fn create_extension_op(schema: Option<&str>) -> Op {
 }
 
 fn lower_drop_from_history(history: &[Op], if_exists: Option<bool>) -> Migration {
-    let dialect = &zero_migrate::POSTGRES;
+    let dialect = &zero_migrate_postgres::DIALECT;
     let pol = policy(PROJECT_SCHEMA);
     let folded =
         fold_ops(history, dialect, PROJECT_SCHEMA, &pol).expect("the extension history must fold");
@@ -226,7 +236,7 @@ async fn unguarded_drop_extension_from_folded_history_has_create_inverse() {
     );
     guard_for(&GuardConfig::from_policy(
         policy(PROJECT_SCHEMA),
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
     ))
     .as_ref()
     .check(migration.down.as_deref().expect("the inverse exists"))
@@ -264,11 +274,16 @@ async fn drop_extension_inverse_uses_only_the_recorded_schema() {
     let with_schema = [create_extension_op(Some("public"))];
     let without_schema = [create_extension_op(None)];
     let pol = policy(PROJECT_SCHEMA);
-    let recorded = fold_ops(&with_schema, &zero_migrate::POSTGRES, PROJECT_SCHEMA, &pol)
-        .expect("the extension history must fold");
+    let recorded = fold_ops(
+        &with_schema,
+        &zero_migrate_postgres::DIALECT,
+        PROJECT_SCHEMA,
+        &pol,
+    )
+    .expect("the extension history must fold");
     let recorded_without_schema = fold_ops(
         &without_schema,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         PROJECT_SCHEMA,
         &pol,
     )

@@ -516,7 +516,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let ir = fixture(&schema);
         let expected = fold_ops(
             &ir.ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &schema,
             &support::no_inject("app"),
         )
@@ -524,7 +524,7 @@ async fn live_postgres_introspects_identity_default_format_and_reference_drift()
         let migrations = IrAuthor::new(
             &schema,
             OWNER,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &support::no_inject(&schema),
         )
             .lower(&ir, &LiveSchema::default())

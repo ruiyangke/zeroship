@@ -38,9 +38,9 @@ use zero_migrate::model::validate::validate_op;
 /// dialect identity, so each row passes the same id to the sidecar lookup and the
 /// authoring gate.
 const DIALECTS: [(&str, &zero_migrate::DialectId); 3] = [
-    ("postgres", &zero_migrate::POSTGRES),
-    ("sqlite", &zero_migrate::SQLITE),
-    ("mysql", &zero_migrate::MYSQL),
+    ("postgres", &zero_migrate_postgres::DIALECT),
+    ("sqlite", &zero_migrate_sqlite::DIALECT),
+    ("mysql", &zero_migrate_mysql::DIALECT),
 ];
 
 #[test]

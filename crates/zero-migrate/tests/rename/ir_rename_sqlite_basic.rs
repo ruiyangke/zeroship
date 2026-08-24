@@ -87,9 +87,13 @@ fn descriptor(table: &str, field: &str, ty: &str) -> CollectionDescriptor {
 /// rebuild consumes are byte-identical to a `t.*`-diff's desired snapshot.
 fn live_schema_for(descriptors: &[CollectionDescriptor]) -> LiveSchema {
     let effective = support::confined_charter();
-    let desired =
-        desired_snapshot_for_dialect(PROJECT, descriptors, &zero_migrate::SQLITE, &effective)
-            .expect("desired snapshot");
+    let desired = desired_snapshot_for_dialect(
+        PROJECT,
+        descriptors,
+        &zero_migrate_sqlite::DIALECT,
+        &effective,
+    )
+    .expect("desired snapshot");
     // Every table is owned by the deploying app (`APP`) — the same-app rename case.
     let table_ownership = desired
         .snapshot
@@ -150,7 +154,7 @@ async fn first_deploy(be: &SqliteBackend, descriptors: &[CollectionDescriptor]) 
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let engine = MigrationEngine::new();
@@ -264,7 +268,7 @@ async fn renamecolumn_lowers_and_applies_as_sqlite_rebuild_through_apply_plan() 
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
@@ -408,7 +412,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
         let author = IrAuthor::new(
             PROJECT,
             APP,
-            &zero_migrate::SQLITE,
+            &zero_migrate_sqlite::DIALECT,
             &support::confined_charter(),
         );
         let engine = MigrationEngine::new();
@@ -472,7 +476,7 @@ async fn renamecolumn_sqlite_renders_neutral_type_as_affinity_not_pg_string() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("events", "count", "total", ColType::Int);
@@ -517,7 +521,7 @@ fn renamecolumn_sqlite_rejects_ir_type_disagreeing_with_live_column() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     // The IR claims the renamed column is `Int` — disagreeing with the live text type.
@@ -557,7 +561,7 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("people", "nickname", "handle", ColType::Text);
@@ -593,7 +597,7 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
@@ -626,7 +630,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let ir = rename_ir("ghost", "a", "b", ColType::Text);
@@ -687,7 +691,7 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
     match err {
         IrLowerError::RenameNeedsLiveTable { table, dialect, .. } => {
             assert_eq!(table, "ghost");
-            assert_eq!(dialect, zero_migrate_ir::dialect::SQLITE);
+            assert_eq!(dialect, zero_migrate_sqlite::DIALECT);
         }
         other => panic!("expected RenameNeedsLiveTable, got: {other}"),
     }
@@ -756,7 +760,7 @@ fn renamecolumn_sqlite_retains_fk_to_another_known_live_table() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
 
@@ -792,7 +796,7 @@ fn renamecolumn_sqlite_rejects_fk_to_table_missing_from_live_table_set() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
 
@@ -825,7 +829,7 @@ fn renamecolumn_sqlite_rejects_rename_to_existing_column() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     // Live `people(nickname, handle)` — both real columns + SDK schema entries.
@@ -883,7 +887,7 @@ async fn two_renames_of_one_table_in_one_migration_are_refused_on_sqlite() {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     let mut ir = rename_ir("people", "nickname", "handle", ColType::Text);
@@ -904,7 +908,7 @@ async fn two_renames_of_one_table_in_one_migration_are_refused_on_sqlite() {
         matches!(
             error,
             IrLowerError::RepeatRenameTarget { ref table, ref dialect }
-                if table == "people" && *dialect == zero_migrate_ir::dialect::SQLITE
+                if table == "people" && *dialect == zero_migrate_sqlite::DIALECT
         ),
         "the refusal is the dedicated variant naming the table: {message}"
     );

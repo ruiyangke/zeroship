@@ -82,12 +82,17 @@ async fn apply_doc(
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
-    let document =
-        zero_migrate::model::load::load_ir_document(&ir, APP, &zero_migrate::SQLITE, reg, None)
-            .expect("load gate (sqlite)");
+    let document = zero_migrate::model::load::load_ir_document(
+        &ir,
+        APP,
+        &zero_migrate_sqlite::DIALECT,
+        reg,
+        None,
+    )
+    .expect("load gate (sqlite)");
     let ops = document.ops.clone();
     let live = LiveSchema::from_tables(live_tables.clone());
     let plan = author
@@ -164,7 +169,7 @@ async fn apply_doc(
 fn canonicalize(mut snap: SchemaSnapshot) -> SchemaSnapshot {
     for t in snap.tables.values_mut() {
         for c in &mut t.columns {
-            c.data_type = zero_migrate::schema::query::renderer(&zero_migrate::SQLITE)
+            c.data_type = zero_migrate::schema::query::renderer(&zero_migrate_sqlite::DIALECT)
                 .canonical_type(&c.data_type);
         }
         // Drop every PRIMARY KEY constraint + its implicit same-named index.
@@ -199,7 +204,7 @@ async fn assert_matches_live(be: &SqliteBackend, ops: &[Op], stage: &str) {
         .unwrap_or_else(|error| panic!("{stage}: introspect live SQLite schema: {error}"));
     let folded = fold_ops(
         ops,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         PROJECT,
         &support::confined_charter(),
     )

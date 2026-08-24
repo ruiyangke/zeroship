@@ -223,11 +223,12 @@ fn exec_cfg() -> ExecutorConfig {
 /// from `fold_ops`, SDK field maps from the `FieldDef` projection, over the same ops.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = charter();
-    let snapshot =
-        fold_ops(history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
-    let sdk_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the history folds to field defs");
+    let snapshot = fold_ops(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+        .expect("the history folds");
+    let sdk_schemas =
+        single_fold::fold(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+            .map(|folded| folded.project_field_defs())
+            .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
     live.unique_indexes = BTreeSet::new();
@@ -250,7 +251,7 @@ fn child_sql(id: &str, column: &str, owner: &str) -> String {
 
 async fn deploy_create(backend: &SqliteBackend, engine: &MigrationEngine) -> Vec<Op> {
     let effective = charter();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
     let create = resolve_create_table_policy(&create_ir(), &effective, PROJECT)
         .expect("the create resolves under the charter");
     let steps = author
@@ -276,7 +277,7 @@ async fn a_sqlite_rename_rebuild_emits_a_foreign_key_over_the_new_local_column()
     let p = paths("fk_definition");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
     let create_ops = deploy_create(&backend, &engine).await;
 
     backend
@@ -544,7 +545,7 @@ async fn the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite() {
     let p = paths("fk_definition_decision");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
     let create_ops = deploy_create(&backend, &engine).await;
 
     let snapshot = backend
@@ -552,10 +553,14 @@ async fn the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite() {
         .await
         .expect("the catalog snapshot reads");
     let mut catalog_live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    catalog_live.sdk_schemas =
-        single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
-            .map(|folded| folded.project_field_defs())
-            .expect("the history folds to field defs");
+    catalog_live.sdk_schemas = single_fold::fold(
+        &create_ops,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the history folds to field defs");
 
     let decision = |live: &LiveSchema| {
         let steps = author
@@ -590,7 +595,7 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
     let p = paths("fk_definition_catalog");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
     let create_ops = deploy_create(&backend, &engine).await;
 
     backend
@@ -630,9 +635,14 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
         .expect("the stored CREATE text");
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sdk_schemas = single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the history folds to field defs");
+    live.sdk_schemas = single_fold::fold(
+        &create_ops,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the history folds to field defs");
 
     let steps = author
         .lower_steps(&rename_ir(), &live)
@@ -730,7 +740,7 @@ async fn a_second_rename_starts_from_a_folded_definition_the_first_rename_alread
     let p = paths("fk_definition_twice");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
     let create_ops = deploy_create(&backend, &engine).await;
 
     let first = rename_ir();
@@ -753,8 +763,8 @@ async fn a_second_rename_starts_from_a_folded_definition_the_first_rename_alread
     history.extend(first.ops.iter().cloned());
 
     // The FOLD's own output, before any rebuild touches it.
-    let folded =
-        fold_ops(&history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
+    let folded = fold_ops(&history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+        .expect("the history folds");
     let fk = folded.tables[TABLE]
         .constraints
         .iter()

@@ -290,7 +290,7 @@ fn a_dropped_unique_constraint_does_not_outlive_itself() {
 #[test]
 fn a_dropped_check_constraint_does_not_outlive_itself() {
     let policy = support::no_inject(SCHEMA);
-    let pg = &zero_migrate::POSTGRES;
+    let pg = &zero_migrate_postgres::DIALECT;
 
     let kept = carrier("check_bound_kept");
     let bound = runtime_field(&kept, pg, &policy, "scores", "score");
@@ -323,7 +323,7 @@ fn a_dropped_check_constraint_does_not_outlive_itself() {
     );
     assert_eq!(membership.get("enum"), None, "and its membership with it");
 
-    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
+    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
         let error = render_artifacts(&carrier("check_bound_dropped"), dialect, SCHEMA, &policy)
             .expect_err("addConstraint(check) is PostgreSQL-only")
             .to_string();
@@ -368,7 +368,7 @@ fn a_re_added_column_does_not_inherit_the_dropped_columns_constraints() {
         );
     }
 
-    let pg = &zero_migrate::POSTGRES;
+    let pg = &zero_migrate_postgres::DIALECT;
     let field = runtime_field(
         &carrier("check_column_dropped_and_readded"),
         pg,
@@ -656,7 +656,7 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
             .map(|_| "rendered".to_string())
             .unwrap_or_else(|e| e.to_string())
     };
-    let pg = &zero_migrate::POSTGRES;
+    let pg = &zero_migrate_postgres::DIALECT;
     assert!(
         outcome("table_created_twice", pg).contains("users"),
         "the duplicate-create probe must name the table: {}",
@@ -687,9 +687,9 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
          reference needs only the name"
     );
     assert!(
-        outcome("column_names_a_dropped_enum", &zero_migrate::SQLITE).contains("tier"),
+        outcome("column_names_a_dropped_enum", &zero_migrate_sqlite::DIALECT).contains("tier"),
         "but SQLite inlines the value list, so it fails closed and names the type: {}",
-        outcome("column_names_a_dropped_enum", &zero_migrate::SQLITE)
+        outcome("column_names_a_dropped_enum", &zero_migrate_sqlite::DIALECT)
     );
     assert!(
         outcome("add_a_column_to_a_missing_table", pg).contains("ghosts"),
@@ -741,7 +741,7 @@ fn the_corpus_golden_records_both_refusals_and_renders() {
                 .1,
         ),
         &support::no_inject(SCHEMA),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &mut out,
     );
     assert_eq!(

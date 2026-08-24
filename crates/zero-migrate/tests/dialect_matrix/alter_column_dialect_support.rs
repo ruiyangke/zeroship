@@ -40,17 +40,17 @@ use zero_migrate::model::validate::validate_ir;
 const REFUSED: &[(&str, &[&zero_migrate::DialectId], &str)] = &[
     (
         "setColumnNotNull",
-        &[&zero_migrate::SQLITE, &zero_migrate::MYSQL],
+        &[&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT],
         r#"{"op":"setColumnNotNull","table":"t","column":"c1"}"#,
     ),
     (
         "dropColumnNotNull",
-        &[&zero_migrate::SQLITE, &zero_migrate::MYSQL],
+        &[&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT],
         r#"{"op":"dropColumnNotNull","table":"t","column":"c1"}"#,
     ),
     (
         "dropColumnDefault",
-        &[&zero_migrate::SQLITE],
+        &[&zero_migrate_sqlite::DIALECT],
         r#"{"op":"dropColumnDefault","table":"t","column":"c1"}"#,
     ),
 ];
@@ -82,7 +82,7 @@ fn postgresql_still_accepts_every_one_of_them() {
     // CONTROL. These operations are genuinely portable on PostgreSQL. Without
     // this arm, refusing them on all three dialects would pass the test above.
     for (name, _, op) in REFUSED {
-        gate(op, &zero_migrate::POSTGRES)
+        gate(op, &zero_migrate_postgres::DIALECT)
             .unwrap_or_else(|code| panic!("{name} must still pass the gate on PostgreSQL: {code}"));
     }
 }

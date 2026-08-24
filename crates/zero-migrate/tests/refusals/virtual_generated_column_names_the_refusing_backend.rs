@@ -35,9 +35,9 @@
 use zero_migrate::render::declarative::{
     desired_snapshot_for_dialect, CollectionDescriptor, FieldDescriptor,
 };
-use zero_migrate::{
-    shipping_backends, BinaryOp, Capability, DialectId, Expr, GeneratedCol, POSTGRES, SQLITE,
-};
+use zero_migrate::{shipping_backends, BinaryOp, Capability, DialectId, Expr, GeneratedCol};
+use zero_migrate_postgres::DIALECT as POSTGRES;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 use crate::support;
 

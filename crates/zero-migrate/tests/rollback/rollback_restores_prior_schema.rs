@@ -89,10 +89,11 @@ async fn an_engine_rendered_down_restores_the_schema_its_up_changed() {
         let author = IrAuthor::new(
             PROJECT,
             APP,
-            &zero_migrate::SQLITE,
+            &zero_migrate_sqlite::DIALECT,
             &support::confined_charter(),
         );
-        let gc = GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate::SQLITE);
+        let gc =
+            GuardConfig::from_policy(support::no_inject(PROJECT), zero_migrate_sqlite::DIALECT);
         if needs_seed {
             let s = format!(r#"{{"ir_version":1,"name":"seed","ops":[{seed}]}}"#);
             let a = author

@@ -21,7 +21,7 @@ use zero_migrate_postgres::guard::{flags_for, SqlGuard};
 fn guard() -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::no_inject_with_extensions("project_acme", &["pgcrypto", "uuid-ossp"]),
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
     ))
 }
 
@@ -1852,7 +1852,7 @@ fn crate_root_reexports_compose_an_end_to_end_check() {
     // A guard + report + flags_for, composed across the neutral root and the vendor.
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("project_x"),
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
     ));
     let up = "CREATE TABLE project_x.t(id int primary key); DROP TABLE project_x.old;";
     let report = g.check(up).expect("safe migration passes");

@@ -452,9 +452,9 @@ fn folding_onto_a_base_that_looked_does_not_erase_the_claim() {
         ..SchemaSnapshot::default()
     };
     for dialect in [
-        &zero_migrate::POSTGRES,
-        &zero_migrate::SQLITE,
-        &zero_migrate::MYSQL,
+        &zero_migrate_postgres::DIALECT,
+        &zero_migrate_sqlite::DIALECT,
+        &zero_migrate_mysql::DIALECT,
     ] {
         let folded = zero_migrate::render::fold::fold_ops_onto(
             &base,
@@ -474,9 +474,9 @@ fn folding_onto_a_base_that_looked_does_not_erase_the_claim() {
     // what keeps the SQLite and MySQL round-trip oracles comparing like with like.
     let silent = SchemaSnapshot::default();
     for (dialect, expected) in [
-        (&zero_migrate::POSTGRES, true),
-        (&zero_migrate::SQLITE, false),
-        (&zero_migrate::MYSQL, false),
+        (&zero_migrate_postgres::DIALECT, true),
+        (&zero_migrate_sqlite::DIALECT, false),
+        (&zero_migrate_mysql::DIALECT, false),
     ] {
         let folded = zero_migrate::render::fold::fold_ops_onto(
             &silent,

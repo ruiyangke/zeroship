@@ -48,7 +48,7 @@ fn verdict_on(dialect: &zero_migrate::DialectId, ops: &str) -> Result<(), String
 }
 
 fn verdict(ops: &str) -> Result<(), String> {
-    verdict_on(&zero_migrate::POSTGRES, ops)
+    verdict_on(&zero_migrate_postgres::DIALECT, ops)
 }
 
 /// Assert WHICH refusal, not merely that the capability gate was not the one.
@@ -198,7 +198,7 @@ fn the_same_envelope_refuses_under_the_dialect_whose_leg_runs() {
     let ops = format!(
         r#"{A},{{"op":"dialectal","legs":{{"sqlite":[{{"op":"dropTable","table":"a"}}]}}}},{ADD_Z}"#
     );
-    verdict_on(&zero_migrate::SQLITE, &ops)
+    verdict_on(&zero_migrate_sqlite::DIALECT, &ops)
         .expect_err("under SQLite that leg runs, so the table really is gone");
 }
 

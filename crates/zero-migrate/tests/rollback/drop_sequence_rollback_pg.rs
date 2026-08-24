@@ -99,13 +99,23 @@ async fn apply_doc(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let policy = support::no_inject(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-    let document =
-        zero_migrate::model::load::load_ir_document(ir, OWNER, &zero_migrate::POSTGRES, reg, None)
-            .map_err(|error| format!("load gate (postgres): {error}"))?;
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        &policy,
+    );
+    let document = zero_migrate::model::load::load_ir_document(
+        ir,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        reg,
+        None,
+    )
+    .map_err(|error| format!("load gate (postgres): {error}"))?;
     let folded = fold_ops(
         history,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &cfg.project_schema,
         &policy,
     )
@@ -150,7 +160,7 @@ async fn live_sequence(
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
     ))
 }
 

@@ -63,7 +63,7 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
     // GENERATED side: produce ops + fold-and-recover.
     let effective = support::confined_charter();
     let ops = descriptors_to_create_ops(&[descriptor], SCHEMA, &effective).expect("producer");
-    let generated = single_fold::fold(&ops, &zero_migrate::POSTGRES, SCHEMA, &effective)
+    let generated = single_fold::fold(&ops, &zero_migrate_postgres::DIALECT, SCHEMA, &effective)
         .map(|folded| folded.project_field_defs())
         .expect("fold");
     let ssn = &generated["people"]["ssn"];

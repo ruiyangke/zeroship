@@ -179,8 +179,13 @@ async fn apply_create(
 ) -> Result<(), String> {
     let resolved_source = serde_json::to_string(resolved)
         .map_err(|error| format!("serialize resolved IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, policy);
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        policy,
+    );
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -270,8 +275,13 @@ async fn measure() -> Measured {
         // What the two offline replays say, over the SAME op stream.
         let mut ops = resolved.ops.clone();
         ops.push(rename_op());
-        let folded = fold_ops(&ops, &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
-            .map_err(|error| format!("fold the PostgreSQL ops: {error}"))?;
+        let folded = fold_ops(
+            &ops,
+            &zero_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+            &policy,
+        )
+        .map_err(|error| format!("fold the PostgreSQL ops: {error}"))?;
         let folded = folded
             .tables
             .get(TABLE)
@@ -280,9 +290,14 @@ async fn measure() -> Measured {
             .map(|generated| generated.expr.clone())
             .ok_or_else(|| "the folded snapshot carries no generated body".to_string())?;
 
-        let fields = single_fold::fold(&ops, &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
-            .map(|folded| folded.project_field_defs())
-            .map_err(|error| format!("fold the ops to field defs: {error}"))?;
+        let fields = single_fold::fold(
+            &ops,
+            &zero_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+            &policy,
+        )
+        .map(|folded| folded.project_field_defs())
+        .map_err(|error| format!("fold the ops to field defs: {error}"))?;
         let descriptor = fields
             .get(TABLE)
             .and_then(|table| table.get(GENERATED_COLUMN))

@@ -105,7 +105,7 @@ fn statements(ir: &str, dialect: &zero_migrate::DialectId) -> Vec<String> {
 /// that is already deployed.
 #[test]
 fn a_sqlite_trigger_renders_these_exact_bytes() {
-    let rendered = statements(TRIGGER_IR, &zero_migrate::SQLITE);
+    let rendered = statements(TRIGGER_IR, &zero_migrate_sqlite::DIALECT);
 
     let create = rendered
         .iter()
@@ -141,7 +141,7 @@ fn a_sqlite_trigger_renders_these_exact_bytes() {
 /// the invariant that no such edit is allowed to drop.
 #[test]
 fn no_identifier_in_a_rendered_sqlite_trigger_is_left_bare() {
-    let rendered = statements(TRIGGER_IR, &zero_migrate::SQLITE);
+    let rendered = statements(TRIGGER_IR, &zero_migrate_sqlite::DIALECT);
     let create = rendered
         .iter()
         .find(|s| s.contains("CREATE TRIGGER"))

@@ -46,14 +46,14 @@ const OWNER: &str = "app_test";
 /// [`mysql_emits_no_encryption_sentinel_to_disagree_with`]), so there is nothing for the
 /// runtime descriptor to disagree with there.
 const SENTINEL_DIALECTS: [(&str, &zero_migrate::DialectId); 2] = [
-    ("postgres", &zero_migrate::POSTGRES),
-    ("sqlite", &zero_migrate::SQLITE),
+    ("postgres", &zero_migrate_postgres::DIALECT),
+    ("sqlite", &zero_migrate_sqlite::DIALECT),
 ];
 
 const ALL_DIALECTS: [(&str, &zero_migrate::DialectId); 3] = [
-    ("postgres", &zero_migrate::POSTGRES),
-    ("sqlite", &zero_migrate::SQLITE),
-    ("mysql", &zero_migrate::MYSQL),
+    ("postgres", &zero_migrate_postgres::DIALECT),
+    ("sqlite", &zero_migrate_sqlite::DIALECT),
+    ("mysql", &zero_migrate_mysql::DIALECT),
 ];
 
 /// `createTable` with one encrypted column whose inner type is `inner`, preceded by a
@@ -276,7 +276,7 @@ fn mysql_emits_no_encryption_sentinel_to_disagree_with() {
     ] {
         let sql = rendered_sql(
             create_ops(json!("int"), inner.clone()),
-            &zero_migrate::MYSQL,
+            &zero_migrate_mysql::DIALECT,
         );
         assert!(
             enc_sentinels(&sql).is_empty(),

@@ -165,7 +165,7 @@ async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
         apply(
             &backend,
             &cfg,
-            &zero_migrate::MYSQL,
+            &zero_migrate_mysql::DIALECT,
             &envelope("setup", base_ops()),
         )
         .await?;
@@ -176,7 +176,7 @@ async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
         let refusal = match apply(
             &backend,
             &cfg,
-            &zero_migrate::MYSQL,
+            &zero_migrate_mysql::DIALECT,
             &envelope("select_body", vec![trigger("tg_bad", select_statement())]),
         )
         .await
@@ -205,7 +205,7 @@ async fn mysql_refuses_a_select_trigger_body_and_keeps_a_delete_one() {
         apply(
             &backend,
             &cfg,
-            &zero_migrate::MYSQL,
+            &zero_migrate_mysql::DIALECT,
             &envelope("delete_body", vec![trigger("tg_good", delete_statement())]),
         )
         .await?;
@@ -256,7 +256,7 @@ async fn sqlite_still_accepts_a_select_trigger_body() {
     apply(
         &backend,
         &cfg,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &envelope("setup", base_ops()),
     )
     .await
@@ -267,7 +267,7 @@ async fn sqlite_still_accepts_a_select_trigger_body() {
     apply(
         &backend,
         &cfg,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &envelope("select_body", vec![trigger("tg_ok", select_statement())]),
     )
     .await

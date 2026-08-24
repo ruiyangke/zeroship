@@ -133,7 +133,7 @@ pub fn confined_charter() -> EffectivePolicy {
 pub fn sqlite_line1_guard() -> Box<dyn zero_migrate::guard::MigrationGuard> {
     zero_migrate::guard_for(&zero_migrate::guard::GuardConfig::from_policy(
         no_inject("main"),
-        zero_migrate::SQLITE,
+        zero_migrate_sqlite::DIALECT,
     ))
 }
 

@@ -155,14 +155,14 @@ fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
     let effective = support::confined_charter();
     let generated = render_artifacts(
         &people_ops_generated(),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
     .expect("generated render");
     let manual = render_artifacts_from_descriptors(
         &[people_descriptor()],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -185,7 +185,7 @@ fn generated_and_manual_sources_emit_byte_identical_runtime_json() {
 fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -245,7 +245,7 @@ fn emitted_runtime_json_parses_and_satisfies_the_v1_shape() {
 fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -302,7 +302,7 @@ fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
 fn check_reports_drift_when_committed_differs_and_clean_when_identical() {
     let artifacts = render_artifacts_from_descriptors(
         &[people_descriptor()],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )

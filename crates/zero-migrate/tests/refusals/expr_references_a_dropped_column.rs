@@ -34,7 +34,8 @@ const TABLE: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","t
 fn verdict(tail: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{TABLE},{tail}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, &zero_migrate::POSTGRES).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, &zero_migrate_postgres::DIALECT)
+        .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 const DROP_V: &str = r#"{"op":"dropColumn","table":"a","column":"v"}"#;
@@ -128,6 +129,6 @@ fn a_check_on_another_table_is_not_affected_by_this_drop() {
         r#"{{"ir_version":1,"name":"n","ops":[{TABLE},{{"op":"createTable","name":"b","columns":[{{"name":"c0","type":"int","nullable":false}},{{"name":"v","type":"int","nullable":true}}],"primaryKey":["c0"]}},{DROP_V},{{"op":"addConstraint","table":"b","constraint":{{"name":"ck","kind":{{"kind":"check","expr":{{"node":"binOp","op":"gt","lhs":{{"node":"colRef","name":"v"}},"rhs":{{"node":"literal","value":0}}}}}}}}}}]}}"#
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, &zero_migrate::POSTGRES)
+    validate_ir(&ir, &zero_migrate_postgres::DIALECT)
         .expect("dropping a.v must not block a CHECK over b.v");
 }

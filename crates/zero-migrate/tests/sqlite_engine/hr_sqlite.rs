@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use tempfile::TempDir;
-use zero_migrate::{Approval, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr, SQLITE};
+use zero_migrate::{Approval, ExecutorConfig, LiveSchema, MigrationEngine, MigrationIr};
 use zero_migrate_sqlite::SqliteBackend;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 const PROJECT: &str = "app_hr";
 const APP: &str = "app_hr";

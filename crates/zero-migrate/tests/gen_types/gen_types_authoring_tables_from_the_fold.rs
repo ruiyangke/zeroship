@@ -103,9 +103,9 @@ use zero_migrate::{render_artifacts, EffectivePolicy};
 const SCHEMA: &str = "public";
 
 const DIALECTS: [&zero_migrate::DialectId; 3] = [
-    &zero_migrate::POSTGRES,
-    &zero_migrate::SQLITE,
-    &zero_migrate::MYSQL,
+    &zero_migrate_postgres::DIALECT,
+    &zero_migrate_sqlite::DIALECT,
+    &zero_migrate_mysql::DIALECT,
 ];
 
 fn parse(ops: &str) -> Vec<Op> {
@@ -272,7 +272,11 @@ fn the_per_field_reader_is_not_a_broken_instrument() {
    "runtimeOptions":{"softDelete":true,"versioning":false}}
 ]"#,
     );
-    let text = env_db_ts(&ops, &zero_migrate::POSTGRES, &support::no_inject(SCHEMA));
+    let text = env_db_ts(
+        &ops,
+        &zero_migrate_postgres::DIALECT,
+        &support::no_inject(SCHEMA),
+    );
     let block = block(&text, "users");
     assert_eq!(
         block.columns.len(),
@@ -388,7 +392,10 @@ fn a_replaced_single_column_primary_key_moves_in_env_db_ts() {
 /// asserted separately rather than assumed to follow from the single-column arm.
 #[test]
 fn a_replaced_composite_primary_key_reaches_the_table_level_clause() {
-    for dialect in [&zero_migrate::POSTGRES, &zero_migrate::MYSQL] {
+    for dialect in [
+        &zero_migrate_postgres::DIALECT,
+        &zero_migrate_mysql::DIALECT,
+    ] {
         let text = env_db_ts(
             &parse(PK_REPLACE_COMPOSITE),
             dialect,
@@ -411,7 +418,7 @@ fn a_replaced_composite_primary_key_reaches_the_table_level_clause() {
     assert!(
         render_artifacts(
             &parse(PK_REPLACE_COMPOSITE),
-            &zero_migrate::SQLITE,
+            &zero_migrate_sqlite::DIALECT,
             SCHEMA,
             &support::no_inject(SCHEMA)
         )
@@ -617,7 +624,7 @@ const EVERY_OTHER_FIELD: &str = r#"[
 /// cannot assert fields on them.
 #[test]
 fn every_other_field_of_the_authoring_map_reaches_env_db_ts_unchanged() {
-    let dialect = &zero_migrate::POSTGRES;
+    let dialect = &zero_migrate_postgres::DIALECT;
     {
         let text = env_db_ts(
             &parse(EVERY_OTHER_FIELD),
@@ -885,12 +892,12 @@ fn corpus_lines(
 ) {
     // Preserve the closed enum's historical debug labels because these strings
     // are part of the corpus golden wire, not merely assertion context.
-    let d = if dialect == &zero_migrate::POSTGRES {
+    let d = if dialect == &zero_migrate_postgres::DIALECT {
         "Postgres"
-    } else if dialect == &zero_migrate::SQLITE {
+    } else if dialect == &zero_migrate_sqlite::DIALECT {
         "Sqlite"
     } else {
-        assert_eq!(dialect, &zero_migrate::MYSQL);
+        assert_eq!(dialect, &zero_migrate_mysql::DIALECT);
         "Mysql"
     };
     let rendered = match render_artifacts(ops, dialect, SCHEMA, policy) {
@@ -1362,7 +1369,7 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
             .map(|_| "rendered".to_string())
             .unwrap_or_else(|e| e.to_string())
     };
-    let pg = &zero_migrate::POSTGRES;
+    let pg = &zero_migrate_postgres::DIALECT;
     assert!(
         outcome("alter_primary_key_without_a_candidate", pg).contains("UNIQUE candidate"),
         "the no-candidate probe must be refused for that reason: {}",
@@ -1384,9 +1391,16 @@ fn the_refusal_probes_still_exercise_the_arms_they_name() {
         outcome("duplicate_enum", pg)
     );
     assert!(
-        outcome("table_level_check_off_postgres", &zero_migrate::SQLITE).contains("CHECK"),
+        outcome(
+            "table_level_check_off_postgres",
+            &zero_migrate_sqlite::DIALECT
+        )
+        .contains("CHECK"),
         "the table-level CHECK probe must be refused off Postgres: {}",
-        outcome("table_level_check_off_postgres", &zero_migrate::SQLITE)
+        outcome(
+            "table_level_check_off_postgres",
+            &zero_migrate_sqlite::DIALECT
+        )
     );
     // And the controls that stop the four above from passing for the wrong reason.
     assert_eq!(

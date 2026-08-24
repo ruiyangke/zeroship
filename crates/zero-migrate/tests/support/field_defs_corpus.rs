@@ -40,9 +40,9 @@ use zero_migrate::{render_artifacts, DialectId, EffectivePolicy};
 pub const SCHEMA: &str = "public";
 
 pub const DIALECTS: [&DialectId; 3] = [
-    &zero_migrate::POSTGRES,
-    &zero_migrate::SQLITE,
-    &zero_migrate::MYSQL,
+    &zero_migrate_postgres::DIALECT,
+    &zero_migrate_sqlite::DIALECT,
+    &zero_migrate_mysql::DIALECT,
 ];
 
 /// The recorded op fixtures - the same 27 `tests/op_fixture_goldens.rs` owns and the
@@ -363,7 +363,7 @@ pub fn sqlite_rebuild_create(
         table,
         schema,
         &FkEmission::Inline,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         true,
         policy,
     )
@@ -407,12 +407,12 @@ pub fn corpus_lines(
 ) {
     // Preserve the closed enum's historical debug labels because these strings
     // are part of the corpus golden wire, not merely assertion context.
-    let d = if dialect == &zero_migrate::POSTGRES {
+    let d = if dialect == &zero_migrate_postgres::DIALECT {
         "Postgres"
-    } else if dialect == &zero_migrate::SQLITE {
+    } else if dialect == &zero_migrate_sqlite::DIALECT {
         "Sqlite"
     } else {
-        assert_eq!(dialect, &zero_migrate::MYSQL);
+        assert_eq!(dialect, &zero_migrate_mysql::DIALECT);
         "Mysql"
     };
     let rendered = match render_artifacts(ops, dialect, SCHEMA, policy) {
@@ -441,7 +441,7 @@ pub fn corpus_lines(
                 serde_json::to_string(def).expect("a FieldDef serialises")
             ));
         }
-        if dialect == &zero_migrate::SQLITE {
+        if dialect == &zero_migrate_sqlite::DIALECT {
             match sqlite_rebuild_create(table, schema, policy) {
                 Ok(sql) => out.push(format!("{label}|{d}|sqlite_create|{table}|{sql}")),
                 Err(error) => {

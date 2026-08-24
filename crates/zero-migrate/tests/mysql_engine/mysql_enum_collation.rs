@@ -122,8 +122,13 @@ async fn deploy_mysql(
         .map_err(|e| format!("resolve create-table policy: {e}"))?;
     let resolved_source =
         serde_json::to_string(&resolved).map_err(|e| format!("serialize resolved IR: {e}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_mysql::DIALECT,
+        &policy,
+    );
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let artifact = author
         .load_and_lower_guarded(
@@ -356,7 +361,11 @@ async fn a_wrong_case_enum_member_is_refused_on_postgres() {
             .batch(&format!("CREATE SCHEMA \"{schema}\""))
             .await
             .map_err(|e| format!("create the probe schema: {e}"))?;
-        for statement in lower(&zero_migrate::POSTGRES, &schema, r#"["active","archived"]"#)? {
+        for statement in lower(
+            &zero_migrate_postgres::DIALECT,
+            &schema,
+            r#"["active","archived"]"#,
+        )? {
             session
                 .batch(&statement)
                 .await
@@ -404,7 +413,10 @@ async fn an_enum_whose_members_differ_only_in_case_deploys_on_mysql() {
         // SQLite renders the same members as an inline CHECK and PostgreSQL as a
         // native type; both accept the pair. Lowering them here keeps the claim about
         // the AUTHORED schema rather than about one dialect's SQL.
-        for dialect in [&zero_migrate::POSTGRES, &zero_migrate::SQLITE] {
+        for dialect in [
+            &zero_migrate_postgres::DIALECT,
+            &zero_migrate_sqlite::DIALECT,
+        ] {
             lower(dialect, "app", r#"["active","Active"]"#).map_err(|e| {
                 format!("{dialect:?} could not even render the case-pair enum: {e}")
             })?;
@@ -497,7 +509,7 @@ async fn a_deployed_enum_column_does_not_drift_against_its_own_fold() {
         let ops = deploy_mysql(&session, &cfg, r#"["active","archived"]"#).await?;
         let expected = fold_ops(
             &ops,
-            &zero_migrate::MYSQL,
+            &zero_migrate_mysql::DIALECT,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -553,8 +565,8 @@ fn an_ir_enum_column_cannot_declare_case_insensitivity() {
         ],"primaryKey":["id"]}}
     ]}}"#
     );
-    let author = IrAuthor::new("app", OWNER, &zero_migrate::MYSQL, &policy);
-    let guard = GuardConfig::from_policy(policy, zero_migrate::MYSQL);
+    let author = IrAuthor::new("app", OWNER, &zero_migrate_mysql::DIALECT, &policy);
+    let guard = GuardConfig::from_policy(policy, zero_migrate_mysql::DIALECT);
     let registry: BTreeMap<String, String> = BTreeMap::new();
     let refusal = author
         .load_and_lower_guarded(&src, OWNER, &registry, &LiveSchema::default(), &guard)
@@ -627,11 +639,11 @@ fn descriptor_create_ddl(
     let desired = desired_snapshot_for_dialect(
         project,
         std::slice::from_ref(descriptor),
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &effective,
     )
     .map_err(|e| format!("build the desired snapshot: {e}"))?;
-    let plan = DeclarativeAuthor::new_for_dialect(project, OWNER, zero_migrate::MYSQL)
+    let plan = DeclarativeAuthor::new_for_dialect(project, OWNER, zero_migrate_mysql::DIALECT)
         .diff(
             &desired,
             &SchemaSnapshot::default(),

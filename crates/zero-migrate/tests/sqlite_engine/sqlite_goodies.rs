@@ -54,7 +54,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 }
 
 fn sqlite_author() -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE)
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT)
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
@@ -108,9 +108,13 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
         runtime_options: Default::default(),
     };
 
-    let desired =
-        desired_snapshot_for_dialect(PROJECT, &[mk()], &zero_migrate::SQLITE, &effective_policy())
-            .expect("desired");
+    let desired = desired_snapshot_for_dialect(
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("desired");
     let plan = sqlite_author()
         .diff(
             &desired,
@@ -144,9 +148,13 @@ async fn vector_field_applies_as_blob_and_redfiff_is_zero_drift() {
     // proves on its side.
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
-    let desired2 =
-        desired_snapshot_for_dialect(PROJECT, &[mk()], &zero_migrate::SQLITE, &effective_policy())
-            .expect("re-desired");
+    let desired2 = desired_snapshot_for_dialect(
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("re-desired");
     let plan2 = sqlite_author()
         .diff(&desired2, &live, &own, &[], &effective_policy())
         .expect("re-diff must succeed");
@@ -186,9 +194,13 @@ async fn vector_inner_product_metric_applies_no_metric_error_on_engine_path() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired =
-        desired_snapshot_for_dialect(PROJECT, &[mk()], &zero_migrate::SQLITE, &effective_policy())
-            .expect("an innerProduct vector descriptor compiles (no author-time metric refusal)");
+    let desired = desired_snapshot_for_dialect(
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("an innerProduct vector descriptor compiles (no author-time metric refusal)");
     let plan = sqlite_author()
         .diff(
             &desired,
@@ -233,9 +245,13 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
-    let desired =
-        desired_snapshot_for_dialect(PROJECT, &[mk()], &zero_migrate::SQLITE, &effective_policy())
-            .expect("desired");
+    let desired = desired_snapshot_for_dialect(
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("desired");
     let plan = sqlite_author()
         .diff(
             &desired,
@@ -281,9 +297,13 @@ async fn geopoint_field_applies_as_blob_and_drift_round_trips() {
     // A re-diff against the REAL introspected live snapshot → ZERO drift.
     let live = be.snapshot_schema_sqlite().await.expect("introspect live");
     let own = ownership_of(&desired);
-    let desired2 =
-        desired_snapshot_for_dialect(PROJECT, &[mk()], &zero_migrate::SQLITE, &effective_policy())
-            .expect("re-desired");
+    let desired2 = desired_snapshot_for_dialect(
+        PROJECT,
+        &[mk()],
+        &zero_migrate_sqlite::DIALECT,
+        &effective_policy(),
+    )
+    .expect("re-desired");
     let plan2 = sqlite_author()
         .diff(&desired2, &live, &own, &[], &effective_policy())
         .expect("re-diff must succeed");

@@ -29,7 +29,7 @@
 //! Everything else in the repo already said MySQL cannot rename a column.
 //! `docs/dialects.md`'s "Rename column" row reads `MySQL 8 | No`.
 //! MySQL's validation policy records `renameColumn | base` as `Unsupported`. The
-//! IR lane onto the SAME `ExpandContractAuthor` answers `&zero_migrate::MYSQL =>
+//! IR lane onto the SAME `ExpandContractAuthor` answers `&MYSQL =>
 //! Err(UnsupportedInV1)` at plan time. The declarative differ was the lone dissenter
 //! and the only path that reached a live server, so the guard makes the code honor a
 //! promise it was breaking rather than changing what the product offers.
@@ -259,8 +259,9 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
         .expect("create the isolated declarative-rename database");
 
     let engine = MigrationEngine::new();
-    let author = DeclarativeAuthor::new_for_dialect(database.clone(), OWNER, zero_migrate::MYSQL);
-    let guard = GuardConfig::from_policy(policy_for(&database), zero_migrate::MYSQL);
+    let author =
+        DeclarativeAuthor::new_for_dialect(database.clone(), OWNER, zero_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(policy_for(&database), zero_migrate_mysql::DIALECT);
     let backend = MysqlBackend::new_generic(&session);
 
     // v1: create the table, then WRITE A ROW. Without data a rename cannot lose
@@ -269,7 +270,7 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
     let desired1 = desired_snapshot_for_dialect(
         &database,
         std::slice::from_ref(&v1),
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &policy_for(&database),
     )
     .expect("desired v1");
@@ -318,7 +319,7 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
     let desired2 = desired_snapshot_for_dialect(
         &database,
         std::slice::from_ref(&v2),
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &policy_for(&database),
     )
     .expect("desired v2");
@@ -420,7 +421,7 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
     // keeps the property ("the refusal names the dialect it stopped for") true for a
     // backend this test does not know about.
     assert!(
-        refusal.contains(zero_migrate_ir::dialect::MYSQL.as_str()),
+        refusal.contains(zero_migrate_mysql::DIALECT.as_str()),
         "the refusal names the dialect it stopped for: {refusal}"
     );
     assert!(
@@ -533,15 +534,16 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
         .expect("create the isolated declarative-rename schema");
 
     let engine = MigrationEngine::new();
-    let author = DeclarativeAuthor::new_for_dialect(schema.clone(), OWNER, zero_migrate::POSTGRES);
-    let guard = GuardConfig::from_policy(policy_for(&schema), zero_migrate::POSTGRES);
+    let author =
+        DeclarativeAuthor::new_for_dialect(schema.clone(), OWNER, zero_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(policy_for(&schema), zero_migrate_postgres::DIALECT);
     let backend = PostgresBackend::new_generic(&session);
 
     let v1 = people(OLD_COLUMN, false);
     let desired1 = desired_snapshot_for_dialect(
         &schema,
         std::slice::from_ref(&v1),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &policy_for(&schema),
     )
     .expect("desired v1");
@@ -587,7 +589,7 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
     let desired2 = desired_snapshot_for_dialect(
         &schema,
         std::slice::from_ref(&v2),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &policy_for(&schema),
     )
     .expect("desired v2");

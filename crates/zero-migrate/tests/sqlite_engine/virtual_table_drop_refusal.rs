@@ -98,7 +98,7 @@ async fn diff_with_total_ownership(
     let desired = desired_snapshot_for_dialect(
         PROJECT,
         &[posts_descriptor()],
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &effective_policy(),
     )
     .expect("desired");
@@ -107,7 +107,7 @@ async fn diff_with_total_ownership(
         .keys()
         .map(|t| (t.clone(), APP.to_string()))
         .collect();
-    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate::SQLITE).diff(
+    DeclarativeAuthor::new_for_dialect(PROJECT, APP, zero_migrate_sqlite::DIALECT).diff(
         &desired,
         &live,
         &ownership,

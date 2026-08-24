@@ -172,10 +172,20 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
         })
         .to_string();
 
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
-        let base = fold_ops(&[], &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
-            .map_err(|error| format!("fold the empty base: {error}"))?;
+        let author = IrAuthor::new(
+            &cfg.project_schema,
+            OWNER,
+            &zero_migrate_postgres::DIALECT,
+            &policy,
+        );
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+        let base = fold_ops(
+            &[],
+            &zero_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+            &policy,
+        )
+        .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
         let artifact = author
             .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
@@ -196,7 +206,7 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
             serde_json::from_str(&doc).map_err(|error| format!("parse the IR: {error}"))?;
         let expected = fold_ops(
             &authored.ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -342,9 +352,9 @@ async fn role_attributes_round_trip_and_drift_is_named() {
         })
         .to_string();
 
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
-        let base = fold_ops(&[], &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
+        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate_postgres::DIALECT, &policy);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+        let base = fold_ops(&[], &zero_migrate_postgres::DIALECT, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
         let artifact = author
@@ -366,7 +376,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
             serde_json::from_str(&doc).map_err(|error| format!("parse the IR: {error}"))?;
         let expected = fold_ops(
             &authored.ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &policy,
         )
@@ -516,10 +526,20 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
         })
         .to_string();
 
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
-        let base = fold_ops(&[], &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
-            .map_err(|error| format!("fold the empty base: {error}"))?;
+        let author = IrAuthor::new(
+            &cfg.project_schema,
+            OWNER,
+            &zero_migrate_postgres::DIALECT,
+            &policy,
+        );
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+        let base = fold_ops(
+            &[],
+            &zero_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+            &policy,
+        )
+        .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
         let artifact = author
             .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
@@ -662,11 +682,21 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
                     "ops": ops
                 })
                 .to_string();
-                let author =
-                    IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-                let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
-                let base = fold_ops(&[], &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
-                    .map_err(|error| format!("fold base: {error}"))?;
+                let author = IrAuthor::new(
+                    &cfg.project_schema,
+                    OWNER,
+                    &zero_migrate_postgres::DIALECT,
+                    &policy,
+                );
+                let guard_cfg =
+                    GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+                let base = fold_ops(
+                    &[],
+                    &zero_migrate_postgres::DIALECT,
+                    &cfg.project_schema,
+                    &policy,
+                )
+                .map_err(|error| format!("fold base: {error}"))?;
                 let live = LiveSchema::from_catalog_snapshot(base, OWNER);
                 let artifact = author
                     .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)
@@ -850,11 +880,21 @@ async fn grant_and_revoke_move_exactly_the_named_privilege() {
                     "ops": ops
                 })
                 .to_string();
-                let author =
-                    IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-                let guard_cfg = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
-                let base = fold_ops(&[], &zero_migrate::POSTGRES, &cfg.project_schema, &policy)
-                    .map_err(|error| format!("fold base: {error}"))?;
+                let author = IrAuthor::new(
+                    &cfg.project_schema,
+                    OWNER,
+                    &zero_migrate_postgres::DIALECT,
+                    &policy,
+                );
+                let guard_cfg =
+                    GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
+                let base = fold_ops(
+                    &[],
+                    &zero_migrate_postgres::DIALECT,
+                    &cfg.project_schema,
+                    &policy,
+                )
+                .map_err(|error| format!("fold base: {error}"))?;
                 let live = LiveSchema::from_catalog_snapshot(base, OWNER);
                 let artifact = author
                     .load_and_lower_guarded(&doc, OWNER, &BTreeMap::new(), &live, &guard_cfg)

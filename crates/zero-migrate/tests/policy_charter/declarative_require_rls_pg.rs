@@ -48,7 +48,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         effective,
     )
 }
@@ -164,14 +164,14 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
 }
 
 fn guard_cfg(policy: &EffectivePolicy) -> GuardConfig {
-    GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES)
+    GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT)
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
     DeclarativeAuthor::new_for_dialect(
         cfg.project_schema.clone(),
         "app_test",
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
     )
 }
 

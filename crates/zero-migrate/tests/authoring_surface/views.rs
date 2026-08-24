@@ -261,19 +261,19 @@ fn lower_up(dialect: &zero_migrate::DialectId, op: Op) -> Result<String, Box<IrL
 
 #[test]
 fn structured_select_supports_group_by_and_having_on_all_dialects() {
-    let pg = lower_up(&zero_migrate::POSTGRES, grouped_order_totals_view()).unwrap();
+    let pg = lower_up(&zero_migrate_postgres::DIALECT, grouped_order_totals_view()).unwrap();
     assert_eq!(
         pg,
         "CREATE VIEW \"app\".\"order_totals\" AS SELECT \"customer_id\", count(*) AS \"n\", sum(\"amount\") AS \"revenue\" FROM \"app\".\"orders\" WHERE (\"status\" = 'paid') GROUP BY \"customer_id\" HAVING (count(\"id\") > 5) ORDER BY \"customer_id\" ASC LIMIT 10"
     );
 
-    let sqlite = lower_up(&zero_migrate::SQLITE, grouped_order_totals_view()).unwrap();
+    let sqlite = lower_up(&zero_migrate_sqlite::DIALECT, grouped_order_totals_view()).unwrap();
     assert_eq!(
         sqlite,
         "CREATE VIEW \"order_totals\" AS SELECT \"customer_id\", count(*) AS \"n\", sum(\"amount\") AS \"revenue\" FROM \"orders\" WHERE (\"status\" = 'paid') GROUP BY \"customer_id\" HAVING (count(\"id\") > 5) ORDER BY \"customer_id\" ASC LIMIT 10"
     );
 
-    let mysql = lower_up(&zero_migrate::MYSQL, grouped_order_totals_view()).unwrap();
+    let mysql = lower_up(&zero_migrate_mysql::DIALECT, grouped_order_totals_view()).unwrap();
     assert_eq!(
         mysql,
         "CREATE VIEW `app`.`order_totals` AS SELECT `customer_id`, count(*) AS `n`, sum(`amount`) AS `revenue` FROM `app`.`orders` WHERE (`status` = _utf8mb4 X'70616964') GROUP BY `customer_id` HAVING (count(`id`) > 5) ORDER BY `customer_id` ASC LIMIT 10"
@@ -285,7 +285,7 @@ fn structured_select_allows_aggregates_in_projection_and_having() {
     let trusted = SchemaScope::Unconfined;
     validate_ir_scoped(
         &ir(grouped_order_totals_view()),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         Some(&trusted),
     )
     .expect("projection and HAVING are grouped SELECT contexts and allow aggregates");
@@ -293,14 +293,18 @@ fn structured_select_allows_aggregates_in_projection_and_having() {
 
 #[test]
 fn pg_first_aggregate_view_renders_on_postgres_and_refuses_off_pg() {
-    let pg = lower_up(&zero_migrate::POSTGRES, pg_first_aggregate_rollup_view()).unwrap();
+    let pg = lower_up(
+        &zero_migrate_postgres::DIALECT,
+        pg_first_aggregate_rollup_view(),
+    )
+    .unwrap();
     assert_eq!(
         pg,
         "CREATE VIEW \"app\".\"order_rollups\" AS SELECT \"customer_id\", string_agg(\"item_name\", ', ') AS \"item_names\", array_agg(\"id\") AS \"order_ids\", bool_and(\"fulfilled\") AS \"all_fulfilled\" FROM \"app\".\"orders\" GROUP BY \"customer_id\" HAVING (count(\"id\") > 1)"
     );
 
     let trusted = SchemaScope::Unconfined;
-    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
+    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
         let err = validate_ir_scoped(
             &ir(pg_first_aggregate_rollup_view()),
             dialect,
@@ -328,7 +332,8 @@ fn structured_select_rejects_aggregate_group_by_item() {
     select.group_by = vec![count(Expr::col("id"))];
 
     let trusted = SchemaScope::Unconfined;
-    let err = validate_ir_scoped(&ir(op), &zero_migrate::POSTGRES, Some(&trusted)).unwrap_err();
+    let err =
+        validate_ir_scoped(&ir(op), &zero_migrate_postgres::DIALECT, Some(&trusted)).unwrap_err();
     assert_eq!(err.code, CODE_AGGREGATE_IN_SCALAR_CONTEXT);
     assert!(
         err.reason.contains("GROUP BY") && err.reason.contains("count"),
@@ -338,7 +343,11 @@ fn structured_select_rejects_aggregate_group_by_item() {
 
 #[test]
 fn pg_structured_view_renders_exact_select_where() {
-    let up = lower_up(&zero_migrate::POSTGRES, create_structured_view(None, None)).unwrap();
+    let up = lower_up(
+        &zero_migrate_postgres::DIALECT,
+        create_structured_view(None, None),
+    )
+    .unwrap();
     assert_eq!(
         up,
         "CREATE VIEW \"app\".\"active_users\" AS SELECT \"id\", \"email\" FROM \"app\".\"users\" WHERE (\"deleted_at\" IS NULL)"
@@ -348,7 +357,7 @@ fn pg_structured_view_renders_exact_select_where() {
 #[test]
 fn replace_renders_or_replace_on_pg_and_drop_create_on_sqlite() {
     let pg = lower_up(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         create_structured_view(Some(true), None),
     )
     .unwrap();
@@ -358,7 +367,7 @@ fn replace_renders_or_replace_on_pg_and_drop_create_on_sqlite() {
     );
 
     let sqlite = lower_up(
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         create_structured_view(Some(true), None),
     )
     .unwrap();
@@ -370,7 +379,11 @@ fn replace_renders_or_replace_on_pg_and_drop_create_on_sqlite() {
 
 #[test]
 fn sqlite_structured_view_renders_dialect_quoted_select() {
-    let up = lower_up(&zero_migrate::SQLITE, create_structured_view(None, None)).unwrap();
+    let up = lower_up(
+        &zero_migrate_sqlite::DIALECT,
+        create_structured_view(None, None),
+    )
+    .unwrap();
     assert_eq!(
         up,
         "CREATE VIEW \"active_users\" AS SELECT \"id\", \"email\" FROM \"users\" WHERE (\"deleted_at\" IS NULL)"
@@ -380,7 +393,7 @@ fn sqlite_structured_view_renders_dialect_quoted_select() {
 #[test]
 fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
     let pg = lower_up(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         create_structured_view(None, Some(true)),
     )
     .unwrap();
@@ -392,7 +405,7 @@ fn materialized_view_renders_on_pg_and_is_unsupported_on_sqlite() {
     let trusted = SchemaScope::Unconfined;
     let err = validate_ir_scoped(
         &ir(create_structured_view(None, Some(true))),
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         Some(&trusted),
     )
     .unwrap_err();
@@ -409,7 +422,7 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
     let trusted = SchemaScope::Unconfined;
     let err = validate_ir_scoped(
         &ir(create_structured_view(Some(true), Some(true))),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         Some(&trusted),
     )
     .unwrap_err();
@@ -418,12 +431,12 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
     assert!(err.reason.contains("replace+materialized"));
     // The non-contradictory shapes still lower fine.
     assert!(lower_up(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         create_structured_view(Some(true), None)
     )
     .is_ok());
     assert!(lower_up(
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         create_structured_view(None, Some(true))
     )
     .is_ok());
@@ -433,26 +446,33 @@ fn replace_plus_materialized_is_rejected_on_pg_not_silently_dropped() {
 fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     let structured = ir(create_structured_view(None, None));
     let confined = SchemaScope::Single(SCHEMA.to_string());
-    validate_ir_scoped(&structured, &zero_migrate::POSTGRES, Some(&confined)).unwrap();
+    validate_ir_scoped(
+        &structured,
+        &zero_migrate_postgres::DIALECT,
+        Some(&confined),
+    )
+    .unwrap();
 
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(SCHEMA), zero_migrate::POSTGRES);
+    let guard_cfg =
+        GuardConfig::from_policy(support::no_inject(SCHEMA), zero_migrate_postgres::DIALECT);
     IrAuthor::new(
         SCHEMA,
         "app_a",
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     )
     .lower_guarded(&structured, &guard_cfg, &LiveSchema::default())
     .expect("plain structured view is core under confined lower_guarded");
 
     let raw = ir(raw_view("SELECT id FROM app.users", None));
-    let err = validate_ir_scoped(&raw, &zero_migrate::POSTGRES, Some(&confined)).unwrap_err();
+    let err =
+        validate_ir_scoped(&raw, &zero_migrate_postgres::DIALECT, Some(&confined)).unwrap_err();
     assert_eq!(err.code, CODE_VENDOR_OP_DENIED);
 
     let err = IrAuthor::new(
         SCHEMA,
         "app_a",
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     )
     .lower_guarded(&raw, &guard_cfg, &LiveSchema::default())
@@ -466,13 +486,13 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     ));
 
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
-    validate_ir_scoped(&raw, &zero_migrate::POSTGRES, Some(&operator)).unwrap();
+    validate_ir_scoped(&raw, &zero_migrate_postgres::DIALECT, Some(&operator)).unwrap();
     // The `sql.raw_view_body` GRANT is what admits this at lower - the same charter
     // the guard above would compose, not the widened scope beside it.
     IrAuthor::new(
         SCHEMA,
         "app_a",
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::operator_charter("app"),
     )
     .with_schema_scope(operator)
@@ -486,7 +506,7 @@ fn raw_view_body_must_be_single_top_level_select_even_with_capability() {
     for sql in ["DROP TABLE x", "SELECT 1; DROP TABLE x"] {
         let err = validate_ir_scoped(
             &ir(raw_view(sql, None)),
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             Some(&operator),
         )
         .unwrap_err();
@@ -504,7 +524,7 @@ fn raw_view_body_runs_function_body_deny_list_scan() {
     let operator = SchemaScope::Allowlist(vec![SCHEMA.to_string()]);
     let err = validate_ir_scoped(
         &ir(raw_view("SELECT pg_read_file('/etc/passwd')", None)),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         Some(&operator),
     )
     .unwrap_err();
@@ -529,8 +549,8 @@ fn raw_view_body_native_quoting_is_not_judged_by_the_postgres_parser() {
     // Each body uses the identifier quoting its OWN dialect spells natively, and
     // which libpg_query cannot parse.
     for (dialect, sql) in [
-        (&zero_migrate::MYSQL, "SELECT `id` FROM app.users"),
-        (&zero_migrate::SQLITE, "SELECT [id] FROM app.users"),
+        (&zero_migrate_mysql::DIALECT, "SELECT `id` FROM app.users"),
+        (&zero_migrate_sqlite::DIALECT, "SELECT [id] FROM app.users"),
     ] {
         validate_ir_scoped(&ir(raw_view(sql, None)), dialect, Some(&operator)).unwrap_or_else(
             |err| {
@@ -544,7 +564,7 @@ fn raw_view_body_native_quoting_is_not_judged_by_the_postgres_parser() {
         // is that the check belongs to whichever backend owns the grammar.
         let err = validate_ir_scoped(
             &ir(raw_view(sql, None)),
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             Some(&operator),
         )
         .unwrap_err();
@@ -593,7 +613,7 @@ fn postgres_raw_view_body_gate_is_unchanged_behind_the_vendor_seam() {
     ] {
         let err = validate_ir_scoped(
             &ir(raw_view(sql, None)),
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             Some(&operator),
         )
         .unwrap_err();
@@ -609,7 +629,7 @@ fn postgres_raw_view_body_gate_is_unchanged_behind_the_vendor_seam() {
     // Cross-schema confinement is part of the same gate and is still enforced.
     let err = validate_ir_scoped(
         &ir(raw_view("SELECT id FROM other_tenant.users", None)),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         Some(&operator),
     )
     .unwrap_err();
@@ -640,12 +660,12 @@ fn mysql_and_sqlite_bypass_the_raw_view_body_gate_for_now() {
         // Refused on PostgreSQL...
         validate_ir_scoped(
             &ir(raw_view(sql, None)),
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             Some(&operator),
         )
         .expect_err(sql);
         // ...and admitted, unchecked, on both bypassing backends.
-        for dialect in [&zero_migrate::MYSQL, &zero_migrate::SQLITE] {
+        for dialect in [&zero_migrate_mysql::DIALECT, &zero_migrate_sqlite::DIALECT] {
             assert!(
                 validate_ir_scoped(&ir(raw_view(sql, None)), dialect, Some(&operator)).is_ok(),
                 "{} is documented as bypassing the raw-view-body gate, so {sql:?} is admitted \
@@ -694,7 +714,7 @@ fn structured_select_supports_order_limit_and_closed_expr_projection() {
         replace: None,
         materialized: None,
     };
-    let up = lower_up(&zero_migrate::POSTGRES, op).unwrap();
+    let up = lower_up(&zero_migrate_postgres::DIALECT, op).unwrap();
     assert_eq!(
         up,
         "CREATE VIEW \"app\".\"user_names\" (\"display_name\") AS SELECT (\"first_name\" || \"last_name\") AS \"display_name\" FROM \"app\".\"users\" AS \"u\" ORDER BY \"u\".\"created_at\" DESC"
@@ -706,7 +726,7 @@ fn fold_records_views_and_drop_removes_them() {
     let create = create_structured_view(None, None);
     let folded = fold_ops(
         std::slice::from_ref(&create),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )
@@ -755,7 +775,7 @@ fn fold_records_views_and_drop_removes_them() {
     };
     let folded = fold_ops(
         &[create, drop],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::no_inject("app"),
     )

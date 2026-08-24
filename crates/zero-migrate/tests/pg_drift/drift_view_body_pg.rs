@@ -218,7 +218,7 @@ async fn snapshot_after_mutation(
             &mut expected,
             &mut actual,
             &AuthoredViewBodyRenderer {
-                dialect: &zero_migrate_ir::dialect::POSTGRES,
+                dialect: &zero_migrate_postgres::DIALECT,
             },
         )
         .await
@@ -243,7 +243,7 @@ async fn install(session: &support::PgDevSession, schema: &str) -> Result<Schema
     let ir = fixture(schema);
     let expected = fold_ops(
         &ir.ops,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         schema,
         &support::no_inject(schema),
     )
@@ -251,7 +251,7 @@ async fn install(session: &support::PgDevSession, schema: &str) -> Result<Schema
     let migrations = IrAuthor::new(
         schema,
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::no_inject(schema),
     )
     .lower(&ir, &LiveSchema::default())
@@ -433,7 +433,7 @@ async fn live_postgres_reports_view_body_drift() {
             &mut clean_expected,
             &mut clean,
             &AuthoredViewBodyRenderer {
-                dialect: &zero_migrate_ir::dialect::POSTGRES,
+                dialect: &zero_migrate_postgres::DIALECT,
             },
         )
         .await

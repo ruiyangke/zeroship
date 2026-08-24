@@ -99,7 +99,7 @@ fn registry(tables: &[&str]) -> BTreeMap<String, String> {
 }
 
 fn lower_drop_from_history(history: &[Op], table: &str, if_exists: Option<bool>) -> Migration {
-    let dialect = &zero_migrate::POSTGRES;
+    let dialect = &zero_migrate_postgres::DIALECT;
     let pol = policy(PROJECT_SCHEMA);
     let folded =
         fold_ops(history, dialect, PROJECT_SCHEMA, &pol).expect("the policy history must fold");
@@ -206,10 +206,20 @@ async fn apply_doc(
 ) -> Result<Vec<Migration>, String> {
     let backend = PostgresBackend::new_generic(session);
     let pol = policy(&cfg.project_schema);
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &pol);
-    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate::POSTGRES);
-    let folded = fold_ops(history, &zero_migrate::POSTGRES, &cfg.project_schema, &pol)
-        .map_err(|error| format!("fold the applied history: {error}"))?;
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        &pol,
+    );
+    let guard = GuardConfig::from_policy(pol.clone(), zero_migrate_postgres::DIALECT);
+    let folded = fold_ops(
+        history,
+        &zero_migrate_postgres::DIALECT,
+        &cfg.project_schema,
+        &pol,
+    )
+    .map_err(|error| format!("fold the applied history: {error}"))?;
     let live = LiveSchema::from_catalog_snapshot(folded, OWNER);
     let artifact = author
         .load_and_lower_guarded(ir, OWNER, &registry(&[LIVE_TABLE]), &live, &guard)
@@ -292,7 +302,7 @@ async fn live_policy_definition(
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zero_migrate::MigrationGuard> {
     guard_for(&GuardConfig::from_policy(
         policy(&cfg.project_schema),
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
     ))
 }
 
@@ -303,7 +313,7 @@ async fn positive_unguarded_drop_policy_from_folded_history_has_create_inverse()
     assert_eq!(migration.down.as_deref(), Some(orders_inverse()));
     guard_for(&GuardConfig::from_policy(
         policy(RECORDED_SCHEMA),
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
     ))
     .as_ref()
     .check(migration.down.as_deref().expect("the inverse exists"))
@@ -347,7 +357,7 @@ async fn positive_same_named_policies_on_two_tables_restore_only_the_dropped_one
 
     let folded_both = fold_ops(
         &both,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         PROJECT_SCHEMA,
         &policy(PROJECT_SCHEMA),
     )
@@ -372,7 +382,7 @@ async fn positive_same_named_policies_on_two_tables_restore_only_the_dropped_one
     let history_after_drop = vec![orders, invoices, drop_policy_op(ORDERS, None)];
     let folded_after_drop = fold_ops(
         &history_after_drop,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         PROJECT_SCHEMA,
         &policy(PROJECT_SCHEMA),
     )

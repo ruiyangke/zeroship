@@ -29,7 +29,8 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 
 use zero_migrate::model::ir::{MigrationIr, Op};
-use zero_migrate::{render_artifacts, SQLITE};
+use zero_migrate::render_artifacts;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 const SCHEMA: &str = "public";
 
@@ -62,7 +63,7 @@ fn history() -> Vec<Op> {
 fn field_names(collection: &str) -> BTreeSet<String> {
     let artifacts = render_artifacts(
         &history(),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )

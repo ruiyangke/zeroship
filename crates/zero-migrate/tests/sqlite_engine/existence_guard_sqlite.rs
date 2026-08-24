@@ -90,7 +90,7 @@ fn lower(op: Op) -> Vec<Migration> {
     let author = IrAuthor::new(
         "main",
         "app_test",
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::confined_charter(),
     );
     author

@@ -54,9 +54,14 @@ fn folded(ops_after_create: &str) -> serde_json::Value {
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
-    let map = single_fold::fold(&ir.ops, &zero_migrate::POSTGRES, "public", &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the fold succeeds");
+    let map = single_fold::fold(
+        &ir.ops,
+        &zero_migrate_postgres::DIALECT,
+        "public",
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
 
@@ -142,9 +147,14 @@ fn folded_with_default(ops_after_create: &str) -> serde_json::Value {
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
-    let map = single_fold::fold(&ir.ops, &zero_migrate::POSTGRES, "public", &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the fold succeeds");
+    let map = single_fold::fold(
+        &ir.ops,
+        &zero_migrate_postgres::DIALECT,
+        "public",
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
 
@@ -207,9 +217,14 @@ fn folded_ref(a_table: &str, rest: &str) -> serde_json::Value {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{REF_TARGET},{a_table}{rest}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
-    let map = single_fold::fold(&ir.ops, &zero_migrate::POSTGRES, "public", &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the fold succeeds");
+    let map = single_fold::fold(
+        &ir.ops,
+        &zero_migrate_postgres::DIALECT,
+        "public",
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
 
@@ -281,9 +296,14 @@ fn folded_table(a_table: &str, rest: &str) -> serde_json::Value {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{a_table}{rest}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     let effective = support::operator_charter("public");
-    let map = single_fold::fold(&ir.ops, &zero_migrate::POSTGRES, "public", &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the fold succeeds");
+    let map = single_fold::fold(
+        &ir.ops,
+        &zero_migrate_postgres::DIALECT,
+        "public",
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
 

@@ -40,7 +40,7 @@ fn comment_sql(schema: Option<&str>) -> String {
     let author = IrAuthor::new(
         SCHEMA,
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::no_inject("app"),
     );
     let ops = vec![Op::Comment {

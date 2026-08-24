@@ -59,7 +59,7 @@ fn posts_descriptor() -> CollectionDescriptor {
 fn descriptor_reference_field_emits_one_foreign_key() {
     let artifacts = render_artifacts_from_descriptors(
         &[users_descriptor(), posts_descriptor()],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -191,7 +191,7 @@ fn envelope_ops(ir: &MigrationIr) -> Vec<Op> {
 fn envelope_ref_brand_emits_one_foreign_key() {
     let artifacts = render_artifacts(
         &envelope_ops(&ref_brand_envelope()),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -213,14 +213,14 @@ fn descriptor_and_envelope_reference_sources_are_byte_identical() {
     let effective = support::confined_charter();
     let manual = render_artifacts_from_descriptors(
         &[users_descriptor(), posts_descriptor()],
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
     .expect("manual render");
     let generated = render_artifacts(
         &envelope_ops(&ref_brand_envelope()),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &effective,
     )
@@ -246,7 +246,7 @@ fn envelope_declaring_the_same_foreign_key_twice_is_still_refused() {
     // not soften this.
     let error = render_artifacts(
         &envelope_ops(&doubly_declared_reference_envelope()),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )
@@ -262,7 +262,7 @@ fn envelope_declaring_the_same_foreign_key_twice_is_still_refused() {
 fn envelope_typed_column_reference_emits_one_foreign_key() {
     let artifacts = render_artifacts(
         &envelope_ops(&typed_reference_envelope()),
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         SCHEMA,
         &support::confined_charter(),
     )

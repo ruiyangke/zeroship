@@ -222,10 +222,10 @@ impl<'a> Deployment<'a> {
         let author = IrAuthor::new(
             &self.cfg.project_schema,
             OWNER,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &self.policy,
         );
-        let guard = GuardConfig::from_policy(self.policy.clone(), zero_migrate::POSTGRES);
+        let guard = GuardConfig::from_policy(self.policy.clone(), zero_migrate_postgres::DIALECT);
         let artifact = author
             .load_and_lower_guarded(&resolved_source, OWNER, registry, &live, &guard)
             .map_err(|error| format!("AUTHORING REFUSED: {error}"))?;
@@ -286,7 +286,7 @@ impl<'a> Deployment<'a> {
     async fn drift(&self, ops: &[zero_migrate::model::ir::Op]) -> Result<StructuralDrift, String> {
         let expected = fold_ops(
             ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &self.cfg.project_schema,
             &self.policy,
         )

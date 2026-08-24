@@ -57,7 +57,7 @@ fn verdict_on(dialect: &DialectId, ops: &str) -> Result<(), String> {
 }
 
 fn verdict(ops: &str) -> Result<(), String> {
-    verdict_on(&zero_migrate::POSTGRES, ops)
+    verdict_on(&zero_migrate_postgres::DIALECT, ops)
 }
 
 /// Assert WHICH op named the column, not merely that a column was mentioned.
@@ -162,13 +162,13 @@ fn each_target_selects_only_its_exact_leg() {
     let ops = format!(
         r#"{A},{DROP_V},{{"op":"dialectal","legs":{{"sqlite":[{INDEX_V}],"postgres":[{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"c0"}}]}}]}}}}"#
     );
-    let sqlite = verdict_on(&zero_migrate::SQLITE, &ops)
+    let sqlite = verdict_on(&zero_migrate_sqlite::DIALECT, &ops)
         .expect_err("the sqlite leg runs and names a dropped column");
     assert!(
         sqlite.contains("this createIndex names column"),
         "the SQLite leg must be refused by the same rule as its PostgreSQL twin: {sqlite}"
     );
-    verdict_on(&zero_migrate::POSTGRES, &ops)
+    verdict_on(&zero_migrate_postgres::DIALECT, &ops)
         .expect("PostgreSQL selects its own leg, which names a live column");
 }
 

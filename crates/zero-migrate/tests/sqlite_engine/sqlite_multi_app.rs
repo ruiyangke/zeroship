@@ -60,7 +60,7 @@ fn backend(p: &Paths) -> SqliteBackend {
 
 /// A `SQLite` author deploying AS `owner_app`.
 fn author_as(owner_app: &str) -> DeclarativeAuthor {
-    DeclarativeAuthor::new_for_dialect(PROJECT, owner_app, zero_migrate::SQLITE)
+    DeclarativeAuthor::new_for_dialect(PROJECT, owner_app, zero_migrate_sqlite::DIALECT)
 }
 
 fn effective_policy() -> zero_migrate::EffectivePolicy {
@@ -75,7 +75,7 @@ fn desired_snapshot(
     zero_migrate::desired_snapshot_for_dialect(
         project_schema,
         descriptors,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         effective,
     )
 }

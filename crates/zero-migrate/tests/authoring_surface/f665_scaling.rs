@@ -73,7 +73,7 @@ fn validate_shape(n: usize, c: usize) -> f64 {
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("envelope parses");
     let start = Instant::now();
-    validate_ir(&ir, &zero_migrate::POSTGRES).expect("validates");
+    validate_ir(&ir, &zero_migrate_postgres::DIALECT).expect("validates");
     start.elapsed().as_secs_f64()
 }
 

@@ -85,7 +85,7 @@ fn lower(op: &str, live: &LiveSchema) -> Result<(), String> {
     let author = IrAuthor::new(
         "public",
         "f721",
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::confined_charter(),
     );
     author

@@ -87,8 +87,13 @@ async fn apply_doc(
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::MYSQL, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::MYSQL);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_mysql::DIALECT,
+        &policy,
+    );
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_mysql::DIALECT);
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;
@@ -123,7 +128,7 @@ async fn assert_no_drift(
 ) -> Result<(), String> {
     let expected = fold_ops(
         ops,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &cfg.project_schema,
         &support::no_inject(&cfg.project_schema),
     )
@@ -314,8 +319,13 @@ async fn a_narrowing_retype_folds_the_contract_mysql_reports_for_the_target() {
         // ops are already in `all_ops` from the deploy above, so what is folded here
         // is exactly the stream that ran.
         let policy = support::no_inject(&cfg.project_schema);
-        let folded = fold_ops(&all_ops, &zero_migrate::MYSQL, &cfg.project_schema, &policy)
-            .map_err(|error| format!("fold the retype offline: {error}"))?;
+        let folded = fold_ops(
+            &all_ops,
+            &zero_migrate_mysql::DIALECT,
+            &cfg.project_schema,
+            &policy,
+        )
+        .map_err(|error| format!("fold the retype offline: {error}"))?;
         let folded_contract = column_contract(&folded, "widths", "label")?;
         if folded_contract != target_contract {
             return Err(format!(
@@ -502,7 +512,7 @@ async fn folding_onto_a_live_mysql_base_keeps_the_contracts_the_server_reported(
         let expected = fold_ops_onto(
             &base,
             &added,
-            &zero_migrate::MYSQL,
+            &zero_migrate_mysql::DIALECT,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )

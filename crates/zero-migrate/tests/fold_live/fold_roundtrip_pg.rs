@@ -171,8 +171,13 @@ async fn apply_ir(
         .map_err(|error| format!("resolve create-table policy: {error}"))?;
     let resolved_source = serde_json::to_string(&resolved)
         .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-    let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
+    let author = IrAuthor::new(
+        &cfg.project_schema,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        &policy,
+    );
+    let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,
@@ -229,7 +234,7 @@ async fn assert_roundtrip(
 
         let expected = fold_ops(
             &ir.ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &cfg.project_schema,
             &support::no_inject(&cfg.project_schema),
         )
@@ -415,8 +420,13 @@ async fn assert_lifecycle_roundtrip(
             .map_err(|error| format!("resolve create-table policy: {error}"))?;
         let resolved_source = serde_json::to_string(&resolved)
             .map_err(|error| format!("serialize resolved test IR: {error}"))?;
-        let author = IrAuthor::new(&cfg.project_schema, OWNER, &zero_migrate::POSTGRES, &policy);
-        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate::POSTGRES);
+        let author = IrAuthor::new(
+            &cfg.project_schema,
+            OWNER,
+            &zero_migrate_postgres::DIALECT,
+            &policy,
+        );
+        let guard = GuardConfig::from_policy(policy.clone(), zero_migrate_postgres::DIALECT);
         let artifact = author
             .load_and_lower_guarded(
                 &resolved_source,
@@ -472,7 +482,7 @@ async fn assert_lifecycle_roundtrip(
                 let (checkpoint, _) = checkpoints[next_checkpoint];
                 let expected = fold_ops(
                     &applied_ops,
-                    &zero_migrate::POSTGRES,
+                    &zero_migrate_postgres::DIALECT,
                     &cfg.project_schema,
                     &policy,
                 )

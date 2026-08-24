@@ -5,9 +5,12 @@
 //! list. A fourth backend could not extend that closed bridge. The rows now live in their vendor
 //! crates and this integration test checks the composition that can see all three.
 
-use zero_migrate::{shipping_backends, Capability, MYSQL, POSTGRES, SQLITE};
+use zero_migrate::{shipping_backends, Capability};
 use zero_migrate_backend::registry::BackendVendor;
 use zero_migrate_ir::ir::PartitionBounds;
+use zero_migrate_mysql::DIALECT as MYSQL;
+use zero_migrate_postgres::DIALECT as POSTGRES;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 const REGISTERED_VENDOR_FLOOR: usize = 3;
 const EXPECTED_VENDOR_IDS: &[&str] = &["postgres", "sqlite", "mysql"];

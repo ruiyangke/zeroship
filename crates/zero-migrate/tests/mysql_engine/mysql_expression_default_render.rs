@@ -93,7 +93,7 @@ fn rendered_up(ir: &MigrationIr) -> String {
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::MYSQL,
+        &zero_migrate_mysql::DIALECT,
         &support::confined_charter(),
     );
     let steps = author

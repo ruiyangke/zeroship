@@ -154,7 +154,7 @@ async fn sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composi
     let error = IrAuthor::new(
         "main",
         OWNER,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject("main"),
     )
     .lower(&composite_fk_ir("sqlite_collation_fk"), &live)
@@ -256,7 +256,7 @@ async fn postgres_exact_collation_is_introspected_drifted_and_rejected_for_compo
         let error = IrAuthor::new(
             &schema,
             OWNER,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &support::no_inject(&schema),
         )
         .lower(&composite_fk_ir("postgres_collation_fk"), &live)

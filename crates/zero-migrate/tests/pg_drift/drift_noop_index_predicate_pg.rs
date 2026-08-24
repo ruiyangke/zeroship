@@ -153,7 +153,7 @@ async fn live_postgres_does_not_invent_drift_for_a_constant_true_predicate() {
         let ir = fixture();
         let expected = fold_ops(
             &ir.ops,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &schema,
             &support::no_inject("app"),
         )
@@ -161,7 +161,7 @@ async fn live_postgres_does_not_invent_drift_for_a_constant_true_predicate() {
         let migrations = IrAuthor::new(
             &schema,
             OWNER,
-            &zero_migrate::POSTGRES,
+            &zero_migrate_postgres::DIALECT,
             &support::no_inject(&schema),
         )
         .lower(&ir, &LiveSchema::default())

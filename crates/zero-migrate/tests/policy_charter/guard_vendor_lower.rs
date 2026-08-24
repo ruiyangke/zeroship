@@ -40,9 +40,12 @@ use zero_migrate::guard::{
 use zero_migrate::model::capability::OperatorCapability;
 use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::model::policy::{DestructiveOps, SchemaScope};
-use zero_migrate::{DialectId, GuardMode, MYSQL, POSTGRES, SQLITE};
+use zero_migrate::{DialectId, GuardMode};
+use zero_migrate_mysql::DIALECT as MYSQL;
 use zero_migrate_postgres::guard::denylist::rule;
 use zero_migrate_postgres::guard::{flags_for, SqlGuard};
+use zero_migrate_postgres::DIALECT as POSTGRES;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 /// A Platform guard over the real port allowlist (`zero_migrate` / `public`) +
 /// the two ported extensions. Minted via the `for_test` seam, a named alias for

@@ -195,11 +195,12 @@ const RENAME_FORMAT_IR: &str = r#"{
 /// snapshot, which is exactly the consumer this sweep is about.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = support::no_inject(APP);
-    let snapshot =
-        fold_ops(history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
-    let sdk_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the history folds to field defs");
+    let snapshot = fold_ops(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+        .expect("the history folds");
+    let sdk_schemas =
+        single_fold::fold(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+            .map(|folded| folded.project_field_defs())
+            .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
     live
@@ -218,13 +219,13 @@ async fn apply_doc(
     let author = IrAuthor::new(
         PROJECT,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         &support::no_inject(APP),
     );
     let document = zero_migrate::model::load::load_ir_document(
         &ir,
         APP,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         registry,
         None,
     )
@@ -279,7 +280,7 @@ async fn measure(tag: &str) -> Measured {
         .expect("introspect live SQLite schema");
     let folded = fold_ops(
         &ops,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         PROJECT,
         &support::no_inject(APP),
     )
@@ -316,7 +317,7 @@ fn baseline_fold() -> SchemaSnapshot {
         .expect("the create IR resolves");
     fold_ops(
         &resolved.ops,
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         PROJECT,
         &support::no_inject(APP),
     )
@@ -476,7 +477,7 @@ async fn does_the_sqlite_inline_check_keep_its_literals_while_its_reference_move
                 .expect("the never-renamed IR resolves")
                 .ops
         },
-        &zero_migrate::SQLITE,
+        &zero_migrate_sqlite::DIALECT,
         PROJECT,
         &support::no_inject(APP),
     )

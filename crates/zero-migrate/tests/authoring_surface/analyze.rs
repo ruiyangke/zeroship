@@ -520,7 +520,10 @@ fn non_concurrent_index_suggestion_notes_own_nontransactional_migration() {
 // ---------------------------------------------------------------------------
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject("proj_acme"), zero_migrate::POSTGRES)
+    GuardConfig::from_policy(
+        support::no_inject("proj_acme"),
+        zero_migrate_postgres::DIALECT,
+    )
 }
 
 #[test]
@@ -590,7 +593,7 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
     // run the analyzer seam over it.
     let drop = RawSqlAuthor::new(
         "app_acme",
-        zero_migrate::POSTGRES,
+        zero_migrate_postgres::DIALECT,
         support::no_inject("proj_acme"),
     )
     .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
@@ -612,17 +615,20 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
         .to_lowercase()
         .contains("expand-contract"));
     // sanity: a benign additive migration gets no advisories.
-    let add =
-        zero_migrate::DeterministicAuthor::new("proj_acme", "app_acme", zero_migrate::POSTGRES)
-            .author(&zero_migrate::AuthorRequest::CreateTable {
-                name: "orders".into(),
-                columns: vec![Column {
-                    name: "id".into(),
-                    ty: "bigint".into(),
-                    nullable: false,
-                }],
-            })
-            .unwrap();
+    let add = zero_migrate::DeterministicAuthor::new(
+        "proj_acme",
+        "app_acme",
+        zero_migrate_postgres::DIALECT,
+    )
+    .author(&zero_migrate::AuthorRequest::CreateTable {
+        name: "orders".into(),
+        columns: vec![Column {
+            name: "id".into(),
+            ty: "bigint".into(),
+            nullable: false,
+        }],
+    })
+    .unwrap();
     for m in &add {
         assert!(
             analyze_migration(m).is_empty(),

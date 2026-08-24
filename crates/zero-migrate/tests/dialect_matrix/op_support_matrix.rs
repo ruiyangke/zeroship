@@ -17,9 +17,9 @@ use zero_migrate::{
 };
 
 const DIALECTS: [&zero_migrate::DialectId; 3] = [
-    &zero_migrate::POSTGRES,
-    &zero_migrate::SQLITE,
-    &zero_migrate::MYSQL,
+    &zero_migrate_postgres::DIALECT,
+    &zero_migrate_sqlite::DIALECT,
+    &zero_migrate_mysql::DIALECT,
 ];
 
 const EXPECTED_OPS: &[&str] = &[
@@ -337,8 +337,12 @@ fn support_declarations_cover_every_op_and_dialect() {
                     "{tag}: support tier capabilities must match Op::vendor_capabilities"
                 );
                 assert!(
-                    !support.decision(&zero_migrate::SQLITE).is_supported()
-                        && !support.decision(&zero_migrate::MYSQL).is_supported(),
+                    !support
+                        .decision(&zero_migrate_sqlite::DIALECT)
+                        .is_supported()
+                        && !support
+                            .decision(&zero_migrate_mysql::DIALECT)
+                            .is_supported(),
                     "{tag}: vendor-tier ops must be non-PG unsupported"
                 );
             }
@@ -596,8 +600,8 @@ fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
                 validates, decision_supported,
                 "{tag} {dialect:?}: support decision and validate() must agree"
             );
-            let expected_supported =
-                matches!(op, Op::DropPartition { .. }) || dialect == &zero_migrate::POSTGRES;
+            let expected_supported = matches!(op, Op::DropPartition { .. })
+                || dialect == &zero_migrate_postgres::DIALECT;
             assert_eq!(decision_supported, expected_supported, "{tag} {dialect:?}");
         }
     }
@@ -607,11 +611,11 @@ fn partition_ops_and_partition_index_feature_support_matches_current_matrix() {
 fn partitioned_create_table_validates_pg_and_refuses_sqlite_mysql() {
     let op = partitioned_create_table();
     assert!(
-        validate_current(&op, &zero_migrate::POSTGRES),
+        validate_current(&op, &zero_migrate_postgres::DIALECT),
         "partitioned createTable must validate on PostgreSQL"
     );
 
-    for dialect in [&zero_migrate::SQLITE, &zero_migrate::MYSQL] {
+    for dialect in [&zero_migrate_sqlite::DIALECT, &zero_migrate_mysql::DIALECT] {
         let err = validate_ir_scoped(
             &one_op_ir(op.clone()),
             dialect,
@@ -640,7 +644,7 @@ fn identity_always_support_decision_matches_validate_and_is_pg_only() {
             );
             assert_eq!(
                 decision_supported,
-                dialect == &zero_migrate::POSTGRES,
+                dialect == &zero_migrate_postgres::DIALECT,
                 "{tag} {dialect:?}: identity(always:true) is PostgreSQL-only"
             );
         }
@@ -661,7 +665,7 @@ fn nextval_default_support_decision_matches_validate_and_is_pg_only() {
             );
             assert_eq!(
                 decision_supported,
-                dialect == &zero_migrate::POSTGRES,
+                dialect == &zero_migrate_postgres::DIALECT,
                 "{tag} {dialect:?}: nextval defaults are PostgreSQL-only"
             );
         }

@@ -33,7 +33,8 @@ use zero_migrate::model::validate::validate_ir;
 fn verdict(ops: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, &zero_migrate::POSTGRES).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, &zero_migrate_postgres::DIALECT)
+        .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 const A: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false}],"primaryKey":["c0"]}"#;
@@ -225,6 +226,6 @@ fn sqlite_is_refused_too_because_its_acceptance_is_only_deferred_failure() {
         view_from("a")
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, &zero_migrate::SQLITE)
+    validate_ir(&ir, &zero_migrate_sqlite::DIALECT)
         .expect_err("SQLite accepts this DDL but the view it creates can never be read");
 }

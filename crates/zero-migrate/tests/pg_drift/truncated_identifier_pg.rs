@@ -32,10 +32,9 @@ use crate::support::apply_pg as apply;
 use zero_migrate::model::ir::ExistenceGuard;
 use zero_migrate::model::probe::{GuardDir, GuardProbe};
 use zero_migrate::render::existence_probe::{decide, GuardVerdict};
-use zero_migrate::{
-    Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase, POSTGRES,
-};
+use zero_migrate::{Approval, ExecutorConfig, IrAuthor, LiveSchema, MigrationIr, Op, Phase};
 use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
+use zero_migrate_postgres::DIALECT as POSTGRES;
 
 /// PostgreSQL's NAMEDATALEN-derived identifier bound, in bytes.
 const MAX: usize = 63;
@@ -191,7 +190,7 @@ async fn a_truncated_constraint_name_can_no_longer_make_a_guarded_drop_journal_a
     let author = IrAuthor::new(
         &cfg.project_schema,
         "app_test",
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &support::no_inject(&cfg.project_schema),
     );
 

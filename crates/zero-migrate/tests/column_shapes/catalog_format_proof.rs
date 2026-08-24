@@ -62,13 +62,13 @@ fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> Colum
     };
     match evidence {
         Evidence::Uuid | Evidence::UuidWithoutCheck => {
-            if dialect == &zero_migrate::POSTGRES {
+            if dialect == &zero_migrate_postgres::DIALECT {
                 column.data_type = "uuid".to_string();
-            } else if dialect == &zero_migrate::MYSQL {
+            } else if dialect == &zero_migrate_mysql::DIALECT {
                 column.data_type = "varchar(36)".to_string();
                 column.text_storage = Some(ascii_bin());
                 column.catalog_uuid_format_check = matches!(evidence, Evidence::Uuid);
-            } else if dialect == &zero_migrate::SQLITE {
+            } else if dialect == &zero_migrate_sqlite::DIALECT {
                 column.data_type = "text".to_string();
                 column.catalog_uuid_format_check = matches!(evidence, Evidence::Uuid);
             } else {
@@ -76,10 +76,12 @@ fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> Colum
             }
         }
         Evidence::TypeId(_) | Evidence::TypeIdWithoutCheck => {
-            if dialect == &zero_migrate::MYSQL {
+            if dialect == &zero_migrate_mysql::DIALECT {
                 column.data_type = "varchar(191)".to_string();
                 column.text_storage = Some(ascii_bin());
-            } else if dialect == &zero_migrate::POSTGRES || dialect == &zero_migrate::SQLITE {
+            } else if dialect == &zero_migrate_postgres::DIALECT
+                || dialect == &zero_migrate_sqlite::DIALECT
+            {
                 column.data_type = "text".to_string();
             } else {
                 panic!("unregistered test dialect {dialect}");
@@ -91,9 +93,11 @@ fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> Colum
             }
         }
         Evidence::PlainText => {
-            if dialect == &zero_migrate::MYSQL {
+            if dialect == &zero_migrate_mysql::DIALECT {
                 column.data_type = "varchar(191)".to_string();
-            } else if dialect == &zero_migrate::POSTGRES || dialect == &zero_migrate::SQLITE {
+            } else if dialect == &zero_migrate_postgres::DIALECT
+                || dialect == &zero_migrate_sqlite::DIALECT
+            {
                 column.data_type = "text".to_string();
             } else {
                 panic!("unregistered test dialect {dialect}");
@@ -205,9 +209,9 @@ fn lower(
 }
 
 const DIALECTS: [&zero_migrate::DialectId; 3] = [
-    &zero_migrate::POSTGRES,
-    &zero_migrate::MYSQL,
-    &zero_migrate::SQLITE,
+    &zero_migrate_postgres::DIALECT,
+    &zero_migrate_mysql::DIALECT,
+    &zero_migrate_sqlite::DIALECT,
 ];
 
 #[test]
@@ -322,7 +326,7 @@ fn a_chained_typed_reference_target_without_its_own_check_stays_rejected() {
     // contract, so a chained PostgreSQL UUID target is legitimately provable.
     let table_level = table_constraint_ir("table_level_chained_uuid", "uuid", None);
     let column_level = column_reference_ir("column_level_chained_uuid", "uuid", None);
-    for dialect in [&zero_migrate::MYSQL, &zero_migrate::SQLITE] {
+    for dialect in [&zero_migrate_mysql::DIALECT, &zero_migrate_sqlite::DIALECT] {
         let live = live(dialect, Evidence::UuidWithoutCheck);
         for (surface, ir) in [
             ("table-level", &table_level),

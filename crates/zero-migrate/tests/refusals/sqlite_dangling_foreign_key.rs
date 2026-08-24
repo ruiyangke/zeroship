@@ -99,7 +99,10 @@ fn a_foreign_key_target_that_is_never_created_is_refused_on_every_dialect() {
 
     // PostgreSQL and MySQL already refuse this, and are quoted here so the SQLite
     // arm is measured against its own engine's behaviour rather than my opinion.
-    for dialect in [&zero_migrate::POSTGRES, &zero_migrate::MYSQL] {
+    for dialect in [
+        &zero_migrate_postgres::DIALECT,
+        &zero_migrate_mysql::DIALECT,
+    ] {
         let refusal = lower_for(dialect, &bytes).expect_err(&format!(
             "{dialect:?} must refuse a foreign key to a table nothing creates"
         ));
@@ -109,7 +112,7 @@ fn a_foreign_key_target_that_is_never_created_is_refused_on_every_dialect() {
         );
     }
 
-    let refusal = lower_for(&zero_migrate::SQLITE, &bytes).expect_err(
+    let refusal = lower_for(&zero_migrate_sqlite::DIALECT, &bytes).expect_err(
         "SQLite must refuse a foreign key whose target no operation creates and no live \
          schema holds. Inlining it produces a table that cannot accept a row: the applied \
          schema references p(c0), and INSERT INTO k fails with `no such table: main.p`",
@@ -128,7 +131,7 @@ async fn a_forward_reference_still_lowers_and_applies_on_sqlite() {
     // on SQLite".
     let bytes = envelope(&[create_k_referencing_p(), create_p()]);
 
-    let artifact = lower_for(&zero_migrate::SQLITE, &bytes)
+    let artifact = lower_for(&zero_migrate_sqlite::DIALECT, &bytes)
         .expect("a forward reference whose target IS created later must still lower on SQLite");
 
     let db = open_db("fk-forward");

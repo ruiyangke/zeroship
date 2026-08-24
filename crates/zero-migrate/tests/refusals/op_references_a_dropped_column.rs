@@ -34,7 +34,8 @@ const TABLE: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","t
 fn verdict(tail: &str) -> Result<(), String> {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{TABLE},{tail}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, &zero_migrate::POSTGRES).map_err(|e| format!("{}: {}", e.code, e.reason))
+    validate_ir(&ir, &zero_migrate_postgres::DIALECT)
+        .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
 #[test]
@@ -107,6 +108,6 @@ fn dropping_a_column_of_a_different_table_does_not_block() {
         r#"{{"ir_version":1,"name":"n","ops":[{TABLE},{{"op":"createTable","name":"b","columns":[{{"name":"c0","type":"int","nullable":false}},{{"name":"v","type":"int","nullable":true}}],"primaryKey":["c0"]}},{{"op":"dropColumn","table":"b","column":"v"}},{{"op":"createIndex","name":"ix","table":"a","columns":[{{"kind":"column","name":"v"}}]}}]}}"#
     );
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, &zero_migrate::POSTGRES)
+    validate_ir(&ir, &zero_migrate_postgres::DIALECT)
         .expect("a drop on another table must not block this one");
 }

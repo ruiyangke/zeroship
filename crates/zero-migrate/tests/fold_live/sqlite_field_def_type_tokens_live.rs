@@ -152,10 +152,10 @@ async fn stored_types(backend: &SqliteBackend, table: &str, column: &str) -> Vec
 /// through the arm that reads the map's content.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let policy = support::no_inject(PROJECT);
-    let snapshot =
-        fold_ops(history, &zero_migrate::SQLITE, PROJECT, &policy).expect("the history folds");
+    let snapshot = fold_ops(history, &zero_migrate_sqlite::DIALECT, PROJECT, &policy)
+        .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sdk_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &policy)
+    live.sdk_schemas = single_fold::fold(history, &zero_migrate_sqlite::DIALECT, PROJECT, &policy)
         .expect("the history folds")
         .project_field_defs();
     live
@@ -167,7 +167,7 @@ async fn apply(backend: &SqliteBackend, source: &str, live: &LiveSchema) -> Vec<
     let exec_cfg = ExecutorConfig::new(PROJECT, PROJECT, policy.clone());
     let raw: MigrationIr = serde_json::from_str(source).expect("test IR parses");
     let resolved = resolve_create_table_policy(&raw, &policy, PROJECT).expect("the IR resolves");
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &policy);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &policy);
     let steps = author.lower_steps(&resolved, live).expect("the IR lowers");
     MigrationEngine::new()
         .apply_plan(

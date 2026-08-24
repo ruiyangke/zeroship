@@ -282,11 +282,12 @@ fn exec_cfg() -> ExecutorConfig {
 /// rebuild renders the new table with the POST-rename column name.
 fn folded_live_schema(history: &[Op]) -> LiveSchema {
     let effective = charter();
-    let snapshot =
-        fold_ops(history, &zero_migrate::SQLITE, PROJECT, &effective).expect("the history folds");
-    let sdk_schemas = single_fold::fold(history, &zero_migrate::SQLITE, PROJECT, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the history folds to field defs");
+    let snapshot = fold_ops(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+        .expect("the history folds");
+    let sdk_schemas =
+        single_fold::fold(history, &zero_migrate_sqlite::DIALECT, PROJECT, &effective)
+            .map(|folded| folded.project_field_defs())
+            .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
     live
@@ -298,7 +299,7 @@ fn insert_sql(id: &str, column: &str, qty: i64, label: &str) -> String {
 
 async fn deploy(backend: &SqliteBackend, engine: &MigrationEngine, ir: &MigrationIr) -> Vec<Op> {
     let effective = charter();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
     let create = resolve_create_table_policy(ir, &effective, PROJECT)
         .expect("the create resolves under the charter");
     let steps = author
@@ -326,7 +327,7 @@ async fn apply_fold_seeded_rename(
     create_ops: &[Op],
 ) -> Result<(), String> {
     let effective = charter();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
     let live = folded_live_schema(create_ops);
     let steps = author
         .lower_steps(&rename_ir(), &live)
@@ -786,7 +787,7 @@ async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_
     let p = paths("indexed_rename_catalog");
     let backend = SqliteBackend::open(&p.app, &p.journal).expect("open hardened sqlite backend");
     let engine = MigrationEngine::new();
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
     let create_ops = deploy(&backend, &engine, &create_ir()).await;
 
     backend
@@ -815,9 +816,14 @@ async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_
          through the replay arm"
     );
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sdk_schemas = single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the history folds to field defs");
+    live.sdk_schemas = single_fold::fold(
+        &create_ops,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the history folds to field defs");
 
     let steps = author
         .lower_steps(&rename_ir(), &live)
@@ -906,7 +912,10 @@ fn neither_postgres_nor_mysql_lowers_a_rename_into_a_sqlite_rebuild() {
     // (`validated createIndex partial predicate on unsupported dialect reached lower`)
     // and the point here is the ROUTING of the rename, not the index surface.
     let create_ir = plain_index_create_ir();
-    for dialect in [&zero_migrate::POSTGRES, &zero_migrate::MYSQL] {
+    for dialect in [
+        &zero_migrate_postgres::DIALECT,
+        &zero_migrate_mysql::DIALECT,
+    ] {
         let author = IrAuthor::new(PROJECT, APP, dialect, &effective);
         let create = resolve_create_table_policy(&create_ir, &effective, PROJECT)
             .expect("the create resolves under the charter");
@@ -942,7 +951,7 @@ fn neither_postgres_nor_mysql_lowers_a_rename_into_a_sqlite_rebuild() {
             }
             Err(error) => assert_eq!(
                 dialect,
-                &zero_migrate::MYSQL,
+                &zero_migrate_mysql::DIALECT,
                 "only MySQL declines to lower a live rename at all: {error:?}"
             ),
         }
@@ -1283,14 +1292,24 @@ columns = [
 
     let create = resolve_create_table_policy(&create_ir, &effective, PROJECT)
         .expect("the create resolves under the injected charter");
-    let snapshot = fold_ops(&create.ops, &zero_migrate::SQLITE, PROJECT, &effective)
-        .expect("the history folds");
+    let snapshot = fold_ops(
+        &create.ops,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sdk_schemas = single_fold::fold(&create.ops, &zero_migrate::SQLITE, PROJECT, &effective)
-        .map(|folded| folded.project_field_defs())
-        .expect("the history folds to field defs");
+    live.sdk_schemas = single_fold::fold(
+        &create.ops,
+        &zero_migrate_sqlite::DIALECT,
+        PROJECT,
+        &effective,
+    )
+    .map(|folded| folded.project_field_defs())
+    .expect("the history folds to field defs");
 
-    let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
+    let author = IrAuthor::new(PROJECT, APP, &zero_migrate_sqlite::DIALECT, &effective);
     let error = author
         .lower_steps(&rename_ir(), &live)
         .expect_err(

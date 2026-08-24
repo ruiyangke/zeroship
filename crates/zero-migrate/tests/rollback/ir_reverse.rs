@@ -147,7 +147,7 @@ fn a_reverse_and_a_reason_it_has_none_cannot_both_be_declared() {
     let error = load_ir_document(
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -175,7 +175,7 @@ fn an_inverse_reaching_a_table_the_app_does_not_own_is_refused() {
     let error = load_ir_document(
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -213,7 +213,7 @@ fn an_inverse_that_could_never_apply_is_refused_when_the_migration_is_authored()
     let error = load_ir_document(
         &serde_json::to_string(&ir).expect("envelope serializes"),
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -238,8 +238,14 @@ fn a_valid_reverse_loads_and_survives_the_round_trip() {
     ir.inverse_ops = Some(vec![delete_op()]);
     let bytes = serde_json::to_string(&ir).expect("envelope serializes");
 
-    let loaded = load_ir_document(&bytes, OWNER, &zero_migrate::POSTGRES, &registry(), None)
-        .expect("a data migration with a valid inverse must load");
+    let loaded = load_ir_document(
+        &bytes,
+        OWNER,
+        &zero_migrate_postgres::DIALECT,
+        &registry(),
+        None,
+    )
+    .expect("a data migration with a valid inverse must load");
 
     assert_eq!(
         loaded.inverse_ops,
@@ -275,7 +281,7 @@ fn an_irreversible_reason_survives_the_boundary() {
     let loaded = load_ir_document(
         &serde_json::to_string(&ir).expect("serializes"),
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -302,7 +308,7 @@ fn a_declared_reverse_makes_an_advisory_hint_refuse_rather_than_compare() {
     let error = load_ir_document(
         &serde_json::to_string(&ir).expect("serializes"),
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &registry(),
         None,
     )
@@ -353,7 +359,7 @@ fn the_create_table_ownership_rule_still_applies_with_a_reverse_present() {
     load_ir_document(
         &serde_json::to_string(&ir).expect("serializes"),
         OWNER,
-        &zero_migrate::POSTGRES,
+        &zero_migrate_postgres::DIALECT,
         &BTreeMap::new(),
         None,
     )
