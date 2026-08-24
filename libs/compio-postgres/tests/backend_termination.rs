@@ -60,12 +60,12 @@ async fn a_backend_killed_mid_copy_fails_the_copy_and_releases_the_connection() 
     let url = test_url();
     let baseline = compio_postgres::live_connections();
 
-    let (victim, victim_connection) = match compio_postgres::connect(&url, NoTls).await {
+    let (victim, victim_connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok(pair) => pair,
         Err(error) => common::postgres_unreachable(&url, &error),
     };
     let victim_driver = compio::runtime::spawn(async move { victim_connection.run().await });
-    let (killer, killer_connection) = match compio_postgres::connect(&url, NoTls).await {
+    let (killer, killer_connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok(pair) => pair,
         Err(error) => common::postgres_unreachable(&url, &error),
     };
@@ -126,12 +126,12 @@ async fn a_backend_killed_mid_row_stream_fails_the_stream_and_releases_the_conne
     let url = test_url();
     let baseline = compio_postgres::live_connections();
 
-    let (victim, victim_connection) = match compio_postgres::connect(&url, NoTls).await {
+    let (victim, victim_connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok(pair) => pair,
         Err(error) => common::postgres_unreachable(&url, &error),
     };
     let victim_driver = compio::runtime::spawn(async move { victim_connection.run().await });
-    let (killer, killer_connection) = match compio_postgres::connect(&url, NoTls).await {
+    let (killer, killer_connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok(pair) => pair,
         Err(error) => common::postgres_unreachable(&url, &error),
     };

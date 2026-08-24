@@ -1,3 +1,11 @@
+// This file chooses its own transport and cannot run under
+// `--features suite-over-tls`, which forces every helper onto the encrypted
+// server: `serialized_loop` reaches its loop through a deliberately
+// unsplittable PLAINTEXT socket, and the sslmode files assert what happens
+// when a connector and a config disagree. Running them in that mode would
+// measure the mode, not the claim.
+#![cfg(not(feature = "suite-over-tls"))]
+
 //! Behaviour on the SERIALIZED connection loop, reached without TLS.
 //!
 //! `Connection::run` picks its loop by whether the transport splits into owned
@@ -423,7 +431,7 @@ async fn a_cancelled_query_leaves_the_serialized_session_usable() {
         // Long enough that the query is certainly executing, short enough that
         // the test does not sit on it.
         compio::time::sleep(std::time::Duration::from_millis(300)).await;
-        token.cancel_query(NoTls).await
+        token.cancel_query(common::suite_tls()).await
     });
 
     let outcome = compio::time::timeout(

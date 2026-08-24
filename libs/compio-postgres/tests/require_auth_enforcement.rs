@@ -241,7 +241,7 @@ async fn a_server_that_never_authenticates_is_refused_under_require_password() {
 
         // `let ... else` rather than `expect_err`: the Ok half carries a
         // `Connection`, which is not `Debug`, so `expect_err` does not apply.
-        let Err(error) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(NoTls))
+        let Err(error) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
             .await
             .expect("connect hung instead of refusing an unauthenticated server")
         else {
@@ -268,7 +268,7 @@ async fn the_same_server_is_accepted_when_no_policy_is_set() {
         let server = StubServer::spawn(trust_server(402));
         let config = base_config(server.addr);
 
-        let (client, connection) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(NoTls))
+        let (client, connection) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
             .await
             .expect("connect hung against a trust server")
             .expect("the default policy rejected a server it should accept");
@@ -292,7 +292,7 @@ async fn a_rejected_method_is_refused_even_though_the_server_offers_it() {
         let mut config = base_config(server.addr);
         config.require_auth(RequireAuth::Reject(AuthMethods::new(AuthMethod::Password)));
 
-        let Err(error) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(NoTls))
+        let Err(error) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
             .await
             .expect("connect hung instead of refusing a rejected method")
         else {
@@ -336,7 +336,7 @@ async fn the_same_method_is_accepted_when_the_policy_requires_it() {
         let mut config = base_config(server.addr);
         config.require_auth(require_password());
 
-        let (client, connection) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(NoTls))
+        let (client, connection) = compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
             .await
             .expect("connect hung against a password server")
             .expect("require_auth=password rejected a password handshake");

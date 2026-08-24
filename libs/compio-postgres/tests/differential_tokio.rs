@@ -137,7 +137,7 @@ fn tokio_outcomes(url: String, statements: Vec<&'static str>) -> Vec<Outcome> {
 }
 
 async fn compio_outcomes(url: &str, statements: &[&'static str]) -> Vec<Outcome> {
-    let (client, connection) = compio_postgres::connect(url, NoTls)
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
     compio::runtime::spawn(async move {
@@ -167,7 +167,7 @@ async fn both_drivers_agree_on_command_tags_and_sqlstates() {
 
     // Separate sessions, so the TEMPORARY table is created independently in
     // each and neither run depends on the other's leftovers.
-    let theirs = tokio_outcomes(url.clone(), statements.clone());
+    let theirs = tokio_outcomes(common::plaintext_url(), statements.clone());
     let ours = compio_outcomes(&url, &statements).await;
 
     assert_eq!(
@@ -323,7 +323,7 @@ fn tokio_fields(url: String, statements: Vec<&'static str>) -> Vec<Option<Fields
 }
 
 async fn compio_fields(url: &str, statements: &[&'static str]) -> Vec<Option<Fields>> {
-    let (client, connection) = compio_postgres::connect(url, NoTls)
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
     compio::runtime::spawn(async move {
@@ -374,7 +374,7 @@ async fn both_drivers_agree_on_every_error_field() {
     let cases = error_cases();
     let statements: Vec<&'static str> = cases.iter().map(|(sql, _)| *sql).collect();
 
-    let theirs = tokio_fields(url.clone(), statements.clone());
+    let theirs = tokio_fields(common::plaintext_url(), statements.clone());
     let ours = compio_fields(&url, &statements).await;
 
     let mut divergences = Vec::new();
@@ -482,7 +482,7 @@ fn tokio_notices(url: String) -> Vec<Notice> {
 async fn compio_notices(url: &str) -> Vec<Notice> {
     use futures_util::StreamExt;
 
-    let (client, mut connection) = compio_postgres::connect(url, NoTls)
+    let (client, mut connection) = compio_postgres::connect(url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
     let mut messages = connection.notifications();
@@ -519,7 +519,7 @@ async fn compio_notices(url: &str) -> Vec<Notice> {
 #[compio::test]
 async fn both_drivers_agree_on_a_raised_notice() {
     let url = common::test_url();
-    let theirs = tokio_notices(url.clone());
+    let theirs = tokio_notices(common::plaintext_url());
     let ours = compio_notices(&url).await;
 
     assert_eq!(
@@ -643,7 +643,7 @@ async fn both_drivers_agree_on_prepared_statement_metadata() {
     let url = common::test_url();
     let table = common::test_object_name("cpg describe");
 
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
@@ -671,7 +671,7 @@ async fn both_drivers_agree_on_prepared_statement_metadata() {
     let cases = describe_cases(&table);
     let statements: Vec<String> = cases.iter().map(|(sql, _)| sql.clone()).collect();
 
-    let theirs = tokio_described(url.clone(), statements.clone());
+    let theirs = tokio_described(common::plaintext_url(), statements.clone());
 
     let mut ours = Vec::new();
     for statement in &statements {
@@ -781,7 +781,7 @@ async fn both_drivers_agree_on_copy_out_bytes() {
     let url = common::test_url();
     let table = common::test_object_name("cpg copyout");
 
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
@@ -803,7 +803,7 @@ async fn both_drivers_agree_on_copy_out_bytes() {
         .expect("copy fixture");
 
     let sql = copy_out_sql(&table);
-    let theirs = tokio_copy_out(url.clone(), sql.clone());
+    let theirs = tokio_copy_out(common::plaintext_url(), sql.clone());
 
     let stream = client.copy_out(&sql).await.expect("copy_out");
     let ours: Vec<u8> = {
@@ -911,7 +911,7 @@ async fn both_drivers_agree_on_copy_in_results() {
     let ours_table = format!("{base}_ours");
     let theirs_table = format!("{base}_theirs");
 
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
@@ -933,7 +933,7 @@ async fn both_drivers_agree_on_copy_in_results() {
     }
 
     let body = copy_in_body();
-    let theirs_count = tokio_copy_in(url.clone(), theirs_table.clone(), body.clone());
+    let theirs_count = tokio_copy_in(common::plaintext_url(), theirs_table.clone(), body.clone());
 
     let sink = client
         .copy_in::<_, bytes::Bytes>(&format!("COPY {ours_table} FROM STDIN"))
@@ -1076,7 +1076,7 @@ fn tokio_paging(url: String, page: i32) -> Paging {
 async fn both_drivers_agree_on_portal_paging() {
     let url = common::test_url();
 
-    let (mut client, connection) = compio_postgres::connect(&url, NoTls)
+    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
@@ -1086,7 +1086,7 @@ async fn both_drivers_agree_on_portal_paging() {
 
     let mut divergences = Vec::new();
     for page in PAGE_SIZES {
-        let theirs = tokio_paging(url.clone(), page);
+        let theirs = tokio_paging(common::plaintext_url(), page);
 
         let transaction = client.transaction().await.expect("transaction");
         let statement = transaction.prepare(&portal_sql()).await.expect("prepare");
@@ -1223,7 +1223,7 @@ async fn both_drivers_agree_on_binary_copy_roundtrip() {
     let ours_table = format!("{base}_ours");
     let theirs_table = format!("{base}_theirs");
 
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {
@@ -1241,7 +1241,7 @@ async fn both_drivers_agree_on_binary_copy_roundtrip() {
             .expect("binary copy fixture");
     }
 
-    let theirs = tokio_binary_roundtrip(url.clone(), theirs_table.clone());
+    let theirs = tokio_binary_roundtrip(common::plaintext_url(), theirs_table.clone());
 
     let types = [
         compio_postgres::types::Type::INT4,
@@ -1446,9 +1446,9 @@ async fn both_drivers_agree_on_simple_query_shapes() {
     let scripts = simple_query_scripts();
     let sql: Vec<&'static str> = scripts.iter().map(|(script, _)| *script).collect();
 
-    let theirs = tokio_simple_queries(url.clone(), sql.clone());
+    let theirs = tokio_simple_queries(common::plaintext_url(), sql.clone());
 
-    let (client, connection) = compio_postgres::connect(&url, NoTls)
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
     compio::runtime::spawn(async move {

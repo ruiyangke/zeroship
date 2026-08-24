@@ -19,7 +19,7 @@ const EARLY_DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn client() -> Client {
     let url = common::test_url();
-    match compio_postgres::connect(&url, NoTls).await {
+    match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
@@ -109,7 +109,7 @@ async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
             .expect("plain slot setup failed");
 
         let replication = compio_postgres::replication::connect_replication(
-            NoTls,
+            common::suite_tls(),
             &common::replication_config("cpg_two_phase_early"),
         )
         .await
@@ -267,7 +267,7 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
 
         let mut config = common::replication_config("cpg_two_phase_observe");
         config.options("-c logical_decoding_work_mem=64kB");
-        let replication = compio_postgres::replication::connect_replication(NoTls, &config)
+        let replication = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
             .await
             .expect("replication connect failed");
         let mut stream = replication

@@ -20,7 +20,7 @@ fn config_for(mode: TargetSessionAttrs, application_name: &str) -> Config {
 }
 
 async fn connect_and_drive(config: &Config) -> Result<Client, Error> {
-    let (client, connection) = config.connect(NoTls).await?;
+    let (client, connection) = config.connect(common::suite_tls()).await?;
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("target_session_attrs connection error: {error}");
@@ -88,7 +88,7 @@ async fn standby_rejects_a_read_only_primary() {
     let mut config = config_for(TargetSessionAttrs::Standby, "cpg_standby_reject_primary");
     config.options("-c default_transaction_read_only=on");
 
-    let Err(error) = config.connect(NoTls).await else {
+    let Err(error) = config.connect(common::suite_tls()).await else {
         panic!("standby accepted a primary configured read only");
     };
     let io = source_io_error(&error).expect("target mismatch did not retain its I/O cause");
@@ -124,7 +124,7 @@ async fn read_write_accepts_a_writable_server() {
 #[compio::test]
 async fn read_only_rejects_a_writable_server() {
     let config = config_for(TargetSessionAttrs::ReadOnly, "cpg_tsa_read_only_reject");
-    let error = match config.connect(NoTls).await {
+    let error = match config.connect(common::suite_tls()).await {
         Ok(_) => panic!("read-only accepted a session whose transaction_read_only is off"),
         Err(error) => error,
     };

@@ -349,7 +349,7 @@ async fn replication_connect_tries_every_configured_host() {
     config.application_name("cpg_replication_failover");
 
     let mut replication =
-        match compio_postgres::replication::connect_replication(NoTls, &config).await {
+        match compio_postgres::replication::connect_replication(common::suite_tls(), &config).await {
             Ok(connection) => connection,
             Err(e) if common::server_answered(&e) => panic!(
                 "the server refused a replication connection: {}",
@@ -391,7 +391,7 @@ async fn replication_connect_broadcasts_a_single_port_across_hosts() {
     config.application_name("cpg_replication_one_port");
 
     let mut replication =
-        match compio_postgres::replication::connect_replication(NoTls, &config).await {
+        match compio_postgres::replication::connect_replication(common::suite_tls(), &config).await {
             Ok(connection) => connection,
             Err(e) if common::server_answered(&e) => panic!(
                 "the server refused a replication connection: {}",
@@ -423,7 +423,7 @@ async fn replication_connect_reports_the_error_when_no_host_answers() {
     config.host("127.0.0.1");
     config.port(second_dead);
 
-    let err = compio_postgres::replication::connect_replication(NoTls, &config)
+    let err = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
         .await
         .err()
         .expect("no host was listening, so this cannot succeed");
@@ -459,7 +459,7 @@ async fn identify_system_returns_the_servers_real_identity() {
     // too_many_connections refusal is a server that ANSWERED, and printing a
     // replication-configuration hint for it is the exact mistake
     // `tests/common/mod.rs` records a measured incident of.
-    let (client, connection) = match compio_postgres::connect(&url, NoTls).await {
+    let (client, connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok(pair) => pair,
         Err(e) => common::postgres_unreachable(&url, &e),
     };
@@ -479,7 +479,7 @@ async fn identify_system_returns_the_servers_real_identity() {
     // Same reasoning as above: let the shared helper decide whether the server
     // answered before it names a remedy.
     let mut replication =
-        match compio_postgres::replication::connect_replication(NoTls, &config).await {
+        match compio_postgres::replication::connect_replication(common::suite_tls(), &config).await {
             Ok(connection) => connection,
             Err(e) if common::server_answered(&e) => panic!(
                 "the server refused a replication connection: {}",
@@ -534,7 +534,7 @@ async fn replication_tls_refusal_is_keyed_to_the_contradiction_not_the_endpoint(
     };
 
     let refused = compio_postgres::replication::connect_replication(
-        NoTls,
+        common::suite_tls(),
         &config_with(compio_postgres::config::SslMode::Prefer),
     )
     .await
@@ -547,7 +547,7 @@ async fn replication_tls_refusal_is_keyed_to_the_contradiction_not_the_endpoint(
     );
 
     let dialled = compio_postgres::replication::connect_replication(
-        NoTls,
+        common::suite_tls(),
         &config_with(compio_postgres::config::SslMode::VerifyFull),
     )
     .await
@@ -596,7 +596,7 @@ async fn replication_read_timeout_starts_after_startup_and_poisons_identify_syst
         let startup_started = Instant::now();
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("replication startup exceeded its outer watchdog")
@@ -655,7 +655,7 @@ async fn a_stalled_start_replication_exchange_times_out_and_retires_its_session(
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                NoTls,
+                common::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -719,7 +719,7 @@ async fn an_awaited_idle_replication_stream_survives_repeated_read_budgets() {
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                NoTls,
+                common::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -814,7 +814,7 @@ async fn a_mid_frame_replication_stall_times_out_and_poisons_the_stream() {
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
             compio_postgres::replication::connect_replication(
-                NoTls,
+                common::suite_tls(),
                 &stub_config(server.addr),
             ),
         )
@@ -897,7 +897,7 @@ async fn an_unrepresentable_start_lsn_is_refused_before_replication_starts() {
 
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -952,7 +952,7 @@ async fn a_representable_start_lsn_still_starts_replication() {
 
         let replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -1023,7 +1023,7 @@ async fn a_null_field_in_identify_system_is_refused_rather_than_defaulted() {
 
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -1099,7 +1099,7 @@ async fn identify_system_refuses_a_response_that_carried_no_row() {
 
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -1146,7 +1146,7 @@ async fn identify_system_accepts_a_response_that_carried_a_row() {
 
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -1195,7 +1195,7 @@ async fn identify_system_tolerates_an_asynchronous_parameter_status() {
 
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -1247,7 +1247,7 @@ async fn an_unaccountable_message_retires_the_replication_session() {
 
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -1319,7 +1319,7 @@ async fn an_identify_system_error_leaves_the_session_able_to_answer_the_next_com
 
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")
@@ -1389,7 +1389,7 @@ async fn a_fatal_identify_system_error_survives_the_close_that_follows_it() {
 
         let mut replication = compio::time::timeout(
             OPERATION_WATCHDOG,
-            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+            compio_postgres::replication::connect_replication(common::suite_tls(), &stub_config(server.addr)),
         )
         .await
         .expect("scripted replication startup exceeded its watchdog")

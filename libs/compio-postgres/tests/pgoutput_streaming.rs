@@ -55,7 +55,7 @@ const ROWS: i32 = 4000;
 
 async fn client() -> Client {
     let url = common::test_url();
-    match compio_postgres::connect(&url, NoTls).await {
+    match compio_postgres::connect(&url, common::suite_tls()).await {
         Ok((client, connection)) => {
             compio::runtime::spawn(async move {
                 if let Err(error) = connection.run().await {
@@ -88,7 +88,7 @@ async fn try_collect(
     // connection has for that - it never runs a `SET`.
     config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
 
-    let replication = compio_postgres::replication::connect_replication(NoTls, &config)
+    let replication = compio_postgres::replication::connect_replication(common::suite_tls(), &config)
         .await
         .map_err(|error| {
             format!(
@@ -567,7 +567,7 @@ async fn streaming_below_its_minimum_proto_version_is_refused_locally() {
     ] {
         // One connection per case: `start_logical_replication` consumes it.
         let replication = compio_postgres::replication::connect_replication(
-            NoTls,
+            common::suite_tls(),
             &common::replication_config("cpg_streaming_refusal"),
         )
         .await
@@ -611,7 +611,7 @@ async fn streaming_below_its_minimum_proto_version_is_refused_locally() {
 #[compio::test]
 async fn protocol_above_four_is_refused_locally() {
     let replication = compio_postgres::replication::connect_replication(
-        NoTls,
+        common::suite_tls(),
         &common::replication_config("cpg_protocol_ceiling"),
     )
     .await

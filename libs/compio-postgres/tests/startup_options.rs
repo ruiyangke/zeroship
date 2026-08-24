@@ -34,7 +34,7 @@ fn base_url() -> String {
 
 async fn connect_with(config: Config) -> Client {
     let (client, connection) = config
-        .connect(NoTls)
+        .connect(common::suite_tls())
         .await
         .unwrap_or_else(|error| common::postgres_unreachable(&base_url(), &error));
     compio::runtime::spawn(async move {

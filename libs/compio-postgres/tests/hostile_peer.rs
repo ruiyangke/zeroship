@@ -306,7 +306,7 @@ async fn hostile_response_retires_session(process_id: i32, response: Vec<u8>) ->
     });
 
     let (client, connection) = stub_config(server.addr)
-        .connect(NoTls)
+        .connect(common::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -502,7 +502,7 @@ async fn a_truncated_frame_followed_by_silence_does_not_hang() {
         let mut config = stub_config(server.addr);
         config.read_timeout(READ_TIMEOUT);
         let (client, connection) = config
-            .connect(NoTls)
+            .connect(common::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -602,7 +602,7 @@ async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> 
     });
 
     let (client, connection) = stub_config(server.addr)
-        .connect(NoTls)
+        .connect(common::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -670,7 +670,7 @@ async fn an_extended_query_data_row_shorter_than_its_description_is_refused() {
         });
 
         let (client, connection) = stub_config(server.addr)
-            .connect(NoTls)
+            .connect(common::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -834,7 +834,7 @@ async fn hostile_copy_out_retires_session(process_id: i32, response: Vec<u8>) ->
     let server = copy_stub_server(process_id, response);
 
     let (client, connection) = stub_config(server.addr)
-        .connect(NoTls)
+        .connect(common::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -910,7 +910,7 @@ async fn hostile_copy_in_retires_session(process_id: i32, response: Vec<u8>) -> 
     });
 
     let (client, connection) = stub_config(server.addr)
-        .connect(NoTls)
+        .connect(common::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -1012,7 +1012,7 @@ async fn a_well_formed_copy_out_is_accepted() {
         let server = copy_stub_server(520, well_formed_copy_out());
 
         let (client, connection) = stub_config(server.addr)
-            .connect(NoTls)
+            .connect(common::suite_tls())
             .await
             .expect("connect to scripted PostgreSQL peer");
         let driver = compio::runtime::spawn(async move { connection.run().await });
@@ -1187,7 +1187,7 @@ async fn binary_copy_out_against(
 
     let server = copy_stub_server(process_id, response);
     let (client, connection) = stub_config(server.addr)
-        .connect(NoTls)
+        .connect(common::suite_tls())
         .await
         .expect("connect to scripted PostgreSQL peer");
     let driver = compio::runtime::spawn(async move { connection.run().await });

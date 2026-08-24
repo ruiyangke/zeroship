@@ -249,7 +249,7 @@ async fn drive_one_case(seed: u64, response: Vec<u8>) {
         thread::sleep(Duration::from_millis(120));
     });
 
-    let (client, connection) = match stub_config(server.addr).connect(NoTls).await {
+    let (client, connection) = match stub_config(server.addr).connect(common::suite_tls()).await {
         Ok(pair) => pair,
         Err(_) => {
             // A handshake this generator never touches; nothing to drive.
@@ -419,7 +419,7 @@ async fn drive_one_handshake(seed: u64, response: Vec<u8>) {
     // A connection that SUCCEEDS is a legitimate outcome: some generated
     // sequences are a valid trust handshake. Both arms are acceptable; only a
     // hang or a panic is not.
-    let outcome = compio::time::timeout(OPERATION_WATCHDOG, stub_config(server.addr).connect(NoTls))
+    let outcome = compio::time::timeout(OPERATION_WATCHDOG, stub_config(server.addr).connect(common::suite_tls()))
         .await
         .unwrap_or_else(|_| {
             panic!("seed {seed:#x}: connect hung on a generated handshake instead of returning")

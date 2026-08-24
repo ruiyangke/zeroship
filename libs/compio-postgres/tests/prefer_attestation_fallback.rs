@@ -1,3 +1,11 @@
+// This file chooses its own transport and cannot run under
+// `--features suite-over-tls`, which forces every helper onto the encrypted
+// server: `serialized_loop` reaches its loop through a deliberately
+// unsplittable PLAINTEXT socket, and the sslmode files assert what happens
+// when a connector and a config disagree. Running them in that mode would
+// measure the mode, not the claim.
+#![cfg(not(feature = "suite-over-tls"))]
+
 //! `sslmode=prefer` falls back to plaintext when the supplied connector cannot
 //! attest to the TLS parameters the config asks for.
 //!
@@ -38,7 +46,7 @@ async fn prefer_with_a_root_cert_falls_back_when_the_connector_cannot_attest() {
     let base = test_url();
     let dsn = format!("{base}?sslmode=prefer&sslrootcert=/etc/ssl/certs/ca-certificates.crt");
 
-    let (client, connection) = compio_postgres::connect(&dsn, NoTls).await.expect(
+    let (client, connection) = compio_postgres::connect(&dsn, common::suite_tls()).await.expect(
         "sslmode=prefer must fall back to plaintext when the connector cannot attest to the \
          verification sslrootcert asks for; refusing here breaks a DSN that connected before the \
          attestation gate existed",
@@ -65,7 +73,7 @@ async fn prefer_without_a_root_cert_still_connects() {
     let base = test_url();
     let dsn = format!("{base}?sslmode=prefer");
 
-    let (client, connection) = compio_postgres::connect(&dsn, NoTls)
+    let (client, connection) = compio_postgres::connect(&dsn, common::suite_tls())
         .await
         .expect("sslmode=prefer with no root cert has always connected");
     compio::runtime::spawn(async move {
@@ -91,7 +99,7 @@ async fn verify_full_still_refuses_a_connector_that_cannot_attest() {
     let base = test_url();
     let dsn = format!("{base}?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt");
 
-    let error = compio_postgres::connect(&dsn, NoTls)
+    let error = compio_postgres::connect(&dsn, common::suite_tls())
         .await
         .err()
         .expect("verify-full must not connect through a connector that verifies nothing");
