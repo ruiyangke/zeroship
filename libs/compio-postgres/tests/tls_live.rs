@@ -1201,3 +1201,78 @@ async fn notls_connect_still_works() {
     let (ssl, _) = server_reports_ssl(&client).await;
     assert!(!ssl);
 }
+
+/// The COPY-1/IO-1 deadlock, over TLS.
+///
+/// `copy_in_error_does_not_deadlock` in tests/integration.rs pins this, and it
+/// connects with `NoTls`. A plaintext socket splits into owned halves and runs
+/// the multiplexed loop, which reads the server's ErrorResponse while the
+/// client is still streaming CopyData. TLS cannot split, so it runs the
+/// serialized loop - the one the 2026-06-05 review named as the root cause of
+/// COPY-1. The fix therefore may never have applied to this transport, and no
+/// test in the crate would notice.
+///
+/// Same shape as the plaintext original: a first row the server rejects, then
+/// enough bulk behind it that the client is still writing long after the
+/// server stopped draining.
+#[compio::test]
+async fn copy_in_error_does_not_deadlock_over_tls() {
+    use bytes::Bytes;
+    use futures_util::SinkExt;
+    use std::pin::pin;
+
+    let s = servers();
+    let dsn = format!("{} sslmode=require", s.tls_url);
+    let config = dsn.parse::<Config>().expect("parse the require DSN");
+    let make = MakeRustlsConnect::from_config(&config).expect("build the require connector");
+    let (client, connection) = config.connect(make).await.expect("sslmode=require connect");
+    let task = compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    });
+
+    let (ssl, _version) = server_reports_ssl(&client).await;
+    assert!(ssl, "this test is meaningless on an unencrypted session");
+
+    client
+        .execute("CREATE TEMPORARY TABLE cpg_tls_copy (id int, n int)", &[])
+        .await
+        .expect("create the copy target");
+
+    let copy_fut = async {
+        let sink = client
+            .copy_in::<_, Bytes>("COPY cpg_tls_copy (id, n) FROM STDIN")
+            .await?;
+        let mut sink = pin!(sink);
+        sink.feed(Bytes::from_static(b"1\tnotanint\n")).await?;
+        for i in 0..200_000i64 {
+            sink.feed(Bytes::from(format!("{i}\t{i}\n"))).await?;
+        }
+        sink.finish().await
+    };
+
+    let outcome = compio::time::timeout(std::time::Duration::from_secs(15), copy_fut).await;
+    let verdict = match &outcome {
+        Err(_) => "TIMED OUT".to_owned(),
+        Ok(Ok(rows)) => format!("succeeded with {rows} rows"),
+        Ok(Err(e)) => format!("errored: {:?}", e.code()),
+    };
+    println!("  [copy over tls] {verdict}");
+
+    drop(client);
+    let _ = task.await;
+
+    match outcome {
+        Err(_) => panic!(
+            "COPY-1 is still live on TLS: copy_in deadlocked (15s) on the serialized \
+             loop, which never reads the server's ErrorResponse while CopyData is \
+             being streamed. The plaintext regression test cannot see this."
+        ),
+        Ok(Ok(rows)) => panic!("expected the COPY parse error, but it succeeded with {rows} rows"),
+        Ok(Err(e)) => assert_eq!(
+            e.code(),
+            Some(&compio_postgres::error::SqlState::INVALID_TEXT_REPRESENTATION),
+            "the COPY parse error lost its SQLSTATE over TLS: {}",
+            describe(&e)
+        ),
+    }
+}
