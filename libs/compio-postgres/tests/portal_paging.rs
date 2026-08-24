@@ -204,3 +204,46 @@ async fn an_ordinary_query_returns_the_same_rows_once_in_order() {
 
     assert_eq!(values, expected_rows());
 }
+
+/// `rows_affected` distinguishes a suspended page from the final one, and the
+/// count it reports belongs to that `Execute` rather than to the portal.
+///
+/// Both halves mislead if assumed. A caller who reads `Some(n)` as "the query
+/// returned n rows" gets 1 for a 5-row portal; a caller who ignores `None`
+/// loses the only signal that another page is waiting.
+#[compio::test]
+async fn rows_affected_marks_the_last_page_and_counts_only_that_execute() {
+    let mut client = client().await;
+    let transaction = client
+        .transaction()
+        .await
+        .expect("begin a transaction for the portal");
+    let portal = bind_ordered_rows(&transaction).await;
+
+    let mut observed = Vec::new();
+    loop {
+        let page = fetch_page(&transaction, &portal, 4).await;
+        let done = page.command_rows.is_some();
+        observed.push((page.values.len(), page.command_rows));
+        if done {
+            break;
+        }
+    }
+
+    let suspended = &observed[..observed.len() - 1];
+    assert!(
+        suspended.iter().all(|(_, affected)| affected.is_none()),
+        "every page before the last must report None: {observed:?}"
+    );
+    let (last_len, last_affected) = observed[observed.len() - 1];
+    assert_eq!(
+        last_affected,
+        Some(last_len as u64),
+        "the final page reports ITS OWN row count, not the portal's: {observed:?}"
+    );
+    let total: usize = observed.iter().map(|(n, _)| n).sum();
+    assert!(
+        total > last_len,
+        "the fixture must span more than one page or this proves nothing: {observed:?}"
+    );
+}

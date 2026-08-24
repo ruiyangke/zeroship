@@ -788,7 +788,16 @@ impl Stream for RowStream {
 impl RowStream {
     /// Returns the number of rows affected by the query.
     ///
-    /// This function will return `None` until the stream has been exhausted.
+    /// `None` until the stream has been exhausted - and, for a PORTAL, `None`
+    /// even then, which is load-bearing rather than a gap. A page that ends on
+    /// `PortalSuspended` has more rows waiting, so `None` is how a caller
+    /// learns to fetch again; only the page that ends on `CommandComplete`
+    /// reports a count.
+    ///
+    /// THAT COUNT IS THE EXECUTE'S, NOT THE PORTAL'S. Measured over a 5-row
+    /// portal paged 2 at a time: the three pages report `None`, `None`,
+    /// `Some(1)` - one, not five. Summing it across pages does not give the
+    /// row total either, since the suspended pages contribute nothing.
     pub fn rows_affected(&self) -> Option<u64> {
         self.rows_affected
     }
