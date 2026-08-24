@@ -282,7 +282,7 @@ impl DdlEmitter for MysqlEmitter {
         let mut parts: Vec<String> = Vec::new();
         let mut consumed_enum_checks = BTreeSet::new();
         for (column_index, c) in t.columns.iter().enumerate() {
-            let inline_pk = inline_pk_for_column(table, t, &c.name);
+            let inline_pk = inline_pk_for_column(&crate::fold::POLICY, table, t, &c.name);
             let enum_check_name = req
                 .enum_check_names
                 .get(column_index)
@@ -344,7 +344,7 @@ impl DdlEmitter for MysqlEmitter {
             if consumed_enum_checks.contains(&c.name) {
                 continue;
             }
-            if should_render_table_pk(table, t, c) || c.kind == "CHECK" || c.kind == "UNIQUE" {
+            if should_render_table_pk(&crate::fold::POLICY, table, t, c) || c.kind == "CHECK" || c.kind == "UNIQUE" {
                 parts.push(format!(
                     "CONSTRAINT {} {}",
                     mysql_quote_ident(&c.name),

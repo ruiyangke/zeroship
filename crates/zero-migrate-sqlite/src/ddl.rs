@@ -148,7 +148,7 @@ impl DdlEmitter for SqliteEmitter {
         let (table, t) = (req.table, req.snapshot);
         let mut parts: Vec<String> = Vec::new();
         for c in &t.columns {
-            let inline_pk = inline_pk_for_column(table, t, &c.name);
+            let inline_pk = inline_pk_for_column(&crate::fold::POLICY, table, t, &c.name);
             let ty = crate::schema::RENDERER.column_type(c, inline_pk);
             let pk = primary_key_clause(c, inline_pk);
             let null = null_clause(c, inline_pk);
@@ -185,7 +185,7 @@ impl DdlEmitter for SqliteEmitter {
         // inlines every FK off the snapshot below, because it has no late
         // `ADD CONSTRAINT` to defer one to.
         for c in &t.constraints {
-            if should_render_table_pk(table, t, c)
+            if should_render_table_pk(&crate::fold::POLICY, table, t, c)
                 || c.kind == "CHECK"
                 || c.kind == "UNIQUE"
                 || c.kind == "FOREIGN KEY"

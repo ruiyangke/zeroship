@@ -2062,7 +2062,12 @@ fn build_table_snapshot_impl(
                 column.nullable = false;
             }
         }
-        let name = format!("{}_pkey", d.name);
+        // The DESIRED side of every structural comparison. It has to be the name the
+        // selected backend will report from its own catalog, or the deploy succeeds
+        // and drift reports a difference that is not there, forever after.
+        let name = crate::render::backends::vendor(dialect)
+            .catalog_fold
+            .implicit_primary_key_name(&d.name);
         constraints.push(ConstraintSnapshot {
             name: name.clone(),
             kind: "PRIMARY KEY".into(),
@@ -2458,23 +2463,42 @@ fn has_case_insensitive_text(table: &TableSnapshot) -> bool {
 /// would churn (a duplicate CREATE) and break re-diff-to-zero. Every OTHER
 /// (user-authored) index must be synthesized — never silently dropped.
 #[must_use]
-pub fn is_system_managed_index(table: &str, index_name: &str, inject: &ResolvedInject) -> bool {
-    (inject.primary_key().is_some() && is_pk_index(table, index_name))
+pub fn is_system_managed_index(
+    table: &str,
+    index_name: &str,
+    dialect: &DialectId,
+    inject: &ResolvedInject,
+) -> bool {
+    (inject.primary_key().is_some()
+        && is_pk_index(
+            crate::render::backends::vendor(dialect).catalog_fold,
+            table,
+            index_name,
+        ))
         || is_injected_index(table, index_name, inject)
 }
 
 /// True if `constraint_name` is a constraint the active policy's CREATE-TABLE
 /// lowering materialises for `table` — currently the implicit constraint for a
-/// policy-pinned primary key (`<table>_pkey`). The op.* `generate` synthesizer uses this to know which
+/// policy-pinned primary key. The op.* `generate` synthesizer uses this to know which
 /// desired-snapshot constraints are platform-managed (skip) vs user-authored
 /// (FK / CHECK — must be synthesized or fail-closed, never silently dropped).
+///
+/// `dialect` selects the backend that says what that implicit constraint is called.
+/// Which backend is deploying decides it: a table's primary key is not named the
+/// same thing on two of the three shipping servers.
 #[must_use]
 pub fn is_system_managed_constraint(
     table: &str,
     constraint_name: &str,
+    dialect: &DialectId,
     inject: &ResolvedInject,
 ) -> bool {
-    inject.primary_key().is_some() && constraint_name == format!("{table}_pkey")
+    inject.primary_key().is_some()
+        && constraint_name
+            == crate::render::backends::vendor(dialect)
+                .catalog_fold
+                .implicit_primary_key_name(table)
 }
 
 /// Deterministic name for a per-field unique index (`<table>_<field>_key`, the
@@ -3304,6 +3328,14 @@ impl DeclarativeAuthor {
         crate::render::backends::schema_renderer(&self.dialect)
     }
 
+    /// The registered backend's catalog-fold policy, which is where the name of a
+    /// table's implicit PRIMARY KEY relation is stated. The differ needs it on every
+    /// index it considers emitting DDL for, because that one index is the one it
+    /// must not.
+    fn catalog_fold(&self) -> &'static dyn zero_migrate_backend::fold::CatalogFoldPolicy {
+        crate::render::backends::vendor(&self.dialect).catalog_fold
+    }
+
     fn table_rebuild_policy(&self) -> &'static dyn TableRebuildPolicy {
         self.schema_renderer()
             .table_rebuild_policy()
@@ -3642,7 +3674,7 @@ impl DeclarativeAuthor {
             let table_version = mig.version.clone();
             out.push(mig);
             for idx in &t.indexes {
-                if is_pk_index(table, &idx.name) {
+                if is_pk_index(self.catalog_fold(), table, &idx.name) {
                     continue;
                 }
                 if inline_create_indexes.contains(idx.name.as_str()) {
@@ -3926,7 +3958,7 @@ impl DeclarativeAuthor {
             )?;
             accepted_index_aliases.extend(pairing.accepted.iter().cloned());
             for idx in &dt.indexes {
-                if is_pk_index(table, &idx.name) {
+                if is_pk_index(self.catalog_fold(), table, &idx.name) {
                     continue; // implicit; created by the PRIMARY KEY clause
                 }
                 match pairing.matched.get(idx.name.as_str()) {
@@ -3973,7 +4005,7 @@ impl DeclarativeAuthor {
                 }
             }
             for idx in &lt.indexes {
-                if is_pk_index(table, &idx.name) {
+                if is_pk_index(self.catalog_fold(), table, &idx.name) {
                     continue; // never drop the PK's implicit index
                 }
                 if !pairing.consumed_live.contains(idx.name.as_str()) {
@@ -5823,7 +5855,7 @@ impl DeclarativeAuthor {
         // policy-injected indexes the shared CREATE emits inline) — identical to
         // `diff`'s per-table index emission. A `CREATE INDEX` is a single statement.
         for idx in &snapshot.indexes {
-            if is_pk_index(table, &idx.name) {
+            if is_pk_index(self.catalog_fold(), table, &idx.name) {
                 continue;
             }
             if inline_create_indexes.contains(idx.name.as_str()) {

@@ -31,6 +31,16 @@ impl CatalogFoldPolicy for PostgresCatalogFoldPolicy {
             .then_some(SnapshotProvenanceStrength::TypeOverride)
     }
 
+    /// PostgreSQL derives the implicit constraint name from the table and then
+    /// STORES it, which is why a table rename leaves it alone.
+    ///
+    /// The spelling MOVED here from the neutral contract crate's `is_pk_index`,
+    /// unchanged. It was always this backend's convention; it was only ever in the
+    /// neutral crate because it arrived there first.
+    fn implicit_primary_key_name(&self, table: &str) -> String {
+        format!("{table}_pkey")
+    }
+
     fn allocate_implicit_relation_name(
         &self,
         default_name: &str,

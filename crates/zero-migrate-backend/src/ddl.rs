@@ -43,6 +43,7 @@
 //! caller's dialect was inferred from WHICH function it called rather than stated,
 //! and the `lower_create_table` site shows what that bought — one request, built
 
+use crate::fold::CatalogFoldPolicy;
 use crate::snapshot::{
     canonical_index_sort_order, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
     IndexElementSnapshot, IndexSnapshot, TableSnapshot,
@@ -51,12 +52,20 @@ use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::IndexSortOrder;
 use zero_migrate_ir::ir::PartitionBounds;
 
-/// True if `index_name` is the implicit index a PRIMARY KEY materialises
-/// (`<table>_pkey`). It is created/dropped by the PK clause, never by a
-/// standalone CREATE/DROP INDEX, so the differ never emits DDL for it.
+/// True if `index_name` is the implicit index a PRIMARY KEY materialises. It is
+/// created/dropped by the PK clause, never by a standalone CREATE/DROP INDEX, so
+/// the differ never emits DDL for it.
+///
+/// `policy` is the REGISTERED backend, and it is a parameter rather than a
+/// convention because there is no convention: this predicate used to spell one
+/// shipping vendor's `<table>_pkey` here, in the crate whose whole purpose is to
+/// name no vendor, and the cost was paid by the other backends. A server that calls
+/// every primary key `PRIMARY` had to report `<table>_pkey` instead so this
+/// comparison kept matching — a backend impersonating another to satisfy a shared
+/// check. Asking the backend is what removes the need to impersonate one.
 #[must_use]
-pub fn is_pk_index(table: &str, index_name: &str) -> bool {
-    index_name == format!("{table}_pkey")
+pub fn is_pk_index(policy: &dyn CatalogFoldPolicy, table: &str, index_name: &str) -> bool {
+    index_name == policy.implicit_primary_key_name(table)
 }
 
 // once, handed to whichever emitter the dialect selects.
@@ -510,21 +519,32 @@ pub fn inline_checks_clause(c: &ColumnSnapshot) -> String {
     }
 }
 
-/// The columns of `table`'s PRIMARY KEY, read off the implicit `<table>_pkey`
-/// unique index the snapshot carries, or `None` when the table has no PK.
+/// The columns of `table`'s PRIMARY KEY, read off the implicit unique index the
+/// snapshot carries under the name `policy` gives it, or `None` when the table has
+/// no PK.
 #[must_use]
-pub fn primary_key_columns<'a>(table: &str, t: &'a TableSnapshot) -> Option<&'a [String]> {
+pub fn primary_key_columns<'a>(
+    policy: &dyn CatalogFoldPolicy,
+    table: &str,
+    t: &'a TableSnapshot,
+) -> Option<&'a [String]> {
+    let pk_name = policy.implicit_primary_key_name(table);
     t.indexes
         .iter()
-        .find(|idx| idx.name == format!("{table}_pkey") && idx.unique)
+        .find(|idx| idx.name == pk_name && idx.unique)
         .map(|idx| idx.columns.as_slice())
 }
 
 /// Whether `column` is the WHOLE primary key, and therefore takes the PK inline on
 /// its own column clause rather than as a table-level constraint.
 #[must_use]
-pub fn inline_pk_for_column(table: &str, t: &TableSnapshot, column: &str) -> bool {
-    matches!(primary_key_columns(table, t), Some(cols) if cols == [column])
+pub fn inline_pk_for_column(
+    policy: &dyn CatalogFoldPolicy,
+    table: &str,
+    t: &TableSnapshot,
+    column: &str,
+) -> bool {
+    matches!(primary_key_columns(policy, table, t), Some(cols) if cols == [column])
 }
 
 /// Whether a PRIMARY KEY constraint must be rendered as a TABLE-level clause —
@@ -532,10 +552,11 @@ pub fn inline_pk_for_column(table: &str, t: &TableSnapshot, column: &str) -> boo
 /// [`inline_pk_for_column`] already inlined.
 #[must_use]
 pub fn should_render_table_pk(
+    policy: &dyn CatalogFoldPolicy,
     table: &str,
     t: &TableSnapshot,
     constraint: &ConstraintSnapshot,
 ) -> bool {
     constraint.kind == "PRIMARY KEY"
-        && !matches!(primary_key_columns(table, t), Some(cols) if cols.len() == 1)
+        && !matches!(primary_key_columns(policy, table, t), Some(cols) if cols.len() == 1)
 }

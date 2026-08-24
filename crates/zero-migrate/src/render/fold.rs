@@ -958,7 +958,14 @@ fn allocate_implicit_relation_name(
     )
 }
 
-/// Allocate the name PostgreSQL gives an implicit PRIMARY KEY relation.
+/// Allocate the name the SELECTED backend gives an implicit PRIMARY KEY relation.
+///
+/// Two questions, asked in order, and neither can answer the other. The backend
+/// says what the relation is CALLED; the allocator then dodges any collision that
+/// name has in the modeled relation namespace. This function used to compose the
+/// first answer itself, in one shipping backend's spelling, and hand it to the
+/// already-routed second — which is why routing the allocator had never removed the
+/// vendor from core.
 ///
 /// This covers relation kinds represented by `SchemaSnapshot`. It does not
 /// uniquify explicit constraint names or indexes adopted by `USING INDEX`.
@@ -971,7 +978,7 @@ fn implicit_primary_key_name(
     sequences: &BTreeMap<String, SequenceSnapshot>,
 ) -> String {
     allocate_implicit_relation_name(
-        &format!("{table}_pkey"),
+        &fold_policy(dialect).implicit_primary_key_name(table),
         dialect,
         tables,
         partitions,
@@ -1638,7 +1645,7 @@ impl<'a> CatalogFold<'a> {
                             .map(|constraint| constraint.kind.clone());
                         let generated_name = match constraint_kind.as_deref() {
                             Some("PRIMARY KEY") => {
-                                let natural = format!("{name}_pkey");
+                                let natural = fold_policy(dialect).implicit_primary_key_name(name);
                                 if crate::plan::author::cap_ident_name(&natural) != natural {
                                     return Err(FoldError::Unsupported(
                                         "detachPartition cannot derive an overlong created-partition clone name",

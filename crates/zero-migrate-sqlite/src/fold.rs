@@ -31,6 +31,26 @@ impl CatalogFoldPolicy for SqliteCatalogFoldPolicy {
             .then_some(SnapshotProvenanceStrength::StoredTableDefinition)
     }
 
+    /// SQLite has no name for a primary key to report. There is no constraint
+    /// catalog at all, and the PK's auto-index — when one exists — is named by the
+    /// engine (`sqlite_autoindex_*`), which is an internal that must not leak.
+    ///
+    /// So this backend does not report a name it was given; it CHOOSES one, and the
+    /// choice is `<table>_pkey`. The spelling is the one this backend has always
+    /// used, moved here from the neutral contract crate unchanged. What is new is
+    /// that it is now this backend's stated answer rather than an assumption made on
+    /// its behalf, so changing it is a one-line change in this file.
+    ///
+    /// Known divergence, pre-existing and NOT introduced here: this crate's catalog
+    /// reader synthesizes `pk_<table>` for the constraint and emits no index at all
+    /// for the primary key, so the folded and introspected sides disagree on both
+    /// counts. The engine's differential corpus records that pair as by-design.
+    /// Converging them is a change to the reader and to those recorded rows, not to
+    /// this answer.
+    fn implicit_primary_key_name(&self, table: &str) -> String {
+        format!("{table}_pkey")
+    }
+
     fn allocate_implicit_relation_name(
         &self,
         default_name: &str,

@@ -302,7 +302,7 @@ impl DdlEmitter for PgEmitter {
         let (table, t) = (req.table, req.snapshot);
         let mut parts: Vec<String> = Vec::new();
         for c in &t.columns {
-            let inline_pk = inline_pk_for_column(table, t, &c.name);
+            let inline_pk = inline_pk_for_column(&crate::fold::POLICY, table, t, &c.name);
             let ty = crate::schema::RENDERER.column_type(c, inline_pk);
             let pk = primary_key_clause(inline_pk);
             let null = null_clause(c);
@@ -349,7 +349,7 @@ impl DdlEmitter for PgEmitter {
         // a named unique round-trips against the live catalog. CHECK is inlined the
         // same way; both are emission-only bodies the differ does not re-diff.
         for c in &t.constraints {
-            if should_render_table_pk(table, t, c)
+            if should_render_table_pk(&crate::fold::POLICY, table, t, c)
                 || c.kind == "CHECK"
                 || c.kind == "UNIQUE"
                 || c.kind == "EXCLUDE"

@@ -1303,7 +1303,7 @@ const ROWS: &[Row] = &[
     Row { key: "c_dialectal_leg_selection|Mysql|runtime_options(docs)", verdict: "AGREED TableRuntimeOptions { soft_delete: false, versioning: false, strictness: Strict }", status: Status::Consistent },
     Row { key: "c_dialectal_leg_selection|Postgres|indexes(docs)", verdict: "DIVERGENT FO={docs_pg_idx,docs_pkey} ATO={docs_pg_idx} RMO={docs_pg_idx}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
     Row { key: "c_dialectal_leg_selection|Sqlite|indexes(docs)", verdict: "DIVERGENT FO={docs_pkey} ATO={} RMO={}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
-    Row { key: "c_dialectal_leg_selection|Mysql|indexes(docs)", verdict: "DIVERGENT FO={docs_pkey} ATO={} RMO={}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
+    Row { key: "c_dialectal_leg_selection|Mysql|indexes(docs)", verdict: "DIVERGENT FO={PRIMARY} ATO={} RMO={}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
 
     // --- a question with no second opinion ----------------------------------
     Row { key: "c_view_is_seen_by_one_walker|Postgres|tables", verdict: "AGREED {people}", status: Status::Consistent },
@@ -1415,7 +1415,7 @@ const ROWS: &[Row] = &[
     Row { key: "c_rename_column_index_key_columns|Mysql|carries(legacy_qty)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_rename_column_index_key_columns|Postgres|indexes(stock)", verdict: "DIVERGENT FO={stock_multi_idx,stock_pkey,stock_qty_idx} ATO={stock_multi_idx,stock_qty_idx} RMO={stock_multi_idx,stock_qty_idx}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
     Row { key: "c_rename_column_index_key_columns|Sqlite|indexes(stock)", verdict: "DIVERGENT FO={stock_multi_idx,stock_pkey,stock_qty_idx} ATO={stock_multi_idx,stock_qty_idx} RMO={stock_multi_idx,stock_qty_idx}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
-    Row { key: "c_rename_column_index_key_columns|Mysql|indexes(stock)", verdict: "DIVERGENT FO={stock_multi_idx,stock_pkey,stock_qty_idx} ATO={stock_multi_idx,stock_qty_idx} RMO={stock_multi_idx,stock_qty_idx}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
+    Row { key: "c_rename_column_index_key_columns|Mysql|indexes(stock)", verdict: "DIVERGENT FO={PRIMARY,stock_multi_idx,stock_qty_idx} ATO={stock_multi_idx,stock_qty_idx} RMO={stock_multi_idx,stock_qty_idx}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
 
     // ... and the two rendered-SQL index carriers that entry recorded as still
     // open at 6837-6847 are still open. This is the corpus reproducing an
@@ -1481,7 +1481,7 @@ const ROWS: &[Row] = &[
     Row { key: "c_create_drop_recreate_same_name|Mysql|carries(drafts_first_idx)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_create_drop_recreate_same_name|Postgres|indexes(drafts)", verdict: "DIVERGENT FO={drafts_pkey} ATO={} RMO={}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
     Row { key: "c_create_drop_recreate_same_name|Sqlite|indexes(drafts)", verdict: "DIVERGENT FO={drafts_pkey} ATO={} RMO={}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
-    Row { key: "c_create_drop_recreate_same_name|Mysql|indexes(drafts)", verdict: "DIVERGENT FO={drafts_pkey} ATO={} RMO={}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
+    Row { key: "c_create_drop_recreate_same_name|Mysql|indexes(drafts)", verdict: "DIVERGENT FO={PRIMARY} ATO={} RMO={}", status: Status::ByDesign(PK_IS_AN_INDEX_ONLY_IN_A_CATALOG) },
 ];
 
 /// Which op variants each walker reaches, measured by prefix sweep, one line

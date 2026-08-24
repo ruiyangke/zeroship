@@ -217,6 +217,10 @@ impl CatalogFoldPolicy for DuckDbCatalogFoldPolicy {
         None
     }
 
+    fn implicit_primary_key_name(&self, table: &str) -> String {
+        format!("duck_pk_{table}")
+    }
+
     fn allocate_implicit_relation_name(
         &self,
         default_name: &str,
@@ -1397,5 +1401,58 @@ fn the_stub_never_names_the_closed_enum() {
     assert!(
         offenders.is_empty(),
         "the fourth-backend stub must name no closed dialect enum, but it does: {offenders:#?}"
+    );
+}
+
+/// The name a backend's catalog gives a table's IMPLICIT primary-key relation is a
+/// vendor fact, and the outsider states it the same way it states every other one.
+///
+/// The three shipping backends disagree on this in the strongest possible way.
+/// PostgreSQL derives a name from the table (`<table>_pkey`) and stores it. MySQL
+/// stores no name at all and reports the fixed catalog name `PRIMARY`, which is the
+/// only name a MySQL primary key can have. SQLite has neither, and its reader
+/// synthesizes one. There is no shared convention here to inherit, which is exactly
+/// why an outsider must be asked rather than assumed.
+///
+/// `DuckDb` below answers `duck_pk_<table>` — a spelling no shipping backend uses,
+/// chosen so that a predicate carrying any one vendor's convention cannot pass this
+/// by accident.
+#[test]
+fn a_fourth_backend_names_its_own_implicit_primary_key() {
+    let policy: &dyn CatalogFoldPolicy = &DuckDbCatalogFoldPolicy;
+    let pk_name = policy.implicit_primary_key_name("items");
+    assert_eq!(
+        pk_name, "duck_pk_items",
+        "the outsider writes its own implicit primary-key spelling instead of \
+         inheriting one shipping backend's convention"
+    );
+
+    let snapshot = TableSnapshot {
+        columns: Vec::new(),
+        indexes: vec![zero_migrate_backend::snapshot::IndexSnapshot::btree(
+            pk_name.clone(),
+            true,
+            vec!["id".to_string()],
+        )],
+        constraints: Vec::new(),
+        runtime_options: Default::default(),
+        partition_by: None,
+        comment: None,
+        stored_create_sql: None,
+    };
+
+    assert!(
+        zero_migrate_backend::ddl::is_pk_index(policy, "items", &pk_name),
+        "the contract crate's primary-key-index predicate must recognise the name \
+         the REGISTERED backend gives the relation; a predicate that spells one \
+         vendor's convention forces every other backend to report a name its own \
+         catalog does not have"
+    );
+    assert_eq!(
+        zero_migrate_backend::ddl::primary_key_columns(policy, "items", &snapshot),
+        Some(&["id".to_string()][..]),
+        "the contract crate reads a table's primary-key columns off the index the \
+         REGISTERED backend named, so an outsider's inline-versus-table-level PK \
+         rendering is decided by its own catalog spelling"
     );
 }

@@ -1023,7 +1023,12 @@ fn build_injected_columns(
                 .iter()
                 .any(|column| pk.first().is_some_and(|name| name == &column.name))
     }) {
-        let name = format!("{table}_pkey");
+        // The same name the desired snapshot carries, from the same backend, so the
+        // constraint this CREATE emits is the one the differ later recognises as
+        // implicit rather than a stray it must reconcile.
+        let name = crate::render::backends::vendor(dialect)
+            .catalog_fold
+            .implicit_primary_key_name(table);
         let rendered_columns = primary_key
             .iter()
             .map(|column| backend.quote_ident(column))

@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use zero_migrate_backend::drift::DriftError;
+use zero_migrate_backend::fold::CatalogFoldPolicy as _;
 use zero_migrate_backend::driver::SqlSession;
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
@@ -426,8 +427,15 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     for ((table_name, catalog_name), parts) in indexes {
         if let Some(table) = tables.get_mut(&table_name) {
             let is_primary = catalog_name.eq_ignore_ascii_case("PRIMARY");
+            // The catalog's own name, canonicalised through this backend's stated
+            // answer so a differently-cased `primary` from an older server still
+            // lands on one spelling. This used to synthesize `<table>_pkey` — a name
+            // no MySQL server has ever held — because the neutral contract crate's
+            // primary-key predicate recognised that one vendor's convention and
+            // nothing else. The predicate asks the backend now, so the catalog's
+            // answer can be reported as-is.
             let name = if is_primary {
-                format!("{table_name}_pkey")
+                crate::fold::POLICY.implicit_primary_key_name(&table_name)
             } else {
                 catalog_name
             };

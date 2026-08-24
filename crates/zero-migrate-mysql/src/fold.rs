@@ -32,6 +32,17 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
             .then_some(SnapshotProvenanceStrength::ExactTextStorage)
     }
 
+    /// MySQL stores no primary-key name. `information_schema.TABLE_CONSTRAINTS`
+    /// reports every primary key in the server under the fixed name `PRIMARY`, and
+    /// a `CONSTRAINT <symbol> PRIMARY KEY` clause is parsed with the symbol
+    /// discarded, so there is exactly one name a MySQL primary key can have.
+    ///
+    /// It is a constant rather than a function of `table` for the same reason, and
+    /// that is what makes it independent of a table rename.
+    fn implicit_primary_key_name(&self, _table: &str) -> String {
+        "PRIMARY".to_string()
+    }
+
     fn allocate_implicit_relation_name(
         &self,
         default_name: &str,
@@ -72,12 +83,25 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
         None
     }
 
+    /// A rename re-derives the primary-key name from the NEW table, because the name
+    /// the catalog reports after a rename is a function of the current table and can
+    /// be nothing else.
+    ///
+    /// That statement is unchanged and still true; what changed is the function.
+    /// While this backend synthesized a per-table name it was a genuine rename, and
+    /// omitting it left every renamed MySQL table permanently drifted. Now that the
+    /// name is asked for rather than spelled, and this backend's answer does not
+    /// depend on the table, the re-derivation lands on the name the primary key
+    /// already had. The traversal is KEPT rather than replaced by an early return:
+    /// it is what pulls a snapshot carrying some other primary-key name back onto
+    /// the one this server will report, which is exactly the case a no-op would
+    /// leave drifting.
     fn rename_primary_key_after_table_rename(&self, snap: &mut TableSnapshot, to: &str) {
-        let renamed_pk = format!("{to}_pkey");
-        // The index is matched by the constraint's OLD name rather than by
-        // a second `format!`, so a primary key the author named something
-        // else still moves together with its implicit index instead of
-        // splitting into a renamed constraint and an orphaned index.
+        let renamed_pk = self.implicit_primary_key_name(to);
+        // The index is matched by the constraint's OLD name rather than by asking a
+        // second time, so a primary key carrying some other name still moves
+        // together with its implicit index instead of splitting into a renamed
+        // constraint and an orphaned index.
         let previous: Vec<String> = snap
             .constraints
             .iter()

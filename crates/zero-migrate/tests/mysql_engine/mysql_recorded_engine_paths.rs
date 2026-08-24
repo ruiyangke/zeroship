@@ -249,18 +249,24 @@ async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
             .iter()
             .map(|index| index.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["idx_nickname_prefix", "uq_users_tenant_email", "users_pkey"]
+        // `PRIMARY` is the canned catalog's OWN value for this row, carried through
+        // instead of replaced. The reader used to substitute `users_pkey` here — a
+        // name no MySQL server holds — to satisfy a primary-key predicate in the
+        // neutral contract crate that recognised only one other vendor's
+        // convention. It sorts first now because it is uppercase, which is the only
+        // reason the two entries below moved.
+        vec!["PRIMARY", "idx_nickname_prefix", "uq_users_tenant_email"]
     );
-    assert!(users.indexes[0].columns.is_empty());
-    assert!(users.indexes[1].unique);
-    assert_eq!(users.indexes[1].columns, ["tenant_id", "email"]);
+    assert!(users.indexes[0].unique);
+    assert_eq!(users.indexes[0].columns, ["id"]);
+    assert!(users.indexes[1].columns.is_empty());
     assert!(users.indexes[2].unique);
-    assert_eq!(users.indexes[2].columns, ["id"]);
+    assert_eq!(users.indexes[2].columns, ["tenant_id", "email"]);
     assert_eq!(users.constraints.len(), 3);
     let primary = users
         .constraints
         .iter()
-        .find(|constraint| constraint.name == "users_pkey")
+        .find(|constraint| constraint.name == "PRIMARY")
         .expect("primary key");
     assert_eq!(primary.kind, "PRIMARY KEY");
     assert_eq!(primary.definition, "PRIMARY KEY (id)");

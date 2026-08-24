@@ -90,7 +90,7 @@ impl SqliteTableRebuildPolicy {
         let live_idx: BTreeMap<&str, &IndexSnapshot> =
             lt.indexes.iter().map(|i| (i.name.as_str(), i)).collect();
         for idx in &dt.indexes {
-            if is_pk_index(table, &idx.name) {
+            if is_pk_index(&crate::fold::POLICY, table, &idx.name) {
                 continue;
             }
             if let Some(li) = live_idx.get(idx.name.as_str()) {
