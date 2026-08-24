@@ -236,3 +236,66 @@ async fn an_open_transaction_does_not_survive_a_release() {
          transaction back"
     );
 }
+
+/// A LISTEN registration survives a release, like the GUC and the advisory
+/// lock above.
+///
+/// Recorded because the release path documents exactly what it does and does
+/// not clear - "ROLLBACK, not DISCARD ALL" - and LISTEN was not on either
+/// list. `pg_listening_channels()` is the server's own view, so this asks the
+/// backend rather than inferring from behaviour.
+///
+/// This is a statement of what the pool DOES, not an endorsement. It matters
+/// to a caller because the registration is invisible from the pooled side:
+/// `notifications()` lives on `Connection`, which the pool owns, so a borrower
+/// can leave a subscription behind that no later borrower can read or clear.
+/// The server keeps sending on it, and the connection task logs and discards.
+///
+/// WHAT THIS CAN AND CANNOT CATCH. A clean release sends NOTHING - the
+/// rollback is queued only for a session that is not provably `Idle` - so
+/// there is no code on this path to perturb, and no mutation short of
+/// changing the policy makes it fail. That is its job: it exists so that
+/// adding a `DISCARD ALL` or an `UNLISTEN *` to the release path goes red and
+/// forces the author to weigh the consequence the surrounding comments
+/// describe - plugin-db holds a session advisory lock across a release.
+#[compio::test]
+async fn a_listen_registration_survives_a_release() {
+    let url = test_url();
+    let pool = single_connection_pool(&url).await;
+
+    let first_pid = {
+        let client = pool.get().await.expect("first checkout");
+        client
+            .batch_execute("LISTEN cpg_carry_channel")
+            .await
+            .expect("listen");
+        client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .expect("pid")
+            .get::<_, i32>(0)
+    };
+
+    let client = pool.get().await.expect("second checkout");
+    let second_pid: i32 = client
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("pid")
+        .get(0);
+    assert_eq!(
+        first_pid, second_pid,
+        "the pool handed out a different backend, so this proves nothing about carry-over"
+    );
+
+    // Set-returning, so it belongs in FROM rather than in an expression.
+    let still_listening: i64 = client
+        .query_one(
+            "SELECT count(*)::int8 FROM pg_listening_channels() AS c
+              WHERE c = 'cpg_carry_channel'",
+            &[],
+        )
+        .await
+        .expect("listening channels")
+        .get(0);
+    assert_eq!(still_listening, 1, "the LISTEN did not survive the release");
+}
