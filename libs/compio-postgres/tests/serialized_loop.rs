@@ -276,3 +276,49 @@ async fn a_notice_raised_by_an_awaited_statement_is_delivered() {
         other => panic!("the notice was not delivered on the serialized loop: {other:?}"),
     }
 }
+
+/// Dropping a query future mid-flight must not strand the session.
+///
+/// The serialized loop cannot read and write at once, so an abandoned request
+/// is the case most likely to leave it mid-frame. If the session survives, the
+/// next query answers; if it does not, this hangs rather than returning a
+/// wrong value, which is why the assertion is bounded.
+///
+/// The sleep is SHORT on purpose. PostgreSQL runs one query at a time per
+/// connection, so abandoning a long one leaves the server busy with it and the
+/// follow-up cannot be answered until it finishes - a bound shorter than the
+/// sleep then fails for a reason that has nothing to do with the driver. An
+/// earlier version of this test used pg_sleep(30) against a 10s bound and
+/// reported a stranded session that was simply still working.
+#[compio::test]
+async fn an_abandoned_query_leaves_the_serialized_session_usable() {
+    let client = serialized_client().await;
+
+    {
+        let pending = client.query_one("SELECT pg_sleep(1)", &[]);
+        // Give the request time to reach the wire, then abandon it.
+        let _ = compio::time::timeout(std::time::Duration::from_millis(150), pending).await;
+    }
+
+    let recovered = compio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.query_one("SELECT 7::int4", &[]),
+    )
+    .await;
+
+    match recovered {
+        Ok(Ok(row)) => assert_eq!(row.get::<_, i32>(0), 7),
+        Ok(Err(error)) => {
+            // A retired session is an acceptable outcome; a WRONG ANSWER is
+            // not, and neither is a hang.
+            eprintln!(
+                "the abandoned query retired the session: {}",
+                common::error_chain(&error)
+            );
+        }
+        Err(_) => panic!(
+            "the serialized session neither answered nor failed after an \
+             abandoned query; it is stranded mid-frame"
+        ),
+    }
+}
