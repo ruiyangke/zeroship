@@ -86,7 +86,7 @@ pub use rule::{
 };
 pub use scope::{
     glob::SegGlob,
-    normalize_pg_identifier,
+    normalize_object_name,
     pattern::{ObjectName, Pattern},
     Difference, Scope, ScopeError,
 };

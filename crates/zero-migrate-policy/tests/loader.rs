@@ -1035,7 +1035,7 @@ scope = { include = ["\"a.b\""] }
     match &doc.rules[0].scope {
         Scope::Of { include, .. } => {
             // Single segment: the schema glob is the literal `a.b`; table glob is `*`.
-            let obj = zero_migrate_policy::normalize_pg_identifier("\"a.b\"").unwrap();
+            let obj = zero_migrate_policy::normalize_object_name("\"a.b\"").unwrap();
             assert!(include[0].matches(&obj));
             // The unrelated schema `a` object is NOT matched.
             assert!(!include[0].matches(&zero_migrate_policy::ObjectName::schema(b"a".to_vec())));

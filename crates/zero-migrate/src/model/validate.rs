@@ -62,11 +62,11 @@ use crate::model::expr::{CaseBranch, Expr, ScalarFn};
 use zero_migrate_ir::backend::Capability;
 use zero_migrate_ir::dialect::DialectId;
 // The PG argument-type alias fold. It moved to `zero-migrate-backend` with the
-// snapshot value types, whose `canonical_pg_signature_type` is its other caller;
+// snapshot value types, whose `canonical_signature_type` is its other caller;
 // re-imported here under its historical name so this module's two call sites and
 // `crate::apply::drift` read unchanged.
 use std::collections::{BTreeMap, BTreeSet};
-pub(crate) use zero_migrate_backend::snapshot::canonical_pg_arg_type;
+pub(crate) use zero_migrate_backend::snapshot::canonical_arg_type;
 
 // The structural, policy-free validator moved to the `zero-migrate-ir` leaf crate.
 // Re-export its full surface so this policy-bound module (and the engine root)
@@ -3753,7 +3753,7 @@ fn validate_no_name_is_claimed_twice(
                     .collect();
                 let arg_types: Vec<String> = signature
                     .iter()
-                    .map(|a| canonical_pg_arg_type(&a.ty))
+                    .map(|a| canonical_arg_type(&a.ty))
                     .collect();
                 let arg_names: Vec<Option<&str>> =
                     signature.iter().map(|a| a.name.as_deref()).collect();
@@ -3819,7 +3819,7 @@ fn validate_no_name_is_claimed_twice(
                 match arg_types {
                     Some(types) => {
                         let canonical: Vec<String> =
-                            types.iter().map(|t| canonical_pg_arg_type(t)).collect();
+                            types.iter().map(|t| canonical_arg_type(t)).collect();
                         functions.remove(&(schema.as_deref(), name.as_str(), canonical));
                     }
                     // No argument types names the sole overload. Releasing EVERY

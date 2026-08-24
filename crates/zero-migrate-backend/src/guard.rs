@@ -76,7 +76,7 @@ use zero_migrate_ir::policy::DestructiveOps;
 use zero_migrate_ir::policy::SchemaScope;
 use zero_migrate_ir::policy_registry;
 use zero_migrate_policy::{
-    normalize_pg_identifier, EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectModel,
+    normalize_object_name, EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectModel,
     ObjectName, ShapeElement,
 };
 
@@ -394,7 +394,7 @@ impl GuardConfig {
     /// [`Self::requires_rls_at`] for a caller holding a schema and a table name
     /// rather than a built [`ObjectName`].
     ///
-    /// The object is built THROUGH [`normalize_pg_identifier`], the same way
+    /// The object is built THROUGH [`normalize_object_name`], the same way
     /// `zero_migrate_ir::policy_approval` builds its own: the composer's scope matcher
     /// PG-folds both sides, so raw table bytes would let a table spelled `"Users"` slip
     /// past a scope of `app.users`.
@@ -406,7 +406,7 @@ impl GuardConfig {
     /// that never mentions RLS untouched.
     #[must_use]
     pub fn requires_rls_at_table(&self, schema: &str, table: &str) -> bool {
-        match normalize_pg_identifier(&format!("{schema}.{table}")) {
+        match normalize_object_name(&format!("{schema}.{table}")) {
             Some(object) => self.requires_rls_at(&object),
             None => self.require_rls_authored_anywhere(),
         }
@@ -527,7 +527,7 @@ impl GuardConfig {
         let Some(k) = KnobKey::parse(policy_registry::KEY_SCHEMA_CROSS_SCHEMA).ok() else {
             return false;
         };
-        let Some(object) = normalize_pg_identifier(schema) else {
+        let Some(object) = normalize_object_name(schema) else {
             return false;
         };
         matches!(
@@ -1180,7 +1180,7 @@ impl DeclaredCreateShape {
 /// not a safety property in either direction; the two folds should be unified once
 /// the policy crate exposes its single-identifier fold.
 fn fold_identifier(name: &str) -> Vec<u8> {
-    match normalize_pg_identifier(name) {
+    match normalize_object_name(name) {
         Some(object) if object.table.is_none() => object.schema,
         _ => name.to_ascii_lowercase().into_bytes(),
     }

@@ -20,9 +20,7 @@
 //! - `on_destructive` → requires approval iff the op is [`Op::is_destructive`] (the
 //!   same destructive notion the guard's `safety.destructive_ops` classifier uses).
 
-use zero_migrate_policy::{
-    normalize_pg_identifier, EffectivePolicy, KnobKey, KnobValue, ObjectName,
-};
+use zero_migrate_policy::{normalize_object_name, EffectivePolicy, KnobKey, KnobValue, ObjectName};
 
 use crate::ir::Op;
 use crate::policy_registry::{KEY_SAFETY_REQUIRE_APPROVAL, REQUIRE_APPROVAL_VARIANTS};
@@ -79,12 +77,12 @@ impl ApprovalLevel {
 /// resolution. A table op resolves to `default_schema.table` (or its own schema
 /// qualifier when present); a schema/namespace-level op with no table resolves to the
 /// schema it names, else the migration's `default_schema`. Identifiers are PG-folded
-/// via [`normalize_pg_identifier`] so the resolution matches the composer's scope
+/// via [`normalize_object_name`] so the resolution matches the composer's scope
 /// matcher exactly (an un-normalizable name fails closed to the `default_schema`
 /// object).
 fn object_for_op(op: &Op, default_schema: &str) -> ObjectName {
     concrete_object_for_op(op, default_schema).unwrap_or_else(|| {
-        normalize_pg_identifier(default_schema)
+        normalize_object_name(default_schema)
             .unwrap_or_else(|| ObjectName::schema(default_schema.as_bytes().to_vec()))
     })
 }
@@ -100,17 +98,17 @@ fn object_for_op(op: &Op, default_schema: &str) -> ObjectName {
 ///
 /// A table op resolves to `default_schema.table` (or its own schema qualifier when
 /// present); an op with no table resolves to the schema it names, else the migration's
-/// `default_schema`. Identifiers are PG-folded via [`normalize_pg_identifier`] so the
+/// `default_schema`. Identifiers are PG-folded via [`normalize_object_name`] so the
 /// resolution matches the composer's scope matcher exactly.
 #[must_use]
 pub fn concrete_object_for_op(op: &Op, default_schema: &str) -> Option<ObjectName> {
     let schema = op.schema().unwrap_or(default_schema);
     if let Some(table) = op.touched_table() {
-        return normalize_pg_identifier(&format!("{schema}.{table}"));
+        return normalize_object_name(&format!("{schema}.{table}"));
     }
     // A schema/role/db-level op (DropSchema, roles, grants, raw islands): resolve to
     // the schema it names when it carries one, else the migration's default schema.
-    normalize_pg_identifier(schema)
+    normalize_object_name(schema)
 }
 
 /// Resolve the effective `safety.require_approval` level at `object`: the LOOSEST

@@ -16,7 +16,7 @@ use crate::rule::{
     AuthorPkPolicy, InjectCollation, InjectColumn, InjectIndex, InjectSpec, NameGlob, Rule,
     RuleKind, ValidatePredicate,
 };
-use crate::scope::normalize_pg_identifier;
+use crate::scope::normalize_object_name;
 use crate::value_order::leq_value;
 use crate::{Pattern, Scope, ScopeError};
 
@@ -1128,7 +1128,7 @@ fn check_self_contradiction(rules: &[Rule]) -> Result<(), LoadError> {
 fn fold_name(s: &str) -> Vec<u8> {
     // A validate `ForbiddenColumns` name / inject column name is a single unquoted
     // identifier; fold via the same normalizer and take the schema-glob bytes.
-    normalize_pg_identifier(s)
+    normalize_object_name(s)
         .map(|o| o.schema)
         .unwrap_or_else(|| s.to_ascii_lowercase().into_bytes())
 }

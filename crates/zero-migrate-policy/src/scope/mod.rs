@@ -27,7 +27,7 @@ mod oracle;
 use std::collections::BTreeSet;
 
 pub use glob::SegGlob;
-pub use pattern::{normalize_pg_identifier, Pattern};
+pub use pattern::{normalize_object_name, Pattern};
 
 use pattern::{intersect_pattern, pattern_covers, ObjectName};
 

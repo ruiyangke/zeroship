@@ -36,7 +36,7 @@ use crate::policy_registry::{capability_knob_key, KEY_CODE_EXTENSION};
 pub fn capability_object_for_op(op: &Op, default_schema: &str) -> Option<ObjectName> {
     match op {
         Op::CreateSchema { name, .. } | Op::DropSchema { name, .. } => {
-            zero_migrate_policy::normalize_pg_identifier(name)
+            zero_migrate_policy::normalize_object_name(name)
         }
         _ => concrete_object_for_op(op, default_schema),
     }

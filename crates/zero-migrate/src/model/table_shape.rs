@@ -33,7 +33,7 @@
 //! measured here; do not read this note as a claim that they do.
 
 use zero_migrate_policy::{
-    normalize_pg_identifier, AuthorPkPolicy, EffectivePolicy, InjectCollation, InjectColumn,
+    normalize_object_name, AuthorPkPolicy, EffectivePolicy, InjectCollation, InjectColumn,
     InjectIndex, ObjectName,
 };
 
@@ -597,7 +597,7 @@ fn canonical_inject_identifier(raw: &str, kind: &'static str) -> Result<String, 
             });
         }
     }
-    let normalized = normalize_pg_identifier(raw)
+    let normalized = normalize_object_name(raw)
         .filter(|object| object.table.is_none())
         .and_then(|object| String::from_utf8(object.schema).ok())
         .filter(|name| name.len() <= 63)

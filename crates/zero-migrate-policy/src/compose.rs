@@ -1640,7 +1640,7 @@ pub(crate) fn names_match(a: &str, b: &str) -> bool {
 /// The II.2.7 single-identifier fold (lowercase unquoted, verbatim quoted), reused
 /// from the loader's identifier normalizer.
 fn fold(s: &str) -> Vec<u8> {
-    crate::scope::normalize_pg_identifier(s)
+    crate::scope::normalize_object_name(s)
         .map(|o| o.schema)
         .unwrap_or_else(|| s.to_ascii_lowercase().into_bytes())
 }

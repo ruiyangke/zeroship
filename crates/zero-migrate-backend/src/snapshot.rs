@@ -1230,8 +1230,15 @@ impl SequenceDataTypeSnapshot {
         }
     }
 
-    /// Convert the PostgreSQL catalog spelling into the snapshot's closed enum.
-    pub fn from_pg_type_name(name: &str) -> Self {
+    /// Convert a catalog type spelling into the snapshot's closed enum.
+    ///
+    /// A SHARED NORMAL FORM, not a target's private business. Only one backend has
+    /// standalone sequences today, so only one backend's catalog spelling reaches
+    /// this — but the DIALECT-BLIND differ compares a snapshot whose producer it does
+    /// not know, so a second copy of this fold on either side would not report a
+    /// difference, it would MANUFACTURE one. It was `from_pg_type_name`, which read
+    /// as a target's private parser rather than as the one both sides must share.
+    pub fn from_catalog_type_name(name: &str) -> Self {
         match name {
             "smallint" | "int2" => Self::SmallInt,
             "integer" | "int4" => Self::Int,
@@ -1480,13 +1487,23 @@ impl FunctionKey {
             arg_types: self
                 .arg_types
                 .iter()
-                .map(|ty| canonical_pg_signature_type(ty))
+                .map(|ty| canonical_signature_type(ty))
                 .collect(),
         }
     }
 }
 
-/// One PostgreSQL argument type in the spelling that decides function IDENTITY.
+/// One function-argument type in the spelling that decides function IDENTITY.
+///
+/// ONE FOLD, TWO CALLERS, and that is why the name stopped naming a backend. An
+/// authored signature and a catalog-reported one must reduce to the SAME string, or
+/// the same overload reads as one function missing and a different one appearing. It
+/// was `canonical_pg_signature_type`; the alias table it applies IS the way one
+/// backend spells types, which the doc below states, but the JOB is the comparison's.
+///
+/// `tests/dialect_matrix/backend_snapshot_privates_stay_core_only.rs` files this
+/// under its VERDICT half, and that stays true: both callers are engine code, and a
+/// vendor calling it would be answering the engine's question with its own opinion.
 ///
 /// Two reductions, in order:
 ///
@@ -1495,14 +1512,14 @@ impl FunctionKey {
 ///     `CREATE FUNCTION g(x varchar(255))` reads back from `pg_proc` as `character
 ///     varying`, so an authored `varchar(255)` that kept its length would be
 ///     reported as a missing function and an unexpected one on every snapshot.
-///  2. **Fold the alias**, through [`canonical_pg_arg_type`]
+///  2. **Fold the alias**, through [`canonical_arg_type`]
 ///     - the authoring gate's own table, called rather than copied.
 ///
 /// Step 1 is deliberately NOT pushed into that shared function. It decides which
 /// migrations the gate REFUSES as duplicate signatures; widening it is a change to
 /// authoring, not to drift, and is not what this work measured.
 #[must_use]
-pub fn canonical_pg_signature_type(raw: &str) -> String {
+pub fn canonical_signature_type(raw: &str) -> String {
     let trimmed = raw.trim();
     let base = match (trimmed.find('('), trimmed.rfind(')')) {
         (Some(open), Some(close)) if close > open => {
@@ -1510,7 +1527,7 @@ pub fn canonical_pg_signature_type(raw: &str) -> String {
         }
         _ => trimmed.to_string(),
     };
-    canonical_pg_arg_type(&base)
+    canonical_arg_type(&base)
 }
 
 /// The authored definition needed to restore a dropped PostgreSQL function.
@@ -1814,7 +1831,7 @@ impl TriggerIdentity {
 pub struct VendorObjectIdentities {
     /// Function overloads present, keyed by [`FunctionKey`] whose `arg_types` are
     /// CANONICAL PostgreSQL type names, not authored spellings - see
-    /// [`canonical_pg_arg_type`]. `pg_proc` reports
+    /// [`canonical_arg_type`]. `pg_proc` reports
     /// `integer` for an authored `int`, so an uncanonicalised key would report the
     /// same function as both missing and unexpected.
     ///
@@ -1978,7 +1995,7 @@ pub struct NamedTypeSnapshot {
 /// reduction of its own (dropping a type modifier) on top of the result; that
 /// belongs to drift and not here, because widening this function widens what the
 /// authoring gate REFUSES.
-pub fn canonical_pg_arg_type(raw: &str) -> String {
+pub fn canonical_arg_type(raw: &str) -> String {
     let lowered = raw.trim().to_ascii_lowercase();
     let collapsed = lowered.split_whitespace().collect::<Vec<_>>().join(" ");
     match collapsed.as_str() {

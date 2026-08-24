@@ -71,7 +71,7 @@ impl Pattern {
     /// NOTE: this is the blunt parser over the alphabet the scope oracle uses;
     /// it splits on EVERY `.` and applies no identifier folding. The oracle proves
     /// the lattice over globs built by this parser, so it stays byte-exact — do not
-    /// route it through [`normalize_pg_identifier`]. The document loader uses
+    /// route it through [`normalize_object_name`]. The document loader uses
     /// [`Pattern::parse_normalized`] for the II.2.7 quote/fold semantics.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
@@ -254,8 +254,23 @@ fn seg_from_normalized(seg: &NormalizedSegment) -> Option<SegGlob> {
 /// `*` would be a nonsensical identifier byte; we fold it verbatim (lowercased)
 /// rather than treating it as a glob (a name never globs). Returns `None` on the
 /// same structural rejects as the pattern parser.
+///
+/// # It is ONE fold, and it is the CHARTER's, not a target's
+///
+/// The fold this applies — an unquoted segment lowercases, a quoted one is verbatim
+/// — is spelled the way PostgreSQL spells identifier resolution, and it was called
+/// `normalize_pg_identifier` for that reason. The name was doing real harm: this
+/// function is not a target's, it is the CHARTER's, and both sides of every scope
+/// comparison go through it precisely so a charter written for one project matches
+/// the same objects on every target it is deployed against. A target-shaped name on a
+/// charter-shaped fold invites a second one "for the other dialects", and a second
+/// fold is how a scope of `app.users` stops covering a table spelled `Users`.
+///
+/// The same reclassification `zero_migrate_backend::constraint_definition`'s
+/// `quote_ident_if_needed` already carries: a deliberate canonical normal form keeps
+/// a neutral name and a doc saying whose grammar it encodes.
 #[must_use]
-pub fn normalize_pg_identifier(s: &str) -> Option<ObjectName> {
+pub fn normalize_object_name(s: &str) -> Option<ObjectName> {
     let segs = split_normalize_segments(s)?;
     match segs.as_slice() {
         [schema] => Some(ObjectName::schema(schema.bytes.clone())),
@@ -338,10 +353,10 @@ mod tests {
         assert!(!quoted.matches(&ObjectName::schema(b"app_x".to_vec())));
         // And an unquoted `app_*` pattern does not match the quoted concrete name.
         let unq = Pattern::parse_normalized("app_*").unwrap();
-        let quoted_name = normalize_pg_identifier("\"App_x\"").unwrap();
+        let quoted_name = normalize_object_name("\"App_x\"").unwrap();
         assert!(!unq.matches(&quoted_name));
         // But it does match the unquoted `App_x`, which folds to `app_x`.
-        let folded_name = normalize_pg_identifier("App_x").unwrap();
+        let folded_name = normalize_object_name("App_x").unwrap();
         assert!(unq.matches(&folded_name));
     }
 
@@ -353,7 +368,7 @@ mod tests {
         assert_eq!(p, Pattern::schema(SegGlob::literal(b"a.b".to_vec())));
         // The schema pattern `a` must NOT match the object named `a.b`.
         let schema_a = Pattern::parse_normalized("a").unwrap();
-        let obj = normalize_pg_identifier("\"a.b\"").unwrap();
+        let obj = normalize_object_name("\"a.b\"").unwrap();
         assert!(!schema_a.matches(&obj));
     }
 

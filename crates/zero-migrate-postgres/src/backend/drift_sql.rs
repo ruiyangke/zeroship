@@ -1681,7 +1681,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
     let mut sequences = std::collections::BTreeMap::new();
     for r in &seq_rows {
         let as_type =
-            SequenceDataTypeSnapshot::from_pg_type_name(&r.try_get::<_, String>("data_type")?);
+            SequenceDataTypeSnapshot::from_catalog_type_name(&r.try_get::<_, String>("data_type")?);
         let increment = SafeI64::new(r.try_get("increment_by")?).map_err(DriftError::Snapshot)?;
         let min_value = normalize_sequence_min_value(as_type, increment, r.try_get("min_value")?)
             .map_err(DriftError::Snapshot)?;

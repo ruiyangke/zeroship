@@ -25,11 +25,11 @@
 //! | `index_predicates_canonically_eq` | `model/snapshot.rs` | index drift comparison |
 //! | `same_definition_except_name` | `model/snapshot.rs` | constraint rename detection |
 //! | `definition_differences_except_name` | `model/snapshot.rs` | constraint drift blame |
-//! | `from_sequence_col_type` / `from_pg_type_name` | `model/snapshot.rs` | sequence typing |
+//! | `from_sequence_col_type` / `from_catalog_type_name` | `model/snapshot.rs` | sequence typing |
 //! | `normalize_sequence_min_value` / `_max_value` | `model/snapshot.rs` | sequence bounds |
 //! | `sequence_default_start_value` | `model/snapshot.rs` | sequence bounds |
 //! | `from_create` / `from_drop` | `model/snapshot.rs` | function-snapshot folding |
-//! | `canonical_pg_arg_type` | `model/validate.rs` | PG signature-collision fold |
+//! | `canonical_arg_type` | `model/validate.rs` | PG signature-collision fold |
 //!
 //! # The sixteen are two kinds, and the PostgreSQL extraction is what proved it
 //!
@@ -102,8 +102,8 @@ const VERDICT_ITEMS: &[&str] = &[
     "index_predicates_canonically_eq",
     "same_definition_except_name",
     "definition_differences_except_name",
-    "canonical_pg_signature_type",
-    "canonical_pg_arg_type",
+    "canonical_signature_type",
+    "canonical_arg_type",
 ];
 
 /// The degraded items that build the shared NORMAL FORM a verdict is taken over.
@@ -114,7 +114,7 @@ const VERDICT_ITEMS: &[&str] = &[
 /// for.
 const SHARED_NORMAL_FORM_ITEMS: &[&str] = &[
     "from_sequence_col_type",
-    "from_pg_type_name",
+    "from_catalog_type_name",
     "normalize_sequence_min_value",
     "normalize_sequence_max_value",
     "sequence_default_start_value",
@@ -158,7 +158,7 @@ const ENGINE_CALLSITE_FLOOR: usize = 10;
 /// reach the one implementation.
 ///
 /// Measured at 8, all in `zero-migrate-postgres/src/backend/drift_sql.rs` — the
-/// `SequenceDataTypeSnapshot::from_pg_type_name` call, the two bound normalizers, the
+/// `SequenceDataTypeSnapshot::from_catalog_type_name` call, the two bound normalizers, the
 /// `nextval` render and parse, and the `use` lines that import them. Set below that so
 /// ordinary churn does not trip it; a drop to zero is the question, and the answer is
 /// either "the needle broke" or "a vendor stopped reusing and started re-deriving".

@@ -35,7 +35,7 @@ use zero_migrate_ir::migration::MigrationFlags;
 use zero_migrate_ir::policy::DestructiveOps;
 use zero_migrate_ir::policy::SchemaScope;
 use zero_migrate_ir::policy_registry;
-use zero_migrate_policy::{normalize_pg_identifier, GrantRegion, ObjectName, ShapeElement};
+use zero_migrate_policy::{normalize_object_name, GrantRegion, ObjectName, ShapeElement};
 
 // The NEUTRAL guard seam lives in the backend contract crate, below every vendor, so
 // a vendor crate can implement `MigrationGuard` without depending on the engine that
@@ -186,7 +186,7 @@ fn drop_object_targets<D: GuardDecisions + ?Sized>(
         drop.objects
             .iter()
             .map(|item| match item.node.as_ref() {
-                Some(NodeEnum::String(s)) => normalize_pg_identifier(s.sval.trim()),
+                Some(NodeEnum::String(s)) => normalize_object_name(s.sval.trim()),
                 _ => None,
             })
             .collect()
@@ -267,7 +267,7 @@ fn raw_relation_target<D: GuardDecisions + ?Sized>(
     } else {
         schemaname.trim().to_string()
     };
-    match normalize_pg_identifier(&format!("{schema}.{relname}")) {
+    match normalize_object_name(&format!("{schema}.{relname}")) {
         Some(object) => RawRelationTarget::Resolved(object),
         None => RawRelationTarget::Unattributable,
     }
@@ -901,7 +901,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 let obj = if name.is_empty() {
                     None
                 } else {
-                    normalize_pg_identifier(name)
+                    normalize_object_name(name)
                 };
                 match obj {
                     Some(schema_obj) => {
@@ -1583,7 +1583,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 // `check_namespace_structural` resolves. A `CREATE SCHEMA
                 // AUTHORIZATION joe` names no schema; that target is unattributable
                 // here and the namespace gate owns its refusal.
-                let target = normalize_pg_identifier(cs.schemaname.trim());
+                let target = normalize_object_name(cs.schemaname.trim());
                 if !self.cfg.grants_object_bool(
                     policy_registry::KEY_SCHEMA_CREATE_SCHEMA,
                     target.as_ref(),
