@@ -62,14 +62,31 @@ pnpm build            # db -> bootstrap -> the rest of sdks/*, in dependency ord
 cargo build --workspace
 ```
 
-Rust gates (these mirror CI - run them before pushing):
+Rust gates - run them before pushing:
 
 ```
-cargo fmt --all -- --check
-cargo clippy --workspace -- -D warnings
+./tests/clippy_gate.sh
 cargo check --workspace
 cargo test --workspace
 ```
+
+**Lint through `tests/clippy_gate.sh`, which is what CI runs, and NOT through
+`cargo clippy --workspace -- -D warnings`.** The workspace grades its own lints
+in the root `Cargo.toml`; `-D warnings` promotes the pedantic and nursery groups
+it deliberately leaves as warnings, so it reports thousands of errors that are
+not gate failures (measured on one crate alone: 1744). The gate also audits
+cargo's JSON stream to catch packages that were never linted at all, which a
+bare `cargo clippy` cannot do because a deny-level lint in one crate aborts the
+run before the crates after it are scheduled.
+
+**There is no `cargo fmt` gate.** CI runs no formatting step, and the tree does
+not currently satisfy `cargo fmt --all -- --check` - it reports diffs in 888
+files (measured 2026-08-23 under the `nix develop` toolchain, and confirmed with
+the newer rustfmt in the same store). This block used to list that command and
+say the block mirrored CI; both halves were false, which is worse than saying
+nothing: a checklist whose gate cannot pass trains you to read red as normal.
+If you want formatting enforced, that is a one-off tree-wide reformat plus a CI
+step, and it wants to land when nothing else is in flight.
 
 Per-crate iteration is faster; run the full per-crate suite (not just `--lib`) for the
 crate you touched, e.g. `cargo test -p zeroship-gateway`. Driver tests that need a live
