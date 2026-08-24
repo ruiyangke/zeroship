@@ -55,8 +55,15 @@ pub mod field_defs_corpus;
 /// so cannot be localized by the pid the way every other cluster-visible name here is.
 /// It lives in `support` rather than in any one test file BECAUSE the claim only works
 /// when every binary that installs a given extension hashes the SAME key: `rollback`,
-/// `fold_live` and `dialect_matrix` are three processes contending for one server, and
-/// three private locks would protect nothing while looking exactly like protection.
+/// `fold_live`, `dialect_matrix` and `pg_engine` are four processes contending for one
+/// server, and four private locks would protect nothing while looking exactly like
+/// protection.
+///
+/// The claimants are not all Rust. `packages/zero-migrate-cli/tests/host/
+/// extension-claim.ts` is the host suite's half, and it hashes this same key by
+/// copying the string this module builds - `extension-claim-is-exclusive.test.ts`
+/// reads `extension_claim.rs` and asserts the two spellings agree, which is the only
+/// check in either tree that can see a one-sided rename.
 pub mod extension_claim;
 
 use std::cell::{Cell, RefCell};

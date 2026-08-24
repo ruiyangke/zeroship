@@ -30,6 +30,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { claim, release } from "./extension-claim.js";
 import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 import { createExtensionPolicy, createSchemaPolicy, noInjectPolicy } from "./policy.js";
 
@@ -394,8 +395,18 @@ test("PostgreSQL: rolling back a dropExtension reinstalls the extension its crea
 
   let dir: string | undefined;
   try {
-    // An extension is database-wide, so a copy left by anything else would make the
-    // assertions read backwards. Start from absent, and say so if it is not.
+    // An extension is database-wide, so no name this arm picks isolates it from a
+    // sibling gate run. The claim is how the claimants isolate in TIME instead, and it
+    // is the SAME lock the Rust suites take - `extension-claim.ts` explains why the key
+    // is copied from them rather than re-designed. Taken before anything else, so an
+    // arm that cannot get it has created nothing to reclaim, and LOUD: `claim` throws
+    // rather than skipping, because a lost claim means this arm never ran.
+    //
+    // It also establishes the precondition the assertion below reads: `claim` issues a
+    // `DROP EXTENSION IF EXISTS` INSIDE the claim, so a leftover from a run killed
+    // between its create and its drop is cleared rather than reported as this arm's
+    // failure. The assertion stays as the proof that it was.
+    await claim(client, extensionName);
     assert.equal(
       await extensionInstalled(),
       false,
@@ -423,7 +434,11 @@ test("PostgreSQL: rolling back a dropExtension reinstalls the extension its crea
     );
   } finally {
     if (dir) rmSync(dir, { recursive: true, force: true });
-    await client.query(`DROP EXTENSION IF EXISTS "${extensionName}"`).catch(() => {});
+    // Drops what this arm installed AND releases the claim, in that order. The
+    // connection closing below would release it too - which is the backstop for a
+    // killed process - but doing it here ends the claim at the CASE boundary rather
+    // than whenever this client happens to be ended.
+    await release(client, extensionName);
     await client
       .query(
         `DROP SCHEMA IF EXISTS "${schemaName}" CASCADE; DROP SCHEMA IF EXISTS "${metaSchema}" CASCADE`,

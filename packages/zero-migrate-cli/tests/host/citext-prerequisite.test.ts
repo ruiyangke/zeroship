@@ -24,7 +24,9 @@
 // assertion below stops matching and this file is the place to record which of those
 // shipped.
 //
-// GATE: `connectLivePg` (see `live-db.ts`).
+// GATE: `connectLivePg` (see `live-db.ts`). This arm also holds the `citext` claim
+// (`extension-claim.ts`) for its whole body, because an absence is what it measures and
+// an extension is a database-wide object no sibling run can be renamed away from.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -33,6 +35,7 @@ import { table, t } from "zero-migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
 import type { MigrationModule } from "zero-migrate/internal/recorder";
 
+import { claim, release } from "./extension-claim.js";
 import { connectLivePg, pgUrl } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
 
@@ -40,6 +43,9 @@ import { noInjectPolicy } from "./policy.js";
 import "./addon.js";
 
 const OWNER_APP = "app_citext_prereq";
+
+/** The extension whose ABSENCE this arm is about, and whose claim it takes. */
+const EXTENSION = "citext";
 
 type NamedMigration = MigrationModule & { readonly name: string };
 
@@ -64,26 +70,38 @@ function caseInsensitiveMigration(): NamedMigration {
   } as NamedMigration;
 }
 
-test("the documented case-insensitive spelling fails at apply when citext is not installed", async (ctx) => {
+test("the documented case-insensitive spelling fails at apply when citext is not installed", async () => {
   const admin = await connectLivePg();
-
-  // The whole arm is meaningless on a database that already has the extension, and
-  // silently meaningless is the failure mode worth avoiding: it would pass by
-  // applying cleanly and assert nothing.
-  const { rows: installed } = await admin.query(
-    `SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'citext'`,
-  );
-  if (installed.length > 0) {
-    await admin.end().catch(() => {});
-    ctx.skip("citext is installed on this server; the prerequisite gap cannot be observed here");
-    return;
-  }
 
   const projectSchema = uniqueNamespace("citext_prereq");
   const meta = `${projectSchema}_migrations`;
   const driver: DriverConfig = { kind: "postgres", url: pgUrl() };
 
   try {
+    // THIS ARM'S SUBJECT IS AN ABSENCE, which makes it the one shape a per-run name
+    // cannot protect: an extension is installed per DATABASE, so a sibling gate run
+    // that installs `citext` for its own case turns this arm's question into one it
+    // cannot ask. It takes the same claim the installers take (see
+    // `extension-claim.ts`), which both excludes them for the duration AND drops any
+    // leftover, so the absence below is established rather than hoped for.
+    //
+    // There used to be a `ctx.skip` here for the installed case. It was the honest
+    // thing to write without the claim and the wrong thing to keep with it: a skip and
+    // a pass print the same exit code, so a suite that quietly stopped asking this
+    // question would report exactly like one that asked it and got the answer.
+    await claim(admin, EXTENSION);
+
+    const { rows: installed } = await admin.query(
+      `SELECT 1 FROM pg_catalog.pg_extension WHERE extname = $1`,
+      [EXTENSION],
+    );
+    assert.equal(
+      installed.length,
+      0,
+      `${EXTENSION} is installed despite this arm holding the claim that clears it, so ` +
+        `the prerequisite gap below cannot be observed and this run would assert nothing`,
+    );
+
     await admin.query(`CREATE SCHEMA ${pgIdent(projectSchema)}`);
 
     await assert.rejects(
@@ -115,6 +133,7 @@ test("the documented case-insensitive spelling fails at apply when citext is not
     );
     assert.equal(rows.length, 0, "the failed create left no table behind");
   } finally {
+    await release(admin, EXTENSION);
     await admin
       .query(
         `DROP SCHEMA IF EXISTS ${pgIdent(projectSchema)} CASCADE;

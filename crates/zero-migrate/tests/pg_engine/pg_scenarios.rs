@@ -1489,12 +1489,27 @@ async fn a_resumed_backfill_stops_at_the_boundary_its_first_run_captured() {
     drop_schemas(&session, &cfg).await;
 }
 
+/// The extension the case-insensitive cursor case installs, named ONCE.
+///
+/// The claim below and the `CREATE EXTENSION` that follows it must name the same
+/// resource: a claim on some other string is a lock nobody else takes, which looks
+/// exactly like protection and provides none.
+const CASE_GUARD_EXTENSION: &str = "citext";
+
 #[compio::test]
 async fn guard_detects_representation_changes_under_case_insensitive_cursor_semantics() {
     use zero_migrate::driver::SqlSession;
 
     let url = require_live_pg!();
     let session = PgDevSession::connect(&url);
+    // `citext` below is the one name in this case that is not this run's alone: an
+    // extension is installed per DATABASE, so no pid can localize it. Taken before
+    // anything else, so a run that cannot get the claim has created nothing to
+    // reclaim - and LOUD, never a skip: without the extension this case cannot build
+    // the case-insensitive cursor column it is about.
+    if let Err(why) = support::extension_claim::claim(&session, CASE_GUARD_EXTENSION).await {
+        panic!("{why}");
+    }
     let tok = token();
     let cfg = cfg_for(&tok);
     drop_schemas(&session, &cfg).await;
@@ -1503,7 +1518,7 @@ async fn guard_detects_representation_changes_under_case_insensitive_cursor_sema
     backend.ensure_journal(&cfg).await.expect("ensure journal");
     session
         .batch(&format!(
-            "CREATE EXTENSION citext WITH SCHEMA \"{schema}\"; \
+            "CREATE EXTENSION {CASE_GUARD_EXTENSION} WITH SCHEMA \"{schema}\"; \
              CREATE TABLE \"{schema}\".case_guard_items (\
                  amount numeric NOT NULL, event_day date NOT NULL, \
                  id uuid NOT NULL, label \"{schema}\".citext NOT NULL, \
@@ -1598,6 +1613,13 @@ async fn guard_detects_representation_changes_under_case_insensitive_cursor_sema
     );
 
     drop_schemas(&session, &cfg).await;
+    // The CASCADE above already took the extension with the schema that holds it, so
+    // the DROP this carries is redundant here rather than load-bearing; what matters is
+    // that the claim ends at the CASE boundary instead of whenever this session closes.
+    // Not a `Drop` guard and it does not need to be: the claim is a session-level
+    // advisory lock on this ONE pinned connection, so a panic above or a kill signal
+    // releases it when the connection closes.
+    support::extension_claim::release(&session, CASE_GUARD_EXTENSION).await;
 }
 
 #[compio::test]

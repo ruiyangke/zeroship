@@ -22,6 +22,17 @@
 //! because ANOTHER RUN removed it, which is exactly the confusion a live suite must
 //! not manufacture.
 //!
+//! THE FIRST LINE IS NOT A RUST TEST, and for a while this module could not have
+//! helped it: the host suite had no claim at all, so the Rust binaries serialized
+//! against each other while the CLI suite installed `citext` whenever it liked. Its
+//! half now lives in `packages/zero-migrate-cli/tests/host/extension-claim.ts` and
+//! hashes the string [`claim_key`] builds. Re-measured from that state: six of six
+//! runs of `rollback-live.test.ts`'s extension arm failed against a loop of
+//! `pg_scenarios::guard_detects_representation_changes_under_case_insensitive_cursor_semantics`,
+//! in three distinct shapes - the `already installed` assertion above, `migration ...
+//! failed to apply: extension "citext" already exists`, and the same error from the
+//! rollback. Zero of six failed once both halves took this claim.
+//!
 //! KEYED BY THE RESOURCE, NOT BY THE SUITE. [`claim_key`] hashes
 //! `zero-migrate:pg-extension:<name>` and NOTHING ELSE - no suite name, no binary
 //! name, no pid. That is the whole point and the easiest thing to get subtly wrong:
