@@ -262,18 +262,58 @@ async fn the_messages_option_decides_whether_logical_messages_arrive() {
     .expect("the messages-option test exceeded its watchdog");
 }
 
-/// `origin: None` asks for locally-written changes only.
+/// `origin: None` drops changes that arrived from another replication origin
+/// and keeps the ones written here.
 ///
-/// What this pins is that the option is SPELLED correctly and accepted, and
-/// that asking for it does not suppress ordinary local changes - the mistake
-/// that would make a bidirectional setup silently receive nothing. It does
-/// NOT prove filtering works: that needs a change carrying a non-local
-/// origin, which means a second node replicating into this one, and this
-/// suite has one server.
+/// A second server is NOT needed to produce a foreign-origin change.
+/// `pg_replication_origin_session_setup` stamps an origin onto everything the
+/// current session writes, which is exactly what a replayed change carries.
+/// So one connection writes a row "as a peer", another writes a row plainly,
+/// and the filter has something real to discriminate.
+///
+/// This test replaced one that only asserted `origin: None` was accepted and
+/// still delivered local rows. That version passed whether or not filtering
+/// worked at all - it could not fail for the reason the option exists.
 #[compio::test]
-async fn the_origin_none_option_is_accepted_and_keeps_local_changes() {
+async fn the_origin_none_option_drops_changes_replayed_from_a_peer() {
     compio::time::timeout(WATCHDOG, async {
-        let fixture = Fixture::create("cpg opt origin").await;
+        // The peer row is written first, in its own transaction, so it is the
+        // first thing the stream would reach. `stream_until_commit` stops at
+        // the first Commit, so whichever row it reports IS the filter's
+        // answer: 'from_peer' when nothing was dropped, 'local' when the peer
+        // transaction was.
+        for (filter, expected) in [
+            (OriginFilter::Any, "from_peer"),
+            (OriginFilter::None, "local"),
+        ] {
+            origin_case(filter, expected).await;
+        }
+    })
+    .await
+    .expect("the origin-option test exceeded its watchdog");
+}
+
+async fn origin_case(filter: OriginFilter, expected: &str) {
+    {
+        let fixture = Fixture::create(&format!("cpg opt origin {expected}")).await;
+        let origin = common::test_object_name(&format!("cpg peer {expected}"));
+
+        // Session-scoped: the setup call and the INSERT must run on ONE
+        // connection, so they go in a single batch. `batch_execute` is a
+        // simple query, which is one round trip on one session.
+        fixture
+            .setup
+            .batch_execute(&format!(
+                "SELECT pg_replication_origin_drop('{origin}')
+                   FROM pg_replication_origin WHERE roname = '{origin}';
+                 SELECT pg_replication_origin_create('{origin}');
+                 SELECT pg_replication_origin_session_setup('{origin}');
+                 INSERT INTO {t} VALUES (1, 'from_peer');
+                 SELECT pg_replication_origin_session_reset();",
+                t = fixture.table,
+            ))
+            .await
+            .expect("origin-stamped insert failed");
         fixture
             .setup
             .batch_execute(&format!(
@@ -288,19 +328,25 @@ async fn the_origin_none_option_is_accepted_and_keeps_local_changes() {
             StartReplicationOptions {
                 slot_name: &fixture.slot,
                 publication_names: &[&fixture.publication],
-                origin: OriginFilter::None,
+                origin: filter,
                 ..Default::default()
             },
         )
         .await;
+        let _ = fixture
+            .setup
+            .batch_execute(&format!(
+                "SELECT pg_replication_origin_drop('{origin}')
+                   FROM pg_replication_origin WHERE roname = '{origin}';"
+            ))
+            .await;
         fixture.drop_all().await;
 
         assert_eq!(
             first_insert(&messages).columns[1],
-            TupleColumn::Text("local".to_owned()),
-            "origin=none must still deliver a change written on this node"
+            TupleColumn::Text(expected.to_owned()),
+            "with origin={filter:?} the first change reaching the consumer must \
+             be {expected:?}, got {messages:?}"
         );
-    })
-    .await
-    .expect("the origin-option test exceeded its watchdog");
+    }
 }
