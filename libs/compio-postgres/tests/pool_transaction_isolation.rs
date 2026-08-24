@@ -445,7 +445,7 @@ async fn a_terminated_backend_is_not_handed_to_the_next_borrower() {
 
     let (killer, connection) = compio::time::timeout(
         POOL_CONNECT_TIMEOUT,
-        compio_postgres::connect(&url, compio_postgres::NoTls),
+        compio_postgres::connect(&url, common::suite_tls()),
     )
     .await
     .expect("second connection exceeded its timeout")

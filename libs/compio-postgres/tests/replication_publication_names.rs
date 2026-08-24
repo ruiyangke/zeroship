@@ -37,7 +37,7 @@
 
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
-use compio_postgres::{Client, Config, NoTls};
+use compio_postgres::Client;
 use std::time::Duration;
 
 #[allow(dead_code)]
@@ -65,41 +65,6 @@ async fn client() -> Client {
         }
         Err(error) => common::postgres_unreachable(&url, &error),
     }
-}
-
-/// A replication `Config` carrying the test DSN's credentials.
-fn replication_config() -> Config {
-    let url = test_url();
-    let parsed: Config = url.parse().expect("test DSN did not parse");
-    let mut config = Config::new();
-    if let Some(user) = parsed.get_user() {
-        config.user(user);
-    }
-    if let Some(password) = parsed.get_password() {
-        config.password(password);
-    }
-    if let Some(dbname) = parsed.get_dbname() {
-        config.dbname(dbname);
-    }
-    for host in parsed.get_hosts() {
-        match host {
-            compio_postgres::config::Host::Tcp(name) => {
-                config.host(name.clone());
-            }
-            #[cfg(unix)]
-            compio_postgres::config::Host::Unix(path) => {
-                panic!(
-                    "this test needs a TCP endpoint, got the socket {}",
-                    path.display()
-                )
-            }
-        }
-    }
-    for port in parsed.get_ports() {
-        config.port(*port);
-    }
-    config.application_name("cpg_publication_names");
-    config
 }
 
 /// `"` doubled, wrapped - the quoting the SERVER expects, written out
@@ -159,14 +124,17 @@ async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputM
 
 async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMessage, String> {
     let mut replication =
-        compio_postgres::replication::connect_replication(common::suite_tls(), &replication_config())
-            .await
-            .map_err(|error| {
-                format!(
-                    "replication connect failed: {}",
-                    common::error_chain(&error)
-                )
-            })?;
+        compio_postgres::replication::connect_replication(
+            common::suite_tls(),
+            &common::replication_config("cpg_publication_names"),
+        )
+        .await
+        .map_err(|error| {
+            format!(
+                "replication connect failed: {}",
+                common::error_chain(&error)
+            )
+        })?;
 
     let mut stream = replication
         .start_logical_replication(StartReplicationOptions {
