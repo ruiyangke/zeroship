@@ -160,6 +160,7 @@ mod tests {
                 keepalive: None,
                 require_peer: None,
                 encryption: crate::connect_tls::Encryption::Plaintext,
+                server_verification: crate::tls::ServerVerification::None,
             }),
             ssl_mode: SslMode::Disable,
             ssl_negotiation: SslNegotiation::Postgres,

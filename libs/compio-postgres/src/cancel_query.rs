@@ -24,7 +24,8 @@
 use crate::client::SocketConfig;
 use crate::config::{SslMode, SslNegotiation};
 use crate::connect::with_connect_timeout;
-use crate::tls::MakeTlsConnect;
+use crate::connect_tls;
+use crate::tls::{MakeTlsConnect, TlsConnect};
 use crate::{Error, Socket, cancel_query_raw, connect_socket};
 use std::io;
 
@@ -54,6 +55,22 @@ where
         let tls = tls
             .make_tls_connect(config.hostname.as_deref().unwrap_or(""))
             .map_err(|e| Error::tls(e.into()))?;
+        // The cancel key is a BEARER CREDENTIAL, and the connector carrying it
+        // arrives from the CALLER at cancel time - `CancelToken::cancel_query`
+        // takes it as an argument, so it need not be the one this session was
+        // vetted with. Check it against the verification the SESSION recorded
+        // rather than trusting whatever turns up. Plaintext needs no check:
+        // there is no certificate to verify, and `sslmode` already decided
+        // that at connect time.
+        if encryption != connect_tls::Encryption::Plaintext
+            && !tls.can_honor_server_verification(config.server_verification)
+        {
+            return Err(Error::tls_unattested(
+                "the TLS connector supplied to cancel does not attest to the server \
+                 verification this session was established with"
+                    .into(),
+            ));
+        }
         let has_hostname = config.hostname.is_some();
 
         let socket = connect_socket::connect_socket(
@@ -111,6 +128,22 @@ where
         let tls = tls
             .make_tls_connect(config.hostname.as_deref().unwrap_or(""))
             .map_err(|e| Error::tls(e.into()))?;
+        // The cancel key is a BEARER CREDENTIAL, and the connector carrying it
+        // arrives from the CALLER at cancel time - `CancelToken::cancel_query`
+        // takes it as an argument, so it need not be the one this session was
+        // vetted with. Check it against the verification the SESSION recorded
+        // rather than trusting whatever turns up. Plaintext needs no check:
+        // there is no certificate to verify, and `sslmode` already decided
+        // that at connect time.
+        if encryption != connect_tls::Encryption::Plaintext
+            && !tls.can_honor_server_verification(config.server_verification)
+        {
+            return Err(Error::tls_unattested(
+                "the TLS connector supplied to cancel does not attest to the server \
+                 verification this session was established with"
+                    .into(),
+            ));
+        }
         let has_hostname = config.hostname.is_some();
 
         let socket = connect_socket::connect_socket(
@@ -198,6 +231,7 @@ mod tests {
             keepalive: None,
             require_peer: None,
             encryption: crate::connect_tls::Encryption::Plaintext,
+            server_verification: crate::tls::ServerVerification::None,
         };
         let cancel = Box::pin(cancel_query_confirmed(
             Some(config),
@@ -508,6 +542,7 @@ mod tests {
             // The only value `require` can record: `connect.rs` never offers
             // it a plaintext leg, and a server refusal is fatal there.
             encryption: crate::connect_tls::Encryption::Tls,
+            server_verification: crate::tls::ServerVerification::None,
         };
         let connected = Arc::new(AtomicBool::new(false));
 
@@ -766,5 +801,118 @@ mod tests {
             "the cancel offered TLS to a session that had already fallen back to plaintext"
         );
         assert_eq!(packet, Some(cancel_packet()));
+    }
+
+    /// A cancel must not carry the backend PID and secret key over a connector
+    /// that attests to less verification than the SESSION was established with.
+    ///
+    /// Those two values are a bearer credential: anything holding them can
+    /// cancel this session's queries. `CancelToken::cancel_query` takes the
+    /// connector as an ARGUMENT, so it need not be the one that connected -
+    /// nothing stops a caller passing one that verifies nothing, and before
+    /// this check nothing did. `connect_raw` gates its own connector this way;
+    /// the cancel path, which carries the credential, did not.
+    ///
+    /// `PassthroughTls` is exactly that connector: it completes a handshake and
+    /// attests to `ServerVerification::None` via the trait default.
+    #[compio::test]
+    async fn a_cancel_refuses_a_connector_that_attests_less_than_the_session() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted server");
+        let addr = listener.local_addr().expect("scripted server address");
+
+        let config = SocketConfig {
+            addr: Addr::Tcp(addr.ip()),
+            hostname: Some("localhost".to_string()),
+            port: addr.port(),
+            connect_timeout: None,
+            tcp_user_timeout: None,
+            keepalive: None,
+            require_peer: None,
+            encryption: crate::connect_tls::Encryption::Tls,
+            // What `sslmode=verify-full` plus a root cert demands.
+            server_verification: crate::tls::ServerVerification::ChainAndHostname,
+        };
+
+        // Bounded: without the gate this proceeds to dial a scripted server that
+            // never answers, so the failure mode of removing it is a HANG. The
+            // watchdog turns that into a clean, fast failure.
+        let error = compio::time::timeout(
+            Duration::from_secs(5),
+            cancel_query(
+            Some(config),
+            SslMode::VerifyFull,
+            SslNegotiation::Postgres,
+            PassthroughTls {
+                connected: Arc::new(AtomicBool::new(false)),
+            },
+            PROCESS_ID,
+            SECRET_KEY,
+        ),
+        )
+        .await
+        .expect("the gate must refuse immediately, not dial the server")
+        .expect_err("a cancel must not send the key through an unattesting connector");
+        let chain = std::iter::successors(
+            std::error::Error::source(&error),
+            |e| std::error::Error::source(*e),
+        )
+        .fold(format!("{error}"), |acc, e| format!("{acc}: {e}"));
+        assert!(
+            chain.contains("does not attest"),
+            "the refusal must name the attestation gap: {chain}"
+        );
+    }
+
+    /// THE CONTROL, one variable: the same connector against a session that
+    /// demanded NO verification. It must still be allowed, or the gate would
+    /// simply ban `PassthroughTls` and every plain `require` cancel with it.
+    #[compio::test]
+    async fn a_cancel_allows_a_connector_when_the_session_demanded_no_verification() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind scripted server");
+        let addr = listener.local_addr().expect("scripted server address");
+        let server = compio::runtime::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept cancel connection");
+            assert_eq!(read_exact(&mut stream, 8).await, ssl_request());
+            write_all(&mut stream, vec![b'S']).await;
+            assert_eq!(read_exact(&mut stream, 16).await, cancel_packet());
+        });
+
+        let config = SocketConfig {
+            addr: Addr::Tcp(addr.ip()),
+            hostname: Some("localhost".to_string()),
+            port: addr.port(),
+            connect_timeout: None,
+            tcp_user_timeout: None,
+            keepalive: None,
+            require_peer: None,
+            encryption: crate::connect_tls::Encryption::Tls,
+            server_verification: crate::tls::ServerVerification::None,
+        };
+
+        compio::time::timeout(
+            Duration::from_secs(2),
+            cancel_query(
+                Some(config),
+                SslMode::Require,
+                SslNegotiation::Postgres,
+                PassthroughTls {
+                    connected: Arc::new(AtomicBool::new(false)),
+                },
+                PROCESS_ID,
+                SECRET_KEY,
+            ),
+        )
+        .await
+        .expect("cancel timed out")
+        .expect("a session that demanded no verification must still be cancellable");
+
+        compio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("scripted server timed out")
+            .expect("scripted server panicked");
     }
 }
