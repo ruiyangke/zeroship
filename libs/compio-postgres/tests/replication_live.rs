@@ -165,7 +165,9 @@ fn expect_simple_query(stream: &mut TcpStream) -> Vec<u8> {
     body
 }
 
-fn send_identify_system(stream: &mut TcpStream) {
+/// A complete, well-formed `IDENTIFY_SYSTEM` response: one row, its completion,
+/// and the `ReadyForQuery` that closes the phase.
+fn identify_system_response() -> Vec<u8> {
     let mut row = Vec::new();
     row.extend_from_slice(&4u16.to_be_bytes());
     for field in [
@@ -181,8 +183,12 @@ fn send_identify_system(stream: &mut TcpStream) {
     let mut response = backend_frame(b'D', &row);
     response.extend_from_slice(&backend_frame(b'C', b"IDENTIFY_SYSTEM\0"));
     response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    response
+}
+
+fn send_identify_system(stream: &mut TcpStream) {
     stream
-        .write_all(&response)
+        .write_all(&identify_system_response())
         .expect("write IDENTIFY_SYSTEM response");
     stream.flush().expect("flush IDENTIFY_SYSTEM response");
 }
@@ -1051,4 +1057,292 @@ async fn a_null_field_in_identify_system_is_refused_rather_than_defaulted() {
     })
     .await
     .expect("malformed IDENTIFY_SYSTEM test exceeded its outer watchdog");
+}
+
+/// The reply a walsender sends when `IDENTIFY_SYSTEM` produced no row at all:
+/// a completion and a `ReadyForQuery`, and nothing in between.
+fn send_identify_system_without_a_row(stream: &mut TcpStream) {
+    let mut response = backend_frame(b'C', b"IDENTIFY_SYSTEM\0");
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream
+        .write_all(&response)
+        .expect("write rowless IDENTIFY_SYSTEM response");
+    stream
+        .flush()
+        .expect("flush rowless IDENTIFY_SYSTEM response");
+}
+
+/// An `IDENTIFY_SYSTEM` response that carried NO `DataRow` must be refused.
+///
+/// The "refused rather than defaulted" rule was applied inside
+/// `parse_identify_system_row`, which only runs when a row arrives. The
+/// response loop above it seeded `systemid = String::new()`, `timeline = 0` and
+/// `xlogpos = String::new()` and returned them at `ReadyForQuery`, so a
+/// response with no row returned `Ok` carrying exactly the three sentinels the
+/// row parser exists to reject. `systemid` is the CLUSTER identity a caller
+/// compares to notice a failover, and two empty strings compare EQUAL: the
+/// check passes silently in precisely the case it exists to catch.
+#[compio::test]
+async fn identify_system_refuses_a_response_that_carried_no_row() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            send_identify_system_without_a_row(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let outcome =
+            compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system()).await;
+        let error = match outcome {
+            Err(_) => panic!("identify_system hung on a rowless response"),
+            Ok(Ok(identity)) => panic!(
+                "a response carrying no row was accepted as systemid {:?}, timeline {}, \
+                 xlogpos {:?}",
+                identity.systemid, identity.timeline, identity.xlogpos
+            ),
+            Ok(Err(error)) => error,
+        };
+
+        let rendered = common::error_chain(&error).to_lowercase();
+        assert!(
+            rendered.contains("identify_system"),
+            "the refusal should name IDENTIFY_SYSTEM: {rendered}"
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("rowless IDENTIFY_SYSTEM test exceeded its outer watchdog");
+}
+
+/// One variable away from the test above: the SAME script with a row in it must
+/// still return the identity. A refusal that fired on every response would
+/// satisfy the assertion above and turn this red.
+#[compio::test]
+async fn identify_system_accepts_a_response_that_carried_a_row() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            send_identify_system(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let identity = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("identify_system exceeded its watchdog")
+            .expect("a well-formed IDENTIFY_SYSTEM row must be accepted");
+
+        assert_eq!(identity.systemid, "scripted-system");
+        assert_eq!(identity.timeline, 1);
+        assert_eq!(identity.xlogpos, "0/10");
+        assert_eq!(identity.dbname.as_deref(), Some("scripted-db"));
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("well-formed IDENTIFY_SYSTEM test exceeded its outer watchdog");
+}
+
+/// A `ParameterStatus` inside the response must not fail the command.
+///
+/// `ParameterStatus`, `NoticeResponse` and `NotificationResponse` are
+/// asynchronous: the protocol lets the backend interleave them into any
+/// response, and `connect_raw.rs` / `connection.rs` both fold them out of the
+/// query path for exactly that reason. This loop skipped `NoticeResponse` only,
+/// so a walsender that reported a changed GUC mid-`IDENTIFY_SYSTEM` -- a
+/// conforming server doing a conforming thing -- fell into the
+/// unexpected-message arm and failed the command.
+#[compio::test]
+async fn identify_system_tolerates_an_asynchronous_parameter_status() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            stream
+                .write_all(&backend_frame(b'S', b"TimeZone\0UTC\0"))
+                .expect("write asynchronous ParameterStatus");
+            stream.flush().expect("flush asynchronous ParameterStatus");
+            send_identify_system(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let identity = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("identify_system exceeded its watchdog")
+            .expect("an asynchronous ParameterStatus must not fail IDENTIFY_SYSTEM");
+        assert_eq!(identity.systemid, "scripted-system");
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("asynchronous ParameterStatus test exceeded its outer watchdog");
+}
+
+/// A message this phase cannot account for retires the session.
+///
+/// An `ErrorResponse` and a rejected row both carry their reason to
+/// `ReadyForQuery`, because PostgreSQL guarantees one arrives. A message the
+/// phase cannot account for carries no such guarantee, so the driver gives up
+/// where it stands and the response is left undrained -- precisely the state
+/// the `ErrorResponse` test below proves is dangerous. The connection therefore
+/// has to refuse everything afterwards rather than answer the next command from
+/// a frame belonging to this one.
+#[compio::test]
+async fn an_unaccountable_message_retires_the_replication_session() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            // EmptyQueryResponse: a real backend message, well framed, and one
+            // no IDENTIFY_SYSTEM response can contain. The rest of a complete
+            // response follows it, so the failure is the message and not a
+            // short read.
+            let mut response = backend_frame(b'I', b"");
+            response.extend_from_slice(&identify_system_response());
+            stream
+                .write_all(&response)
+                .expect("write unaccountable IDENTIFY_SYSTEM response");
+            stream
+                .flush()
+                .expect("flush unaccountable IDENTIFY_SYSTEM response");
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let first = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("identify_system exceeded its watchdog")
+            .expect_err("a message this phase cannot account for must fail the command");
+        assert!(
+            !first.is_cancelled(),
+            "the first call must report the message, not the refusal: {}",
+            common::error_chain(&first)
+        );
+
+        let second = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the retried identify_system exceeded its watchdog")
+            .expect_err("a retired session must not answer a second command");
+        assert!(
+            second.is_cancelled(),
+            "the session was left undrained, so it must be refused rather than \
+             answered from the stale frames: {}",
+            common::error_chain(&second)
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("unaccountable message test exceeded its outer watchdog");
+}
+
+/// A server-sent `ErrorResponse` must not leave the session one frame behind.
+///
+/// The response loop returned the moment it saw the `ErrorResponse`, leaving
+/// the `ReadyForQuery` that closes every simple-query response sitting in the
+/// read buffer. The NEXT command on that connection then read the stale frame
+/// as its own reply: a second `IDENTIFY_SYSTEM` parsed the leftover
+/// `ReadyForQuery`, broke out of its loop before its own response arrived, and
+/// -- with the sentinels above still in place -- reported `Ok` with an empty
+/// identity for a command the server had not answered yet.
+#[compio::test]
+async fn an_identify_system_error_leaves_the_session_able_to_answer_the_next_command() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            // A complete simple-query response: the failure, then the
+            // ReadyForQuery that ends the phase. Written as ONE flush so the
+            // driver's read pulls both into its buffer, which is what makes the
+            // stale frame reachable by the next command.
+            let mut refusal =
+                backend_frame(b'E', b"SERROR\0C57P03\0Mscripted identify refusal\0\0");
+            refusal.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&refusal)
+                .expect("write scripted IDENTIFY_SYSTEM refusal");
+            stream
+                .flush()
+                .expect("flush scripted IDENTIFY_SYSTEM refusal");
+
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            send_identify_system(&mut stream);
+            expect_disconnect(&mut stream);
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let refusal = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the refused identify_system exceeded its watchdog")
+            .expect_err("the server refused IDENTIFY_SYSTEM, so this must be an error");
+        let rendered = common::error_chain(&refusal);
+        assert!(
+            rendered.contains("57P03"),
+            "the server's SQLSTATE must survive: {rendered}"
+        );
+
+        let identity = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the retried identify_system exceeded its watchdog")
+            .expect("the session was left in step, so the retry must answer");
+        assert_eq!(
+            identity.systemid, "scripted-system",
+            "the retry answered from a stale frame rather than from the server's reply"
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("IDENTIFY_SYSTEM resynchronisation test exceeded its outer watchdog");
 }

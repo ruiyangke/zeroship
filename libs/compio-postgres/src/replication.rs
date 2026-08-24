@@ -429,36 +429,78 @@ where
         // IDENTIFY_SYSTEM returns: RowDescription, DataRow,
         // CommandComplete, ReadyForQuery. We use postgres-protocol's
         // parser for these — they're regular tags.
-        let mut systemid = String::new();
-        let mut timeline: u32 = 0;
-        let mut xlogpos = String::new();
-        let mut dbname: Option<String> = None;
+        //
+        // The outcome is decided at `ReadyForQuery`, NOT at the frame that
+        // produced it. Two reasons, and each was its own defect:
+        //
+        // * `ReadyForQuery` closes a simple-query response. Returning the
+        //   moment an `ErrorResponse` arrived left it in the read buffer, and
+        //   the NEXT command on this connection read that stale frame as its
+        //   own reply - a second `IDENTIFY_SYSTEM` broke out of this loop
+        //   before the server had answered it at all.
+        // * There is no seeded "empty identity" to fall out of the loop with.
+        //   This used to start from `systemid = String::new()`, `timeline = 0`
+        //   and `xlogpos = String::new()` and return them when no `DataRow`
+        //   arrived - exactly the three sentinels `parse_identify_system_row`
+        //   refuses inside a row, reported as `Ok`. Combined with the stale
+        //   frame above, a retry after a refused `IDENTIFY_SYSTEM` returned a
+        //   successful empty identity for a command nothing had answered.
+        //
+        // The trade this makes is explicit: a peer that sends an
+        // `ErrorResponse` and then goes silent is now waited on rather than
+        // reported immediately. That surface is not new - the same is already
+        // true of a peer that sends only `NoticeResponse` and stops - and
+        // `Config::read_timeout` is what bounds it, which is why the arm below
+        // that CANNOT rely on a `ReadyForQuery` arriving does not wait at all.
+        let mut identity: Option<IdentifySystem> = None;
+        let mut failure: Option<Error> = None;
 
         loop {
             let msg = read_one_message(&mut self.stream).await?;
             match msg {
                 Message::RowDescription(_) => {}
-                Message::DataRow(row) => {
-                    let parsed = parse_identify_system_row(&row)?;
-                    systemid = parsed.systemid;
-                    timeline = parsed.timeline;
-                    xlogpos = parsed.xlogpos;
-                    dbname = parsed.dbname;
-                }
+                Message::DataRow(row) => match parse_identify_system_row(&row) {
+                    // `Message::parse` consumed the whole row, so a rejected
+                    // one leaves the session in step: carry the reason to the
+                    // end of the phase rather than abandoning it here.
+                    Ok(parsed) => identity = Some(parsed),
+                    Err(error) => failure = failure.or(Some(error)),
+                },
                 Message::CommandComplete(_) => {}
                 Message::ReadyForQuery(_) => break,
-                Message::ErrorResponse(body) => return Err(Error::db(body)),
-                Message::NoticeResponse(_) => {}
-                _ => return Err(Error::unexpected_message()),
+                Message::ErrorResponse(body) => failure = failure.or(Some(Error::db(body))),
+                // Asynchronous, and legal at any point in any response - the
+                // backend interleaves them whenever a reported GUC changes or a
+                // notification fires. `connect_raw.rs` and `connection.rs` both
+                // fold them out of the query path for that reason; only
+                // `NoticeResponse` was skipped here, so a walsender reporting a
+                // changed GUC mid-response failed the command below.
+                Message::NoticeResponse(_)
+                | Message::ParameterStatus(_)
+                | Message::NotificationResponse(_) => {}
+                _ => {
+                    // NOT carried to `ReadyForQuery` like the `ErrorResponse`
+                    // and rejected-row arms above, and the difference is a
+                    // guarantee: PostgreSQL always closes a simple-query
+                    // response with `ReadyForQuery`, whatever else it sent, so
+                    // draining to it terminates. A message the driver does not
+                    // expect in this phase says the peer is not running that
+                    // state machine, and waiting for a frame it may never send
+                    // is a hang the caller cannot break. Retire the session
+                    // instead, so a caller cannot reuse a connection whose
+                    // response was abandoned part-way.
+                    self.in_flight.poison();
+                    return Err(Error::unexpected_message());
+                }
             }
         }
 
-        Ok(IdentifySystem {
-            systemid,
-            timeline,
-            xlogpos,
-            dbname,
-        })
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        // A conforming server answers `IDENTIFY_SYSTEM` with exactly one row.
+        // No row is not an empty identity - see the note above.
+        identity.ok_or_else(identify_system_returned_no_row)
     }
 
     /// Issue `START_REPLICATION SLOT <slot> LOGICAL <lsn> ("proto_version" '...', "publication_names" '...')`.
@@ -1245,6 +1287,20 @@ fn eof_identify_row() -> Error {
     Error::parse(std::io::Error::new(
         std::io::ErrorKind::UnexpectedEof,
         "IDENTIFY_SYSTEM DataRow truncated",
+    ))
+}
+
+/// `IDENTIFY_SYSTEM` completed its response without returning the row it is
+/// defined to return.
+///
+/// Refused rather than answered with an empty identity, for the same reason
+/// [`missing_identify_field`] refuses one inside a row: `systemid` is the
+/// CLUSTER identity a caller compares to notice it has been failed over, and
+/// two empty strings compare EQUAL.
+fn identify_system_returned_no_row() -> Error {
+    Error::parse(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "IDENTIFY_SYSTEM completed without returning a row",
     ))
 }
 
