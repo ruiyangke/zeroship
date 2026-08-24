@@ -192,6 +192,243 @@ async fn both_drivers_agree_on_command_tags_and_sqlstates() {
     );
 }
 
+/// One short transaction program and the state transition it discriminates.
+struct TransactionSequence {
+    name: &'static str,
+    statements: &'static [&'static str],
+    why: &'static str,
+}
+
+fn transaction_sequences() -> Vec<TransactionSequence> {
+    vec![
+        TransactionSequence {
+            name: "failed transaction rollback",
+            statements: &[
+                "BEGIN",
+                "SELECT 1",
+                "SELECT 1/0",
+                "SELECT 1",
+                "ROLLBACK",
+                "SELECT 1",
+            ],
+            why: "an execution error changes ReadyForQuery from in-transaction to failed; \
+                  the next statement must be refused, ROLLBACK must clear the failure, \
+                  and the session must become usable again",
+        },
+        TransactionSequence {
+            name: "savepoint recovery",
+            statements: &[
+                "BEGIN",
+                "SAVEPOINT s1",
+                "SELECT 1/0",
+                "ROLLBACK TO SAVEPOINT s1",
+                "SELECT 1",
+                "RELEASE SAVEPOINT s1",
+                "COMMIT",
+            ],
+            why: "ROLLBACK TO SAVEPOINT must recover the failed subtransaction while \
+                  preserving the outer transaction, which RELEASE SAVEPOINT witnesses",
+        },
+        TransactionSequence {
+            name: "idle commit and rollback",
+            statements: &["COMMIT", "ROLLBACK"],
+            why: "COMMIT and ROLLBACK outside a transaction emit warnings but still \
+                  complete successfully",
+        },
+        TransactionSequence {
+            name: "nested begin",
+            statements: &["BEGIN", "BEGIN", "COMMIT"],
+            why: "a nested BEGIN warns and completes successfully instead of failing",
+        },
+    ]
+}
+
+/// Run every transaction sequence through tokio-postgres on one session.
+fn tokio_transaction_outcomes(
+    url: String,
+    sequences: Vec<Vec<&'static str>>,
+) -> Vec<Vec<Outcome>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let outcomes = runtime.block_on(async move {
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+
+            let mut outcomes = Vec::new();
+            for sequence in sequences {
+                let mut sequence_outcomes = Vec::new();
+                for statement in sequence {
+                    sequence_outcomes.push(match client.execute(statement, &[]).await {
+                        Ok(rows) => Outcome::Rows(rows),
+                        Err(error) => match error.code() {
+                            Some(code) => Outcome::SqlState(code.code().to_owned()),
+                            None => Outcome::LocalFailure,
+                        },
+                    });
+                }
+                outcomes.push(sequence_outcomes);
+            }
+            drop(client);
+            let _ = driver.await;
+            outcomes
+        });
+        let _ = sender.send(outcomes);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver
+        .recv()
+        .expect("no transaction outcomes came back from tokio")
+}
+
+async fn compio_transaction_outcomes(
+    url: &str,
+    sequences: &[Vec<&'static str>],
+) -> Vec<Vec<Outcome>> {
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let mut outcomes = Vec::new();
+    for sequence in sequences {
+        let mut sequence_outcomes = Vec::new();
+        for statement in sequence {
+            // Both public `execute` APIs expose only the affected-row count
+            // parsed from CommandComplete, which is `Outcome::Rows` here.
+            sequence_outcomes.push(match client.execute(*statement, &[]).await {
+                Ok(rows) => Outcome::Rows(rows),
+                Err(error) => match error.code() {
+                    Some(code) => Outcome::SqlState(code.code().to_owned()),
+                    None => Outcome::LocalFailure,
+                },
+            });
+        }
+        outcomes.push(sequence_outcomes);
+    }
+    outcomes
+}
+
+/// Both drivers must follow the same transaction failure and recovery paths.
+///
+/// WHAT THIS DOES NOT CATCH. Warning payloads, concurrent transaction
+/// isolation, and high-level `Transaction` drop cleanup are outside this
+/// sequential raw-SQL surface.
+#[compio::test]
+async fn both_drivers_agree_on_transaction_recovery() {
+    let url = common::test_url();
+    let sequences = transaction_sequences();
+    let statements: Vec<Vec<&'static str>> = sequences
+        .iter()
+        .map(|sequence| sequence.statements.to_vec())
+        .collect();
+
+    // Each driver runs every sequence, in order, on one independent session.
+    let theirs = tokio_transaction_outcomes(common::plaintext_url(), statements.clone());
+    let ours = compio_transaction_outcomes(&url, &statements).await;
+
+    assert_eq!(
+        ours.len(),
+        sequences.len(),
+        "this driver answered {} transaction sequences, expected {}",
+        ours.len(),
+        sequences.len()
+    );
+    assert_eq!(
+        theirs.len(),
+        sequences.len(),
+        "tokio-postgres answered {} transaction sequences, expected {}",
+        theirs.len(),
+        sequences.len()
+    );
+
+    let expected_comparisons: usize = statements.iter().map(Vec::len).sum();
+    let mut comparisons = 0;
+    let mut first_divergence = None;
+    'sequences: for (sequence_index, sequence) in sequences.iter().enumerate() {
+        if ours[sequence_index].len() != sequence.statements.len()
+            || theirs[sequence_index].len() != sequence.statements.len()
+        {
+            first_divergence = Some(format!(
+                "  sequence {:?}\n    ours returned {} statements\n    \
+                 tokio-postgres returned {} statements\n    expected {} statements",
+                sequence.name,
+                ours[sequence_index].len(),
+                theirs[sequence_index].len(),
+                sequence.statements.len()
+            ));
+            break;
+        }
+
+        for (statement_index, statement) in sequence.statements.iter().enumerate() {
+            comparisons += 1;
+            if ours[sequence_index][statement_index]
+                != theirs[sequence_index][statement_index]
+            {
+                first_divergence = Some(format!(
+                    "  sequence {:?}, statement {}: {:?}\n    ours: {:?}\n    \
+                     tokio-postgres: {:?}\n    matters because {}",
+                    sequence.name,
+                    statement_index + 1,
+                    statement,
+                    ours[sequence_index][statement_index],
+                    theirs[sequence_index][statement_index],
+                    sequence.why
+                ));
+                break 'sequences;
+            }
+        }
+    }
+    assert!(
+        first_divergence.is_none(),
+        "transaction recovery diverged:\n{}",
+        first_divergence.unwrap_or_default()
+    );
+    assert_eq!(
+        comparisons, expected_comparisons,
+        "compared only {comparisons} of {expected_comparisons} transaction statements"
+    );
+
+    // Pin the semantics rather than accepting two drivers making the same
+    // mistake. In particular, 25P02 proves the failed transaction refused the
+    // next statement before either recovery path made SELECT usable again.
+    let expected = vec![
+        vec![
+            Outcome::Rows(0),
+            Outcome::Rows(1),
+            Outcome::SqlState("22012".to_owned()),
+            Outcome::SqlState("25P02".to_owned()),
+            Outcome::Rows(0),
+            Outcome::Rows(1),
+        ],
+        vec![
+            Outcome::Rows(0),
+            Outcome::Rows(0),
+            Outcome::SqlState("22012".to_owned()),
+            Outcome::Rows(0),
+            Outcome::Rows(1),
+            Outcome::Rows(0),
+            Outcome::Rows(0),
+        ],
+        vec![Outcome::Rows(0), Outcome::Rows(0)],
+        vec![Outcome::Rows(0), Outcome::Rows(0), Outcome::Rows(0)],
+    ];
+    assert_eq!(
+        ours, expected,
+        "the sequences did not exercise the required transaction-recovery states"
+    );
+}
+
 /// A TEMPORARY table lives in a per-SESSION schema, so its name carries an
 /// ordinal that differs between the two connections - `pg_temp_3` against
 /// `pg_temp_4`. That is server state, not driver output, and comparing it
