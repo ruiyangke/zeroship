@@ -865,14 +865,34 @@ impl MakeRustlsConnect {
     /// supplies an incompatible list can cause `PostgreSQL` to reject the TLS
     /// handshake, including when `sslnegotiation=direct` is used.
     ///
-    /// The verification policy of a caller-supplied [`ClientConfig`] cannot be
-    /// read back out of it, so a connector built this way attests to
-    /// [`ServerVerification::None`] and the connection path refuses it under
-    /// `sslmode=verify-ca` / `verify-full`, or under any `sslmode` that names
-    /// `sslrootcert`. Use [`MakeRustlsConnect::from_config`] for those - it is
-    /// the constructor that reads those settings and can therefore promise
-    /// them.
-    pub fn new(config: Arc<ClientConfig>) -> MakeRustlsConnect {
+    /// `verification` is what YOU promise the supplied [`ClientConfig`]
+    /// actually checks, and the driver takes it at its word.
+    ///
+    /// It has to be told, because rustls does not expose a `ClientConfig`'s
+    /// verifier and the policy therefore cannot be read back out. Before this
+    /// argument existed the constructor assumed
+    /// [`ServerVerification::None`] - the only honest guess, but a permanent
+    /// one: a connector built from a genuinely verifying config could never
+    /// satisfy `sslmode=verify-ca` / `verify-full`, or any `sslmode` naming
+    /// `sslrootcert`, and the only way out was to use a different constructor.
+    /// The in-crate tests had to assign the private field directly, which is
+    /// the tell that the capability was missing rather than withheld.
+    ///
+    /// ATTESTING MORE THAN THE CONFIG PERFORMS IS THE ONE THING THAT MATTERS
+    /// HERE. Claim [`ServerVerification::ChainAndHostname`] for a config whose
+    /// verifier accepts anything and `verify-full` will report success over a
+    /// session nothing authenticated - a failure that looks exactly like a
+    /// verified connection. This is the same trust any
+    /// [`TlsConnect`](crate::tls::TlsConnect) implementation is given when it
+    /// overrides `can_honor_server_verification`; the argument only makes the
+    /// promise explicit at the call site instead of silently denying it.
+    ///
+    /// [`MakeRustlsConnect::from_config`] needs no such argument: it builds the
+    /// verifier itself from `sslmode` and `sslrootcert`, so it knows.
+    pub fn new(
+        config: Arc<ClientConfig>,
+        verification: ServerVerification,
+    ) -> MakeRustlsConnect {
         let config = if config.alpn_protocols.is_empty() {
             let mut config = (*config).clone();
             config.alpn_protocols = vec![POSTGRESQL_ALPN_PROTOCOL.to_vec()];
@@ -883,7 +903,7 @@ impl MakeRustlsConnect {
         MakeRustlsConnect {
             config,
             ssl_cert_mode: SslCertMode::Allow,
-            server_verification: ServerVerification::None,
+            server_verification: verification,
             crl_directory_reload: None,
         }
     }
@@ -1051,9 +1071,9 @@ impl MakeRustlsConnect {
         // that need `Resumption::disabled()` and this whole decision has to be
         // re-taken. Re-run the probe above rather than assuming either way.
 
-        let mut connector = MakeRustlsConnect::new(Arc::new(client_config));
+        let mut connector =
+            MakeRustlsConnect::new(Arc::new(client_config), server_verification);
         connector.ssl_cert_mode = config.get_ssl_cert_mode();
-        connector.server_verification = server_verification;
         connector.crl_directory_reload = crl_directory_reload;
         Ok(connector)
     }
@@ -1355,7 +1375,8 @@ mod tests {
         let stream = TcpStream::connect(address)
             .await
             .expect("connect to rustls server");
-        let mut make = MakeRustlsConnect::new(Arc::new(client_config));
+        let mut make =
+            MakeRustlsConnect::new(Arc::new(client_config), ServerVerification::None);
         let connector =
             <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(
                 &mut make,
@@ -1635,6 +1656,65 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&make.config, &connector.config),
             "the pool's initial CRL snapshot was reused"
+        );
+    }
+
+    /// A caller-supplied `ClientConfig` can now serve the verifying modes,
+    /// because the caller says what it verifies.
+    ///
+    /// Before the `verification` argument existed this was IMPOSSIBLE, not
+    /// merely awkward: `new` hard-coded `ServerVerification::None`, the field
+    /// is private, and `can_honor_server_verification` compares for equality -
+    /// so a connector built from a genuinely verifying config was refused under
+    /// `verify-ca` / `verify-full` and under any `sslmode` naming
+    /// `sslrootcert`, with no way for the caller to say otherwise. The
+    /// in-crate tests had to assign the private field directly, which is
+    /// exactly the tell.
+    ///
+    /// The three cases below are the discriminating set: the level the caller
+    /// declares is honoured, a DIFFERENT level is not, and the old default is
+    /// still reachable by declaring it.
+    /// Build the connector the way a connection does, so the level is checked
+    /// after it has crossed `make_tls_connect` rather than only in the maker.
+    fn connector_declaring(verification: ServerVerification) -> RustlsConnect {
+        let mut make = MakeRustlsConnect::new(Arc::new(client_config(vec![])), verification);
+        <MakeRustlsConnect as MakeTlsConnect<TcpStream>>::make_tls_connect(&mut make, "localhost")
+            .expect("make rustls connector")
+    }
+
+    #[test]
+    fn a_declared_verification_level_is_what_the_connector_attests() {
+        let declared = connector_declaring(ServerVerification::ChainAndHostname);
+        assert!(
+            TlsConnect::<TcpStream>::can_honor_server_verification(
+                &declared,
+                ServerVerification::ChainAndHostname
+            ),
+            "a connector told it verifies chain and host name must attest to it"
+        );
+
+        // Same construction, one variable changed: a level it was NOT told it
+        // performs. Attestation is exact, so this must be refused - otherwise
+        // the argument would be decorative and `verify-full` could ride on a
+        // connector that only checks the chain.
+        assert!(
+            !TlsConnect::<TcpStream>::can_honor_server_verification(
+                &declared,
+                ServerVerification::Chain
+            ),
+            "attestation must be exact, not 'at least as strong'"
+        );
+
+        // The old hard-coded behaviour is still expressible, and still refuses
+        // the verifying modes. This is the control for the pair above: it must
+        // stay green whatever the argument does.
+        let unverified = connector_declaring(ServerVerification::None);
+        assert!(
+            !TlsConnect::<TcpStream>::can_honor_server_verification(
+                &unverified,
+                ServerVerification::ChainAndHostname
+            ),
+            "declaring None must not satisfy a mode that demands verification"
         );
     }
 }
