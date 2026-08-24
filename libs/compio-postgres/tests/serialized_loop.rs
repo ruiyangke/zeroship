@@ -13,7 +13,7 @@
 //! serialized loop: they must keep passing when TLS and plaintext share one.
 
 use compio_postgres::test_utils::connect_serialized;
-use compio_postgres::{Client, Config};
+use compio_postgres::{Client, Config, NoTls};
 
 #[allow(dead_code)]
 mod common;
@@ -321,4 +321,134 @@ async fn an_abandoned_query_leaves_the_serialized_session_usable() {
              abandoned query; it is stranded mid-frame"
         ),
     }
+}
+
+/// A read timeout fires on this loop, and retires the session rather than
+/// leaving it half-read.
+///
+/// The timeout is armed only while a response is owed, and the serialized loop
+/// is where that bookkeeping is most delicate: it cannot read and write at
+/// once, so the deadline has to be started and cleared around a single
+/// interleaved sequence. A server that is merely slow must trip it; the point
+/// of the assertion is that the call RETURNS rather than hanging.
+#[compio::test]
+async fn a_read_timeout_fires_and_retires_the_serialized_session() {
+    let url = common::test_url();
+    let mut config: Config = url.parse().expect("test DSN did not parse");
+    config.read_timeout(std::time::Duration::from_millis(250));
+
+    let (client, connection, split_refused) =
+        compio_postgres::test_utils::connect_serialized(&config)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    // Well inside the 250ms budget: the deadline must not fire on a healthy
+    // exchange, or the assertion below would pass for the wrong reason.
+    let row = client
+        .query_one("SELECT 1::int4", &[])
+        .await
+        .expect("a prompt query must not trip the read timeout");
+    assert_eq!(row.get::<_, i32>(0), 1);
+    assert!(
+        split_refused.get(),
+        "this test is not on the serialized loop"
+    );
+
+    // Now outlast it. The generous outer bound makes this a hang detector: a
+    // 250ms deadline that fires at all will fire long before 10s, and load
+    // only pushes the measured time up.
+    let started = std::time::Instant::now();
+    let outcome = compio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.query_one("SELECT pg_sleep(3)", &[]),
+    )
+    .await
+    .expect("the read timeout did not fire; the serialized session hung");
+    let elapsed = started.elapsed();
+
+    let Err(error) = outcome else {
+        panic!("a query outlasting the read timeout must not succeed");
+    };
+    assert!(
+        error.is_read_timeout(),
+        "the failure was not reported as a read timeout: {}",
+        common::error_chain(&error)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "the deadline fired after {elapsed:?}, which is not before the query \
+         would have finished on its own"
+    );
+}
+
+/// A cancelled query surfaces as 57014 on this loop, and the session survives
+/// it.
+///
+/// The cancel itself travels on a SEPARATE connection - that part is
+/// transport-independent. What is specific to this loop is the aftermath: the
+/// running statement's ErrorResponse has to be read and matched to the request
+/// that is still awaiting it, on a loop that cannot read and write at once. A
+/// driver that mishandles it strands the session rather than returning an
+/// error, so the follow-up query is the real assertion.
+#[compio::test]
+async fn a_cancelled_query_leaves_the_serialized_session_usable() {
+    let url = common::test_url();
+    let config: Config = url.parse().expect("test DSN did not parse");
+    let (client, connection, split_refused) =
+        compio_postgres::test_utils::connect_serialized(&config)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    // Establish the session before timing anything, so the assertion below
+    // cannot be satisfied by a connection that never got started.
+    client
+        .query_one("SELECT 1::int4", &[])
+        .await
+        .expect("the session must work before it is cancelled");
+    assert!(
+        split_refused.get(),
+        "this test is not on the serialized loop"
+    );
+
+    let token = client.cancel_token();
+    let canceller = compio::runtime::spawn(async move {
+        // Long enough that the query is certainly executing, short enough that
+        // the test does not sit on it.
+        compio::time::sleep(std::time::Duration::from_millis(300)).await;
+        token.cancel_query(NoTls).await
+    });
+
+    let outcome = compio::time::timeout(
+        std::time::Duration::from_secs(20),
+        client.query_one("SELECT pg_sleep(10)", &[]),
+    )
+    .await
+    .expect("the cancelled query neither returned nor failed; the session is stranded");
+    let cancel_result = canceller.await;
+
+    let Err(error) = outcome else {
+        panic!(
+            "a cancelled query must not report success; the cancel itself said {cancel_result:?}"
+        );
+    };
+    assert_eq!(
+        error.code().map(compio_postgres::error::SqlState::code),
+        Some("57014"),
+        "the cancellation did not surface as query_canceled: {}",
+        common::error_chain(&error)
+    );
+
+    let row = client
+        .query_one("SELECT 2::int4", &[])
+        .await
+        .expect("the session must survive a cancelled query");
+    assert_eq!(row.get::<_, i32>(0), 2);
 }

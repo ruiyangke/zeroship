@@ -72,10 +72,7 @@ pub fn statement_for_test(columns: Vec<Column>) -> Statement {
 /// panics on `usize → i32 / u16 / u32` overflow because the test inputs
 /// are bounded by what fits on a stack — overflow here would mean
 /// something is deeply wrong with the test fixture.
-pub fn row_for_test(
-    columns: Vec<Column>,
-    values: Vec<Option<Vec<u8>>>,
-) -> Result<Row, Error> {
+pub fn row_for_test(columns: Vec<Column>, values: Vec<Option<Vec<u8>>>) -> Result<Row, Error> {
     assert_eq!(
         columns.len(),
         values.len(),
@@ -230,7 +227,7 @@ pub async fn connect_serialized(
         inner: Socket::new_tcp(tcp),
         split_refused: std::rc::Rc::clone(&split_refused),
     };
-    let (client, connection) = crate::connect_raw::connect_raw(
+    let (mut client, connection) = crate::connect_raw::connect_raw(
         socket,
         NoTls,
         crate::connect_tls::Encryption::Plaintext,
@@ -239,5 +236,28 @@ pub async fn connect_serialized(
         None,
     )
     .await?;
+
+    // `connect_raw` deliberately leaves the socket config unset - its own
+    // comment says such a stream "can never issue a CancelToken". A cancel
+    // opens a SECOND connection and needs somewhere to dial, so a harness that
+    // omitted this would make every cancellation fail with "unknown host" and
+    // look like a driver defect. Recorded here exactly as `connect` does.
+    client.set_socket_config(crate::client::SocketConfig {
+        addr: crate::client::Addr::Tcp(
+            host.parse()
+                .map_err(|_| Error::config("connect_serialized needs a numeric TCP host".into()))?,
+        ),
+        hostname: Some(host.clone()),
+        port,
+        connect_timeout: config.get_connect_timeout().copied(),
+        tcp_user_timeout: config.get_tcp_user_timeout().copied(),
+        keepalive: None,
+        require_peer: config.get_require_peer().map(str::to_owned),
+        encryption: crate::connect_tls::Encryption::Plaintext,
+        // Plaintext, so nothing is verified - the same value the connect path
+        // records for an unencrypted session.
+        server_verification: crate::tls::ServerVerification::None,
+    });
+
     Ok((client, connection, split_refused))
 }
