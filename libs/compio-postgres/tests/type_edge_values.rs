@@ -19,8 +19,9 @@ use compio_postgres::{Client, NoTls};
 
 mod common;
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -39,10 +40,7 @@ async fn connect_client(url: &str) -> Client {
 /// `f64` edge values round-trip bit-for-bit.
 #[compio::test]
 async fn every_f64_edge_value_survives_the_server_unchanged() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let cases: &[(&str, f64)] = &[
@@ -75,10 +73,7 @@ async fn every_f64_edge_value_survives_the_server_unchanged() {
 /// The same for `f32`, which has its own encode path.
 #[compio::test]
 async fn every_f32_edge_value_survives_the_server_unchanged() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let cases: &[(&str, f32)] = &[
@@ -117,10 +112,7 @@ async fn every_f32_edge_value_survives_the_server_unchanged() {
 /// pass.
 #[compio::test]
 async fn negative_zero_keeps_its_sign_through_the_server() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let row = client
@@ -150,10 +142,7 @@ async fn negative_zero_keeps_its_sign_through_the_server() {
 /// Integer extremes round-trip.
 #[compio::test]
 async fn integer_extremes_survive_the_server_unchanged() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     for value in [i16::MIN, i16::MAX, 0, -1] {
@@ -188,10 +177,7 @@ async fn integer_extremes_survive_the_server_unchanged() {
 /// as a SHORT result rather than an error.
 #[compio::test]
 async fn every_byte_value_survives_a_bytea_round_trip() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let all_bytes: Vec<u8> = (0..=255u8).collect();
@@ -224,10 +210,7 @@ async fn every_byte_value_survives_a_bytea_round_trip() {
 /// a driver that conflated them would look right in casual use.
 #[compio::test]
 async fn array_null_elements_and_emptiness_are_distinguished() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     // A NULL in the middle, so an off-by-one in element walking shows up as a
@@ -289,10 +272,7 @@ async fn array_null_elements_and_emptiness_are_distinguished() {
 /// only about the decoder.
 #[compio::test]
 async fn a_multidimensional_array_is_refused_rather_than_flattened() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let row = client
@@ -338,10 +318,7 @@ async fn a_multidimensional_array_is_refused_rather_than_flattened() {
 /// driver's own accessor, not about the decoder in isolation.
 #[compio::test]
 async fn an_integer_width_mismatch_is_refused_not_truncated() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     // Narrowing: the value genuinely does not fit.
@@ -380,10 +357,7 @@ async fn an_integer_width_mismatch_is_refused_not_truncated() {
 /// Reading a text column as a number is refused, and vice versa.
 #[compio::test]
 async fn a_type_mismatch_across_families_is_refused() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let row = client

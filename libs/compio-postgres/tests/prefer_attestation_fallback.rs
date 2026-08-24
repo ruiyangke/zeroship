@@ -27,18 +27,16 @@ use compio_postgres::NoTls;
 #[allow(dead_code)]
 mod common;
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 /// A root cert is named, the connector cannot attest, and `prefer` connects
 /// anyway -- over plaintext, which is what the mode promises.
 #[compio::test]
 async fn prefer_with_a_root_cert_falls_back_when_the_connector_cannot_attest() {
-    let Some(base) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let base = test_url();
     let dsn = format!("{base}?sslmode=prefer&sslrootcert=/etc/ssl/certs/ca-certificates.crt");
 
     let (client, connection) = compio_postgres::connect(&dsn, NoTls).await.expect(
@@ -65,10 +63,7 @@ async fn prefer_with_a_root_cert_falls_back_when_the_connector_cannot_attest() {
 /// the change broke `prefer` generally rather than the attestation case.
 #[compio::test]
 async fn prefer_without_a_root_cert_still_connects() {
-    let Some(base) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let base = test_url();
     let dsn = format!("{base}?sslmode=prefer");
 
     let (client, connection) = compio_postgres::connect(&dsn, NoTls)
@@ -94,10 +89,7 @@ async fn prefer_without_a_root_cert_still_connects() {
 /// the refusal is the only correct outcome.
 #[compio::test]
 async fn verify_full_still_refuses_a_connector_that_cannot_attest() {
-    let Some(base) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let base = test_url();
     let dsn = format!("{base}?sslmode=verify-full&sslrootcert=/etc/ssl/certs/ca-certificates.crt");
 
     let error = compio_postgres::connect(&dsn, NoTls)

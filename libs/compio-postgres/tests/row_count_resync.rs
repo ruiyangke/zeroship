@@ -35,8 +35,9 @@ use compio_postgres::{Client, NoTls};
 #[allow(dead_code)]
 mod common;
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -64,10 +65,7 @@ async fn backend_pid(client: &Client) -> i32 {
 /// correctly.
 #[compio::test]
 async fn a_row_count_refusal_leaves_the_session_usable_and_in_step() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let pid_before = backend_pid(&client).await;
 
@@ -106,10 +104,7 @@ async fn a_row_count_refusal_leaves_the_session_usable_and_in_step() {
 /// connection down and rebuilt it on every `query_opt`.
 #[compio::test]
 async fn a_single_row_query_opt_succeeds_and_leaves_the_session_usable() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let pid_before = backend_pid(&client).await;
 
@@ -133,10 +128,7 @@ async fn a_single_row_query_opt_succeeds_and_leaves_the_session_usable() {
 /// Zero rows is `Ok(None)`, not a refusal -- the third arm of the same method.
 #[compio::test]
 async fn zero_rows_is_none_rather_than_a_row_count_error() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let outcome = client

@@ -21,8 +21,9 @@ use compio_postgres::{Client, NoTls};
 #[allow(dead_code)]
 mod common;
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -55,10 +56,7 @@ async fn sqlstate_of(client: &Client, sql: &str) -> SqlState {
 /// Errors reachable with no schema at all.
 #[compio::test]
 async fn schema_free_errors_carry_the_constants_this_crate_names() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let cases: &[(&str, &SqlState)] = &[
@@ -98,10 +96,7 @@ async fn schema_free_errors_carry_the_constants_this_crate_names() {
 /// on most often.
 #[compio::test]
 async fn constraint_violations_carry_the_constants_this_crate_names() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     // Temporary, so the shared review database keeps no residue even if this
@@ -162,10 +157,7 @@ async fn constraint_violations_carry_the_constants_this_crate_names() {
 /// a constructed `SqlState`.
 #[compio::test]
 async fn an_unknown_sqlstate_is_carried_through_rather_than_discarded() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     // "ZZ999" is in the user-defined range and is not a PostgreSQL code, so it
