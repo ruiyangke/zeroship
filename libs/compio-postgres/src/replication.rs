@@ -456,7 +456,32 @@ where
         let mut failure: Option<Error> = None;
 
         loop {
-            let msg = read_one_message(&mut self.stream).await?;
+            let msg = match read_one_message(&mut self.stream).await {
+                Ok(msg) => msg,
+                Err(error) => {
+                    // Retiring the session is this arm's OWN job, not the
+                    // caller wrapper's. `identify_system` poisons when the
+                    // error it gets back `is_read_timeout`, and the error
+                    // returned below may be the SERVER's instead - so keying
+                    // the retirement to it would leave a session whose
+                    // response ended at an unknown frame boundary reusable.
+                    self.in_flight.poison();
+                    if let Some(release) = &self.release {
+                        release.shutdown();
+                    }
+                    // A stashed diagnostic outranks the transport error. This
+                    // loop reports an `ErrorResponse` only after the
+                    // `ReadyForQuery` that closes the response, and PostgreSQL
+                    // sends no `ReadyForQuery` after a FATAL - it writes the
+                    // `ErrorResponse` and hangs up. The read that fails IS how
+                    // that response ends, so propagating the read error
+                    // replaced `57P01 terminating connection due to
+                    // administrator command` with `connection closed by
+                    // server`, on every admin-terminated, shutting-down or
+                    // idle-timed-out walsender.
+                    return Err(failure.unwrap_or(error));
+                }
+            };
             match msg {
                 Message::RowDescription(_) => {}
                 Message::DataRow(row) => match parse_identify_system_row(&row) {

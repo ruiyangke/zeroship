@@ -302,7 +302,10 @@ fn live_endpoint(url: &str) -> (String, u16) {
         compio_postgres::config::Host::Tcp(host) => host.clone(),
         #[cfg(unix)]
         compio_postgres::config::Host::Unix(path) => {
-            panic!("this test needs a TCP endpoint, got the socket {}", path.display())
+            panic!(
+                "this test needs a TCP endpoint, got the socket {}",
+                path.display()
+            )
         }
     };
     let port = parsed.get_ports().first().copied().unwrap_or(5432);
@@ -475,16 +478,15 @@ async fn identify_system_returns_the_servers_real_identity() {
     config.application_name("cpg_identify_system");
     // Same reasoning as above: let the shared helper decide whether the server
     // answered before it names a remedy.
-    let mut replication = match compio_postgres::replication::connect_replication(NoTls, &config)
-        .await
-    {
-        Ok(connection) => connection,
-        Err(e) if common::server_answered(&e) => panic!(
-            "the server refused a replication connection: {}",
-            common::error_chain(&e)
-        ),
-        Err(e) => common::postgres_unreachable(&url, &e),
-    };
+    let mut replication =
+        match compio_postgres::replication::connect_replication(NoTls, &config).await {
+            Ok(connection) => connection,
+            Err(e) if common::server_answered(&e) => panic!(
+                "the server refused a replication connection: {}",
+                common::error_chain(&e)
+            ),
+            Err(e) => common::postgres_unreachable(&url, &e),
+        };
 
     let identity = replication
         .identify_system()
@@ -1345,4 +1347,83 @@ async fn an_identify_system_error_leaves_the_session_able_to_answer_the_next_com
     })
     .await
     .expect("IDENTIFY_SYSTEM resynchronisation test exceeded its outer watchdog");
+}
+
+/// A FATAL `ErrorResponse` must reach the caller even though no `ReadyForQuery`
+/// follows it.
+///
+/// The response loop drains to `ReadyForQuery` and only THEN reports the
+/// `ErrorResponse` it stashed. PostgreSQL does not send a `ReadyForQuery` after
+/// a FATAL error - it writes the `ErrorResponse` and closes the connection - so
+/// the next read fails, and the `?` on it discarded the server's diagnostic and
+/// reported the transport error in its place. `57P01`, `57P03` and
+/// `idle_session_timeout` on a walsender all take this exact path.
+///
+/// The pairing with the test above is the one variable that matters: there the
+/// same `ErrorResponse` is followed by a `ReadyForQuery` and the SQLSTATE
+/// already survived. Here it is not, and only the read-error arm can carry it.
+#[compio::test]
+async fn a_fatal_identify_system_error_survives_the_close_that_follows_it() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = ReplicationStub::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_replication_startup(&mut stream, Duration::ZERO);
+
+            assert_eq!(expect_simple_query(&mut stream), b"IDENTIFY_SYSTEM\0");
+            // NO ReadyForQuery: a FATAL is the whole response, and the server
+            // hangs up behind it. That is what makes the driver's next read
+            // fail rather than deliver a terminator.
+            stream
+                .write_all(&backend_frame(
+                    b'E',
+                    b"SFATAL\0C57P01\0Mterminating connection due to administrator command\0\0",
+                ))
+                .expect("write scripted FATAL refusal");
+            stream.flush().expect("flush scripted FATAL refusal");
+            stream
+                .shutdown(std::net::Shutdown::Both)
+                .expect("close the scripted connection behind the FATAL");
+        });
+
+        let mut replication = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio_postgres::replication::connect_replication(NoTls, &stub_config(server.addr)),
+        )
+        .await
+        .expect("scripted replication startup exceeded its watchdog")
+        .expect("connect to scripted replication peer");
+
+        let refusal = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the refused identify_system exceeded its watchdog")
+            .expect_err("the server refused IDENTIFY_SYSTEM, so this must be an error");
+        let rendered = common::error_chain(&refusal);
+        assert!(
+            rendered.contains("57P01"),
+            "the server's SQLSTATE was replaced by the close that followed it: {rendered}"
+        );
+        assert!(
+            rendered.contains("terminating connection due to administrator command"),
+            "the server's message was replaced by the close that followed it: {rendered}"
+        );
+
+        // The response ended at an unknown frame boundary, so the session must
+        // be retired rather than reused - the same ruling the unaccountable
+        // message test makes, and the reason the read-error arm cannot simply
+        // swap the error it returns.
+        let second = compio::time::timeout(OPERATION_WATCHDOG, replication.identify_system())
+            .await
+            .expect("the retried identify_system exceeded its watchdog")
+            .expect_err("a retired session must not answer a second command");
+        assert!(
+            second.is_cancelled(),
+            "the session survived a transport error mid-response: {}",
+            common::error_chain(&second)
+        );
+
+        drop(replication);
+        server.finish();
+    })
+    .await
+    .expect("FATAL IDENTIFY_SYSTEM test exceeded its outer watchdog");
 }
