@@ -52,8 +52,9 @@ pub enum PlanStatusStepKind {
     OnlineExpand,
     /// One PostgreSQL deferred-contract migration of an online rename.
     OnlineContract,
-    /// The journal migration for an atomic SQLite table rebuild.
-    SqliteRebuild,
+    /// The journal migration for an atomic table rebuild — the strategy a backend
+    /// selects when it has no native online form for the change, not one backend's name.
+    TableRebuild,
 }
 
 impl PlanStatusStepKind {
@@ -67,7 +68,7 @@ impl PlanStatusStepKind {
             Self::SynchronizeIdentity => "synchronizeIdentity",
             Self::OnlineExpand => "onlineExpand",
             Self::OnlineContract => "onlineContract",
-            Self::SqliteRebuild => "sqliteRebuild",
+            Self::TableRebuild => "tableRebuild",
         }
     }
 }
@@ -218,7 +219,7 @@ impl PlanStatusManifest {
                 PlanStep::OnlineRename(RenameStep::TableRebuild(rebuild)) => {
                     steps.push(migration_step(
                         &rebuild.migration,
-                        PlanStatusStepKind::SqliteRebuild,
+                        PlanStatusStepKind::TableRebuild,
                     ));
                 }
             }

@@ -336,7 +336,7 @@ impl std::fmt::Display for FoldError {
             FoldError::CheckCascadeColumnsMissing { table, name } => write!(
                 f,
                 "fold: CHECK constraint `{name}` on `{table}` records no cascade columns, \
-                 so a column drop cannot tell whether PostgreSQL cascaded it away; the \
+                 so a column drop cannot tell whether the catalog cascaded it away; the \
                  producer of this constraint must record them structurally"
             ),
             FoldError::RenameCollision { table, to } => {
@@ -2459,8 +2459,9 @@ impl<'a> CatalogFold<'a> {
                     return Err(FoldError::Unsupported(
                         "setColumnType on a column carrying a value format \
                          (the apply path cannot drop the TypeID/ULID format CHECK; \
-                         PostgreSQL refuses the ALTER outright for a non-text target, and \
-                         keeps an unrecognisable rewritten CHECK for a text one; \
+                         a target catalog either refuses the ALTER outright for a non-text \
+                         target or keeps an unrecognisable rewritten CHECK for a text \
+                         one; \
                          fail-closed rather than fold a stale format contract)",
                     ));
                 }

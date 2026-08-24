@@ -189,7 +189,11 @@ pub enum EngineError {
         pending_version: String,
     },
     /// The selected backend has no online-rename pending-contract capability.
-    #[error("pending-contract resolution is supported only for PostgreSQL online renames")]
+    #[error(
+        "pending-contract resolution needs a backend that resolves an online rename by \
+         cross-deploy contract cutover; the selected backend registers no pending-contract \
+         surface"
+    )]
     PendingContractsUnsupported,
     /// The requested key is not currently outstanding.
     #[error("no outstanding pending contract has version '{version}'")]
@@ -619,7 +623,7 @@ impl MigrationEngine {
                     .map_err(|error| {
                         envelope_deploy_error(
                             &migration_name,
-                            "SQLite logical-column advance",
+                            "logical-column advance",
                             error,
                         )
                     })?;
@@ -646,7 +650,7 @@ impl MigrationEngine {
                     .map_err(|error| {
                         envelope_deploy_error(
                             &migration_name,
-                            "SQLite rebuild-facet supplementation",
+                            "rebuild-facet supplementation",
                             error,
                         )
                     })?
@@ -1701,7 +1705,7 @@ impl MigrationEngine {
                     })?;
                 let reason = if !shape.columns_compatible {
                     Some(
-                        "both recorded columns must exist with the same declared PostgreSQL type, including modifiers",
+                        "both recorded columns must exist with the same declared type, including modifiers",
                     )
                 } else if !shape.values_synchronized {
                     Some("source and destination values are no longer synchronized")
@@ -2296,7 +2300,7 @@ impl MigrationEngine {
                     .any(|version| completed_gated.contains(version));
                 let reason = if !shape.columns_compatible {
                     Some(
-                        "both recorded columns must exist with the same declared PostgreSQL type, including modifiers",
+                        "both recorded columns must exist with the same declared type, including modifiers",
                     )
                 } else if !shape.values_synchronized {
                     Some("source and destination values are no longer synchronized")

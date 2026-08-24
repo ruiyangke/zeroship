@@ -111,7 +111,7 @@ fixture:comments_indexes|Postgres|field|users|email|{"type":"string","required":
 fixture:comments_indexes|Postgres|field|users|active|{"type":"boolean","required":true,"default":true}
 fixture:comments_indexes|Postgres|field|users|status|{"type":"string","enum":["active","disabled"]}
 fixture:comments_indexes|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level UNIQUE on SQLite (the SQLite CREATE renders from the descriptor; a table-level UNIQUE is not threaded into the emitter)
-fixture:comments_indexes|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: render error: IrAuthor::lower does not yet compile op "validated createIndex expression elements on MySQL reached lower" (DDL ops only)
+fixture:comments_indexes|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: render error: IrAuthor::lower does not yet compile op "validated createIndex expression elements reached lower on a target whose catalog fold declares no expression index" (DDL ops only)
 fixture:constraint_not_valid|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
 fixture:constraint_not_valid|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
 fixture:constraint_not_valid|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist

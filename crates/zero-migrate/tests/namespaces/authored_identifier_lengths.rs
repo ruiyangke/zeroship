@@ -277,14 +277,35 @@ fn assert_refused_for_length(label: &str, dialect: &DialectId, op: Op) {
     let error = validate(op, dialect).expect_err(&format!(
         "{label} on {dialect:?} must refuse a truncatable name"
     ));
+    // TWO refusals, one bound. The reason used to be a single sentence —
+    // "PostgreSQL truncates identifiers to 63 bytes" — asserted for every dialect,
+    // which made this helper require a FALSE statement on the two targets that do not
+    // truncate at all. The module header above already states the real split: the
+    // create-side bound applies everywhere because the authored name is carried
+    // forward, and only SOME targets truncate. The refusal now says whichever of those
+    // is true for the target it asked, so this checks the disjunction and the parts
+    // that hold in both arms.
     assert!(
-        error.reason.contains("truncates identifiers"),
+        error.reason.contains("truncates identifiers")
+            || error.reason.contains("authored names are bounded at"),
         "{label} on {dialect:?} was refused for the wrong reason: {error:?}"
     );
     assert!(
         error.reason.contains(&MAX.to_string()),
         "{label} on {dialect:?} must name the byte cap: {error:?}"
     );
+    assert!(
+        error.reason.contains(dialect.as_str()),
+        "{label} on {dialect:?} must name the target it asked, not a compiled-in \
+         vendor: {error:?}"
+    );
+    for product in ["PostgreSQL", "MySQL", "SQLite"] {
+        assert!(
+            !error.reason.contains(product),
+            "{label} on {dialect:?} names the product {product:?} rather than reading a \
+             DialectId: {error:?}"
+        );
+    }
 }
 
 fn assert_not_refused_for_length(label: &str, dialect: &DialectId, op: Op) {

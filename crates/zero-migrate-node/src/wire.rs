@@ -615,7 +615,7 @@ pub struct PlanStatusStepDto {
     /// Human-readable operation label.
     pub name: String,
     /// `ddl | dml | backfill | synchronizeIdentity | onlineExpand |
-    /// onlineContract | sqliteRebuild`.
+    /// onlineContract | tableRebuild`.
     pub kind: String,
     /// `pending | inflight | applied | drifted`.
     pub state: String,

@@ -689,7 +689,7 @@ fn render_alter_column_type(
     out: &mut Vec<Rendered>,
 ) {
     out.push(Rendered::label(format!(
-        "{RUNTIME_RESOLVED} retype {:?}.{:?}.{:?} to {}: MySQL spells this MODIFY COLUMN, which restates the whole column definition; the live definition is read from SHOW CREATE TABLE under the apply lock and reproduced with only its type token replaced",
+        "{RUNTIME_RESOLVED} retype {:?}.{:?}.{:?} to {}: this target restates the WHOLE column definition to change its type, so the statement cannot be written offline; the live definition is read from the server under the apply lock and reproduced with only its type token replaced",
         step.schema, step.table, step.column, step.ddl_type,
     )));
 }
@@ -721,7 +721,7 @@ fn render_online_rename(op: &Op, rename: &RenameStep, out: &mut Vec<Rendered>) {
         }
         RenameStep::TableRebuild(rb) => {
             out.push(Rendered::label(format!(
-                "{RUNTIME_RESOLVED} online rename {subject}: SQLite 12-step table rebuild; \
+                "{RUNTIME_RESOLVED} online rename {subject}: table rebuild; \
                  needs the live table structure — exact rebuild SQL depends on live state"
             )));
             let _ = rb; // the rebuild statements depend on live shape — never printed as the stream
@@ -743,7 +743,7 @@ fn render_online_rename_no_op(rename: &RenameStep, out: &mut Vec<Rendered>) {
         }
         RenameStep::TableRebuild(_) => {
             out.push(Rendered::label(format!(
-                "{RUNTIME_RESOLVED} online rename (SQLite 12-step rebuild): needs live table \
+                "{RUNTIME_RESOLVED} online rename (table rebuild): needs live table \
                  structure — exact rebuild SQL depends on live state"
             )));
         }
@@ -771,7 +771,7 @@ fn runtime_resolved_for_lower_error(op: &Op, err: &IrLowerError) -> String {
         // cutover. NEVER fabricate the stream.
         IrLowerError::RenameLower(_) | IrLowerError::RenameNeedsLiveColumn(..) => format!(
             "{RUNTIME_RESOLVED} {kind} {subject}: online rename needs the live column \
-             structure to lower (expand-contract dual-write / SQLite rebuild); the backfill is \
+             structure to lower (expand-contract dual-write / table rebuild); the backfill is \
              windowed by PK and the cutover is partitioned across deploys; exact statement \
              stream depends on live state"
         ),
@@ -1085,7 +1085,7 @@ fn write_doc_header(out: &mut String, caption: DialectCaption) {
     );
     let _ = writeln!(
         out,
-        "-- (online-rename backfill/cutover, SQLite rebuild, existence-guarded ops) are LABELED"
+        "-- (online-rename backfill/cutover, table rebuild, existence-guarded ops) are LABELED"
     );
     let _ = writeln!(
         out,

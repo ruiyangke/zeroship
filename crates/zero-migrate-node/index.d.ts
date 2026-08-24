@@ -735,7 +735,7 @@ export interface PlanStatusStepDto {
   name: string
   /**
    * `ddl | dml | backfill | synchronizeIdentity | onlineExpand |
-   * onlineContract | sqliteRebuild`.
+   * onlineContract | tableRebuild`.
    */
   kind: string
   /** `pending | inflight | applied | drifted`. */

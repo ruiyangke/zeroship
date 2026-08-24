@@ -3814,7 +3814,7 @@ impl DeclarativeAuthor {
                                 || lc.case_sensitive != c.case_sensitive
                             {
                                 return Err(DeclarativeError::Invalid(format!(
-                                    "internal: SQLite column {table}.{} has a type/nullability \
+                                    "internal: rebuilt column {table}.{} has a type/nullability \
                                      change that the rebuild detector should have caught \
                                      (rebuild invariant violated)",
                                     c.name
@@ -4417,12 +4417,12 @@ impl DeclarativeAuthor {
     ) -> Result<String, DeclarativeError> {
         let snapshot = desired.snapshot.tables.get(table).ok_or_else(|| {
             DeclarativeError::Invalid(format!(
-                "internal: no SQLite rebuild snapshot for table '{table}'"
+                "internal: no rebuild snapshot for table '{table}'"
             ))
         })?;
         let inject = desired.resolved_injects.get(table).ok_or_else(|| {
             DeclarativeError::Invalid(format!(
-                "internal: no resolved inject for SQLite rebuild table '{table}'"
+                "internal: no resolved inject for rebuild table '{table}'"
             ))
         })?;
 
@@ -4467,7 +4467,7 @@ impl DeclarativeAuthor {
                         .retarget_foreign_key_definition(&constraint.definition, tmp_table)
                     .ok_or_else(|| {
                         DeclarativeError::Invalid(format!(
-                            "SQLite rebuild of '{table}' could not retarget self-referential foreign key {:?}",
+                            "rebuild of '{table}' could not retarget self-referential foreign key {:?}",
                             constraint.name
                         ))
                     })?;
@@ -4487,14 +4487,14 @@ impl DeclarativeAuthor {
                 .next()
                 .ok_or_else(|| {
                     DeclarativeError::Invalid(format!(
-                        "internal: SQLite rebuild of '{table}' emitted no CREATE TABLE"
+                        "internal: rebuild of '{table}' emitted no CREATE TABLE"
                     ))
                 });
         }
 
         let schema = desired.sdk_schemas.get(table).ok_or_else(|| {
             DeclarativeError::Invalid(format!(
-                "internal: no SDK schema for SQLite rebuild table '{table}'"
+                "internal: no SDK schema for rebuild table '{table}'"
             ))
         })?;
         let mut schema = schema.clone();
@@ -4511,13 +4511,13 @@ impl DeclarativeAuthor {
                 effective,
             )
             .map_err(|error| {
-                DeclarativeError::Invalid(format!("sqlite rebuild emit for '{table}': {error}"))
+                DeclarativeError::Invalid(format!("rebuild emit for '{table}': {error}"))
             })?
             .into_iter()
             .next()
             .ok_or_else(|| {
                 DeclarativeError::Invalid(format!(
-                    "internal: SQLite rebuild of '{table}' emitted no CREATE TABLE"
+                    "internal: rebuild of '{table}' emitted no CREATE TABLE"
                 ))
             })?;
         if let Some(primary_key) = self
@@ -4566,7 +4566,7 @@ impl DeclarativeAuthor {
         let create_real = if let Some(stored) = live.stored_create_sql.as_deref() {
             self.schema_renderer()
                 .stored_ddl()
-                .expect("the SQLite renderer must provide stored-DDL analysis")
+                .expect("the resolved renderer must provide stored-DDL analysis")
                 .rewrite_stored_foreign_keys(table, stored, live, desired, self.schema_renderer())?
         } else {
             let injected_indexes = injected_index_names(table, desired, Some(inject));
@@ -4582,7 +4582,7 @@ impl DeclarativeAuthor {
                 .next()
                 .ok_or_else(|| {
                     DeclarativeError::Invalid(format!(
-                        "internal: SQLite constraint rebuild of '{table}' emitted no CREATE TABLE"
+                        "internal: constraint rebuild of '{table}' emitted no CREATE TABLE"
                     ))
                 })?
         };
@@ -4594,10 +4594,10 @@ impl DeclarativeAuthor {
         let stored_ddl = self
             .schema_renderer()
             .stored_ddl()
-            .expect("the SQLite renderer must provide stored-DDL analysis");
+            .expect("the resolved renderer must provide stored-DDL analysis");
         let Some((open, _)) = stored_ddl.create_body_bounds(&create_real) else {
             return Err(DeclarativeError::Invalid(format!(
-                "internal: SQLite constraint rebuild of '{table}' could not locate the emitted CREATE TABLE body"
+                "internal: constraint rebuild of '{table}' could not locate the emitted CREATE TABLE body"
             )));
         };
         // The target is canonicalized, while the entire body and trailing SQLite
@@ -4669,7 +4669,7 @@ impl DeclarativeAuthor {
             .collect::<Vec<_>>()
             .join(";\n");
         let migration = self.make(
-            &format!("sqlite_rebuild_{table}"),
+            &format!("table_rebuild_{table}"),
             preview_up,
             None,
             destructive_flags(),
@@ -4721,7 +4721,7 @@ impl DeclarativeAuthor {
                 // than emit a CREATE under the real name (which would collide with the
                 // table we are about to drop) or a malformed statement.
                 return Err(DeclarativeError::Invalid(format!(
-                    "internal: SQLite rebuild of '{table}' could not re-point the emitted CREATE \
+                    "internal: rebuild of '{table}' could not re-point the emitted CREATE \
                      to the temp name (emitter shape mismatch); refusing to emit a colliding CREATE"
                 )));
             }
@@ -4744,7 +4744,7 @@ impl DeclarativeAuthor {
             let stored_ddl = self
                 .schema_renderer()
                 .stored_ddl()
-                .expect("the SQLite renderer must provide stored-DDL analysis");
+                .expect("the resolved renderer must provide stored-DDL analysis");
             let generated = dt
                 .stored_create_sql
                 .as_deref()
@@ -4848,7 +4848,7 @@ impl DeclarativeAuthor {
             .collect::<Vec<_>>()
             .join(";\n");
         let migration = self.make(
-            &format!("sqlite_rebuild_{table}"),
+            &format!("table_rebuild_{table}"),
             preview_up,
             None,
             destructive_flags(),
@@ -5192,7 +5192,7 @@ impl DeclarativeAuthor {
         match (rebuilds.len(), plan.renames.is_empty()) {
             (1, true) => Ok(rebuilds.remove(0)),
             (n, renames_empty) => Err(DeclarativeError::Invalid(format!(
-                "renameColumn SQLite lowering of '{table}.{from}→{to}' expected exactly \
+                "renameColumn rebuild lowering of '{table}.{from}→{to}' expected exactly \
                  one rebuild and no PG expand-contract, got {n} rebuild(s) / \
                  renames_empty={renames_empty} (internal rebuild-planner invariant)"
             ))),

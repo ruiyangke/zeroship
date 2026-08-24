@@ -821,11 +821,23 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
     )
     .lower(&add, &live)
     .expect_err("different exact live MySQL collations must be rejected");
+    // The diagnostic names the POSITION and both sides' exact storage. It used to open
+    // "position 2 MySQL character storage differs", naming the vendor in a refusal whose
+    // gate is the selected backend's own reference policy; the refusing target is
+    // already carried structurally (`dialect=mysql` in the error tag), so the product
+    // name in the prose was a second, unmaintained copy of it.
+    let text = error.to_string();
     assert!(
-        error
-            .to_string()
-            .contains("MySQL character storage differs"),
+        text.contains("position 2 character storage differs"),
         "unexpected exact-storage diagnostic: {error}"
+    );
+    assert!(
+        text.contains("ascii_bin") && text.contains("utf8mb4_bin"),
+        "the diagnostic must print both sides' exact storage: {error}"
+    );
+    assert!(
+        text.contains(zero_migrate::MYSQL.as_str()),
+        "the refusal must still identify the target that raised it: {error}"
     );
 }
 

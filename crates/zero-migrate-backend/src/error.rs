@@ -967,6 +967,25 @@ pub enum IrLowerError {
         /// The target dialect.
         dialect: DialectId,
     },
+    /// A RELATION-valued partition operation reached a target that does not declare
+    /// [`Capability::PartitionRelationDdl`](zero_migrate_ir::backend::Capability).
+    ///
+    /// The refusing target is CARRIED, for the reason
+    /// [`Self::VendorUnsupported`] states: these three refusals were
+    /// `UnsupportedOp("attachPartition is PostgreSQL-only")` and its siblings —
+    /// `&'static str` constants naming the one backend that declared the capability
+    /// when they were written. The PREDICATE had already been moved to the
+    /// capability; the two comments beside it in `render/lower.rs` said so, one of
+    /// them promising that "a fourth backend with relation-valued partitions answers
+    /// for itself instead of inheriting PostgreSQL's yes" — which was true of the
+    /// branch and false of the sentence the operator was shown.
+    #[error("UNSUPPORTED {{ kind: {kind:?}, dialect: {dialect} }}")]
+    PartitionRelationUnsupported {
+        /// Stable unsupported-kind token (`attachPartition`, `detachPartition`).
+        kind: &'static str,
+        /// The target that declares no relation-valued partition DDL.
+        dialect: DialectId,
+    },
     /// Exclusion constraints are PostgreSQL-only.
     #[error("UNSUPPORTED {{ kind: {kind:?}, dialect: {dialect} }}")]
     ExclusionConstraintUnsupported {

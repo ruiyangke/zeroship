@@ -221,7 +221,7 @@ pub struct ColumnInfo {
         dead_code,
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
-    pub pg_type: String,
+    pub catalog_type: String,
     #[allow(
         dead_code,
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
@@ -297,11 +297,11 @@ impl Default for ColumnInfo {
     /// shape is: empty type string, nullable, no default, no
     /// volatility, no vector dimension, not a
     /// geopoint, **no encryption**. Every existing
-    /// introspection / test site overrides `pg_type` + `not_null`
+    /// introspection / test site overrides `catalog_type` + `not_null`
     /// explicitly.
     fn default() -> Self {
         Self {
-            pg_type: String::new(),
+            catalog_type: String::new(),
             not_null: false,
             default_expr: None,
             vector_dims: None,
@@ -874,7 +874,7 @@ pub fn compute_diff(
     //
     // We key the detection off the encryption flag (a semantic signal
     // the introspector already recovers) rather than string-matching
-    // `pg_type`, because `format_type` spellings ("bytea" vs the DDL
+    // `catalog_type`, because `format_type` spellings ("bytea" vs the DDL
     // "BYTEA", "double precision" vs "DOUBLE PRECISION") would make a raw
     // type compare brittle. Encryption is the corruption-causing toggle;
     // other type changes (e.g. number widening) are out of scope for
@@ -902,7 +902,7 @@ pub fn compute_diff(
             // The live side's spelling as introspected (e.g. "text",
             // "bytea"). We surface it verbatim so the audit row / authoring
             // pipeline sees exactly what the catalog reports.
-            let from_type = live_col.pg_type.clone();
+            let from_type = live_col.catalog_type.clone();
 
             ops.push(DiffOp {
                 collection: collection.to_string(),
@@ -1136,7 +1136,7 @@ mod tests {
         cols.insert(
             "id".to_string(),
             ColumnInfo {
-                pg_type: "integer".into(),
+                catalog_type: "integer".into(),
                 not_null: true,
                 default_expr: None,
                 ..Default::default()
@@ -1145,7 +1145,7 @@ mod tests {
         cols.insert(
             "legacy_score".to_string(),
             ColumnInfo {
-                pg_type: "integer".into(),
+                catalog_type: "integer".into(),
                 not_null: false,
                 default_expr: None,
                 ..Default::default()
@@ -1154,7 +1154,7 @@ mod tests {
         cols.insert(
             "created_at".to_string(),
             ColumnInfo {
-                pg_type: "timestamptz".into(),
+                catalog_type: "timestamptz".into(),
                 not_null: false,
                 default_expr: None,
                 ..Default::default()
@@ -1163,7 +1163,7 @@ mod tests {
         cols.insert(
             "updated_at".to_string(),
             ColumnInfo {
-                pg_type: "timestamptz".into(),
+                catalog_type: "timestamptz".into(),
                 not_null: false,
                 default_expr: None,
                 ..Default::default()
@@ -1201,7 +1201,7 @@ mod tests {
 
     fn plaintext_text_col() -> ColumnInfo {
         ColumnInfo {
-            pg_type: "text".into(),
+            catalog_type: "text".into(),
             not_null: false,
             ..Default::default()
         }
@@ -1209,7 +1209,7 @@ mod tests {
 
     fn encrypted_bytea_col() -> ColumnInfo {
         ColumnInfo {
-            pg_type: "bytea".into(),
+            catalog_type: "bytea".into(),
             not_null: false,
             encryption: Some(EncryptionMeta {
                 mode: crate::schema::descriptors::EncryptionMode::Randomised,
@@ -1357,7 +1357,7 @@ mod tests {
             cols.insert(
                 column.name.clone(),
                 ColumnInfo {
-                    pg_type: "text".into(),
+                    catalog_type: "text".into(),
                     not_null: !column.nullable.unwrap_or(true),
                     ..Default::default()
                 },
@@ -1366,7 +1366,7 @@ mod tests {
         cols.insert(
             "email".to_string(),
             ColumnInfo {
-                pg_type: "text".into(),
+                catalog_type: "text".into(),
                 ..Default::default()
             },
         );
@@ -1388,7 +1388,7 @@ mod tests {
             vec![(
                 "updated_at",
                 ColumnInfo {
-                    pg_type: "text".into(),
+                    catalog_type: "text".into(),
                     ..Default::default()
                 },
             )],
@@ -1451,7 +1451,7 @@ mod tests {
         cols.insert(
             "id".to_string(),
             ColumnInfo {
-                pg_type: "integer".into(),
+                catalog_type: "integer".into(),
                 not_null: true,
                 default_expr: None,
                 ..Default::default()
@@ -1460,7 +1460,7 @@ mod tests {
         cols.insert(
             "authorId".to_string(),
             ColumnInfo {
-                pg_type: "integer".into(),
+                catalog_type: "integer".into(),
                 not_null: false,
                 default_expr: None,
                 ..Default::default()
@@ -1489,7 +1489,7 @@ mod tests {
         cols.insert(
             "id".to_string(),
             ColumnInfo {
-                pg_type: "integer".into(),
+                catalog_type: "integer".into(),
                 not_null: true,
                 default_expr: None,
                 ..Default::default()
@@ -1498,7 +1498,7 @@ mod tests {
         cols.insert(
             "authorId".to_string(),
             ColumnInfo {
-                pg_type: "integer".into(),
+                catalog_type: "integer".into(),
                 not_null: false,
                 default_expr: None,
                 ..Default::default()
@@ -1541,7 +1541,7 @@ mod tests {
         cols.insert(
             "authorId".to_string(),
             ColumnInfo {
-                pg_type: "integer".into(),
+                catalog_type: "integer".into(),
                 not_null: false,
                 default_expr: None,
                 ..Default::default()
@@ -1612,7 +1612,7 @@ mod tests {
             cols.insert(
                 c.to_string(),
                 ColumnInfo {
-                    pg_type: "text".into(),
+                    catalog_type: "text".into(),
                     not_null: false,
                     default_expr: None,
                     ..Default::default()
@@ -1674,7 +1674,7 @@ mod tests {
             cols.insert(
                 c.to_string(),
                 ColumnInfo {
-                    pg_type: "text".into(),
+                    catalog_type: "text".into(),
                     not_null: false,
                     default_expr: None,
                     ..Default::default()
@@ -1717,7 +1717,7 @@ mod tests {
         cols.insert(
             "id".to_string(),
             ColumnInfo {
-                pg_type: "integer".into(),
+                catalog_type: "integer".into(),
                 not_null: true,
                 ..Default::default()
             },
@@ -1725,7 +1725,7 @@ mod tests {
         cols.insert(
             col.to_string(),
             ColumnInfo {
-                pg_type: "text".into(),
+                catalog_type: "text".into(),
                 not_null: false,
                 mask,
                 ..Default::default()
@@ -1912,7 +1912,7 @@ mod tests {
         cols.insert(
             "id".to_string(),
             ColumnInfo {
-                pg_type: "integer".into(),
+                catalog_type: "integer".into(),
                 not_null: true,
                 ..Default::default()
             },
@@ -1922,7 +1922,7 @@ mod tests {
         cols.insert(
             "ssn".to_string(),
             ColumnInfo {
-                pg_type: "text".into(),
+                catalog_type: "text".into(),
                 mask: Some(MaskMeta {
                     kind: MaskKind::Last4,
                     classification: Classification::Spi,
@@ -1936,7 +1936,7 @@ mod tests {
         cols.insert(
             "ssn_masked".to_string(),
             ColumnInfo {
-                pg_type: "text".into(),
+                catalog_type: "text".into(),
                 not_null: true,
                 ..Default::default()
             },

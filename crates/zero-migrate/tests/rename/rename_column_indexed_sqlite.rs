@@ -1301,7 +1301,7 @@ columns = [
         )
         .to_string();
     assert!(
-        error.contains("sqlite rebuild emit") && error.contains("reserved system field name"),
+        error.contains("rebuild emit") && error.contains("reserved system field name"),
         "and the refusal comes from the SDK-value arm re-emitting the injected columns \
          it was handed: {error}"
     );

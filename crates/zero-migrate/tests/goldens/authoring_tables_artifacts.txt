@@ -456,7 +456,7 @@ carrier:unique_constraint_lifecycle|Sqlite|sha|runtime.json|113ea73e021a8df608f3
 fixture:alter_primary_key|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:alter_primary_key|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:alter_primary_key|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
-fixture:comments_indexes|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: render error: IrAuthor::lower does not yet compile op "validated createIndex expression elements on MySQL reached lower" (DDL ops only)
+fixture:comments_indexes|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: render error: IrAuthor::lower does not yet compile op "validated createIndex expression elements reached lower on a target whose catalog fold declares no expression index" (DDL ops only)
 fixture:comments_indexes|Postgres|column|users|0|id: t.string({ length: 255 }).primaryKey(),
 fixture:comments_indexes|Postgres|column|users|1|created_at: t.timestamp().notNull(),
 fixture:comments_indexes|Postgres|column|users|2|updated_at: t.timestamp().notNull(),

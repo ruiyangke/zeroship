@@ -1455,7 +1455,7 @@ pub(crate) fn render_ir_default(
                 .contains(Capability::Sequence)
             {
                 return Err(IrLowerError::UnsupportedOp(
-                    "nextval defaults are PostgreSQL-only",
+                    "nextval defaults need a target that declares standalone sequences",
                 ));
             }
             Ok(crate::render::declarative::nextval_default_expr(sequence))
@@ -2905,7 +2905,7 @@ impl IrAuthor {
                     return Err(self.typed_reference_catalog_error(
                         &site,
                         format!(
-                            "recorded local character storage is explicitly {} / {}, but the live target catalog has no exact MySQL character-set/collation metadata",
+                            "recorded local character storage is explicitly {} / {}, but the live target catalog has no exact character-set/collation metadata",
                             local_storage.character_set, local_storage.collation
                         ),
                         "introspect CHARACTER_SET_NAME and COLLATION_NAME for the target; catalog state may validate but never select local character storage",
@@ -2921,7 +2921,7 @@ impl IrAuthor {
                             target_storage.character_set,
                             target_storage.collation
                         ),
-                        "use the same exact MySQL character set and collation on both sides; catalog state may validate but never select local character storage",
+                        "use the same exact character set and collation on both sides; catalog state may validate but never select local character storage",
                     ));
                 }
             }
@@ -3240,21 +3240,21 @@ impl IrAuthor {
                             return Err(self.table_foreign_key_catalog_error(
                                 &site,
                                 format!(
-                                    "position {} MySQL character storage differs ({} / {} local vs {} / {} target)",
+                                    "position {} character storage differs ({} / {} local vs {} / {} target)",
                                     position + 1,
                                     local_storage.character_set,
                                     local_storage.collation,
                                     target_storage.character_set,
                                     target_storage.collation
                                 ),
-                                "use the same exact MySQL character set and collation at each tuple position",
+                                "use the same exact character set and collation at each tuple position",
                             ));
                         }
                         (Some(local_storage), None) => {
                             return Err(self.table_foreign_key_catalog_error(
                                 &site,
                                 format!(
-                                    "position {} has explicit local MySQL storage {} / {}, but the live target has no exact character metadata",
+                                    "position {} has explicit local character storage {} / {}, but the live target has no exact character metadata",
                                     position + 1,
                                     local_storage.character_set,
                                     local_storage.collation
@@ -3266,7 +3266,7 @@ impl IrAuthor {
                             return Err(self.table_foreign_key_catalog_error(
                                 &site,
                                 format!(
-                                    "position {} live target has exact MySQL storage {} / {}, but the local column has no exact character metadata",
+                                    "position {} live target has exact character storage {} / {}, but the local column has no exact character metadata",
                                     position + 1,
                                     target_storage.character_set,
                                     target_storage.collation
@@ -4267,7 +4267,8 @@ impl IrAuthor {
                         .filter(|parent| parent.spec.collapse())
                         .map(|parent| parent.spec.clone())
                         .ok_or(IrLowerError::UnsupportedOp(
-                            "createPartition needs a collapse-affirmed parent on SQLite/MySQL",
+                            "createPartition needs a collapse-affirmed parent on a target \
+                             that declares no relation-valued partition DDL",
                         ))?;
                     let step = if !matches!(
                         bounds,
@@ -4326,9 +4327,10 @@ impl IrAuthor {
                 // question: a fourth backend with relation-valued partitions
                 // answers for itself instead of inheriting PostgreSQL's yes.
                 if !self.backend.supports(Capability::PartitionRelationDdl) {
-                    return Err(IrLowerError::UnsupportedOp(
-                        "attachPartition is PostgreSQL-only",
-                    ));
+                    return Err(IrLowerError::PartitionRelationUnsupported {
+                        kind: "attachPartition",
+                        dialect: self.dialect.clone(),
+                    });
                 }
                 partition_state.insert_child(parent, name, bound.clone());
                 vec![decl.lower_attach_partition(parent, name, bound)]
@@ -4344,9 +4346,10 @@ impl IrAuthor {
                 // so this refuses rather than degrading. Same capability, same
                 // reason it is a capability.
                 if !self.backend.supports(Capability::PartitionRelationDdl) {
-                    return Err(IrLowerError::UnsupportedOp(
-                        "detachPartition is PostgreSQL-only",
-                    ));
+                    return Err(IrLowerError::PartitionRelationUnsupported {
+                        kind: "detachPartition",
+                        dialect: self.dialect.clone(),
+                    });
                 }
                 partition_state.remove_child(parent, name);
                 vec![decl.lower_detach_partition(parent, name, concurrently.unwrap_or(false))]
@@ -5131,7 +5134,7 @@ impl IrAuthor {
                         .find(|constraint| constraint.name == *name)
                     else {
                         return Err(IrLowerError::Snapshot(DeclarativeError::Invalid(format!(
-                            "SQLite table {table:?} has no live constraint named {name:?}"
+                            "table {table:?} has no live constraint named {name:?}"
                         ))));
                     };
                     if existing.kind != "FOREIGN KEY" {
@@ -5424,7 +5427,8 @@ impl IrAuthor {
             .parent(parent)
             .filter(|parent| parent.spec.collapse())
             .ok_or(IrLowerError::UnsupportedOp(
-                "dropPartition needs a collapse-affirmed parent on SQLite/MySQL",
+                "dropPartition needs a collapse-affirmed parent on a target that declares \
+                 no relation-valued partition DDL",
             ))?;
         let bounds = parent_state
             .children
@@ -6579,7 +6583,7 @@ impl IrAuthor {
                         .folds_check_constraint_identity()
                     {
                         return Err(IrLowerError::UnsupportedOp(
-                            "validated non-Postgres createTable CHECK reached lower",
+                            "validated createTable CHECK reached lower on a target whose catalog fold does not fold check-constraint identity",
                         ));
                     }
                     let name = c.name.as_deref().map_or_else(
@@ -6646,7 +6650,7 @@ impl IrAuthor {
                 IrConstraintKind::Unique { columns } => {
                     if !self.backend.supports(Capability::TableLevelUnique) {
                         return Err(IrLowerError::UnsupportedOp(
-                            "validated SQLite createTable table-level UNIQUE reached lower",
+                            "validated createTable table-level UNIQUE reached lower on a target that declares no table-level UNIQUE",
                         ));
                     }
                     let name = c.name.as_deref().map_or_else(
@@ -6799,7 +6803,7 @@ impl IrAuthor {
             return Err(IrLowerError::ColumnUnsupported {
                 kind: "identity",
                 dialect: self.dialect.clone(),
-                reason: Some("non-PK identity has no sound SQLite emulation"),
+                reason: Some("the target declares no non-PK identity, and there is no sound emulation"),
             });
         }
         let field = ir_column_to_field(&IrColumn {
@@ -7341,7 +7345,7 @@ impl IrAuthor {
                 let expand_contract_ty =
                     if matches!(ty, ColType::Enum { .. } | ColType::Domain { .. }) {
                         ir_ddl_type.ok_or(IrLowerError::UnsupportedOp(
-                            "PostgreSQL named type metadata carried no DDL spelling",
+                            "named type metadata carried no DDL spelling",
                         ))?
                     } else {
                         let mut render_column = live_from_column.clone();
@@ -7406,7 +7410,7 @@ impl IrAuthor {
                 // here makes the differ refuse with `NotTableOwner`.
                 let live_owner = live.table_ownership.get(table).ok_or_else(|| {
                     IrLowerError::RenameLower(format!(
-                        "renameColumn on SQLite table '{table}' has no introspected owner \
+                        "renameColumn rebuild of table '{table}' has no introspected owner \
                          in LiveSchema::table_ownership — refusing to author a rebuild on a \
                          table whose ownership cannot be confirmed (cross-app drop guard)"
                     ))
@@ -7515,7 +7519,7 @@ impl IrAuthor {
         } = &constraint.kind
         else {
             return Err(IrLowerError::UnsupportedOp(
-                "non-foreign-key reached SQLite FK rebuild lowerer",
+                "non-foreign-key reached the FK rebuild lowerer",
             ));
         };
         if columns.is_empty() {
@@ -7525,7 +7529,7 @@ impl IrAuthor {
         }
         if not_valid.is_some() {
             return Err(IrLowerError::UnsupportedOp(
-                "validated SQLite addConstraint(fk) NOT VALID reached lower",
+                "validated addConstraint(fk) NOT VALID reached the rebuild lowerer, which has no online adoption to author",
             ));
         }
         let live_table = live_schema
@@ -7558,7 +7562,7 @@ impl IrAuthor {
         {
             if existing.kind != "FOREIGN KEY" {
                 return Err(IrLowerError::Snapshot(DeclarativeError::Invalid(format!(
-                    "cannot replace SQLite constraint {:?} on table {table:?}: the live object is {}, not a foreign key",
+                    "cannot replace constraint {:?} on table {table:?}: the live object is {}, not a foreign key",
                     fk.name, existing.kind
                 ))));
             }
@@ -7654,10 +7658,12 @@ impl IrAuthor {
                     // and in neither other descriptor, so this is byte-identical to
                     // the vendor test it replaces on all three shipping dialects.
                     //
-                    // The message still says "non-Postgres" because it is a pinned
-                    // diagnostic string; only the PREDICATE moved.
+                    // The message used to say "non-Postgres" — a pinned diagnostic
+                    // string that outlived the predicate beside it, and said so.
+                    // It now states the capability that is absent, which is what
+                    // the branch actually tested.
                     return Err(IrLowerError::UnsupportedOp(
-                        "validated non-Postgres addConstraint(fk) NOT VALID reached lower",
+                        "validated addConstraint(fk) NOT VALID reached lower on a target that declares no online constraint adoption",
                     ));
                 }
                 // the FK references resolve in the SAME effective schema
@@ -7748,7 +7754,7 @@ impl IrAuthor {
                     .folds_check_constraint_identity()
                 {
                     return Err(IrLowerError::UnsupportedOp(
-                        "validated non-Postgres addConstraint(check) reached lower",
+                        "validated addConstraint(check) reached lower on a target whose catalog fold does not fold check-constraint identity",
                     ));
                 }
                 let cname = name.map_or_else(
@@ -8943,7 +8949,7 @@ pub(crate) fn create_index_snapshot(
             .any(|e| matches!(e, IndexElement::Expr { .. }))
     {
         return Err(IrLowerError::UnsupportedOp(
-            "validated createIndex expression elements on MySQL reached lower",
+            "validated createIndex expression elements reached lower on a target whose catalog fold declares no expression index",
         ));
     }
     if predicate.is_some()

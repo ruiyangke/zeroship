@@ -771,7 +771,7 @@ const DIVERGENCE_STREAMS: &[(&str, &str, &str)] = &[
     ),
     (
         "a dropped partition still in the map",
-        "native only on Postgres",
+        "native only where the backend declares partition DDL",
         r#"{"ir_version":1,"name":"d5","owner_app":"app_rebuild_field_defs","ops":[
   {"op":"createTable","name":"par","columns":[{"name":"bucket","type":"int","nullable":false},{"name":"payload","type":"text"}],"partitionBy":{"kind":"range","columns":["bucket"]}},
   {"op":"createTable","name":"p1","columns":[{"name":"bucket","type":"int","nullable":false},{"name":"payload","type":"text"}]},
