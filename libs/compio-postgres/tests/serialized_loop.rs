@@ -130,3 +130,149 @@ async fn transactions_work_on_the_serialized_loop() {
         .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
         .await;
 }
+
+/// COPY OUT on this loop.
+///
+/// The serialized loop has needed COPY-specific fixes of its own ("drain
+/// stashed batches before each serialized copy startup read", "charge the read
+/// clock for a copy response no producer answers"), so this is the surface
+/// most likely to regress when the two loops merge.
+#[compio::test]
+async fn copy_out_works_on_the_serialized_loop() {
+    use futures_util::TryStreamExt;
+
+    let client = serialized_client().await;
+    let stream = client
+        .copy_out("COPY (SELECT g, repeat('x', 100) FROM generate_series(1, 500) g) TO STDOUT")
+        .await
+        .expect("copy_out");
+    let chunks: Vec<bytes::Bytes> = stream.try_collect().await.expect("copy chunks");
+    let bytes: usize = chunks.iter().map(bytes::Bytes::len).sum();
+    let lines = chunks
+        .iter()
+        .flat_map(|chunk| chunk.iter())
+        .filter(|byte| **byte == b'\n')
+        .count();
+
+    assert_eq!(lines, 500, "every row must arrive; got {bytes} bytes");
+
+    // The session must still answer afterwards, which is what the serialized
+    // COPY fixes were about.
+    let row = client
+        .query_one("SELECT 1::int4", &[])
+        .await
+        .expect("the session must survive a COPY OUT");
+    assert_eq!(row.get::<_, i32>(0), 1);
+}
+
+/// COPY IN on this loop, including that the session recovers afterwards.
+#[compio::test]
+async fn copy_in_works_on_the_serialized_loop() {
+    use futures_util::SinkExt;
+
+    let client = serialized_client().await;
+    let table = common::test_object_name("cpg serialized copyin");
+    client
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {table}; CREATE TABLE {table}(id int, pad text)"
+        ))
+        .await
+        .expect("fixture");
+
+    let sink = client
+        .copy_in::<_, bytes::Bytes>(&format!("COPY {table} FROM STDIN"))
+        .await
+        .expect("copy_in");
+    let mut sink = std::pin::pin!(sink);
+    for id in 1..=500 {
+        sink.feed(bytes::Bytes::from(format!("{id}\tpad-{id}\n")))
+            .await
+            .expect("copy feed");
+    }
+    let written = sink.finish().await.expect("copy finish");
+    assert_eq!(written, 500, "COPY IN reported the wrong count");
+
+    let row = client
+        .query_one(&format!("SELECT count(*)::int8 FROM {table}"), &[])
+        .await
+        .expect("count after copy");
+    assert_eq!(row.get::<_, i64>(0), 500, "the rows did not land");
+
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+}
+
+/// Portal paging on this loop.
+#[compio::test]
+async fn portal_paging_works_on_the_serialized_loop() {
+    let mut client = serialized_client().await;
+    let transaction = client.transaction().await.expect("begin");
+    let statement = transaction
+        .prepare("SELECT g::int4 FROM generate_series(1, 10) g ORDER BY g")
+        .await
+        .expect("prepare");
+    let portal = transaction.bind(&statement, &[]).await.expect("bind");
+
+    let mut seen = Vec::new();
+    loop {
+        let rows = transaction
+            .query_portal(&portal, 3)
+            .await
+            .expect("query_portal");
+        let empty = rows.is_empty();
+        for row in &rows {
+            seen.push(row.get::<_, i32>(0));
+        }
+        if rows.len() < 3 || empty {
+            break;
+        }
+    }
+    assert_eq!(
+        seen,
+        (1..=10).collect::<Vec<i32>>(),
+        "paging on the serialized loop lost or reordered rows"
+    );
+}
+
+/// A notice raised by a statement the caller is awaiting must be delivered.
+///
+/// This is NOT the idle case. An IDLE serialized connection never reads, so a
+/// notification arriving between requests is not delivered at all - that is
+/// IO-2, still open in task #49. A notice raised BY the statement being
+/// awaited travels while the loop is already reading, so it must arrive, and
+/// pinning that keeps the fix for the idle case from being mistaken for the
+/// whole of notice handling.
+#[compio::test]
+async fn a_notice_raised_by_an_awaited_statement_is_delivered() {
+    use futures_util::StreamExt;
+
+    let url = common::test_url();
+    let config: Config = url.parse().expect("test DSN did not parse");
+    let (client, mut connection, split_refused) =
+        compio_postgres::test_utils::connect_serialized(&config)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    let mut messages = connection.notifications();
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    client
+        .batch_execute("DO $$ BEGIN RAISE NOTICE 'serialized notice'; END $$")
+        .await
+        .expect("raise notice");
+
+    let delivered = compio::time::timeout(std::time::Duration::from_secs(5), messages.next()).await;
+    assert!(
+        split_refused.get(),
+        "this test is not on the serialized loop"
+    );
+    match delivered {
+        Ok(Some(compio_postgres::AsyncMessage::Notice(notice))) => {
+            assert_eq!(notice.message(), "serialized notice");
+        }
+        other => panic!("the notice was not delivered on the serialized loop: {other:?}"),
+    }
+}
