@@ -21,5 +21,6 @@ mod pg_fail_closed_coverage;
 mod split_part_grammar_boundary;
 mod sqlite_confinement;
 mod sqlite_dqs_hardening;
+mod trigger_ops_carry_no_capability_grant;
 mod vendor_capabilities_do_not_leak;
 mod vendor_capability_policy_authority;
