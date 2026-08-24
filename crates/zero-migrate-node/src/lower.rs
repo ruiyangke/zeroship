@@ -30,9 +30,10 @@ use zero_migrate::ops::status::{
 };
 use zero_migrate::{
     effective_policy_from_charter_layers, fold_ops_onto, resolve_create_table_policy, DialectId,
-    EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact, MYSQL,
-    POSTGRES,
+    EffectivePolicy, FoldError, GuardConfig, IrAuthor, LiveSchema, LoweredArtifact,
 };
+use zero_migrate_mysql::DIALECT as MYSQL;
+use zero_migrate_postgres::DIALECT as POSTGRES;
 
 /// Map the wire dialect spelling to its open [`DialectId`]. Unknown → `Err`.
 fn parse_sql_dialect(s: &str) -> Result<DialectId, String> {

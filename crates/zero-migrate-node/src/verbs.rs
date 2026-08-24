@@ -14,7 +14,9 @@ use zero_migrate::approval::Approval;
 use zero_migrate::conn::ExecutorConfig;
 use zero_migrate::model::migration::Migration;
 use zero_migrate::ops::status::{AppliedPlanStatus, MigrationStatus, PlanStatusManifest};
-use zero_migrate::{shipping_backends, DialectId, LiveSchema, MigrationEngine, MYSQL, POSTGRES};
+use zero_migrate::{shipping_backends, DialectId, LiveSchema, MigrationEngine};
+use zero_migrate_mysql::DIALECT as MYSQL;
+use zero_migrate_postgres::DIALECT as POSTGRES;
 
 use crate::wire::{
     ApplyPendingContractDto, ApplyReply, BlockedPlanDto, PendingContractStatusDto, PlanStatusDto,
@@ -1228,7 +1230,7 @@ mod status_projection_tests {
         let unknown = ApplyDialect::parse("Postgres").expect_err("the spelling is exact");
         assert!(unknown.contains("unknown dialect"), "{unknown}");
         // The offline renderer has no host driver to route at, so it takes sqlite.
-        assert_eq!(preview_dialect("sqlite"), Ok(zero_migrate::SQLITE));
+        assert_eq!(preview_dialect("sqlite"), Ok(zero_migrate_sqlite::DIALECT));
         assert!(preview_dialect("oracle").is_err());
     }
 

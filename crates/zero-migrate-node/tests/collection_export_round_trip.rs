@@ -45,7 +45,10 @@ mod support;
 use zero_migrate::model::expr::{BinaryOp, Expr};
 use zero_migrate::model::ir::{ColType, GeneratedCol, IdentityCol, IrColumn, Op};
 use zero_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
-use zero_migrate::{DialectId, TableRuntimeOptions, MYSQL, POSTGRES, SQLITE};
+use zero_migrate::{DialectId, TableRuntimeOptions};
+use zero_migrate_mysql::DIALECT as MYSQL;
+use zero_migrate_postgres::DIALECT as POSTGRES;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 use zero_migrate_node::descriptors::{
     descriptor_dto_to_engine, descriptor_to_dto, field_dto_to_engine, field_to_dto,

@@ -71,11 +71,13 @@ use zero_migrate::model::migration::{Migration, MigrationId};
 // `if dialect != POSTGRES` in `advisories_for` that decided on the backends' behalf
 // which of them could be analyzed. The backends state that themselves now, through
 // `zero_migrate::analyzer_absence`, so this addon has one fewer vendor it names.
-// (`ops::status::history` still names `zero_migrate::POSTGRES` in full, on the
-// PG-only status path — a different coupling, untouched here.)
-use zero_migrate::{MigrationEngine, MigrationIr, SQLITE};
+// (The PG-only status path below reaches `zero_migrate_postgres` for its backend
+// type, which is a different coupling and untouched here; it no longer names a
+// dialect at all.)
+use zero_migrate::{MigrationEngine, MigrationIr};
 use zero_migrate_postgres::confinement::PostgresConfinementExt;
 use zero_migrate_sqlite::SqliteBackend;
+use zero_migrate_sqlite::DIALECT as SQLITE;
 
 use crate::api;
 use crate::descriptors::descriptor_dto_to_engine;
