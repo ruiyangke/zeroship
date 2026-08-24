@@ -525,3 +525,190 @@ async fn both_drivers_agree_on_a_raised_notice() {
         "the two drivers disagree about the same NOTICE"
     );
 }
+
+/// One prepared statement's metadata, as each driver parsed it.
+/// One column as Describe reported it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ColumnMeta {
+    name: String,
+    type_name: String,
+    table_oid: Option<u32>,
+    /// SIGNED: a system column such as ctid reports -1.
+    column_id: Option<i16>,
+    type_modifier: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Described {
+    params: Vec<String>,
+    columns: Vec<ColumnMeta>,
+}
+
+/// Statements chosen so the Describe response varies in shape.
+///
+/// Both drivers parse ParameterDescription and RowDescription themselves, and
+/// the fields below are where a hand-written parser goes wrong: a type
+/// modifier is only meaningful for some types, a column that is an expression
+/// has no table behind it, and a SYSTEM column's attribute number is
+/// NEGATIVE - `ctid` is -1. Reading that field as unsigned turns it into
+/// 65535 and nothing else in the row looks wrong.
+fn describe_cases(table: &str) -> Vec<(String, &'static str)> {
+    vec![
+        (
+            format!("SELECT id, label FROM {table} WHERE id = $1"),
+            "ordinary table columns: real table oid, positive attribute numbers",
+        ),
+        (
+            format!("SELECT ctid, id FROM {table}"),
+            "ctid is a system column whose attribute number is NEGATIVE",
+        ),
+        (
+            format!("SELECT id + 1 AS computed, 'literal'::text FROM {table}"),
+            "expressions have no table behind them, so oid and attnum are absent",
+        ),
+        (
+            format!("SELECT bounded, exact FROM {table}"),
+            "varchar(10) and numeric(5,2) carry type modifiers; most types do not",
+        ),
+        (
+            "SELECT $1::int8, $2::text, $3::bool".to_owned(),
+            "parameter types come from ParameterDescription, a separate message",
+        ),
+    ]
+}
+
+fn tokio_described(url: String, statements: Vec<String>) -> Vec<Described> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let collected = runtime.block_on(async move {
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let mut collected = Vec::new();
+            for statement in &statements {
+                let prepared = client.prepare(statement).await.expect("tokio prepare");
+                collected.push(Described {
+                    params: prepared
+                        .params()
+                        .iter()
+                        .map(|ty| ty.name().to_owned())
+                        .collect(),
+                    columns: prepared
+                        .columns()
+                        .iter()
+                        .map(|column| ColumnMeta {
+                            name: column.name().to_owned(),
+                            type_name: column.type_().name().to_owned(),
+                            table_oid: column.table_oid(),
+                            column_id: column.column_id(),
+                            type_modifier: column.type_modifier(),
+                        })
+                        .collect(),
+                });
+            }
+            drop(client);
+            let _ = driver.await;
+            collected
+        });
+        let _ = sender.send(collected);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver
+        .recv()
+        .expect("no descriptions came back from tokio")
+}
+
+/// Both drivers parse Describe themselves, so the metadata must match.
+#[compio::test]
+async fn both_drivers_agree_on_prepared_statement_metadata() {
+    let url = common::test_url();
+    let table = common::test_object_name("cpg describe");
+
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    // A PERMANENT table on purpose. A temporary one lives in a per-session
+    // schema and gets a different pg_class oid in each connection, so
+    // table_oid could never match and the strongest field here would have to
+    // be thrown away.
+    client
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {table};
+             CREATE TABLE {table} (
+                 id int primary key,
+                 label text,
+                 bounded varchar(10),
+                 exact numeric(5,2)
+             );"
+        ))
+        .await
+        .expect("describe fixture");
+
+    let cases = describe_cases(&table);
+    let statements: Vec<String> = cases.iter().map(|(sql, _)| sql.clone()).collect();
+
+    let theirs = tokio_described(url.clone(), statements.clone());
+
+    let mut ours = Vec::new();
+    for statement in &statements {
+        let prepared = client.prepare(statement).await.expect("prepare");
+        ours.push(Described {
+            params: prepared
+                .params()
+                .iter()
+                .map(|ty| ty.name().to_owned())
+                .collect(),
+            columns: prepared
+                .columns()
+                .iter()
+                .map(|column| ColumnMeta {
+                    name: column.name().to_owned(),
+                    type_name: column.type_().name().to_owned(),
+                    table_oid: column.table_oid(),
+                    column_id: column.column_id(),
+                    type_modifier: column.type_modifier(),
+                })
+                .collect(),
+        });
+    }
+
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+
+    let mut divergences = Vec::new();
+    for (index, (sql, why)) in cases.iter().enumerate() {
+        if ours[index] != theirs[index] {
+            divergences.push(format!(
+                "  {sql}\n    ours: {:?}\n    tokio-postgres: {:?}\n    matters because {why}",
+                ours[index], theirs[index]
+            ));
+        }
+    }
+    assert!(
+        divergences.is_empty(),
+        "the two Describe parsers disagree:\n{}",
+        divergences.join("\n")
+    );
+
+    // The negative attribute number must actually have been exercised, or the
+    // agreement above says nothing about the signedness this case exists for.
+    let ctid_attnum = ours[1].columns[0].column_id;
+    assert!(
+        ctid_attnum.is_some_and(|attnum| attnum < 0),
+        "ctid's attribute number should be negative, got {ctid_attnum:?}; \
+         without it this test does not cover signed attribute numbers"
+    );
+}
