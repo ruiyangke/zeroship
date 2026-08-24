@@ -5741,7 +5741,7 @@ fn validate_partition_recording(
                             format!(
                                 "dropping hash partition {name:?} from collapse-affirmed parent {parent:?} has no portable row predicate"
                             ),
-                            "omit partitionBy.whenUnsupported for PG-only hash repartitioning, or avoid dropping hash children under collapse",
+                            "omit partitionBy.whenUnsupported and keep this single-target, or avoid dropping hash children under collapse",
                         ));
                     }
                 }
@@ -7606,9 +7606,15 @@ fn validate_vendor_op(
             kind: None,
             op_index,
             dialect: target_dialect.clone(),
+            // No product name here. The dialect is already carried as DATA on the
+            // `dialect` field above, so naming one in the prose added nothing and made
+            // this an operator-facing violation of the one-vendor-name rule. It also
+            // sat here unseen: `PG ` is invisible to BOTH census matchers, because the
+            // needles want `pg_` with an underscore and the camel matcher wants a
+            // lowercase `g`.
             reason: format!(
-                "vendor PG primitive (op capability {:?}) requires the {} capability, which \
-                 {reason_tail}",
+                "a privileged vendor primitive (op capability {:?}) requires the {} capability, \
+                 which {reason_tail}",
                 cap.as_token(),
                 cap.flag_name(),
             ),

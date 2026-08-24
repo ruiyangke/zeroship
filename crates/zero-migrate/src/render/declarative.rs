@@ -5191,7 +5191,7 @@ impl DeclarativeAuthor {
             (1, true) => Ok(rebuilds.remove(0)),
             (n, renames_empty) => Err(DeclarativeError::Invalid(format!(
                 "renameColumn rebuild lowering of '{table}.{from}→{to}' expected exactly \
-                 one rebuild and no PG expand-contract, got {n} rebuild(s) / \
+                 one rebuild and no expand-contract, got {n} rebuild(s) / \
                  renames_empty={renames_empty} (internal rebuild-planner invariant)"
             ))),
         }

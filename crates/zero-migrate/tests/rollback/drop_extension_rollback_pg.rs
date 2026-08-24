@@ -80,8 +80,8 @@ fn quote_ident(identifier: &str) -> String {
 
 /// Vendor ops need the operator/platform capability set, not a creator profile.
 /// Granting `code.extension` alone is not enough: the load gate refuses the op
-/// outright under a confined profile with "vendor PG primitive (op capability
-/// \"extension\") requires the allowExtension capability, which the active
+/// outright under a confined profile with "a privileged vendor primitive (op
+/// capability \"extension\") requires the allowExtension capability, which the active
 /// (Confined creator) capability set does not grant". `operator_charter` carries
 /// both the profile and the extension allowlist.
 fn policy(schema: &str) -> EffectivePolicy {

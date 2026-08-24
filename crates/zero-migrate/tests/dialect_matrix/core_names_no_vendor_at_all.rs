@@ -245,6 +245,34 @@ fn names_a_vendor_by_pg_camel(code: &str) -> bool {
         .any(|w| w[0] == b'P' && w[1] == b'g' && w[2].is_ascii_uppercase())
 }
 
+/// Does this code fragment contain `PG` as a WORD — the all-caps spelling?
+///
+/// The third matcher, and it exists because the first two left a gap between them that
+/// a live violation sat in. `crate::model::validate`'s vendor-op refusal read
+/// **"vendor PG primitive (op capability …)"** — a product name in an operator-facing
+/// string, in the crate that must not name one — and every census reported clean:
+///
+/// * [`names_a_vendor_by_needle`] case-folds and looks for `pg_`, WITH the underscore.
+///   `PG ` lowercases to `pg `, a space, so no needle matched.
+/// * [`names_a_vendor_by_pg_camel`] requires a lowercase `g` (`PgOnly`, `PgRaw`).
+///   `PG` has an uppercase one, so it did not match either.
+///
+/// Two matchers tuned to two real spellings, and the third spelling went straight
+/// between them. Word-bounded on both sides so `PGN`, `SPG` and a base64 blob that
+/// happens to contain the pair do not fire.
+fn names_a_vendor_by_pg_word(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    bytes.windows(2).enumerate().any(|(i, w)| {
+        if w[0] != b'P' || w[1] != b'G' {
+            return false;
+        }
+        let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric() && bytes[i - 1] != b'_';
+        let after = bytes.get(i + 2);
+        let after_ok = after.is_none_or(|c| !c.is_ascii_alphanumeric() && *c != b'_');
+        before_ok && after_ok
+    })
+}
+
 /// Does this code fragment name a vendor, by either spelling?
 ///
 /// The two are kept as SEPARATE functions rather than one `||` because they have to be
@@ -256,7 +284,9 @@ fn names_a_vendor_by_pg_camel(code: &str) -> bool {
 /// product-name needle was dead. A positive control that two matchers can satisfy for
 /// each other is not a control over either.
 fn names_a_vendor(code: &str) -> bool {
-    names_a_vendor_by_needle(code) || names_a_vendor_by_pg_camel(code)
+    names_a_vendor_by_needle(code)
+        || names_a_vendor_by_pg_camel(code)
+        || names_a_vendor_by_pg_word(code)
 }
 
 /// One structural token: a brace outside any string, char or comment, or the start of a
@@ -710,6 +740,13 @@ fn the_needle_still_matches_where_a_vendor_name_is_the_point() {
              proves nothing about any matcher",
             src.display()
         );
+        // `names_a_vendor_by_pg_word` deliberately has no floor here, and the reason is
+        // measured: the control crate carries only a handful of standalone `PG` words,
+        // because it spells itself `Pg…` in types and `postgres` in ids. A density
+        // floor over five lines would be noise, and lowering a floor to fit is exactly
+        // what this file forbids. Its control is
+        // `the_pg_word_matcher_sees_the_spelling_that_escaped_both_others` instead,
+        // which pins the matcher against literals rather than against a crate's habits.
         assert!(
             total >= floor,
             "{label} found only {total} production lines across {file_count} files in \
@@ -718,6 +755,54 @@ fn the_needle_still_matches_where_a_vendor_name_is_the_point() {
              gone blind — which would make the census above report a clean zero for \
              the wrong reason, and the OTHER matcher would go on covering for it. Fix \
              the matcher; do not lower this."
+        );
+    }
+}
+
+/// The control for the all-caps `PG` matcher, pinned against literals.
+///
+/// The first two assertions are the exact strings that were live in core when this
+/// matcher was added, each of them an operator-facing refusal in the crate that must
+/// name no vendor, and each invisible to BOTH existing matchers: the needles want
+/// `pg_` with an underscore, the camel matcher wants a lowercase `g`.
+///
+/// The negatives matter as much. A matcher that fires on any `PG` byte pair would
+/// catch these too and then catch a base64 blob, a `PGN` token and a `SPGiST` spelling,
+/// and an over-firing matcher gets an allowance entry written for it — which is how a
+/// census stops meaning anything.
+#[test]
+fn the_pg_word_matcher_sees_the_spelling_that_escaped_both_others() {
+    // The fragments, not the whole strings: the originals carried `{:?}` and `{}`
+    // placeholders, and clippy reads a format-shaped brace inside a literal as a
+    // mistake. What is pinned is the part that escaped, which is the product name.
+    for live in [
+        "vendor PG primitive (op capability",
+        "omit partitionBy.whenUnsupported for PG-only hash repartitioning",
+        "one rebuild and no PG expand-contract",
+    ] {
+        assert!(
+            names_a_vendor_by_pg_word(live),
+            "the all-caps matcher missed {live:?}, which is a spelling that WAS live in \
+             core and passed every other matcher"
+        );
+        assert!(
+            !names_a_vendor_by_needle(live) && !names_a_vendor_by_pg_camel(live),
+            "{live:?} is supposed to be the case the other two matchers cannot see; if \
+             one of them now catches it, this control is measuring nothing"
+        );
+    }
+
+    for benign in [
+        "let png = PGN_HEADER;",
+        "SPGiST is an access method",
+        "const X: &str = \"aPGb\";",
+        "spg_config",
+    ] {
+        assert!(
+            !names_a_vendor_by_pg_word(benign),
+            "the all-caps matcher fired on {benign:?}, where `PG` is not a word; an \
+             over-firing matcher earns itself an allowance entry and the census stops \
+             meaning anything"
         );
     }
 }
