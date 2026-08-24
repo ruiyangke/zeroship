@@ -117,22 +117,16 @@ impl DbError {
                 b'M' => message = Some(value.into_owned()),
                 b'D' => detail = Some(value.into_owned()),
                 b'H' => hint = Some(value.into_owned()),
-                b'P' => {
-                    normal_position = Some(value.parse::<u32>().map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "`P` field did not contain an integer",
-                        )
-                    })?);
-                }
-                b'p' => {
-                    internal_position = Some(value.parse::<u32>().map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "`p` field did not contain an integer",
-                        )
-                    })?);
-                }
+                // An unreadable position leaves this `None` rather than failing
+                // the whole message, for the same reason as `V` below: these
+                // are OPTIONAL informational fields whose absence is already a
+                // supported state, so a value this parser cannot read is
+                // "unknown", not "the message is malformed". Refusing here
+                // discarded a well-formed error's SQLSTATE and text and
+                // reported a parse failure in their place.
+                b'P' => normal_position = value.parse::<u32>().ok(),
+                // See `P` above.
+                b'p' => internal_position = value.parse::<u32>().ok(),
                 b'q' => internal_query = Some(value.into_owned()),
                 b'W' => where_ = Some(value.into_owned()),
                 b's' => schema = Some(value.into_owned()),
@@ -141,14 +135,8 @@ impl DbError {
                 b'd' => datatype = Some(value.into_owned()),
                 b'n' => constraint = Some(value.into_owned()),
                 b'F' => file = Some(value.into_owned()),
-                b'L' => {
-                    line = Some(value.parse::<u32>().map_err(|_| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "`L` field did not contain an integer",
-                        )
-                    })?);
-                }
+                // See `P` above.
+                b'L' => line = value.parse::<u32>().ok(),
                 b'R' => routine = Some(value.into_owned()),
                 // An unrecognised level leaves this `None` rather than failing
                 // the whole message. `V` is a non-localized copy of `S` and its
@@ -795,5 +783,56 @@ mod tests {
         // No `C`.
         let body = error_response(&[(b'S', "ERROR"), (b'M', "no sqlstate here")]);
         DbError::parse(&mut body.fields()).expect_err("`C` is mandatory");
+    }
+
+    /// A malformed AUXILIARY field must not discard the diagnostic.
+    ///
+    /// `P`, `p` and `L` are optional informational fields - a character
+    /// position, an internal position, and a source line. Each was parsed with
+    /// `?`, so a non-integer in any of them failed the WHOLE `ErrorResponse`
+    /// and the caller got a parse error in place of the server's SQLSTATE and
+    /// message.
+    ///
+    /// This is the defect already fixed for `V`, whose comment in the parser
+    /// says it outright: refusing there "discarded a well-formed error's
+    /// SQLSTATE and text and reported a parse failure in their place". The
+    /// reasoning transfers unchanged - these fields are optional, their absence
+    /// is a supported state, so a value this parser cannot read is "unknown",
+    /// not "the message is malformed".
+    #[test]
+    fn a_malformed_position_field_keeps_the_sqlstate_and_message() {
+        for tag in [b'P', b'p', b'L'] {
+            let body = error_response(&[
+                (b'S', "ERROR"),
+                (b'C', "42P01"),
+                (b'M', "relation \"t\" does not exist"),
+                (tag, "not-an-integer"),
+            ]);
+            let error = DbError::parse(&mut body.fields()).unwrap_or_else(|e| {
+                panic!(
+                    "a non-integer in the optional `{}` field discarded the whole error: {e}",
+                    tag as char
+                )
+            });
+            assert_eq!(error.code(), &SqlState::UNDEFINED_TABLE);
+            assert_eq!(error.message(), "relation \"t\" does not exist");
+        }
+    }
+
+    /// THE CONTROL, one variable: the same fields carrying VALID integers must
+    /// still be parsed and exposed. Dropping them outright would also satisfy
+    /// the test above, so this is what stops the fix being "ignore P/p/L".
+    #[test]
+    fn a_well_formed_position_field_is_still_reported() {
+        let body = error_response(&[
+            (b'S', "ERROR"),
+            (b'C', "42601"),
+            (b'M', "syntax error"),
+            (b'P', "42"),
+            (b'L', "1234"),
+        ]);
+        let error = DbError::parse(&mut body.fields()).expect("a well-formed error parses");
+        assert_eq!(error.position(), Some(&ErrorPosition::Original(42)));
+        assert_eq!(error.line(), Some(1234));
     }
 }
