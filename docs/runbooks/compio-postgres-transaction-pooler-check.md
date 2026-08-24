@@ -55,6 +55,49 @@ docker exec zs-cpg-pgb grep -E '^(pool_mode|default_pool_size|auth_type)' \
 
 Expect `pool_mode = transaction` and `default_pool_size = 1`.
 
+## Running the WHOLE suite through the pooler
+
+Add `IGNORE_STARTUP_PARAMETERS` or you will measure pgbouncer, not the driver:
+
+```bash
+  -e IGNORE_STARTUP_PARAMETERS="search_path,default_transaction_isolation,\
+default_transaction_read_only,extra_float_digits,options,application_name" \
+  -e DEFAULT_POOL_SIZE=20 -e MAX_CLIENT_CONN=200 \
+```
+
+pgbouncer REFUSES a startup packet carrying `options` it does not recognise,
+with `08P01 unsupported startup parameter in options: search_path` - and that
+is pgbouncer talking, not PostgreSQL. This suite scopes almost every test to
+its own schema with `options=-c search_path=...`, so without the setting the
+refusal lands on nearly everything. MEASURED 2026-08-24: 133 failed without
+it, 49 with it, out of the same 1423. The 84-test difference was entirely
+pgbouncer's own rejection, and reads at a glance like a driver that cannot
+speak to a pooler at all.
+
+A larger pool is right here too. `DEFAULT_POOL_SIZE=1` is for isolating one
+protocol question; a whole-suite run needs enough backends not to serialise
+1400 tests behind a single one.
+
+## What SHOULD still fail, and why
+
+MEASURED 2026-08-24 on the configured pooler: **1374 passed, 49 failed**, and
+every failure was session state that a transaction pooler does not preserve.
+Expect roughly this set, and treat anything OUTSIDE it as the finding:
+
+- the implicit statement cache (`0A000` cached plan, `26000` prepared
+  statement gone) - `Config::statement_cache_capacity` says in as many words
+  to keep it disabled behind such a pooler
+- `LISTEN`/`NOTIFY` - the listening session goes back to the pool
+- `CancelRequest` - the pooler owns the cancel key, not the backend
+- session GUCs, `target_session_attrs` read-only checks, dirty-state and
+  hand-off assertions, template-database fixtures
+- one hardcoded temp table (`cpg_diff` in `differential_tokio.rs`) that two
+  sessions can collide on when they share a backend; the newer surfaces in
+  that file use `common::test_object_name` and do not
+
+None of that is a defect. The value of the run is the 1374, and any failure
+whose cause is not in the list above.
+
 Run the suite through it:
 
 ```bash
