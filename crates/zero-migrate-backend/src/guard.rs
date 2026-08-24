@@ -297,18 +297,20 @@ impl GuardConfig {
         )
     }
 
-    /// Whether the effective policy holds the EXTENSION capability at all — i.e. the
-    /// `code.extension` StrSet allowlist is non-empty. The allowlist IS the capability:
-    /// empty = deny all (so no CREATE/DROP EXTENSION). `FORBIDDEN_EXTENSIONS` still
-    /// overrides which specific names may be created.
-    pub fn grants_extension_capability(&self) -> bool {
-        !self.granted_extension_allowlist().is_empty()
-    }
-
-    /// The permitted `CREATE EXTENSION` names granted by the effective policy — the
-    /// `code.extension` StrSet grant value at the global witness. Empty when no
-    /// grant covers it (deny-by-default). `FORBIDDEN_EXTENSIONS` still overrides
-    /// this in the guard regardless.
+    /// The extension names the effective policy permits — the `code.extension` StrSet
+    /// grant value at the global witness. Empty when no grant covers it
+    /// (deny-by-default, so no `CREATE` and no `DROP`). The guard's hard deny still
+    /// overrides this regardless of what a charter lists.
+    ///
+    /// # There is deliberately no scalar "holds the extension capability" beside this
+    ///
+    /// There used to be one, reading only whether this list was non-empty, and the
+    /// drop side of the guard asked it instead of asking about a name. `code.extension`
+    /// is the one capability knob whose value is a SET OF NAMES rather than a Bool, so
+    /// collapsing it to "non-empty" throws away the entire grant: a charter permitting
+    /// one extension answered yes for every other extension in the database. Any
+    /// caller deciding a statement has a name in hand and must match it against this
+    /// list; a caller that has no name has no question this can answer.
     pub fn granted_extension_allowlist(&self) -> Vec<String> {
         let Some(k) = KnobKey::parse(policy_registry::KEY_CODE_EXTENSION).ok() else {
             return Vec::new();

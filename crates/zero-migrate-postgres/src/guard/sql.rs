@@ -116,8 +116,9 @@ pub mod namespace_rule {
 ///
 /// `object` is the concrete target the statement names, resolved by
 /// [`drop_object_targets`]: the schema for `DROP SCHEMA`, the policy's table for
-/// `DROP POLICY`. Both knobs are object-scoped, so a charter that grants them on one
-/// schema/table must not decide a drop of another.
+/// `DROP POLICY`, the extension name for `DROP EXTENSION`. All three knobs address
+/// something narrower than the whole database, so a charter that grants them on one
+/// schema/table/extension must not decide a drop of another.
 ///
 /// # Why this is a free function here rather than a `GuardConfig` method
 ///
@@ -133,7 +134,7 @@ fn grants_drop_object(cfg: &GuardConfig, remove_type: i32, object: Option<&Objec
         return cfg.grants_object_bool(policy_registry::KEY_SCHEMA_CREATE_SCHEMA, object);
     }
     if remove_type == ObjectType::ObjectExtension as i32 {
-        return cfg.grants_extension_capability();
+        return grants_extension_drop(cfg, object);
     }
     if remove_type == ObjectType::ObjectPolicy as i32 {
         return cfg.grants_object_bool(policy_registry::KEY_ACCESS_POLICY, object);
@@ -142,6 +143,64 @@ fn grants_drop_object(cfg: &GuardConfig, remove_type: i32, object: Option<&Objec
         return cfg.grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
     }
     false
+}
+
+/// Whether the effective policy admits `DROP EXTENSION` of the extension `object`
+/// names.
+///
+/// This asks exactly what the `CreateExtensionStmt` arm of [`SqlGuard::check`] asks,
+/// in the same order: the hard deny first, then membership in the `code.extension`
+/// allowlist. `code.extension` is the one capability knob whose value is a SET OF
+/// NAMES, so "holds the extension capability" and "may name THIS extension" are two
+/// different questions. The drop side used to ask the first one - a predicate over
+/// the allowlist's emptiness that took no object at all - which handed a charter
+/// authority over every extension in the database the moment it was granted one.
+///
+/// # An unresolvable name refuses, it does not fall back
+///
+/// `object` is `None` when [`drop_object_targets`] cannot resolve the statement to
+/// one extension name: a parse node that is not a bare identifier, an empty name, or
+/// a name that does not fold to a single segment. The answer there is no, with no
+/// fallback to a coarser question. `code.extension` has no whole-universe spelling -
+/// its value is an enumerated set of names, never a glob - so unlike the Bool knobs
+/// beside it there is no `⊤` grant an unnamed target could still be provably inside.
+/// Refusing is the only sound answer, and it is the one that stays sound if the
+/// grammar ever grows a spelling this resolver has not seen.
+///
+/// A `DROP` naming SEVERAL extensions is not that case. The caller resolves each name
+/// and requires every one of them to be granted, the same way `DROP SCHEMA a, b`
+/// already works, so `DROP EXTENSION granted, other` is refused because of `other` and
+/// not because it named two.
+fn grants_extension_drop(cfg: &GuardConfig, object: Option<&ObjectName>) -> bool {
+    let Some(name) = object.and_then(unqualified_name) else {
+        return false;
+    };
+    // FORBIDDEN_EXTENSIONS is a non-grant HARD DENY, and it is not a create-side
+    // rule. A name the charter has no authority to install is a name it has no
+    // authority to name in DDL at all: were the drop side to skip this, listing a
+    // forbidden name in the allowlist would buy back on one side the authority the
+    // other side refuses, which is precisely what "not grantable" rules out.
+    if crate::guard::denylist::list_contains_ci(crate::guard::denylist::FORBIDDEN_EXTENSIONS, &name)
+    {
+        return false;
+    }
+    cfg.granted_extension_allowlist()
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(&name))
+}
+
+/// The single-segment name an [`ObjectName`] carries, or `None` when it carries a
+/// qualified `schema.table` name or bytes that are not UTF-8.
+///
+/// [`ObjectName`] is the resolver's only arity-carrying shape, and its one-segment
+/// form is what a database-global name with no qualifier - an extension - resolves
+/// to. A two-segment result means the resolver read the text as `schema.table`, which
+/// no extension name is, so it answers `None` and its caller refuses.
+fn unqualified_name(object: &ObjectName) -> Option<String> {
+    if object.table.is_some() {
+        return None;
+    }
+    String::from_utf8(object.schema.clone()).ok()
 }
 
 /// The concrete object a raw `RangeVar` names, or `None` when the parse names no
@@ -172,9 +231,19 @@ fn named_relation_target<D: GuardDecisions + ?Sized>(
     }
 }
 
-/// The concrete objects a `DROP` names, for the object-scoped members of the extra
-/// drop set: the schema of each `DROP SCHEMA` name, and the TABLE each `DROP POLICY`
-/// names (the knob is `PerTable`, so a policy is decided at the table it protects).
+/// The concrete objects a `DROP` names, for the name-scoped members of the extra
+/// drop set: the schema of each `DROP SCHEMA` name, the EXTENSION each `DROP
+/// EXTENSION` names, and the TABLE each `DROP POLICY` names (that knob is `PerTable`,
+/// so a policy is decided at the table it protects).
+///
+/// A schema and an extension are both bare single-part `String` nodes in `objects`
+/// and both resolve through the same fold, which is the point: `code.extension`
+/// matches an authored allowlist entry against a name the statement spells, and an
+/// unquoted identifier downcases on the way in, so `DROP EXTENSION PostGIS` and
+/// `CREATE EXTENSION PostGIS` reach the same entry. Where this fold is STRICTER than
+/// the create side's plain downcase - a name carrying an unquoted dot resolves as
+/// `schema.table` and one carrying a stray quote resolves as nothing - the difference
+/// only ever refuses, and no real extension name is spelled either way.
 ///
 /// Every other remove type is decided by a Global knob that ignores the object, so
 /// they answer with a single `None`. The result is never empty: an empty list would
@@ -183,7 +252,9 @@ fn drop_object_targets<D: GuardDecisions + ?Sized>(
     cfg: &D,
     drop: &protobuf::DropStmt,
 ) -> Vec<Option<ObjectName>> {
-    let targets: Vec<Option<ObjectName>> = if drop.remove_type == ObjectType::ObjectSchema as i32 {
+    let targets: Vec<Option<ObjectName>> = if drop.remove_type == ObjectType::ObjectSchema as i32
+        || drop.remove_type == ObjectType::ObjectExtension as i32
+    {
         drop.objects
             .iter()
             .map(|item| match item.node.as_ref() {
@@ -1512,9 +1583,10 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
                 // Platform the extra set (schema/extension/policy — the
                 // `.down.sql`-only reverses) is also admitted.
                 //
-                // The schema/policy members of that set are object-scoped, so each
-                // named target is decided at itself and EVERY target must be granted:
-                // `DROP SCHEMA owned, other` is not a drop the `owned` grant covers.
+                // Every member of that set is name-scoped, so each named target is
+                // decided at itself and EVERY target must be granted: `DROP SCHEMA
+                // owned, other` is not a drop the `owned` grant covers, and
+                // `DROP EXTENSION granted, other` is not one the allowlist covers.
                 let drop_allowed = is_safe_drop_object(d.remove_type)
                     || drop_object_targets(self.cfg, d)
                         .iter()

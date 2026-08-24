@@ -9,8 +9,11 @@
 //! [`capability_knob_key`] names and at the object the op targets.
 //!
 //! Every capability knob but `code.extension` is a `Bool` grant. `code.extension` is
-//! the `StrSet` allowlist whose non-emptiness IS the capability, which is how the
-//! guard reads it too.
+//! the `StrSet` allowlist whose non-emptiness IS the capability THIS gate asks about:
+//! may the artifact reach the extension primitive at all. Which NAME it may reach is
+//! a question this gate never sees - an op carries the name, the rendered statement
+//! spells it, and the guard matches it against the same allowlist on both the create
+//! and the drop side. Do not read the non-emptiness answer as authority over a name.
 
 use zero_migrate_policy::{EffectivePolicy, GrantRegion, KnobKey, KnobValue, ObjectName};
 
@@ -57,7 +60,9 @@ pub fn policy_grants_capability(
     let key = capability_knob_key(capability);
     if key.as_str() == KEY_CODE_EXTENSION {
         // The allowlist IS the capability: empty means deny every CREATE/DROP
-        // EXTENSION. `FORBIDDEN_EXTENSIONS` still decides which names may be created.
+        // EXTENSION. WHICH name is not decided here - the guard matches the name the
+        // statement spells against this same list, on the create and the drop side
+        // alike, and `FORBIDDEN_EXTENSIONS` overrides both.
         return matches!(
             grant_value_at(effective, &key, object),
             Some(KnobValue::StrSet(names)) if !names.is_empty()

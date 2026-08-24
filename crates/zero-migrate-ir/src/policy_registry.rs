@@ -207,9 +207,11 @@ pub const KEY_ACCESS_POLICY: &str = "access.policy";
 
 // ── code — programmable / installed objects ─────────────────────────────────────
 
-/// The `CREATE EXTENSION` name allowlist (Global **StrSet** grant) — the `StrSet`
-/// value carries the permitted extension names. The allowlist IS the capability:
-/// empty = deny all. `FORBIDDEN_EXTENSIONS` is a non-grant hard deny in the guard
+/// The extension name allowlist (Global **StrSet** grant) — the `StrSet` value
+/// carries the permitted extension names, and it decides `CREATE` and `DROP` alike:
+/// the guard matches the name the statement spells against this list in BOTH
+/// directions, so a charter permitting one extension has no authority over another.
+/// Empty = deny all. `FORBIDDEN_EXTENSIONS` is a non-grant hard deny in the guard
 /// regardless. (Merged from the former extension bool toggle + name allowlist.)
 pub const KEY_CODE_EXTENSION: &str = "code.extension";
 /// `CREATE/DROP FUNCTION` / `PROCEDURE` (Global Bool grant).
@@ -493,7 +495,7 @@ pub fn builtin_registry() -> PolicyRegistry {
                 object_model: ObjectModel::Global,
                 requires_db_privilege: true,
                 inherit: true,
-                docs: "The permitted CREATE EXTENSION names (empty = deny all; FORBIDDEN_EXTENSIONS still override).".to_string(),
+                docs: "The permitted extension names, for CREATE and DROP alike (empty = deny all; FORBIDDEN_EXTENSIONS still override).".to_string(),
             },
             // ── sql — the raw-text escape hatch ─────────────────────────────────
             // `sql.raw` is OBJECT-scoped (II.2.5): "raw only in staging" is a
