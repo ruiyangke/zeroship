@@ -1130,3 +1130,179 @@ async fn both_drivers_agree_on_portal_paging() {
         divergences.join("\n")
     );
 }
+
+/// Binary COPY carries its own framing on top of the COPY protocol: a
+/// 19-byte header with flags and an extension area, a per-tuple field count,
+/// a length-prefixed value per field, and a -1 field count as the trailer.
+/// Both drivers write and read that themselves, and this crate has already had
+/// two defects in it - a field count that could not be represented on the wire
+/// and a critical-flag mask that rejected valid headers.
+const BINARY_ROWS: i32 = 500;
+
+fn tokio_binary_roundtrip(url: String, table: String) -> (u64, Vec<(i32, String, Option<i64>)>) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let result = runtime.block_on(async move {
+            use futures_util::TryStreamExt;
+
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+
+            let sink = client
+                .copy_in(&format!("COPY {table} FROM STDIN BINARY"))
+                .await
+                .expect("tokio binary copy_in");
+            let types = [
+                tokio_postgres::types::Type::INT4,
+                tokio_postgres::types::Type::TEXT,
+                tokio_postgres::types::Type::INT8,
+            ];
+            let writer = tokio_postgres::binary_copy::BinaryCopyInWriter::new(sink, &types);
+            let mut writer = std::pin::pin!(writer);
+            for id in 1..=BINARY_ROWS {
+                // A NULL every third row: the field length is -1 rather than a
+                // payload, which is the case a length-prefix bug survives.
+                let maybe: Option<i64> = if id % 3 == 0 {
+                    None
+                } else {
+                    Some(i64::from(id) * 1000)
+                };
+                writer
+                    .as_mut()
+                    .write(&[&id, &format!("row-{id}"), &maybe])
+                    .await
+                    .expect("tokio binary write");
+            }
+            let written = writer.finish().await.expect("tokio binary finish");
+
+            let stream = client
+                .copy_out(&format!("COPY {table} TO STDOUT BINARY"))
+                .await
+                .expect("tokio binary copy_out");
+            let rows = tokio_postgres::binary_copy::BinaryCopyOutStream::new(stream, &types);
+            let rows: Vec<_> = rows.try_collect().await.expect("tokio binary read");
+            let decoded = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.get::<i32>(0),
+                        row.get::<&str>(1).to_owned(),
+                        row.get::<Option<i64>>(2),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            drop(client);
+            let _ = driver.await;
+            (written, decoded)
+        });
+        let _ = sender.send(result);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver
+        .recv()
+        .expect("no binary copy result came back from tokio")
+}
+
+/// Both drivers write and read binary COPY framing themselves, so a
+/// round-trip through each must agree row for row.
+#[compio::test]
+async fn both_drivers_agree_on_binary_copy_roundtrip() {
+    use futures_util::TryStreamExt;
+
+    let url = common::test_url();
+    let base = common::test_object_name("cpg bincopy");
+    let ours_table = format!("{base}_ours");
+    let theirs_table = format!("{base}_theirs");
+
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    for table in [&ours_table, &theirs_table] {
+        client
+            .batch_execute(&format!(
+                "DROP TABLE IF EXISTS {table};
+                 CREATE TABLE {table} (id int4, label text, amount int8);"
+            ))
+            .await
+            .expect("binary copy fixture");
+    }
+
+    let theirs = tokio_binary_roundtrip(url.clone(), theirs_table.clone());
+
+    let types = [
+        compio_postgres::types::Type::INT4,
+        compio_postgres::types::Type::TEXT,
+        compio_postgres::types::Type::INT8,
+    ];
+    let sink = client
+        .copy_in(&format!("COPY {ours_table} FROM STDIN BINARY"))
+        .await
+        .expect("binary copy_in");
+    let writer = compio_postgres::binary_copy::BinaryCopyInWriter::new(sink, &types);
+    let mut writer = std::pin::pin!(writer);
+    for id in 1..=BINARY_ROWS {
+        let maybe: Option<i64> = if id % 3 == 0 {
+            None
+        } else {
+            Some(i64::from(id) * 1000)
+        };
+        writer
+            .as_mut()
+            .write(&[&id, &format!("row-{id}"), &maybe])
+            .await
+            .expect("binary write");
+    }
+    let ours_written = writer.finish().await.expect("binary finish");
+
+    let stream = client
+        .copy_out(&format!("COPY {ours_table} TO STDOUT BINARY"))
+        .await
+        .expect("binary copy_out");
+    let rows = compio_postgres::binary_copy::BinaryCopyOutStream::new(stream, &types);
+    let rows: Vec<_> = rows.try_collect().await.expect("binary read");
+    let ours: Vec<(i32, String, Option<i64>)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<i32>(0),
+                row.get::<&str>(1).to_owned(),
+                row.get::<Option<i64>>(2),
+            )
+        })
+        .collect();
+
+    for table in [&ours_table, &theirs_table] {
+        let _ = client
+            .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+            .await;
+    }
+
+    assert_eq!(
+        ours_written, theirs.0,
+        "the drivers reported different binary COPY IN counts"
+    );
+    assert_eq!(
+        ours.len(),
+        BINARY_ROWS as usize,
+        "neither driver round-tripped every row, so agreement proves nothing"
+    );
+    assert_eq!(ours, theirs.1, "the binary COPY round-trips disagree");
+    assert!(
+        ours.iter().any(|(_, _, amount)| amount.is_none()),
+        "the NULL rows did not survive, so the -1 field length was never exercised"
+    );
+}
