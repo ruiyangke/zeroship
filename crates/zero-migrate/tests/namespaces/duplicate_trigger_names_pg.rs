@@ -37,16 +37,38 @@
 //! like the duplicate-name refusal it was supposed to be proving. The mixed
 //! pass/fail pattern across sibling controls is what exposed it.
 //!
+//! THE TRIGGER OP HAS SINCE JOINED THE GATED CLASS. It is no longer reachable
+//! from a confined migration either, so `verdict` now runs AUTHORISED, the same
+//! way `privileged_names_claimed_twice.rs` runs - which is what keeps the
+//! question this file asks about NAMES answerable at all. The assertions that a
+//! refusal must not be a VENDOR_OP_DENIED are unchanged and are now doing the
+//! work the paragraph above describes.
+//!
 //! SCOPE: PostgreSQL, where the per-table scoping was measured. The other
 //! dialects scope trigger names differently and are not covered by this check.
 
+use crate::support;
+
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::validate_ir;
+use zero_migrate::model::validate::{validate_ir_authorized, VendorAuthority};
 
 fn verdict(ops: &str) -> Result<(), String> {
+    let policy = support::operator_charter("public");
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
-    validate_ir(&ir, &zero_migrate_postgres::DIALECT)
+    let authority = VendorAuthority {
+        effective: &policy,
+        default_schema: "public",
+    };
+    validate_ir_authorized(&ir, &zero_migrate_postgres::DIALECT, None, Some(authority))
+        .map_err(|e| format!("{}: {}", e.code, e.reason))
+}
+
+/// The unauthorised probe, kept for the one test that is ABOUT the capability gate.
+fn confined_verdict(ops: &str) -> Result<(), String> {
+    let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
+    let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
+    zero_migrate::model::validate::validate_ir(&ir, &zero_migrate_postgres::DIALECT)
         .map_err(|e| format!("{}: {}", e.code, e.reason))
 }
 
@@ -134,7 +156,7 @@ fn the_privileged_name_claiming_ops_are_closed_by_the_capability_gate() {
         ("extension", r#"{"op":"createExtension","name":"citext"}"#),
         ("role", r#"{"op":"createRole","name":"r"}"#),
     ] {
-        let refusal = verdict(op).expect_err(&format!(
+        let refusal = confined_verdict(op).expect_err(&format!(
             "create{label} must be refused before any name check"
         ));
         assert!(

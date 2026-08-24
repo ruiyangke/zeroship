@@ -51,6 +51,11 @@ scope = ${scope}
 key = "schema.create_table"
 value = true
 scope = ${scope}
+
+[[grant]]
+key = "code.trigger"
+value = true
+scope = ${scope}
 `;
 }
 

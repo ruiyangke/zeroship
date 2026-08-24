@@ -17,14 +17,42 @@
 //! calls proves the rules fire, and the whole point of this one is to prove they
 //! do NOT fire on legitimate work.
 
+use crate::support;
+
 use zero_migrate::model::ir::MigrationIr;
-use zero_migrate::model::validate::validate_ir;
+use zero_migrate::model::validate::{validate_ir, validate_ir_authorized, VendorAuthority};
 
 #[track_caller]
 fn must_pass(what: &str, ops: &str) {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
     let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
     if let Err(e) = validate_ir(&ir, &zero_migrate_postgres::DIALECT) {
+        panic!(
+            "{what} is an ordinary migration and must pass: [{}] {}",
+            e.code, e.reason
+        );
+    }
+}
+
+/// [`must_pass`] for a case whose ops are CAPABILITY-GATED.
+///
+/// `validate_ir` runs with no charter, so its capability set grants nothing - an
+/// over-refusal claim about a gated op made through it would be answered by the grant
+/// gate rather than by the rule under test. Only the trigger case below needs this;
+/// the shared `must_pass` stays unauthorised so every other case keeps making the
+/// stronger claim that it needs no charter at all.
+#[track_caller]
+fn must_pass_authorized(what: &str, ops: &str) {
+    let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{ops}]}}"#);
+    let ir: MigrationIr = serde_json::from_str(&bytes).expect("the envelope parses");
+    let policy = support::operator_charter("public");
+    let authority = VendorAuthority {
+        effective: &policy,
+        default_schema: "public",
+    };
+    if let Err(e) =
+        validate_ir_authorized(&ir, &zero_migrate_postgres::DIALECT, None, Some(authority))
+    {
         panic!(
             "{what} is an ordinary migration and must pass: [{}] {}",
             e.code, e.reason
@@ -140,7 +168,7 @@ fn a_foreign_key_may_point_forward() {
 
 #[test]
 fn different_object_kinds_may_share_a_name_where_the_server_allows_it() {
-    must_pass(
+    must_pass_authorized(
         "a trigger and a constraint with the same name on one table",
         &format!(
             r#"{A},{{"op":"addConstraint","table":"a","constraint":{{"name":"x","kind":{{"kind":"unique","columns":["v"]}}}}}},{{"op":"createTrigger","name":"x","table":"a","timing":"after","events":["insert"],"forEach":"row","action":{{"kind":"executeFunction","name":"f"}}}}"#

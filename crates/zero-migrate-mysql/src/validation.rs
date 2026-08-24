@@ -175,6 +175,7 @@ impl ValidationPolicy for MysqlValidationPolicy {
             | VendorCapability::Partition
             | VendorCapability::Policy
             | VendorCapability::Function
+            | VendorCapability::Trigger
             | VendorCapability::RawSql
             | VendorCapability::RawViewBody
             | VendorCapability::MaterializedView => None,

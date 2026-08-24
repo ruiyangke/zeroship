@@ -169,7 +169,9 @@ impl ValidationPolicy for SqliteValidationPolicy {
 
     fn vendor_capability_refusal(&self, capability: VendorCapability) -> Option<ValidationRefusal> {
         match capability {
-            VendorCapability::RawViewBody => None,
+            // This backend renders triggers (in its own body-carrying action shape),
+            // so the capability gates AUTHORITY here and refuses nothing.
+            VendorCapability::RawViewBody | VendorCapability::Trigger => None,
             VendorCapability::MaterializedView => Some(refusal(
                 "materializedView: SQLite has no materialized views; materialized:true is PostgreSQL-only".to_string(),
                 "drop materialized:true for SQLite, or target Postgres for this view".to_string(),
@@ -190,7 +192,7 @@ impl ValidationPolicy for SqliteValidationPolicy {
             | VendorCapability::Function
             | VendorCapability::RawSql) => Some(refusal(
                 format!(
-                    "the zero-migrate vendor op (capability {:?}) has no {} analogue — roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/raw are the privileged catalog-object family, which this backend does not render",
+                    "the zero-migrate vendor op (capability {:?}) has no {} analogue — roles/grants/RLS/partitions/policies/functions/extensions/schemas/raw are the privileged catalog-object family, which this backend does not render",
                     capability.as_token(),
                     crate::DIALECT.as_str()
                 ),

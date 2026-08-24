@@ -5432,9 +5432,14 @@ impl IrAuthor {
                 }
                 self.lower_view_op(op, &eff_schema, &decl, confinement, live_schema)?
             }
-            // CROSS-DIALECT CORE triggers. The op is admitted without a vendor
-            // capability; unsupported pieces are refused per dialect/action/facet.
+            // CROSS-DIALECT triggers. Every registered backend renders these, so the
+            // op keeps a portable reach and no `PrivilegedCatalogObjects` check
+            // applies; unsupported pieces are refused per dialect/action/facet. The
+            // capability the op DOES require is enforced here as well as at the
+            // guarded entry, the same defense-in-depth the view arms above use: an
+            // unguarded lower caller reaches this arm without passing that entry.
             Op::CreateTrigger { .. } | Op::DropTrigger { .. } => {
+                enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
                 self.lower_trigger_op(op, &eff_schema, &decl, live_schema)?
             }
             // VENDOR (`zero-migrate`) — render the privileged primitive to

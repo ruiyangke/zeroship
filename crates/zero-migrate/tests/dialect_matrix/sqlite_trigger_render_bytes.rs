@@ -84,7 +84,11 @@ fn statements(ir: &str, dialect: &zero_migrate::DialectId) -> Vec<String> {
     let opts = PreviewOpts {
         default_schema: "public".to_string(),
         owner_app: "app_sqlite_trigger_render_bytes".to_string(),
-        effective_policy: crate::support::confined_charter(),
+        // A trigger op is capability-gated, so the preview needs a charter that
+        // grants `code.trigger` to reach the renderer at all. Nothing about the BYTES
+        // depends on which charter got us here; the authority axis is measured in
+        // `policy_charter::trigger_ops_require_a_capability_grant`.
+        effective_policy: crate::support::operator_charter("public"),
     };
     let (_name, statements) = render_ir_envelope_sql_statements(ir, dialect, &opts)
         .unwrap_or_else(|e| panic!("rendering the trigger IR on {dialect:?}: {e}"));

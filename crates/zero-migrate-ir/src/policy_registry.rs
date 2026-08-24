@@ -214,6 +214,13 @@ pub const KEY_ACCESS_POLICY: &str = "access.policy";
 pub const KEY_CODE_EXTENSION: &str = "code.extension";
 /// `CREATE/DROP FUNCTION` / `PROCEDURE` (Global Bool grant).
 pub const KEY_CODE_FUNCTION: &str = "code.function";
+/// `CREATE/DROP TRIGGER` (PerTable Bool grant). Object-scoped like `access.policy`
+/// and `access.rls`, and for the same reason: a trigger is attached to one table, so
+/// "may hang triggers on the staging tables" is a statement this grant must be able
+/// to make. Unlike its `code.*` neighbours the knob is not one product's — every
+/// registered backend renders triggers, so the grant governs AUTHORITY rather than
+/// which dialects the artifact reaches.
+pub const KEY_CODE_TRIGGER: &str = "code.trigger";
 /// `CREATE/DROP MATERIALIZED VIEW` (Global Bool grant). Gates the op wherever a
 /// backend declares `Capability::MaterializedView`; it is not one product's knob.
 pub const KEY_CODE_MATERIALIZED_VIEW: &str = "code.materialized_view";
@@ -289,6 +296,7 @@ pub const fn knob_key_for_capability(cap: VendorCapability) -> &'static str {
         VendorCapability::Partition => KEY_SCHEMA_PARTITION,
         VendorCapability::Policy => KEY_ACCESS_POLICY,
         VendorCapability::Function => KEY_CODE_FUNCTION,
+        VendorCapability::Trigger => KEY_CODE_TRIGGER,
         VendorCapability::RawSql => KEY_SQL_RAW,
         VendorCapability::RawViewBody => KEY_SQL_RAW_VIEW_BODY,
         VendorCapability::MaterializedView => KEY_CODE_MATERIALIZED_VIEW,
@@ -472,6 +480,7 @@ pub fn builtin_registry() -> PolicyRegistry {
             bool_grant(KEY_SCHEMA_CROSS_SCHEMA, ObjectModel::PerSchema, false, "Which schemas this migration may reference (default-deny)."),
             // ── code — programmable / installed objects ─────────────────────────
             bool_grant(KEY_CODE_FUNCTION, ObjectModel::Global, true, "CREATE/DROP FUNCTION."),
+            bool_grant(KEY_CODE_TRIGGER, ObjectModel::PerTable, true, "CREATE/DROP TRIGGER on this table."),
             bool_grant(KEY_CODE_MATERIALIZED_VIEW, ObjectModel::Global, false, "CREATE/DROP MATERIALIZED VIEW."),
             // the CREATE EXTENSION name allowlist (StrSet, Global) — the allowlist IS
             // the knob (empty = deny all); FORBIDDEN_EXTENSIONS still overrides.
@@ -533,6 +542,7 @@ mod tests {
             VendorCapability::Partition,
             VendorCapability::Policy,
             VendorCapability::Function,
+            VendorCapability::Trigger,
             VendorCapability::RawSql,
             VendorCapability::RawViewBody,
             VendorCapability::MaterializedView,
@@ -558,6 +568,8 @@ mod tests {
         // PerTable: RLS + policy.
         assert_eq!(om(KEY_ACCESS_RLS), ObjectModel::PerTable);
         assert_eq!(om(KEY_ACCESS_POLICY), ObjectModel::PerTable);
+        // PerTable: a trigger is attached to the table it fires on.
+        assert_eq!(om(KEY_CODE_TRIGGER), ObjectModel::PerTable);
         // PerTable: the namespace-authority creation/movement/immutability anchors.
         assert_eq!(om(KEY_SCHEMA_CREATE_TABLE), ObjectModel::PerTable);
         assert_eq!(om(KEY_SCHEMA_RENAME), ObjectModel::PerTable);
@@ -745,6 +757,7 @@ mod tests {
                 KEY_CODE_EXTENSION,         // guard/mod.rs, policy_capability.rs
                 KEY_CODE_FUNCTION,          // (cap) Function
                 KEY_CODE_MATERIALIZED_VIEW, // (cap) MaterializedView
+                KEY_CODE_TRIGGER,           // (cap) Trigger
                 KEY_SAFETY_DESTRUCTIVE_OPS, // guard/mod.rs
                 KEY_SAFETY_REQUIRE_RLS,     // guard/mod.rs
                 KEY_SCHEMA_ALTER_INJECTED,  // guard/mod.rs

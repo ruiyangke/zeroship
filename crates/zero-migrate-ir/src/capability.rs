@@ -93,6 +93,16 @@ pub enum VendorCapability {
     Policy,
     /// `CREATE/DROP FUNCTION` ([`VendorCapabilities::allow_function`]).
     Function,
+    /// `CREATE/DROP TRIGGER` ([`VendorCapabilities::allow_trigger`]).
+    ///
+    /// Unlike the rest of this enum, a trigger is NOT confined to the one backend
+    /// that renders the privileged catalog-object family: every registered backend
+    /// renders triggers, in its own action shape. The capability is therefore about
+    /// AUTHORITY, not about reach — the op's support tier stays
+    /// `SupportTier::Core` and an artifact carrying a trigger still measures a
+    /// portable reach. What the grant governs is that a trigger arranges for work to
+    /// happen on every affected row without any later statement naming it.
+    Trigger,
     /// The gated raw escape (`raw`) ([`VendorCapabilities::allow_raw_sql`]).
     RawSql,
     /// The gated raw view-body SELECT escape ([`VendorCapabilities::allow_raw_view_body`]).
@@ -115,6 +125,7 @@ impl VendorCapability {
             Self::Partition => "partition",
             Self::Policy => "policy",
             Self::Function => "function",
+            Self::Trigger => "trigger",
             Self::RawSql => "rawSql",
             Self::RawViewBody => "rawViewBody",
             Self::MaterializedView => "materializedView",
@@ -133,6 +144,7 @@ impl VendorCapability {
             Self::Partition => "allowPartition",
             Self::Policy => "allowPolicy",
             Self::Function => "allowFunction",
+            Self::Trigger => "allowTrigger",
             Self::RawSql => "allowRawSql",
             Self::RawViewBody => "allowRawViewBody",
             Self::MaterializedView => "allowMaterializedView",
@@ -164,6 +176,8 @@ pub struct VendorCapabilities {
     pub allow_policy: bool,
     /// `CREATE/DROP FUNCTION` (the raw body escape).
     pub allow_function: bool,
+    /// `CREATE/DROP TRIGGER`.
+    pub allow_trigger: bool,
     /// The gated raw-statement escape (`raw`).
     pub allow_raw_sql: bool,
     /// The gated raw view-body SELECT escape.
@@ -195,6 +209,7 @@ impl VendorCapabilities {
             allow_partition: false,
             allow_policy: false,
             allow_function: false,
+            allow_trigger: false,
             allow_raw_sql: false,
             allow_raw_view_body: false,
             allow_materialized_view: false,
@@ -218,6 +233,7 @@ impl VendorCapabilities {
             allow_partition: true,
             allow_policy: true,
             allow_function: true,
+            allow_trigger: true,
             allow_raw_sql: true,
             allow_raw_view_body: true,
             allow_materialized_view: true,
@@ -243,6 +259,7 @@ impl VendorCapabilities {
             allow_partition: true,
             allow_policy: true,
             allow_function: true,
+            allow_trigger: true,
             allow_raw_sql: false,
             allow_raw_view_body: false,
             allow_materialized_view: true,
@@ -310,6 +327,7 @@ impl VendorCapabilities {
             VendorCapability::Partition => self.allow_partition,
             VendorCapability::Policy => self.allow_policy,
             VendorCapability::Function => self.allow_function,
+            VendorCapability::Trigger => self.allow_trigger,
             VendorCapability::RawSql => self.allow_raw_sql,
             VendorCapability::RawViewBody => self.allow_raw_view_body,
             VendorCapability::MaterializedView => self.allow_materialized_view,
@@ -333,6 +351,7 @@ mod tests {
             VendorCapability::Partition,
             VendorCapability::Policy,
             VendorCapability::Function,
+            VendorCapability::Trigger,
             VendorCapability::RawSql,
             VendorCapability::RawViewBody,
             VendorCapability::MaterializedView,
@@ -353,6 +372,7 @@ mod tests {
             VendorCapability::Partition,
             VendorCapability::Policy,
             VendorCapability::Function,
+            VendorCapability::Trigger,
             VendorCapability::RawSql,
             VendorCapability::RawViewBody,
             VendorCapability::MaterializedView,
@@ -365,6 +385,7 @@ mod tests {
     fn local_is_in_between_no_role_no_raw() {
         let l = VendorCapabilities::local();
         assert!(l.grants(VendorCapability::Function));
+        assert!(l.grants(VendorCapability::Trigger));
         assert!(l.grants(VendorCapability::Policy));
         assert!(l.grants(VendorCapability::Partition));
         assert!(l.grants(VendorCapability::MaterializedView));

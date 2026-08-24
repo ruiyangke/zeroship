@@ -1,50 +1,41 @@
 //! What must an author be GRANTED before `createTrigger` / `dropTrigger` is accepted?
 //!
-//! The answer this file MEASURES is: **nothing, on any of the three dialects**. Trigger
-//! ops are portable-core in the capability model, not members of the privileged
-//! catalog-object family, so no vendor capability and no charter knob stands between an
-//! author and a trigger.
+//! The answer this file MEASURES is: [`VendorCapability::Trigger`], on every one of
+//! the three dialects, at both gates. A trigger op is a member of the privileged
+//! capability family; the charter knob that grants it is `code.trigger`.
 //!
 //! # Why the question needed measuring rather than reading
 //!
-//! Prose in the tree says the opposite, in more than one place, and it is wrong about
-//! triggers wherever it says it:
+//! This file previously measured the OPPOSITE and was right to: trigger ops sat in
+//! `vendor_capabilities`'s portable-core arm returning the empty set, and
+//! `validate_vendor_op` returns `Ok` on an empty set before it can consult a backend
+//! refusal or a charter grant. Prose in two places already CLAIMED triggers were in
+//! the privileged family while the gate could not see them. The claim is now true and
+//! the prose is now checkable, which is what this file checks.
 //!
-//! - [`CODE_VENDOR_OP_DENIED`]'s own doc comment lists "role/grant/RLS/policy/trigger/
-//!   function/extension/schema/`raw`" as the privileged vendor family;
-//! - `zero_migrate_sqlite`'s `vendor_capability_refusal` says
-//!   "roles/grants/RLS/partitions/policies/triggers/functions/extensions/schemas/raw
-//!   are the privileged catalog-object family".
+//! # The one axis a trigger does NOT share with the rest of the family
 //!
-//! Neither sentence can be reached by a trigger op. The gate consults
-//! [`vendor_capabilities`], whose `createTrigger`/`dropTrigger` arm returns the EMPTY
-//! set, and `validate_vendor_op` returns `Ok` on an empty set before it can ask a
-//! backend for a refusal or a charter for a grant. The closed
-//! [`VendorCapability`] enum has no trigger variant to name, and the charter's builtin
-//! knob registry has no trigger key to grant. Grepping either sentence would have
-//! answered this question wrongly, which is why the claim is asserted here instead.
+//! Every other capability in the closed [`VendorCapability`] set belongs to the
+//! privileged catalog-object family, which exactly ONE registered backend renders, so
+//! an artifact carrying one measures a single-dialect reach. A trigger is rendered by
+//! all three, in each backend's own action shape. The op therefore keeps a
+//! `SupportTier::Core` declaration and a portable reach, and the capability governs
+//! AUTHORITY alone. [`the_trigger_grant_did_not_pin_the_op_to_one_dialect`] holds that
+//! apart, because reading "capability-gated" as "PG-only" is exactly the one-axis
+//! misreading this whole area has already produced once.
 //!
 //! # The instrument, and how each arm proves it was live
 //!
-//! A test that shows a trigger op is "not refused" proves nothing unless the same call,
-//! on the same path, under the same posture, IS able to refuse. Every arm below is
-//! therefore a CONTRAST against `createFunction`, a genuinely capability-gated op
-//! (`code.function`), decided by the same code on the same call:
+//! A test that shows a trigger op IS refused proves nothing unless the same call, on
+//! the same path, under the same posture, is able to ADMIT. Every arm below therefore
+//! carries two contrasts, decided by the same code on the same call:
 //!
-//! - [`the_gate_reads_no_capability_for_a_trigger_op`] - at the function the gate
-//!   consults, trigger ops answer with the empty set while `createFunction` answers
-//!   with [`VendorCapability::Function`].
-//! - [`validate_admits_trigger_ops_under_the_posture_that_grants_nothing`] - through
-//!   `validate_ir_authorized` on all three dialects, under the Confined creator scope
-//!   `VendorCapabilities::from_scope` maps to the capability set that grants nothing.
-//!   The PostgreSQL control refuses `createFunction` there with
-//!   [`CODE_VENDOR_OP_DENIED`].
-//! - [`a_charter_granting_no_vendor_capability_lowers_a_trigger_drop`] and
-//!   [`granting_every_vendor_capability_changes_nothing_for_a_trigger_drop`] - through
-//!   the production guarded lower entry, the emptiest vendor charter and the full
-//!   operator charter produce the SAME emitted SQL for a trigger drop, while those two
-//!   charters DISAGREE about `createFunction`. A grant that changes nothing is not a
-//!   gate.
+//! - `createFunction`, a capability-gated op (`code.function`), which must still be
+//!   refused where nothing is granted and admitted where everything is - the control
+//!   that the gate is reached at all;
+//! - `dropIndex` / a bare `createTable`, ops carrying NO capability, which must still
+//!   be admitted under the very posture that refuses the trigger - the control that
+//!   the refusal is a GRANT decision and not the posture refusing everything.
 //!
 //! # The one axis this file deliberately holds constant
 //!
@@ -117,14 +108,22 @@ fn create_trigger_op(dialect: &DialectId) -> Value {
     })
 }
 
-/// The CONTROL op: creating a function requires [`VendorCapability::Function`]. Every
-/// arm pairs its trigger claim with this one so a green cannot come from a gate that
-/// was never able to fire.
+/// The GATED CONTROL op: creating a function requires [`VendorCapability::Function`].
+/// Every arm pairs its trigger claim with this one so a green cannot come from a gate
+/// that was never reached.
 fn create_function_op() -> Value {
     json!({
         "op": "createFunction", "name": FUNCTION, "returns": "trigger",
         "language": "procedural", "body": "BEGIN RETURN NEW; END",
     })
+}
+
+/// The UNGATED CONTROL op: dropping an index requires no vendor capability at all, and
+/// is the one remaining member of `Op::is_destructive`'s non-destructive family that
+/// carries none. Every arm pairs its trigger claim with this one so a green cannot come
+/// from a posture that has started refusing everything.
+fn drop_index_op() -> Value {
+    json!({ "op": "dropIndex", "name": "audited_val_idx", "table": TABLE })
 }
 
 /// The table the trigger hangs on. Present so the envelope clears the load gate's
@@ -155,19 +154,19 @@ fn envelope(name: &str, ops: Vec<Value>) -> String {
 
 /// `validate_vendor_op` returns `Ok` the moment [`vendor_capabilities`] answers with an
 /// empty set, BEFORE it can consult a backend refusal or a charter grant. So the whole
-/// question "what must be granted" is decided here, and for a trigger op the answer is
-/// the empty set.
+/// question "what must be granted" is decided here, and for a trigger op the answer
+/// names [`VendorCapability::Trigger`].
 #[test]
-fn the_gate_reads_no_capability_for_a_trigger_op() {
+fn the_gate_reads_the_trigger_capability_for_a_trigger_op() {
     for dialect in dialects() {
         for op in [drop_trigger_op(), create_trigger_op(&dialect)] {
             let parsed: MigrationIr = serde_json::from_str(&envelope("caps", vec![op.clone()]))
                 .expect("the trigger envelope parses");
-            assert_eq!(
-                vendor_capabilities(&parsed.ops[0]),
-                Vec::new(),
-                "{dialect}: a trigger op must require no vendor capability, but the gate reads \
-                 one: {op}"
+            assert!(
+                vendor_capabilities(&parsed.ops[0]).contains(&VendorCapability::Trigger),
+                "{dialect}: a trigger op must require the trigger capability, but the gate reads \
+                 {:?}: {op}",
+                vendor_capabilities(&parsed.ops[0])
             );
         }
     }
@@ -177,26 +176,32 @@ fn the_gate_reads_no_capability_for_a_trigger_op() {
     assert_eq!(
         vendor_capabilities(&control.ops[0]),
         vec![VendorCapability::Function],
-        "the control op must be capability-gated, or the contrast above measures nothing"
+        "the gated control op must be capability-gated, or the contrast above measures nothing"
+    );
+
+    let ungated: MigrationIr = serde_json::from_str(&envelope("caps", vec![drop_index_op()]))
+        .expect("the ungated control envelope parses");
+    assert_eq!(
+        vendor_capabilities(&ungated.ops[0]),
+        Vec::new(),
+        "the ungated control op must require nothing, or this function has started \
+         answering with a capability for everything"
     );
 }
 
 /// `Op::is_destructive`'s doc names a FAMILY it declares deliberately non-destructive:
 /// `DROP INDEX`, `DROP ROLE`, `DROP EXTENSION`, `DROP POLICY`, `DROP TRIGGER`, `REVOKE`.
-/// Reading that list as one decision invites the conclusion that a classifier arm
-/// naming only the index drop is an omission.
+/// Reading that list as one decision invites the conclusion that its members are all
+/// governed alike. They are not: "non-destructive" and "capability-gated" are two
+/// axes, and this arm measures the second one member by member.
 ///
-/// It is not one decision. The role, extension, policy and grant members are each
-/// capability-gated, and that grant is what governs them once the destructive posture
-/// lets them past. The members carrying NO capability are `dropTrigger` and
-/// `dropIndex` - and `dropIndex`, the only one the parser-backed classifier already
-/// vouches for, has the compensating control the IR's own doc records instead: a
-/// UNIQUE-index drop is gated through `MigrationFlags`.
-///
-/// This arm is what makes that asymmetry a measurement rather than a reading, so a
-/// future change that gives trigger ops a capability breaks it here and says so.
+/// `dropTrigger` has now joined the gated majority. `dropIndex` is the sole member
+/// carrying no capability, and it has the compensating control the IR's own doc
+/// records instead: a UNIQUE-index drop is gated through `MigrationFlags`. Keeping it
+/// here is what makes this arm a measurement rather than a restatement of "everything
+/// is gated".
 #[test]
-fn dropping_a_trigger_is_the_family_member_with_no_capability_behind_it() {
+fn the_index_drop_is_the_last_family_member_with_no_capability_behind_it() {
     let gated = [
         (r#"{"op":"dropRole","name":"r"}"#, VendorCapability::Role),
         (
@@ -211,6 +216,10 @@ fn dropping_a_trigger_is_the_family_member_with_no_capability_behind_it() {
             r#"{"op":"revoke","privileges":["select"],"on":{"kind":"schema","names":["app"]},"from":["reader"]}"#,
             VendorCapability::Grant,
         ),
+        (
+            r#"{"op":"dropTrigger","name":"audited_touch_trg","table":"audited"}"#,
+            VendorCapability::Trigger,
+        ),
     ];
     for (op_json, expected) in gated {
         let ir: MigrationIr = serde_json::from_str(&format!(
@@ -224,18 +233,49 @@ fn dropping_a_trigger_is_the_family_member_with_no_capability_behind_it() {
         );
     }
 
-    for op_json in [
-        r#"{"op":"dropTrigger","name":"audited_touch_trg","table":"audited"}"#,
-        r#"{"op":"dropIndex","name":"audited_val_idx","table":"audited"}"#,
-    ] {
-        let ir: MigrationIr = serde_json::from_str(&format!(
-            r#"{{"ir_version":1,"name":"n","ops":[{op_json}]}}"#
-        ))
-        .expect("the family envelope parses");
-        assert_eq!(
-            vendor_capabilities(&ir.ops[0]),
-            Vec::new(),
-            "this family member is expected to carry no capability at all: {op_json}"
+    let op_json = r#"{"op":"dropIndex","name":"audited_val_idx","table":"audited"}"#;
+    let ir: MigrationIr = serde_json::from_str(&format!(
+        r#"{{"ir_version":1,"name":"n","ops":[{op_json}]}}"#
+    ))
+    .expect("the family envelope parses");
+    assert_eq!(
+        vendor_capabilities(&ir.ops[0]),
+        Vec::new(),
+        "this family member is expected to carry no capability at all: {op_json}"
+    );
+}
+
+/// The grant governs AUTHORITY, not REACH. Every other capability in the closed set
+/// belongs to the privileged catalog-object family that exactly one backend renders,
+/// so an artifact carrying one is pinned to that dialect. A trigger is rendered by all
+/// three, and gating it must not have quietly narrowed where a trigger migration can
+/// be deployed.
+/// `dropTrigger` is the shape every backend renders identically, so it is the one that
+/// can carry the whole-universe reach claim. A `createTrigger` carries a per-dialect
+/// ACTION, and which actions a backend accepts is a facet question this file does not
+/// ask - so each create is only asserted to reach its own dialect.
+#[test]
+fn the_trigger_grant_did_not_pin_the_op_to_one_dialect() {
+    let ir: MigrationIr =
+        serde_json::from_str(&envelope("reach", vec![drop_trigger_op()])).expect("envelope parses");
+    let supported = zero_migrate::model::op_support::support(&ir.ops[0]).supported_dialects();
+    for dialect in dialects() {
+        assert!(
+            supported.contains_id(&dialect),
+            "{dialect}: the trigger capability must not have narrowed a trigger drop's reach"
+        );
+    }
+
+    for dialect in dialects() {
+        let op = create_trigger_op(&dialect);
+        let ir: MigrationIr =
+            serde_json::from_str(&envelope("reach", vec![op.clone()])).expect("envelope parses");
+        assert!(
+            zero_migrate::model::op_support::support(&ir.ops[0])
+                .supported_dialects()
+                .contains_id(&dialect),
+            "{dialect}: the trigger capability must not have cost this backend its own \
+             create shape: {op}"
         );
     }
 }
@@ -252,7 +292,7 @@ fn confined_scope() -> SchemaScope {
 }
 
 #[test]
-fn validate_admits_trigger_ops_under_the_posture_that_grants_nothing() {
+fn validate_refuses_trigger_ops_under_the_posture_that_grants_nothing() {
     let scope = confined_scope();
     for dialect in dialects() {
         for (label, op) in [
@@ -261,19 +301,28 @@ fn validate_admits_trigger_ops_under_the_posture_that_grants_nothing() {
         ] {
             let ir: MigrationIr = serde_json::from_str(&envelope("t", vec![create_table_op(), op]))
                 .expect("the trigger envelope parses");
-            validate_ir_authorized(&ir, &dialect, Some(&scope), None).unwrap_or_else(|e| {
-                panic!(
-                    "{dialect}: {label} must need no grant, but the posture that grants nothing \
-                     refused it: {} / {}",
-                    e.code, e.reason
-                )
-            });
+            let error =
+                validate_ir_authorized(&ir, &dialect, Some(&scope), None).expect_err(&format!(
+                    "{dialect}: {label} must need a grant, but the posture that grants nothing \
+                     admitted it"
+                ));
+            assert_eq!(
+                error.code, CODE_VENDOR_OP_DENIED,
+                "{dialect}: {label} was refused for the wrong reason: {}",
+                error.reason
+            );
+            assert!(
+                error.reason.contains(VendorCapability::Trigger.flag_name()),
+                "{dialect}: {label}'s refusal does not name the trigger capability: {}",
+                error.reason
+            );
         }
     }
 }
 
-/// The instrument check for the arm above: the SAME call, the SAME posture, on the
-/// dialect that renders the privileged family, DOES refuse an op that needs a grant.
+/// The first instrument check for the arm above: the SAME call, the SAME posture, on
+/// the dialect that renders the privileged family, DOES refuse an op that needs a
+/// different grant - so the gate is reached and keys on the capability it reads.
 #[test]
 fn the_same_validate_posture_still_refuses_an_op_that_needs_a_grant() {
     let scope = confined_scope();
@@ -296,6 +345,27 @@ fn the_same_validate_posture_still_refuses_an_op_that_needs_a_grant() {
         "the control refusal does not name the function capability: {}",
         error.reason
     );
+}
+
+/// The second instrument check, and the one the inversion of this file made necessary:
+/// the SAME call under the SAME posture still ADMITS an op that needs no grant. Without
+/// it, a build where the confined posture had begun refusing every op would pass the
+/// trigger arm above for entirely the wrong reason.
+#[test]
+fn the_same_validate_posture_still_admits_an_op_that_needs_no_grant() {
+    let scope = confined_scope();
+    for dialect in dialects() {
+        let ir: MigrationIr =
+            serde_json::from_str(&envelope("i", vec![create_table_op(), drop_index_op()]))
+                .expect("the ungated control envelope parses");
+        validate_ir_authorized(&ir, &dialect, Some(&scope), None).unwrap_or_else(|e| {
+            panic!(
+                "{dialect}: dropIndex needs no grant, so the posture that grants nothing must \
+                 still admit it: {} / {}",
+                e.code, e.reason
+            )
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +451,11 @@ value = true
 scope = "all"
 
 [[grant]]
+key = "code.trigger"
+value = true
+scope = "all"
+
+[[grant]]
 key = "code.materialized_view"
 value = true
 scope = "all"
@@ -436,54 +511,59 @@ fn emitted_sql(artifact: &LoweredArtifact) -> String {
 }
 
 #[test]
-fn a_charter_granting_no_vendor_capability_lowers_a_trigger_drop() {
+fn a_charter_granting_no_vendor_capability_refuses_a_trigger_drop() {
     for dialect in dialects() {
-        let artifact = lower(
+        let error = lower(
             &no_vendor_capability_charter(),
             &dialect,
             vec![create_table_op(), drop_trigger_op()],
         )
-        .unwrap_or_else(|e| {
-            panic!("{dialect}: a charter granting no vendor capability must still admit a trigger drop: {e:?}")
-        });
+        .expect_err(&format!(
+            "{dialect}: a charter granting no vendor capability must refuse a trigger drop"
+        ));
+        let reported = format!("{error:?}");
         assert!(
-            emitted_sql(&artifact)
-                .to_ascii_uppercase()
-                .contains("TRIGGER"),
-            "{dialect}: the trigger drop lowered without emitting its DDL:\n{}",
-            emitted_sql(&artifact)
+            reported.contains(CODE_VENDOR_OP_DENIED)
+                || reported.contains(&format!("{:?}", VendorCapability::Trigger)),
+            "{dialect}: the trigger drop was refused for the wrong reason: {reported}"
         );
     }
 }
 
-/// The sharpest form of "ungated": adding every vendor grant the registry defines
-/// changes the emitted SQL not at all. A grant that makes no difference is not a gate.
+/// The sharpest form of "gated": the emptiest vendor charter and the full operator
+/// charter DISAGREE about a trigger drop, and the difference is exactly the DDL. A
+/// grant that makes no difference is not a gate; this is the assertion that inverted
+/// when the grant was introduced.
 #[test]
-fn granting_every_vendor_capability_changes_nothing_for_a_trigger_drop() {
+fn granting_every_vendor_capability_is_what_lowers_a_trigger_drop() {
     for dialect in dialects() {
-        let ungranted = lower(
+        lower(
             &no_vendor_capability_charter(),
             &dialect,
             vec![create_table_op(), drop_trigger_op()],
         )
-        .expect("the ungranted charter lowers the trigger drop");
+        .expect_err("the ungranted charter must not lower the trigger drop");
         let granted = lower(
             &every_vendor_capability_charter(),
             &dialect,
             vec![create_table_op(), drop_trigger_op()],
         )
-        .expect("the fully-granted charter lowers the trigger drop");
-        assert_eq!(
-            emitted_sql(&ungranted),
-            emitted_sql(&granted),
-            "{dialect}: the two charters disagree about a trigger drop, so something DOES gate it"
+        .unwrap_or_else(|e| {
+            panic!("{dialect}: a charter granting code.trigger must lower a trigger drop: {e:?}")
+        });
+        assert!(
+            emitted_sql(&granted)
+                .to_ascii_uppercase()
+                .contains("TRIGGER"),
+            "{dialect}: the granted trigger drop lowered without emitting its DDL:\n{}",
+            emitted_sql(&granted)
         );
     }
 }
 
-/// The instrument check for the two arms above: those same two charters DISAGREE about
-/// an op that is capability-gated. Without this, both arms would pass on a build where
-/// the charter axis had stopped being read at all.
+/// The first instrument check for the two arms above: those same two charters disagree
+/// about an op that is gated on a DIFFERENT capability. Without this, both arms would
+/// pass on a build where the charter axis had stopped being read at all.
 #[test]
 fn the_same_two_charters_still_disagree_about_an_op_that_needs_a_grant() {
     let dialect = zero_migrate_postgres::DIALECT;
@@ -498,4 +578,29 @@ fn the_same_two_charters_still_disagree_about_an_op_that_needs_a_grant() {
     );
     lower(&every_vendor_capability_charter(), &dialect, ops)
         .expect("a charter granting code.function must admit createFunction");
+}
+
+/// The second instrument check, made necessary by the inversion: the emptiest vendor
+/// charter still LOWERS an op that needs no vendor capability. Without it, a build
+/// where that charter had begun refusing everything would pass the two arms above for
+/// entirely the wrong reason.
+#[test]
+fn the_charter_granting_no_vendor_capability_still_lowers_an_ungated_op() {
+    for dialect in dialects() {
+        let artifact = lower(
+            &no_vendor_capability_charter(),
+            &dialect,
+            vec![create_table_op(), drop_index_op()],
+        )
+        .unwrap_or_else(|e| {
+            panic!("{dialect}: dropIndex needs no vendor capability, so this charter must lower it: {e:?}")
+        });
+        assert!(
+            emitted_sql(&artifact)
+                .to_ascii_uppercase()
+                .contains("INDEX"),
+            "{dialect}: the ungated control lowered without emitting its DDL:\n{}",
+            emitted_sql(&artifact)
+        );
+    }
 }

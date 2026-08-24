@@ -246,6 +246,11 @@ value = true
 scope = "all"
 
 [[grant]]
+key = "code.trigger"
+value = true
+scope = "all"
+
+[[grant]]
 key = "code.extension"
 value = ["citext", "pgcrypto"]
 scope = "all"
@@ -1169,6 +1174,11 @@ scope = "all"
 
 [[grant]]
 key = "code.materialized_view"
+value = true
+scope = "all"
+
+[[grant]]
+key = "code.trigger"
 value = true
 scope = "all"
 

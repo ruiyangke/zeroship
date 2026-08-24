@@ -314,12 +314,20 @@ async fn sqlite_apply(
         &zero_migrate_sqlite::DIALECT,
         &policy,
     );
-    let document = zero_migrate::model::load::load_ir_document(
+    // Threaded exactly as the PostgreSQL half above threads it, and for the same
+    // reason: a trigger op is capability-gated, and the scope-derived fallback grants
+    // nothing outside an operator posture. Without the charter the load gate refuses
+    // for want of a GRANT and this fixture's INSTEAD OF question is never reached.
+    let document = zero_migrate::model::load::load_ir_document_authorized(
         ir,
         OWNER,
         &zero_migrate_sqlite::DIALECT,
         &registry(),
         None,
+        Some(zero_migrate::model::validate::VendorAuthority {
+            effective: &policy,
+            default_schema: &cfg.project_schema,
+        }),
     )
     .map_err(|error| format!("load gate (sqlite): {error}"))?;
     let folded = fold_ops(

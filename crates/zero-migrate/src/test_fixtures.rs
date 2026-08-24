@@ -273,6 +273,11 @@ value = true
 scope = "all"
 
 [[grant]]
+key = "code.trigger"
+value = true
+scope = "all"
+
+[[grant]]
 key = "schema.cross_schema"
 value = true
 scope = {scope}

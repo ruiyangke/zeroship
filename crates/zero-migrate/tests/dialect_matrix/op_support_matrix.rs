@@ -313,17 +313,36 @@ fn support_declarations_cover_every_op_and_dialect() {
         match support.tier {
             SupportTier::Core => {
                 let caps = op_support::vendor_capabilities(op);
-                let raw_view_body_exception = matches!(
+                // The two axes this arm keeps apart. TIER answers "which dialects can
+                // render this at all" — a `Vendor` tier means the privileged
+                // catalog-object family, which exactly one backend renders, and the
+                // arm below pins that. CAPABILITY answers "what must the charter have
+                // granted" — a different question, and a portable op is allowed to
+                // need an answer to it.
+                //
+                // Reading the two as one decision is the defect this file guards, so
+                // the core-tier ops that DO carry a capability are enumerated by shape
+                // rather than waved through: a raw view body (the raw-text escape in a
+                // shape every backend renders) and a trigger (fires on every affected
+                // row, in a shape every backend renders).
+                let portable_but_gated = if matches!(
                     op,
                     Op::CreateView {
                         query: ViewQuery::Raw { .. },
                         materialized,
                         ..
                     } if !materialized.unwrap_or(false)
-                ) && caps == vec![VendorCapability::RawViewBody];
+                ) {
+                    caps == vec![VendorCapability::RawViewBody]
+                } else if matches!(op, Op::CreateTrigger { .. } | Op::DropTrigger { .. }) {
+                    caps.contains(&VendorCapability::Trigger)
+                } else {
+                    false
+                };
                 assert!(
-                    caps.is_empty() || raw_view_body_exception,
-                    "{tag}: core declarations must not hide vendor capabilities except the current raw view-body capability exception"
+                    caps.is_empty() || portable_but_gated,
+                    "{tag}: a core-tier declaration may carry a vendor capability only in \
+                     an enumerated portable-but-gated shape; this one carries {caps:?}"
                 );
             }
             SupportTier::Vendor(caps) => {

@@ -179,6 +179,7 @@ impl ValidationPolicy for PostgresValidationPolicy {
             | VendorCapability::Partition
             | VendorCapability::Policy
             | VendorCapability::Function
+            | VendorCapability::Trigger
             | VendorCapability::RawSql
             | VendorCapability::RawViewBody
             | VendorCapability::MaterializedView => None,

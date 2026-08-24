@@ -865,8 +865,6 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
         | Op::Delete { .. }
         | Op::Backfill { .. }
         | Op::Dialectal { .. }
-        | Op::CreateTrigger { .. }
-        | Op::DropTrigger { .. }
         | Op::CreateEnum { .. }
         | Op::DropEnum { .. }
         | Op::CreateDomain { .. }
@@ -913,6 +911,12 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
         Op::SetRls { .. } => vec![C::Rls],
         Op::CreatePolicy { .. } | Op::DropPolicy { .. } => vec![C::Policy],
         Op::CreateFunction { .. } | Op::DropFunction { .. } => vec![C::Function],
+        // Capability-gated but NOT tier-vendor. Every registered backend renders
+        // triggers, so the op keeps a portable reach and a `SupportTier::Core`
+        // declaration; what the grant governs is the authority to arrange for work to
+        // fire on every affected row without a later statement naming it. The same
+        // core-tier-plus-capability shape the raw view body already has.
+        Op::CreateTrigger { .. } | Op::DropTrigger { .. } => vec![C::Trigger],
         Op::Raw { .. } => vec![C::RawSql],
     }
 }
