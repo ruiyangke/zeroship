@@ -477,16 +477,22 @@ pub trait MigrationBackend {
     /// Bootstrap the journal + immutability constructs (idempotent).
     async fn ensure_journal(&self, cfg: &ExecutorConfig) -> Result<(), JournalError>;
 
-    /// Versions with an unresolved backend-specific rollback marker.
+    /// Versions with an unresolved backend-specific rollback marker, each carrying
+    /// this backend's own instruction for clearing it.
     ///
-    /// MySQL uses a durable side-table because its `down` DDL auto-commits and an
-    /// interrupted unwind can leave an unverified partially-reverted shape.
-    /// Transactional rollback backends have no such artifact and inherit the
-    /// empty result.
+    /// A backend whose `down` DDL auto-commits needs a durable side-table, because an
+    /// interrupted unwind leaves an unverified partially-reverted shape it cannot roll
+    /// back. A backend whose rollback is transactional has no such artifact and
+    /// inherits the empty result.
+    ///
+    /// The instruction rides WITH the marker rather than being templated by the
+    /// caller: the marker's home, its table name and its quoting are the recording
+    /// backend's, and the caller only has to print what it is handed. See
+    /// [`crate::executor::ApplyError::UnresolvedRollbackMarker`].
     async fn unresolved_rollback_markers(
         &self,
         _cfg: &ExecutorConfig,
-    ) -> Result<Vec<String>, JournalError> {
+    ) -> Result<Vec<crate::executor::RollbackMarker>, JournalError> {
         Ok(Vec::new())
     }
 

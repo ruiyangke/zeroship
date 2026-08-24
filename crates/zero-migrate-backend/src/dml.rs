@@ -1442,16 +1442,15 @@ where
     })
 }
 
-/// **VENDOR** — render a CLOSED [`Expr`] predicate to an inline Postgres SQL
-/// fragment for the vendor `CREATE POLICY` `USING`/`WITH CHECK` and `CREATE
-/// TRIGGER` `WHEN` clauses. These DDL positions carry NO binds
-/// (a policy/trigger predicate is part of the catalog definition, not a
-/// parameterized statement), so the inline renderer is the right seam — a
-/// `ColRef` is its quoted identifier, a `Literal` an inline SQL literal, and the
-/// VENDOR `c.fn.currentSetting`/`currentUser` scalars render their PG form. The
-/// whole rendered statement is then `pg_query`-parsed by the guard, so the inline
-/// literals are re-validated by the real parser before any apply. PG dialect only
-/// (vendor predicates are `PgOnly`).
+/// Render a CLOSED [`Expr`] predicate to an inline SQL fragment in the CALLER'S
+/// OWN spelling, for a DDL position that carries no binds.
+///
+/// The two positions in this tree are a policy `USING` / `WITH CHECK` clause and a
+/// trigger `WHEN` clause. Both are part of a catalog DEFINITION rather than a
+/// parameterized statement, so there is nowhere to bind and the inline renderer is
+/// the right seam: a `ColRef` becomes the caller's quoted identifier and a `Literal`
+/// its inline literal. A backend that guards its own emitted SQL re-parses the whole
+/// statement afterwards, so the inline literals are re-validated before any apply.
 ///
 /// # Errors
 /// [`DmlError::UnrenderableExpr`] for an expression node that has no inline form

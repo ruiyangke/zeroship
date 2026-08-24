@@ -714,8 +714,12 @@ mod tests {
                     name: "external_id".into(),
                     scalar_type: CursorScalarType::String,
                     database_type: "text".into(),
+                    // A schema-qualified named collation. The qualifier is a
+                    // fixture value, not a fact about any shipping backend: the
+                    // encoding under test is the cursor TUPLE's, and the contract's
+                    // collation only has to round-trip whatever a producer recorded.
                     comparison: CursorComparison::NamedCollation {
-                        schema: Some("pg_catalog".into()),
+                        schema: Some("catalog".into()),
                         name: "C".into(),
                     },
                 },

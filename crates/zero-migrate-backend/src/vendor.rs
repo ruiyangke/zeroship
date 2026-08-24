@@ -1,23 +1,30 @@
-//! The VENDOR (`zero-migrate`) Postgres render seam.
+//! The VENDOR-OP render VOCABULARY: what a `DmlRenderer::render_vendor_op` hands
+//! back, and how it refuses.
 //!
-//! Renders the privileged vendor `Op` variants to **structured**
-//! Postgres DDL: identifiers double-quoted via the crate's single quoting seam
-//! (`quote_ident_checked`), policy/trigger predicates rendered from the CLOSED
-//! [`Expr`](zero_migrate_ir::expr::Expr) AST via the existing inline renderer
-//! (`render_predicate_pg`) — **never string concatenation**. The function `body`
-//! and the `raw` escape are the two raw-string fields: they are embedded
-//! VERBATIM and the WHOLE rendered statement is then `pg_query`-parsed by the
-//! guard at the lower seam (so the body is scanned).
+//! The privileged catalog-object family — namespaces, server extensions, roles and
+//! their grants, row-level security and its policies, stored functions and triggers,
+//! plus the audited raw-statement escape — is rendered by whichever backend answers
+//! yes to
+//! [`Capability::PrivilegedCatalogObjects`](zero_migrate_ir::backend::Capability::PrivilegedCatalogObjects).
+//! This module holds only the two types that crossing costs: the statement shape
+//! ([`VendorStatement`]) and the refusal set ([`VendorError`]). It renders nothing
+//! and spells no keyword.
 //!
-//! Every vendor op is `dialect_scope = PgOnly`: this module only renders Postgres,
-//! and the lower seam (`crate::render::lower`) hard-rejects a SQLite target before
-//! reaching here. The render is pure (no DB, no live schema).
+//! **This header used to describe a PostgreSQL renderer**, because it once WAS one:
+//! it opened "The VENDOR (`zero-migrate`) Postgres render seam", described
+//! double-quoting identifiers and `pg_query`-parsing the rendered statement, and
+//! said "this module only renders Postgres". None of that has been true since the
+//! renderer moved to `zero_migrate_postgres::vendor`, which is where every sentence
+//! of it now applies. What was left behind was a vendor's module doc on a neutral
+//! vocabulary — a description that would have told a fourth backend it was reading
+//! PostgreSQL's code.
 //!
-//! # NOT in this module
+//! # What is NOT here
 //!
-//! The capability GATE lives in `crate::model::validate`
-//! (`VENDOR_OP_DENIED` at load) + the rendered-SQL deny-list (the guard at lower).
-//! This module is render-only; it assumes the op already passed both gates.
+//! The capability GATE. A vendor op is refused at load by the validator and again at
+//! the engine's lower seam, both on the capability rather than on an identity, so a
+//! [`VendorError::VendorOpsUnsupported`] from a backend with no renderer is defence
+//! in depth rather than the live refusal path.
 
 use crate::dml::IdentQuoteError;
 use zero_migrate_ir::dialect::DialectId;
@@ -37,7 +44,7 @@ pub struct VendorStatement {
     pub down: Option<String>,
 }
 
-/// A failure rendering a vendor op to Postgres DDL.
+/// A failure rendering a vendor op to its target's DDL.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VendorError {
     /// An identifier could not be quoted (empty / NUL).
@@ -53,13 +60,20 @@ pub enum VendorError {
         /// What was empty.
         what: &'static str,
     },
-    /// A trigger action is not renderable on Postgres.
-    #[error("vendor render: trigger action {kind} is unsupported on Postgres")]
+    /// A trigger action this backend's trigger grammar cannot express.
+    ///
+    /// The refusing target is CARRIED rather than written into the message, for the
+    /// same reason [`Self::VendorOpsUnsupported`] below carries one: the text said
+    /// "unsupported on Postgres" and would have said so at any backend that grew a
+    /// vendor-op renderer and met an action it could not render.
+    #[error("vendor render: trigger action {kind} is unsupported on {dialect}")]
     UnsupportedTriggerAction {
         /// Stable unsupported-kind token.
         kind: &'static str,
+        /// The target that cannot render it, from its own identity.
+        dialect: DialectId,
     },
-    /// `CREATE ROLE IF NOT EXISTS` is synthesized with an opaque PL/pgSQL DO
+    /// `CREATE ROLE IF NOT EXISTS` is synthesized with an opaque procedural-language
     /// wrapper; SUPERUSER must never be hidden inside that body.
     #[error("vendor render: createRole cannot combine superuser:true with ifNotExists:true")]
     SuperuserIfNotExistsUnsupported,
@@ -91,10 +105,12 @@ pub enum VendorError {
     /// This vendor renders NO vendor ops at all, and says so itself.
     ///
     /// The privileged op kinds — roles, grants, RLS, policies, functions,
-    /// extensions, schemas and the raw escape — are every one of them
-    /// `dialect_scope = PgOnly`. Two of the three shipping vendors have no
-    /// counterpart to render and never had one, so this is the whole of their
-    /// answer to [`crate::renderer::DmlRenderer::render_vendor_op`].
+    /// extensions, schemas and the raw escape — are every one of them pinned to a
+    /// single dialect by their artifact's
+    /// [`DialectScope::Only`](crate::step::DialectScope::Only). Two of the three
+    /// shipping vendors have no counterpart to render and never had one, so this is
+    /// the whole of their answer to
+    /// [`crate::renderer::DmlRenderer::render_vendor_op`].
     ///
     /// It carries the refusing vendor's own dialect, read from that module's
     /// `DIALECT` const rather than written as a literal, so the one-dialect-literal
@@ -116,6 +132,6 @@ pub enum VendorError {
     /// `tests/a_fourth_backend_names_itself.rs` failed to compile on exactly
     /// that, which is the cheapest possible demonstration that the type was
     /// wrong rather than the newcomer.
-    #[error("vendor render: {0} renders no vendor ops (every vendor op is PgOnly)")]
+    #[error("vendor render: {0} registers no vendor-op renderer")]
     VendorOpsUnsupported(DialectId),
 }

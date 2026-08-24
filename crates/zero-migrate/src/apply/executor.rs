@@ -350,15 +350,15 @@ async fn apply_locked<B: MigrationBackend>(
     // before partitioning whenever its durable marker intersects the FULL set
     // supplied to this apply. PostgreSQL and SQLite inherit the empty hook.
     let supplied_versions: HashSet<&str> = migrations.iter().map(|m| m.version.as_str()).collect();
-    if let Some(version) = backend
+    if let Some(marker) = backend
         .unresolved_rollback_markers(cfg)
         .await?
         .into_iter()
-        .find(|version| supplied_versions.contains(version.as_str()))
+        .find(|marker| supplied_versions.contains(marker.version.as_str()))
     {
         return Err(ApplyError::UnresolvedRollbackMarker {
-            version,
-            meta_schema: cfg.confinement.meta_schema.clone(),
+            version: marker.version,
+            clear_instruction: marker.clear_instruction,
         });
     }
 

@@ -588,7 +588,10 @@ impl DmlRenderer for PostgresDmlRenderer {
         }
         let stmts = match crate::vendor::render_vendor_op(op, eff_schema) {
             Ok(stmts) => stmts,
-            Err(zero_migrate_backend::vendor::VendorError::UnsupportedTriggerAction { kind }) => {
+            Err(zero_migrate_backend::vendor::VendorError::UnsupportedTriggerAction {
+                kind,
+                ..
+            }) => {
                 return Err(IrLowerError::TriggerUnsupported {
                     kind,
                     dialect: DIALECT,

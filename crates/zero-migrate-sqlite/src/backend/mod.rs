@@ -751,7 +751,7 @@ impl MigrationBackend for SqliteBackend {
         } else {
             Err(ApplyError::NonTxnUnsupportedOnDialect {
                 version: m.version.as_str().to_string(),
-                dialect: "sqlite",
+                dialect: SQLITE_DIALECT,
             })
         }
     }

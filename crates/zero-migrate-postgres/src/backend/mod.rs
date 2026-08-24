@@ -52,7 +52,7 @@ use zero_migrate_backend::conn::ExecutorConfig;
 use zero_migrate_backend::drift::DriftError;
 use zero_migrate_backend::executor::{ApplyError, RollbackError};
 use zero_migrate_backend::journal::{self, AppliedEntry, JournalError};
-use zero_migrate_backend::requirements::DatabaseRequirements;
+use zero_migrate_backend::requirements::{DatabaseFeature, DatabaseRequirements};
 use zero_migrate_backend::snapshot::SchemaSnapshot;
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_backend::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
@@ -90,6 +90,30 @@ pub struct PostgresSessionSnapshot {
     pub lock_timeout: String,
     /// PG `search_path` GUC text.
     pub search_path: String,
+}
+
+/// This server's `server_version_num` floor for a plan-required database feature,
+/// or `0` for a feature it has had throughout the engine's supported range.
+///
+/// A version FLOOR is this backend's own knowledge — its numbering scheme, its
+/// release history — so it lives here rather than as a method on the neutral
+/// [`DatabaseFeature`]. It was
+/// `DatabaseFeature::minimum_postgres_version_num` in the contract crate, whose only
+/// production caller was `verify_database_requirements` below: the engine asks WHAT a
+/// plan needs, and each target answers whether it has it, in whatever terms its own
+/// versions come in.
+///
+/// The three validation features are collected only for a target whose CHECK
+/// enforcement is version-gated. This server has enforced them throughout, so it
+/// answers `0` and they impose no floor here.
+const fn minimum_server_version_num(feature: DatabaseFeature) -> i32 {
+    match feature {
+        DatabaseFeature::UuidV4Generation => 130_000,
+        DatabaseFeature::UuidV7Generation => 180_000,
+        DatabaseFeature::UuidValidation
+        | DatabaseFeature::TypeIdValidation
+        | DatabaseFeature::UlidValidation => 0,
+    }
 }
 
 /// The generic Postgres [`MigrationBackend`] implementation.
@@ -144,7 +168,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
         }
         let actual = session::server_version_num(self.conn).await?;
         for feature in requirements.iter() {
-            let minimum = feature.minimum_postgres_version_num();
+            let minimum = minimum_server_version_num(feature);
             if actual < minimum {
                 let minimum_major = minimum / 10_000;
                 return Err(ApplyError::Backend(format!(
@@ -1268,6 +1292,42 @@ mod recording_session_genericity {
             }),
             "legacy journal bootstrap must add nullable down idempotently: {log:?}"
         );
+    }
+
+    /// The `server_version_num` floors this backend enforces, pinned in the crate
+    /// that owns them.
+    ///
+    /// RELOCATED, not written fresh: `render::lower`'s
+    /// `postgres_plan_records_uuid_server_requirements` asserted these two numbers
+    /// while the floor table was a method on the neutral `DatabaseFeature`. The engine
+    /// cannot reach a private `const fn` here, so the assertions came with the table
+    /// rather than being dropped. What stayed in the engine is the half that is
+    /// genuinely the engine's: that lowering a UUIDv4/v7 default RECORDS the two
+    /// requirements on the plan.
+    #[test]
+    fn the_uuid_generators_carry_this_servers_own_version_floors() {
+        assert_eq!(
+            minimum_server_version_num(DatabaseFeature::UuidV4Generation),
+            130_000,
+            "gen_random_uuid() is core from 13"
+        );
+        assert_eq!(
+            minimum_server_version_num(DatabaseFeature::UuidV7Generation),
+            180_000,
+            "uuidv7() is core from 18"
+        );
+        for enforced_throughout in [
+            DatabaseFeature::UuidValidation,
+            DatabaseFeature::TypeIdValidation,
+            DatabaseFeature::UlidValidation,
+        ] {
+            assert_eq!(
+                minimum_server_version_num(enforced_throughout),
+                0,
+                "this server has enforced CHECK constraints throughout the supported \
+                 range, so a validation feature imposes no floor: {enforced_throughout:?}"
+            );
+        }
     }
 
     /// The guard is a real guard: a deliberately re-entrant driver (a verb that

@@ -10612,14 +10612,13 @@ mod tests {
                 DatabaseFeature::UuidV7Generation,
             ]
         );
-        assert_eq!(
-            DatabaseFeature::UuidV4Generation.minimum_postgres_version_num(),
-            130_000
-        );
-        assert_eq!(
-            DatabaseFeature::UuidV7Generation.minimum_postgres_version_num(),
-            180_000
-        );
+        // The two SERVER-VERSION FLOORS these features imply were asserted here
+        // while the floor table was a method on the neutral `DatabaseFeature`. They
+        // moved with the table into
+        // `zero_migrate_postgres::backend::the_uuid_generators_carry_this_servers_own_version_floors`,
+        // which is the crate that knows what a `server_version_num` even is. What is
+        // the ENGINE's to assert is the line above: that lowering these defaults
+        // RECORDS the two requirements on the plan.
     }
 
     #[test]

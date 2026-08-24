@@ -36,6 +36,7 @@
 
 use zero_migrate_backend::conn::ExecutorConfig;
 use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::executor::RollbackMarker;
 use zero_migrate_backend::journal::{
     AppliedEntry, CompletedRecord, EventKind, JournalError, JournaledKind, Phase,
 };
@@ -538,11 +539,16 @@ pub(crate) async fn net_rolled_back_versions<D: SqlSession>(
         .collect()
 }
 
-/// Return every version whose MySQL `down` started without a recorded outcome.
+/// Return every version whose `down` started here without a recorded outcome, each
+/// with this backend's own instruction for clearing its marker.
+///
+/// The instruction is built HERE rather than templated by the neutral apply path:
+/// the table name, the meta schema and the identifier quoting are all this backend's,
+/// and the caller only prints what it is handed.
 pub(crate) async fn unresolved_rollback_markers<D: SqlSession>(
     conn: &D,
     cfg: &ExecutorConfig,
-) -> Result<Vec<String>, JournalError> {
+) -> Result<Vec<RollbackMarker>, JournalError> {
     let meta = quote_ident_mysql(&cfg.confinement.meta_schema)?;
     let rows = conn
         .query(
@@ -555,8 +561,35 @@ pub(crate) async fn unresolved_rollback_markers<D: SqlSession>(
         )
         .await?;
     rows.into_iter()
-        .map(|row| row.try_get("version").map_err(JournalError::from))
+        .map(|row| {
+            let version: String = row.try_get("version")?;
+            let clear_instruction = clear_marker_instruction(&meta, &version);
+            Ok(RollbackMarker {
+                version,
+                clear_instruction,
+            })
+        })
         .collect()
+}
+
+/// The operator repair for one unresolved rollback marker, in this backend's own
+/// spelling.
+///
+/// Factored out of the query above so it can be asserted without a live session. It
+/// is the OPERATOR-VISIBLE half of an `apply` refusal and the CLI's host suite pins
+/// its shape (`packages/zero-migrate-cli/tests/host/apply-interrupted-rollback-marker.test.ts`
+/// matches `DELETE FROM \`<meta>\`.schema_migrations_rollback_inflight`), so it is
+/// worth a unit test that does not need a database to run.
+///
+/// `meta` arrives ALREADY QUOTED by this backend's identifier seam; the version goes
+/// through the grammar-string form because a `WHERE` comparison wants a quoted string
+/// token rather than this backend's ordinary hex literal.
+fn clear_marker_instruction(meta: &str, version: &str) -> String {
+    format!(
+        "clear the marker with DELETE FROM {meta}.schema_migrations_rollback_inflight \
+         WHERE version = {}",
+        crate::dml::grammar_string_literal(version)
+    )
 }
 
 /// The versions covered by a net-applied squash (the MySQL implementation behind
@@ -926,4 +959,43 @@ pub(crate) async fn append_recovery_audit<D: SqlSession>(
     )
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The refusal's operator repair is exactly what the CLI host suite matches on.
+    ///
+    /// It was a `format!` inside `zero_migrate_backend::executor::ApplyError`'s
+    /// `#[error]` attribute until this backend took ownership of it. That put one
+    /// backend's table name and one backend's identifier quoting in the neutral
+    /// vocabulary, where they would print at any target that reached the arm. The
+    /// TEXT is unchanged, which is what this pins.
+    #[test]
+    fn the_clear_instruction_names_this_backends_own_marker_table() {
+        let instruction = clear_marker_instruction("`proj_x_migrations`", "mig_00001_init");
+        assert_eq!(
+            instruction,
+            concat!(
+                "clear the marker with DELETE FROM ",
+                "`proj_x_migrations`.schema_migrations_rollback_inflight ",
+                "WHERE version = 'mig_00001_init'"
+            )
+        );
+    }
+
+    /// A version carrying a quote cannot break out of the repair statement.
+    ///
+    /// A journal version is engine-generated and cannot contain one today, but the
+    /// instruction is text an operator PASTES INTO A SHELL, so the escape is not
+    /// optional and the doubling is asserted rather than assumed.
+    #[test]
+    fn a_quote_in_a_version_is_doubled_rather_than_closing_the_literal() {
+        let instruction = clear_marker_instruction("`m`", "mig_'; DROP TABLE t; --");
+        assert!(
+            instruction.ends_with("WHERE version = 'mig_''; DROP TABLE t; --'"),
+            "{instruction}"
+        );
+    }
 }

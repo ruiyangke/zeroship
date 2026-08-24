@@ -985,10 +985,17 @@ pub async fn status_ir_with_locked_backend<B: MigrationBackend>(
         // project while they refuse leaves the operator with a contradiction and
         // nothing to act on, so it is read here and carried in the reply (F661).
         // The hook returns nothing on the dialects that cannot leave the marker.
-        let interrupted_unwinds = backend
+        // The seam hands back each marker WITH the owning backend's instruction for
+        // clearing it. This reply carries versions only, so the instruction is dropped
+        // here rather than in the contract: an operator who needs it gets it from the
+        // `apply` refusal, which is where it is actionable.
+        let interrupted_unwinds: Vec<String> = backend
             .unresolved_rollback_markers(cfg)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|marker| marker.version)
+            .collect();
         let mut reply = plan_status_reply(&status);
         for plan in reply.plans.iter_mut().flatten() {
             plan.touched_tables =

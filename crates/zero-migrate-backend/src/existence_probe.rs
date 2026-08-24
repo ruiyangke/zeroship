@@ -909,7 +909,7 @@ fn decide_constraint(
             drift(
                 &format!("constraint {name}"),
                 "definition",
-                "<declared constraint — cannot prove equal to live pg_get_constraintdef>",
+                "<declared constraint — cannot prove equal to the live catalog definition>",
                 if live_definition.is_empty() {
                     "<present>"
                 } else {

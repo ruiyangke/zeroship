@@ -125,6 +125,22 @@ impl From<crate::driver::DbError> for BackendError {
 // `BackendError` boxes the single `DbError` shape above. It still `downcast_ref`s
 // to a concrete backend error type when a test needs SQLSTATE details.
 
+/// One version whose interrupted rollback left a durable marker, and the recording
+/// backend's own instruction for clearing it.
+///
+/// The instruction travels with the marker because everything an operator needs to
+/// clear one — which table it lives in, which schema, how that backend quotes an
+/// identifier — is knowledge only the backend that wrote it has. The neutral apply
+/// path prints it and nothing more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollbackMarker {
+    /// The version carrying the unresolved marker.
+    pub version: String,
+    /// This backend's operator instruction for clearing THIS marker, phrased to
+    /// follow "then " in [`ApplyError::UnresolvedRollbackMarker`]'s message.
+    pub clear_instruction: String,
+}
+
 /// Error from `apply`.
 #[derive(Debug, thiserror::Error)]
 pub enum ApplyError {
@@ -134,22 +150,31 @@ pub enum ApplyError {
     /// A journal operation failed.
     #[error(transparent)]
     Journal(#[from] JournalError),
-    /// MySQL records that this version's `down` began, but no successful outcome
-    /// was journaled. The live schema may therefore be partially reverted, so an
-    /// already-applied version must not be reported as a clean skip.
+    /// The backend records that this version's `down` BEGAN, but no successful
+    /// outcome was journaled.
+    ///
+    /// A backend whose `down` DDL auto-commits cannot roll an interrupted unwind
+    /// back, so it leaves a durable marker instead: the live schema may be partially
+    /// reverted, and an already-applied version must not then be reported as a clean
+    /// skip. A backend whose rollback is transactional has no such artifact and never
+    /// produces this.
+    ///
+    /// `clear_instruction` is the BACKEND'S OWN operator instruction for this exact
+    /// marker, from [`RollbackMarker`]. It used to be a `DELETE FROM
+    /// \`{meta_schema}\`.schema_migrations_rollback_inflight` template written here —
+    /// one backend's table name and one backend's quoting, in the neutral vocabulary,
+    /// printed at whatever target reached the arm.
     #[error(
-        "mysql migration {version} has a rollback marker from an interrupted unwind; its \
+        "migration {version} has a rollback marker from an interrupted unwind; its \
          `down` auto-committed an unknown number of statements, so the live shape is not the \
          one this `up` expects. Inspect the live schema against the migration's `down`, finish \
-         or undo the partial revert yourself, then clear the marker with DELETE FROM \
-         `{meta_schema}`.schema_migrations_rollback_inflight WHERE version = '{version}' and \
-         run apply again"
+         or undo the partial revert yourself, then {clear_instruction}, and run apply again"
     )]
     UnresolvedRollbackMarker {
         /// The supplied migration version carrying the unresolved marker.
         version: String,
-        /// The MySQL meta database containing the rollback marker table.
-        meta_schema: String,
+        /// The owning backend's instruction for clearing this marker.
+        clear_instruction: String,
     },
     /// A dialect-level backend error whose message is already the intended
     /// operator-facing text. Use [`ApplyError::Db`] /
@@ -157,15 +182,17 @@ pub enum ApplyError {
     #[error("backend error: {0}")]
     Backend(String),
     /// A migration requested the **non-transactional** path (`transaction:false`)
-    /// on a dialect that has no non-txn DDL to recover (SQLite).
-    /// Rejected at the dialect boundary, before any apply. Postgres never returns
-    /// this — its non-txn path is real.
+    /// on a target that has no non-txn DDL to recover.
+    ///
+    /// Rejected at the dialect boundary, before any apply. A target whose non-txn
+    /// path is real never returns this; one whose DDL is wholly transactional has
+    /// nothing to classify and says so in its own name.
     #[error("migration {version} is transaction:false but the {dialect} backend has no non-transactional DDL path")]
     NonTxnUnsupportedOnDialect {
         /// The rejected migration's version.
         version: String,
-        /// The dialect that lacks a non-txn path (`"sqlite"`).
-        dialect: &'static str,
+        /// The target that lacks a non-txn path, from its own identity.
+        dialect: zero_migrate_ir::dialect::DialectId,
     },
     /// A plan step needs an optional backend capability
     /// ([`BackendCapability`](crate::capability::BackendCapability)) the deploy

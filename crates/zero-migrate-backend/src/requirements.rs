@@ -15,6 +15,15 @@
 //! `zero_migrate::render::plan`.
 
 /// A database feature whose exact IR lowering has live target requirements.
+///
+/// A VERSION FLOOR IS NOT HERE, and its absence is the point. The enum carried a
+/// `minimum_postgres_version_num` for a while: one backend's version-number scheme,
+/// one backend's release history, as a method on the neutral question. Its only
+/// production caller was that backend's own `verify_database_requirements`, which is
+/// exactly the seam the trait exists to route through — the engine asks WHAT a plan
+/// needs, and each target answers whether it has it, in whatever terms its own
+/// server versions come in. It is `zero_migrate_postgres::backend::minimum_server_version_num`
+/// now, private to the crate that reads it.
 /// These are derived from the typed expression AST and carried on the complete
 /// engine's `AppliedPlan` so apply can check them before any authored step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -37,18 +46,6 @@ pub enum DatabaseFeature {
 }
 
 impl DatabaseFeature {
-    /// PostgreSQL's numeric server-version floor for this feature.
-    #[must_use]
-    pub const fn minimum_postgres_version_num(self) -> i32 {
-        match self {
-            Self::UuidV4Generation => 130_000,
-            Self::UuidV7Generation => 180_000,
-            // Collected only for MySQL plans; PostgreSQL has enforced CHECK
-            // constraints throughout the engine's supported version range.
-            Self::UuidValidation | Self::TypeIdValidation | Self::UlidValidation => 0,
-        }
-    }
-
     /// Operator-facing feature description for a target-capability error.
     #[must_use]
     pub const fn description(self) -> &'static str {
