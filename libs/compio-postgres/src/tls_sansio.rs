@@ -139,23 +139,27 @@ impl TlsSession {
         Ok(())
     }
 
-    /// Hand received ciphertext to rustls.
+    /// Hand rustls ONE step of received ciphertext, and report how much it
+    /// took.
     ///
-    /// `read_tls` takes only as much as one record boundary allows, so this
-    /// loops. `process_new_packets` runs after each chunk because rustls will
-    /// not accept further input while packets are pending, and because that is
-    /// where a protocol violation surfaces.
-    fn feed_ciphertext(&mut self, mut src: &[u8]) -> io::Result<()> {
-        while !src.is_empty() {
-            let before = src.len();
-            self.conn.read_tls(&mut src)?;
-            self.conn
-                .process_new_packets()
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-            if src.len() == before {
-                break;
-            }
-        }
+    /// One step, not the whole buffer, and that is the contract rather than a
+    /// preference. `read_tls` refuses outright - `Err("received plaintext
+    /// buffer full")` - once 64 KiB of DECRYPTED bytes are sitting unread, and
+    /// rustls' own documentation on `read_tls` says to empty `reader()` after
+    /// each `process_new_packets`. A loop that drains a whole socket chunk
+    /// through `read_tls`/`process_new_packets` without returning to the
+    /// reader in between can cross that line and kill the connection.
+    ///
+    /// MEASURED 2026-08-24: it did. `concurrent_large_bidirectional_queries_do
+    /// _not_deadlock` streams 4 MB parameters while the server floods results
+    /// back, and the connection died with `error communicating with the
+    /// server` - this error, surfacing as an I/O failure several layers up.
+    /// The caller loops back to `reader()` between every step now.
+    fn feed_ciphertext_step(&mut self, src: &mut &[u8]) -> io::Result<()> {
+        self.conn.read_tls(src)?;
+        self.conn
+            .process_new_packets()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         self.collect_outgoing()
     }
 
@@ -236,6 +240,11 @@ pub(crate) struct TlsReader<R> {
     session: SharedSession,
     /// Ciphertext straight off the socket.
     cipher: Vec<u8>,
+    /// Bytes of `cipher` the last socket read produced.
+    cipher_len: usize,
+    /// How much of that rustls has taken. The gap between the two is fed one
+    /// step at a time, draining decrypted bytes in between.
+    cipher_read: usize,
     /// Decrypted bytes, staged before being copied into the caller's buffer.
     plain: Vec<u8>,
 }
@@ -246,6 +255,8 @@ impl<R> TlsReader<R> {
             socket,
             session,
             cipher: Vec::new(),
+            cipher_len: 0,
+            cipher_read: 0,
             plain: Vec::new(),
         }
     }
@@ -277,6 +288,10 @@ where
             self.plain.resize(cap, 0);
         }
         loop {
+            // ALWAYS the first thing in the loop. Every path back here - a
+            // fresh socket chunk, or another step through one already held -
+            // returns to the reader before giving rustls more, which is the
+            // condition `feed_ciphertext_step` documents.
             let n = self
                 .session
                 .borrow_mut()
@@ -284,12 +299,32 @@ where
             if n > 0 {
                 return Ok(n);
             }
-            // Read one chunk of ciphertext and give it to rustls. Inlined
-            // rather than a helper on purpose: every nested async frame here
-            // lands in the layout of the caller's async block, and this one
-            // sits under the connection task of every consumer of this crate.
-            // Splitting it back out pushed five downstream crates past rustc's
-            // default query-depth limit of 128.
+
+            // Ciphertext already read but not yet handed over: give rustls one
+            // step of it, then go back and drain.
+            if self.cipher_read < self.cipher_len {
+                let mut src = &self.cipher[self.cipher_read..self.cipher_len];
+                let before = src.len();
+                let outcome = self.session.borrow_mut().feed_ciphertext_step(&mut src);
+                self.cipher_read += before - src.len();
+                outcome?;
+                if before == src.len() {
+                    // rustls took nothing and raised nothing. Dropping the
+                    // remainder would silently desynchronise the stream, so
+                    // treat it as a protocol failure rather than looping.
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "the TLS session stopped accepting ciphertext",
+                    ));
+                }
+                continue;
+            }
+
+            // Read one chunk of ciphertext. Inlined rather than a helper on
+            // purpose: every nested async frame here lands in the layout of the
+            // caller's async block, and this one sits under the connection task
+            // of every consumer of this crate. Splitting it back out pushed
+            // five downstream crates past rustc's default query-depth limit.
             if self.cipher.is_empty() {
                 self.cipher = vec![0u8; READ_CHUNK];
             }
@@ -306,10 +341,8 @@ where
                     .borrow_mut()
                     .read_plaintext(&mut self.plain[..cap]);
             }
-            let chunk = std::mem::take(&mut self.cipher);
-            let outcome = self.session.borrow_mut().feed_ciphertext(&chunk[..read]);
-            self.cipher = chunk;
-            outcome?;
+            self.cipher_read = 0;
+            self.cipher_len = read;
         }
     }
 
