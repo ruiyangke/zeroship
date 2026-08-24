@@ -2732,10 +2732,7 @@ mod tuple_tests {
             "email".into(),
             "email_address".into(),
         );
-        let body = crate::dual_write::dual_write_function_body(
-            "\"email\"",
-            "\"email_address\"",
-        );
+        let body = crate::dual_write::dual_write_function_body("\"email\"", "\"email_address\"");
         prove_allowed_engine_trigger(
             &online_rename_row(&allowed, "O", true, body.clone()),
             &spec(),

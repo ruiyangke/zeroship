@@ -262,25 +262,25 @@ enum Token {
 /// * a block comment can hold anything at all.
 fn lex(text: &str) -> Vec<(usize, Token)> {
     let bytes = text.as_bytes();
-    let n = bytes.len();
+    let end = bytes.len();
     let mut out = Vec::new();
     let mut i = 0;
-    while i < n {
-        let c = bytes[i];
+    while i < end {
+        let byte = bytes[i];
         // line comment
-        if c == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
-            i = text[i..].find('\n').map_or(n, |at| i + at);
+        if byte == b'/' && i + 1 < end && bytes[i + 1] == b'/' {
+            i = text[i..].find('\n').map_or(end, |at| i + at);
             continue;
         }
         // block comment, nesting (Rust's are nestable)
-        if c == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+        if byte == b'/' && i + 1 < end && bytes[i + 1] == b'*' {
             let mut depth = 1usize;
             i += 2;
-            while i < n && depth > 0 {
-                if bytes[i] == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            while i < end && depth > 0 {
+                if bytes[i] == b'/' && i + 1 < end && bytes[i + 1] == b'*' {
                     depth += 1;
                     i += 2;
-                } else if bytes[i] == b'*' && i + 1 < n && bytes[i + 1] == b'/' {
+                } else if bytes[i] == b'*' && i + 1 < end && bytes[i + 1] == b'/' {
                     depth -= 1;
                     i += 2;
                 } else {
@@ -290,35 +290,35 @@ fn lex(text: &str) -> Vec<(usize, Token)> {
             continue;
         }
         // raw / byte-raw string: r"…", r#"…"#, br##"…"##
-        if c == b'r' || c == b'b' {
-            let mut j = i;
-            if bytes[j] == b'b' && j + 1 < n && bytes[j + 1] == b'r' {
-                j += 1;
+        if byte == b'r' || byte == b'b' {
+            let mut scan = i;
+            if bytes[scan] == b'b' && scan + 1 < end && bytes[scan + 1] == b'r' {
+                scan += 1;
             }
-            if bytes[j] == b'r' {
-                let mut k = j + 1;
+            if bytes[scan] == b'r' {
+                let mut probe = scan + 1;
                 let mut hashes = 0usize;
-                while k < n && bytes[k] == b'#' {
+                while probe < end && bytes[probe] == b'#' {
                     hashes += 1;
-                    k += 1;
+                    probe += 1;
                 }
-                if k < n && bytes[k] == b'"' {
+                if probe < end && bytes[probe] == b'"' {
                     let mut close = String::with_capacity(hashes + 1);
                     close.push('"');
                     for _ in 0..hashes {
                         close.push('#');
                     }
-                    i = text[k + 1..]
+                    i = text[probe + 1..]
                         .find(&close)
-                        .map_or(n, |at| k + 1 + at + close.len());
+                        .map_or(end, |at| probe + 1 + at + close.len());
                     continue;
                 }
             }
         }
         // ordinary string
-        if c == b'"' {
+        if byte == b'"' {
             i += 1;
-            while i < n {
+            while i < end {
                 if bytes[i] == b'\\' {
                     i += 2;
                     continue;
@@ -332,24 +332,24 @@ fn lex(text: &str) -> Vec<(usize, Token)> {
             continue;
         }
         // char literal vs lifetime
-        if c == b'\'' {
-            if i + 1 < n && bytes[i + 1] == b'\\' {
+        if byte == b'\'' {
+            if i + 1 < end && bytes[i + 1] == b'\\' {
                 // escaped char: run to the closing quote
-                let mut j = i + 2;
-                while j < n && bytes[j] != b'\'' {
-                    j += 1;
+                let mut scan = i + 2;
+                while scan < end && bytes[scan] != b'\'' {
+                    scan += 1;
                 }
-                i = j + 1;
+                i = scan + 1;
                 continue;
             }
-            if i + 2 < n && bytes[i + 2] == b'\'' {
+            if i + 2 < end && bytes[i + 2] == b'\'' {
                 i += 3; // simple char literal
                 continue;
             }
             i += 1; // lifetime
             continue;
         }
-        match c {
+        match byte {
             b'{' => out.push((i, Token::Open)),
             b'}' => out.push((i, Token::Close)),
             b'#' if text[i..].starts_with("#[cfg(test)]") => out.push((i, Token::CfgTest)),
@@ -397,13 +397,13 @@ fn test_line_span(text: &str) -> BTreeSet<usize> {
         };
         let mut depth = 0usize;
         let mut close = tokens.len() - 1;
-        for k in open..tokens.len() {
-            match tokens[k].1 {
+        for (offset, (_, token)) in tokens[open..].iter().enumerate() {
+            match token {
                 Token::Open => depth += 1,
                 Token::Close => {
                     depth -= 1;
                     if depth == 0 {
-                        close = k;
+                        close = open + offset;
                         break;
                     }
                 }
@@ -449,7 +449,12 @@ fn module_file(parent: &Path, name: &str) -> Option<PathBuf> {
     };
     roots
         .into_iter()
-        .flat_map(|root| [root.join(format!("{name}.rs")), root.join(name).join("mod.rs")])
+        .flat_map(|root| {
+            [
+                root.join(format!("{name}.rs")),
+                root.join(name).join("mod.rs"),
+            ]
+        })
         .find(|candidate| candidate.is_file())
 }
 

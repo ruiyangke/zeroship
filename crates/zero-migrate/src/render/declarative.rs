@@ -4416,9 +4416,7 @@ impl DeclarativeAuthor {
         column_renames: &[&ResolvedRename],
     ) -> Result<String, DeclarativeError> {
         let snapshot = desired.snapshot.tables.get(table).ok_or_else(|| {
-            DeclarativeError::Invalid(format!(
-                "internal: no rebuild snapshot for table '{table}'"
-            ))
+            DeclarativeError::Invalid(format!("internal: no rebuild snapshot for table '{table}'"))
         })?;
         let inject = desired.resolved_injects.get(table).ok_or_else(|| {
             DeclarativeError::Invalid(format!(

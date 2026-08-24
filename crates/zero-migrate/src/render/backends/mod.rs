@@ -169,13 +169,13 @@ pub(crate) const GENERATED_IDENT_MAX_BYTES: usize = tightest_identifier_budget(V
 /// Each declared limit is converted to a BYTE budget, taking the safe direction in
 /// both cases where the two units differ:
 ///
-/// * [`IdentifierLimit::Bytes(n)`] is already a byte budget.
-/// * [`IdentifierLimit::Characters(n)`] becomes `n` bytes, because a byte string of
+/// * `IdentifierLimit::Bytes(n)` is already a byte budget.
+/// * `IdentifierLimit::Characters(n)` becomes `n` bytes, because a byte string of
 ///   length `b` holds at most `b` characters — so `b <= n` bytes always fits an
 ///   `n`-character cap, whatever encoding the name is in. Treating it as `4 * n`
 ///   would be the true maximum and the WRONG direction: it would let the engine mint
 ///   a name that fits only if the name happens to be ASCII.
-/// * [`IdentifierLimit::Unbounded`] imposes nothing, so it contributes `usize::MAX`
+/// * `IdentifierLimit::Unbounded` imposes nothing, so it contributes `usize::MAX`
 ///   and cannot be the minimum unless it is the only kind present.
 ///
 /// An empty registry would yield `usize::MAX`, which cannot arise: `SHIPPING` is a

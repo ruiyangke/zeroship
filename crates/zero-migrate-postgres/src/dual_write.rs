@@ -32,7 +32,7 @@ use zero_migrate_backend::schema::{DualWriteTriggerSpec, DualWriteTriggerSql};
 /// The PL/pgSQL body of the managed dual-write trigger function.
 ///
 /// Public within this crate so ONE speller is reached by both the author that writes
-/// the trigger ([`super::PostgresSchemaRenderer::dual_write_trigger`]) and the
+/// the trigger (this crate's `SchemaRenderer::dual_write_trigger` impl) and the
 /// backfill guard that proves the LIVE trigger's source still matches it. It was
 /// `zero_migrate_backend::capability::dual_write_function_body` — this grammar in the
 /// neutral contract crate — until the engine stopped spelling the wrapper around it.

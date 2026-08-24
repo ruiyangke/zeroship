@@ -407,10 +407,9 @@ fn refresh_historical_live(
         // as a PROJECTION of the single fold rather than a fourth replay of the op
         // stream (step 4 consumer 3 of `docs/proposals/single-fold-and-effects.md`
         // section G).
-        historical_live.sdk_schemas =
-            single_fold::fold(cumulative_ops, dialect, project, policy)
-                .map_err(|error| error.to_string())?
-                .project_field_defs();
+        historical_live.sdk_schemas = single_fold::fold(cumulative_ops, dialect, project, policy)
+            .map_err(|error| error.to_string())?
+            .project_field_defs();
     }
     Ok(())
 }
@@ -621,11 +620,7 @@ impl MigrationEngine {
             if preserves_authored_logical_columns {
                 live.advance_logical_columns(&resolved, dialect, project, None)
                     .map_err(|error| {
-                        envelope_deploy_error(
-                            &migration_name,
-                            "logical-column advance",
-                            error,
-                        )
+                        envelope_deploy_error(&migration_name, "logical-column advance", error)
                     })?;
             }
             let logical_columns =

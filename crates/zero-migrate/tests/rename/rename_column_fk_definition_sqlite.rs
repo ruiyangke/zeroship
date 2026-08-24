@@ -630,10 +630,9 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
         .expect("the stored CREATE text");
 
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sdk_schemas =
-        single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
-            .map(|folded| folded.project_field_defs())
-            .expect("the history folds to field defs");
+    live.sdk_schemas = single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
+        .expect("the history folds to field defs");
 
     let steps = author
         .lower_steps(&rename_ir(), &live)

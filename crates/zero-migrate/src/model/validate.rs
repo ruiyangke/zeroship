@@ -3186,7 +3186,9 @@ fn validate_no_name_is_claimed_twice(
                             "this {} claims the name {:?}, but an earlier operation in this \
                              migration already created a {held_by} with that name, and {} \
                              keeps both in one type namespace",
-                            $what, $name, target_dialect.as_str()
+                            $what,
+                            $name,
+                            target_dialect.as_str()
                         ),
                         "drop the existing object first, or use a different name",
                     ));
@@ -5692,7 +5694,7 @@ fn validate_partition_recording(
                         format!(
                             "createPartition {name:?} targets parent {of:?}, but this recording does not contain a collapse-affirmed partitioned parent to authorize the no-DDL leg"
                         ),
-                        &native_partition_alternative(
+                        native_partition_alternative(
                             "record the partitioned parent with partitionBy.whenUnsupported: \"collapse\" in the same fold",
                             "native partition DDL",
                         ),
@@ -5718,7 +5720,7 @@ fn validate_partition_recording(
                             "attachPartition {name:?} targets parent {parent:?}, but {} does not declare native partition DDL",
                             target_dialect.as_str()
                         ),
-                        &native_partition_alternative(
+                        native_partition_alternative(
                             "record the parent with partitionBy.whenUnsupported: \"collapse\" instead",
                             "native partition attach",
                         ),
@@ -5829,7 +5831,7 @@ fn validate_partition_recording(
                         "collapse-affirmed range partitioning on table {table:?} has {} partition key columns; v1 collapse supports exactly one",
                         key_columns.len()
                     ),
-                    &collapse_or_native_target("use a single range partition key for collapse"),
+                    collapse_or_native_target("use a single range partition key for collapse"),
                 ));
             }
             for key in key_columns {
@@ -5841,7 +5843,7 @@ fn validate_partition_recording(
                         format!(
                             "collapse-affirmed partitioned table {table:?} has nullable partition key column {key:?}"
                         ),
-                        &collapse_or_native_target("mark every partition key column notNull"),
+                        collapse_or_native_target("mark every partition key column notNull"),
                     ));
                 }
             }
@@ -6068,7 +6070,9 @@ fn validate_partition_bounds_total(
                         "collapse-affirmed {} partitioned table {table:?} has no default child",
                         partition_spec_label(&parent.spec)
                     ),
-                    &collapse_or_native_target("add a .partition(...).create({ default: true }) child"),
+                    collapse_or_native_target(
+                        "add a .partition(...).create({ default: true }) child",
+                    ),
                 ));
             }
         }

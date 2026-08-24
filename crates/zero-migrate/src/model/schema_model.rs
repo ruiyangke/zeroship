@@ -281,8 +281,7 @@ impl VendorFacts {
             index_element_collation,
         } = other;
         self.rowid_alias.extend(rowid_alias);
-        self.stored_create_sql
-            .extend(stored_create_sql);
+        self.stored_create_sql.extend(stored_create_sql);
         self.catalog_uuid_format_check
             .extend(catalog_uuid_format_check);
         self.expression_default.extend(expression_default);
@@ -292,10 +291,8 @@ impl VendorFacts {
         self.index_opclass.extend(index_opclass);
         self.index_nulls_not_distinct
             .extend(index_nulls_not_distinct);
-        self.index_element_opclass
-            .extend(index_element_opclass);
-        self.index_element_collation
-            .extend(index_element_collation);
+        self.index_element_opclass.extend(index_element_opclass);
+        self.index_element_collation.extend(index_element_collation);
     }
 
     /// The VENDOR half of TABLE-SHAPE identity for one column: the vendor term
@@ -762,9 +759,7 @@ impl Table {
     #[must_use]
     pub fn from_snapshot(name: &str, snapshot: &TableSnapshot, vendor: &mut VendorFacts) -> Self {
         if let Some(stored) = snapshot.stored_create_sql.clone() {
-            vendor
-                .stored_create_sql
-                .insert(TableKey::new(name), stored);
+            vendor.stored_create_sql.insert(TableKey::new(name), stored);
         }
         Self {
             columns: snapshot
@@ -810,10 +805,7 @@ impl Table {
             runtime_options: self.runtime_options.clone(),
             partition_by: self.partition_by.clone(),
             comment: self.comment.clone(),
-            stored_create_sql: vendor
-                .stored_create_sql
-                .get(&TableKey::new(name))
-                .cloned(),
+            stored_create_sql: vendor.stored_create_sql.get(&TableKey::new(name)).cloned(),
         }
     }
 }

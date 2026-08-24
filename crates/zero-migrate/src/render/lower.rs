@@ -6803,7 +6803,9 @@ impl IrAuthor {
             return Err(IrLowerError::ColumnUnsupported {
                 kind: "identity",
                 dialect: self.dialect.clone(),
-                reason: Some("the target declares no non-PK identity, and there is no sound emulation"),
+                reason: Some(
+                    "the target declares no non-PK identity, and there is no sound emulation",
+                ),
             });
         }
         let field = ir_column_to_field(&IrColumn {

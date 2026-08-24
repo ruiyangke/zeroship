@@ -526,13 +526,13 @@ impl ExpandContractAuthor {
         );
 
         // ---- C1: remove the dual-write trigger (gated, depends_on E2) ----
-        let c1_up = e2_sql.remove.clone();
+        // Last use of both halves, so this consumes the pair the renderer built.
         let c1 = self.make(
             &format!("contract_drop_dual_write_{table}_{from}_{to}"),
-            c1_up,
+            e2_sql.remove,
             // Re-creating the dual-write is the reverse (best-effort); the
             // contract is gated + roll-forward-preferred, but a clean down exists.
-            Some(e2_sql.install.clone()),
+            Some(e2_sql.install),
             MigrationFlags {
                 online: true,
                 phase: Some(OnlinePhase::Contract),

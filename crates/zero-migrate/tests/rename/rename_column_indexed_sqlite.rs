@@ -815,10 +815,9 @@ async fn a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_
          through the replay arm"
     );
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sdk_schemas =
-        single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
-            .map(|folded| folded.project_field_defs())
-            .expect("the history folds to field defs");
+    live.sdk_schemas = single_fold::fold(&create_ops, &zero_migrate::SQLITE, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
+        .expect("the history folds to field defs");
 
     let steps = author
         .lower_steps(&rename_ir(), &live)
@@ -1287,10 +1286,9 @@ columns = [
     let snapshot = fold_ops(&create.ops, &zero_migrate::SQLITE, PROJECT, &effective)
         .expect("the history folds");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
-    live.sdk_schemas =
-        single_fold::fold(&create.ops, &zero_migrate::SQLITE, PROJECT, &effective)
-            .map(|folded| folded.project_field_defs())
-            .expect("the history folds to field defs");
+    live.sdk_schemas = single_fold::fold(&create.ops, &zero_migrate::SQLITE, PROJECT, &effective)
+        .map(|folded| folded.project_field_defs())
+        .expect("the history folds to field defs");
 
     let author = IrAuthor::new(PROJECT, APP, &zero_migrate::SQLITE, &effective);
     let error = author
