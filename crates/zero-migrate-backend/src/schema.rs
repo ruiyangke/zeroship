@@ -45,6 +45,43 @@ pub enum ColumnRenameStrategy {
     Refuse(&'static str),
 }
 
+/// The already-quoted names one dual-write trigger is built from.
+///
+/// Every field arrives QUOTED, by the same renderer that is being asked for the SQL —
+/// the engine composes the names (the generated function and trigger names are its
+/// own, bounded by `GENERATED_IDENT_MAX_BYTES`) and the backend spells them. Passing
+/// the quoted forms rather than the bare ones keeps the one identifier-quoting seam
+/// the tree already has instead of opening a second one inside this method.
+#[derive(Debug, Clone, Copy)]
+pub struct DualWriteTriggerSpec<'a> {
+    /// Quoted, schema-qualified name of the generated trigger function.
+    pub function: &'a str,
+    /// Quoted name of the generated trigger.
+    pub trigger: &'a str,
+    /// Quoted, schema-qualified name of the table being renamed on.
+    pub table: &'a str,
+    /// Quoted name of the legacy column.
+    pub from: &'a str,
+    /// Quoted name of the new column.
+    pub to: &'a str,
+}
+
+/// The two statements a managed dual-write trigger needs over its lifetime.
+///
+/// Both are returned together because the engine uses `remove` in three places — the
+/// structural rollback of the install step, the contract step that tears the trigger
+/// down, and that contract step's own `down` — and a backend that spelled the install
+/// without the matching removal would strand a trigger the contract's
+/// `DROP COLUMN <from>` then runs beside.
+#[derive(Debug, Clone)]
+pub struct DualWriteTriggerSql {
+    /// Installs the function and the trigger. Must be re-runnable.
+    pub install: String,
+    /// Removes the trigger and the function. Must be idempotent, so a partly
+    /// applied install can still be torn down.
+    pub remove: String,
+}
+
 /// The physical evidence available while validating whether a column may be
 /// used as a key without a prefix length.
 ///
@@ -242,6 +279,35 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
         rendered_type: &str,
         rendered_default: &str,
     ) -> Option<StorageValidationRefusal>;
+
+    /// The MANAGED DUAL-WRITE TRIGGER for an expand-contract online rename: the SQL
+    /// that installs it and the SQL that removes it, or an explicit `None` from a
+    /// backend that does not resolve a rename that way.
+    ///
+    /// Required with no default, for the same fail-closed reason as
+    /// [`Self::stored_ddl`]: a backend that returns [`ColumnRenameStrategy::ExpandContract`]
+    /// and no trigger has contradicted itself, and that should be a decision it makes
+    /// at its own definition site.
+    ///
+    /// # Why this is a method and not four `format!`s in the engine
+    ///
+    /// It was four `format!`s in the engine. `render::expand_contract` spelled
+    /// `CREATE OR REPLACE FUNCTION … LANGUAGE plpgsql`, `CREATE TRIGGER … BEFORE
+    /// INSERT OR UPDATE … EXECUTE FUNCTION`, and twice `DROP TRIGGER … ON … ; DROP
+    /// FUNCTION …` — one vendor's procedural language and one vendor's trigger
+    /// grammar, emitted from the neutral engine. Only the `plpgsql` token was visible
+    /// to a vendor-name census; the other three statements are just as much one
+    /// backend's SQL, and `DROP TRIGGER <t> ON <table>` is not even syntactically
+    /// portable.
+    ///
+    /// The trigger BODY had the same problem one crate lower. It was
+    /// `zero_migrate_backend::capability::dual_write_function_body`, twenty lines of
+    /// PL/pgSQL — `TG_OP`, `NEW`, `OLD`, `IS DISTINCT FROM`, `RETURN NEW` — in the
+    /// crate whose rule is that nothing in it spells a vendor's grammar. It passed
+    /// that crate's neutrality census because the census looks for vendor NAMES and
+    /// PL/pgSQL contains none. It lives with its backend now, next to the backfill
+    /// guard that compares a live trigger against it.
+    fn dual_write_trigger(&self, spec: &DualWriteTriggerSpec<'_>) -> Option<DualWriteTriggerSql>;
 
     /// Required structural strategies used by the neutral declarative planner.
     fn existing_column_change_strategy(&self) -> ExistingColumnChangeStrategy;

@@ -352,6 +352,15 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         })
     }
 
+    fn dual_write_trigger(
+        &self,
+        _spec: &zero_migrate_backend::schema::DualWriteTriggerSpec<'_>,
+    ) -> Option<zero_migrate_backend::schema::DualWriteTriggerSql> {
+        // This backend REFUSES a live column rename (`ColumnRenameStrategy::Refuse`
+        // below), so it never reaches an expand-contract sequence at all.
+        None
+    }
+
     fn existing_column_change_strategy(
         &self,
     ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {

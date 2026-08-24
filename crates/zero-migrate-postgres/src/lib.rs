@@ -41,6 +41,7 @@ pub mod confinement;
 mod ddl;
 mod descriptor;
 mod dml;
+mod dual_write;
 mod existence_probe;
 mod fold;
 pub mod guard;

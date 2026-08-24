@@ -134,6 +134,16 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         None
     }
 
+    fn dual_write_trigger(
+        &self,
+        _spec: &zero_migrate_backend::schema::DualWriteTriggerSpec<'_>,
+    ) -> Option<zero_migrate_backend::schema::DualWriteTriggerSql> {
+        // This backend reconciles a rename by REBUILDING the table
+        // (`ColumnRenameStrategy::TableRebuild` below), so there is no window in which
+        // two columns coexist and nothing for a dual-write trigger to keep equal.
+        None
+    }
+
     fn existing_column_change_strategy(
         &self,
     ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {

@@ -344,45 +344,17 @@ fn capped_name(natural: &str, max_bytes: usize) -> String {
     format!("{prefix}_{suffix}")
 }
 
-/// Render the dual-write function + trigger SQL (shared by E2's `up` and C1's
-/// `down`, so they are byte-identical).
-///
-/// `CREATE OR REPLACE FUNCTION … LANGUAGE plpgsql` (SECURITY INVOKER — the
-/// plpgsql default; we deliberately emit NO `SECURITY DEFINER`). The body is
-/// **total**: after it runs, `from` and `to` are ALWAYS equal, for every INSERT
-/// and UPDATE — no input row is left divergent (a divergent pair would be
-/// silently destroyed by the contract's `DROP COLUMN <from>`). Precedence is
-/// **`to` wins** (consistent with the contract keeping `to`):
-///
-/// - on INSERT: if only `from` is set, mirror `from → to`; otherwise (`to` set,
-///   both set, or both NULL) copy `to → from`;
-/// - on UPDATE: if only `from` changed, mirror `from → to`; otherwise (`to`
-///   changed, both changed → to wins, or neither changed → no-op) copy
-///   `to → from`.
-///
-/// The only-`from` arm is `IS DISTINCT FROM`-guarded (NULL-safe). The else arm
-/// is the total catch-all; when nothing changed it is a no-op self-copy, so an
-/// UPDATE that touches neither column is not amplified.
-pub fn dual_write_function_body(from_q: &str, to_q: &str) -> String {
-    format!(
-        "\nBEGIN\n\
-         \x20   IF TG_OP = 'INSERT' THEN\n\
-         \x20       IF NEW.{to_q} IS NULL AND NEW.{from_q} IS NOT NULL THEN\n\
-         \x20           NEW.{to_q} := NEW.{from_q};   -- only from set\n\
-         \x20       ELSE\n\
-         \x20           NEW.{from_q} := NEW.{to_q};   -- to set / both set (to wins) / both null (no-op)\n\
-         \x20       END IF;\n\
-         \x20   ELSE\n\
-         \x20       -- UPDATE: TOTAL, to wins. Only-from-changed mirrors from→to;\n\
-         \x20       -- to-changed / both-changed / neither-changed all resolve to→from.\n\
-         \x20       IF NEW.{from_q} IS DISTINCT FROM OLD.{from_q}\n\
-         \x20          AND NEW.{to_q} IS NOT DISTINCT FROM OLD.{to_q} THEN\n\
-         \x20           NEW.{to_q} := NEW.{from_q};   -- only from changed\n\
-         \x20       ELSE\n\
-         \x20           NEW.{from_q} := NEW.{to_q};   -- to changed / both changed (to wins) / neither (no-op)\n\
-         \x20       END IF;\n\
-         \x20   END IF;\n\
-         \x20   RETURN NEW;\n\
-         END;\n"
-    )
-}
+// `pub fn dual_write_function_body(from_q, to_q) -> String` USED TO LIVE HERE, and it
+// was twenty lines of PL/pgSQL — `TG_OP`, `NEW`, `OLD`, `IS DISTINCT FROM`,
+// `RETURN NEW` — in the crate whose stated rule is that "nothing here spells a
+// keyword, quotes an identifier or names a dialect".
+//
+// It passed this crate's own neutrality census the whole time, because that census
+// looks for vendor NAMES and PL/pgSQL contains none of them. The name it would have
+// caught, `LANGUAGE plpgsql`, was one crate UP, in the engine's
+// `render::expand_contract`, wrapped around this body.
+//
+// Both halves are in `zero-migrate-postgres` now, behind
+// `SchemaRenderer::dual_write_trigger`, next to the backfill guard that compares a
+// live trigger's source against them. The engine asks the resolved renderer and
+// spells nothing.

@@ -145,6 +145,17 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         None
     }
 
+    fn dual_write_trigger(
+        &self,
+        spec: &zero_migrate_backend::schema::DualWriteTriggerSpec<'_>,
+    ) -> Option<zero_migrate_backend::schema::DualWriteTriggerSql> {
+        // This backend answers `ColumnRenameStrategy::ExpandContract` below, so it
+        // MUST answer here; the two are one decision stated twice, and a `None`
+        // paired with `ExpandContract` would leave the engine with a rename it
+        // selected and cannot install.
+        Some(crate::dual_write::dual_write_trigger(spec))
+    }
+
     fn existing_column_change_strategy(
         &self,
     ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {

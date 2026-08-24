@@ -1005,7 +1005,7 @@ fn prove_allowed_engine_trigger(
     let function_body: String = row.try_get("function_body")?;
     let from = quote_ident(&expected.from_column)?;
     let to = quote_ident(&expected.to_column)?;
-    let expected_body = zero_migrate_backend::capability::dual_write_function_body(&from, &to);
+    let expected_body = crate::dual_write::dual_write_function_body(&from, &to);
     let touches_cursor = spec
         .cursor_columns
         .iter()
@@ -2732,7 +2732,7 @@ mod tuple_tests {
             "email".into(),
             "email_address".into(),
         );
-        let body = zero_migrate_backend::capability::dual_write_function_body(
+        let body = crate::dual_write::dual_write_function_body(
             "\"email\"",
             "\"email_address\"",
         );

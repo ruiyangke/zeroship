@@ -452,12 +452,12 @@ impl ExpandContractAuthor {
         // construction; the only-from arm's IS DISTINCT FROM is the
         // amplification guard (a no-op UPDATE falls into the self-copy else arm),
         // not a recursion guard.
-        let e2_up = build_dual_write_sql(&fn_q, &trg_q, &tbl_q, &from_q, &to_q);
+        let e2_sql = dual_write_sql(&self.dialect, &fn_q, &trg_q, &tbl_q, &from_q, &to_q)?;
+        let e2_up = e2_sql.install.clone();
         // Structural rollback of E2 (before backfill) tears down trigger then
-        // function — IF EXISTS so it is idempotent / safe if partly applied.
-        let e2_down = Some(format!(
-            "DROP TRIGGER IF EXISTS {trg_q} ON {tbl_q}; DROP FUNCTION IF EXISTS {fn_q}()"
-        ));
+        // function. Idempotence is the backend's stated contract for `remove`, so
+        // this is safe if the install was only partly applied.
+        let e2_down = Some(e2_sql.remove.clone());
         let e2 = self.make(
             &format!("expand_dual_write_{table}_{from}_{to}"),
             e2_up,
@@ -525,15 +525,14 @@ impl ExpandContractAuthor {
             EC_STEP_E3,
         );
 
-        // ---- C1: DROP TRIGGER + DROP FUNCTION (gated, depends_on E2) ----
-        let c1_up =
-            format!("DROP TRIGGER IF EXISTS {trg_q} ON {tbl_q}; DROP FUNCTION IF EXISTS {fn_q}()");
+        // ---- C1: remove the dual-write trigger (gated, depends_on E2) ----
+        let c1_up = e2_sql.remove.clone();
         let c1 = self.make(
             &format!("contract_drop_dual_write_{table}_{from}_{to}"),
             c1_up,
             // Re-creating the dual-write is the reverse (best-effort); the
             // contract is gated + roll-forward-preferred, but a clean down exists.
-            Some(build_dual_write_sql(&fn_q, &trg_q, &tbl_q, &from_q, &to_q)),
+            Some(e2_sql.install.clone()),
             MigrationFlags {
                 online: true,
                 phase: Some(OnlinePhase::Contract),
@@ -662,52 +661,46 @@ impl ExpandContractAuthor {
     }
 }
 
-// The trigger function body: one speller, reached by the author that writes it and
-// the backfill guard that proves the live trigger matches it.
-pub(crate) use zero_migrate_backend::capability::dual_write_function_body;
-
-fn build_dual_write_sql(fn_q: &str, trg_q: &str, tbl_q: &str, from_q: &str, to_q: &str) -> String {
-    // The function body. `$zsdw$` dollar-quote so embedded SQL needs no escaping.
-    // BEGIN … RETURN NEW: a BEFORE trigger mutates NEW in place (never re-issues
-    // a write → no recursion).
-    //
-    // BOTH arms are TOTAL — they ALWAYS leave `from` == `to`, for every INSERT
-    // and every UPDATE, no input row left divergent. This is the coexistence
-    // model's central data-integrity invariant: a divergent pair would be
-    // silently destroyed by the contract's `DROP COLUMN <from>`. When a single
-    // statement changes BOTH columns (to different values), the old guarded form
-    // matched NEITHER branch and let the pair diverge; the totalized form below
-    // closes that hole.
-    //
-    // Precedence: **`to` (the new column) WINS** — consistent with the end state
-    // (the contract keeps `to`). The `from`-only arm is the single exception: it
-    // is the one case where `from` is the source of truth (the app wrote only the
-    // legacy name), so `from → to`. Every other shape resolves to `to`.
-    //
-    // INSERT (OLD is undefined): if ONLY `from` is set, mirror `from → to`;
-    // otherwise (`to` set, both set, or both NULL) the else arm copies
-    // `to → from` (to-wins; both-NULL is a no-op self-copy).
-    //
-    // UPDATE: if ONLY `from` changed, mirror `from → to`; otherwise (`to`
-    // changed, BOTH changed → to wins, or NEITHER changed → no-op self-copy) the
-    // else arm copies `to → from`.
-    let body = dual_write_function_body(from_q, to_q);
-    let func = format!(
-        "CREATE OR REPLACE FUNCTION {fn_q}() RETURNS trigger AS $zsdw${body}$zsdw$ LANGUAGE plpgsql"
-    );
-    // The trigger. BEFORE INSERT OR UPDATE, FOR EACH ROW. We attach a single
-    // trigger for both events and keep no WHEN clause: Postgres forbids OLD in a
-    // WHEN for the INSERT event, and the body is already total + self-no-op (a
-    // no-op UPDATE falls into the to→from else arm, which writes the same value
-    // back — no amplification). The function body is the authoritative guard.
-    // (A separate UPDATE-only trigger with a WHEN (OLD.* IS DISTINCT FROM NEW.*)
-    // is a possible v2 optimization; v1's body-level total form is correct and
-    // simpler.)
-    let trigger = format!(
-        "CREATE TRIGGER {trg_q} BEFORE INSERT OR UPDATE ON {tbl_q}\n\
-         FOR EACH ROW EXECUTE FUNCTION {fn_q}()"
-    );
-    format!("{func};\n{trigger}")
+// `pub(crate) use zero_migrate_backend::capability::dual_write_function_body;` and
+// `fn build_dual_write_sql(..)` USED TO LIVE HERE, and between them they made the
+// neutral engine spell four PostgreSQL statements: `CREATE OR REPLACE FUNCTION …
+// LANGUAGE plpgsql`, `CREATE TRIGGER … BEFORE INSERT OR UPDATE … EXECUTE FUNCTION`,
+// and twice `DROP TRIGGER <t> ON <table>; DROP FUNCTION <f>()` — the last of which is
+// not portable syntax in either direction.
+//
+// Only `plpgsql` was a name a census could see. The engine asks
+// `SchemaRenderer::dual_write_trigger` now, which is a REQUIRED method, so the three
+// backends that do not resolve a rename this way say so at their own definition sites
+// rather than being papered over by a fallthrough here. See
+// `zero-migrate-postgres/src/dual_write.rs` for the whole of it, including the body
+// that had been sitting in the CONTRACT crate.
+fn dual_write_sql(
+    dialect: &DialectId,
+    fn_q: &str,
+    trg_q: &str,
+    tbl_q: &str,
+    from_q: &str,
+    to_q: &str,
+) -> Result<zero_migrate_backend::schema::DualWriteTriggerSql, ExpandContractError> {
+    crate::render::backends::schema_renderer(dialect)
+        .dual_write_trigger(&zero_migrate_backend::schema::DualWriteTriggerSpec {
+            function: fn_q,
+            trigger: trg_q,
+            table: tbl_q,
+            from: from_q,
+            to: to_q,
+        })
+        .ok_or_else(|| {
+            // Reachable only from a backend that answered `ExpandContract` for
+            // `column_rename_strategy` and `None` here — one decision contradicting
+            // itself. Fail closed rather than author an expand step with no trigger,
+            // which would leave the contract's `DROP COLUMN <from>` destroying writes
+            // that never got mirrored.
+            ExpandContractError::Invalid(format!(
+                "{dialect} resolves a column rename by expand-contract but registers no \
+                 dual-write trigger, so the expand step cannot be authored"
+            ))
+        })
 }
 
 #[cfg(test)]

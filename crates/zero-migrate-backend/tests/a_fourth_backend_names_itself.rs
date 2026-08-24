@@ -914,6 +914,13 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         None
     }
 
+    fn dual_write_trigger(
+        &self,
+        _spec: &zero_migrate_backend::schema::DualWriteTriggerSpec<'_>,
+    ) -> Option<zero_migrate_backend::schema::DualWriteTriggerSql> {
+        None
+    }
+
     fn existing_column_change_strategy(
         &self,
     ) -> zero_migrate_backend::schema::ExistingColumnChangeStrategy {
