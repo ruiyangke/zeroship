@@ -3,7 +3,7 @@
 //! That file states its own gap: of the ops that render a `down`, it exercises
 //! `createTable`, `addColumn`, `createIndex` and `renameTable`, and cannot reach
 //! `addConstraint` or `setColumnNotNull` because SQLite REFUSES both
-//! (`SqliteRebuildOnly`, `NativeAlterColumn`). Those two are the interesting
+//! (`TableRebuildUnavailable`, `NativeAlterColumn`). Those two are the interesting
 //! ones: their reverses drop a constraint and restore a nullability, neither of
 //! which is visible in a table list.
 //!

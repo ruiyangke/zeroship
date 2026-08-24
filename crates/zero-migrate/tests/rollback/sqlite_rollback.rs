@@ -213,14 +213,19 @@ async fn rollback_rebuild_needed_returns_p3b_deferred_error() {
         .await
         .expect_err("rebuild-needing down must be refused");
     match err {
-        RollbackError::SqliteRebuildRequired { version, reason } => {
+        RollbackError::TableRebuildRequired {
+            dialect,
+            version,
+            reason,
+        } => {
+            assert_eq!(dialect, zero_migrate_ir::dialect::SQLITE);
             assert_eq!(version, m.version.as_str());
             assert!(
                 reason.contains("type or constraint change"),
                 "reason names the rebuild cause: {reason}"
             );
         }
-        other => panic!("expected SqliteRebuildRequired, got {other:?}"),
+        other => panic!("expected TableRebuildRequired, got {other:?}"),
     }
 
     // Nothing was rolled back: no rolled_back event, the migration is still applied.

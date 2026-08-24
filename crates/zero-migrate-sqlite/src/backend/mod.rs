@@ -233,7 +233,7 @@ impl SqliteBackend {
     /// `rolled_back` event, atomically. The direct executor-internal seam (no
     /// approval gate; the generic executor gates approval before reaching here).
     /// A rebuild-needing `down` is refused with
-    /// [`RollbackError::SqliteRebuildRequired`];
+    /// [`RollbackError::TableRebuildRequired`];
     /// the rebuild is not built.
     ///
     /// # Errors
@@ -715,7 +715,7 @@ impl MigrationBackend for SqliteBackend {
     ) -> Result<(), RollbackError> {
         // ADDITIVE rollback: reverse the `down` (DROP TABLE/COLUMN/INDEX,
         // RENAME) transactionally + append a `rolled_back` event. A rebuild-needing
-        // `down` is refused with `SqliteRebuildRequired` (the rebuild is not built).
+        // `down` is refused with `TableRebuildRequired` (the rebuild is not built).
         rollback_sql::rollback_one_transactional(&self.actor, m, applied_by).await
     }
 

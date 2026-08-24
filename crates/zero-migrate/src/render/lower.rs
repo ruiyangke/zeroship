@@ -5110,11 +5110,15 @@ impl IrAuthor {
                     if guard.is_some() {
                         return Err(IrLowerError::GuardProbeUnbuildable("dropConstraint"));
                     }
-                    let live_table = live_schema
-                        .table_snapshots
-                        .get(table)
-                        .cloned()
-                        .ok_or(IrLowerError::SqliteRebuildOnly("dropConstraint"))?;
+                    let live_table =
+                        live_schema
+                            .table_snapshots
+                            .get(table)
+                            .cloned()
+                            .ok_or_else(|| IrLowerError::TableRebuildUnavailable {
+                                op_kind: "dropConstraint",
+                                dialect: self.dialect.clone(),
+                            })?;
                     let Some(existing) = live_table
                         .constraints
                         .iter()
@@ -5125,7 +5129,10 @@ impl IrAuthor {
                         ))));
                     };
                     if existing.kind != "FOREIGN KEY" {
-                        return Err(IrLowerError::SqliteRebuildOnly("dropConstraint"));
+                        return Err(IrLowerError::TableRebuildUnavailable {
+                            op_kind: "dropConstraint",
+                            dialect: self.dialect.clone(),
+                        });
                     }
                     let mut desired = live_table.clone();
                     desired
@@ -7412,11 +7419,15 @@ impl IrAuthor {
         }
     }
 
-    /// Fail closed unless the target dialect supports the requested native feature
-    /// — the stand-alone `alterColumn*` / `addConstraint` / `dropConstraint` render
-    /// coverage is PG-native; SQLite reconciles these via the 12-step rebuild
-    /// in the declarative diff path (which needs full live structure, not this
-    /// pure-render lower). See [`IrLowerError::SqliteRebuildOnly`].
+    /// Fail closed unless the target supports the requested native feature.
+    ///
+    /// The stand-alone `alterColumn*` / `addConstraint` / `dropConstraint` render
+    /// coverage needs a target that can ALTER in place. A target that cannot
+    /// reconciles these through a whole-table rebuild in the declarative diff path,
+    /// which needs full live structure rather than this pure-render lower. The
+    /// question asked is the CAPABILITY, never the identity, so a fourth backend gets
+    /// the same answer for the same reason. See
+    /// [`IrLowerError::TableRebuildUnavailable`].
     fn require_capability_for(
         &self,
         cap: Capability,
@@ -7425,7 +7436,10 @@ impl IrAuthor {
         if self.backend.supports(cap) {
             Ok(())
         } else {
-            Err(IrLowerError::SqliteRebuildOnly(op))
+            Err(IrLowerError::TableRebuildUnavailable {
+                op_kind: op,
+                dialect: self.dialect.clone(),
+            })
         }
     }
 
@@ -7506,7 +7520,10 @@ impl IrAuthor {
             .table_snapshots
             .get(table)
             .cloned()
-            .ok_or(IrLowerError::SqliteRebuildOnly("addConstraint"))?;
+            .ok_or_else(|| IrLowerError::TableRebuildUnavailable {
+                op_kind: "addConstraint",
+                dialect: self.dialect.clone(),
+            })?;
         let fk = crate::render::declarative::ir_fk_constraint_snapshot_for_columns(
             eff_schema,
             table,

@@ -348,7 +348,7 @@ fn classify_ir_lower(error: &IrLowerError, detail: String) -> Verdict {
         IrLowerError::UnsupportedOp(_)
         | IrLowerError::MysqlAlterColumnUnsupported(_)
         | IrLowerError::SqliteSchemaUnsupported(_)
-        | IrLowerError::SqliteRebuildOnly(_)
+        | IrLowerError::TableRebuildUnavailable { .. }
         | IrLowerError::VendorUnsupported { .. }
         | IrLowerError::TriggerUnsupported { .. }
         | IrLowerError::ViewUnsupported { .. }

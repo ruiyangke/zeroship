@@ -929,7 +929,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
 /// addConstraint path is gated on a CAPABILITY rather than on a vendor name -
 /// `require_capability_for` fails closed unless the registered backend claims it - and
 /// the `SQLite` leg, which does not, still refuses a stand-alone FK add with
-/// `SqliteRebuildOnly`, unchanged).
+/// `TableRebuildUnavailable`, unchanged).
 #[test]
 fn add_constraint_fk_renders_on_delete_cascade_pg() {
     use zero_migrate::model::ir::{IrConstraint, IrConstraintKind, Op, RefAction};
@@ -1264,8 +1264,11 @@ fn standalone_alter_and_constraint_are_sqlite_rebuild_only() {
         ),
     ] {
         match one(op).unwrap_err() {
-            IrLowerError::SqliteRebuildOnly(got) => assert_eq!(got, tag),
-            other => panic!("expected SqliteRebuildOnly({tag}), got: {other}"),
+            IrLowerError::TableRebuildUnavailable { op_kind, dialect } => {
+                assert_eq!(op_kind, tag);
+                assert_eq!(dialect, zero_migrate_ir::dialect::SQLITE);
+            }
+            other => panic!("expected TableRebuildUnavailable({tag}), got: {other}"),
         }
     }
 }

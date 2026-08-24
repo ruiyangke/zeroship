@@ -22,7 +22,7 @@
 //!
 //! Any `down` that would REQUIRE the 12-step rebuild — a column TYPE-change
 //! reversal, a constraint add/drop, a `CHECK`/`DEFAULT`/nullability flip — is
-//! REFUSED up-front with [`RollbackError::SqliteRebuildRequired`] (the rebuild path
+//! REFUSED up-front with [`RollbackError::TableRebuildRequired`] (the rebuild path
 //! is not built). We do NOT half-implement a rebuild here. The classifier
 //! ([`down_needs_rebuild`]) is a lightweight SQLite-aware scan: the libpg_query
 //! parser the PG path uses (`zero_migrate_postgres::analysis::classify`) is a
@@ -63,7 +63,7 @@ fn rb_err(e: SqliteActorError) -> RollbackError {
 /// have cleared. This method does the dialect-coupled work only.
 ///
 /// # Errors
-/// - [`RollbackError::SqliteRebuildRequired`] if the `down` needs the 12-step
+/// - [`RollbackError::TableRebuildRequired`] if the `down` needs the 12-step
 /// rebuild — refused before any statement runs; nothing changes.
 /// - [`RollbackError::DownFailed`]-shaped `Backend` error if the `down` SQL
 /// fails or is denied by the authorizer (the txn is rolled back).
@@ -86,7 +86,8 @@ pub(crate) async fn rollback_one_transactional(
     // GATE: refuse a rebuild-needing `down` UP FRONT (before BEGIN), so nothing
     // is half-done. This is the additive-only boundary; the rebuild is not built.
     if let Some(reason) = down_needs_rebuild(down) {
-        return Err(RollbackError::SqliteRebuildRequired {
+        return Err(RollbackError::TableRebuildRequired {
+            dialect: zero_migrate_ir::dialect::SQLITE,
             version: m.version.as_str().to_string(),
             reason,
         });

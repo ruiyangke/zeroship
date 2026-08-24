@@ -41,7 +41,7 @@
 //! - **stand-alone SQLite `alterColumn*` / non-FK constraint changes** — require
 //!   live structure; named FK add/drop changes lower to the live 12-step rebuild
 //!   and are not flattened into ordinary offline SQL
-//!   ([`IrLowerError::SqliteRebuildOnly`](crate::render::lower::IrLowerError)).
+//!   ([`IrLowerError::TableRebuildUnavailable`](crate::render::lower::IrLowerError)).
 //!
 //! The preview is HONEST that it shows the offline-renderable subset and labels the
 //! rest; the header + trailing summary state exactly that.
@@ -760,9 +760,9 @@ fn runtime_resolved_for_lower_error(op: &Op, err: &IrLowerError) -> String {
             "{RUNTIME_RESOLVED} {kind} {subject}: SQLite online rename needs the live table \
              structure (12-step rebuild) — not offline-renderable"
         ),
-        IrLowerError::SqliteRebuildOnly(_) => format!(
-            "{RUNTIME_RESOLVED} {kind} {subject}: reconciled via the SQLite 12-step rebuild \
-             (needs live table structure) — not offline-renderable"
+        IrLowerError::TableRebuildUnavailable { dialect, .. } => format!(
+            "{RUNTIME_RESOLVED} {kind} {subject}: reconciled on {dialect} via a whole-table \
+             rebuild (needs live table structure) — not offline-renderable"
         ),
         // An online `renameColumn` (PG expand-contract OR SQLite rebuild) needs the
         // LIVE `from` column's type/structure to lower (reconcile the IR type, author

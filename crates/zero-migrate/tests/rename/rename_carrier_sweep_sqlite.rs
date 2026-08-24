@@ -75,7 +75,7 @@ const RENAMES: &[(&str, &str)] = &[
 ///
 /// * `definition (UNIQUE)` / `definition (FOREIGN KEY)` - the SQLite emitter does not
 ///   thread a table-level UNIQUE or FK off a `createTable`, and a stand-alone
-///   `addConstraint` is `SqliteRebuildOnly`, so neither kind reaches the fold's SQLite
+///   `addConstraint` is `TableRebuildUnavailable`, so neither kind reaches the fold's SQLite
 ///   constraint bucket.
 /// * `definition (CHECK)` and `cascade_columns` - a table-level CHECK is refused
 ///   outright ("createTable table-level CHECK is PostgreSQL-only"), and it is the only

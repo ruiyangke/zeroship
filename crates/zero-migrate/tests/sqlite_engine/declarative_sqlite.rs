@@ -706,7 +706,7 @@ async fn second_deploy_type_change_generates_rebuild_on_sqlite() {
 // snapshot (PG spellings: `bytea` / `double precision` / `timestamp with time
 // zone`) against a LIVE snapshot REAL-introspected from the app file (SQLite
 // declared types: `blob` / `real` / `text`). Pre-fix the raw-spelling compare
-// flagged a spurious `SqliteRebuildRequired` on every encrypted / number /
+// flagged a spurious rebuild refusal on every encrypted / number /
 // timestamp column even when the schema is UNCHANGED.
 //
 // These tests use the REAL introspected live snapshot (`snapshot_schema_sqlite`)
@@ -757,13 +757,13 @@ fn spelling_gap_desc() -> CollectionDescriptor {
 
 /// (FIX B) A second deploy of an UNCHANGED schema, diffed against the REAL
 /// SQLite-introspected live snapshot, produces ZERO spurious drift — no
-/// `SqliteRebuildRequired` for the encrypted (`bytea`→`blob`), number
+/// rebuild refusal for the encrypted (`bytea`→`blob`), number
 /// (`double precision`→`real`), or timestamp (`… with time zone`→`text`)
 /// columns whose PG and `SQLite` spellings differ.
 ///
 /// This is RED before the dialect-aware normalisation: the raw-spelling compare
 /// (`lc.data_type != c.data_type`) sees `blob != bytea` (etc.) and returns
-/// `SqliteRebuildRequired`. It is GREEN after `sqlite_canonical_type` folds both
+/// that refusal. It is GREEN after `sqlite_canonical_type` folds both
 /// sides to the same affinity token.
 #[compio::test]
 async fn second_deploy_unchanged_real_introspected_live_has_no_spurious_drift() {
@@ -933,9 +933,12 @@ async fn second_deploy_real_type_change_still_detected_against_introspected_live
 //      is gone. `MigrationEngine` is generic over `MigrationBackend`, and
 //      `apply_declarative` drives `plan.rebuilds` through `SqliteBackend::rebuild_one`
 //      under the destructive/approval gate. The old behavior returned a typed
-//      `SqliteRebuildRequired`; P6a replaces that with carrying the rebuild so the
+//      `DeclarativeError::SqliteRebuildRequired`; P6a replaced that with carrying the
+//      rebuild so the
 //      engine can apply it. This pins the new contract: the plan exposes the rebuild
 //      (with its destructive/approval flags) instead of refusing the whole deploy.
+//      That variant has since been DELETED: it kept zero constructors for as long as
+//      P6a has held, so the enum was carrying an arm nothing could reach.
 // ---------------------------------------------------------------------------
 #[compio::test]
 async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {

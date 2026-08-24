@@ -150,7 +150,7 @@ mysql = "portable"
 # carries the table and the named constraint is a FOREIGN KEY, the op lowers to a
 # 12-step rebuild and APPLIES end to end - proven through validate + lower + apply
 # by `tests/sqlite_declaration_flip_over_refusal_control.rs`. It refuses
-# `SqliteRebuildOnly` only for a missing snapshot or a NON-FK constraint.
+# `TableRebuildUnavailable` only for a missing snapshot or a NON-FK constraint.
 #
 # The live conformance suite recorded this row as a wrong declaration, but its
 # representative drops a constraint that is not a foreign key, so it measured the

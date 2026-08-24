@@ -918,23 +918,27 @@ pub enum RollbackError {
         /// The selected-for-rollback version it depends on.
         dependency: String,
     },
-    /// **SQLite, additive-only.** The migration's `down` requires the 12-step
-    /// table REBUILD to reverse (a column TYPE-change reversal, a constraint
-    /// add/drop, or any `ALTER` SQLite cannot perform natively). Only
-    /// the ADDITIVE reversals SQLite ≥ 3.35 supports natively are implemented —
-    /// `DROP TABLE` / `DROP COLUMN` / `DROP INDEX` / `RENAME`. A rebuild-needing
-    /// `down` is REFUSED here (not half-rebuilt): the rebuild path is not built.
-    /// Nothing was rolled back.
+    /// The migration's `down` needs a whole-table REBUILD to reverse on a target
+    /// that cannot perform the reversal natively, and this rollback path does not
+    /// emit rebuilds.
+    ///
+    /// REFUSED before any statement runs rather than half-rebuilt: nothing was
+    /// rolled back. A target that reverses everything natively never reaches here,
+    /// which is why the concept is stated once instead of once per backend — the
+    /// refusing target names itself from its own [`DialectId`], and `reason` is its
+    /// own account of what specifically needs the rebuild.
     #[error(
-        "migration {version} has a SQLite `down` requiring the 12-step table rebuild ({reason}); \
-         the rebuild path is not implemented. Rollback reverses only the operations SQLite \
-         supports natively (DROP TABLE/COLUMN/INDEX, RENAME). Author a compensating migration \
+        "migration {version} has a {dialect} `down` requiring a whole-table rebuild \
+         ({reason}); the rebuild path is not implemented, so rollback reverses only \
+         the operations {dialect} performs natively. Author a compensating migration \
          instead."
     )]
-    SqliteRebuildRequired {
+    TableRebuildRequired {
+        /// The target that cannot reverse it natively, from its own identity.
+        dialect: zero_migrate_ir::dialect::DialectId,
         /// The migration whose `down` needs a table rebuild.
         version: String,
-        /// What specifically requires the rebuild.
+        /// That target's account of what specifically requires the rebuild.
         reason: String,
     },
 }

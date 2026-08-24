@@ -4,7 +4,7 @@
 //! supports through `IrAuthor::load_and_lower` + `engine.apply` WITHOUT the 12-step
 //! rebuild: `createTable` (plain columns + an index), `addColumn`, `dropColumn`,
 //! `createIndex`, `dropIndex`. The PG-only ops (`alterColumn*`, stand-alone
-//! `addConstraint`, table-level UNIQUE/FK on a `createTable`) are `SqliteRebuildOnly`
+//! `addConstraint`, table-level UNIQUE/FK on a `createTable`) are `TableRebuildUnavailable`
 //! / not threaded into the `SQLite` emitter, so they live in the PG-only oracle.
 //!
 //! Same shape as the PG oracle: APPLY the corpus to a real temp-file `SQLite` backend,

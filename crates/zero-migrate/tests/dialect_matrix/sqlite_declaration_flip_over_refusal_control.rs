@@ -10,7 +10,7 @@
 //! That risk is not hypothetical here. `dropConstraint` on SQLite has a REAL
 //! rebuild lane in `render/lower.rs`: when the live snapshot carries the table
 //! and the named constraint is a FOREIGN KEY, it lowers to a 12-step rebuild and
-//! applies. It refuses `SqliteRebuildOnly` only for a MISSING snapshot or a
+//! applies. It refuses `TableRebuildUnavailable` only for a MISSING snapshot or a
 //! NON-FK constraint. The live conformance suite's representative for
 //! `dropConstraint/base` drops a constraint that is not a foreign key, so it
 //! measured the refusal and recorded the row as a wrong declaration. The refusal

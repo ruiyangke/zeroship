@@ -458,26 +458,20 @@ pub enum DeclarativeError {
         /// The FK's target table (not yet available to inline against).
         target: String,
     },
-    /// **Reserved fail-closed guard.** A Confined-SQLite existing-table change
-    /// that the 12-step rebuild genuinely cannot express. The rebuild
-    /// DOES handle the previously-deferred ops — a column TYPE change, a nullability
-    /// change (either direction), a column RENAME, an ADD/DROP CONSTRAINT, and an
-    /// in-place FK redefinition — so those now flow through
-    /// `DeclarativePlan::rebuilds` instead of surfacing here. This variant remains
-    /// as the fail-closed boundary for any future existing-table op the rebuild
-    /// author cannot yet emit: the engine refuses to emit dangling Postgres DDL on
-    /// the SQLite path, surfacing a clear typed error rather than a silent pass.
-    #[error(
-        "SQLite cannot perform the existing-table change on '{table}' natively \
-         ({op}): it has no rebuild expression. The engine refuses to emit dangling \
-         Postgres DDL on the SQLite path. Author a compensating migration."
-    )]
-    SqliteRebuildRequired {
-        /// The existing table the rebuild-needing change targets.
-        table: String,
-        /// The specific operation that has no rebuild expression (human-readable).
-        op: String,
-    },
+    /* `SqliteRebuildRequired { table, op }` USED TO LIVE HERE, and its doc called it
+     * a "**Reserved fail-closed guard**" for a future existing-table op the rebuild
+     * author cannot yet emit. It had ZERO constructors, workspace-wide, and the same
+     * doc explains why: every op it was reserved for — a column type change, a
+     * nullability change either way, a column rename, an add/drop constraint, an
+     * in-place FK redefinition — now flows through `DeclarativePlan::rebuilds`
+     * instead. The reservation outlived the gap it reserved against.
+     *
+     * A variant nobody builds is not a fail-closed boundary; it is a `match` arm
+     * every reader has to account for and no test can reach. `SeedError` came out of
+     * `capability.rs` for exactly this in the `MigrationBackend` move. If a rebuild
+     * author later meets an op it cannot emit, the refusal it needs will carry the
+     * shape that op actually has, which this one was guessing at.
+     */
     /// The diff would CREATE a table that a `safety.require_rls` obligation covers.
     ///
     /// The obligation is a final-state one: every table a migration creates and
@@ -714,21 +708,32 @@ pub enum IrLowerError {
         /// Why it cannot be rendered.
         reason: &'static str,
     },
-    /// A SQLite operation that requires a table rebuild but lacks the complete
-    /// live table snapshot (or is a non-FK constraint shape this IR path does not
-    /// rebuild). Named FK add/drop changes do lower to the structured 12-step
-    /// rebuild when full live structure is available.
-    /// The message states the two reasons as alternatives because they ARE
-    /// alternatives, and only one of them holds on any given refusal. The
-    /// capability route reaches this without inspecting the snapshot at all, so a
-    /// caller who supplied a complete one used to be told it was missing and went
-    /// looking for introspection data it already had.
+    /// An op the target cannot perform natively, on a path that cannot emit the
+    /// whole-table REBUILD it would otherwise be reconciled through.
+    ///
+    /// The target is not asked by name: this is reached from a
+    /// `!backend.supports(cap)` gate, so a fourth backend without
+    /// `AlterTableAddConstraint` or `NativeAlterColumn` arrives here on its own
+    /// capability answer. Named FK add/drop DOES lower to the structured rebuild when
+    /// full live structure is available — this is the refusal for when it is not.
+    ///
+    /// The message states its two reasons as alternatives because they ARE
+    /// alternatives, and only one of them holds on any given refusal. The capability
+    /// route reaches this without inspecting the snapshot at all, so a caller who
+    /// supplied a complete one used to be told it was missing and went looking for
+    /// introspection data it already had.
     #[error(
-        "IrAuthor::lower of SQLite op {0:?} needs the 12-step table rebuild, which this \
-         path cannot emit: either the op shape is one it does not rebuild, or the live \
-         table snapshot is incomplete. Refusing rather than emitting a partial rebuild"
+        "IrAuthor::lower of op {op_kind:?} on {dialect} needs a whole-table rebuild, \
+         which this path cannot emit: either the op shape is one it does not rebuild, \
+         or the live table snapshot is incomplete. Refusing rather than emitting a \
+         partial rebuild"
     )]
-    SqliteRebuildOnly(&'static str),
+    TableRebuildUnavailable {
+        /// The op kind tag that was refused.
+        op_kind: &'static str,
+        /// The target that cannot perform it natively, from its own identity.
+        dialect: DialectId,
+    },
     /// a guarded op whose shape cannot produce a verifiable
     /// `GuardProbe`. Lowering REFUSES fail-closed
     /// rather than stamping a probe that could not verify the declared shape.

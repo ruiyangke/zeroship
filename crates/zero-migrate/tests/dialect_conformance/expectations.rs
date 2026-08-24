@@ -145,7 +145,7 @@ const ALLOWANCES: &[Allowance] = &[
     //
     // (A) THE SIXTH WAS REFUTED, and it is the interesting one. This row was
     // recorded as a (B) declaration error on the same evidence as the other five: it
-    // refuses with `SqliteRebuildOnly`. But SQLite HAS a dropConstraint lane. When
+    // refuses with `TableRebuildUnavailable`. But SQLite HAS a dropConstraint lane. When
     // the live snapshot carries the table and the named constraint is a FOREIGN KEY,
     // `render/lower.rs` lowers the op to a 12-step rebuild and it APPLIES. The
     // refusal is reached only for a missing snapshot or a NON-FK constraint, and the
@@ -168,7 +168,11 @@ const ALLOWANCES: &[Allowance] = &[
         variant: "base",
         dialect: "sqlite",
         observed: Outcome::RefusedByCapability,
-        words: "needs the 12-step table rebuild",
+        // Tracks the message `IrLowerError::TableRebuildUnavailable` prints. The
+        // pinned substring stayed the same LENGTH of claim when that variant lost its
+        // vendor name ("needs the 12-step table rebuild" -> this): it still names the
+        // refusal's reason and still fails if the arm reached is a different one.
+        words: "needs a whole-table rebuild, which this path cannot emit",
         why: "(A) the representative drops a NON-FK constraint, the one shape SQLite's \
                rebuild lane does not cover. FK drops apply end to end; flipping this \
                cell was measured to be an over-refusal and was reverted.",

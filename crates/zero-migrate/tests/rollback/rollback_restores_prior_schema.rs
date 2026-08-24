@@ -16,7 +16,7 @@
 //! WHAT IS NOT COVERED, stated rather than implied. Of the ops that render a
 //! `down`, this exercises `createTable`, `addColumn`, `createIndex` and
 //! `renameTable`. `addConstraint`, `setColumnNotNull` and `dropColumnNotNull`
-//! are absent because SQLite REFUSES them (`SqliteRebuildOnly`,
+//! are absent because SQLite REFUSES them (`TableRebuildUnavailable`,
 //! `NativeAlterColumn`), so reaching them needs a PostgreSQL arm and a live
 //! database — worth adding, not done here.
 //!
