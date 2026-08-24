@@ -27,7 +27,7 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
         table
             .columns
             .iter()
-            .any(|column| column.mysql_text_storage.is_some())
+            .any(|column| column.text_storage.is_some())
             .then_some(SnapshotProvenanceStrength::ExactTextStorage)
     }
 
@@ -217,7 +217,7 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
         column: &ColumnSnapshot,
     ) -> Option<ReferenceTextStorage> {
         column
-            .mysql_text_storage
+            .text_storage
             .as_ref()
             .map(|storage| ReferenceTextStorage {
                 character_set: storage.character_set.clone(),
@@ -288,7 +288,7 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
             // character-set/collation proof.
             && cursor_type_is_character(&snapshot_database_type)
         {
-            let storage = column.mysql_text_storage.as_ref().ok_or_else(|| {
+            let storage = column.text_storage.as_ref().ok_or_else(|| {
                 format!(
                     "cursor component {:?} is a MySQL character column but its exact character set and collation are unavailable",
                     column.name

@@ -401,7 +401,7 @@ async fn introspect_columns(
             // `ValueFormat`).
             catalog_uuid_format_check: has_uuid_format_check,
             id_default,
-            mysql_default_generated: None,
+            expression_default: None,
             encryption_sentinel: None,
             ddl_type_override: None,
             inline_checks: Vec::new(),
@@ -411,7 +411,7 @@ async fn introspect_columns(
             type_def: None,
             authored_type: false,
             collation: recover_column_collation(stored_create_sql, &name),
-            mysql_text_storage: None,
+            text_storage: None,
             mysql_physical_type: None,
             comment: None,
         });

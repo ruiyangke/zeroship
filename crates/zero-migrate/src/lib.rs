@@ -420,10 +420,10 @@ pub use model::schema_model::{
 pub use model::snapshot::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot, FunctionKey,
     FunctionSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot, IdDefaultSnapshot,
-    IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, MysqlTextStorageSnapshot,
-    NamedTypeSnapshot, PartitionSnapshot, PolicyKey, PolicySnapshot, RoleSnapshot,
-    SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
-    TableSnapshot, TriggerKey, TriggerSnapshot, ViewSnapshot,
+    IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, NamedTypeSnapshot, PartitionSnapshot,
+    PolicyKey, PolicySnapshot, RoleSnapshot, SchemaObjectSnapshot, SchemaSnapshot,
+    SequenceDataTypeSnapshot, SequenceSnapshot, TableSnapshot, TextStorageSnapshot, TriggerKey,
+    TriggerSnapshot, ViewSnapshot,
 };
 pub use plan::manifest::{
     compute_manifest, verify_manifest, ManifestError, ManifestHash, MismatchKind,

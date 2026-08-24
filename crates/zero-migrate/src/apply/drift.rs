@@ -1101,19 +1101,19 @@ fn diff_attrs(
                         vendor
                             .value_format
                             .catalog_default_marker_is_authoritative()
-                    }) && ac.mysql_text_storage.is_some()
+                    }) && ac.text_storage.is_some()
                     {
                         return catalog_text_id_default(
                             ac.default.as_deref(),
                             actual_dialect.expect("an actual vendor supplies its own dialect id"),
-                            ac.mysql_default_generated,
+                            ac.expression_default,
                         );
                     }
                     catalog_id_default_for_expected(
                         expected_default,
                         ac.default.as_deref(),
                         actual_dialect,
-                        ac.mysql_default_generated,
+                        ac.expression_default,
                     )
                 };
                 let actual_default =
@@ -1143,7 +1143,7 @@ fn diff_attrs(
                 comparable_column_default(
                     ac.default.as_deref(),
                     actual_vendor,
-                    ac.mysql_default_generated,
+                    ac.expression_default,
                 ),
             ) {
                 push(
@@ -2045,7 +2045,7 @@ mod constraint_definition_tests {
 /// **A snapshot no backend claims must not be read in any backend's dialect.**
 ///
 /// [`introspected_table_vendor`] recognises a live catalog read by the evidence only
-/// introspection leaves — a `ddl_type_override`, a `mysql_text_storage`, a
+/// introspection leaves — a `ddl_type_override`, a `text_storage`, a
 /// `stored_create_sql` — and a table carrying none of the three matches no vendor. The
 /// ID-default comparison below it then reaches
 /// [`catalog_id_default_for_expected`](crate::render::value_format::catalog_id_default_for_expected)

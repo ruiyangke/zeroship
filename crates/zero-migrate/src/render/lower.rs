@@ -1092,7 +1092,7 @@ fn cursor_column_contract(
         FoldCursorComparison::ExactText {
             character_set,
             collation,
-        } => CursorComparison::MysqlText {
+        } => CursorComparison::ExactText {
             character_set,
             collation,
         },
@@ -9903,7 +9903,7 @@ pub(crate) fn index_method_access(m: IndexMethod) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::snapshot::MysqlTextStorageSnapshot;
+    use crate::model::snapshot::TextStorageSnapshot;
     use crate::render::declarative::build_table_snapshot;
     use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
 
@@ -10200,7 +10200,7 @@ mod tests {
                 name: "token".into(),
                 data_type: "char(36)".into(),
                 nullable: false,
-                mysql_text_storage: Some(MysqlTextStorageSnapshot {
+                text_storage: Some(TextStorageSnapshot {
                     character_set: "ascii".into(),
                     collation: "ascii_bin".into(),
                 }),
@@ -10211,7 +10211,7 @@ mod tests {
         assert_eq!(character.database_type, "character(36)");
         assert!(matches!(
             character.comparison,
-            CursorComparison::MysqlText { ref character_set, ref collation }
+            CursorComparison::ExactText { ref character_set, ref collation }
                 if character_set == "ascii" && collation == "ascii_bin"
         ));
     }

@@ -253,11 +253,11 @@ async fn the_engine_snapshot_of_a_mysql_column_is_lossy_against_show_create_tabl
             "the modifier-bearing physical type must reach the snapshot"
         );
         // The exact COLLATE arrives, but NOT on `ColumnSnapshot::collation` - that
-        // field stays `None` on MySQL. It arrives on `mysql_text_storage`, together
+        // field stays `None` on MySQL. It arrives on `text_storage`, together
         // with the character set. Reading the wrong field is how a restate design
         // gets talked into believing the collation is unavailable.
         let storage = label
-            .mysql_text_storage
+            .text_storage
             .as_ref()
             .ok_or("the character-set/collation pair must reach the snapshot")?;
         assert_eq!(storage.collation, "utf8mb4_bin");
@@ -275,7 +275,7 @@ async fn the_engine_snapshot_of_a_mysql_column_is_lossy_against_show_create_tabl
         assert_eq!(
             label.collation, None,
             "MEASURED: ColumnSnapshot::collation is the PostgreSQL-side field and \
-             stays None on MySQL; mysql_text_storage carries the fact instead"
+             stays None on MySQL; text_storage carries the fact instead"
         );
         assert_eq!(
             label.comment, None,

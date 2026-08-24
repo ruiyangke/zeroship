@@ -603,7 +603,7 @@ fn comparison_expression(column: &CursorColumnContract) -> String {
         CursorComparison::NamedCollation {
             schema: Some(_), ..
         }
-        | CursorComparison::MysqlText { .. } => {
+        | CursorComparison::ExactText { .. } => {
             unreachable!("non-SQLite comparison escaped live-contract validation")
         }
     };

@@ -219,7 +219,7 @@ async fn snapshot_schema_reads_canonical_columns_and_ordered_unique_indexes() {
                 column.nullable,
                 column.case_sensitive,
                 column
-                    .mysql_text_storage
+                    .text_storage
                     .as_ref()
                     .map(|storage| (storage.character_set.as_str(), storage.collation.as_str(),)),
             ))

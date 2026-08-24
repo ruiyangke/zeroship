@@ -53,8 +53,16 @@ pub enum CursorComparison {
         /// Exact catalog collation name.
         name: String,
     },
-    /// Exact MySQL character-set and collation comparison contract.
-    MysqlText {
+    /// An exact character-set + collation storage pair as the comparison
+    /// contract, for a backend whose ordering is defined by that pair rather than
+    /// by a collation name alone.
+    ///
+    /// Spelled the same as the backend-owned
+    /// [`FoldCursorComparison::ExactText`](crate::fold::FoldCursorComparison::ExactText)
+    /// it is built from, so the one translation site between the two vocabularies
+    /// stays a relabelling and cannot quietly become a decision. MySQL is the
+    /// backend that produces it today.
+    ExactText {
         /// Exact catalog character set.
         character_set: String,
         /// Exact catalog collation.

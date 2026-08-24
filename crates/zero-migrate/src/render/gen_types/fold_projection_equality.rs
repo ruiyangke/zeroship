@@ -577,13 +577,13 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
         value_format,
         catalog_uuid_format_check,
         id_default,
-        mysql_default_generated,
+        expression_default,
         case_sensitive,
         unbounded_text,
         type_def,
         authored_type,
         collation,
-        mysql_text_storage,
+        text_storage,
         mysql_physical_type,
         encryption_sentinel,
         comment_sentinel,
@@ -615,18 +615,15 @@ fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> V
     );
     check("id_default", *id_default == theirs.id_default);
     check(
-        "mysql_default_generated",
-        *mysql_default_generated == theirs.mysql_default_generated,
+        "expression_default",
+        *expression_default == theirs.expression_default,
     );
     check("case_sensitive", *case_sensitive == theirs.case_sensitive);
     check("unbounded_text", *unbounded_text == theirs.unbounded_text);
     check("type_def", *type_def == theirs.type_def);
     check("authored_type", *authored_type == theirs.authored_type);
     check("collation", *collation == theirs.collation);
-    check(
-        "mysql_text_storage",
-        *mysql_text_storage == theirs.mysql_text_storage,
-    );
+    check("text_storage", *text_storage == theirs.text_storage);
     check(
         "mysql_physical_type",
         *mysql_physical_type == theirs.mysql_physical_type,
@@ -772,7 +769,7 @@ fn table_field_differences(mine: &TableSnapshot, theirs: &TableSnapshot) -> Vec<
 /// The existing equivalence suites (`tests/schema_model_equivalence_pg.rs`,
 /// `..._mysql.rs`) only ever ran the split on LIVE-INTROSPECTED snapshots. An
 /// introspected snapshot populates a different set of vendor families from an authored
-/// one - `catalog_uuid_format_check` and `mysql_text_storage` are introspection-only,
+/// one - `catalog_uuid_format_check` and `text_storage` are introspection-only,
 /// and `ddl_type_override` and `encryption_sentinel` are author-only - so this is the
 /// first measurement of the split on the half of the input space that authoring
 /// produces.

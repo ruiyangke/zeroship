@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
-    diff_snapshots, fold_ops, fold_ops_onto, validate_ir, IrAuthor, LiveSchema,
-    MysqlTextStorageSnapshot, PlanStep, RenameStep,
+    diff_snapshots, fold_ops, fold_ops_onto, validate_ir, IrAuthor, LiveSchema, PlanStep,
+    RenameStep, TextStorageSnapshot,
 };
 use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
 
@@ -777,7 +777,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
         .iter_mut()
         .find(|column| column.name == "code")
         .unwrap()
-        .mysql_text_storage = Some(MysqlTextStorageSnapshot {
+        .text_storage = Some(TextStorageSnapshot {
         character_set: "utf8mb4".to_string(),
         collation: "utf8mb4_bin".to_string(),
     });
@@ -789,7 +789,7 @@ fn mysql_composite_fk_compares_exact_live_character_storage_per_position() {
         .iter_mut()
         .find(|column| column.name == "parent_code")
         .unwrap()
-        .mysql_text_storage = Some(MysqlTextStorageSnapshot {
+        .text_storage = Some(TextStorageSnapshot {
         character_set: "ascii".to_string(),
         collation: "ascii_bin".to_string(),
     });

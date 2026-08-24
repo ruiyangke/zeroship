@@ -24,7 +24,7 @@
 use zero_migrate::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
     GeneratedKindSnapshot, IdDefaultSnapshot, IdentityCol, IndexElementSnapshot, IndexSnapshot,
-    IndexStorageParams, MysqlPhysicalType, MysqlTextStorageSnapshot, TableSnapshot, ValueFormat,
+    IndexStorageParams, MysqlPhysicalType, TableSnapshot, TextStorageSnapshot, ValueFormat,
 };
 
 /// One field, and a mutation that changes ONLY that field.
@@ -130,13 +130,13 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
         value_format,
         catalog_uuid_format_check,
         id_default,
-        mysql_default_generated,
+        expression_default,
         case_sensitive,
         unbounded_text,
         type_def,
         authored_type,
         collation,
-        mysql_text_storage,
+        text_storage,
         mysql_physical_type,
         encryption_sentinel,
         comment_sentinel,
@@ -189,9 +189,9 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
         c.id_default = Some(IdDefaultSnapshot::Absent);
     });
     set.probe(
-        "ColumnSnapshot::mysql_default_generated",
-        mysql_default_generated,
-        |c| c.mysql_default_generated = Some(true),
+        "ColumnSnapshot::expression_default",
+        expression_default,
+        |c| c.expression_default = Some(true),
     );
     set.probe("ColumnSnapshot::case_sensitive", case_sensitive, |c| {
         c.case_sensitive = Some(false);
@@ -214,16 +214,12 @@ pub fn column_snapshot_probes() -> ProbeSet<ColumnSnapshot> {
             name: "C".to_string(),
         });
     });
-    set.probe(
-        "ColumnSnapshot::mysql_text_storage",
-        mysql_text_storage,
-        |c| {
-            c.mysql_text_storage = Some(MysqlTextStorageSnapshot {
-                character_set: "utf8mb4".to_string(),
-                collation: "utf8mb4_bin".to_string(),
-            });
-        },
-    );
+    set.probe("ColumnSnapshot::text_storage", text_storage, |c| {
+        c.text_storage = Some(TextStorageSnapshot {
+            character_set: "utf8mb4".to_string(),
+            collation: "utf8mb4_bin".to_string(),
+        });
+    });
     set.probe(
         "ColumnSnapshot::mysql_physical_type",
         mysql_physical_type,

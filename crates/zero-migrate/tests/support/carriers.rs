@@ -192,13 +192,13 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
         value_format,
         catalog_uuid_format_check,
         id_default,
-        mysql_default_generated,
+        expression_default,
         case_sensitive,
         unbounded_text,
         type_def,
         authored_type,
         collation,
-        mysql_text_storage,
+        text_storage,
         mysql_physical_type,
         encryption_sentinel,
         comment_sentinel,
@@ -265,8 +265,8 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
          generator - and `default` itself cannot name a column.",
     );
     never_a_column_name(
-        "TableSnapshot::columns[].mysql_default_generated",
-        mysql_default_generated,
+        "TableSnapshot::columns[].expression_default",
+        expression_default,
         "an `Option<bool>`.",
     );
     never_a_column_name(
@@ -296,8 +296,8 @@ fn walk_column(column: &ColumnSnapshot, set: &mut CarrierSet) {
          object from a column.",
     );
     never_a_column_name(
-        "TableSnapshot::columns[].mysql_text_storage",
-        mysql_text_storage,
+        "TableSnapshot::columns[].text_storage",
+        text_storage,
         "a closed MySQL storage-class enum.",
     );
     never_a_column_name(

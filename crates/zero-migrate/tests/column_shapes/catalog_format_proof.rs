@@ -16,8 +16,8 @@ use crate::support;
 use serde_json::{json, Value};
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
-    ColumnSnapshot, ConstraintSnapshot, IrAuthor, LiveSchema, MysqlTextStorageSnapshot,
-    SchemaSnapshot, TableSnapshot, ValueFormat,
+    ColumnSnapshot, ConstraintSnapshot, IrAuthor, LiveSchema, SchemaSnapshot, TableSnapshot,
+    TextStorageSnapshot, ValueFormat,
 };
 
 const PROJECT_SCHEMA: &str = "app";
@@ -47,8 +47,8 @@ enum Evidence {
     PlainText,
 }
 
-fn ascii_bin() -> MysqlTextStorageSnapshot {
-    MysqlTextStorageSnapshot {
+fn ascii_bin() -> TextStorageSnapshot {
+    TextStorageSnapshot {
         character_set: "ascii".to_string(),
         collation: "ascii_bin".to_string(),
     }
@@ -66,7 +66,7 @@ fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> Colum
                 column.data_type = "uuid".to_string();
             } else if dialect == &zero_migrate::MYSQL {
                 column.data_type = "varchar(36)".to_string();
-                column.mysql_text_storage = Some(ascii_bin());
+                column.text_storage = Some(ascii_bin());
                 column.catalog_uuid_format_check = matches!(evidence, Evidence::Uuid);
             } else if dialect == &zero_migrate::SQLITE {
                 column.data_type = "text".to_string();
@@ -78,7 +78,7 @@ fn target_column(dialect: &zero_migrate::DialectId, evidence: Evidence) -> Colum
         Evidence::TypeId(_) | Evidence::TypeIdWithoutCheck => {
             if dialect == &zero_migrate::MYSQL {
                 column.data_type = "varchar(191)".to_string();
-                column.mysql_text_storage = Some(ascii_bin());
+                column.text_storage = Some(ascii_bin());
             } else if dialect == &zero_migrate::POSTGRES || dialect == &zero_migrate::SQLITE {
                 column.data_type = "text".to_string();
             } else {

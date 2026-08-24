@@ -11,7 +11,7 @@ use zero_migrate::driver::SqlSession;
 use zero_migrate::model::ir::{MigrationIr, CURRENT_IR_VERSION};
 use zero_migrate::{
     fold_ops, validate_ir, ColumnSnapshot, ConstraintSnapshot, IrAuthor, LiveSchema,
-    MysqlTextStorageSnapshot, SchemaSnapshot, TableSnapshot,
+    SchemaSnapshot, TableSnapshot, TextStorageSnapshot,
 };
 use zero_migrate_postgres::backend::drift_sql::snapshot_schema;
 
@@ -1044,7 +1044,7 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
                 name: "id".to_string(),
                 data_type: "varchar(36)".to_string(),
                 nullable: false,
-                mysql_text_storage: Some(MysqlTextStorageSnapshot {
+                text_storage: Some(TextStorageSnapshot {
                     character_set: "ascii".to_string(),
                     collation: "ascii_bin".to_string(),
                 }),
@@ -1090,7 +1090,7 @@ fn mysql_live_catalog_validates_but_does_not_select_declared_uuid_storage() {
         .get_mut("uuid_parents")
         .expect("UUID target snapshot")
         .columns[0]
-        .mysql_text_storage = Some(MysqlTextStorageSnapshot {
+        .text_storage = Some(TextStorageSnapshot {
         character_set: "utf8mb4".to_string(),
         collation: "utf8mb4_bin".to_string(),
     });

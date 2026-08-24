@@ -3,7 +3,7 @@
 //! `apply::drift::introspected_table_vendor` recognises a live catalog read by the
 //! evidence only introspection leaves, and every vendor claims provenance on ONE
 //! positive marker: PostgreSQL on a column's `ddl_type_override`, MySQL on a column's
-//! `mysql_text_storage`, SQLite on the table's `stored_create_sql`. A table carrying
+//! `text_storage`, SQLite on the table's `stored_create_sql`. A table carrying
 //! none of the three matches no vendor, and the ID-default recovery under it is then
 //! handed `None` for the dialect - the one entry point in
 //! `render::value_format` that takes an optional one.
@@ -18,7 +18,7 @@
 //!
 //! MySQL is the one that can. `zero-migrate-mysql/src/backend/drift_sql.rs` writes
 //! `ddl_type_override: None` and `stored_create_sql: None` unconditionally, so MySQL's
-//! whole claim rests on `mysql_text_storage`, which `information_schema` populates
+//! whole claim rests on `text_storage`, which `information_schema` populates
 //! only for columns that HAVE a character set. A table whose columns are all numeric
 //! therefore comes back from a real server with nothing any vendor recognises.
 //!
@@ -149,8 +149,8 @@ fn markers(snapshot: &SchemaSnapshot, name: &str) -> String {
             t.columns
                 .iter()
                 .map(|c| format!(
-                    "{}: ddl_type_override={:?} mysql_text_storage={:?}",
-                    c.name, c.ddl_type_override, c.mysql_text_storage
+                    "{}: ddl_type_override={:?} text_storage={:?}",
+                    c.name, c.ddl_type_override, c.text_storage
                 ))
                 .collect::<Vec<_>>()
                 .join("\n      ")
@@ -166,7 +166,7 @@ fn any_vendor_claims(snapshot: &SchemaSnapshot, name: &str) -> Result<bool, Stri
     let t = table(snapshot, name)?;
     Ok(t.stored_create_sql.is_some()
         || t.columns.iter().any(|c| c.ddl_type_override.is_some())
-        || t.columns.iter().any(|c| c.mysql_text_storage.is_some()))
+        || t.columns.iter().any(|c| c.text_storage.is_some()))
 }
 
 /// The one `default` line for a table's `id` column, or `None`.

@@ -1544,7 +1544,7 @@ pub(crate) fn column_snapshot_for_field(
     //                     field: "case_sensitive", expected: "", actual: "false" }
     //
     // The facet is NOT double-counted by removing the exclusion.
-    // `mysql_text_storage` carries the exact character set and collation name, but
+    // `text_storage` carries the exact character set and collation name, but
     // `ColumnSnapshot` deliberately excludes that field from `PartialEq` and from
     // structural drift precisely because a server-default collation name is not part
     // of the portable schema surface. The portable intent has exactly one comparable

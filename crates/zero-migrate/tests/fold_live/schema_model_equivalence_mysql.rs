@@ -7,7 +7,7 @@
 //! `catalog_uuid_format_check` false, `pg_index_only` false (PostgreSQL introspection
 //! hardcodes it), `mysql_*` absent - so a round trip that silently dropped a vendor
 //! family would still pass there. MySQL populates `mysql_physical_type`,
-//! `mysql_text_storage` and `mysql_default_generated` from
+//! `text_storage` and `expression_default` from
 //! `information_schema.COLUMNS` on every column, so the lossless claim is only actually
 //! TESTED here.
 //!
@@ -160,8 +160,8 @@ async fn the_neutral_model_preserves_mysql_behaviour_exactly() {
          exercising the vendor side table at all"
     );
     assert!(
-        !vendor.mysql_text_storage.is_empty(),
-        "the live MySQL snapshot populated NO `mysql_text_storage`"
+        !vendor.text_storage.is_empty(),
+        "the live MySQL snapshot populated NO `text_storage`"
     );
 
     // ---- Claim 1: the split is lossless, with vendor facts actually present ----

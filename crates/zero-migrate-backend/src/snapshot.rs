@@ -173,15 +173,28 @@ pub struct ColumnSnapshot {
     /// means it is ID-bearing and deliberately has no database default, which is
     /// distinct from an untracked ordinary column.
     pub id_default: Option<IdDefaultSnapshot>,
-    /// MySQL's authoritative distinction between an expression default
-    /// (`EXTRA` contains `DEFAULT_GENERATED`) and a scalar literal. MySQL strips
-    /// SQL quotes from `COLUMN_DEFAULT`, so the raw text alone cannot distinguish
-    /// a literal such as `"uuid()"` from the function call `uuid()`.
+    /// The catalog's own authoritative answer to "is this default an EXPRESSION
+    /// rather than a scalar literal?", for a backend whose default TEXT cannot be
+    /// read to tell.
     ///
-    /// Live MySQL snapshots retain this only for expected-driven ID-default
-    /// classification. It is introspection metadata, not an independently
-    /// drift-comparable portable facet, and is excluded from equality.
-    pub mysql_default_generated: Option<bool>,
+    /// `None` means the producing catalog did not answer, which is also the state
+    /// every backend that never asks is in. The name is the one its consumers
+    /// already gave it: [`ValueFormatRenderer::catalog_default_is_unquoted_literal`]
+    /// takes exactly this value and every hop between here and there calls it
+    /// `expression_default`.
+    ///
+    /// Measured need, and the only backend that populates it today: MySQL strips
+    /// SQL quotes from `information_schema.COLUMNS.COLUMN_DEFAULT`, so the raw text
+    /// cannot distinguish the literal `"uuid()"` from the call `uuid()`; its
+    /// `EXTRA` column carrying `DEFAULT_GENERATED` is what settles it.
+    ///
+    /// Introspection metadata retained only for expected-driven ID-default
+    /// classification, not an independently drift-comparable portable facet, and
+    /// so excluded from equality.
+    ///
+    /// [`ValueFormatRenderer::catalog_default_is_unquoted_literal`]:
+    ///     crate::value_format::ValueFormatRenderer::catalog_default_is_unquoted_literal
+    pub expression_default: Option<bool>,
     /// `Some(false)` means this logical text column is case-insensitive. It is a
     /// drift-comparable catalog attribute on engines where the intent is
     /// recoverable (Postgres `citext`, SQLite `COLLATE NOCASE`, and MySQL
@@ -215,16 +228,23 @@ pub struct ColumnSnapshot {
     /// foreign-key storage contracts. SQLite's default `BINARY` collation is
     /// canonicalized to `None`, while `NOCASE` continues to round-trip through
     /// `case_sensitive = Some(false)`; named alternatives such as `RTRIM` stay
-    /// here. MySQL uses [`Self::mysql_text_storage`] because character-set
+    /// here. MySQL uses [`Self::text_storage`] because character-set
     /// identity is part of its compatibility contract too.
     pub collation: Option<ColumnCollationSnapshot>,
-    /// Exact MySQL character storage recovered from
-    /// `information_schema.COLUMNS`. This is introspection-only metadata used
-    /// to validate character foreign-key compatibility; author-built desired
-    /// snapshots leave it `None`. It is deliberately excluded from structural
-    /// drift equality because the portable schema surface records
-    /// collation intent, not a server-default MySQL collation name.
-    pub mysql_text_storage: Option<MysqlTextStorageSnapshot>,
+    /// The exact character-set + collation pair the live catalog holds for this
+    /// column, for a backend whose foreign-key compatibility rule is written in
+    /// terms of that pair rather than of a portable case-sensitivity Boolean.
+    ///
+    /// `None` on author-built desired snapshots and on any backend that does not
+    /// read one. Introspection-only, and deliberately excluded from structural
+    /// drift equality: the portable schema surface records collation INTENT, and a
+    /// server-default storage name is not intent.
+    ///
+    /// Measured need, and the only backend that populates it today: MySQL refuses a
+    /// character foreign key whose two sides have incompatible storage, and
+    /// `ascii_bin` and `utf8mb4_bin` are both case-sensitive — so the portable
+    /// [`Self::case_sensitive`] cannot tell them apart.
+    pub text_storage: Option<TextStorageSnapshot>,
     /// The parsed physical identity of a MySQL column, when the snapshot came from
     /// a MySQL catalog. `None` on every other dialect and on author-built desired
     /// snapshots that have not derived it yet.
@@ -234,7 +254,7 @@ pub struct ColumnSnapshot {
     /// folds every `varchar(n)` to the literal `text`, so a live `varchar(64)` and
     /// a declared `varchar(255)` are the same string by the time they are compared.
     ///
-    /// Like [`MysqlTextStorageSnapshot`] above it is excluded from this type's
+    /// Like [`TextStorageSnapshot`] above it is excluded from this type's
     /// `PartialEq` / `Eq`, but for the OPPOSITE reason. That one is excluded
     /// because it is not part of the portable schema surface at all. This one is
     /// excluded because it is dialect-specific: folding it into the general equality
@@ -357,14 +377,14 @@ impl std::fmt::Debug for ColumnSnapshot {
         if self.catalog_uuid_format_check {
             s.field("catalog_uuid_format_check", &self.catalog_uuid_format_check);
         }
-        if self.mysql_text_storage.is_some() {
-            s.field("mysql_text_storage", &self.mysql_text_storage);
+        if self.text_storage.is_some() {
+            s.field("text_storage", &self.text_storage);
         }
         if self.mysql_physical_type.is_some() {
             s.field("mysql_physical_type", &self.mysql_physical_type);
         }
-        if self.mysql_default_generated.is_some() {
-            s.field("mysql_default_generated", &self.mysql_default_generated);
+        if self.expression_default.is_some() {
+            s.field("expression_default", &self.expression_default);
         }
         s.field("encryption_sentinel", &self.encryption_sentinel)
             .field("comment_sentinel", &self.comment_sentinel)
@@ -800,13 +820,16 @@ fn split_quoted_members(args: &str) -> Vec<String> {
     members
 }
 
-/// Exact MySQL character-set and collation metadata for one catalog column.
+/// The exact character-set and collation identity one catalog holds for one
+/// column.
 ///
-/// MySQL requires both sides of a character foreign key to use compatible
-/// character storage. A portable `caseSensitive` Boolean is insufficient to
-/// distinguish, for example, `ascii_bin` from `utf8mb4_bin`.
+/// This is a STORAGE identity, not a comparison intent: the portable
+/// `caseSensitive` Boolean cannot distinguish `ascii_bin` from `utf8mb4_bin`,
+/// which are both case-sensitive and are nevertheless not interchangeable on a
+/// backend that requires both sides of a character foreign key to share
+/// compatible storage. MySQL is the backend that requires it today.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct MysqlTextStorageSnapshot {
+pub struct TextStorageSnapshot {
     /// `information_schema.COLUMNS.CHARACTER_SET_NAME`.
     pub character_set: String,
     /// `information_schema.COLUMNS.COLLATION_NAME`.

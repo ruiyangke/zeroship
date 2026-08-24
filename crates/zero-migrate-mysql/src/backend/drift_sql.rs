@@ -7,7 +7,7 @@ use zero_migrate_backend::driver::SqlSession;
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,
-    MysqlPhysicalType, MysqlTextStorageSnapshot, SchemaSnapshot, TableSnapshot, ViewSnapshot,
+    MysqlPhysicalType, SchemaSnapshot, TableSnapshot, TextStorageSnapshot, ViewSnapshot,
 };
 use zero_migrate_backend::value_format::{
     catalog_id_default, catalog_text_id_default, catalog_uuid_id_default, recover_format_check,
@@ -106,10 +106,10 @@ fn case_sensitive_from_collation(collation: Option<&str>) -> Result<Option<bool>
     }
 }
 
-fn mysql_text_storage(
+fn text_storage(
     character_set: Option<&str>,
     collation: Option<&str>,
-) -> Result<Option<MysqlTextStorageSnapshot>, DriftError> {
+) -> Result<Option<TextStorageSnapshot>, DriftError> {
     match (character_set, collation) {
         (None, None) => Ok(None),
         (Some(character_set), Some(collation)) => {
@@ -120,7 +120,7 @@ fn mysql_text_storage(
                     "MySQL catalog returned empty character-set/collation metadata".to_string(),
                 ));
             }
-            Ok(Some(MysqlTextStorageSnapshot {
+            Ok(Some(TextStorageSnapshot {
                 character_set,
                 collation,
             }))
@@ -211,8 +211,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
         let raw_type: String = row.try_get("column_type")?;
         let character_set: Option<String> = row.try_get("character_set_name")?;
         let collation: Option<String> = row.try_get("collation_name")?;
-        let mysql_text_storage =
-            mysql_text_storage(character_set.as_deref(), collation.as_deref())?;
+        let text_storage = text_storage(character_set.as_deref(), collation.as_deref())?;
         let nullable: String = row.try_get("is_nullable")?;
         let default: Option<String> = row.try_get("column_default")?;
         let extra: String = row.try_get("extra")?;
@@ -222,7 +221,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             has_default_generated(&extra),
         );
         let identity = has_auto_increment(&extra).then_some(IdentityCol { always: false });
-        let mysql_default_generated = default.as_ref().map(|_| has_default_generated(&extra));
+        let expression_default = default.as_ref().map(|_| has_default_generated(&extra));
         table.columns.push(ColumnSnapshot {
             name: column_name,
             // Deliberately NOT populated. MySQL does record the facet - `EXTRA` reads
@@ -249,13 +248,13 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
             id_default: identity.map(|_| {
                 recover_mysql_id_default(default.as_deref(), has_default_generated(&extra), false)
             }),
-            mysql_default_generated,
+            expression_default,
             case_sensitive: case_sensitive_from_collation(collation.as_deref())?,
             unbounded_text: false,
             type_def: None,
             authored_type: false,
             collation: None,
-            mysql_text_storage,
+            text_storage,
             encryption_sentinel: None,
             comment_sentinel: None,
             comment: None,
@@ -629,7 +628,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                     .get(&(table_name.clone(), column.name.clone()))
                     .copied()
                     .unwrap_or(false);
-                column.id_default = Some(if column.mysql_text_storage.is_some() {
+                column.id_default = Some(if column.text_storage.is_some() {
                     catalog_text_id_default(
                         column.default.as_deref(),
                         VALUE_FORMAT,
@@ -741,8 +740,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
 #[cfg(test)]
 mod tests {
     use super::{
-        case_sensitive_from_collation, has_auto_increment, mysql_text_storage,
-        recover_mysql_id_default,
+        case_sensitive_from_collation, has_auto_increment, recover_mysql_id_default, text_storage,
     };
     use zero_migrate_backend::snapshot::MysqlPhysicalType;
 
@@ -862,14 +860,14 @@ mod tests {
 
     #[test]
     fn mysql_catalog_text_storage_requires_an_exact_pair() {
-        let storage = mysql_text_storage(Some("ASCII"), Some("ASCII_BIN"))
+        let storage = text_storage(Some("ASCII"), Some("ASCII_BIN"))
             .unwrap()
             .expect("character column metadata");
         assert_eq!(storage.character_set, "ascii");
         assert_eq!(storage.collation, "ascii_bin");
-        assert!(mysql_text_storage(Some("ascii"), None).is_err());
-        assert!(mysql_text_storage(None, Some("ascii_bin")).is_err());
-        assert_eq!(mysql_text_storage(None, None).unwrap(), None);
+        assert!(text_storage(Some("ascii"), None).is_err());
+        assert!(text_storage(None, Some("ascii_bin")).is_err());
+        assert_eq!(text_storage(None, None).unwrap(), None);
     }
 
     #[test]

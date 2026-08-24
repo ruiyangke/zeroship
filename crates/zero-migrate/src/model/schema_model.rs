@@ -92,8 +92,8 @@ use crate::model::ir::{
 use crate::model::snapshot::{
     canonical_index_sort_order, index_predicates_canonically_eq, ColumnCollationSnapshot,
     ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot,
-    IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType,
-    MysqlTextStorageSnapshot, TableSnapshot,
+    IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot, MysqlPhysicalType, TableSnapshot,
+    TextStorageSnapshot,
 };
 
 // ---------------------------------------------------------------------------
@@ -220,9 +220,9 @@ pub struct VendorFacts {
     pub catalog_uuid_format_check: BTreeMap<ColumnKey, bool>,
     /// MySQL: `EXTRA` contains `DEFAULT_GENERATED`, distinguishing an expression
     /// default from a scalar literal MySQL has stripped the quotes from.
-    pub mysql_default_generated: BTreeMap<ColumnKey, bool>,
+    pub expression_default: BTreeMap<ColumnKey, bool>,
     /// MySQL: exact character-set and collation identity.
-    pub mysql_text_storage: BTreeMap<ColumnKey, MysqlTextStorageSnapshot>,
+    pub text_storage: BTreeMap<ColumnKey, TextStorageSnapshot>,
     /// MySQL: parsed physical type identity, which the portable `data_type` cannot
     /// carry because `mysql_canonical_type` folds every `varchar(n)` to `text`.
     pub mysql_physical_type: BTreeMap<ColumnKey, MysqlPhysicalType>,
@@ -247,8 +247,8 @@ impl VendorFacts {
             sqlite_rowid,
             sqlite_stored_create_sql,
             catalog_uuid_format_check,
-            mysql_default_generated,
-            mysql_text_storage,
+            expression_default,
+            text_storage,
             mysql_physical_type,
             pg_index_only,
             pg_index_opclass,
@@ -261,8 +261,8 @@ impl VendorFacts {
             .extend(sqlite_stored_create_sql);
         self.catalog_uuid_format_check
             .extend(catalog_uuid_format_check);
-        self.mysql_default_generated.extend(mysql_default_generated);
-        self.mysql_text_storage.extend(mysql_text_storage);
+        self.expression_default.extend(expression_default);
+        self.text_storage.extend(text_storage);
         self.mysql_physical_type.extend(mysql_physical_type);
         self.pg_index_only.extend(pg_index_only);
         self.pg_index_opclass.extend(pg_index_opclass);
@@ -292,10 +292,10 @@ impl VendorFacts {
     /// * `catalog_uuid_format_check` - introspection-only; author-built desired
     ///   snapshots always leave it `false`, so comparing it reports permanent phantom
     ///   drift on every UUID column.
-    /// * `mysql_default_generated` - introspection metadata retained only for
+    /// * `expression_default` - introspection metadata retained only for
     ///   expected-driven ID-default classification, not an independently comparable
     ///   portable facet.
-    /// * `mysql_text_storage` - the portable schema surface records collation INTENT,
+    /// * `text_storage` - the portable schema surface records collation INTENT,
     ///   not a server-default MySQL collation name.
     /// * `mysql_physical_type` - NOT part of table shape. It IS part of drift, and it
     ///   is compared by [`Self::column_drift_identity`] below. Its field doc already
@@ -525,13 +525,11 @@ impl Column {
         vendor
             .catalog_uuid_format_check
             .insert(key.clone(), snapshot.catalog_uuid_format_check);
-        if let Some(generated) = snapshot.mysql_default_generated {
-            vendor
-                .mysql_default_generated
-                .insert(key.clone(), generated);
+        if let Some(generated) = snapshot.expression_default {
+            vendor.expression_default.insert(key.clone(), generated);
         }
-        if let Some(storage) = snapshot.mysql_text_storage.clone() {
-            vendor.mysql_text_storage.insert(key.clone(), storage);
+        if let Some(storage) = snapshot.text_storage.clone() {
+            vendor.text_storage.insert(key.clone(), storage);
         }
         if let Some(physical) = snapshot.mysql_physical_type.clone() {
             vendor.mysql_physical_type.insert(key, physical);
@@ -583,13 +581,13 @@ impl Column {
                 .copied()
                 .unwrap_or(false),
             id_default: self.id_default.clone(),
-            mysql_default_generated: vendor.mysql_default_generated.get(&key).copied(),
+            expression_default: vendor.expression_default.get(&key).copied(),
             case_sensitive: self.case_sensitive,
             unbounded_text: self.unbounded_text,
             type_def: self.type_def.clone(),
             authored_type: self.authored_type,
             collation: self.collation.clone(),
-            mysql_text_storage: vendor.mysql_text_storage.get(&key).cloned(),
+            text_storage: vendor.text_storage.get(&key).cloned(),
             mysql_physical_type: vendor.mysql_physical_type.get(&key).cloned(),
             encryption_sentinel: self.encryption_sentinel.clone(),
             comment_sentinel: self.comment_sentinel.clone(),

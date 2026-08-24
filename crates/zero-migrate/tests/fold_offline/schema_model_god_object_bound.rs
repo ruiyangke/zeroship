@@ -317,7 +317,7 @@ fn the_neutral_column_carries_eighteen_fields_and_the_catalog_snapshot_carries_t
 
     // 24 catalog fields = 18 neutral + 5 vendor + one ephemeral schema-query token
     // carrier. The vendor five are `sqlite_rowid`,
-    // `catalog_uuid_format_check`, `mysql_default_generated`, `mysql_text_storage` and
+    // `catalog_uuid_format_check`, `expression_default`, `text_storage` and
     // `mysql_physical_type`, and `tests/schema_model_equivalence_mysql.rs` proves the
     // split is lossless with all of them populated.
     let neutral = schema_model::Column::default();

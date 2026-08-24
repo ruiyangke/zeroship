@@ -148,7 +148,7 @@ fn pg_collation_sql(column: &CursorColumnContract) -> Result<Option<String>, App
                 quote_ident(name)?
             )))
         }
-        CursorComparison::MysqlText { .. } => Err(backend_error(format!(
+        CursorComparison::ExactText { .. } => Err(backend_error(format!(
             "PostgreSQL cursor component {:?} carries MySQL comparison semantics",
             column.name
         ))),

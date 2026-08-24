@@ -1624,7 +1624,7 @@ fn mysql_live_cursor_column(
         lower_data_type.as_str(),
         "char" | "varchar" | "tinytext" | "text" | "mediumtext" | "longtext"
     ) {
-        CursorComparison::MysqlText {
+        CursorComparison::ExactText {
             character_set: validated_catalog_ident("character set", character_set.as_deref())?
                 .to_string(),
             collation: validated_catalog_ident("collation", collation.as_deref())?.to_string(),
@@ -2116,7 +2116,7 @@ fn guard_descriptor(
                 // Paging intentionally follows the declared collation, but the
                 // guard must detect representation changes that a case- or
                 // accent-insensitive collation considers equal.
-                CursorComparison::MysqlText { .. } => {
+                CursorComparison::ExactText { .. } => {
                     format!("CAST(OLD.{column} AS BINARY) <=> CAST(NEW.{column} AS BINARY)")
                 }
                 _ => format!("OLD.{column} <=> NEW.{column}"),
@@ -2794,7 +2794,7 @@ mod tests {
                     name: "slug".into(),
                     scalar_type: CursorScalarType::String,
                     database_type: "text".into(),
-                    comparison: CursorComparison::MysqlText {
+                    comparison: CursorComparison::ExactText {
                         character_set: "utf8mb4".into(),
                         collation: "utf8mb4_bin".into(),
                     },
@@ -2813,7 +2813,7 @@ mod tests {
                     quoted: format!("`{}`", column.name),
                     scalar_type: column.scalar_type,
                     bind_expression: match &column.comparison {
-                        CursorComparison::MysqlText {
+                        CursorComparison::ExactText {
                             character_set,
                             collation,
                         } => {
@@ -3308,7 +3308,7 @@ mod tests {
     fn guard_rejects_case_only_text_change_under_case_insensitive_collation() {
         let mut spec = spec(CursorStability::GuardUpdates);
         spec.cursor_contract.as_mut().unwrap().columns[1].comparison =
-            CursorComparison::MysqlText {
+            CursorComparison::ExactText {
                 character_set: "utf8mb4".into(),
                 collation: "utf8mb4_0900_ai_ci".into(),
             };
