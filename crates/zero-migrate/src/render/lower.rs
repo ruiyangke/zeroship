@@ -136,9 +136,13 @@ enum LoweredOp {
 /// index units have been emitted. The originating op metadata travels with it so
 /// guard failures, fragments, and the eventual non-contiguous op span remain
 /// attributed to the child `createTable`, not to the target op that unblocks it.
+///
+/// The op ITSELF used to travel too. `guard_lowered_unit` took it in order to ask
+/// whether it was one of the two IR raw-island shapes, which decided whether the
+/// narrower raw-island backstop ran ahead of the belt for a belt-off config. Nothing
+/// asks that now, and the index and kind are what attribution actually reads.
 struct PendingGuardedForeignKey {
     deferred: DeferredForeignKeyUnit,
-    op: Op,
     op_index: usize,
     op_kind: &'static str,
     op_span_index: usize,
@@ -2345,7 +2349,7 @@ impl IrAuthor {
 
     /// bind a connection/CLI-level DEFAULT schema. Applied as the
     /// effective schema for any op that omits its own `schema` qualifier. The
-    /// general/Trusted CLI sets this from a `--schema`/search-path flag; the
+    /// general operator CLI sets this from a `--schema`/search-path flag; the
     /// Confined platform path leaves it `None` (lowering pins `project_schema`).
     ///
     /// **Confinement.** A `default_schema` is NOT trusted blindly: it is validated
@@ -2395,7 +2399,7 @@ impl IrAuthor {
     /// `project_schema` casing, never the op's verbatim casing. Under Confined this
     /// therefore resolves to `project_schema` for every op (the op's schema is
     /// absent or case-folds to it; `default_schema` is `None`) — defense in depth,
-    /// byte-identical to the earlier render. Under Platform/Trusted the op's schema
+    /// byte-identical to the earlier render. Under a widened scope the op's schema
     /// is honored verbatim unless it case-folds to `project_schema` (in which case
     /// the canonical form is rendered — harmless, since they denote the same schema
     /// only when casing matches, and PG folds unquoted identifiers to lowercase).
@@ -2504,7 +2508,7 @@ impl IrAuthor {
     ) -> Result<LoweredArtifact, LoadAndLowerGuardedError> {
         // derive the schema-confinement scope from the guard config's
         // trust posture: Confined ⇒ pin the project schema (refuse
-        // cross-schema), Platform ⇒ its allow-list, Trusted ⇒ no confinement. This
+        // cross-schema), Platform ⇒ its allow-list, an unconfined grant ⇒ no confinement. This
         // is the single source of truth (`GuardConfig::schema_scope`) shared with the
         // parse-guard cross-schema line-1 denial.
         let scope = guard_cfg.schema_scope();
@@ -6074,7 +6078,7 @@ impl IrAuthor {
     /// `eff_schema`, which the cross-schema scope gate (`permits`) has
     /// ALREADY vetted: under Confined `eff == project_schema` (a foreign qualifier
     /// is refused upstream), so the executor qualifies into the project schema
-    /// byte-identically to before; under Trusted/Platform a gate-approved foreign
+    /// byte-identically to before; under a widened scope a gate-approved foreign
     /// schema flows through and the windowed `UPDATE` qualifies into it (the
     /// executor's profile-derived guard permits the cross-schema ref). Confinement
     /// is unchanged — it lives in the scope gate, not in a lower-time refusal.
@@ -6104,7 +6108,7 @@ impl IrAuthor {
         // cross-schema scope gate (`permits`, in `lower_one_op`) BEFORE reaching
         // here: under Confined `Single(project_schema)` a truly foreign qualifier is
         // refused upstream, so `eff_schema == project_schema` always; under
-        // Trusted/Platform the scope widens and a gate-approved foreign schema flows
+        // a widened scope admits a gate-approved foreign schema, which flows
         // through. So the batched-backfill executor now threads `spec.schema =
         // eff_schema` (the executor qualifies its windowed UPDATE + anchors its
         // search_path on it and guards via its profile-derived `guard_config`).
@@ -6315,7 +6319,6 @@ impl IrAuthor {
                 &mut pending_foreign_keys,
                 guard_scope.as_ref(),
                 guard.as_ref(),
-                guard_cfg.skips_denylist_belt(),
             )?;
         }
         if let Some(pending) = pending_foreign_keys.first() {
@@ -6331,80 +6334,35 @@ impl IrAuthor {
         Ok((steps, fragments, op_spans))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn guard_lowered_unit(
-        op: &Op,
         op_index: usize,
         op_kind: &'static str,
         unit: LoweredUnit,
         steps: &mut Vec<PlanStep>,
         fragments: &mut Vec<GuardedFragment>,
         guard: &dyn MigrationGuard,
-        skips_static_guard: bool,
     ) -> Result<(), IrGuardedLowerError> {
         let (migration, statements) = unit;
         // Guard EACH true statement individually so a denial is attributed to
         // the originating op even when this is a forward FK emitted later.
+        //
+        // One `check` per statement is the whole gate. There used to be a second
+        // arm here, taken when the config's root/host-set mode had turned the static
+        // belt off: it ran `check_raw_island_sql` / `check_raw_island_body` FIRST for
+        // the two IR raw islands, so an `Op::Raw` or a `createFunction` body could not
+        // host-reach through a posture that had waved the belt away. That posture is
+        // gone, `check` runs the full belt for every config the engine can build, and
+        // the arm went with the mode that selected it.
         for statement in &statements {
             let mut advisories = Vec::new();
-            if skips_static_guard {
-                match op {
-                    Op::Raw { .. } => guard
-                        .check_raw_island_sql(statement)
-                        .map_err(|source| FragmentGuardDenied {
-                            op_index,
-                            op_kind,
-                            source,
-                        })
-                        .and_then(|()| {
-                            guard
-                                .check(statement)
-                                .map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })
-                        })
-                        .map(|outcome| advisories.extend(outcome.advisories))?,
-                    Op::CreateFunction { body, .. } => guard
-                        .check_raw_island_body(body, statement)
-                        .map_err(|source| FragmentGuardDenied {
-                            op_index,
-                            op_kind,
-                            source,
-                        })
-                        .and_then(|()| {
-                            guard
-                                .check(statement)
-                                .map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })
-                        })
-                        .map(|outcome| advisories.extend(outcome.advisories))?,
-                    _ => {
-                        let outcome =
-                            guard
-                                .check(statement)
-                                .map_err(|source| FragmentGuardDenied {
-                                    op_index,
-                                    op_kind,
-                                    source,
-                                })?;
-                        advisories.extend(outcome.advisories);
-                    }
-                }
-            } else {
-                let outcome = guard
-                    .check(statement)
-                    .map_err(|source| FragmentGuardDenied {
-                        op_index,
-                        op_kind,
-                        source,
-                    })?;
-                advisories.extend(outcome.advisories);
-            }
+            let outcome = guard
+                .check(statement)
+                .map_err(|source| FragmentGuardDenied {
+                    op_index,
+                    op_kind,
+                    source,
+                })?;
+            advisories.extend(outcome.advisories);
             fragments.push(GuardedFragment {
                 op_index,
                 op_kind,
@@ -6440,10 +6398,6 @@ impl IrAuthor {
         pending_foreign_keys: &mut Vec<PendingGuardedForeignKey>,
         guard_scope: Option<&crate::model::policy::SchemaScope>,
         guard: &dyn MigrationGuard,
-        // The Trusted (dbmate-like) posture skips the static parse-time belt — the
-        // the root/host-set `GuardMode::Off` grant. When set, raw islands still run the
-        // deny-list backstop so embedded arbitrary SQL cannot host-reach.
-        skips_static_guard: bool,
     ) -> Result<(), IrGuardedLowerError> {
         if let Op::Dialectal { legs } = op {
             // No own leg contributes no ops. See `model::validate`'s dialectal
@@ -6467,7 +6421,6 @@ impl IrAuthor {
                     pending_foreign_keys,
                     guard_scope,
                     guard,
-                    skips_static_guard,
                 )?;
             }
             return Ok(());
@@ -6494,16 +6447,7 @@ impl IrAuthor {
             LoweredOp::Ddl(units) => units,
             LoweredOp::CreateTable { table, lowered } => {
                 for unit in lowered.immediate_units {
-                    Self::guard_lowered_unit(
-                        op,
-                        op_index,
-                        op_kind,
-                        unit,
-                        steps,
-                        fragments,
-                        guard,
-                        skips_static_guard,
-                    )?;
+                    Self::guard_lowered_unit(op_index, op_kind, unit, steps, fragments, guard)?;
                 }
                 let op_span_index = op_spans.len();
                 op_spans.push(LoweredOpSpan {
@@ -6515,7 +6459,6 @@ impl IrAuthor {
                 pending_foreign_keys.extend(lowered.deferred_foreign_keys.into_iter().map(
                     |deferred| PendingGuardedForeignKey {
                         deferred,
-                        op: op.clone(),
                         op_index,
                         op_kind,
                         op_span_index,
@@ -6538,14 +6481,12 @@ impl IrAuthor {
                         if let Some(unit) = pending.deferred.unit {
                             let deferred_start = steps.len();
                             Self::guard_lowered_unit(
-                                &pending.op,
                                 pending.op_index,
                                 pending.op_kind,
                                 unit,
                                 steps,
                                 fragments,
                                 guard,
-                                skips_static_guard,
                             )?;
                             op_spans[pending.op_span_index]
                                 .additional_step_ranges
@@ -6617,16 +6558,7 @@ impl IrAuthor {
         };
 
         for unit in op_units {
-            Self::guard_lowered_unit(
-                op,
-                op_index,
-                op_kind,
-                unit,
-                steps,
-                fragments,
-                guard,
-                skips_static_guard,
-            )?;
+            Self::guard_lowered_unit(op_index, op_kind, unit, steps, fragments, guard)?;
         }
         op_spans.push(LoweredOpSpan {
             op: op.clone(),
@@ -11855,7 +11787,7 @@ mod tests {
             *schema = Some("app2".into());
         }
         // The author is BOUND to project schema "app1"; the op overrides to "app2".
-        // This is the Trusted/Platform render path (a Confined creator could never name
+        // This is the widened-scope render path (a Confined creator could never name
         // a foreign schema — the cross-schema confinement gate refuses it first), so the
         // scope ADMITS "app2"; the test then proves the qualified render, not the gate.
         let author = test_ir_author("app1", "app_a", POSTGRES).with_schema_scope(
@@ -12102,7 +12034,7 @@ mod tests {
     /// qualifier. RED before `with_default_schema`/`effective_schema`. The
     /// default scope is now the Confined `Single(project_schema)`, so a foreign
     /// `default_schema` (`"dflt"` ≠ `"app1"`) must be admitted by an explicit
-    /// `with_schema_scope` widen — the Platform/Trusted CLI posture.
+    /// `with_schema_scope` widen — the operator CLI posture.
     #[test]
     fn default_schema_applies_when_op_omits_qualifier_pg() {
         let ir = create_table_ir(
@@ -12125,7 +12057,7 @@ mod tests {
             }],
         );
         let author = test_ir_author("app1", "app_a", POSTGRES)
-            // Trusted CLI widens the scope to admit the connection default it binds.
+            // The operator CLI widens the scope to admit the connection default it binds.
             .with_schema_scope(crate::model::policy::SchemaScope::Allowlist(vec![
                 "dflt".into()
             ]))
@@ -12286,7 +12218,7 @@ mod tests {
     /// qualifier is REFUSED fail-closed at lower, NOT silently rendered into `main`.
     /// The SQLite emitter performs no auto-ATTACH, so honoring `schema:'reporting'`
     /// would otherwise silently drop the qualifier and land the op in `main` (a
-    /// silent-WRONG-target). The Trusted/general CLI is the exposed surface (no
+    /// silent-WRONG-target). The general operator CLI is the exposed surface (no
     /// confinement gate pins the schema). RED before the lower-time fail-closed check
     /// (it would have silently emitted unqualified `main` DDL).
     #[test]
@@ -12315,7 +12247,7 @@ mod tests {
         }
         // Project schema "app"; the SQLite leg's implicit target is `main` (== the
         // bound project schema). "reporting" is a different, non-main schema. This is
-        // the Trusted/general-CLI posture (the exposed surface — a Confined creator
+        // the general operator-CLI posture (the exposed surface — a Confined creator
         // could never NAME a foreign schema; the cross-schema confinement gate refuses
         // it first), so widen the scope to ADMIT "reporting" — the test then exercises
         // the SQLite functional limit (no auto-ATTACH), not the confinement boundary.
@@ -12391,7 +12323,7 @@ mod tests {
     /// UPDATE qualifies into `app2`, NOT silently into `app1`. Before this fix (it
     /// returned `BackfillSchemaUnsupported`).
     ///
-    /// Trusted/Platform posture: the foreign schema "app2" is ADMITTED by the scope
+    /// A widened scope: the foreign schema "app2" is ADMITTED by the scope
     /// (a Confined creator could never name it — the cross-schema confinement gate
     /// refuses it first), so the test reaches the now-enabled cross-schema backfill,
     /// not the confinement gate.
@@ -12506,7 +12438,7 @@ mod tests {
     /// Confinement is UNCHANGED: a Confined creator (scope =
     /// `Single(project_schema)`) naming a FOREIGN schema in a backfill is still
     /// refused at the cross-schema scope gate (BEFORE `lower_backfill`), so the
-    /// cross-schema backfill is reachable ONLY under the widened (Trusted/Platform)
+    /// cross-schema backfill is reachable ONLY under the widened (Platform / unconfined)
     /// posture. RED would be a Confined cross-schema backfill silently lowering.
     #[test]
     fn confined_cross_schema_backfill_still_refused_pg() {

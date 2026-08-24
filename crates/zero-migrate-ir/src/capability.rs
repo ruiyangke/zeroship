@@ -14,11 +14,11 @@
 //!
 //! The operator asked for a capability-COMPOSITION model so the gate is
 //! orthogonal to the trust-profile machinery: the existing
-//! [`crate::policy::TrustProfile`] (`Confined`/`Platform`/`Trusted`) MAPS onto
+//! [`crate::policy::TrustProfile`] (`Confined`/`Platform`) MAPS onto
 //! NAMED PRESETS ([`VendorCapabilities::confined`] / [`operator`] / [`local`]),
 //! but the gate keys on `caps.allow_role`, never on `trust == Confined`. A future
 //! "local dev" or "CI" posture can compose its own flag set without touching the
-//! gate. The three-profile mapping is [`VendorCapabilities::for_trust`].
+//! gate. The profile mapping is [`VendorCapabilities::for_trust`].
 //!
 //! [`operator`]: VendorCapabilities::operator
 //! [`local`]: VendorCapabilities::local
@@ -205,7 +205,7 @@ impl VendorCapabilities {
 
     /// The **operator** preset (the trusted platform/operator posture): EVERY
     /// vendor capability enabled. This is the composition [`TrustProfile::Platform`]
-    /// and [`TrustProfile::Trusted`] map onto. `schemas` is filled from the active
+    /// maps onto. `schemas` is filled from the active
     /// allowlist by [`from_scope`](Self::from_scope).
     #[must_use]
     pub const fn operator() -> Self {
@@ -252,14 +252,14 @@ impl VendorCapabilities {
     }
 
     /// Map a [`TrustProfile`] onto its named preset: Confined ⇒
-    /// [`confined`](Self::confined); Platform / Trusted ⇒ [`operator`](Self::operator).
+    /// [`confined`](Self::confined); Platform ⇒ [`operator`](Self::operator).
     /// The `TrustProfile` is the EXISTING operator-gated machinery; this is the
     /// single bridge from it to the capability composition.
     #[must_use]
     pub const fn for_trust(trust: TrustProfile) -> Self {
         match trust {
             TrustProfile::Confined => Self::confined(),
-            TrustProfile::Platform | TrustProfile::Trusted => Self::operator(),
+            TrustProfile::Platform => Self::operator(),
         }
     }
 
@@ -270,8 +270,9 @@ impl VendorCapabilities {
     /// - `Some(Single(_))` ⇒ **Confined** (the creator/AI posture) ⇒ [`confined`](Self::confined).
     /// - `Some(Allowlist(list))` ⇒ **Platform** ⇒ [`operator`](Self::operator) with
     ///   `schemas = list`.
-    /// - `Some(Unconfined)` ⇒ **Trusted** ⇒ [`operator`](Self::operator) with no
-    ///   validate-time cross-schema confinement.
+    /// - `Some(Unconfined)` ⇒ an operator charter granting `schema.cross_schema` over the
+    ///   whole universe ⇒ [`operator`](Self::operator) with no validate-time
+    ///   cross-schema confinement.
     ///
     /// `None` is intentionally least-privilege so future public callers cannot
     /// accidentally enable vendor ops by omitting a capability. Wider scopes must
@@ -387,18 +388,16 @@ mod tests {
             VendorCapabilities::for_trust(TrustProfile::Confined),
             VendorCapabilities::confined()
         );
+        // A third row asserted `for_trust(Trusted) == operator()`. That label named the
+        // belt-off posture, which no config can select any more, and it is gone.
         assert_eq!(
             VendorCapabilities::for_trust(TrustProfile::Platform),
-            VendorCapabilities::operator()
-        );
-        assert_eq!(
-            VendorCapabilities::for_trust(TrustProfile::Trusted),
             VendorCapabilities::operator()
         );
     }
 
     #[test]
-    fn from_scope_distinguishes_the_three_postures() {
+    fn from_scope_distinguishes_the_schema_scopes() {
         // Confined (Single) → no vendor caps.
         let confined = VendorCapabilities::from_scope(Some(&SchemaScope::Single("app1".into())));
         assert!(!confined.grants(VendorCapability::Role));
@@ -416,9 +415,9 @@ mod tests {
         let defaulted = VendorCapabilities::from_scope(None);
         assert!(!defaulted.grants(VendorCapability::RawSql));
         assert!(!defaulted.grants(VendorCapability::RawViewBody));
-        // Explicit Trusted (Unconfined) → all caps.
-        let trusted = VendorCapabilities::from_scope(Some(&SchemaScope::Unconfined));
-        assert!(trusted.grants(VendorCapability::RawSql));
-        assert!(trusted.grants(VendorCapability::RawViewBody));
+        // An unconfined scope (a whole-universe cross-schema grant) → all caps.
+        let unconfined = VendorCapabilities::from_scope(Some(&SchemaScope::Unconfined));
+        assert!(unconfined.grants(VendorCapability::RawSql));
+        assert!(unconfined.grants(VendorCapability::RawViewBody));
     }
 }

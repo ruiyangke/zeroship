@@ -22,11 +22,12 @@
 //! - **`runtime`** — execution & resource behavior (timeouts, index creation, rewrite).
 //! - **`safety`** — data protection (limits AND obligations; polarity is the field).
 //!
-//! Two of the old operator-posture toggles do NOT live here anymore. "Skip the static
-//! guard belt" is a host/root POSTURE (`GuardMode`), not a composable per-app grant —
-//! it is the single most dangerous switch, quarantined OUT of the composable registry.
-//! The raw-island role-needle relaxation is an INTERNAL guard vendor-lower rule keyed
-//! off the posture, not an operator-authorable knob. Both moved to the guard crate.
+//! Two of the old operator-posture toggles do NOT live here. "Skip the static guard
+//! belt" was a host/root POSTURE rather than a composable per-app grant — the single
+//! most dangerous switch, quarantined OUT of the composable registry, and since
+//! removed outright: no config can select it. The raw-island role-needle relaxation is
+//! an INTERNAL guard vendor-lower rule, not an operator-authorable knob; it survives,
+//! keyed off the `access.role` grant alone now that there is no posture to key off.
 //!
 //! This is the Step-0 prep for moving the guard's capability gate onto the PDP: the
 //! guard, given an [`EffectivePolicy`](zero_migrate_policy::EffectivePolicy) composed

@@ -75,7 +75,7 @@ pub const RUNTIME_RESOLVED: &str = "-- [runtime-resolved]";
 #[derive(Debug, Clone)]
 pub struct PreviewOpts {
     /// The trust profile's effective schema for an op that omits its own qualifier.
-    /// The general/Trusted CLI default is `public`
+    /// The general operator CLI default is `public`
     /// ([`DEFAULT_GENERIC_SCHEMA`](crate)); the Confined platform path pins the
     /// project schema. NEVER requires a DB to pick — it is a flag/profile value.
     pub default_schema: String,
@@ -395,7 +395,7 @@ fn render_ir_envelope_rendered(
     crate::model::validate::validate_ir(&ir, dialect)
         .map_err(|e| format!("validate IR envelope: {e}"))?;
 
-    // The general/Trusted operator preview renders into the chosen default schema:
+    // The general operator preview renders into the chosen default schema:
     // bind it as the author's project schema, so an op with NO qualifier (or one
     // matching the default) renders there. A truly FOREIGN explicit qualifier is
     // out of the Confined `Single(default_schema)` scope and fails to lower → it is

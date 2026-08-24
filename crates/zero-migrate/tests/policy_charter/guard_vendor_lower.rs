@@ -40,7 +40,7 @@ use zero_migrate::guard::{
 use zero_migrate::model::capability::OperatorCapability;
 use zero_migrate::model::ir::{MigrationIr, Op};
 use zero_migrate::model::policy::{DestructiveOps, SchemaScope};
-use zero_migrate::{DialectId, GuardMode};
+use zero_migrate::DialectId;
 use zero_migrate_mysql::DIALECT as MYSQL;
 use zero_migrate_postgres::guard::denylist::rule;
 use zero_migrate_postgres::guard::{flags_for, SqlGuard};
@@ -533,17 +533,19 @@ fn raw_body_backstop_decision(cfg: &GuardConfig, body: &str) -> GuardDecision {
     }
 }
 
+/// The behaviour lock ran over THREE postures. The third was Trusted, the root/host-set
+/// belt-off mode, and every one of its expectations was `Allow` for the trivial reason
+/// that the belt did not run. That posture is gone; the two that decide anything are
+/// what is locked here.
 fn assert_profile_decisions(
     site: &str,
     sql: &str,
     confined: GuardDecision,
     platform: GuardDecision,
-    trusted: GuardDecision,
 ) {
     let profiles = [
         ("confined", confined_guard(), confined),
         ("platform", platform_guard(), platform),
-        ("trusted", trusted_guard(), trusted),
     ];
     for (profile, guard, expected) in profiles {
         let got = decision_of(&guard, sql);
@@ -554,14 +556,17 @@ fn assert_profile_decisions(
     }
 }
 
+/// The site this locked was the belt-skip early-return itself, whose whole content
+/// was "the belt-off posture reaches none of this". The posture is gone and so is the
+/// early-return; what the two surviving postures decide about the statement it guarded
+/// is unchanged and is what the lock is now.
 #[test]
-fn m2_stage2_site_459_belt_skip_behavior_lock() {
+fn m2_stage2_site_459_copy_program_behavior_lock() {
     assert_profile_decisions(
-        "site :459 belt-skip",
+        "site :459 COPY … TO PROGRAM",
         "COPY zero_migrate.t TO PROGRAM 'sh -c id'",
         GuardDecision::Denied(rule::COPY_PROGRAM),
         GuardDecision::Denied(rule::COPY_PROGRAM),
-        GuardDecision::Allow,
     );
 }
 
@@ -572,7 +577,6 @@ fn m2_stage2_site_655_create_role_behavior_lock() {
         "CREATE ROLE zero_migrate_auth NOLOGIN",
         GuardDecision::Denied(rule::ROLE_MANAGEMENT),
         GuardDecision::Allow,
-        GuardDecision::Allow,
     );
 }
 
@@ -582,7 +586,6 @@ fn m2_stage2_site_664_alter_role_behavior_lock() {
         "site :664 alter role",
         "ALTER ROLE zero_migrate_auth LOGIN",
         GuardDecision::Denied(rule::ROLE_MANAGEMENT),
-        GuardDecision::Allow,
         GuardDecision::Allow,
     );
 }
@@ -598,7 +601,6 @@ fn m2_stage2_site_670_role_set_and_drop_behavior_lock() {
             sql,
             GuardDecision::Denied(rule::ROLE_MANAGEMENT),
             GuardDecision::Allow,
-            GuardDecision::Allow,
         );
     }
 }
@@ -610,7 +612,6 @@ fn m2_stage2_site_682_grant_stmt_behavior_lock() {
         "GRANT CONNECT ON DATABASE zero_migrate TO zero_migrate_app",
         GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
         GuardDecision::Allow,
-        GuardDecision::Allow,
     );
 }
 
@@ -621,7 +622,6 @@ fn m2_stage2_site_691_grant_role_stmt_behavior_lock() {
         "GRANT zero_migrate_app TO zero_migrate_worker",
         GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
         GuardDecision::Allow,
-        GuardDecision::Allow,
     );
 }
 
@@ -631,7 +631,6 @@ fn m2_stage2_site_700_alter_default_privileges_behavior_lock() {
         "site :700 alter default privileges",
         "ALTER DEFAULT PRIVILEGES IN SCHEMA zero_migrate GRANT SELECT ON TABLES TO zero_migrate_app",
         GuardDecision::Denied(rule::PRIVILEGE_MANAGEMENT),
-        GuardDecision::Allow,
         GuardDecision::Allow,
     );
 }
@@ -648,7 +647,6 @@ fn m2_stage2_site_798_drop_stmt_behavior_lock() {
             sql,
             GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
             GuardDecision::Allow,
-            GuardDecision::Allow,
         );
     }
 }
@@ -660,7 +658,6 @@ fn m2_stage2_site_821_create_schema_behavior_lock() {
         "CREATE SCHEMA IF NOT EXISTS public",
         GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
         GuardDecision::Allow,
-        GuardDecision::Allow,
     );
 }
 
@@ -670,7 +667,6 @@ fn m2_stage2_site_829_create_policy_behavior_lock() {
         "site :829 create policy",
         "CREATE POLICY tenant_isolation ON zero_migrate.app_secrets USING (true)",
         GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
-        GuardDecision::Allow,
         GuardDecision::Allow,
     );
 }
@@ -682,7 +678,6 @@ fn m2_stage2_site_836_drop_owned_behavior_lock() {
         "DROP OWNED BY zero_migrate_auth",
         GuardDecision::Denied(rule::UNRECOGNIZED_DANGEROUS),
         GuardDecision::Allow,
-        GuardDecision::Allow,
     );
 }
 
@@ -693,7 +688,6 @@ fn m2_stage2_site_900_rls_alter_table_behavior_lock() {
         "ALTER TABLE zero_migrate.app_secrets ENABLE ROW LEVEL SECURITY",
         GuardDecision::Denied(rule::UNSAFE_ALTER_TABLE_CMD),
         GuardDecision::Allow,
-        GuardDecision::Allow,
     );
 }
 
@@ -703,7 +697,6 @@ fn m2_stage2_site_1209_body_role_needles_behavior_lock() {
         "site :1209 body role needles",
         "DO $$ BEGIN PERFORM 'create role hidden'; END $$",
         GuardDecision::Denied(rule::ROLE_MANAGEMENT),
-        GuardDecision::Allow,
         GuardDecision::Allow,
     );
 }
@@ -721,48 +714,13 @@ fn m2_stage2_site_1209_raw_island_body_backstop_behavior_lock() {
         GuardDecision::Allow,
         "Platform is the only posture whose body-token backstop relaxes role/search_path needles"
     );
-    assert_eq!(
-        raw_body_backstop_decision(&trusted_guard_config(), body),
-        GuardDecision::Denied(rule::BODY_INSPECTION),
-        "Trusted raw-island body backstop must match the pre-refactor non-Platform decision"
-    );
-
-    let cfg = trusted_guard_config();
-    let author = trusted_author();
-    let op = zero_migrate_ir::ir::Op::CreateFunction {
-        name: "raw_body_role_needles".into(),
-        schema: Some("public".into()),
-        args: None,
-        returns: "void".into(),
-        language: zero_migrate_ir::ir::FuncLanguage::Procedural,
-        replace: Some(true),
-        volatility: None,
-        body: body.into(),
-    };
-
-    match author.lower_guarded(
-        &vendor_ir(op),
-        &cfg,
-        &zero_migrate::render::lower::LiveSchema::default(),
-    ) {
-        Err(zero_migrate::render::lower::IrGuardedLowerError::Denied(denial)) => {
-            assert_eq!(denial.op_kind, "createFunction");
-            assert!(
-                matches!(
-                    denial.source,
-                    GuardError::Denied {
-                        rule: rule::BODY_INSPECTION,
-                        ..
-                    }
-                ),
-                "Trusted createFunction must route through the raw-island body backstop, got {:?}",
-                denial.source
-            );
-        }
-        other => panic!(
-            "Trusted createFunction role/search_path body must be denied through lower_guarded; got {other:?}"
-        ),
-    }
+    // A third row asserted the same denial for the belt-off posture, and a second half
+    // drove the same body through `lower_guarded` to prove a `createFunction` under
+    // that posture ROUTED here rather than round the belt. Both are gone with the
+    // posture: `lower_guarded` calls this backstop for nobody now — every config it can
+    // be handed runs the full belt through `check` — so there is no routing left to
+    // assert, and the backstop's own two-posture decision above is the surviving
+    // subject.
 }
 
 #[test]
@@ -809,18 +767,18 @@ fn m2_stage2_superuser_belt_sites_stay_hard_denied() {
 #[test]
 fn t11_platform_capability_mints_only_via_runner_seam() {
     let cap = OperatorCapability::for_test();
-    // The token grants a Platform GuardConfig + ExecutorConfig. The Platform posture
-    // is now identified by its PDP shape: a schema allowlist scope + the full belt
-    // (it does NOT skip the static guard — only Trusted does).
+    // The token grants a Platform GuardConfig + ExecutorConfig. The Platform posture is
+    // identified by its PDP shape: a schema allowlist scope.
+    //
+    // Each assertion below had a `!skips_denylist_belt()` partner reading "Platform
+    // runs the full static belt", which distinguished Platform from the one posture
+    // that did not. That posture is gone and every config runs the belt, so the
+    // question no longer separates anything and both partners came off.
     let gcfg =
         GuardConfig::from_policy(crate::support::operator_no_inject("zero_migrate"), POSTGRES);
     assert_eq!(
         gcfg.schema_scope(),
         Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
-    );
-    assert!(
-        !gcfg.skips_denylist_belt(),
-        "Platform runs the full static belt"
     );
     let ecfg = zero_migrate::conn::ExecutorConfig::platform(
         &cap,
@@ -832,7 +790,6 @@ fn t11_platform_capability_mints_only_via_runner_seam() {
         ecfg.guard_config_for(&POSTGRES).schema_scope(),
         Some(SchemaScope::Allowlist(vec!["zero_migrate".into()]))
     );
-    assert!(!ecfg.guard_config_for(&POSTGRES).skips_denylist_belt());
     // NOTE: `OperatorCapability::new` is PUBLIC, as are `Default` and (under an
     // additive feature) `for_test`, so any dependent crate can mint one. Nothing
     // reads it. The boundary that is actually pinned is the unforgeable
@@ -1344,25 +1301,33 @@ fn schema_scope_permits_is_case_insensitive() {
     assert!(!SchemaScope::Single("zero_migrate".into()).permits("control"));
 }
 
-// ---- The Trusted profile: the public dbmate-like posture ---------------
+// ---- The widest composable charter: an UNCONFINED operator ---------------
+//
+// These fixtures were the Trusted profile: this same charter, plus the root/host-set
+// mode that turned the whole deny-list belt off. Only the mode is gone. What remains
+// is the most permissive posture a charter can compose — `access.role` and
+// `schema.cross_schema` granted over the whole universe — and it is a posture a real
+// operator charter reaches, which is exactly why the tests below are worth keeping
+// pointed at it: they measure how far the composable grants widen the guard, now that
+// no posture can switch the guard off.
 
-/// A Trusted guard, minted via the same `for_test` operator-token seam.
-fn trusted_guard() -> SqlGuard {
-    SqlGuard::new(trusted_guard_config())
+/// A guard over the unconfined operator charter, minted via the same `for_test`
+/// operator-token seam.
+fn unconfined_operator_guard() -> SqlGuard {
+    SqlGuard::new(unconfined_operator_guard_config())
 }
 
-fn trusted_guard_config() -> GuardConfig {
-    GuardConfig::from_policy_with_mode(
+fn unconfined_operator_guard_config() -> GuardConfig {
+    GuardConfig::from_policy(
         crate::support::operator_with_data_security(&[], &[], false, DestructiveOps::Allow),
         POSTGRES,
-        GuardMode::Off,
     )
 }
 
-/// The Trusted peer of [`platform_author`]: the author composes the same unconfined
-/// operator charter `trusted_guard_config` does, because the charter is what grants a
+/// The unconfined peer of [`platform_author`]: the author composes the same charter
+/// `unconfined_operator_guard_config` does, because the charter is what grants a
 /// vendor capability.
-fn trusted_author() -> zero_migrate::render::lower::IrAuthor {
+fn unconfined_operator_author() -> zero_migrate::render::lower::IrAuthor {
     zero_migrate::render::lower::IrAuthor::new(
         "public",
         "app_corpus",
@@ -1371,64 +1336,77 @@ fn trusted_author() -> zero_migrate::render::lower::IrAuthor {
     )
 }
 
-/// The Trusted early-return SKIPS the deny-list ENTIRELY: SQL the Confined
-/// guard hard-denies (role mgmt, cross-schema, even RCE/host-escape shapes)
-/// passes the GUARD under Trusted (the operator owns the DB — there is no
-/// untrusted boundary; PG itself remains the only authority). This is the
-/// guard-level proof; `db.rs`/`shadow.rs`/`executor.rs` ride on it.
+/// How far the widest charter widens, and where it STOPS.
+///
+/// This test used to assert that EVERY one of these passed, because the belt-off
+/// posture skipped the deny-list entirely. Removing that posture is a behaviour change
+/// and this is where it is measured. What the charter genuinely grants — role
+/// management under `access.role`, a write outside the project schema under a
+/// whole-universe `schema.cross_schema` — still passes. Everything else is now
+/// REFUSED where the belt-off posture applied it: the host-reach rules (ALTER SYSTEM,
+/// COPY … TO PROGRAM, the file-reading function), an extension the charter never
+/// granted, and a GRANT to a host-reaching built-in role, which is hard-denied in
+/// every profile because Platform widens privilege WITHIN the database and never
+/// host reach.
+///
+/// The Confined column was this test's precondition and is unchanged: every one of
+/// these is a hard Confined denial.
 #[test]
-fn trusted_skips_the_denylist_that_confined_enforces() {
-    let trusted = trusted_guard();
+fn the_unconfined_operator_charter_widens_the_grants_and_nothing_else() {
+    let unconfined = unconfined_operator_guard();
     let confined = confined_guard();
-    // Each of these is a HARD Confined denial (role mgmt / cross-schema / RCE
-    // tokens / host escape). Under Trusted the guard must not deny any.
+    // (sql, does the unconfined operator charter admit it?)
     let arbitrary = [
-        "CREATE ROLE zsmig_arbitrary NOLOGIN",
-        "GRANT ALL ON SCHEMA public TO postgres",
-        "CREATE TABLE other_schema.t (id int)",
-        "ALTER SYSTEM SET wal_level = minimal",
-        "COPY t TO PROGRAM 'sh -c id'",
-        "SELECT pg_read_file('/etc/passwd')",
-        "CREATE EXTENSION dblink",
+        ("CREATE ROLE zsmig_arbitrary NOLOGIN", true),
+        ("CREATE TABLE other_schema.t (id int)", true),
+        ("GRANT ALL ON SCHEMA public TO postgres", false),
+        ("ALTER SYSTEM SET wal_level = minimal", false),
+        ("COPY t TO PROGRAM 'sh -c id'", false),
+        ("SELECT pg_read_file('/etc/passwd')", false),
+        ("CREATE EXTENSION dblink", false),
     ];
-    for sql in arbitrary {
+    for (sql, admitted) in arbitrary {
         assert!(
             confined.check(sql).is_err(),
             "precondition: Confined must DENY {sql} for this test to be meaningful"
         );
-        assert!(
-            trusted.check(sql).is_ok(),
-            "Trusted must SKIP the deny-list and PASS {sql}\n  got: {:?}",
-            trusted.check(sql)
+        assert_eq!(
+            unconfined.check(sql).is_ok(),
+            admitted,
+            "the unconfined operator charter's decision on {sql} changed\n  got: {:?}",
+            unconfined.check(sql)
         );
     }
 }
 
-/// Trusted still DERIVES the destructive flag (classify is trust-independent):
-/// a `DROP TABLE` passes the guard (no deny) but the report is `destructive`
-/// and `flags_for` sets `requires_approval` — so the CLI's `--yes` gate holds.
+/// The destructive flag is derived from `classify`, independent of what the charter
+/// grants: a `DROP TABLE` the guard admits still reports `destructive`, and
+/// `flags_for` still sets `requires_approval` — so a caller's `--yes` gate holds.
 #[test]
-fn trusted_still_derives_destructive_flag_at_guard_level() {
-    let g = trusted_guard();
+fn an_admitted_destructive_op_still_requires_approval() {
+    let g = unconfined_operator_guard();
     let report = g
         .check("DROP TABLE users")
-        .expect("Trusted must not deny a DROP TABLE");
-    assert!(
-        report.destructive,
-        "DROP TABLE is destructive under Trusted"
-    );
+        .expect("the unconfined operator charter must not deny a DROP TABLE");
+    assert!(report.destructive, "DROP TABLE is destructive");
     let flags = flags_for(&report);
     assert!(flags.destructive);
     assert!(
         flags.requires_approval,
-        "a destructive op still requires approval (CLI --yes) under Trusted"
+        "a destructive op still requires approval (CLI --yes)"
     );
 }
 
+/// A raw island creating a SUPERUSER role is refused however wide the charter is.
+///
+/// The refusal used to come from `check_raw_island_sql`, the narrower backstop
+/// `lower_guarded` ran INSTEAD of the belt for the belt-off posture. There is no
+/// belt-off posture, so it comes from the belt itself now — the same rule, from the
+/// door that is actually open.
 #[test]
-fn trusted_raw_still_runs_raw_island_denylist_backstop() {
-    let cfg = trusted_guard_config();
-    let author = trusted_author();
+fn a_raw_island_creating_a_superuser_role_is_refused() {
+    let cfg = unconfined_operator_guard_config();
+    let author = unconfined_operator_author();
     let bad = zero_migrate_ir::ir::Op::Raw {
         sql: "CREATE ROLE zsmig_raw_evil SUPERUSER".into(),
         reason: "raw SUPERUSER denial regression".into(),
@@ -1449,16 +1427,16 @@ fn trusted_raw_still_runs_raw_island_denylist_backstop() {
                         ..
                     }
                 ),
-                "Trusted raw must still hit the SUPERUSER deny-list backstop, got {:?}",
+                "a raw island creating a SUPERUSER role must be denied, got {:?}",
                 denial.source
             );
         }
-        other => panic!("Trusted raw SUPERUSER must be denied; got {other:?}"),
+        other => panic!("a raw island creating a SUPERUSER role must be denied; got {other:?}"),
     }
 
     let clean = zero_migrate_ir::ir::Op::Raw {
         sql: "SELECT 1".into(),
-        reason: "trusted raw smoke test".into(),
+        reason: "clean raw island smoke test".into(),
     };
     author
         .lower_guarded(
@@ -1466,13 +1444,17 @@ fn trusted_raw_still_runs_raw_island_denylist_backstop() {
             &cfg,
             &zero_migrate::render::lower::LiveSchema::default(),
         )
-        .expect("clean Trusted raw should pass the raw-island backstop");
+        .expect("a clean raw island should pass");
 }
 
+/// A `createFunction` body that shells out is refused however wide the charter is —
+/// the peer of [`a_raw_island_creating_a_superuser_role_is_refused`], and refused now
+/// by the belt rather than by the body backstop `lower_guarded` used to substitute for
+/// the belt-off posture.
 #[test]
-fn trusted_create_function_body_still_runs_raw_island_denylist_backstop() {
-    let cfg = trusted_guard_config();
-    let author = trusted_author();
+fn a_create_function_body_that_shells_out_is_refused() {
+    let cfg = unconfined_operator_guard_config();
+    let author = unconfined_operator_author();
     let bad = zero_migrate_ir::ir::Op::CreateFunction {
         name: "raw_body_evil".into(),
         schema: Some("public".into()),
@@ -1499,11 +1481,11 @@ fn trusted_create_function_body_still_runs_raw_island_denylist_backstop() {
                         ..
                     }
                 ),
-                "Trusted createFunction body must be scanned, got {:?}",
+                "the createFunction body must be scanned, got {:?}",
                 denial.source
             );
         }
-        other => panic!("Trusted createFunction COPY PROGRAM body must deny; got {other:?}"),
+        other => panic!("a COPY … TO PROGRAM function body must deny; got {other:?}"),
     }
 
     let clean = zero_migrate_ir::ir::Op::CreateFunction {
@@ -1522,23 +1504,26 @@ fn trusted_create_function_body_still_runs_raw_island_denylist_backstop() {
             &cfg,
             &zero_migrate::render::lower::LiveSchema::default(),
         )
-        .expect("clean Trusted createFunction body should pass the raw-island backstop");
+        .expect("a clean createFunction body should pass");
 }
 
-/// The Trusted early-return is gated on `trust == Trusted` ONLY: a Confined
-/// guard still DENIES, and a Platform guard still APPLIES its (bounded)
-/// widening — neither leaks the deny-list-off behaviour. This pins that the
-/// Confined/Platform code paths are unchanged by the new branch.
+/// Platform's widening is real and BOUNDED: it admits the privileged role op Confined
+/// denies, and still denies a cross-schema write outside its allowlist.
+///
+/// The framing was "the belt-off early-return is gated on Trusted only, so neither of
+/// these two leaks it". The early-return is gone, so there is nothing left to leak —
+/// but each of the three assertions is a statement about Confined or Platform on its
+/// own terms, and every one of them still holds and is still worth holding.
 #[test]
-fn trusted_early_return_is_gated_on_trust_trusted_only() {
-    // Confined: a privileged op is STILL denied (the early-return never fires).
+fn platform_widening_is_real_and_bounded() {
+    // Confined: the privileged op is denied.
     let confined = confined_guard();
     assert!(
         is_denied(&confined, "CREATE ROLE zsmig_x NOLOGIN"),
-        "Confined must still deny CREATE ROLE — the Trusted branch must not fire"
+        "Confined must deny CREATE ROLE"
     );
-    // Platform: a privileged-but-bounded op still APPLIES, and a NON-allowlisted
-    // cross-schema op still DENIES (Platform's deny-list is intact, NOT skipped).
+    // Platform: a privileged-but-bounded op APPLIES, and a NON-allowlisted
+    // cross-schema op DENIES.
     let platform = platform_guard();
     assert!(
         platform
@@ -1548,8 +1533,7 @@ fn trusted_early_return_is_gated_on_trust_trusted_only() {
     );
     assert!(
         is_denied(&platform, "CREATE TABLE proj_acme.steal(id int)"),
-        "Platform must still deny a NON-allowlisted cross-schema op — \
-         the Trusted deny-list-off branch must NOT fire under Platform"
+        "Platform must deny a cross-schema op outside its allowlist"
     );
 }
 

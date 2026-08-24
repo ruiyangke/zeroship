@@ -1995,19 +1995,16 @@ async fn rollback_locked<B: MigrationBackend>(
 }
 
 // ===========================================================================
-// The Trusted profile applies arbitrary SQL on a REAL Postgres.
+// This header described a Trusted-profile apply suite that would have run the FULL
+// `executor::apply` path under an `ExecutorConfig::trusted` and proved that SQL the
+// Confined guard hard-denies APPLIES. The suite never existed, the ctor it named was
+// `#[cfg(test)] #[allow(dead_code)]` with no caller in either language, and both are
+// gone: the belt-off posture has been removed, so `ExecutorConfig` builds exactly one
+// kind of guard config and the deny-list belt runs for all of them.
 //
-// These MUST be in-crate because `ExecutorConfig::trusted` is `pub(crate)` AND
-// `#[cfg(test)]`, so an integration test - a separate crate - cannot construct a
-// Trusted config. `OperatorCapability::for_test` is NOT what stops it: that is `pub`
-// under an additive feature a downstream can turn on, and the token authorises
-// nothing anyway. The external boundary that is genuinely pinned is the unforgeable
-// `EffectivePolicy`, held by the T8 `compile_fail` doctests in
-// `zero_migrate_backend::guard`.
-//
-// They run the FULL `executor::apply` path under a Trusted `ExecutorConfig` and
-// prove (a) SQL the Confined guard hard-denies APPLIES, and (b) a destructive op
-// still carries the approval flag (so the CLI `--yes` gate holds).
+// The external boundary the header claimed for that ctor is unaffected and still
+// pinned where it always was: the unforgeable `EffectivePolicy`, held by the T8
+// `compile_fail` doctests in `zero_migrate_backend::guard`.
 // ===========================================================================
 
 #[cfg(test)]

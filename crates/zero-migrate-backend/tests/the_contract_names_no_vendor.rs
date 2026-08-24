@@ -66,29 +66,16 @@ const VENDOR_NEEDLES: &[&str] = &["mysql", "sqlite", "postgres", "pgsql", "pg_",
 /// all. Lowering an entry is the point of this file and is expected; RAISING one, or
 /// adding a file, is the thing it exists to make loud.
 const ALLOWED: &[(&str, usize, &str)] = &[
-    (
-        "guard.rs",
-        1,
-        "`GuardConfig::for_dialect` forces `GuardMode::Enforced` for every id that is \
-         not PostgreSQL, so a host-set belt-off posture cannot follow a config onto a \
-         backend with no belt to skip. It has no fix available from here and the \
-         obvious reformulation is a MEASURED regression: \"reset when the target \
-         changes\" satisfies every assertion in `zero-migrate-postgres/tests/guard_smoke.rs` \
-         but breaks the production path, because `ExecutorConfig::guard_config_for` \
-         builds the config already pointed at the target and calls `for_dialect` with \
-         the SAME id purely to trip the fail-safe. Asking the guard — the fix the \
-         sibling `destructive_ops` gate took — is not available either: `GuardConfig` \
-         holds no guard and cannot resolve one, since the registry is composed one \
-         crate above this one. Closing it is a security-posture decision. \
-         \
-         It was TWO. The second hit was `use zero_migrate_ir::dialect::POSTGRES`, an \
-         import that served only this comparison, and it came off when the shipping \
-         ids moved out of the neutral IR crate into the vendors. The comparison \
-         builds its own `DialectId::new(\"postgres\")` now — it cannot import one, \
-         since all three vendor crates depend on THIS one — and `DialectId` compares \
-         by content, so it is the same id `zero_migrate_postgres::DIALECT` declares. \
-         The vendor name did not leave this file; only the import did.",
-    ),
+    // `guard.rs` was here, at ONE, and it is off the ratchet entirely now.
+    //
+    // The recorded reason was `GuardConfig::for_dialect`'s explicit
+    // `DialectId::new("postgres")` comparison, which reset a host-set belt-off mode to
+    // `Enforced` for every other id so that a posture built for the one backend with a
+    // parser could not follow a config onto a backend with no belt to skip. That
+    // comparison was called a security-posture decision with no fix available from
+    // here, and the fix turned out to be upstream of it: the belt-off mode itself is
+    // gone, so there is no mode to reset and no id to compare against. Removing the
+    // POSTURE removed the name.
     (
         "snapshot.rs",
         1,

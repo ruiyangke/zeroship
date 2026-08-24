@@ -11,10 +11,10 @@
 //! `OnlineSchemaChange::run_online_backfill`. A config the traits cannot be written without
 //! cannot live above the traits.
 //!
-//! The two private fields survived the crate boundary that would normally dissolve
-//! a `pub(crate)`. `effective` and `guard_mode` are still unnameable from outside
-//! this module: their only in-crate readers ([`ExecutorConfig::guard_config_for`],
-//! [`ExecutorConfig::effective`], the builders) came with them, and the engine's
+//! The private `effective` field survived the crate boundary that would normally
+//! dissolve a `pub(crate)`. It is still unnameable from outside
+//! this module: its only in-crate readers ([`ExecutorConfig::guard_config_for`],
+//! [`ExecutorConfig::effective`], the builders) came with it, and the engine's
 //! one write site went through the public
 //! [`with_effective_policy`](ExecutorConfig::with_effective_policy) setter that
 //! already existed. The one member that WOULD have had to widen —
@@ -203,12 +203,6 @@ pub struct ExecutorConfig {
     /// executor-path guard uses. The guard is built from this single policy source
     /// for every composable decision.
     pub(crate) effective: zero_migrate_policy::EffectivePolicy,
-    /// PRIVATE (`pub(crate)`). The root/host-set [`GuardMode`] the executor stamps onto
-    /// every guard it builds. `Off` ONLY for the Trusted (dbmate-like) posture — the
-    /// belt-skip is this posture, NOT a policy grant. Confined/Platform stay `Enforced`.
-    ///
-    /// [`GuardMode`]: crate::guard::GuardMode
-    pub(crate) guard_mode: crate::guard::GuardMode,
 }
 
 impl ExecutorConfig {
@@ -233,8 +227,6 @@ impl ExecutorConfig {
             // PostgreSQL-only nested settings, which are inert on a
             // non-PostgreSQL backend.
             confinement: ConfinementConfig::new(meta_schema),
-            // Confined/Platform run the full belt; only `trusted()` flips this to `Off`.
-            guard_mode: crate::guard::GuardMode::Enforced,
         }
     }
 
@@ -256,24 +248,15 @@ impl ExecutorConfig {
     /// Build the [`GuardConfig`](crate::guard::GuardConfig) every executor-path
     /// guard site uses for an explicitly selected backend.
     ///
-    /// The caller-authored policy is preserved exactly. Trusted test configs differ
-    /// only by their explicit host-selected [`GuardMode`](crate::guard::GuardMode).
+    /// The caller-authored policy is preserved exactly, and it is the whole of what
+    /// distinguishes one config's guard from another's.
     ///
     /// Public because the engine's `rollback_with_lock` takes its
     /// guard as an argument, so an out-of-crate driver has to be able to build the
-    /// one this config implies. Composing a `GuardConfig` by hand from the same
-    /// policy would drop the host-selected mode, and the resulting guard would
-    /// admit what the executor's own guard sites deny.
+    /// one this config implies.
     #[must_use]
     pub fn guard_config_for(&self, dialect: &DialectId) -> crate::guard::GuardConfig {
-        crate::guard::GuardConfig::from_policy_with_mode(
-            self.effective.clone(),
-            dialect.clone(),
-            self.guard_mode,
-        )
-        // Keep the security-critical fail-safe in GuardConfig: every non-Postgres
-        // id forces Enforced even when a trusted host selected belt-off mode.
-        .for_dialect(dialect.clone())
+        crate::guard::GuardConfig::from_policy(self.effective.clone(), dialect.clone())
     }
 
     /// Build a **Platform** executor config. REQUIRES a
@@ -306,53 +289,6 @@ impl ExecutorConfig {
         Self::new(project_id, project_schema, effective)
     }
 
-    /// Build a **Trusted** executor config — the public dbmate-like posture.
-    /// REQUIRES an
-    /// [`OperatorCapability`](zero_migrate_ir::capability::OperatorCapability) token, EXACTLY
-    /// like [`ExecutorConfig::platform`], mintable only through named in-crate
-    /// seams. So neither the control plane (external; cannot
-    /// name `Trusted` nor mint the token) nor any in-crate creator-path module
-    /// (`submit`/`engine`; cannot mint the token) can flip the executor into
-    /// Trusted.
-    ///
-    /// Trusted runs as the **connecting role** (`migrator_role = None`, like
-    /// Platform's admin), with **no schema confinement** and **no deny-list**
-    /// (the executor's [`guard_config`](Self::guard_config) returns the Trusted
-    /// guard, whose `check()` skips the deny-list/cross-schema/body walks). The
-    /// destructive flags are still derived, so a caller's `--yes`-style approval
-    /// gate still applies.
-    ///
-    /// This ctor is `#[cfg(test)]`-only: the operator-side CLI that used to be the
-    /// sole Trusted producer was retired into the `zero-migrate-cli` TS CLI.
-    /// The token stays the in-crate enforcement primitive.
-    // `#[allow(dead_code)]`: the sole in-crate consumer (the live-Postgres
-    // Trusted-apply tests) is gated behind a running DB and currently absent, but
-    // this `pub(crate)` ctor stays as the pinned in-crate Trusted-config primitive,
-    // so it must not be deleted. What keeps a separate integration crate out is the
-    // `#[cfg(test)]` below plus `pub(crate)`, not the capability token it takes -
-    // that token is freely mintable and authorises nothing. The unforgeable input is
-    // the composed `EffectivePolicy`, pinned by the T8 `compile_fail` doctests in
-    // `zero_migrate_backend::guard` (NOT by any `tests/trybuild_*`, which has never
-    // existed here).
-    #[must_use]
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn trusted(
-        _cap: &zero_migrate_ir::capability::OperatorCapability,
-        project_id: impl Into<String>,
-        project_schema: impl Into<String>,
-        effective: zero_migrate_policy::EffectivePolicy,
-    ) -> Self {
-        let mut cfg = Self::new(project_id, project_schema, effective);
-        // The belt-skip is not a grant. It is the root/host-set `GuardMode::Off`
-        // stamped here, which `guard_config_for()` threads into every guard this config
-        // builds.
-        cfg.guard_mode = crate::guard::GuardMode::Off;
-        // `migrator_role` stays `None` (the `new()` default): Trusted runs as the
-        // connecting role, exactly like Platform's admin (no `SET ROLE`).
-        cfg
-    }
-
     /// The caller-authored composed policy this config was built with.
     ///
     /// This exists so the `effective` FIELD can stay private now that the engine
@@ -363,7 +299,7 @@ impl ExecutorConfig {
     /// [`with_effective_policy`](Self::with_effective_policy) replaces it, and
     /// `self.guard_config_for(d).effective()` already returns it by a longer route.
     /// The struct-literal boundary is unaffected — an external crate still cannot
-    /// NAME `effective` or `guard_mode`.
+    /// NAME `effective`.
     #[must_use]
     pub const fn effective(&self) -> &zero_migrate_policy::EffectivePolicy {
         &self.effective

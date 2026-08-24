@@ -7,9 +7,8 @@
 //!
 //! Before the gate below existed, nothing in the engine noticed. The only layer
 //! that objected was the SQL guard's PARSER - a security belt that exists to stop
-//! host-reaching SQL, not to spell-check the engine's own output - so an operator
-//! running with a Trusted posture, or any embedder calling `lower_plan` directly,
-//! got the raw unparseable statement.
+//! host-reaching SQL, not to spell-check the engine's own output - so any embedder
+//! calling `lower_plan` directly got the raw unparseable statement.
 //!
 //! This file drives the UNGUARDED lowering path deliberately, because that is the
 //! path with no parser in front of it: if the refusal holds there, it holds

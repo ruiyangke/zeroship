@@ -88,7 +88,7 @@
   ],
   "$defs": {
     "Op": {
-      "description": "The CLOSED `op.*` operation enum, internally tagged on `\"op\"` and\ncamel-cased (`{\"op\":\"createTable\", …}`). NO `untagged`, NO `flatten` on the\nenum itself — see the module-level note + the ADR.\n\nevery table-targeting variant carries an optional\n`schema: Option<String>` (the schema-qualifier — honored under Trusted/Platform,\npinned/refused under Confined) and, where guardable, an optional\n`existence_guard: Option<ExistenceGuard>`. Both are omitted-when-absent on the\nwire (`skip_serializing_if = \"Option::is_none\"`), so they fold into\n[`Checksum::of_ir`](crate::migration::Checksum::of_ir) ONLY when present and are\nchecksum-neutral when unset — preserving the cross-impl single-checksum invariant.",
+      "description": "The CLOSED `op.*` operation enum, internally tagged on `\"op\"` and\ncamel-cased (`{\"op\":\"createTable\", …}`). NO `untagged`, NO `flatten` on the\nenum itself — see the module-level note + the ADR.\n\nevery table-targeting variant carries an optional\n`schema: Option<String>` (the schema-qualifier — honored under a widened schema scope,\npinned/refused under Confined) and, where guardable, an optional\n`existence_guard: Option<ExistenceGuard>`. Both are omitted-when-absent on the\nwire (`skip_serializing_if = \"Option::is_none\"`), so they fold into\n[`Checksum::of_ir`](crate::migration::Checksum::of_ir) ONLY when present and are\nchecksum-neutral when unset — preserving the cross-impl single-checksum invariant.",
       "oneOf": [
         {
           "description": "`CREATE TABLE` with columns + table constraints + indexes.",
@@ -155,7 +155,7 @@
               ]
             },
             "schema": {
-              "description": "the schema qualifier. Honored under Trusted/Platform,\npinned/refused under Confined. Omitted-when-absent.",
+              "description": "the schema qualifier. Honored under a widened schema scope,\npinned/refused under Confined. Omitted-when-absent.",
               "type": [
                 "string",
                 "null"
@@ -367,7 +367,7 @@
               "$ref": "#/$defs/TableRuntimeOptionsPatch"
             },
             "schema": {
-              "description": "the schema qualifier. Honored under Trusted/Platform,\npinned/refused under Confined. Omitted-when-absent.",
+              "description": "the schema qualifier. Honored under a widened schema scope,\npinned/refused under Confined. Omitted-when-absent.",
               "type": [
                 "string",
                 "null"

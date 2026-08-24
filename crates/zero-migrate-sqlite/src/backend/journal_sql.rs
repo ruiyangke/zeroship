@@ -24,7 +24,7 @@
 //! 3. The authorizer denies `PRAGMA` / writes / DROP / ALTER on `_mig` in
 //! CreatorUp (the primary deny, at prepare time).
 //! 4. Append-only `BEFORE UPDATE`/`BEFORE DELETE` triggers (`RAISE(ABORT,…)`) are
-//! the in-DB backstop for row mutation (the Trusted/operator path where the
+//! the in-DB backstop for row mutation (the operator path where the
 //! authorizer relaxes; on the Confined path the authorizer already denied it).
 //!
 //! # Atomic apply

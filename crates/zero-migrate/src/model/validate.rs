@@ -249,7 +249,7 @@ pub fn validate_ir(
 ///   ([`CODE_CROSS_SCHEMA`]).
 /// - `Some(SchemaScope::Allowlist([...]))` ⇒ the **Platform** profile: an explicit
 ///   `schema` must be a member of the allow-list.
-/// - `Some(SchemaScope::Unconfined)` ⇒ the explicit **Trusted** operator profile:
+/// - `Some(SchemaScope::Unconfined)` ⇒ an explicit whole-universe operator grant:
 ///   no cross-schema confinement and full vendor capability.
 ///
 /// # Errors
@@ -6123,7 +6123,7 @@ pub fn validate_op(
     target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
-    // The bare entry keeps the Trusted posture (no cross-schema confinement); the
+    // The bare entry keeps the unconfined posture (no cross-schema confinement); the
     // schema-ident + guard-direction checks still run (trust-independent).
     validate_op_scoped(op, target_dialect, op_index, None)
 }
@@ -7790,8 +7790,8 @@ fn validate_select_ast(
 /// 2. **Cross-schema confinement** — under a `Some(scope)` (Confined/Platform) an
 ///    explicit `schema` the scope does not `permit` is refused
 ///    ([`CODE_CROSS_SCHEMA`]). Absent schema, or a permitted one, passes.
-///    `SchemaScope::Unconfined` skips this for the explicit Trusted operator
-///    profile; `None` means default public validation without vendor capabilities.
+///    `SchemaScope::Unconfined` skips this for an explicit whole-universe operator
+///    grant; `None` means default public validation without vendor capabilities.
 /// 3. **Existence-guard direction** — a guard whose direction is illegal for the op
 ///    variant is refused ([`CODE_GUARD_DIRECTION`]).
 fn validate_op_schema_and_guard(
@@ -11029,7 +11029,7 @@ mod tests {
     /// so it honors any schema for non-vendor ops; PLATFORM (`Allowlist`) refuses a
     /// schema outside its allow-list.
     #[test]
-    fn trusted_honors_any_schema_platform_gates_to_allowlist() {
+    fn unscoped_honors_any_schema_platform_gates_to_allowlist() {
         use crate::model::policy::SchemaScope;
         let foreign = ir_with(vec![Op::DropTable {
             table: "t".into(),

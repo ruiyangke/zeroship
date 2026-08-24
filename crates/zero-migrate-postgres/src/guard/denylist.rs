@@ -246,13 +246,13 @@ pub mod rule {
     pub const ROLE_MANAGEMENT: &str = "role_management";
     /// `CREATE/ALTER ROLE … SUPERUSER` — host-reaching privilege escalation
     /// (a superuser bypasses RLS, reads/writes arbitrary files, runs `COPY …
-    /// PROGRAM`). Denied in ALL profiles INCLUDING Platform (Platform widens
-    /// privilege *within* the DB, never *host* reach). Only
-    /// Trusted (operator-owns-the-DB) skips the whole deny-list.
+    /// PROGRAM`). Denied for EVERY charter, INCLUDING Platform (Platform widens
+    /// privilege *within* the DB, never *host* reach), and there is no longer any
+    /// posture that skips the deny-list to reach it.
     pub const SUPERUSER_ROLE: &str = "superuser_role";
     /// `GRANT <host-reaching built-in role> TO ...` or granting privileges to one
     /// of those roles. These built-ins carry server-file / server-program reach
-    /// and are denied in all non-Trusted profiles, including Platform.
+    /// and are denied for every charter, including Platform.
     pub const PRIVILEGED_ROLE_GRANT: &str = "privileged_role_grant";
     pub const PRIVILEGE_MANAGEMENT: &str = "privilege_management";
     pub const FILE_ACCESS_FUNCTION: &str = "file_access_function";

@@ -1,6 +1,6 @@
 //! Focused public-API smoke tests for this vendor's SQL guard.
 //!
-//! The exhaustive guard behaviour-lock suite (Platform/Trusted widening, vendor
+//! The exhaustive guard behaviour-lock suite (Platform widening, vendor
 //! lowering, the data-security IR gate) lives in the engine crate, because those
 //! scenarios drive the guard THROUGH the engine's `render::lower` / `conn` apply
 //! pipeline (which this backend crate deliberately cannot depend on). These smoke
@@ -10,7 +10,7 @@
 
 mod support;
 
-use zero_migrate_backend::guard::{GuardConfig, GuardError, GuardMode};
+use zero_migrate_backend::guard::{GuardConfig, GuardError};
 use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::policy::SchemaScope;
 use zero_migrate_postgres::guard::{check_raw_view_body_text, extract_string_literals, SqlGuard};
@@ -34,33 +34,37 @@ fn explicit_confined_charter_fixture_composes() {
     );
 }
 
+/// Retargeting a config carries the composed policy across unchanged: `for_dialect`
+/// selects WHICH backend vets the SQL, never WHAT the policy grants.
+///
+/// It used to assert a second thing alongside — that a host-set belt-off mode
+/// survived onto PostgreSQL and was reset to `Enforced` for every other id. Both
+/// halves of that are gone with the mode itself: there is no belt-off posture to
+/// carry, so nothing to reset and nothing a future backend could inherit. The
+/// policy-preservation half is unchanged and is what remains here.
 #[test]
-fn dialect_selection_preserves_policy_and_enforces_non_postgres_guard() {
-    let cfg =
-        GuardConfig::from_policy_with_mode(support::no_inject("app1"), POSTGRES, GuardMode::Off);
+fn dialect_selection_preserves_the_composed_policy() {
+    let cfg = GuardConfig::from_policy(support::no_inject("app1"), POSTGRES);
 
     let postgres = cfg.clone().for_dialect(POSTGRES);
-    assert_eq!(postgres.guard_mode(), GuardMode::Off);
+    assert_eq!(postgres.dialect(), &POSTGRES);
     assert_eq!(
         postgres.schema_scope(),
         Some(SchemaScope::Single("app1".to_string()))
     );
 
-    let sqlite = cfg.for_dialect(DialectId::new("sqlite"));
-    assert_eq!(sqlite.guard_mode(), GuardMode::Enforced);
+    let sqlite = cfg.clone().for_dialect(DialectId::new("sqlite"));
+    assert_eq!(sqlite.dialect(), &DialectId::new("sqlite"));
     assert_eq!(
         sqlite.schema_scope(),
         Some(SchemaScope::Single("app1".to_string()))
     );
 
-    let future =
-        GuardConfig::from_policy_with_mode(support::no_inject("app1"), POSTGRES, GuardMode::Off)
-            .for_dialect(DUCKDB);
+    let future = cfg.for_dialect(DUCKDB);
     assert_eq!(future.dialect(), &DUCKDB);
     assert_eq!(
-        future.guard_mode(),
-        GuardMode::Enforced,
-        "a future backend must not inherit PostgreSQL's belt-off posture"
+        future.schema_scope(),
+        Some(SchemaScope::Single("app1".to_string()))
     );
 }
 

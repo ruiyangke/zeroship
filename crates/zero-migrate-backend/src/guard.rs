@@ -18,7 +18,7 @@
 //!
 //! # What lives here
 //!
-//! The SEAM: [`GuardConfig`], [`GuardMode`], [`GuardError`], [`GuardOutcome`],
+//! The SEAM: [`GuardConfig`], [`GuardError`], [`GuardOutcome`],
 //! [`ParseError`] and [`IrDataSecurityError`], plus [`crate::advisory`]. Every
 //! vendor's guard is configured by the same unforgeable [`EffectivePolicy`] and
 //! reports in the same vocabulary, so the seam is genuinely neutral and belongs below
@@ -106,31 +106,17 @@ pub mod data_security_rule {
     pub const REQUIRE_RLS: &str = "DATA_SECURITY_REQUIRE_RLS";
 }
 
-/// The engine-construction POSTURE that decides whether the static parse-time guard
-/// belt runs at all. This is NOT a composable policy knob: "run without the deny-list
-/// guard" is the single most dangerous switch, so it is a root/host-set posture on the
-/// guard config — it can neither be granted, inherited, nor drafted by a creator.
-///
-/// - `Enforced` (the default) — the full belt runs: the deny-list, cross-schema
-///   confinement, and body walks. Confined and Platform both run `Enforced`.
-/// - `Off` - the public dbmate-like Trusted posture: the operator owns the
-///   DB, so there is NO untrusted boundary and the whole belt is skipped (arbitrary
-///   SQL applies as the connecting role). Raw islands embedded in structured IR still
-///   run their deny-list backstop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GuardMode {
-    /// Run the full static parse-time guard belt (Confined / Platform).
-    Enforced,
-    /// Skip the belt entirely — the Trusted dbmate-like posture (host owns the DB).
-    Off,
-}
-
 /// Per-guard configuration.
 ///
 /// All fields are private. A caller must supply an explicitly composed
-/// [`EffectivePolicy`] through [`GuardConfig::from_policy`] or
-/// [`GuardConfig::from_policy_with_mode`]. The guard never selects or fabricates a
-/// policy from a named posture.
+/// [`EffectivePolicy`] through [`GuardConfig::from_policy`]. The guard never selects
+/// or fabricates a policy from a named posture.
+///
+/// There is no belt-off posture. The static parse-time guard belt — the deny-list,
+/// cross-schema confinement and body walks — runs for every config this type can
+/// build. The engine used to carry a root/host-set mode that skipped it for a
+/// dbmate-like Trusted operator, and removing that mode is what makes the belt
+/// unconditional here.
 #[derive(Debug, Clone)]
 pub struct GuardConfig {
     /// PRIVATE. The target SQL dialect this guard config is for.
@@ -138,10 +124,7 @@ pub struct GuardConfig {
     /// - `postgres` — the `libpg_query` line-1 guard runs
     ///   (`SqlGuard::check` parses + deny-walks the SQL).
     /// - every other id — a vendor-owned guard path. An untrusted raw SQL string
-    ///   presented to PostgreSQL's `SqlGuard::check` is refused. Any explicit
-    ///   non-enforced mode is reset to [`GuardMode::Enforced`] by
-    ///   [`GuardConfig::for_dialect`]. This comparison is deliberately open and
-    ///   fail-closed: a future backend cannot inherit PostgreSQL's belt-off mode.
+    ///   presented to PostgreSQL's `SqlGuard::check` is refused.
     dialect: DialectId,
     /// PRIVATE. The unforgeable [`EffectivePolicy`] — the SINGLE source the guard's
     /// every composable decision queries. The capability gate asks `grants(key,
@@ -150,41 +133,19 @@ pub struct GuardConfig {
     /// `obligations`/`grants` on the safety.* knobs. There is no separate posture/scope
     /// state for the composable knobs — the policy IS the posture.
     effective: EffectivePolicy,
-    /// PRIVATE. The root/host-set [`GuardMode`] — whether the static parse-time belt
-    /// runs. This is NOT a composable knob (it quarantines the "skip the guard" switch
-    /// out of the policy registry); the belt-skip reads it, and the raw-island
-    /// role-needle relaxation keys off it + the `access.role` grant internally.
-    guard_mode: GuardMode,
 }
 
 impl GuardConfig {
-    /// Construct a guard directly from one composed [`EffectivePolicy`] + dialect, at
-    /// the default [`GuardMode::Enforced`] posture (the full belt runs). The effective
-    /// policy is the SINGLE source for injection and every composable guard decision.
+    /// Construct a guard directly from one composed [`EffectivePolicy`] + dialect. The
+    /// full belt runs for every config: the effective policy is the SINGLE source for
+    /// injection and every composable guard decision, and there is no separate posture
+    /// that turns the belt off.
     #[must_use]
     pub fn from_policy(effective: EffectivePolicy, dialect: DialectId) -> Self {
-        Self::from_policy_with_mode(effective, dialect, GuardMode::Enforced)
+        Self { dialect, effective }
     }
 
-    /// Construct a guard from a composed [`EffectivePolicy`] + dialect + an explicit
-    /// root/host-set [`GuardMode`]. `GuardMode::Off` is the Trusted dbmate-like posture
-    /// (belt skipped). The mode is NOT derivable from the policy — it is a posture the
-    /// host sets, never a composable grant.
-    #[must_use]
-    pub fn from_policy_with_mode(
-        effective: EffectivePolicy,
-        dialect: DialectId,
-        guard_mode: GuardMode,
-    ) -> Self {
-        Self {
-            dialect,
-            effective,
-            guard_mode,
-        }
-    }
-
-    /// Replace the composed policy while preserving this config's dialect and
-    /// host-selected guard mode.
+    /// Replace the composed policy while preserving this config's dialect.
     #[must_use]
     pub fn with_effective_policy(mut self, effective: EffectivePolicy) -> Self {
         self.effective = effective;
@@ -198,31 +159,22 @@ impl GuardConfig {
     /// policy the caller already holds — it grants nothing that
     /// [`GuardConfig::with_effective_policy`] does not already allow, and it is what
     /// keeps the `compile_fail` struct-literal boundary below intact: an external
-    /// crate still cannot NAME any of the three fields.
+    /// crate still cannot NAME either field.
     #[must_use]
     pub const fn effective(&self) -> &EffectivePolicy {
         &self.effective
     }
 
     /// Select a target dialect without changing the caller-composed policy.
-    /// PostgreSQL preserves the selected guard mode. Every other id forces
-    /// [`GuardMode::Enforced`]. This must remain an explicit comparison against
-    /// PostgreSQL's id, never a self-declared capability: a future backend must not
-    /// be able to declare its way out of the fail-safe posture.
     ///
-    /// The id is built here rather than imported. It used to come from
-    /// `zero_migrate_ir::dialect::POSTGRES`, which put the name in a NEUTRAL crate so
-    /// that this one could reach it without depending on a vendor; the ids live in
-    /// the vendor crates now, and this crate cannot depend on one — all three depend
-    /// on it. `DialectId` compares by CONTENT, so the id built here IS the id
-    /// `zero_migrate_postgres::DIALECT` declares. The vendor name has not moved out
-    /// of this file, and closing that is a security-posture decision rather than a
-    /// spelling one; see this crate's `the_contract_names_no_vendor.rs`.
+    /// This used to double as a fail-safe: it compared the incoming id against
+    /// PostgreSQL's and reset any host-selected belt-off mode to `Enforced` for every
+    /// other id, so that a posture built for the one backend with a parser could not
+    /// follow a config onto a backend with no belt to skip. There is no belt-off mode
+    /// to reset now, and the comparison went with it — which is also how this crate's
+    /// `the_contract_names_no_vendor.rs` ratchet reached zero for this file.
     #[must_use]
     pub fn for_dialect(mut self, dialect: DialectId) -> Self {
-        if dialect != DialectId::new("postgres") {
-            self.guard_mode = GuardMode::Enforced;
-        }
         self.dialect = dialect;
         self
     }
@@ -233,24 +185,10 @@ impl GuardConfig {
         &self.dialect
     }
 
-    /// Whether this config skips the confined deny-list belt entirely (the Trusted
-    /// dbmate-like posture) — the root/host-set [`GuardMode::Off`]. `pub`: the engine's
-    /// profile behaviour-lock tests assert it across the crate boundary.
-    #[must_use]
-    pub fn skips_denylist_belt(&self) -> bool {
-        matches!(self.guard_mode, GuardMode::Off)
-    }
-
-    /// The root/host-set [`GuardMode`] posture this config carries.
-    #[must_use]
-    pub fn guard_mode(&self) -> GuardMode {
-        self.guard_mode
-    }
-
     /// The schema-confinement scope this guard config enforces, for the
     /// validate-time cross-schema gate. Derived from the effective policy's
     /// `schema.cross_schema` grant:
-    /// - a `⊤` (whole-universe) grant ⇒ `Unconfined` (the Trusted operator posture);
+    /// - a `⊤` (whole-universe) grant ⇒ `Unconfined` (the unconfined operator charter);
     /// - a finite set of owned schemas ⇒ `Single(s)` for one, `Allowlist([…])` for
     ///   several (Confined / Platform);
     /// - no owned schema (empty) ⇒ `Single("")` (the degenerate default).
@@ -559,7 +497,7 @@ impl GuardConfig {
 /// the doctests FAIL, then put the visibility back.
 ///
 /// (1) An external crate cannot write a `GuardConfig { .. }` struct literal — the
-/// fields (`dialect`, `effective`, `guard_mode`) are private, so a privileged
+/// fields (`dialect`, `effective`) are private, so a privileged
 /// profile can never be forged by a literal (the `EffectivePolicy` is itself
 /// unforgeable). This MUST fail to compile:
 ///
@@ -568,7 +506,6 @@ impl GuardConfig {
 /// let _ = GuardConfig {
 ///     dialect: zero_migrate_ir::dialect::DialectId::new("postgres"),
 ///     effective: unimplemented!(),
-///     guard_mode: unimplemented!(),
 /// };
 /// ```
 ///
@@ -734,21 +671,28 @@ pub trait MigrationGuard {
     /// vendors do not deny (they trust), so their `check` is infallible in practice.
     fn check(&self, up: &str) -> Result<GuardOutcome, GuardError>;
 
-    /// Line-1 BACKSTOP over one rendered raw-SQL island, for the posture that has
-    /// already skipped the deny-list belt ([`GuardConfig::skips_denylist_belt`]).
+    /// Line-1 BACKSTOP over one rendered raw-SQL island: the narrower "even text the
+    /// ordinary statement-kind gate would wave through may not do THIS" set. A vendor
+    /// that answers `Ok` unconditionally is granting an unchecked raw door, and must
+    /// say so in its own doc.
     ///
-    /// The belt-skipping posture is a trusted one: the operator has granted raw SQL,
-    /// so the ordinary statement-kind gate is off. This is what still runs — the
-    /// narrower "even trusted text may not do THIS" set. A vendor that answers `Ok`
-    /// unconditionally is granting the trusted posture an unchecked raw door, and
-    /// must say so in its own doc.
+    /// # This method currently has no caller on the lowering path
+    ///
+    /// It was reached from `render::lower`'s guarded lowering ONLY for a config whose
+    /// root/host-set mode had skipped the deny-list belt — the removed Trusted
+    /// posture. Every config the engine can build now runs the full belt through
+    /// [`MigrationGuard::check`], so nothing calls this. It is kept as the declared
+    /// vendor answer to "what survives a belt-skip", because reinstating an
+    /// unconfined posture without it would hand that posture an unchecked raw door,
+    /// and each vendor's answer is already written and tested here.
     ///
     /// # Errors
     /// Vendor-specific, in the same vocabulary as [`MigrationGuard::check`].
     fn check_raw_island_sql(&self, sql: &str) -> Result<(), GuardError>;
 
-    /// Line-1 BACKSTOP over one raw FUNCTION BODY under the same trusted posture as
-    /// [`MigrationGuard::check_raw_island_sql`].
+    /// Line-1 BACKSTOP over one raw FUNCTION BODY, the peer of
+    /// [`MigrationGuard::check_raw_island_sql`] and uncalled on the lowering path for
+    /// the same reason.
     ///
     /// A body is not a statement list: a procedural body is only best-effort
     /// parseable, so a vendor's answer here is generally a token/literal scan rather

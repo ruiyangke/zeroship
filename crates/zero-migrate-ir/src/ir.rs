@@ -2836,7 +2836,7 @@ pub enum OrderItem {
 /// enum itself — see the module-level note + the ADR.
 ///
 /// every table-targeting variant carries an optional
-/// `schema: Option<String>` (the schema-qualifier — honored under Trusted/Platform,
+/// `schema: Option<String>` (the schema-qualifier — honored under a widened schema scope,
 /// pinned/refused under Confined) and, where guardable, an optional
 /// `existence_guard: Option<ExistenceGuard>`. Both are omitted-when-absent on the
 /// wire (`skip_serializing_if = "Option::is_none"`), so they fold into
@@ -2888,7 +2888,7 @@ pub enum Op {
             skip_serializing_if = "Option::is_none"
         )]
         runtime_options: Option<TableRuntimeOptions>,
-        /// the schema qualifier. Honored under Trusted/Platform,
+        /// the schema qualifier. Honored under a widened schema scope,
         /// pinned/refused under Confined. Omitted-when-absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,
@@ -2962,7 +2962,7 @@ pub enum Op {
         table: String,
         /// Option patch. Absent fields leave the previous folded value unchanged.
         options: TableRuntimeOptionsPatch,
-        /// the schema qualifier. Honored under Trusted/Platform,
+        /// the schema qualifier. Honored under a widened schema scope,
         /// pinned/refused under Confined. Omitted-when-absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         schema: Option<String>,

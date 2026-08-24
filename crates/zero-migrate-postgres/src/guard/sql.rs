@@ -375,7 +375,6 @@ trait GuardDecisions {
     fn granted_extension_allowlist(&self) -> Vec<String>;
     fn grants_cross_schema(&self, schema: &str) -> bool;
     fn is_injected_shape(&self, object: &ObjectName, element: &ShapeElement) -> bool;
-    fn skips_denylist_belt(&self) -> bool;
 }
 
 impl GuardDecisions for GuardConfig {
@@ -421,10 +420,6 @@ impl GuardDecisions for GuardConfig {
 
     fn is_injected_shape(&self, object: &ObjectName, element: &ShapeElement) -> bool {
         Self::is_injected_shape(self, object, element)
-    }
-
-    fn skips_denylist_belt(&self) -> bool {
-        Self::skips_denylist_belt(self)
     }
 }
 
@@ -540,10 +535,6 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
     fn is_injected_shape(&self, _object: &ObjectName, _element: &ShapeElement) -> bool {
         false
     }
-
-    fn skips_denylist_belt(&self) -> bool {
-        false
-    }
 }
 
 struct GuardWalker<'a, D> {
@@ -586,12 +577,12 @@ impl SqlGuard {
     /// - [`GuardError::CrossSchema`] — a reference outside the project schema.
     /// - [`GuardError::Parse`] — unparseable SQL (deny-by-default).
     ///
-    /// Under [`zero_migrate_ir::policy::TrustProfile::Trusted`] the deny-list / cross-schema / body walks
-    /// are SKIPPED entirely (the operator owns the DB; arbitrary SQL applies) —
-    /// only `classify` + `analyze` run so the destructive/transactional/approval
-    /// flags are still derived. A [`GuardError::Parse`] can still surface
-    /// (malformed SQL has no parse tree to classify), but no `Denied`/`CrossSchema`
-    /// can: there is no deny arm on the Trusted path.
+    /// There used to be a posture under which the deny-list, cross-schema and body
+    /// walks were SKIPPED entirely, leaving only `classify` + `analyze` to derive the
+    /// destructive/transactional/approval flags — a config selected it through a
+    /// root/host-set guard mode, not through anything the policy could grant. It is
+    /// gone: every config runs every walk, and how far a caller's SQL gets is decided
+    /// by the composed policy alone.
     pub fn check(&self, sql: &str) -> Result<GuardReport, GuardError> {
         // Non-Postgres fail-closed backstop. `SqlGuard` is the **Postgres** line-1
         // (libpg_query below); it is the PG arm of the per-engine
@@ -606,9 +597,10 @@ impl SqlGuard {
 
         let classes = classify(sql)?;
 
-        // Walk the full parse tree once per statement. The data-security policy
-        // check runs even under Trusted; the deny-list/cross-schema/body walk below
-        // is what Trusted skips.
+        // Walk the full parse tree once per statement: the data-security policy check,
+        // then the deny-list / cross-schema / body walk. Both run for every config.
+        // There used to be a root/host-set posture that ran the first and skipped the
+        // second, and it is gone.
         let parsed = pg_query::parse(sql).map_err(|e| ParseError::Syntax(e.to_string()))?;
         let mut data_security_advisories = Vec::new();
         let mut class_index = 0;
@@ -629,34 +621,12 @@ impl SqlGuard {
                 &mut data_security_advisories,
             )?;
 
-            if self.cfg.skips_denylist_belt() {
-                continue;
-            }
-
             // Serialize the ONE statement subtree to JSON for the generic
             // full-tree walks (dangerous funcs + every schema reference). This
             // sidesteps `node.nodes()`, whose hand-written traversal skips
             // column DEFAULT / CHECK / VALUES / RULE-action subtrees.
             let json = guard_stmt_json(raw_stmt, &raw)?;
             self.walker().check_node(node, &json, &raw)?;
-        }
-
-        // TRUSTED early-return for the public dbmate-like posture. The
-        // operator owns the database, so there is NO untrusted boundary: skip the
-        // deny-list, cross-schema confinement, and body walks ENTIRELY and apply
-        // arbitrary SQL. We still derive the report from `classify` (above) +
-        // `analyze` (below) so `flags_for` keeps gating destructive ops via the
-        // CLI's `--yes`. Data-security policy above remains load-bearing when a
-        // direct caller explicitly tightens a Trusted config with those knobs.
-        if self.cfg.skips_denylist_belt() {
-            let mut advisories = crate::analysis::analyze::analyze(sql);
-            advisories.extend(data_security_advisories);
-            let destructive = classes.iter().any(|c| c.destructive);
-            return Ok(GuardReport {
-                classes,
-                destructive,
-                advisories,
-            });
         }
 
         // Collect operational advisories (lock-heavy / destructive / rename /
@@ -674,11 +644,16 @@ impl SqlGuard {
         })
     }
 
-    /// Backstop for the two IR raw islands (`raw` and `createFunction.body`)
-    /// under the Trusted operator profile. Trusted still skips project-schema
-    /// confinement for general SQL files, but arbitrary SQL strings embedded inside
-    /// otherwise structured IR must not bypass the deny-list for host-reaching or
-    /// privilege-escalating constructs.
+    /// Backstop for the two IR raw islands (`raw` and `createFunction.body`): the
+    /// deny-list for host-reaching and privilege-escalating constructs, WITHOUT
+    /// project-schema confinement.
+    ///
+    /// It exists because a posture once skipped the whole belt for general SQL files,
+    /// and arbitrary SQL embedded inside otherwise structured IR still had to be
+    /// refused a host reach. That posture is gone and `render::lower` no longer routes
+    /// anything here; see [`MigrationGuard::check_raw_island_sql`], which this backs.
+    ///
+    /// [`MigrationGuard::check_raw_island_sql`]: zero_migrate_backend::guard::MigrationGuard::check_raw_island_sql
     ///
     /// # Errors
     /// [`GuardError`] when parsing fails or a deny-listed construct is found.
@@ -698,7 +673,8 @@ impl SqlGuard {
         Ok(())
     }
 
-    /// Backstop for a raw function body under Trusted. PL/pgSQL is only
+    /// The function-body peer of [`Self::check_raw_island_sql_backstop`], uncalled on
+    /// the lowering path for the same reason. PL/pgSQL is only
     /// best-effort parseable as SQL, so this intentionally reuses the existing body
     /// scanner: parse what can be parsed, inspect dynamic SQL literals, then token
     /// scan for deny-listed names.
@@ -1318,9 +1294,9 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
     }
 
     /// Raw-island variant of [`Self::check_node`]. It preserves the deny-list and
-    /// body scanning but skips project-schema confinement, matching Trusted's
-    /// operator posture for SQL ownership while still blocking dangerous arbitrary
-    /// raw text.
+    /// body scanning but skips project-schema confinement: schema ownership was the
+    /// belt-off posture's to decide, and this backstop only had to keep dangerous
+    /// arbitrary raw text out.
     fn check_node_raw_island_backstop(
         &self,
         node: &NodeEnum,
@@ -1370,8 +1346,7 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
             // reaches the host (file I/O, `COPY … PROGRAM`). Platform widens
             // privilege *within* the DB, never *host* reach — so a
             // `CREATE/ALTER ROLE … SUPERUSER` is refused before the Platform
-            // allow. (Trusted skips the whole deny-list earlier — operator owns
-            // the DB.) This guards the vendor `createRole({ superuser: true })`
+            // allow. This guards the vendor `createRole({ superuser: true })`
             // render-here-refuse-at-guard backstop.
             NodeEnum::CreateRoleStmt(s) => {
                 // SUPERUSER stays a HARD DENY (non-grant hard rule) even under a
@@ -2055,18 +2030,19 @@ impl<D: GuardDecisions> GuardWalker<'_, D> {
         if body_contains_superuser_role_escalation(&lower) {
             return Err(denied(rule::BODY_INSPECTION, raw));
         }
-        // The role-management body needles are relaxed under the PLATFORM posture
-        // ONLY — now an INTERNAL guard vendor-lower rule (no operator-authorable knob):
-        // the belt is running (`GuardMode::Enforced`) AND the config holds the
-        // `access.role` capability. Platform is `Enforced` + `access.role` → relaxed;
-        // Confined is `Enforced` without `access.role` → denied; Trusted is
-        // `GuardMode::Off` → the whole belt is skipped in `check()`, but its raw-island
-        // body backstop (which reaches here with `Off`) still DENIES these needles, a
-        // behaviour the vendor-lower matrix locks.
-        let allow_role = !self.cfg.skips_denylist_belt()
-            && self
-                .cfg
-                .grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
+        // The role-management body needles are relaxed for a config holding the
+        // `access.role` capability — an INTERNAL guard vendor-lower rule, not an
+        // operator-authorable knob. Platform holds it and is relaxed; Confined does
+        // not and is denied.
+        //
+        // The condition used to carry a second conjunct: the belt-off posture was
+        // excluded from the relaxation, so a config that skipped the whole deny-list
+        // in `check()` was still denied these needles when it reached this body
+        // backstop. That posture is gone and it was the only way the conjunct could
+        // read false, so it came off with it.
+        let allow_role = self
+            .cfg
+            .grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
         let needles: &[&str] = if allow_role {
             &["alter system"]
         } else {

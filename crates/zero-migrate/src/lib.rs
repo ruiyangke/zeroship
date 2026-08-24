@@ -67,7 +67,7 @@
 //! so it is plain synchronous logic — no async runtime — and exhaustively
 //! unit-testable without a database (`tests/guard_security.rs`).
 
-// The NEUTRAL guard seam — `GuardConfig`, `GuardMode`, `GuardError`, `GuardOutcome`,
+// The NEUTRAL guard seam — `GuardConfig`, `GuardError`, `GuardOutcome`,
 // `MigrationGuard` and the structured-IR data-security walk. Re-exported under the
 // historical `crate::guard::…` path so the engine's dozens of references keep
 // resolving unchanged.
@@ -271,7 +271,7 @@ pub use apply::executor::apply;
 // They are reachable at `zero_migrate_postgres::guard`, which says whose they are.
 // A caller that wants "this project's line-1" rather than "PostgreSQL's" asks the
 // registry through `render::backends::guard_for`.
-pub use guard::{GuardConfig, GuardError, GuardMode, GuardOutcome, MigrationGuard};
+pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 // ── The three per-vendor guard TYPES are NOT re-exported here any more.
 //
 // `MysqlGuard`, `PgGuard` and `SqliteGuard` were `pub use`d at this crate root, and

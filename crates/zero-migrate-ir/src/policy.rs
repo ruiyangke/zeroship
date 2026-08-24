@@ -3,27 +3,24 @@
 /// A shared trust-posture label used by capability and validation vocabulary.
 ///
 /// This enum never selects or constructs an effective policy. Guard and executor
-/// APIs receive a caller-composed policy explicitly, and the host selects any
-/// non-policy guard mode independently. `#[non_exhaustive]` keeps the label set
-/// evolvable and requires external matches to include a wildcard.
+/// APIs receive a caller-composed policy explicitly. `#[non_exhaustive]` keeps the
+/// label set evolvable and requires external matches to include a wildcard.
+///
+/// There was a third label, `Trusted`: the dbmate-like posture with no untrusted
+/// boundary at all, whose documented meaning was that the deny-list, cross-schema and
+/// body walks were SKIPPED entirely. Nothing can skip them now — the root/host-set
+/// guard mode that did has been removed — so the label described a posture no config
+/// could be put into, and it went with the posture rather than staying as a name for
+/// something that does not happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TrustProfile {
     /// Untrusted creator/AI SQL. The full deny-list (today's behaviour).
     Confined,
     /// Trusted operator SQL for the platform's own schemas. Its grants and schema
-    /// allowlist come from the explicitly authored policy.
+    /// allowlist come from the explicitly authored policy. The deny-list still runs:
+    /// what widens is what the composed policy grants.
     Platform,
-    /// **No untrusted boundary at all** — the public dbmate-like CLI posture
-    /// where the operator owns the database. The deny-list / cross-schema /
-    /// body walks are SKIPPED entirely (arbitrary SQL applies as the connecting
-    /// role: `CREATE ROLE`, touch any schema, etc. — dbmate parity). The
-    /// destructive/transactional/approval flags are STILL derived independently
-    /// of trust, so the CLI's `--yes`
-    /// data-loss gate still applies; Trusted disables the deny-list, NOT the
-    /// destructive classification. A host that uses this label must still supply
-    /// the policy and belt-off guard mode explicitly.
-    Trusted,
 }
 
 /// The schemas a guard permits references to.
@@ -43,7 +40,7 @@ pub enum SchemaScope {
     /// Platform: a set of permitted schemas (e.g. a project schema / `public`). A
     /// reference is foreign iff its schema is NOT in this list.
     Allowlist(Vec<String>),
-    /// Explicit Trusted/operator posture: no validate-time cross-schema
+    /// An explicit whole-universe operator grant: no validate-time cross-schema
     /// confinement. This is deliberately distinct from `None` at public load /
     /// validate APIs so an omitted capability defaults to least privilege.
     Unconfined,

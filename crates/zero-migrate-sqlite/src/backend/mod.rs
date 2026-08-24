@@ -309,7 +309,7 @@ impl SqliteBackend {
 
     /// `load` (a.k.a. `db:setup`) — RESTORE a dumped schema's DDL onto `main`. The
     /// SQLite peer of piping `schema.sql` into `psql`: the operator-/engine-generated
-    /// dump body is replayed verbatim under engine mode (the Trusted/restore posture —
+    /// dump body is replayed verbatim under engine mode (the operator-restore posture —
     /// this is an operator restore of a dump, not an untrusted creator `up`). Runs as
     /// one `execute_batch` (the dump body is multi-statement). The `_mig` journal is a
     /// SEPARATE attached DB and the dump never references it, so this only recreates
