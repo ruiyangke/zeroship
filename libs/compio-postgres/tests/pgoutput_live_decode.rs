@@ -261,6 +261,9 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
         let old = update
             .0
             .expect("REPLICA IDENTITY FULL must yield an old tuple");
+        let old = old
+            .full()
+            .expect("REPLICA IDENTITY FULL must send a Full old tuple, not a Key");
         assert_eq!(
             text(&old.columns[1]),
             "first",
@@ -280,6 +283,9 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
                 _ => None,
             })
             .expect("no Delete message arrived");
+        let delete = delete
+            .full()
+            .expect("REPLICA IDENTITY FULL must send a Full old tuple on DELETE too");
         assert_eq!(text(&delete.columns[0]), "1");
         assert_eq!(text(&delete.columns[1]), "second");
 
@@ -299,6 +305,106 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
     })
     .await
     .expect("the live pgoutput decode exceeded its watchdog");
+}
+
+/// Two DELETEs whose old tuples hold the SAME columns must still be told
+/// apart, because only one of them is reporting values.
+///
+/// Under the default replica identity a DELETE sends `K`: the key column, and
+/// a NULL placeholder for every other column. Under `FULL` it sends `O`: the
+/// real row, where a NULL is a value. Delete a row whose non-key column is
+/// genuinely NULL under `FULL`, and the two frames differ in ONE byte -
+/// `4b` vs `4f` - with identical columns after it.
+///
+/// So a decoder that drops that byte makes "the label was NULL" and "the
+/// label was never sent" the same answer. This test builds exactly that
+/// collision on a live server and requires the two to remain distinguishable.
+#[compio::test]
+async fn a_key_only_old_tuple_is_not_confusable_with_a_row_that_held_nulls() {
+    compio::time::timeout(WATCHDOG, async {
+        let base = common::test_object_name("cpg ident kinds");
+        let table = format!("{base}_t");
+        let publication = format!("{base}_p");
+        let slot = format!("{base}_s");
+        let setup = client().await;
+
+        setup
+            .batch_execute(&format!(
+                "DROP PUBLICATION IF EXISTS \"{publication}\";
+                 DROP TABLE IF EXISTS {table};
+                 CREATE TABLE {table}(id int primary key, label text);
+                 CREATE PUBLICATION \"{publication}\" FOR TABLE {table};
+                 INSERT INTO {table} VALUES (1, 'not null at all'), (2, NULL);"
+            ))
+            .await
+            .expect("setup failed");
+        setup
+            .batch_execute(&format!(
+                "SELECT pg_drop_replication_slot('{slot}')
+                   FROM pg_replication_slots WHERE slot_name = '{slot}';
+                 SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
+            ))
+            .await
+            .expect("slot setup failed");
+
+        // Row 1 leaves under DEFAULT: its label is NOT null, but the wire
+        // carries a placeholder. Row 2 leaves under FULL: its label really is
+        // null. Same decoded columns, different meaning.
+        setup
+            .batch_execute(&format!(
+                "DELETE FROM {table} WHERE id = 1;
+                 ALTER TABLE {table} REPLICA IDENTITY FULL;
+                 DELETE FROM {table} WHERE id = 2;"
+            ))
+            .await
+            .expect("deletes failed");
+
+        let messages = decoded_stream(&slot, &publication).await;
+
+        let _ = setup
+            .batch_execute(&format!(
+                "SELECT pg_drop_replication_slot('{slot}')
+                   FROM pg_replication_slots WHERE slot_name = '{slot}';
+                 DROP PUBLICATION IF EXISTS \"{publication}\";
+                 DROP TABLE IF EXISTS {table};"
+            ))
+            .await;
+
+        let deletes = messages
+            .iter()
+            .filter_map(|message| match message {
+                PgOutputMessage::Delete { old_tuple, .. } => Some(old_tuple.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(deletes.len(), 2, "expected both deletes: {messages:?}");
+
+        // The collision itself: identical columns.
+        assert_eq!(
+            deletes[0].tuple().columns[1],
+            TupleColumn::Null,
+            "the DEFAULT-identity delete pads the non-key column with NULL"
+        );
+        assert_eq!(
+            deletes[1].tuple().columns[1],
+            TupleColumn::Null,
+            "the FULL-identity delete carries a genuine NULL"
+        );
+
+        // ...and the distinction that must survive it.
+        assert!(
+            deletes[0].full().is_none(),
+            "a key-only tuple must not be offered as the row's prior values: \
+             its NULL is a placeholder, and row 1's label was 'not null at all'"
+        );
+        assert!(
+            deletes[1].full().is_some(),
+            "a FULL old tuple must be offered as the row's prior values: \
+             its NULL is what row 2 actually held"
+        );
+    })
+    .await
+    .expect("the replica-identity kind test exceeded its watchdog");
 }
 
 /// A NULL is a distinct wire kind (`n`), not an empty text value. Decoding it

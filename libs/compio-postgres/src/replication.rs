@@ -1460,18 +1460,19 @@ pub mod pgoutput {
         },
         /// INSERT.
         Insert { rel_id: u32, new_tuple: TupleData },
-        /// UPDATE. `old_tuple` is present only when the relation's
-        /// replica identity is `FULL` or `INDEX`.
+        /// UPDATE. `old_tuple` is absent unless the replica identity
+        /// columns changed (`DEFAULT`/`INDEX`) or the relation is
+        /// `REPLICA IDENTITY FULL`.
         Update {
             rel_id: u32,
-            old_tuple: Option<TupleData>,
+            old_tuple: Option<OldTuple>,
             new_tuple: TupleData,
         },
-        /// DELETE. `old_tuple` carries either the full row or just
-        /// the replica-identity columns, depending on REPLICA IDENTITY.
+        /// DELETE. Under the default replica identity `old_tuple` is
+        /// [`OldTuple::Key`] - the row's identity, NOT its contents.
         Delete {
             rel_id: u32,
-            old_tuple: TupleData,
+            old_tuple: OldTuple,
         },
         /// TRUNCATE.
         Truncate {
@@ -1497,6 +1498,56 @@ pub mod pgoutput {
         pub type_oid: u32,
         /// Type modifier (per pg_attribute.atttypmod).
         pub type_modifier: i32,
+    }
+
+    /// The pre-change tuple on an UPDATE or DELETE, and WHICH KIND it is.
+    ///
+    /// pgoutput tags this tuple `K` or `O` and the two mean different things.
+    /// Collapsing them loses the only signal that says whether a NULL in the
+    /// tuple is a value or a placeholder:
+    ///
+    /// ```text
+    /// DELETE, REPLICA IDENTITY DEFAULT      -> 44 <rel> 4b 0002 74 ..."7" 6e
+    /// DELETE, REPLICA IDENTITY FULL, of a      44 <rel> 4f 0002 74 ..."7" 6e
+    ///   row whose second column IS NULL
+    /// ```
+    ///
+    /// Those two frames differ in exactly one byte - `4b` vs `4f`, `K` vs `O`
+    /// - and decode to the same columns. A consumer handed only the columns
+    /// cannot tell "this column was NULL" from "this column was not sent",
+    /// so a predicate evaluated against it silently answers about a value the
+    /// server never claimed. This enum is that byte, kept.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum OldTuple {
+        /// `K` - the replica-identity columns only. Every other column is a
+        /// NULL PLACEHOLDER, not a NULL value. This is what the DEFAULT
+        /// replica identity sends on every DELETE, and on an UPDATE that
+        /// changed the key. Use it to IDENTIFY the row; do not read the
+        /// non-key columns as the row's prior contents.
+        Key(TupleData),
+        /// `O` - the complete pre-change row, sent when the relation is
+        /// `REPLICA IDENTITY FULL`. Here a NULL is a value.
+        Full(TupleData),
+    }
+
+    impl OldTuple {
+        /// The tuple, whichever kind this is. Callers that genuinely only
+        /// need the row's identity can use this; callers reading prior values
+        /// must use [`OldTuple::full`], because [`OldTuple::Key`] does not
+        /// carry them.
+        pub fn tuple(&self) -> &TupleData {
+            match self {
+                Self::Key(tuple) | Self::Full(tuple) => tuple,
+            }
+        }
+
+        /// The full pre-change row, or `None` when only the identity was sent.
+        pub fn full(&self) -> Option<&TupleData> {
+            match self {
+                Self::Full(tuple) => Some(tuple),
+                Self::Key(_) => None,
+            }
+        }
     }
 
     /// One column value in a tuple.
@@ -1722,7 +1773,15 @@ pub mod pgoutput {
                 let kind = read_u8(&mut cur)?;
                 let (old_tuple, new_tuple) = match kind {
                     b'K' | b'O' => {
-                        let old = read_tuple(&mut cur)?;
+                        let tuple = read_tuple(&mut cur)?;
+                        // Which of the two it was decides whether the
+                        // non-key columns are values or placeholders, so it
+                        // is carried, not just validated.
+                        let old = if kind == b'K' {
+                            OldTuple::Key(tuple)
+                        } else {
+                            OldTuple::Full(tuple)
+                        };
                         let n_kind = read_u8(&mut cur)?;
                         if n_kind != b'N' {
                             return Err(DecodeError::UnknownTupleFormat(n_kind));
@@ -1741,12 +1800,15 @@ pub mod pgoutput {
             }
             b'D' => {
                 let rel_id = read_u32(&mut cur)?;
-                // 'K' (replica identity key) or 'O' (full row).
+                // 'K' (replica identity key) or 'O' (full row). Which one
+                // decides whether a NULL in the tuple is a value, so the
+                // answer travels with it.
                 let kind = read_u8(&mut cur)?;
-                if kind != b'K' && kind != b'O' {
-                    return Err(DecodeError::UnknownTupleFormat(kind));
-                }
-                let old_tuple = read_tuple(&mut cur)?;
+                let old_tuple = match kind {
+                    b'K' => OldTuple::Key(read_tuple(&mut cur)?),
+                    b'O' => OldTuple::Full(read_tuple(&mut cur)?),
+                    other => return Err(DecodeError::UnknownTupleFormat(other)),
+                };
                 PgOutputMessage::Delete { rel_id, old_tuple }
             }
             b'T' => {
@@ -1937,7 +1999,7 @@ mod tests {
     use crate::config::{SslMode, SslRootCert};
     use crate::tls::{NoTlsStream, TlsConnect};
     use compio::io::{AsyncReadExt, AsyncWriteExt};
-    use pgoutput::{PgOutputMessage, TupleColumn};
+    use pgoutput::{OldTuple, PgOutputMessage, TupleColumn};
     use std::error::Error as _;
     use std::future;
 
@@ -2805,8 +2867,13 @@ mod tests {
         match msg {
             PgOutputMessage::Delete { rel_id, old_tuple } => {
                 assert_eq!(rel_id, 16384);
-                assert_eq!(old_tuple.columns.len(), 1);
-                assert_eq!(old_tuple.columns[0], TupleColumn::Text("42".into()));
+                // The encoder writes a 'K' frame, so this must come back as
+                // Key - a Full here would mean the kind byte was ignored.
+                let OldTuple::Key(tuple) = &old_tuple else {
+                    panic!("a 'K' frame must decode as OldTuple::Key, got {old_tuple:?}");
+                };
+                assert_eq!(tuple.columns.len(), 1);
+                assert_eq!(tuple.columns[0], TupleColumn::Text("42".into()));
             }
             other => panic!("expected Delete, got {other:?}"),
         }
