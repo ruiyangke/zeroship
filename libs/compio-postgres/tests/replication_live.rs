@@ -267,7 +267,7 @@ fn start_options() -> StartReplicationOptions<'static> {
         slot_name: "deadline_slot",
         start_lsn: "0/0",
         proto_version: 1,
-        publication_names: "deadline_publication",
+        publication_names: &["deadline_publication"],
     }
 }
 
@@ -639,7 +639,7 @@ async fn a_stalled_start_replication_exchange_times_out_and_retires_its_session(
             complete_replication_startup(&mut stream, Duration::ZERO);
             assert_eq!(
                 expect_simple_query(&mut stream),
-                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" 'deadline_publication')\0"
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
             );
 
             // CopyBothResponse declares its three-byte body, but only its
@@ -696,7 +696,7 @@ async fn an_awaited_idle_replication_stream_survives_repeated_read_budgets() {
             send_identify_system(&mut stream);
             assert_eq!(
                 expect_simple_query(&mut stream),
-                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" 'deadline_publication')\0"
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
             );
             send_copy_both(&mut stream);
 
@@ -791,7 +791,7 @@ async fn a_mid_frame_replication_stall_times_out_and_poisons_the_stream() {
             complete_replication_startup(&mut stream, Duration::ZERO);
             assert_eq!(
                 expect_simple_query(&mut stream),
-                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" 'deadline_publication')\0"
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/0 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
             );
             send_copy_both(&mut stream);
             send_prefix_rx
@@ -907,7 +907,7 @@ async fn an_unrepresentable_start_lsn_is_refused_before_replication_starts() {
                 slot_name: "deadline_slot",
                 start_lsn: "0/100000000",
                 proto_version: 1,
-                publication_names: "deadline_publication",
+                publication_names: &["deadline_publication"],
             })
             .await
             .err()
@@ -942,7 +942,7 @@ async fn a_representable_start_lsn_still_starts_replication() {
             complete_replication_startup(&mut stream, Duration::ZERO);
             assert_eq!(
                 expect_simple_query(&mut stream),
-                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/16B3750 (\"proto_version\" '1', \"publication_names\" 'deadline_publication')\0"
+                b"START_REPLICATION SLOT \"deadline_slot\" LOGICAL 0/16B3750 (\"proto_version\" '1', \"publication_names\" '\"deadline_publication\"')\0"
             );
             send_copy_both(&mut stream);
             expect_disconnect(&mut stream);
@@ -962,7 +962,7 @@ async fn a_representable_start_lsn_still_starts_replication() {
                 slot_name: "deadline_slot",
                 start_lsn: "0/16B3750",
                 proto_version: 1,
-                publication_names: "deadline_publication",
+                publication_names: &["deadline_publication"],
             }),
         )
         .await

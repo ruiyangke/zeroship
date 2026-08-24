@@ -54,6 +54,8 @@ mod copy_in;
 mod copy_out;
 #[path = "../src/error/mod.rs"]
 pub mod error;
+#[path = "../src/escape.rs"]
+mod escape;
 #[path = "../src/generic_client.rs"]
 mod generic_client;
 #[cfg(not(target_arch = "wasm32"))]

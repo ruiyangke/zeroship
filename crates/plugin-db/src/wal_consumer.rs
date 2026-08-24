@@ -381,7 +381,7 @@ impl WalConsumer {
             slot_name: &self.slot_name,
             start_lsn: &self.start_lsn,
             proto_version: 1,
-            publication_names: &self.publication_name,
+            publication_names: &[&self.publication_name],
         };
         let stream = match conn.start_logical_replication(opts).await {
             Ok(stream) => stream,
