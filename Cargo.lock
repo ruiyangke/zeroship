@@ -1101,6 +1101,7 @@ dependencies = [
  "postgres-protocol",
  "postgres-types",
  "rand 0.10.1",
+ "rcgen",
  "rustls",
  "rustls-native-certs",
  "sha1",
