@@ -60,6 +60,7 @@ async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
         let slot = format!("{base}_s");
         let gid = format!("{base}_gid");
         let setup = client().await;
+        common::sweep_stale_replication_slots(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -201,6 +202,7 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
         let stream_commit_gid = format!("{base}_stream_commit");
         let stream_rollback_gid = format!("{base}_stream_rollback");
         let setup = client().await;
+        common::sweep_stale_replication_slots(&setup).await;
 
         let configured: String = setup
             .query_one("SHOW max_prepared_transactions", &[])

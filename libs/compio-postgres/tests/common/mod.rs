@@ -217,6 +217,74 @@ pub fn test_url() -> String {
         .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
+/// Drop replication slots left behind by test processes that are gone.
+///
+/// A test that panics or trips its watchdog never reaches its own cleanup, and
+/// a logical slot outlives the connection that made it: it stays, and it PINS
+/// WAL until something drops it. Six had accumulated by 2026-08-24 and took
+/// the server to 9 of its 20 slots; the first symptom was an unrelated probe
+/// failing with `max_replication_slots` exhausted, which reads as a server
+/// misconfiguration rather than as test litter.
+///
+/// The sweep is keyed on the PID that [`test_object_name`] embeds, and drops
+/// only slots whose process is no longer running. A slot belonging to a LIVE
+/// process is left alone, so this is safe to call while other test binaries
+/// are running concurrently - which is exactly when a blunter rule (drop every
+/// inactive slot, drop by age) would delete a slot a running test is about to
+/// use. `active` is not enough on its own: a slot sits inactive between its
+/// creation and the START_REPLICATION that attaches to it.
+pub async fn sweep_stale_replication_slots(client: &compio_postgres::Client) {
+    let Ok(rows) = client
+        .query(
+            "SELECT slot_name FROM pg_replication_slots
+              WHERE NOT active AND slot_type = 'logical'",
+            &[],
+        )
+        .await
+    else {
+        return;
+    };
+
+    for row in rows {
+        let name: String = row.get(0);
+        let Some(pid) = pid_embedded_in(&name) else {
+            continue;
+        };
+        if process_is_alive(pid) {
+            continue;
+        }
+        // Best effort: another sweep may have taken it first, and losing that
+        // race is the correct outcome, not an error.
+        let _ = client
+            .execute("SELECT pg_drop_replication_slot($1)", &[&name])
+            .await;
+    }
+}
+
+/// The PID [`test_object_name`] put in the middle of `<readable>_<pid>_<hash>`.
+///
+/// Returns `None` for any name that is not that shape, so a slot this suite
+/// did not create is never a candidate.
+fn pid_embedded_in(slot_name: &str) -> Option<u32> {
+    let parts: Vec<&str> = slot_name.split('_').collect();
+    // <readable...> _ <pid> _ <hash> _ <suffix>: the fixtures append a
+    // one-character suffix, so the PID is third from the end.
+    let candidate = parts.get(parts.len().checked_sub(3)?)?;
+    candidate.parse::<u32>().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_alive(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Elsewhere, never claim a process is dead - leaving a slot is recoverable,
+/// dropping a live test's slot is not.
+#[cfg(not(target_os = "linux"))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
+}
+
 /// A `Config` for a replication connection to the test server.
 ///
 /// Carries the test DSN's credentials, host and port, and nothing else - a
@@ -262,7 +330,54 @@ pub fn replication_config(application_name: &str) -> compio_postgres::Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_POSTGRES_IDENTIFIER_LEN, redact_dsn, test_object_name};
+    use super::{
+        MAX_POSTGRES_IDENTIFIER_LEN, pid_embedded_in, redact_dsn, test_object_name,
+    };
+
+    #[test]
+    fn a_slot_named_by_this_suite_yields_the_pid_that_made_it() {
+        // Exactly the shape the fixtures build: test_object_name() plus a
+        // one-character suffix.
+        let name = format!("{}_s", test_object_name("cpg stream off"));
+        let pid = pid_embedded_in(&name).expect("the sweep must find the pid it embedded");
+        assert_eq!(
+            pid,
+            std::process::id(),
+            "the pid parsed back must be the one test_object_name wrote: {name}"
+        );
+    }
+
+    #[test]
+    fn a_slot_this_suite_did_not_create_is_never_a_candidate() {
+        // The sweep DROPS what it matches, so failing to parse must mean
+        // "leave it alone", not "guess". A production slot caught by a loose
+        // rule is deleted WAL retention, and nothing announces it.
+        for foreign in [
+            "my_app_slot",
+            "debezium",
+            "",
+            "_",
+            "cpg_missing_hash",
+            "slot_with_no_digits_here_x",
+        ] {
+            assert_eq!(
+                pid_embedded_in(foreign),
+                None,
+                "{foreign:?} is not this suite's shape and must not be swept"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pid_that_is_not_a_number_is_refused_rather_than_coerced() {
+        assert_eq!(pid_embedded_in("cpg_thing_notapid_abcdef0123456789_s"), None);
+        // Negative and overflowing values are not pids either.
+        assert_eq!(pid_embedded_in("cpg_thing_-1_abcdef0123456789_s"), None);
+        assert_eq!(
+            pid_embedded_in("cpg_thing_99999999999999999999_abcdef_s"),
+            None
+        );
+    }
 
     #[test]
     fn test_object_names_are_safe_bounded_and_process_scoped() {
