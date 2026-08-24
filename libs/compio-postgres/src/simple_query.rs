@@ -71,6 +71,30 @@ pub async fn batch_execute(client: &InnerClient, query: &str) -> Result<(), Erro
 /// so the server prefix alone cannot tell the two apart.
 const COPY_IN_UNSUPPORTED: &str = "simple query execution cannot supply COPY data; use copy_in";
 
+/// The reason the EXTENDED-protocol drain gives for the same abort.
+///
+/// Spelled differently on purpose: it is the only thing that tells a caller
+/// WHICH entry point could not feed the copy, and both paths reach the same
+/// `COPY from stdin failed:` prefix.
+pub(crate) const COPY_IN_UNSUPPORTED_EXTENDED: &str =
+    "extended query execution cannot supply COPY data; use copy_in";
+
+/// Which protocol started the copy being aborted.
+///
+/// It decides how many `ReadyForQuery` frames the abort earns, which is why
+/// the two paths cannot share one frame list. In SIMPLE query mode PostgreSQL
+/// answers `CopyFail` with `ErrorResponse` AND its own `ReadyForQuery`. Under
+/// an EXTENDED-protocol copy the same error sets `ignore_till_sync` instead
+/// and no terminator is released until a `Sync`. The caller's response is
+/// still at the head of the queue and consumes the first terminator either
+/// way, so the extended form has to trail a SECOND `Sync` to pay for the
+/// housekeeping slot this send registers.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum CopyAbortProtocol {
+    Simple,
+    Extended,
+}
+
 /// Take the session back out of COPY-IN mode.
 ///
 /// A `COPY ... FROM STDIN` sent as a simple query is answered with
@@ -99,10 +123,24 @@ const COPY_IN_UNSUPPORTED: &str = "simple query execution cannot supply COPY dat
 /// because the caller's error is unchanged - the follow-up query simply never
 /// returns. The orphaned slot stays at the head of the queue and is handed the
 /// NEXT request's reply, so a regression here is a HANG, not a wrong answer.
-fn abort_copy_in(client: &InnerClient) -> Result<(), Error> {
+pub(crate) fn abort_copy_in(
+    client: &InnerClient,
+    protocol: CopyAbortProtocol,
+) -> Result<(), Error> {
+    let reason = match protocol {
+        CopyAbortProtocol::Simple => COPY_IN_UNSUPPORTED,
+        CopyAbortProtocol::Extended => COPY_IN_UNSUPPORTED_EXTENDED,
+    };
     let buf = client.with_buf(|buf| {
-        frontend::copy_fail(COPY_IN_UNSUPPORTED, buf).map_err(Error::encode)?;
+        frontend::copy_fail(reason, buf).map_err(Error::encode)?;
         frontend::sync(buf);
+        if protocol == CopyAbortProtocol::Extended {
+            // The second terminator. See `CopyAbortProtocol`: under an
+            // extended-protocol copy the `CopyFail` error releases no
+            // `ReadyForQuery` of its own, so one `Sync` pays the caller and
+            // this one pays the slot below.
+            frontend::sync(buf);
+        }
         Ok(buf.split().freeze())
     })?;
     // Housekeeping: the bare `ReadyForQuery` this earns is bookkeeping, not an
@@ -162,7 +200,7 @@ pub(crate) async fn finish_batch_execute(
             // copy mode. See `abort_copy_in`. The abort makes PostgreSQL answer
             // this very stream with the copy's own error, so the loop keeps
             // draining and the caller gets that instead.
-            Message::CopyInResponse(_) => abort_copy_in(client)?,
+            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Simple)?,
             _ => return Err(Error::unexpected_message()),
         }
     }
@@ -193,7 +231,7 @@ pub(crate) async fn finish_batch_execute_reporting_tag(
                 tag = Some(body.tag().map_err(Error::parse)?.to_string());
             }
             Message::EmptyQueryResponse | Message::RowDescription(_) | Message::DataRow(_) => {}
-            Message::CopyInResponse(_) => abort_copy_in(client)?,
+            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Simple)?,
             _ => return Err(Error::unexpected_message()),
         }
     }
@@ -262,7 +300,7 @@ impl Stream for SimpleQueryStream {
                 Message::ReadyForQuery(_) => return Poll::Ready(None),
                 Message::CopyInResponse(_) => match this.client.upgrade() {
                     Some(client) => {
-                        if let Err(error) = abort_copy_in(&client) {
+                        if let Err(error) = abort_copy_in(&client, CopyAbortProtocol::Simple) {
                             return Poll::Ready(Some(Err(error)));
                         }
                     }
