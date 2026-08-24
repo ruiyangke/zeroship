@@ -59,19 +59,18 @@ pub const CODE_UNSUPPORTED: &str = "UNSUPPORTED";
 /// the remedy differs ("stay in-envelope, or give the expression its own
 /// `dialect({ ... })` leg and accept the narrower reach that pins").
 pub const CODE_EXPR_NOT_PORTABLE: &str = "EXPR_NOT_PORTABLE";
-/// An artifact whose measured dialect reach is one backend, deployed against another.
-///
-/// **RESERVED, AND NOTHING EMITS IT.** Stated plainly because the value used to read
-/// `DIALECT_SCOPE_PGONLY`, naming a `DialectScope` variant that does not exist — the
-/// pinned arm is `Only(DialectId)` — on a facet no author can write, since the reach
-/// is derived from the op list rather than declared. A census over vendor NAMES
-/// cannot see it: `PgOnly` lowercases to `pgonly`, which contains no product needle.
-///
-/// The live refusal is `zero_migrate::engine::EngineError::DialectScopeRefused`,
-/// raised whole-plan at APPLY. It is not an authoring code because the question it
-/// answers is not an authoring one: a plan reaching one dialect is perfectly valid to
-/// author, and load already refuses the per-target cases it can see.
-pub const CODE_DIALECT_SCOPE_REFUSED: &str = "DIALECT_SCOPE_REFUSED";
+// There is deliberately no code here for "this artifact's dialect reach is one
+// backend and the target is another". That question is not an authoring one — a plan
+// reaching a single dialect is perfectly valid to author — so it has no place in a
+// taxonomy of authoring-time codes. It is answered at APPLY, by the typed
+// `zero_migrate::engine::EngineError::DialectScopeRefused`, which carries both
+// `DialectId`s as data.
+//
+// A `DIALECT_SCOPE_PGONLY` code did sit here, emitted by nothing, naming a
+// `DialectScope` variant that has never existed (the pinned arm is `Only(DialectId)`)
+// on a facet no author can write, since the reach is derived from the op list. The
+// vendor-name censuses could not see it either: `PgOnly` lowercases to `pgonly`, which
+// contains no product needle. Do not reintroduce it.
 /// An op-function called outside an active recorder — emitted JS-side.
 pub const CODE_OP_OUTSIDE_RECORDER: &str = "OP_OUTSIDE_RECORDER";
 /// An op is structurally valid JSON but carries an internally inconsistent shape.
