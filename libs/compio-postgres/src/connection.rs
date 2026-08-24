@@ -70,7 +70,7 @@ use crate::codec::{
 };
 use crate::copy_in::CopyInReceiver;
 use crate::error::DbError;
-use crate::maybe_tls_stream::{MaybeTlsReadHalf, MaybeTlsStream, MaybeTlsWriteHalf};
+use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::{AsyncMessage, Error, Notification, Statement};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
