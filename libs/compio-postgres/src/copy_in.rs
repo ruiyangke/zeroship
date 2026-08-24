@@ -52,6 +52,7 @@ enum CopyInMessage {
 pub struct CopyInReceiver {
     receiver: mpsc::Receiver<CopyInMessage>,
     done: bool,
+    abort_reason: Option<&'static str>,
 }
 
 impl CopyInReceiver {
@@ -59,6 +60,29 @@ impl CopyInReceiver {
         CopyInReceiver {
             receiver,
             done: false,
+            abort_reason: None,
+        }
+    }
+
+    /// Build a connection-owned COPY producer for an API which can execute a
+    /// `COPY FROM STDIN` statement but has no caller data channel.
+    ///
+    /// The initial extended-protocol batch is sent first. If `PostgreSQL` accepts
+    /// it, the closed channel below deterministically yields `CopyFail + Sync`
+    /// with the caller-visible reason. If startup is rejected, the connection
+    /// observes the initial batch's `ReadyForQuery` and never polls this
+    /// terminal frame. Reusing the real COPY state machine is what makes both
+    /// paths cost exactly one response slot.
+    pub(crate) fn aborting(initial: FrontendMessage, reason: &'static str) -> Self {
+        let (mut sender, receiver) = mpsc::channel(1);
+        sender
+            .try_send(CopyInMessage::Message(initial))
+            .expect("a new producerless COPY channel accepts its initial frame");
+        drop(sender);
+        Self {
+            receiver,
+            done: false,
+            abort_reason: Some(reason),
         }
     }
 
@@ -94,7 +118,7 @@ impl Stream for CopyInReceiver {
             None => {
                 self.done = true;
                 let mut buf = BytesMut::new();
-                frontend::copy_fail("", &mut buf).unwrap();
+                frontend::copy_fail(self.abort_reason.unwrap_or(""), &mut buf).unwrap();
                 frontend::sync(&mut buf);
                 Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
             }

@@ -8,8 +8,9 @@
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
+use crate::copy_in::CopyInReceiver;
 use crate::prepare::get_type;
-use crate::simple_query::{CopyAbortProtocol, abort_copy_in};
+use crate::simple_query::{COPY_IN_UNSUPPORTED_EXTENDED, may_enter_copy_in};
 use crate::types::{BorrowToSql, IsNull, Kind, ToSql};
 use crate::{Column, Error, Portal, Row, Statement};
 use bytes::{Bytes, BytesMut};
@@ -22,7 +23,7 @@ use postgres_protocol::message::frontend;
 use postgres_types::Type;
 use std::fmt;
 use std::pin::Pin;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 struct BorrowToSqlParamsDebug<'a, T>(&'a [T]);
@@ -109,7 +110,6 @@ where
         None
     };
     Ok(RowStream {
-        client: Arc::downgrade(client),
         statement,
         responses,
         pending,
@@ -167,14 +167,13 @@ pub async fn query_text_params(
         Ok(buf.split().freeze())
     })?;
 
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let mut responses = client.send(producerless_request(buf, may_enter_copy_in(query)))?;
 
     loop {
         match responses.next().await? {
             Message::ParseComplete | Message::BindComplete | Message::ParameterDescription(_) => {}
             Message::NoData => {
                 return Ok(RowStream {
-                    client: Arc::downgrade(client),
                     statement: Statement::unnamed(vec![], vec![]),
                     responses,
                     pending: None,
@@ -196,7 +195,6 @@ pub async fn query_text_params(
                     columns.push(column);
                 }
                 return Ok(RowStream {
-                    client: Arc::downgrade(client),
                     statement: Statement::unnamed(vec![], columns),
                     responses,
                     pending: None,
@@ -256,7 +254,7 @@ pub async fn execute_text_params(
         Ok(buf.split().freeze())
     })?;
 
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let mut responses = client.send(producerless_request(buf, may_enter_copy_in(query)))?;
     let mut rows = 0;
     loop {
         match responses.next().await? {
@@ -270,11 +268,9 @@ pub async fn execute_text_params(
                 rows = extract_row_affected(&body)?;
             }
             Message::EmptyQueryResponse => rows = 0,
-            // Not `unexpected_message`: walking away here leaves the SESSION
-            // in copy mode, and the `Sync` this request already sent was
-            // ignored while it is. See `simple_query::abort_copy_in` - this is
-            // the extended-protocol peer of the arm it documents.
-            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Extended)?,
+            // The connection-owned producer is already committed to
+            // `CopyFail + Sync`; keep draining to its server error.
+            Message::CopyInResponse(_) => {}
             Message::ReadyForQuery(_) => return Ok(rows),
             _ => return Err(Error::unexpected_message()),
         }
@@ -305,14 +301,13 @@ where
         })?
     };
 
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let mut responses = client.send(producerless_request(buf, may_enter_copy_in(query)))?;
 
     loop {
         match responses.next().await? {
             Message::ParseComplete | Message::BindComplete | Message::ParameterDescription(_) => {}
             Message::NoData => {
                 return Ok(RowStream {
-                    client: Arc::downgrade(client),
                     statement: Statement::unnamed(vec![], vec![]),
                     responses,
                     pending: None,
@@ -334,7 +329,6 @@ where
                     columns.push(column);
                 }
                 return Ok(RowStream {
-                    client: Arc::downgrade(client),
                     statement: Statement::unnamed(vec![], columns),
                     responses,
                     pending: None,
@@ -370,7 +364,7 @@ where
         })?
     };
 
-    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    let mut responses = client.send(producerless_request(buf, may_enter_copy_in(query)))?;
 
     let mut rows = 0;
 
@@ -390,11 +384,7 @@ where
             }
 
             Message::EmptyQueryResponse => rows = 0,
-            // Not `unexpected_message`: walking away here leaves the SESSION
-            // in copy mode, and the `Sync` this request already sent was
-            // ignored while it is. See `simple_query::abort_copy_in` - this is
-            // the extended-protocol peer of the arm it documents.
-            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Extended)?,
+            Message::CopyInResponse(_) => {}
             Message::ReadyForQuery(_) => return Ok(rows),
             _ => {
                 return Err(Error::unexpected_message());
@@ -416,12 +406,11 @@ pub async fn query_portal(
     })?;
 
     let responses = client.send_statement(
-        RequestMessages::Single(FrontendMessage::Raw(buf)),
+        producerless_request(buf, portal.statement().may_enter_copy_in()),
         portal.statement(),
     )?;
 
     Ok(RowStream {
-        client: Arc::downgrade(client),
         statement: portal.statement().clone(),
         responses,
         pending: None,
@@ -479,11 +468,7 @@ where
                 rows = extract_row_affected(&body)?;
             }
             Message::EmptyQueryResponse => rows = 0,
-            // Not `unexpected_message`: walking away here leaves the SESSION
-            // in copy mode, and the `Sync` this request already sent was
-            // ignored while it is. See `simple_query::abort_copy_in` - this is
-            // the extended-protocol peer of the arm it documents.
-            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Extended)?,
+            Message::CopyInResponse(_) => {}
             Message::ReadyForQuery(_) => return Ok(rows),
             _ => return Err(Error::unexpected_message()),
         }
@@ -496,7 +481,7 @@ async fn start(
     statement: &Statement,
 ) -> Result<Responses, Error> {
     let mut responses = client.send_statement(
-        RequestMessages::Single(FrontendMessage::Raw(buf)),
+        producerless_request(buf, statement.may_enter_copy_in()),
         statement,
     )?;
 
@@ -520,6 +505,23 @@ where
         frontend::sync(buf);
         Ok(buf.split().freeze())
     })
+}
+
+/// Route a known `COPY FROM STDIN` through the real COPY state machine even
+/// when this API has no data producer. The connection owns the abort, so a
+/// dropped response consumer cannot suppress it and a later request cannot be
+/// written ahead of it. Startup rejection remains balanced because the COPY
+/// loop suppresses its terminal frame after the initial `ReadyForQuery`.
+pub(crate) fn producerless_request(buf: Bytes, may_enter_copy_in: bool) -> RequestMessages {
+    let initial = FrontendMessage::Raw(buf);
+    if may_enter_copy_in {
+        RequestMessages::CopyIn(CopyInReceiver::aborting(
+            initial,
+            COPY_IN_UNSUPPORTED_EXTENDED,
+        ))
+    } else {
+        RequestMessages::Single(initial)
+    }
 }
 
 /// Recreate a described statement in PostgreSQL's unnamed slot and bind it in
@@ -715,13 +717,6 @@ pin_project! {
     /// A stream of table rows.
     #[project(!Unpin)]
     pub struct RowStream {
-        // Held so the stream can end a copy this path cannot feed
-        // (`simple_query::abort_copy_in`). WEAK for the same reason
-        // `SimpleQueryStream` holds a weak handle: `InnerClient` owns the
-        // request channel and `Connection::run` finishes only once every
-        // sender is gone, so a strong handle would keep a connection alive
-        // for as long as a caller held the stream.
-        client: Weak<InnerClient>,
         statement: Statement,
         responses: Responses,
         pending: Option<Message>,
@@ -765,20 +760,9 @@ impl Stream for RowStream {
                 // honest answer.
                 Message::PortalSuspended => {}
                 Message::ReadyForQuery(_) => return Poll::Ready(None),
-                // This is where a `COPY ... FROM STDIN` sent through `query`
-                // lands: `start` has already consumed `BindComplete` and the
-                // `Describe` answered before the `Execute` that entered copy
-                // mode. Walking away leaves the SESSION there, and the `Sync`
-                // this request already sent was ignored while it is. See
-                // `simple_query::abort_copy_in`.
-                Message::CopyInResponse(_) => match this.client.upgrade() {
-                    Some(client) => {
-                        if let Err(error) = abort_copy_in(&client, CopyAbortProtocol::Extended) {
-                            return Poll::Ready(Some(Err(error)));
-                        }
-                    }
-                    None => return Poll::Ready(Some(Err(Error::closed()))),
-                },
+                // The connection owns the producerless COPY abort. Returning
+                // no item here keeps polling until PostgreSQL reports it.
+                Message::CopyInResponse(_) => {}
                 _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }
         }

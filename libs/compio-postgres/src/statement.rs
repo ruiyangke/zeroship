@@ -12,6 +12,7 @@ struct StatementInner {
     name: String,
     params: Vec<Type>,
     columns: Vec<Column>,
+    may_enter_copy_in: bool,
 }
 
 /// Queues `Close S` + `Sync` for a server-side prepared statement.
@@ -68,21 +69,32 @@ impl Statement {
         name: String,
         params: Vec<Type>,
         columns: Vec<Column>,
+        may_enter_copy_in: bool,
     ) -> Statement {
         Statement(Arc::new(StatementInner {
             client: Arc::downgrade(inner),
             name,
             params,
             columns,
+            may_enter_copy_in,
         }))
     }
 
     pub(crate) fn unnamed(params: Vec<Type>, columns: Vec<Column>) -> Statement {
+        Self::unnamed_with_copy_in(params, columns, false)
+    }
+
+    pub(crate) fn unnamed_with_copy_in(
+        params: Vec<Type>,
+        columns: Vec<Column>,
+        may_enter_copy_in: bool,
+    ) -> Statement {
         Statement(Arc::new(StatementInner {
             client: Weak::new(),
             name: String::new(),
             params,
             columns,
+            may_enter_copy_in,
         }))
     }
 
@@ -92,6 +104,10 @@ impl Statement {
 
     pub(crate) fn same_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    pub(crate) fn may_enter_copy_in(&self) -> bool {
+        self.0.may_enter_copy_in
     }
 
     pub(crate) fn invalidate_cache_on_error(&self, error: &crate::Error) {

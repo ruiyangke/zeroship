@@ -56,7 +56,7 @@ pub async fn simple_query(
         // caller or abandoned. Waiting until `CopyInResponse` is observed is
         // too late when another multiplexed request is already behind this
         // Query: PostgreSQL would read that request as COPY data first.
-        abort_copy_in(client, CopyAbortProtocol::Simple)?;
+        abort_copy_in(client)?;
     }
 
     Ok(SimpleQueryStream {
@@ -80,29 +80,13 @@ pub async fn batch_execute(client: &InnerClient, query: &str) -> Result<(), Erro
 /// so the server prefix alone cannot tell the two apart.
 const COPY_IN_UNSUPPORTED: &str = "simple query execution cannot supply COPY data; use copy_in";
 
-/// The reason the EXTENDED-protocol drain gives for the same abort.
+/// The reason an EXTENDED-protocol API gives for the same abort.
 ///
 /// Spelled differently on purpose: it is the only thing that tells a caller
 /// WHICH entry point could not feed the copy, and both paths reach the same
 /// `COPY from stdin failed:` prefix.
 pub(crate) const COPY_IN_UNSUPPORTED_EXTENDED: &str =
     "extended query execution cannot supply COPY data; use copy_in";
-
-/// Which protocol started the copy being aborted.
-///
-/// It decides how many `ReadyForQuery` frames the abort earns, which is why
-/// the two paths cannot share one frame list. In SIMPLE query mode PostgreSQL
-/// answers `CopyFail` with `ErrorResponse` AND its own `ReadyForQuery`. Under
-/// an EXTENDED-protocol copy the same error sets `ignore_till_sync` instead
-/// and no terminator is released until a `Sync`. The caller's response is
-/// still at the head of the queue and consumes the first terminator either
-/// way, so the extended form has to trail a SECOND `Sync` to pay for the
-/// housekeeping slot this send registers.
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) enum CopyAbortProtocol {
-    Simple,
-    Extended,
-}
 
 /// Take the session back out of COPY-IN mode.
 ///
@@ -119,7 +103,7 @@ pub(crate) enum CopyAbortProtocol {
 /// or dirty.
 ///
 /// `CopyFail` is the message that ends copy mode. It costs one extra request
-/// slot and that is deliberate, not an oversight: in SIMPLE query mode
+/// slot and that is deliberate, not an oversight: in simple-query mode
 /// PostgreSQL answers the `CopyFail` with `ErrorResponse` AND its own
 /// `ReadyForQuery` - it does not suppress the terminator the way it does for an
 /// extended-protocol copy, where the error sets `ignore_till_sync` and only the
@@ -127,29 +111,15 @@ pub(crate) enum CopyAbortProtocol {
 /// still at the head of the queue - the caller's, which is what turns its drain
 /// into the server's real diagnostic. The trailing `Sync` then produces a
 /// SECOND, bare `ReadyForQuery` for the slot this send registers, so the
-/// connection task's response accounting balances. MEASURED: delete that one
-/// line and every assertion in `tests/simple_query_copy_resync.rs` still holds,
+/// connection task's response accounting balances. MEASURED: delete the Sync
+/// below and every assertion in `tests/simple_query_copy_resync.rs` still holds,
 /// because the caller's error is unchanged - the follow-up query simply never
 /// returns. The orphaned slot stays at the head of the queue and is handed the
 /// NEXT request's reply, so a regression here is a HANG, not a wrong answer.
-pub(crate) fn abort_copy_in(
-    client: &InnerClient,
-    protocol: CopyAbortProtocol,
-) -> Result<(), Error> {
-    let reason = match protocol {
-        CopyAbortProtocol::Simple => COPY_IN_UNSUPPORTED,
-        CopyAbortProtocol::Extended => COPY_IN_UNSUPPORTED_EXTENDED,
-    };
+pub(crate) fn abort_copy_in(client: &InnerClient) -> Result<(), Error> {
     let buf = client.with_buf(|buf| {
-        frontend::copy_fail(reason, buf).map_err(Error::encode)?;
+        frontend::copy_fail(COPY_IN_UNSUPPORTED, buf).map_err(Error::encode)?;
         frontend::sync(buf);
-        if protocol == CopyAbortProtocol::Extended {
-            // The second terminator. See `CopyAbortProtocol`: under an
-            // extended-protocol copy the `CopyFail` error releases no
-            // `ReadyForQuery` of its own, so one `Sync` pays the caller and
-            // this one pays the slot below.
-            frontend::sync(buf);
-        }
         Ok(buf.split().freeze())
     })?;
     // Housekeeping: the bare `ReadyForQuery` this earns is bookkeeping, not an
@@ -180,7 +150,7 @@ pub(crate) fn start_batch_execute(
     let buf = encode(client, query)?;
     let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
     if may_enter_copy_in(query) {
-        abort_copy_in(client, CopyAbortProtocol::Simple)?;
+        abort_copy_in(client)?;
     }
     Ok(responses)
 }
@@ -201,7 +171,7 @@ pub(crate) fn start_batch_execute_with_error_cleanup(
     }
 
     let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(query)))?;
-    abort_copy_in(client, CopyAbortProtocol::Simple)?;
+    abort_copy_in(client)?;
     drop(client.send_with(
         RequestMessages::Single(FrontendMessage::Raw(cleanup)),
         RequestDisposition::Housekeeping,
@@ -227,7 +197,7 @@ pub(crate) async fn finish_batch_execute(
             // copy mode. See `abort_copy_in`. The abort makes PostgreSQL answer
             // this very stream with the copy's own error, so the loop keeps
             // draining and the caller gets that instead.
-            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Simple)?,
+            Message::CopyInResponse(_) => abort_copy_in(client)?,
             // A COPY OUT needs no abort - the server sends its own `CopyDone`
             // and finishes unaided - but it must not RETURN here either. A
             // batch can chain `COPY TO STDOUT; COPY FROM STDIN`, and returning
@@ -274,7 +244,7 @@ pub(crate) async fn finish_batch_execute_reporting_tag(
                 tag = Some(body.tag().map_err(Error::parse)?.to_string());
             }
             Message::EmptyQueryResponse | Message::RowDescription(_) | Message::DataRow(_) => {}
-            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Simple)?,
+            Message::CopyInResponse(_) => abort_copy_in(client)?,
             // See the twin in `finish_batch_execute`: drain the copy-out rather
             // than returning at it, so a chained `COPY FROM STDIN` later in the
             // same batch is still reached and aborted.
@@ -306,7 +276,7 @@ fn encode(client: &InnerClient, query: &str) -> Result<Bytes, Error> {
 /// This lexer recognises statement-leading COPY and a top-level FROM STDIN
 /// source while excluding strings, quoted identifiers, dollar-quoted bodies,
 /// comments, and the FROM inside `COPY (SELECT ...) TO STDOUT`.
-fn may_enter_copy_in(query: &str) -> bool {
+pub(crate) fn may_enter_copy_in(query: &str) -> bool {
     // `standard_conforming_strings` is session state and PostgreSQL reports it,
     // but this low-level helper only has the SQL. Accept a COPY found under
     // either interpretation so a backslash-escaped quote can never hide a real
@@ -542,7 +512,7 @@ impl Stream for SimpleQueryStream {
                 }
                 Message::CopyInResponse(_) => match this.client.upgrade() {
                     Some(client) => {
-                        if let Err(error) = abort_copy_in(&client, CopyAbortProtocol::Simple) {
+                        if let Err(error) = abort_copy_in(&client) {
                             return Poll::Ready(Some(Err(error)));
                         }
                     }
