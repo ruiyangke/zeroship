@@ -9,6 +9,7 @@ use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::prepare::get_type;
+use crate::simple_query::{CopyAbortProtocol, abort_copy_in};
 use crate::types::{BorrowToSql, IsNull, Kind, ToSql};
 use crate::{Column, Error, Portal, Row, Statement};
 use bytes::{Bytes, BytesMut};
@@ -21,7 +22,7 @@ use postgres_protocol::message::frontend;
 use postgres_types::Type;
 use std::fmt;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, ready};
 
 struct BorrowToSqlParamsDebug<'a, T>(&'a [T]);
@@ -38,7 +39,7 @@ where
 }
 
 pub async fn query<P, I>(
-    client: &InnerClient,
+    client: &Arc<InnerClient>,
     statement: Statement,
     params: I,
 ) -> Result<RowStream, Error>
@@ -55,7 +56,7 @@ where
 /// raised during Execute inside the retryable call without allowing any row
 /// to escape before the decision.
 pub(crate) async fn query_cached<P, I>(
-    client: &InnerClient,
+    client: &Arc<InnerClient>,
     statement: Statement,
     params: I,
 ) -> Result<RowStream, Error>
@@ -68,7 +69,7 @@ where
 }
 
 async fn query_inner<P, I>(
-    client: &InnerClient,
+    client: &Arc<InnerClient>,
     statement: Statement,
     params: I,
     prefetch_first: bool,
@@ -108,6 +109,7 @@ where
         None
     };
     Ok(RowStream {
+        client: Arc::downgrade(client),
         statement,
         responses,
         pending,
@@ -172,6 +174,7 @@ pub async fn query_text_params(
             Message::ParseComplete | Message::BindComplete | Message::ParameterDescription(_) => {}
             Message::NoData => {
                 return Ok(RowStream {
+                    client: Arc::downgrade(client),
                     statement: Statement::unnamed(vec![], vec![]),
                     responses,
                     pending: None,
@@ -193,6 +196,7 @@ pub async fn query_text_params(
                     columns.push(column);
                 }
                 return Ok(RowStream {
+                    client: Arc::downgrade(client),
                     statement: Statement::unnamed(vec![], columns),
                     responses,
                     pending: None,
@@ -266,6 +270,11 @@ pub async fn execute_text_params(
                 rows = extract_row_affected(&body)?;
             }
             Message::EmptyQueryResponse => rows = 0,
+            // Not `unexpected_message`: walking away here leaves the SESSION
+            // in copy mode, and the `Sync` this request already sent was
+            // ignored while it is. See `simple_query::abort_copy_in` - this is
+            // the extended-protocol peer of the arm it documents.
+            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Extended)?,
             Message::ReadyForQuery(_) => return Ok(rows),
             _ => return Err(Error::unexpected_message()),
         }
@@ -303,6 +312,7 @@ where
             Message::ParseComplete | Message::BindComplete | Message::ParameterDescription(_) => {}
             Message::NoData => {
                 return Ok(RowStream {
+                    client: Arc::downgrade(client),
                     statement: Statement::unnamed(vec![], vec![]),
                     responses,
                     pending: None,
@@ -324,6 +334,7 @@ where
                     columns.push(column);
                 }
                 return Ok(RowStream {
+                    client: Arc::downgrade(client),
                     statement: Statement::unnamed(vec![], columns),
                     responses,
                     pending: None,
@@ -379,6 +390,11 @@ where
             }
 
             Message::EmptyQueryResponse => rows = 0,
+            // Not `unexpected_message`: walking away here leaves the SESSION
+            // in copy mode, and the `Sync` this request already sent was
+            // ignored while it is. See `simple_query::abort_copy_in` - this is
+            // the extended-protocol peer of the arm it documents.
+            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Extended)?,
             Message::ReadyForQuery(_) => return Ok(rows),
             _ => {
                 return Err(Error::unexpected_message());
@@ -389,7 +405,7 @@ where
 
 #[allow(dead_code)]
 pub async fn query_portal(
-    client: &InnerClient,
+    client: &Arc<InnerClient>,
     portal: &Portal,
     max_rows: i32,
 ) -> Result<RowStream, Error> {
@@ -405,6 +421,7 @@ pub async fn query_portal(
     )?;
 
     Ok(RowStream {
+        client: Arc::downgrade(client),
         statement: portal.statement().clone(),
         responses,
         pending: None,
@@ -426,7 +443,7 @@ pub fn extract_row_affected(body: &CommandCompleteBody) -> Result<u64, Error> {
 }
 
 pub async fn execute<P, I>(
-    client: &InnerClient,
+    client: &Arc<InnerClient>,
     statement: Statement,
     params: I,
 ) -> Result<u64, Error>
@@ -462,6 +479,11 @@ where
                 rows = extract_row_affected(&body)?;
             }
             Message::EmptyQueryResponse => rows = 0,
+            // Not `unexpected_message`: walking away here leaves the SESSION
+            // in copy mode, and the `Sync` this request already sent was
+            // ignored while it is. See `simple_query::abort_copy_in` - this is
+            // the extended-protocol peer of the arm it documents.
+            Message::CopyInResponse(_) => abort_copy_in(client, CopyAbortProtocol::Extended)?,
             Message::ReadyForQuery(_) => return Ok(rows),
             _ => return Err(Error::unexpected_message()),
         }
@@ -651,6 +673,13 @@ pin_project! {
     /// A stream of table rows.
     #[project(!Unpin)]
     pub struct RowStream {
+        // Held so the stream can end a copy this path cannot feed
+        // (`simple_query::abort_copy_in`). WEAK for the same reason
+        // `SimpleQueryStream` holds a weak handle: `InnerClient` owns the
+        // request channel and `Connection::run` finishes only once every
+        // sender is gone, so a strong handle would keep a connection alive
+        // for as long as a caller held the stream.
+        client: Weak<InnerClient>,
         statement: Statement,
         responses: Responses,
         pending: Option<Message>,
@@ -694,6 +723,20 @@ impl Stream for RowStream {
                 // honest answer.
                 Message::PortalSuspended => {}
                 Message::ReadyForQuery(_) => return Poll::Ready(None),
+                // This is where a `COPY ... FROM STDIN` sent through `query`
+                // lands: `start` has already consumed `BindComplete` and the
+                // `Describe` answered before the `Execute` that entered copy
+                // mode. Walking away leaves the SESSION there, and the `Sync`
+                // this request already sent was ignored while it is. See
+                // `simple_query::abort_copy_in`.
+                Message::CopyInResponse(_) => match this.client.upgrade() {
+                    Some(client) => {
+                        if let Err(error) = abort_copy_in(&client, CopyAbortProtocol::Extended) {
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                    }
+                    None => return Poll::Ready(Some(Err(Error::closed()))),
+                },
                 _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }
         }
