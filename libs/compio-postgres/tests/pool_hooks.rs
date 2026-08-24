@@ -149,6 +149,14 @@ async fn after_connect_failure_discards_the_connection() {
     drop(held);
 }
 
+/// A rejected candidate is replaced by the NEXT IDLE one, and the borrower
+/// never receives the session the hook turned down.
+///
+/// Two warm connections, not one, so both the rejected candidate and its
+/// replacement come out of the idle set. That is what keeps this a test of the
+/// recycling path: with a single warm entry the replacement would be a freshly
+/// opened connection, which `before_acquire` no longer inspects, and the second
+/// hook call this asserts would never happen.
 #[compio::test]
 async fn before_acquire_false_discards_and_retries() {
     let url = test_url();
@@ -156,7 +164,7 @@ async fn before_acquire_false_discards_and_retries() {
     let rejected_pid = Rc::new(Cell::new(None));
     let hook_calls = Rc::clone(&calls);
     let hook_rejected_pid = Rc::clone(&rejected_pid);
-    let mut config = config(1, 1);
+    let mut config = config(2, 2);
     config.before_acquire(move |client| {
         let hook_calls = Rc::clone(&hook_calls);
         let hook_rejected_pid = Rc::clone(&hook_rejected_pid);
@@ -230,7 +238,12 @@ async fn cancelling_an_async_hook_releases_its_capacity_slot() {
     assert_eq!(pool.metrics.timeouts.get(), 1);
 
     let client = pool.get().await.unwrap();
-    assert_eq!(calls.get(), 2);
+    // Still 1: the cancelled checkout took the only warm entry with it
+    // (`total_count` is 0 above), so this second checkout is served by a
+    // freshly opened connection, which `before_acquire` does not inspect. The
+    // point of this test is the capacity slot, asserted below and above -- the
+    // hook count is incidental to it.
+    assert_eq!(calls.get(), 1);
     assert_eq!(pool.total_count(), 1);
     assert_eq!(pool.active_count(), 1);
     let row = client.query_one("SELECT 7::int4", &[]).await.unwrap();
@@ -360,45 +373,49 @@ async fn the_session_attrs_probe_runs_before_after_connect() {
     drop(client);
 }
 
-/// MEASUREMENT: how many physical connections does ONE `get()` open when
-/// `before_acquire` always rejects?
+/// `before_acquire` is a RECYCLING check: it is not consulted for a connection
+/// the pool just opened.
 ///
-/// The acquisition loop `continue`s on `Ok(false)`, and for a RECYCLED entry
-/// that is right -- the next candidate may differ. But a FRESHLY connected
-/// client has just been accepted by `after_connect` microseconds earlier, so
-/// the hook cannot return a different answer for it, and the retry is pure
-/// load on the server. The only bound is `acquire_timeout`.
+/// This is the contract `sqlx` states outright -- "This is _not_ invoked for
+/// new connections. Use `after_connect` for those." -- and that `deadpool`
+/// gets structurally by having `recycle` apply only to recycled objects. This
+/// driver used to consult it on both, and the difference is not cosmetic.
 ///
-/// This test does not assert a policy. It exists to put a NUMBER on the
-/// behaviour, because "unbounded connect storm" and "retries a couple of
-/// times" call for different fixes and nobody had measured which one this is.
-/// `sqlx` and `deadpool` scope their equivalent hook to recycled connections
-/// only; this driver's contract does not, and changing that is a decision
-/// rather than a bug fix.
+/// WHAT THE OLD BEHAVIOUR COST. A freshly connected client has been accepted by
+/// `after_connect` microseconds earlier, so a hook that answers from connection
+/// state cannot answer differently for it -- but `Ok(false)` still hit the
+/// acquisition loop's `continue`. With no idle entry to find, the next
+/// iteration opened ANOTHER connection, offered it, was refused again, and so
+/// on until `acquire_timeout`. Every iteration paid a full TCP connect plus
+/// startup handshake, so a single `get()` became sustained load on the server.
+/// MEASURED 2026-08-23 before the fix: 3 hook calls and 3 physical connections
+/// inside a 300ms timeout -- about 10/s, extrapolating to roughly 300
+/// connections for one `get()` at the default 30s `acquire_timeout`. That was a
+/// LOWER bound; the box sat at load ~25, which slows each connect and so
+/// lowers the count in a fixed window.
 ///
-/// MEASURED 2026-08-23 against the live review server: **3 hook calls and 3
-/// physical connections in 300ms**, i.e. about 10 per second, which
-/// extrapolates to roughly 300 connections for a single `get()` at the default
-/// 30s `acquire_timeout`. So this is NOT a tight spin loop -- every iteration
-/// pays a full TCP connect plus startup handshake -- but it is sustained load
-/// a misconfigured hook can put on a server indefinitely.
+/// The hook that provokes it is not exotic. "Reject if the server is in
+/// recovery" is a normal thing to write, and it is false for every connection
+/// while a failover lasts.
 ///
-/// That number is a LOWER BOUND: the box was at load average ~25 from other
-/// work, which slows each connect and therefore reduces the count in a fixed
-/// window. An idle machine would reach a higher number, not a lower one.
-///
-/// The bound asserted below is deliberately loose: it pins that the loop
-/// retries at all, so a change that stops retrying (or one that turns this
-/// into a real spin loop, caught by the hook-calls-equals-connections
-/// assertion) is visible, while ordinary timing jitter is not.
+/// WHY THIS TEST HAS NO TIMING IN IT. The old test could only report a RATE,
+/// and it had to bound the storm with a short `acquire_timeout` to terminate at
+/// all. The fixed contract is a deterministic statement instead: the hook is
+/// never called, and the fresh client is handed over. It fails on the old code
+/// by TIMING OUT rather than by measuring anything.
 #[compio::test]
-async fn before_acquire_that_always_rejects_reopens_until_the_acquire_timeout() {
+async fn before_acquire_is_not_consulted_for_a_freshly_connected_client() {
     let url = test_url();
     let calls = Rc::new(Cell::new(0));
     let hook_calls = Rc::clone(&calls);
 
-    let mut config = config(1, 0);
-    // Short, so the storm is bounded and the test terminates quickly.
+    // `min_idle` of 0 still warms ONE connection -- `connect_with_config` uses
+    // `min_idle.max(1)` so the constructor proves the connection settings. That
+    // single warm entry is the recycled candidate the hook legitimately sees
+    // below; the replacement for it is the fresh one that it must not see.
+    let mut config = config(2, 0);
+    // Short so that, on the pre-fix code, this test fails in under a second
+    // instead of storming for the 30s default.
     config.acquire_timeout(Duration::from_millis(300));
     config.before_acquire(move |_client| {
         let hook_calls = Rc::clone(&hook_calls);
@@ -409,40 +426,30 @@ async fn before_acquire_that_always_rejects_reopens_until_the_acquire_timeout() 
     });
     let pool = connect_pool(&url, config).await;
 
-    let outcome = pool.get().await;
-    assert!(
-        outcome.is_err(),
-        "a hook that never accepts must eventually time out, not hand out a \
-         client it rejected"
-    );
-
-    let created = pool.metrics.connections_created.get();
-    let rejections = calls.get();
-    println!(
-        "MEASURED: one get() with an always-rejecting before_acquire made \
-         {rejections} hook calls and opened {created} physical connections in 300ms"
+    let client = pool.get().await.expect(
+        "a rejecting before_acquire must not block the FRESH connection opened to replace the \
+         candidate it rejected: the hook is a recycling check, and consulting it here reopens \
+         until acquire_timeout",
     );
 
     assert_eq!(
-        rejections, created,
-        "every connection opened must have been offered to the hook exactly \
-         once; a mismatch means connections are being opened without being \
-         inspected"
+        calls.get(),
+        1,
+        "the hook must see the one recycled candidate and nothing else; a second call means the \
+         freshly opened replacement was offered to it too"
     );
-    // NO FLOOR ON `created`. This asserted `>= 2` when it was written, and
-    // that assertion FAILED at load ~32 having managed only one connect inside
-    // the 300ms window -- the same load-dependence its own comment predicts
-    // above, which I wrote and then asserted against anyway. Raising the
-    // timeout until it passes would be widening a budget to make a test green,
-    // which is exactly what this suite refuses elsewhere.
-    //
-    // Nothing is lost by dropping it: that the loop RETRIES at all is proved
-    // deterministically, with no timing, by
-    // `before_acquire_false_discards_and_retries` above, which rejects exactly
-    // once and asserts the hook saw two candidates. What only this test can
-    // show is the RATE, and a rate is reported, not asserted.
-    assert!(
-        created >= 1,
-        "the pool must open at least one connection to offer the hook: {created}"
+    assert_eq!(
+        pool.metrics.connections_created.get(),
+        2,
+        "the warm-up connection plus its replacement"
     );
+    assert_eq!(pool.metrics.evictions.get(), 1);
+
+    // It is a usable client, not merely a returned handle.
+    let row = client
+        .query_one("SELECT 1::int4", &[])
+        .await
+        .expect("the handed-out connection must work");
+    assert_eq!(row.get::<_, i32>(0), 1);
+    drop(client);
 }
