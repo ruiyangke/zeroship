@@ -933,6 +933,10 @@ impl SchemaRenderer for DuckDbSchemaRenderer {
         true
     }
 
+    fn identity_column_type_confinement(&self) -> &'static str {
+        "any type a column of this target may have"
+    }
+
     fn canonical_type(&self, raw: &str) -> String {
         raw.to_string()
     }

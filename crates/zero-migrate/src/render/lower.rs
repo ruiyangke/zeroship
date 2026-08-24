@@ -4654,6 +4654,9 @@ impl IrAuthor {
                     && !matches!(to_type, ColType::SmallInt | ColType::Int | ColType::BigInt)
                 {
                     return Err(IrLowerError::IdentityColumnTypeUnsupported {
+                        dialect: self.dialect.clone(),
+                        confinement: crate::render::backends::schema_renderer(&self.dialect)
+                            .identity_column_type_confinement(),
                         table: table.clone(),
                         column: column.clone(),
                         to_type: crate::render::backends::schema_renderer(&self.dialect)

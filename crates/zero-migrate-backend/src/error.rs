@@ -134,23 +134,34 @@ pub enum DeclarativeError {
         /// The column the hint renames to.
         to: String,
     },
-    /// A declared IDENTITY column's type moved off the three types PostgreSQL lets
-    /// an identity column have.
+    /// A declared IDENTITY column's type moved off the set the target admits for one.
     ///
-    /// The differ's half of
-    /// `IrLowerError::IdentityColumnTypeUnsupported`,
-    /// refused for the same measured reason: the server answers `identity column
-    /// type must be smallint, integer, or bigint` and rejects the `ALTER` outright,
-    /// so a plan carrying it dies partway through applying. Widening and narrowing
-    /// WITHIN the three stay legal and are not refused here.
+    /// Which types those are is the TARGET's answer, asked through
+    /// [`SchemaRenderer::identity_column_type_allowed`](crate::schema::SchemaRenderer::identity_column_type_allowed).
+    /// PostgreSQL admits `smallint`, `integer` and `bigint` and exactly those --
+    /// MEASURED, including that a DOMAIN over `integer` is refused too -- and answers
+    /// `identity column type must be smallint, integer, or bigint` while rejecting the
+    /// `ALTER` outright, so a plan carrying one dies partway through applying. Widening
+    /// and narrowing WITHIN an admitted set stay legal and are not refused here.
+    ///
+    /// The message names the TARGET rather than a vendor and does not restate the
+    /// permitted set, because the set is not core's to state: it belonged to the one
+    /// backend whose answer was written into this string, and would have been printed
+    /// at any other.
+    ///
+    /// The differ's half of [`IrLowerError::IdentityColumnTypeUnsupported`], refused
+    /// for the same reason.
     #[error(
         "cannot change column {table}.{column} to {to_type}: it is an IDENTITY column \
-         and PostgreSQL confines one to smallInt, int or bigInt (`identity column type \
-         must be smallint, integer, or bigint`). The ALTER is refused by the server, so \
-         the migration would fail partway through applying. Declare it within those \
-         three, or drop the identity property first."
+         and {dialect} confines one to {confinement}. The ALTER is refused by the \
+         server, so the migration would fail partway through applying. Declare it \
+         within those, or drop the identity property first."
     )]
     IdentityColumnTypeUnsupported {
+        /// The target that does not admit the type, from its own identity.
+        dialect: DialectId,
+        /// That target's own words for the types it DOES admit.
+        confinement: &'static str,
         /// The table holding the identity column.
         table: String,
         /// The identity column whose declared type moved.
@@ -595,12 +606,15 @@ pub enum IrLowerError {
     /// broader than the server's would deny a migration the database honours.
     #[error(
         "setColumnType on {table:?}.{column:?} names {to_type}, but that column is an \
-         IDENTITY column and PostgreSQL confines one to smallInt, int or bigInt \
-         (`identity column type must be smallint, integer, or bigint`). The ALTER is \
+         IDENTITY column and {dialect} confines one to {confinement}. The ALTER is \
          refused by the server, so the migration would fail partway through applying. \
-         Retype it within those three, or drop the identity property first."
+         Retype it within those, or drop the identity property first."
     )]
     IdentityColumnTypeUnsupported {
+        /// The target that does not admit the type, from its own identity.
+        dialect: DialectId,
+        /// That target's own words for the types it DOES admit.
+        confinement: &'static str,
         /// Target table.
         table: String,
         /// The identity column the op names.
@@ -629,10 +643,9 @@ pub enum IrLowerError {
     /// is a real action.
     #[error(
         "alterSequence {name:?} names no action, so it renders `ALTER SEQUENCE` with \
-         nothing after the name - which PostgreSQL rejects outright (`syntax error at \
-         end of input`) and the whole migration dies partway through applying. Give \
-         the alter at least one of increment, restart, minValue, maxValue, cache, \
-         cycle or ownedBy, or drop the operation."
+         nothing after the name - which is not a statement, and the whole migration \
+         dies partway through applying. Give the alter at least one of increment, \
+         restart, minValue, maxValue, cache, cycle or ownedBy, or drop the operation."
     )]
     AlterSequenceHasNoAction {
         /// The sequence the op names.
@@ -672,9 +685,8 @@ pub enum IrLowerError {
     /// posture [`Self::DmlValidate`]'s resolved-`ColRef` rule documents.
     #[error(
         "createTrigger {trigger:?} is INSTEAD OF, but {table:?} is a table. INSTEAD OF \
-         triggers may only be used on views - SQLite answers `cannot create INSTEAD OF \
-         trigger on table: {table}` and PostgreSQL answers `\"{table}\" is a table \
-         (Tables cannot have INSTEAD OF triggers)`, so the migration would fail partway \
+         triggers may only be used on views, and every target that has the timing \
+         refuses it on a table in its own words - so the migration would fail partway \
          through applying. Target a view, or use BEFORE/AFTER timing on the table."
     )]
     InsteadOfTriggerTargetIsATable {

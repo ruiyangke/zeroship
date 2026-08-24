@@ -252,6 +252,23 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// catalog type. Backends without this restriction explicitly return true.
     fn identity_column_type_allowed(&self, data_type: &str) -> bool;
 
+    /// The types this backend DOES admit for an identity column, in its own
+    /// operator-facing words, for the refusal
+    /// [`identity_column_type_allowed`](Self::identity_column_type_allowed) produces.
+    ///
+    /// A refusal that says only "not that one" is not actionable, and
+    /// `tests/column_shapes/set_column_type_generation_contracts.rs` pins that the
+    /// message must name the legal set. That set is this backend's, so this backend
+    /// spells it: the string used to be written into
+    /// [`IrLowerError::IdentityColumnTypeUnsupported`](crate::error::IrLowerError)'s
+    /// message in the neutral contract, where it was one vendor's rule printed at
+    /// every target that reached the arm.
+    ///
+    /// Required rather than defaulted, like every other method here: a backend that
+    /// confines nothing answers so deliberately, and its string is never read because
+    /// its `identity_column_type_allowed` never says no.
+    fn identity_column_type_confinement(&self) -> &'static str;
+
     /// Fold a raw catalog/DDL type spelling to this backend's drift-comparison
     /// token.
     fn canonical_type(&self, raw: &str) -> String;

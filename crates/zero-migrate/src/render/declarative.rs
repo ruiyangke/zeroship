@@ -3871,6 +3871,10 @@ impl DeclarativeAuthor {
                                     .identity_column_type_allowed(&c.data_type)
                             {
                                 return Err(DeclarativeError::IdentityColumnTypeUnsupported {
+                                    dialect: self.dialect.clone(),
+                                    confinement: self
+                                        .schema_renderer()
+                                        .identity_column_type_confinement(),
                                     table: table.clone(),
                                     column: c.name.clone(),
                                     to_type: crate::render::backends::schema_renderer(

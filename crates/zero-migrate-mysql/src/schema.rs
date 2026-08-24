@@ -372,6 +372,18 @@ impl SchemaRenderer for MysqlSchemaRenderer {
         true
     }
 
+    /// Never read while `identity_column_type_allowed` above admits everything.
+    ///
+    /// DEFERRED DEFECT, recorded here because this is where a reader will look:
+    /// this backend's auto-increment column must be an integer type, so the `true`
+    /// above is an UNDER-refusal on the declarative lane. It is masked on the IR lane
+    /// only because `render::lower` hard-codes one backend's three types instead of
+    /// asking this method. Closing it needs a live measurement of what this server
+    /// actually rejects, which is a separate change from naming the seam.
+    fn identity_column_type_confinement(&self) -> &'static str {
+        "any type a column of this target may have"
+    }
+
     fn canonical_type(&self, raw: &str) -> String {
         mysql_canonical_type(raw)
     }

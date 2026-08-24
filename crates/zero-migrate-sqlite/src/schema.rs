@@ -152,6 +152,12 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         true
     }
 
+    /// Never read: this backend admits every type above, so its refusal is
+    /// unreachable. Stated rather than defaulted so the answer is deliberate.
+    fn identity_column_type_confinement(&self) -> &'static str {
+        "any type a column of this target may have"
+    }
+
     fn canonical_type(&self, raw: &str) -> String {
         sqlite_canonical_type(raw).to_string()
     }

@@ -620,17 +620,33 @@ pub enum GuardError {
     /// The SQL could not be parsed (deny-by-default: it never reaches the DB).
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
-    /// A raw SQL string was presented to PostgreSQL's parser-backed guard for a
-    /// different backend. `libpg_query` cannot vet another backend's grammar, so
-    /// the text is refused fail-closed instead of being mis-vetted. The open id is
-    /// provenance only: no behaviour dispatches on it, and a future backend gets
-    /// this refusal automatically.
+    /// A raw SQL string reached a guard that cannot vet it, and was refused
+    /// fail-closed rather than mis-vetted or waved through.
+    ///
+    /// # The message used to describe only one of the three ways this is reached
+    ///
+    /// It read "raw SQL is not accepted by the PostgreSQL parser guard for backend
+    /// {dialect}", which was TRUE of one producer and FALSE of the other two. All
+    /// three shipping guards raise it, each carrying its OWN id:
+    ///
+    /// * the parser-backed guard, when the config's target is not the dialect its
+    ///   parser reads — it cannot vet another grammar, so it declines;
+    /// * the other two, from `check_raw_island_sql` / `check_raw_island_body`,
+    ///   because they have NO raw door at all. Answering `Ok` there would grant an
+    ///   unchecked raw path no author of that dialect can even open.
+    ///
+    /// So on two of the three the refusal came from the target's own guard, and the
+    /// message told the operator a different backend's parser had turned it away. It
+    /// names the refusing target and nothing else now.
+    ///
+    /// The id is PROVENANCE only: no behaviour dispatches on it, and a fourth backend
+    /// gets this refusal by declining in its own name.
     #[error(
-        "raw SQL is not accepted by the PostgreSQL parser guard for backend {dialect}: \
-         that backend must use its own registered guard"
+        "raw SQL is not accepted by {dialect}'s registered guard: it cannot vet this \
+         text, so the statement is refused rather than mis-vetted"
     )]
     RawSqlRejected {
-        /// The backend whose SQL the PostgreSQL guard refused to mis-vet.
+        /// The backend whose guard refused the text, from its own identity.
         dialect: DialectId,
     },
 }

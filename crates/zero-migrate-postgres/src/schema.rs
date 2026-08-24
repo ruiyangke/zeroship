@@ -173,6 +173,12 @@ impl SchemaRenderer for PostgresSchemaRenderer {
         )
     }
 
+    /// MEASURED, and the server's own words are carried because they are what an
+    /// operator will find in the log if the refusal is bypassed.
+    fn identity_column_type_confinement(&self) -> &'static str {
+        "smallInt, int or bigInt (`identity column type must be smallint, integer, or bigint`)"
+    }
+
     /// PostgreSQL's desired and catalog spellings are already compared in their
     /// retained form, so its canonicalizer is an explicit identity.
     fn canonical_type(&self, raw: &str) -> String {
