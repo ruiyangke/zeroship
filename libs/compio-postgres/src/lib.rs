@@ -238,6 +238,8 @@ mod socket;
 mod statement;
 pub mod tls;
 #[cfg(feature = "tls")]
+mod tls_sansio;
+#[cfg(feature = "tls")]
 pub mod tls_rustls;
 mod to_statement;
 pub mod replication;
