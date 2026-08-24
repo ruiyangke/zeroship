@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use zero_migrate_backend::drift::DriftError;
-use zero_migrate_backend::fold::CatalogFoldPolicy as _;
 use zero_migrate_backend::driver::SqlSession;
+use zero_migrate_backend::fold::CatalogFoldPolicy as _;
 use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IdDefaultSnapshot, IndexElementSnapshot, IndexSnapshot,

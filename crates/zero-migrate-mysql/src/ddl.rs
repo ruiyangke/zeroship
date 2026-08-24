@@ -344,7 +344,10 @@ impl DdlEmitter for MysqlEmitter {
             if consumed_enum_checks.contains(&c.name) {
                 continue;
             }
-            if should_render_table_pk(&crate::fold::POLICY, table, t, c) || c.kind == "CHECK" || c.kind == "UNIQUE" {
+            if should_render_table_pk(&crate::fold::POLICY, table, t, c)
+                || c.kind == "CHECK"
+                || c.kind == "UNIQUE"
+            {
                 parts.push(format!(
                     "CONSTRAINT {} {}",
                     mysql_quote_ident(&c.name),
