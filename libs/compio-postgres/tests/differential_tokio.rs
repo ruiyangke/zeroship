@@ -17,6 +17,18 @@
 //! `tests/zero_tokio_gate.sh` still refuses a normal or build dependency on
 //! tokio.
 //!
+//! WHERE THE REFERENCE IS WRONG. tokio-postgres is a reference, not an
+//! oracle: agreement is evidence, disagreement is a question, and sometimes
+//! the answer is that it has the bug. Its `Transaction::savepoint` emits
+//! `format!("SAVEPOINT {name}")` with the name UNQUOTED, so a savepoint
+//! called `MyPoint` is folded to `mypoint` and one containing a quote or a
+//! semicolon is a syntax error or worse. This crate quotes it, and
+//! `integration.rs` pins that with spaces, mixed case, an embedded quote and
+//! an injection attempt. A differential asserting equality THERE would fail,
+//! and would be wrong to. Before adding a surface here, check that both sides
+//! are implementing the same contract rather than one implementing it and the
+//! other approximating it.
+//!
 //! The two runtimes never mix: tokio-postgres runs on its own thread with a
 //! current-thread tokio runtime and returns plain data over a channel, so no
 //! tokio reactor is ever installed on a compio thread.
