@@ -29,9 +29,9 @@
 use std::any::Any;
 use std::sync::Arc;
 
+use crate::DIALECT;
 use zero_migrate_backend::dialectal::{Dialectal, DialectalValue, VendorColumnFacts};
 use zero_migrate_backend::snapshot::ColumnSnapshot;
-use zero_migrate_ir::dialect::MYSQL;
 
 /// The physical identity of one MySQL column, as parsed VALUES rather than as
 /// rendered type text.
@@ -382,14 +382,14 @@ impl VendorColumnFacts for MysqlPhysicalType {
 pub fn record(column: &mut ColumnSnapshot, physical: MysqlPhysicalType) {
     column
         .vendor
-        .insert(MYSQL, Arc::new(physical) as Arc<dyn VendorColumnFacts>);
+        .insert(DIALECT, Arc::new(physical) as Arc<dyn VendorColumnFacts>);
 }
 
 /// MySQL's leg of `column`'s vendor facts, or `None` when this column carries no
 /// MySQL physical contract.
 #[must_use]
 pub fn recorded(column: &ColumnSnapshot) -> Option<&MysqlPhysicalType> {
-    column.vendor.get::<MysqlPhysicalType>(&MYSQL)
+    column.vendor.get::<MysqlPhysicalType>(&DIALECT)
 }
 
 /// A carrier holding exactly MySQL's leg, for a caller that has a contract but not a
@@ -397,7 +397,7 @@ pub fn recorded(column: &ColumnSnapshot) -> Option<&MysqlPhysicalType> {
 #[must_use]
 pub fn carrier(physical: MysqlPhysicalType) -> Dialectal<dyn VendorColumnFacts> {
     let mut carrier = Dialectal::new();
-    carrier.insert(MYSQL, Arc::new(physical) as Arc<dyn VendorColumnFacts>);
+    carrier.insert(DIALECT, Arc::new(physical) as Arc<dyn VendorColumnFacts>);
     carrier
 }
 

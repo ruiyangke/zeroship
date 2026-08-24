@@ -57,10 +57,10 @@ use zero_migrate_backend::snapshot::SchemaSnapshot;
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_backend::step::{AlterPrimaryKeyStep, SynchronizeIdentityStep};
 use zero_migrate_backend::table_rebuild::TableRebuildSpec;
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::migration::{Migration, MigrationId};
 
-pub(crate) const DIALECT: DialectId = POSTGRES;
+pub(crate) use crate::DIALECT;
 
 /// This crate's DECLARED identifier byte cap, read off its own descriptor rather than
 /// restated as a literal, and handed to the dual-write name derivations in the backend

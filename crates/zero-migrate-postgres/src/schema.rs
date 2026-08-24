@@ -7,10 +7,10 @@ use zero_migrate_backend::schema::{
     CreateIndexIfNotExistsRequest, SchemaRenderer,
 };
 use zero_migrate_backend::snapshot::ColumnSnapshot;
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_ir::dialect::DialectId;
 
-/// This module's own vendor identity.
-const DIALECT: DialectId = POSTGRES;
+// This module's vendor identity, read from the crate's ONE declaration of it.
+use crate::DIALECT;
 
 #[derive(Debug)]
 pub(super) struct PostgresSchemaRenderer;

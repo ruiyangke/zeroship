@@ -14,10 +14,10 @@ use zero_migrate_backend::snapshot::{
     IndexSnapshot, TableSnapshot,
 };
 use zero_migrate_backend::spelling::ansi_double_quote_ident;
-use zero_migrate_ir::dialect::{DialectId, MYSQL};
+use zero_migrate_ir::dialect::DialectId;
 
-/// This module's own vendor identity.
-const DIALECT: DialectId = MYSQL;
+// This module's vendor identity, read from the crate's ONE declaration of it.
+use crate::DIALECT;
 
 fn mysql_quote_ident(ident: &str) -> String {
     crate::schema::RENDERER.quote_ident(ident)

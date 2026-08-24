@@ -71,10 +71,10 @@ use zero_migrate_backend::step::{
     AlterColumnTypeStep, AlterPrimaryKeyStep, BindValue, SynchronizeIdentityStep,
 };
 use zero_migrate_backend::table_rebuild::TableRebuildSpec;
-use zero_migrate_ir::dialect::{DialectId, MYSQL};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::migration::{Checksum, Migration, MigrationId};
 
-const DIALECT: DialectId = MYSQL;
+use crate::DIALECT;
 
 /// The generic MySQL [`MigrationBackend`] implementation.
 ///

@@ -73,7 +73,7 @@ use zero_migrate_backend::executor::{
 use zero_migrate_backend::journal::{AppliedEntry, JournalError};
 use zero_migrate_backend::snapshot::SchemaSnapshot;
 use zero_migrate_backend::table_rebuild::TableRebuildSpec;
-use zero_migrate_ir::dialect::{DialectId, SQLITE};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::migration::Migration;
 
 pub use actor::{MigrationActor, SqliteActorError};
@@ -81,19 +81,21 @@ pub use authorizer::Mode;
 pub use journal_sql::LoadedVersion;
 pub use rebuild_sql::RebuildError;
 
-/// This backend's vendor identity, named ONCE for the whole `backend/` subtree.
-///
-/// The four apply-time SQL builders under this module (`backfill_sql`,
-/// `identity_sql`, `primary_key_sql`, `rebuild_sql`) each spell identifiers into
-/// SQL they send to a real SQLite database. They used to do it through the raw
-/// crate-wide escape primitive, which reached no renderer at all — and because
-/// they contained no vendor-identity literal, the one-dialect-literal grep read
-/// them as clean: it looks for a FOREIGN literal, and "no literal" passes.
-///
-/// One const, read by all four, is the shape that makes their vendor greppable
-/// without putting four literals in the tree. It mirrors this crate's other
-/// modules, each of which names its own dialect exactly once.
-const SQLITE_DIALECT: DialectId = SQLITE;
+// This backend's vendor identity, read once for the whole `backend/` subtree from
+// the crate's single declaration in `lib.rs`.
+//
+// The four apply-time SQL builders under this module (`backfill_sql`,
+// `identity_sql`, `primary_key_sql`, `rebuild_sql`) each spell identifiers into
+// SQL they send to a real SQLite database. They used to do it through the raw
+// crate-wide escape primitive, which reached no renderer at all — and because
+// they contained no vendor-identity literal, the one-dialect-literal grep read
+// them as clean: it looks for a FOREIGN literal, and "no literal" passes.
+//
+// One name, read by all four, is the shape that makes their vendor greppable
+// without putting four literals in the tree. It is aliased rather than imported
+// bare because this subtree also carries `rusqlite`'s `SQLITE_*` flag names, and a
+// lone `DIALECT` reads ambiguously beside them.
+use crate::DIALECT as SQLITE_DIALECT;
 
 /* `fn stored_ddl()` USED TO LIVE HERE. It asked the ENGINE's registry which parser
  * handles `SQLITE_DIALECT` and unwrapped the `Option` the registry returns, which

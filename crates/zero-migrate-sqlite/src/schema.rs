@@ -6,10 +6,10 @@ use zero_migrate_backend::schema::{
     SchemaRenderer,
 };
 use zero_migrate_backend::snapshot::ColumnSnapshot;
-use zero_migrate_ir::dialect::{DialectId, SQLITE};
+use zero_migrate_ir::dialect::DialectId;
 
-/// This module's own vendor identity.
-const DIALECT: DialectId = SQLITE;
+// This module's vendor identity, read from the crate's ONE declaration of it.
+use crate::DIALECT;
 
 #[derive(Debug)]
 pub(super) struct SqliteSchemaRenderer;

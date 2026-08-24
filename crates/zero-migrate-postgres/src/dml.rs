@@ -11,7 +11,7 @@ use zero_migrate_backend::renderer::{
 };
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::{CastTarget, Duration, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::TableRef;
 use zero_migrate_ir::ir::{
@@ -20,11 +20,10 @@ use zero_migrate_ir::ir::{
 };
 use zero_migrate_ir::validate::{ExprDialectFeature, ExprDialectRejection, ExprDialectValidator};
 
-/// This module's own vendor identity — the ONE dialect literal it is allowed to
-/// name. See `backends/mod.rs` for why. Deleting this const (and the
-/// `DIALECT`-shaped error fields it feeds) is the whole of the edit this module
-/// needs when it becomes its own crate.
-const DIALECT: DialectId = POSTGRES;
+// This module's vendor identity. It names NO dialect literal of its own — the one
+// declaration is `crate::DIALECT` in `lib.rs`, and the one-dialect rule is a
+// per-CRATE rule now rather than a per-module one. See `render/backends/mod.rs`.
+use crate::DIALECT;
 
 /// A validated text operand in this backend's explicitly-typed spelling.
 ///

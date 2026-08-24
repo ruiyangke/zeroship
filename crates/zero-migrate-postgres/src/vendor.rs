@@ -576,7 +576,7 @@ pub(crate) fn render_vendor_op(
                 TriggerAction::Body { .. } => {
                     return Err(VendorError::UnsupportedTriggerAction {
                         kind: "triggerBody",
-                        dialect: zero_migrate_ir::dialect::POSTGRES,
+                        dialect: crate::DIALECT,
                     });
                 }
             }

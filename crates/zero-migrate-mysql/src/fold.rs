@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::DIALECT;
 use zero_migrate_backend::error::IrLowerError;
 use zero_migrate_backend::fold::{
     AuthorTypeOverride, CatalogFoldPolicy, CatalogFoldRefusal, FoldCursorColumnContract,
@@ -10,7 +11,6 @@ use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
-use zero_migrate_ir::dialect::MYSQL;
 use zero_migrate_ir::expr::{Expr, SynthFn};
 use zero_migrate_ir::ir::{ColType, ValueFormat};
 use zero_migrate_ir::precondition::PreconditionCheck;
@@ -370,7 +370,7 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
             // from a vendor word written into the message. `CatalogFoldPolicy`
             // carries no dialect, and giving it one would make core supply the
             // answer to a question only the refusing backend can answer.
-            dialect: MYSQL,
+            dialect: DIALECT,
         })
     }
 

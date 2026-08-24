@@ -9,13 +9,13 @@ use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, ConstraintSnapshot, IndexElementSnapshot, IndexSnapshot,
 };
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::{
     IndexStorageParams, PartitionBoundValue, PartitionBounds, PartitionSpec,
 };
 
-/// This module's own vendor identity.
-const DIALECT: DialectId = POSTGRES;
+// This module's vendor identity, read from the crate's ONE declaration of it.
+use crate::DIALECT;
 
 fn quote_ident(ident: &str) -> String {
     crate::schema::RENDERER.quote_ident(ident)

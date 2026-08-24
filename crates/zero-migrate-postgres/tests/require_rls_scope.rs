@@ -14,9 +14,9 @@ mod support;
 use zero_migrate_backend::guard::{
     check_ir_data_security_policy, data_security_rule, GuardConfig, GuardError,
 };
-use zero_migrate_ir::dialect::POSTGRES;
 use zero_migrate_ir::ir::{MigrationIr, Op};
 use zero_migrate_postgres::guard::PgGuard;
+use zero_migrate_postgres::DIALECT as POSTGRES;
 
 /// A charter granting the `app` schema everything the data-security walk needs, plus
 /// whatever `require`/`default_scope` text an arm supplies.

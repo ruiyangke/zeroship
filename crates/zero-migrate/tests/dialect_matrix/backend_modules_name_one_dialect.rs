@@ -1,332 +1,211 @@
-//! The one-dialect-literal rule of the backend module directories, enforced rather
-//! than documented.
+//! The one-dialect-literal rule of the vendor crates, enforced rather than
+//! documented.
 //!
-//! There are FOUR renderer module families: DML, schema typing, DDL emission, and
-//! value-format normalization.
-//! All are covered here. The schema family came later
-//! — `SchemaRenderer`'s three vendors lived as bare structs and `impl` blocks in
-//! the middle of `schema/query.rs` long after the DML vendors had modules — and it
-//! is guarded from its first commit precisely because the rule is invisible to
-//! behaviour tests, so an unguarded module drifts silently.
+//! # The rule, and how it tightened
 //!
-//! `backends/mod.rs` states the rule in prose: a backend module names its own
-//! dialect exactly ONCE, as its `DIALECT` const, and names no other dialect at all.
-//! Everything else in the module reads `DIALECT`. That is what makes the crate
-//! extraction of `docs/proposals/pluggable-backends.md` step 4 mechanical - deleting
-//! the const is the only edit each module needs, because nothing else in it can
-//! observe which vendor it is.
+//! It used to be per-MODULE: a backend module names its own dialect exactly ONCE,
+//! as its `const DIALECT: DialectId = POSTGRES;`, and names no other dialect at all;
+//! everything else in the module reads `DIALECT`. The name on the right of that
+//! `=` came from `zero-migrate-ir`, the NEUTRAL vocabulary crate, which declared
+//! `POSTGRES`, `SQLITE` and `MYSQL` for three vendors it does not own — while its own
+//! module doc said a backend "declares its own — `DialectId::new(\"duckdb\")` —
+//! without editing this crate".
+//!
+//! The ids moved into the vendors. Each crate now declares its id ONCE, in its
+//! `lib.rs`, and every module — render half and execution half — reads
+//! `crate::DIALECT`. So the rule is per-CRATE and it is strictly stronger: there is
+//! no longer a module that names a dialect at all, and the count this file pins is a
+//! count of DECLARATIONS rather than of imports.
+//!
+//! That also fixed this census's needle, which the move would otherwise have killed
+//! silently. Its old matcher looked for the identifier tokens `POSTGRES` / `SQLITE` /
+//! `MYSQL`. After the move there are none anywhere in any vendor crate, so every
+//! assertion it made would have gone on passing over a tree it could no longer see —
+//! the exact failure mode the floors below exist for. The needles are the
+//! DECLARATION (`DialectId::new(`) and the vendor CRATE IDENT
+//! (`zero_migrate_postgres`) now, and each has a positive control that is permanent
+//! rather than one of the things being ratcheted to zero.
+//!
+//! # Why it needs a test
 //!
 //! The rule is invisible to every behaviour test. A PostgreSQL backend module that
-//! reaches for the `MYSQL` dialect constant still emits correct PostgreSQL today; what it
+//! reaches for another vendor's dialect still emits correct PostgreSQL today; what it
 //! costs is the extraction, and no assertion about emitted SQL can see that. So the
 //! rule gets its own check or it has none, which is what it had.
 //!
-//! WHY THIS FILE AND NOT A `#[cfg(test)] mod tests` IN `backends/mod.rs`. The check
-//! reads the RENDERER modules as TEXT — an enumerated list of `include_str!`s, one
-//! per (basename, vendor) pair — which a unit test could do just as well. It lives
-//! out here because it is a fact about the two layers' SHAPE rather than about their
-//! behaviour, and because this theme binary is where the other "what does each
-//! dialect declare" checks already are. It still reads the real files, so it tracks
-//! them: `include_str!` is a compile-time dependency, and editing any of them
-//! rebuilds this binary.
+//! WHY THIS FILE AND NOT A `#[cfg(test)] mod tests` IN a vendor crate. The check
+//! reads the vendor crates as TEXT, and it must see all three at once to say
+//! "foreign". A unit test inside `zero-migrate-postgres` cannot: the whole point of
+//! the split is that it does not depend on its siblings. This binary is also where
+//! the other "what does each dialect declare" checks already live.
 //!
-//! (That sentence used to say "the nine modules". The list has been 17 for some time
-//! — 4 anchored basenames plus 5 unanchored ones across three vendors — and a stale
-//! count in prose reads as authoritative: it caused one reader to misreport this
-//! census's scope. The list is the fact; there is no number here to go stale now.)
+//! # What this does NOT catch, and it is the important half
 //!
-//! # The second half: the EXECUTION modules
+//! This sees EXPLICIT coupling only — a foreign vendor named inside a vendor crate.
+//! It is blind to a backend that reaches another vendor's spelling THROUGH a core or
+//! contract helper that hard-codes a dialect, because the offending literal then
+//! lives in that helper and no grep of the backend can see it.
 //!
-//! The enumerated list above reaches ZERO `backend/` directories, and for most of
-//! this census's life that was not a gap — the execution halves were inside the
-//! engine, where a different census (`core_names_no_vendor_backend_module`) covered
-//! them. All three left: `zero-migrate-mysql/src/backend/`,
-//! `zero-migrate-sqlite/src/backend/`, `zero-migrate-postgres/src/backend/`. Nothing
-//! covered them afterwards.
+//! That is not hypothetical. When the per-module version of this test was written it
+//! was TRUE OF THIS TREE while the test passed: `render::dml::quote_ident` and
+//! `quote_ident_checked` both pinned the PostgreSQL dialect constant (and
+//! `quote_bare_ident` delegated to the first), so every identifier the SQLite backend
+//! emitted was quoted by the POSTGRESQL renderer — correct only because both vendors
+//! spell an identifier `"x"`.
 //!
-//! [`no_backend_directory_module_names_a_foreign_dialect`] does, and it enforces the
-//! SECOND clause only: a module names no OTHER vendor's dialect. Measured across all
-//! three execution halves the day it was written, that clause is at zero, so it is
-//! asserted as a real zero rather than ratcheted.
+//! That instance is FIXED, through `SqliteDmlRenderer::quote_ident`, proven by
+//! neutering the PostgreSQL method: the SQLite-only `sqlite_engine` binary went from
+//! 148 passed / 7 failed to 155 / 0 over the same 155 tests, so the dependency is
+//! gone rather than merely re-covered.
 //!
-//! The FIRST clause — "exactly once, as the `DIALECT` const" — is deliberately NOT
-//! enforced over the whole walk. Each execution half carries its const in exactly one
-//! file (`backend/mod.rs`) and every sibling reads `super::DIALECT`, which is the rule
-//! working; asserting the const per FILE would redden 28 files that are correct.
-//! The three `backend/mod.rs` files are pinned individually instead, and that pin
-//! doubles as this walk's needle control.
+//! AN EQUIVALENT INSTANCE SURVIVED ONE HOP AWAY, and the test was equally blind to
+//! it: `render_sqlite_trigger_op`, then living in `render::lower`, called the
+//! PostgreSQL-pinned `dml::quote_bare_ident` six times, and the SQLite renderer
+//! delegated its trigger rendering there. That one is now fixed too — those six say
+//! `quote_bare_ident_for_dialect(.., DIALECT)`, the pinned wrapper they used no longer
+//! exists, and the three functions moved into `zero-migrate-sqlite/src/dml.rs`, which
+//! is why this test can see them at all.
+//!
+//! HOW it was proven is the part worth keeping, because the obvious proof LIED. The
+//! neuter above works by watching a suite go red; run against the trigger path it did
+//! not. `sqlite_engine` stayed at 156 passed / 0 failed with `PostgresDmlRenderer::
+//! quote_ident` neutered AT THE COMMIT WHERE THE REACH WAS STILL LIVE — that binary
+//! never renders a trigger, so its green meant nothing, and only running the
+//! before-case as a control exposed it. `sqlite_trigger_render_bytes.rs` was written
+//! to be an instrument that can see the path, and with it the same neuter fails
+//! before the fix and passes after.
+//!
+//! So both examples are WORKED ones now. The CLASS is not gone: it is invisible to
+//! this test by construction, and both instances were found only because someone went
+//! looking. Do not read either fix as evidence the class is gone — and do not trust a
+//! neuter that stays green without first checking it can go red. The second grep it
+//! asks for — over the CORE helpers a moved branch calls — has a test next door in
+//! `sqlite_trigger_quoting_reaches_postgres.rs`, which walks every `.rs` under `src/`
+//! and pins the pinned-wrapper call count at ZERO.
 
-/// The rule, as a test: one dialect literal per backend module, its own, and it is
-/// the `DIALECT` const.
-///
-/// The second clause is not decoration. A bare occurrence COUNT would stay at one if
-/// the const were deleted and some other line in the module reached for the same
-/// variant - which is the shape the rule actually forbids, since the point is that
-/// exactly one line in the module knows the vendor and everything else reads it.
-///
-/// # What this does NOT catch, and it is the important half
-///
-/// This sees EXPLICIT coupling only - a foreign shipping dialect constant written
-/// inside a backend module. It is blind to a backend that reaches another vendor's
-/// spelling THROUGH a core helper that hard-codes a dialect, because the offending
-/// literal then lives in core and no grep of the backend module can see it.
-///
-/// That is not hypothetical. When this test was written it was TRUE OF THIS TREE
-/// while the test passed: `render::dml::quote_ident` and `quote_ident_checked` both
-/// pinned the `POSTGRES` dialect constant (and `quote_bare_ident` delegated to the first), so
-/// every identifier `backends/sqlite.rs` emitted was quoted by the POSTGRESQL
-/// renderer - correct only because both vendors spell an identifier `"x"`.
-///
-/// That instance is FIXED. `backends/sqlite.rs` now routes through
-/// `SqliteDmlRenderer::quote_ident`, proven by neutering the PostgreSQL method: the
-/// SQLite-only `sqlite_engine` binary went from 148 passed / 7 failed to 155 / 0 over
-/// the same 155 tests, so the dependency is gone rather than merely re-covered.
-///
-/// AN EQUIVALENT INSTANCE SURVIVED ONE HOP AWAY, and this test was equally blind to
-/// it: `render_sqlite_trigger_op`, then living in `render::lower`, called the
-/// PostgreSQL-pinned `dml::quote_bare_ident` six times, and `backends/sqlite.rs`
-/// delegated its trigger rendering there. That one is now fixed too — those six say
-/// `quote_bare_ident_for_dialect(.., DIALECT)`, the pinned wrapper they used no longer
-/// exists, and step 3 moved the three functions into `backends/sqlite.rs`, which is
-/// why this test can now see them at all.
-///
-/// HOW it was proven is the part worth keeping, because the obvious proof LIED. The
-/// neuter above works by watching a suite go red; run against the trigger path it did
-/// not. `sqlite_engine` stayed at 156 passed / 0 failed with `PostgresDmlRenderer::
-/// quote_ident` neutered AT THE COMMIT WHERE THE REACH WAS STILL LIVE — that binary
-/// never renders a trigger, so its green meant nothing, and only running the
-/// before-case as a control exposed it. `sqlite_trigger_render_bytes.rs` was written
-/// to be an instrument that can see the path, and with it the same neuter fails
-/// before the fix and passes after.
-///
-/// So both examples are WORKED ones now. The CLASS is not gone: it is invisible to
-/// this test by construction, and both instances were found only because someone went
-/// looking. Do not read either fix as evidence the class is gone — and do not trust a
-/// neuter that stays green without first checking it can go red.
-///
-/// So a green run here means "no backend module NAMES another vendor". It does NOT
-/// mean the backend boundary is clean, and a reader who takes it for that has been
-/// given a proof of the wrong proposition. `backends/mod.rs` carries the same
-/// warning at more length, with the measurement behind it; the second grep it asks
-/// for - over the CORE helpers a moved branch calls - now HAS a test, next door in
-/// `sqlite_trigger_quoting_reaches_postgres.rs`, which walks every `.rs` under `src/`
-/// and pins the pinned-wrapper call count at ZERO.
-///
-/// # Two ways this goes red that are not defects
-///
-/// A module that legitimately needs its own dialect on a second line, and a
-/// `DIALECT` const that moves out of the module, both fail here. Both are exactly
-/// the edits the rule exists to make an author justify out loud, so the pin is
-/// working; it is written down so the failure is read as a question and not as a bug
-/// in this file.
-#[test]
-fn a_backend_module_names_only_its_own_dialect_and_only_once() {
-    fn code_identifier_hits(src: &str, identifier: &str) -> usize {
-        src.lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .flat_map(|line| line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')))
-            .filter(|token| *token == identifier)
-            .count()
-    }
+use std::path::{Path, PathBuf};
 
-    let cases = [
-        (
-            "zero-migrate-postgres/src/dml.rs",
-            include_str!("../../../zero-migrate-postgres/src/dml.rs"),
-            "POSTGRES",
-        ),
-        (
-            "zero-migrate-sqlite/src/dml.rs",
-            include_str!("../../../zero-migrate-sqlite/src/dml.rs"),
-            "SQLITE",
-        ),
-        (
-            "zero-migrate-mysql/src/dml.rs",
-            include_str!("../../../zero-migrate-mysql/src/dml.rs"),
-            "MYSQL",
-        ),
-        (
-            "zero-migrate-postgres/src/schema.rs",
-            include_str!("../../../zero-migrate-postgres/src/schema.rs"),
-            "POSTGRES",
-        ),
-        (
-            "zero-migrate-sqlite/src/schema.rs",
-            include_str!("../../../zero-migrate-sqlite/src/schema.rs"),
-            "SQLITE",
-        ),
-        (
-            "zero-migrate-mysql/src/schema.rs",
-            include_str!("../../../zero-migrate-mysql/src/schema.rs"),
-            "MYSQL",
-        ),
-        (
-            "zero-migrate-postgres/src/ddl.rs",
-            include_str!("../../../zero-migrate-postgres/src/ddl.rs"),
-            "POSTGRES",
-        ),
-        (
-            "zero-migrate-sqlite/src/ddl.rs",
-            include_str!("../../../zero-migrate-sqlite/src/ddl.rs"),
-            "SQLITE",
-        ),
-        (
-            "zero-migrate-mysql/src/ddl.rs",
-            include_str!("../../../zero-migrate-mysql/src/ddl.rs"),
-            "MYSQL",
-        ),
-        (
-            "zero-migrate-postgres/src/value_format.rs",
-            include_str!("../../../zero-migrate-postgres/src/value_format.rs"),
-            "POSTGRES",
-        ),
-        (
-            "zero-migrate-sqlite/src/value_format.rs",
-            include_str!("../../../zero-migrate-sqlite/src/value_format.rs"),
-            "SQLITE",
-        ),
-        (
-            "zero-migrate-mysql/src/value_format.rs",
-            include_str!("../../../zero-migrate-mysql/src/value_format.rs"),
-            "MYSQL",
-        ),
-    ];
-
-    // The two vendor-crate files that carry spelling but NO renderer, and therefore
-    // no `DIALECT` const: PostgreSQL's vendor-op renderer is PostgreSQL by
-    // construction (every vendor op is `dialect_scope = PgOnly`) and MySQL's
-    // collation module is MySQL by construction. The "exactly once, as the const"
-    // half of the rule has nothing to bind to in either, so only the half that DOES
-    // apply is asserted: no FOREIGN dialect, at all.
-    //
-    // They are asserted rather than skipped because they are exactly where a
-    // cross-vendor reach would be invisible — `vendor.rs` moved out of the engine in
-    // the crate-extraction commit and `collation.rs` moved out of the declarative
-    // differ, and in both former homes naming another dialect was ordinary.
-    let unanchored = [
-        (
-            "zero-migrate-postgres/src/vendor.rs",
-            include_str!("../../../zero-migrate-postgres/src/vendor.rs"),
-            "POSTGRES",
-        ),
-        (
-            "zero-migrate-mysql/src/collation.rs",
-            include_str!("../../../zero-migrate-mysql/src/collation.rs"),
-            "MYSQL",
-        ),
-        (
-            "zero-migrate-postgres/src/validation.rs",
-            include_str!("../../../zero-migrate-postgres/src/validation.rs"),
-            "POSTGRES",
-        ),
-        (
-            "zero-migrate-sqlite/src/validation.rs",
-            include_str!("../../../zero-migrate-sqlite/src/validation.rs"),
-            "SQLITE",
-        ),
-        (
-            "zero-migrate-mysql/src/validation.rs",
-            include_str!("../../../zero-migrate-mysql/src/validation.rs"),
-            "MYSQL",
-        ),
-    ];
-    for (file, src, own) in unanchored {
-        for other in ["POSTGRES", "SQLITE", "MYSQL"] {
-            if other == own {
-                continue;
-            }
-            assert_eq!(
-                code_identifier_hits(src, other),
-                0,
-                "{file} names the foreign `{other}` dialect constant; it is a {own}-only module in a {own}-only \
-                 crate and must not reach another vendor's spelling. See the \
-                 one-dialect-literal rule in render/backends/mod.rs."
-            );
-        }
-    }
-
-    for (file, src, own) in cases {
-        for other in ["POSTGRES", "SQLITE", "MYSQL"] {
-            let hits = code_identifier_hits(src, other);
-            // The module imports its own constant and assigns it to `DIALECT`.
-            let expected = if other == own { 2 } else { 0 };
-            assert_eq!(
-                hits, expected,
-                "{file} names the `{other}` dialect constant {hits} time(s); expected {expected} \
-                 (its own constant once in the import and once in the DIALECT declaration; no other dialect). \
-                 See the one-dialect-literal rule in backends/mod.rs."
-            );
-        }
-
-        // ...and the use-site occurrence is the const, not merely some other line.
-        let declaration = format!("const DIALECT: DialectId = {own};");
-        assert!(
-            src.lines().map(str::trim).any(|line| line == declaration),
-            "{file} must carry its dialect identity in `{declaration}`; a module whose \
-             own constant appears elsewhere has lost the const that makes the vendor deletable"
-        );
-    }
-}
-
-/// The vendor crates and the dialect constant each one IS, for the execution-half
-/// walk below.
-const VENDORS: &[(&str, &str)] = &[
-    ("zero-migrate-postgres", "POSTGRES"),
-    ("zero-migrate-sqlite", "SQLITE"),
-    ("zero-migrate-mysql", "MYSQL"),
+/// The vendor crates, the id each one IS, and the exact `lib.rs` lines that declare
+/// it.
+///
+/// The declaration is spelled out rather than derived, because a derived string is
+/// how a needle stops matching without anyone noticing: derive it from the id and a
+/// change in the declaration's SHAPE (a rename of `NAME`, a move to a different
+/// constructor) still produces a string that matches nothing, and the census then
+/// reports a confident zero.
+const VENDORS: &[Vendor] = &[
+    Vendor {
+        krate: "zero-migrate-postgres",
+        ident: "zero_migrate_postgres",
+        name_decl: "const NAME: &str = \"postgres\";",
+    },
+    Vendor {
+        krate: "zero-migrate-sqlite",
+        ident: "zero_migrate_sqlite",
+        name_decl: "const NAME: &str = \"sqlite\";",
+    },
+    Vendor {
+        krate: "zero-migrate-mysql",
+        ident: "zero_migrate_mysql",
+        name_decl: "const NAME: &str = \"mysql\";",
+    },
 ];
 
-/// The three shipping dialect constants, so "foreign" is computed rather than listed
-/// per vendor.
-const DIALECT_CONSTANTS: &[&str] = &["POSTGRES", "SQLITE", "MYSQL"];
+/// A shipping vendor crate, as this census reads it.
+struct Vendor {
+    /// Directory name under `crates/`.
+    krate: &'static str,
+    /// The crate's Rust ident, which is what a FOREIGN reach would spell.
+    ident: &'static str,
+    /// The `lib.rs` line that spells the id string, verbatim.
+    name_decl: &'static str,
+}
 
-/// The walk's ANCHORS, relative to `crates/`: the file in each execution half that
-/// carries its dialect const, the constant it IS, and the declaration verbatim.
+/// The one line in the workspace that may build a `DialectId` from a vendor's own
+/// name, spelled verbatim so a change to its shape is a red rather than a silent
+/// zero.
+const DIALECT_DECL: &str = "pub const DIALECT: DialectId = DialectId::new(NAME);";
+
+/// The modules that must READ the crate's id rather than hold one, with the exact
+/// import each carries.
 ///
-/// A floor over a discovered set bounds HOW MANY files were read; these bound WHICH,
-/// and they stay true at any size. They are also where the needle control runs — each
-/// must show its own constant exactly twice (the import and the const) — so a matcher
-/// that stopped recognizing a dialect constant fails here instead of reporting a
-/// confident zero over every file it walked.
+/// Four renderer families — DML, schema typing, DDL emission, value-format
+/// normalization — times three vendors, plus each execution half's `backend/mod.rs`.
+/// SQLite's execution half aliases the import because that subtree also carries
+/// `rusqlite`'s `SQLITE_*` flag names and a lone `DIALECT` reads ambiguously beside
+/// them.
 ///
-/// The declaration is spelled out per vendor rather than derived, because SQLite's
-/// half names its const `SQLITE_DIALECT` (the module also carries `rusqlite`'s
-/// `SQLITE_*` flag names, so a bare `DIALECT` would have read ambiguously to a human
-/// scanning the file). Deriving the string would have quietly stopped matching there.
-const EXECUTION_ANCHORS: &[(&str, &str, &str)] = &[
+/// A module that legitimately stops needing the id, and an import that changes shape,
+/// both fail here. Both are exactly the edits the rule exists to make an author
+/// justify out loud.
+const IDENTITY_READERS: &[(&str, &str)] = &[
+    ("zero-migrate-postgres/src/dml.rs", "use crate::DIALECT;"),
+    ("zero-migrate-sqlite/src/dml.rs", "use crate::DIALECT;"),
+    ("zero-migrate-mysql/src/dml.rs", "use crate::DIALECT;"),
+    ("zero-migrate-postgres/src/schema.rs", "use crate::DIALECT;"),
+    ("zero-migrate-sqlite/src/schema.rs", "use crate::DIALECT;"),
+    ("zero-migrate-mysql/src/schema.rs", "use crate::DIALECT;"),
+    ("zero-migrate-postgres/src/ddl.rs", "use crate::DIALECT;"),
+    ("zero-migrate-sqlite/src/ddl.rs", "use crate::DIALECT;"),
+    ("zero-migrate-mysql/src/ddl.rs", "use crate::DIALECT;"),
+    (
+        "zero-migrate-postgres/src/value_format.rs",
+        "use crate::DIALECT;",
+    ),
+    (
+        "zero-migrate-sqlite/src/value_format.rs",
+        "use crate::DIALECT;",
+    ),
+    (
+        "zero-migrate-mysql/src/value_format.rs",
+        "use crate::DIALECT;",
+    ),
     (
         "zero-migrate-postgres/src/backend/mod.rs",
-        "POSTGRES",
-        "const DIALECT: DialectId = POSTGRES;",
+        "pub(crate) use crate::DIALECT;",
     ),
     (
         "zero-migrate-sqlite/src/backend/mod.rs",
-        "SQLITE",
-        "const SQLITE_DIALECT: DialectId = SQLITE;",
+        "use crate::DIALECT as SQLITE_DIALECT;",
     ),
     (
         "zero-migrate-mysql/src/backend/mod.rs",
-        "MYSQL",
-        "const DIALECT: DialectId = MYSQL;",
+        "use crate::DIALECT;",
     ),
 ];
 
-/// The walk's floor across the three execution halves. They hold 31 `.rs` files under
-/// `src/backend` the day this was written; the floor sits under that with room for
-/// ordinary churn and would still notice losing an entire ten-file directory
-/// (31 minus PostgreSQL's ten is 21).
+/// The NEEDLE control for [`declaration_hits`]: a file outside the vendor crates
+/// where `DialectId::new(` is the point and the count cannot fall to zero.
+///
+/// `dialect_table.rs` is GENERATOR-OWNED — the drift test byte-compares it against
+/// `gen:dialect-table` — and every row of it constructs three ids by literal. It is
+/// not a violation of anything, so it is not a control that disappears the moment
+/// this census succeeds.
+const DECL_CONTROL: &str = "zero-migrate/tests/dialect_matrix/dialect_table.rs";
+
+/// The floor for that control. Blunt on purpose: the number only has to prove the
+/// matcher is alive. Measured at 92 rows when this landed, and the table only grows
+/// as op kinds are added.
+const DECL_CONTROL_FLOOR: usize = 80;
+
+/// The NEEDLE control for [`code_identifier_hits`] over vendor crate idents: the
+/// registry composition, which names all three shipping crates exactly once each and
+/// is the one place designed to.
+const IDENT_CONTROL: &str = "zero-migrate/src/render/backends/mod.rs";
+
+/// The walk's floor across the three vendor `src` trees.
 ///
 /// A scan over a DISCOVERED set fails OPEN: narrow the walk and it iterates nothing,
-/// finds nothing, and reports clean. Raise it deliberately as the halves grow. NEVER
-/// lower it to get green — check [`EXECUTION_ANCHORS`] first and trust them over this
-/// number.
-const EXECUTION_FILE_FLOOR: usize = 24;
+/// finds nothing, and reports clean. Measured at 82 `.rs` files the day this landed;
+/// the floor sits under that with room for churn and would still notice losing an
+/// entire ten-file directory. Raise it deliberately as the vendors grow. NEVER lower
+/// it to get green — the anchors above are what tell a shrink from a broken walk.
+const VENDOR_FILE_FLOOR: usize = 70;
 
 /// How many times `src` names `identifier` on a CODE line, as a whole token.
 ///
-/// The same matcher the enumerated check above uses, lifted to a free function so
-/// both halves of this file provably run ONE needle. A census whose two halves used
-/// two matchers could have one of them go blind while the other vouched for it.
+/// One matcher for both halves of this file, so a census whose two halves used two
+/// matchers cannot have one go blind while the other vouches for it.
 fn code_identifier_hits(src: &str, identifier: &str) -> usize {
     src.lines()
         .filter(|line| !line.trim_start().starts_with("//"))
@@ -335,8 +214,19 @@ fn code_identifier_hits(src: &str, identifier: &str) -> usize {
         .count()
 }
 
+/// How many times `src` CONSTRUCTS a dialect id on a CODE line.
+///
+/// Substring rather than token, because `DialectId::new(` is the whole shape that
+/// matters and splitting it into tokens would count every unrelated `new`.
+fn declaration_hits(src: &str) -> usize {
+    src.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .filter(|line| line.contains("DialectId::new("))
+        .count()
+}
+
 /// Every `.rs` file under `root`, sorted.
-fn rs_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+fn rs_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -355,70 +245,133 @@ fn rs_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-/// CLAUSE TWO over the three EXECUTION halves: no file under a vendor's
-/// `src/backend/` names another vendor's dialect constant.
-///
-/// # Why only clause two
-///
-/// See the module header. Clause one binds a `DIALECT` const to a MODULE; an
-/// execution half is a directory whose siblings all read `super::DIALECT`, which is
-/// the rule being obeyed rather than broken. Enforcing "exactly once per file" here
-/// would redden 28 correct files in three vendors, which is a census demanding a
-/// defect. The const's home is pinned per anchor instead.
+/// `crates/`, the root both halves walk from.
+fn crates_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/zero-migrate has a parent")
+        .to_path_buf()
+}
+
+fn read(path: &Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+}
+
+/// CLAUSE ONE: a vendor crate declares its dialect EXACTLY ONCE, in its `lib.rs`.
 ///
 /// # What a red here means
 ///
-/// A vendor's execution half wrote another vendor's dialect constant. That is either
-/// a cross-vendor reach — the thing this rule exists to make loud — or a test in that
-/// half asserting something about a foreign dialect, which belongs in the engine's
-/// test tree where all three are visible. Both are questions for the author; neither
-/// is fixed by adding an exemption here.
+/// A second `DialectId::new(` appeared somewhere in a vendor crate. Either a module
+/// re-declared the id it should be reading from `crate::DIALECT` — which puts the
+/// vendor's name back into a module and undoes the rule — or it built a FOREIGN id
+/// by literal, which is a cross-vendor reach wearing a different spelling than the
+/// one clause two looks for. Neither is fixed by adding an exemption here.
 #[test]
-fn no_backend_directory_module_names_a_foreign_dialect() {
-    let crates = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/zero-migrate has a parent")
-        .to_path_buf();
+fn a_vendor_crate_declares_its_dialect_exactly_once() {
+    let crates = crates_root();
 
-    // ---- THE ANCHORS, which double as the NEEDLE POSITIVE CONTROL. -----------
-    for (rel, own, declaration) in EXECUTION_ANCHORS {
-        let path = crates.join(rel);
+    // ---- FLOOR TWO, the NEEDLE, first: a dead matcher makes every count below a
+    // ---- meaningless zero, and it is not one of the things being ratcheted.
+    let control = read(&crates.join(DECL_CONTROL));
+    let control_hits = declaration_hits(&control);
+    assert!(
+        control_hits >= DECL_CONTROL_FLOOR,
+        "the needle found {control_hits} `DialectId::new(` in {DECL_CONTROL}, below \
+         the control floor of {DECL_CONTROL_FLOOR}. That table constructs an id on \
+         every row and cannot legitimately fall this far, so `declaration_hits` has \
+         stopped matching and every zero this census reports is blind. Fix the \
+         matcher; do NOT lower the floor."
+    );
+
+    for vendor in VENDORS {
+        let src = crates.join(vendor.krate).join("src");
+        let lib = src.join("lib.rs");
+        let lib_text = read(&lib);
+
         assert!(
-            path.is_file(),
-            "this census must read {}, and it does not exist. If the execution half \
-             legitimately moved, repoint the anchor and say so in the commit; do NOT \
-             delete it to get green.",
-            path.display()
-        );
-        let src = std::fs::read_to_string(&path).expect("anchor reads");
-        let hits = code_identifier_hits(&src, own);
-        assert_eq!(
-            hits, 2,
-            "{rel} names its own `{own}` constant {hits} time(s); expected 2 (the \
-             import and the `DIALECT` declaration). Either the const moved — say so \
-             deliberately — or `code_identifier_hits` stopped matching, in which case \
-             the zero this test reports over every other file is blind."
-        );
-        assert!(
-            src.lines()
+            lib_text
+                .lines()
                 .map(str::trim)
-                .any(|line| line.ends_with(declaration)),
-            "{rel} must carry its execution half's dialect identity in \
-             `{declaration}`; the siblings all read it through `super::` and a half \
-             whose const moved has lost the one line that knows the vendor"
+                .any(|l| l == vendor.name_decl),
+            "{}/src/lib.rs must spell its id in `{}`. That line is the workspace's \
+             ONLY spelling of this vendor's id string; if it legitimately moved or \
+             changed shape, repoint this census deliberately and say so in the \
+             commit. Do not delete the assertion.",
+            vendor.krate,
+            vendor.name_decl
+        );
+        assert!(
+            lib_text.lines().map(str::trim).any(|l| l == DIALECT_DECL),
+            "{}/src/lib.rs must declare its identity in `{DIALECT_DECL}`; a vendor \
+             whose declaration moved or changed shape has lost the one line the rest \
+             of the workspace reads its id from",
+            vendor.krate
+        );
+
+        let mut declarations: Vec<String> = Vec::new();
+        for path in rs_files(&src) {
+            let hits = declaration_hits(&read(&path));
+            if hits > 0 {
+                let rel = path
+                    .strip_prefix(&crates)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                declarations.push(format!("  {rel}: {hits}"));
+            }
+        }
+        let expected = format!("  {}/src/lib.rs: 1", vendor.krate);
+        assert_eq!(
+            declarations,
+            vec![expected.clone()],
+            "{} must construct a `DialectId` exactly once, in its `lib.rs`. Found:\n{}\
+             \n\nEverything else in the crate reads `crate::DIALECT`.",
+            vendor.krate,
+            declarations.join("\n")
+        );
+    }
+}
+
+/// CLAUSE TWO: no vendor crate names another vendor crate.
+///
+/// # What a red here means
+///
+/// A vendor reached a sibling by name. That is either a cross-vendor coupling — the
+/// thing this rule exists to make loud, and the reason the three crates can be linked
+/// independently — or a test in that crate asserting something about a foreign
+/// dialect, which belongs in the engine's test tree where all three are visible.
+/// Both are questions for the author; neither is fixed by adding an exemption here.
+#[test]
+fn no_vendor_crate_names_a_foreign_vendor() {
+    let crates = crates_root();
+
+    // ---- FLOOR TWO, the NEEDLE. The registry composition names all three shipping
+    // ---- crates and is PERMANENT — `render/backends/mod.rs` is the one place
+    // ---- designed to hold them — so it cannot go to zero the way a violation can.
+    let control = read(&crates.join(IDENT_CONTROL));
+    for vendor in VENDORS {
+        let hits = code_identifier_hits(&control, vendor.ident);
+        assert_eq!(
+            hits, 1,
+            "the needle found `{}` {hits} time(s) in {IDENT_CONTROL}, expected 1 (its \
+             `SHIPPING` entry). Either the registry was restructured — update this \
+             control deliberately — or `code_identifier_hits` stopped matching, in \
+             which case every zero below it is blind.",
+            vendor.ident
         );
     }
 
-    // ---- THE WALK, with its floor. ------------------------------------------
+    // ---- FLOOR ONE, the WALK. -----------------------------------------------
     let mut walked = 0usize;
     let mut violations: Vec<String> = Vec::new();
-    for (vendor_crate, own) in VENDORS {
-        let root = crates.join(vendor_crate).join("src").join("backend");
+    for vendor in VENDORS {
+        let root = crates.join(vendor.krate).join("src");
         assert!(
             root.is_dir(),
-            "{} does not exist, so this census would walk nothing for {vendor_crate} \
-             and report clean",
-            root.display()
+            "{} does not exist, so this census would walk nothing for {} and report \
+             clean",
+            root.display(),
+            vendor.krate
         );
         for path in rs_files(&root) {
             walked += 1;
@@ -427,32 +380,64 @@ fn no_backend_directory_module_names_a_foreign_dialect() {
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
-            let src = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-            for other in DIALECT_CONSTANTS {
-                if other == own {
+            let text = read(&path);
+            for other in VENDORS {
+                if other.ident == vendor.ident {
                     continue;
                 }
-                let hits = code_identifier_hits(&src, other);
+                let hits = code_identifier_hits(&text, other.ident);
                 if hits > 0 {
-                    violations.push(format!("  {rel}: names `{other}` {hits} time(s)"));
+                    violations.push(format!("  {rel}: names `{}` {hits} time(s)", other.ident));
                 }
             }
         }
     }
 
     assert!(
-        walked >= EXECUTION_FILE_FLOOR,
-        "the census walked only {walked} execution-half files, below the floor of \
-         {EXECUTION_FILE_FLOOR}. A narrowed walk finds nothing and reports clean; fix \
+        walked >= VENDOR_FILE_FLOOR,
+        "the census walked only {walked} vendor-crate files, below the floor of \
+         {VENDOR_FILE_FLOOR}. A narrowed walk finds nothing and reports clean; fix \
          the walk, do not lower the floor to get green."
     );
 
     assert!(
         violations.is_empty(),
-        "a vendor execution half names a FOREIGN dialect constant:\n{}\n\nA backend \
-         module names its own dialect and no other. See the one-dialect-literal rule \
-         in render/backends/mod.rs.",
+        "a vendor crate names a FOREIGN vendor crate:\n{}\n\nA backend names its own \
+         dialect and no other. See the one-dialect-literal rule in \
+         render/backends/mod.rs.",
         violations.join("\n")
     );
+}
+
+/// CLAUSE THREE: every module that needs the identity READS it, and the import is the
+/// one shape the rule allows.
+///
+/// # Why the list is enumerated rather than walked
+///
+/// A walk would have to decide which modules OUGHT to hold the identity, and it
+/// cannot: a module that legitimately never names a dialect is indistinguishable from
+/// one that lost its import. The list is the fact. `include_str!` is not used because
+/// these are read from three sibling crates at run time by the same walker the other
+/// two clauses use, which is what keeps all three provably reading one tree.
+#[test]
+fn every_identity_reader_reads_the_crates_own_id() {
+    let crates = crates_root();
+    for (rel, import) in IDENTITY_READERS {
+        let path = crates.join(rel);
+        assert!(
+            path.is_file(),
+            "this census must read {}, and it does not exist. If the module \
+             legitimately moved, repoint the entry and say so in the commit; do NOT \
+             delete it to get green.",
+            path.display()
+        );
+        let text = read(&path);
+        assert!(
+            text.lines().map(str::trim).any(|line| line == *import),
+            "{rel} must read its vendor identity as `{import}`. A module that spells \
+             a dialect any other way has either re-declared one — which puts the \
+             vendor's name back in the module — or stopped reading the crate's, in \
+             which case nothing here knows which vendor it is."
+        );
+    }
 }

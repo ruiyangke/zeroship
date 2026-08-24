@@ -87,7 +87,7 @@ pub(crate) async fn rollback_one_transactional(
     // is half-done. This is the additive-only boundary; the rebuild is not built.
     if let Some(reason) = down_needs_rebuild(down) {
         return Err(RollbackError::TableRebuildRequired {
-            dialect: zero_migrate_ir::dialect::SQLITE,
+            dialect: crate::DIALECT,
             version: m.version.as_str().to_string(),
             reason,
         });

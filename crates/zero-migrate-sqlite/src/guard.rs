@@ -63,7 +63,7 @@ impl MigrationGuard for SqliteGuard {
     /// SQLite's own id.
     fn check_raw_island_sql(&self, _sql: &str) -> Result<(), GuardError> {
         Err(GuardError::RawSqlRejected {
-            dialect: zero_migrate_ir::dialect::SQLITE,
+            dialect: crate::DIALECT,
         })
     }
 
@@ -71,7 +71,7 @@ impl MigrationGuard for SqliteGuard {
     /// function body reaching this vendor is PostgreSQL text on the wrong path.
     fn check_raw_island_body(&self, _body: &str, _raw: &str) -> Result<(), GuardError> {
         Err(GuardError::RawSqlRejected {
-            dialect: zero_migrate_ir::dialect::SQLITE,
+            dialect: crate::DIALECT,
         })
     }
 

@@ -5,11 +5,11 @@ use zero_migrate_backend::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot}
 use zero_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
 };
-use zero_migrate_ir::dialect::{DialectId, SQLITE};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::Expr;
 use zero_migrate_ir::ir::{validate_type_id_prefix, ValueFormat};
 
-const DIALECT: DialectId = SQLITE;
+use crate::DIALECT;
 
 fn literal_cast_kind(compact: &str) -> Option<LiteralCastKind> {
     if compact == "uuid" {

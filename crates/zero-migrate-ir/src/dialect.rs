@@ -73,12 +73,33 @@ impl DialectId {
     /// Whether this id satisfies the id rule: lowercase ASCII `[a-z][a-z0-9_]*`.
     ///
     /// Rejects the empty string, a leading digit or underscore, uppercase, dots,
-    /// dashes, and any non-ASCII byte. `const` so a backend can assert its own id
-    /// at compile time; the registry asserts it again at build time because a
-    /// backend is not trusted about its own declaration.
+    /// dashes, and any non-ASCII byte. The registry asserts the same rule at build
+    /// time because a backend is not trusted about its own declaration.
+    ///
+    /// To assert it at COMPILE time — which is what a backend crate wants for its
+    /// own declaration — use [`DialectId::is_well_formed_name`]. This method cannot
+    /// do that job: reading a `DialectId` const inside a `const` item copies it, and
+    /// const evaluation refuses to run the `Cow`'s destructor (E0493).
     #[must_use]
     pub const fn is_well_formed(&self) -> bool {
-        let bytes = self.as_str().as_bytes();
+        Self::is_well_formed_name(self.as_str())
+    }
+
+    /// Whether `name` satisfies the id rule: lowercase ASCII `[a-z][a-z0-9_]*`.
+    ///
+    /// The string-taking form, so a backend can hold itself to the rule where the
+    /// diagnostic is a compile error naming its own line:
+    ///
+    /// ```
+    /// use zero_migrate_ir::dialect::DialectId;
+    /// pub const DIALECT: DialectId = DialectId::new("duckdb");
+    /// const _: () = assert!(DialectId::is_well_formed_name("duckdb"));
+    /// ```
+    ///
+    /// [`DialectId::is_well_formed`] delegates here, so the two can never disagree.
+    #[must_use]
+    pub const fn is_well_formed_name(name: &str) -> bool {
+        let bytes = name.as_bytes();
         if bytes.is_empty() {
             return false;
         }

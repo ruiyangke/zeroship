@@ -1,7 +1,8 @@
 use zero_migrate_ir::backend::{
     BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
 };
-use zero_migrate_ir::dialect::MYSQL;
+
+use crate::DIALECT;
 
 /// `MySQL`'s capability answers.
 ///
@@ -34,7 +35,7 @@ pub const MYSQL_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
 
 /// The `MySQL` backend descriptor.
 pub static MYSQL_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
-    id: MYSQL,
+    id: DIALECT,
     display_name: "MySQL",
     capabilities: MYSQL_CAPABILITIES,
     limits: Limits {

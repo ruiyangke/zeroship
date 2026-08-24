@@ -20,7 +20,7 @@ use zero_migrate_backend::renderer::{
 };
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
-use zero_migrate_ir::dialect::{DialectId, SQLITE};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
     ForEach, IrScalar, IrValue, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
@@ -44,34 +44,34 @@ pub(crate) fn placeholder(n: usize) -> String {
     format!("?{n}")
 }
 
-/// This module's own vendor identity — the ONE dialect literal it is allowed to
-/// name. See `backends/mod.rs`.
-///
-/// # It absorbed the trigger renderer's const on the way in
-///
-/// `render_sqlite_trigger_op` and the two helpers below it named this vendor
-/// nineteen times between them while they lived in `render::lower`: thirteen
-/// capability and inline-render arguments that were already right, and six identifier
-/// quotes that were NOT. Those six called the PostgreSQL-pinned
-/// `dml::quote_bare_ident`, so every identifier in a rendered SQLite trigger was
-/// spelled by `PostgresDmlRenderer::quote_ident` — correct only because both vendors
-/// spell an identifier `"x"`, and a hard blocker on extracting a `zero-migrate-sqlite`
-/// crate that does not need `zero-migrate-postgres` at RUNTIME. A crate-extraction
-/// spike proved the reach was live rather than theoretical: it rendered a
-/// `createTrigger` from inside the extracted crate and got PostgreSQL's marker back
-/// in the SQLite trigger SQL.
-///
-/// Routing those six through `quote_bare_ident_for_backend` was the fix; folding the
-/// other thirteen into a single const is what made it stay fixed. That const was
-/// `SQLITE_TRIGGER_DIALECT`, a `lower.rs`-local stand-in for the rule this file
-/// already obeyed, and its whole purpose was to make the eventual move of those three
-/// functions a RELOCATION rather than an edit. It worked: the move renamed one
-/// identifier and touched nothing else, and this const is the thing it was renamed to.
-///
-/// Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`, whose
-/// count went 6 → 0 when the fix landed and whose subject-anchor followed the three
-/// functions here.
-const DIALECT: DialectId = SQLITE;
+// This module's vendor identity, read from `crate::DIALECT` — this module names no
+// dialect literal of its own. See `render/backends/mod.rs`.
+//
+// # It absorbed the trigger renderer's const on the way in
+//
+// `render_sqlite_trigger_op` and the two helpers below it named this vendor
+// nineteen times between them while they lived in `render::lower`: thirteen
+// capability and inline-render arguments that were already right, and six identifier
+// quotes that were NOT. Those six called the PostgreSQL-pinned
+// `dml::quote_bare_ident`, so every identifier in a rendered SQLite trigger was
+// spelled by `PostgresDmlRenderer::quote_ident` — correct only because both vendors
+// spell an identifier `"x"`, and a hard blocker on extracting a `zero-migrate-sqlite`
+// crate that does not need `zero-migrate-postgres` at RUNTIME. A crate-extraction
+// spike proved the reach was live rather than theoretical: it rendered a
+// `createTrigger` from inside the extracted crate and got PostgreSQL's marker back
+// in the SQLite trigger SQL.
+//
+// Routing those six through `quote_bare_ident_for_backend` was the fix; folding the
+// other thirteen into a single name is what made it stay fixed. That name was
+// `SQLITE_TRIGGER_DIALECT`, a `lower.rs`-local stand-in for the rule this file
+// already obeyed, and its whole purpose was to make the eventual move of those three
+// functions a RELOCATION rather than an edit. It worked: the move renamed one
+// identifier and touched nothing else, and `DIALECT` is what it was renamed to.
+//
+// Pinned by `tests/dialect_matrix/sqlite_trigger_quoting_reaches_postgres.rs`, whose
+// count went 6 → 0 when the fix landed and whose subject-anchor followed the three
+// functions here.
+use crate::DIALECT;
 
 #[derive(Debug)]
 pub(super) struct SqliteDmlRenderer;

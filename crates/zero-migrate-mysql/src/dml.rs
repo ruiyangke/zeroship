@@ -15,7 +15,7 @@ use zero_migrate_backend::renderer::{
 };
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
-use zero_migrate_ir::dialect::{DialectId, MYSQL};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
     ForEach, IrScalar, IrValue, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
@@ -26,15 +26,15 @@ use zero_migrate_ir::validate::{
     CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE, CODE_UNSUPPORTED,
 };
 
-/// This module's own vendor identity — the ONE dialect literal it is allowed to
-/// name. See `backends/mod.rs`.
-///
-/// Every `dml::*_for_dialect(.., DIALECT)` call below is core's "validate, then
-/// ask the vendor how to spell it" seam: `dml` owns whether an identifier is
-/// LEGAL (semantics), this module owns how it is WRITTEN (spelling), and the
-/// round trip goes back out through the `DmlRenderer` trait object. The const is
-/// what keeps that from being a hard-coded vendor name inside a vendor module.
-const DIALECT: DialectId = MYSQL;
+// This module's vendor identity, read from `crate::DIALECT` — this module names no
+// dialect literal of its own. See `render/backends/mod.rs`.
+//
+// Every `dml::*_for_dialect(.., DIALECT)` call below is core's "validate, then
+// ask the vendor how to spell it" seam: `dml` owns whether an identifier is
+// LEGAL (semantics), this module owns how it is WRITTEN (spelling), and the
+// round trip goes back out through the `DmlRenderer` trait object. Reading the
+// id rather than spelling one is what keeps a vendor name out of this module.
+use crate::DIALECT;
 
 /// Render a string in a grammar position that accepts only a quoted string TOKEN,
 /// not an expression.

@@ -30,7 +30,6 @@ use crate::analysis::analyze::Advisory;
 use crate::analysis::classify::{classify, DataSecurityClass, DdlKind, ParseError, StatementClass};
 use crate::guard::denylist::rule;
 use serde_json::Value;
-use zero_migrate_ir::dialect::POSTGRES;
 use zero_migrate_ir::migration::MigrationFlags;
 use zero_migrate_ir::policy::DestructiveOps;
 use zero_migrate_ir::policy::SchemaScope;
@@ -58,6 +57,8 @@ use zero_migrate_policy::{normalize_object_name, GrantRegion, ObjectName, ShapeE
 use zero_migrate_backend::guard::{
     data_security_rule, DeclaredCreateShape, GuardConfig, GuardError, InjectedCreateShape,
 };
+
+use crate::DIALECT;
 
 /// Stable NAMESPACE-authority policy rule ids (II.2.5 / II.2.6). These are the
 /// conservative-deny rules the policy redesign introduces on top of the deny-list:
@@ -567,7 +568,7 @@ impl SqlGuard {
     }
 
     fn refuse_non_postgres_raw_sql(&self) -> Result<(), GuardError> {
-        if self.cfg.dialect() != &POSTGRES {
+        if self.cfg.dialect() != &DIALECT {
             return Err(GuardError::RawSqlRejected {
                 dialect: self.cfg.dialect().clone(),
             });

@@ -8,10 +8,15 @@
 //!
 //! # The one-dialect-literal rule
 //!
-//! Each module names its own dialect exactly ONCE, as its `DIALECT` const, and names
-//! no other dialect at all. Everything else reads `DIALECT`. The rule predates the
-//! extraction and it is what made the extraction mechanical; it is ENFORCED, across
-//! the crate boundary now, by
+//! This CRATE names its dialect exactly ONCE — [`DIALECT`] in this file — and no
+//! module names another vendor at all. Everything else reads `crate::DIALECT`.
+//!
+//! The rule used to be per-MODULE: each renderer held its own
+//! `const DIALECT: DialectId = POSTGRES;` and imported that name from
+//! `zero-migrate-ir`, the neutral vocabulary crate, which declared the ids for all
+//! three shipping vendors. The ids moved into the vendors, so the rule tightened to
+//! per-crate: `"postgres"` is now spelled in exactly one place in this crate and in
+//! exactly one place in the workspace. It is ENFORCED, across the crate boundary, by
 //! `zero-migrate/tests/dialect_matrix/backend_modules_name_one_dialect.rs`.
 //!
 //! # What the rule does NOT catch
@@ -87,6 +92,39 @@ pub use backend::PostgresBackend;
 mod test_fixtures;
 
 use zero_migrate_backend::registry::BackendVendor;
+use zero_migrate_ir::dialect::DialectId;
+
+/// This backend's id STRING, spelled once for the whole crate.
+///
+/// Separate from [`DIALECT`] only so the compile-time check below can read the
+/// same bytes the id is built from. Asserting on the `DialectId` itself is not
+/// available: evaluating one inside a `const` item copies it, and const
+/// evaluation refuses to run the `Cow`'s destructor (E0493). One string, two
+/// readers, and no way for the declaration and the check to drift apart.
+const NAME: &str = "postgres";
+
+/// This backend's identity, declared HERE and nowhere else in the workspace.
+///
+/// `zero-migrate-ir` is the neutral vocabulary crate and its own module doc says a
+/// backend "declares its own — `DialectId::new(\"duckdb\")` — without editing this
+/// crate". It used to declare three anyway, and core re-exported them, so every
+/// consumer that wanted to name PostgreSQL reached a neutral crate to get it. This
+/// is the declaration that ended that: [`NAME`] above is the workspace's only
+/// spelling of it, and [`VENDOR`]'s descriptor, this crate's own
+/// modules, the engine's tests and the Node host all read it from here.
+///
+/// A fourth backend adds its own `DIALECT` in its own crate and edits neither the
+/// contract crate nor any other vendor.
+pub const DIALECT: DialectId = DialectId::new(NAME);
+
+/// The id rule, asserted at COMPILE time on this crate's own declaration.
+///
+/// [`DialectId::new`] is `const` and so cannot return a `Result`; the registry
+/// re-checks at build time because a backend is not trusted about its own
+/// declaration. This is the same check one hop earlier, in the crate that owns the
+/// string, where a violation is a compile error naming this line rather than a
+/// registry panic naming a value.
+const _: () = assert!(DialectId::is_well_formed_name(NAME));
 
 /// Everything the engine needs from this crate: the capability descriptor, the four
 /// renderers, and the line-1 guard.

@@ -27,9 +27,9 @@
 use std::any::Any;
 use std::sync::{Arc, LazyLock};
 
+use crate::DIALECT;
 use zero_migrate_backend::conn::ExecutorConfig;
 use zero_migrate_backend::dialectal::{DialectalValue, VendorConfinement};
-use zero_migrate_ir::dialect::POSTGRES;
 
 /// The confinement settings **only the PostgreSQL backend reads**.
 ///
@@ -148,16 +148,15 @@ static ABSENT: LazyLock<PostgresConfinement> = LazyLock::new(PostgresConfinement
 pub fn of(cfg: &ExecutorConfig) -> &PostgresConfinement {
     cfg.confinement
         .vendor
-        .get::<PostgresConfinement>(&POSTGRES)
+        .get::<PostgresConfinement>(&DIALECT)
         .unwrap_or(&ABSENT)
 }
 
 /// Install `confinement` as PostgreSQL's leg of `cfg`.
 pub fn set(cfg: &mut ExecutorConfig, confinement: PostgresConfinement) {
-    cfg.confinement.vendor.insert(
-        POSTGRES,
-        Arc::new(confinement) as Arc<dyn VendorConfinement>,
-    );
+    cfg.confinement
+        .vendor
+        .insert(DIALECT, Arc::new(confinement) as Arc<dyn VendorConfinement>);
 }
 
 /// The host's provisioning seam for the settings only this backend reads.
@@ -215,7 +214,7 @@ mod tests {
     #[test]
     fn the_provisioning_seam_installs_a_leg_the_read_seam_finds() {
         let cfg = cfg().with_migrator_role("migrator_prj_x");
-        assert!(cfg.confinement.vendor.carries(&POSTGRES));
+        assert!(cfg.confinement.vendor.carries(&DIALECT));
         assert_eq!(of(&cfg).migrator_role.as_deref(), Some("migrator_prj_x"));
         // The other field keeps its default rather than being reset by the builder.
         assert_eq!(of(&cfg).extension_schemas, vec!["public".to_string()]);

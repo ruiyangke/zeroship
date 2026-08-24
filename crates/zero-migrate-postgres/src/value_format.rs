@@ -5,11 +5,11 @@ use zero_migrate_backend::snapshot::{ColumnCollationSnapshot, IdDefaultSnapshot}
 use zero_migrate_backend::value_format::{
     CatalogSqlContext, LiteralCastKind, ValueFormatColumnMetadata, ValueFormatRenderer,
 };
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::expr::{BinaryOp, CastTarget, Expr, ScalarFn, SynthFn};
 use zero_migrate_ir::ir::{IrScalar, ValueFormat};
 
-const DIALECT: DialectId = POSTGRES;
+use crate::DIALECT;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PgDefaultType {

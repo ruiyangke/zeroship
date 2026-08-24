@@ -1,7 +1,8 @@
 use zero_migrate_ir::backend::{
     BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
 };
-use zero_migrate_ir::dialect::POSTGRES;
+
+use crate::DIALECT;
 
 /// PostgreSQL's capability answers.
 pub const POSTGRES_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
@@ -38,7 +39,7 @@ pub const POSTGRES_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
 
 /// The PostgreSQL backend descriptor.
 pub static POSTGRES_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
-    id: POSTGRES,
+    id: DIALECT,
     display_name: "PostgreSQL",
     capabilities: POSTGRES_CAPABILITIES,
     limits: Limits {

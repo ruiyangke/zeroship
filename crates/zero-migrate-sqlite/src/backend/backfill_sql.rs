@@ -974,7 +974,7 @@ fn sqlite_journal_err(error: SqliteActorError) -> BackfillError {
 fn batch_error(last: Option<&CursorTuple>, error: SqliteActorError) -> BackfillError {
     match error {
         SqliteActorError::Poisoned(message) => BackfillError::SessionPoisoned {
-            dialect: zero_migrate_ir::dialect::SQLITE,
+            dialect: crate::DIALECT,
             detail: message,
         },
         error => BackfillError::BatchFailedAtCursor {

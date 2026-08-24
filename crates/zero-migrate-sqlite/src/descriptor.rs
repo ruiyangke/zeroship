@@ -1,7 +1,8 @@
 use zero_migrate_ir::backend::{
     BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
 };
-use zero_migrate_ir::dialect::SQLITE;
+
+use crate::DIALECT;
 
 /// `SQLite`'s capability answers.
 ///
@@ -22,7 +23,7 @@ pub const SQLITE_CAPABILITIES: CapabilitySet = CapabilitySet::empty()
 
 /// The `SQLite` backend descriptor.
 pub static SQLITE_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
-    id: SQLITE,
+    id: DIALECT,
     display_name: "SQLite",
     capabilities: SQLITE_CAPABILITIES,
     limits: Limits {

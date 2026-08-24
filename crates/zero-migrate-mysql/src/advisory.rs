@@ -36,9 +36,8 @@
 use zero_migrate_backend::advisory::{
     AdvisoryVerdict, AnalyzerAbsent, IndexCoverage, OperationalAdvisor,
 };
-use zero_migrate_ir::dialect::{DialectId, MYSQL};
 
-const DIALECT: DialectId = MYSQL;
+use crate::DIALECT;
 
 /// This vendor's own words for what is not being checked. Read by BOTH trait
 /// methods, so they cannot state different postures.

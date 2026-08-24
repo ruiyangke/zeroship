@@ -11,9 +11,10 @@
 mod support;
 
 use zero_migrate_backend::guard::{GuardConfig, GuardError, GuardMode};
-use zero_migrate_ir::dialect::{DialectId, POSTGRES, SQLITE};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::policy::SchemaScope;
 use zero_migrate_postgres::guard::{check_raw_view_body_text, extract_string_literals, SqlGuard};
+use zero_migrate_postgres::DIALECT as POSTGRES;
 
 const DUCKDB: DialectId = DialectId::new("duckdb");
 
@@ -45,7 +46,7 @@ fn dialect_selection_preserves_policy_and_enforces_non_postgres_guard() {
         Some(SchemaScope::Single("app1".to_string()))
     );
 
-    let sqlite = cfg.for_dialect(SQLITE);
+    let sqlite = cfg.for_dialect(DialectId::new("sqlite"));
     assert_eq!(sqlite.guard_mode(), GuardMode::Enforced);
     assert_eq!(
         sqlite.schema_scope(),
