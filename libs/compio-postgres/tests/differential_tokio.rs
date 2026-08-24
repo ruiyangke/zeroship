@@ -830,3 +830,158 @@ async fn both_drivers_agree_on_copy_out_bytes() {
         );
     }
 }
+
+/// Rows fed through COPY IN, chosen to span many CopyData frames.
+///
+/// The sink batches what it is fed into frames of its own choosing, so the
+/// framing on the wire is the driver's decision, not the caller's. A driver
+/// that loses a batch, or emits a partial final frame, still reports a
+/// plausible count - the server's own count is what catches it.
+const COPY_IN_ROWS: i32 = 3000;
+
+fn copy_in_body() -> String {
+    let mut body = String::new();
+    for id in 1..=COPY_IN_ROWS {
+        // Tabs and backslashes are COPY's escapes; a row that carries them
+        // proves the bytes went through unmangled.
+        body.push_str(&format!("{id}\tvalue\\t{id}\tpad-{id}\n"));
+    }
+    body
+}
+
+fn tokio_copy_in(url: String, table: String, body: String) -> u64 {
+    use futures_util::SinkExt;
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let written = runtime.block_on(async move {
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let sink = client
+                .copy_in::<_, bytes::Bytes>(&format!("COPY {table} FROM STDIN"))
+                .await
+                .expect("tokio copy_in");
+            let mut sink = std::pin::pin!(sink);
+            for line in body.lines() {
+                sink.feed(bytes::Bytes::from(format!("{line}\n")))
+                    .await
+                    .expect("tokio copy feed");
+            }
+            let written = sink.finish().await.expect("tokio copy finish");
+            drop(client);
+            let _ = driver.await;
+            written
+        });
+        let _ = sender.send(written);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver
+        .recv()
+        .expect("no copy-in count came back from tokio")
+}
+
+/// COPY IN framing is the driver's own work, and both must land identical
+/// rows and report the same count.
+#[compio::test]
+async fn both_drivers_agree_on_copy_in_results() {
+    use futures_util::SinkExt;
+
+    let url = common::test_url();
+    let base = common::test_object_name("cpg copyin");
+    let ours_table = format!("{base}_ours");
+    let theirs_table = format!("{base}_theirs");
+
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    // Two permanent tables so each driver writes its own and the contents can
+    // be compared by the SERVER, which is the only party neither driver can
+    // talk into agreeing.
+    for table in [&ours_table, &theirs_table] {
+        client
+            .batch_execute(&format!(
+                "DROP TABLE IF EXISTS {table};
+                 CREATE TABLE {table} (id int, tagged text, pad text);"
+            ))
+            .await
+            .expect("copy-in fixture");
+    }
+
+    let body = copy_in_body();
+    let theirs_count = tokio_copy_in(url.clone(), theirs_table.clone(), body.clone());
+
+    let sink = client
+        .copy_in::<_, bytes::Bytes>(&format!("COPY {ours_table} FROM STDIN"))
+        .await
+        .expect("copy_in");
+    let mut sink = std::pin::pin!(sink);
+    for line in body.lines() {
+        sink.feed(bytes::Bytes::from(format!("{line}\n")))
+            .await
+            .expect("copy feed");
+    }
+    let ours_count = sink.finish().await.expect("copy finish");
+
+    // Ask the server whether the two tables are identical, rather than
+    // comparing what either driver believes it wrote.
+    let row = client
+        .query_one(
+            &format!(
+                "SELECT
+                   (SELECT count(*) FROM {ours_table})::int8,
+                   (SELECT count(*) FROM {theirs_table})::int8,
+                   (SELECT count(*) FROM (
+                      SELECT * FROM {ours_table} EXCEPT ALL SELECT * FROM {theirs_table}
+                    ) d)::int8,
+                   (SELECT count(*) FROM (
+                      SELECT * FROM {theirs_table} EXCEPT ALL SELECT * FROM {ours_table}
+                    ) d)::int8"
+            ),
+            &[],
+        )
+        .await
+        .expect("compare the two tables");
+    let ours_rows: i64 = row.get(0);
+    let theirs_rows: i64 = row.get(1);
+    let only_ours: i64 = row.get(2);
+    let only_theirs: i64 = row.get(3);
+
+    for table in [&ours_table, &theirs_table] {
+        let _ = client
+            .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+            .await;
+    }
+
+    assert_eq!(
+        ours_count, theirs_count,
+        "the drivers reported different COPY IN counts"
+    );
+    assert_eq!(
+        ours_rows, theirs_rows,
+        "the server holds different row counts for the two drivers"
+    );
+    assert_eq!(
+        i64::from(COPY_IN_ROWS),
+        ours_rows,
+        "neither driver wrote the expected number of rows, so agreement proves nothing"
+    );
+    assert_eq!(
+        (only_ours, only_theirs),
+        (0, 0),
+        "the two drivers wrote different content: {only_ours} rows only ours, \
+         {only_theirs} only theirs"
+    );
+}
