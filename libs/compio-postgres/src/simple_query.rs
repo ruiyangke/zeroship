@@ -48,8 +48,16 @@ pub async fn simple_query(
 ) -> Result<SimpleQueryStream, Error> {
     debug!("executing simple query: {query}");
 
+    let must_prequeue_copy_abort = may_enter_copy_in(query);
     let buf = encode(client, query)?;
     let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    if must_prequeue_copy_abort {
+        // Queue this while starting the stream, before it can be handed to a
+        // caller or abandoned. Waiting until `CopyInResponse` is observed is
+        // too late when another multiplexed request is already behind this
+        // Query: PostgreSQL would read that request as COPY data first.
+        abort_copy_in(client, CopyAbortProtocol::Simple)?;
+    }
 
     Ok(SimpleQueryStream {
         client: Arc::downgrade(client),
@@ -170,7 +178,11 @@ pub(crate) fn start_batch_execute(
     debug!("executing statement batch: {query}");
 
     let buf = encode(client, query)?;
-    client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))
+    let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+    if may_enter_copy_in(query) {
+        abort_copy_in(client, CopyAbortProtocol::Simple)?;
+    }
+    Ok(responses)
 }
 
 pub(crate) fn start_batch_execute_with_error_cleanup(
@@ -180,9 +192,22 @@ pub(crate) fn start_batch_execute_with_error_cleanup(
 ) -> Result<Responses, Error> {
     debug!("executing statement batch: {query}");
 
+    let must_prequeue_copy_abort = may_enter_copy_in(query);
     let query = encode(client, query)?;
     let cleanup = encode(client, cleanup)?;
-    client.send_with_error_cleanup(FrontendMessage::Raw(query), FrontendMessage::Raw(cleanup))
+    if !must_prequeue_copy_abort {
+        return client
+            .send_with_error_cleanup(FrontendMessage::Raw(query), FrontendMessage::Raw(cleanup));
+    }
+
+    let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(query)))?;
+    abort_copy_in(client, CopyAbortProtocol::Simple)?;
+    drop(client.send_with(
+        RequestMessages::Single(FrontendMessage::Raw(cleanup)),
+        RequestDisposition::Housekeeping,
+        TransactionEffect::MayChange,
+    )?);
+    Ok(responses)
 }
 
 /// Drain the response stream `start_batch_execute` returned.
@@ -268,6 +293,182 @@ fn encode(client: &InnerClient, query: &str) -> Result<Bytes, Error> {
     })
 }
 
+/// Whether a simple Query message can put PostgreSQL into COPY-IN mode.
+///
+/// Drop recovery must be selective: an unfinished ordinary stream may belong
+/// to command-timeout recovery, whose next frontend frame is deliberately a
+/// `Sync`. Sending `CopyFail` in front of that barrier changes the protocol.
+/// Conversely, a stream whose SQL contains `COPY ... FROM STDIN` needs its
+/// `CopyFail` queued synchronously on drop, before the caller can reuse the
+/// client. PostgreSQL does not describe all statements in a simple Query ahead
+/// of execution, so the original SQL is the only place that distinction exists.
+///
+/// This lexer recognises statement-leading COPY and a top-level FROM STDIN
+/// source while excluding strings, quoted identifiers, dollar-quoted bodies,
+/// comments, and the FROM inside `COPY (SELECT ...) TO STDOUT`.
+fn may_enter_copy_in(query: &str) -> bool {
+    // `standard_conforming_strings` is session state and PostgreSQL reports it,
+    // but this low-level helper only has the SQL. Accept a COPY found under
+    // either interpretation so a backslash-escaped quote can never hide a real
+    // statement. A false positive is safe: PostgreSQL discards CopyFail outside
+    // COPY mode and the paired Sync pays the housekeeping response slot.
+    may_enter_copy_in_with_string_mode(query, false)
+        || may_enter_copy_in_with_string_mode(query, true)
+}
+
+fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: bool) -> bool {
+    let bytes = query.as_bytes();
+    let mut index = 0;
+    let mut statement_start = true;
+    let mut copy = false;
+    let mut copy_from = false;
+    let mut paren_depth = 0usize;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            byte if byte.is_ascii_whitespace() => index += 1,
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                let mut depth = 1usize;
+                while index < bytes.len() && depth != 0 {
+                    if bytes[index..].starts_with(b"/*") {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes[index..].starts_with(b"*/") {
+                        depth -= 1;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'\'' => {
+                copy_from = false;
+                let escape_string = ordinary_backslash_escapes
+                    || (index > 0
+                        && matches!(bytes[index - 1], b'e' | b'E')
+                        && (index == 1
+                            || !matches!(
+                                bytes[index - 2],
+                                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$'
+                            )));
+                index += 1;
+                while index < bytes.len() {
+                    if escape_string && bytes[index] == b'\\' {
+                        index = (index + 2).min(bytes.len());
+                    } else if bytes[index] == b'\'' {
+                        index += 1;
+                        if bytes.get(index) == Some(&b'\'') {
+                            index += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'"' => {
+                copy_from = false;
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b'"' {
+                        index += 1;
+                        if bytes.get(index) == Some(&b'"') {
+                            index += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'$' => {
+                let tag_start = index;
+                let mut tag_end = index + 1;
+                if bytes.get(tag_end).is_some_and(|byte| {
+                    byte.is_ascii_alphabetic() || *byte == b'_' || !byte.is_ascii()
+                }) {
+                    tag_end += 1;
+                    while bytes.get(tag_end).is_some_and(|byte| {
+                        byte.is_ascii_alphanumeric()
+                            || *byte == b'_'
+                            || !byte.is_ascii()
+                    }) {
+                        tag_end += 1;
+                    }
+                }
+                if bytes.get(tag_end) != Some(&b'$') {
+                    copy_from = false;
+                    index += 1;
+                    continue;
+                }
+
+                copy_from = false;
+                let delimiter = &bytes[tag_start..=tag_end];
+                index = tag_end + 1;
+                while index + delimiter.len() <= bytes.len()
+                    && &bytes[index..index + delimiter.len()] != delimiter
+                {
+                    index += 1;
+                }
+                index = (index + delimiter.len()).min(bytes.len());
+            }
+            b';' if paren_depth == 0 => {
+                statement_start = true;
+                copy = false;
+                copy_from = false;
+                index += 1;
+            }
+            b'(' => {
+                paren_depth += 1;
+                copy_from = false;
+                index += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                copy_from = false;
+                index += 1;
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' || !byte.is_ascii() => {
+                let start = index;
+                index += 1;
+                while bytes.get(index).is_some_and(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(*byte, b'_' | b'$')
+                        || !byte.is_ascii()
+                }) {
+                    index += 1;
+                }
+                let word = &bytes[start..index];
+                if statement_start {
+                    statement_start = false;
+                    copy = word.eq_ignore_ascii_case(b"copy");
+                    copy_from = false;
+                } else if copy && paren_depth == 0 {
+                    if copy_from && word.eq_ignore_ascii_case(b"stdin") {
+                        return true;
+                    }
+                    copy_from = word.eq_ignore_ascii_case(b"from");
+                }
+            }
+            _ => {
+                copy_from = false;
+                index += 1;
+            }
+        }
+    }
+
+    false
+}
+
 pin_project! {
     /// A stream of simple query results.
     #[project(!Unpin)]
@@ -349,6 +550,42 @@ impl Stream for SimpleQueryStream {
                 },
                 _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_enter_copy_in;
+
+    #[test]
+    fn copy_in_classifier_finds_statement_level_from_stdin() {
+        for query in [
+            "COPY t FROM STDIN",
+            "SELECT 1; COPY t (a) FrOm /* nested /* comment */ ok */ StDiN",
+            "; -- lead\n COPY BINARY t FROM STDIN WITH (FORMAT binary)",
+            r"SELECT 'a\'; COPY t FROM STDIN",
+            r"SELECT 'x\'; SELECT 2'; COPY t FROM STDIN",
+            "SELECT $é$'$é$; COPY t FROM STDIN",
+        ] {
+            assert!(may_enter_copy_in(query), "missed COPY-IN query: {query}");
+        }
+    }
+
+    #[test]
+    fn copy_in_classifier_ignores_non_commands_and_copy_out() {
+        for query in [
+            "SELECT 'COPY t FROM STDIN'",
+            r"SELECT E'not COPY t FROM STDIN \' either'",
+            "SELECT $$ COPY t FROM STDIN $$",
+            "SELECT $tag$ COPY t FROM STDIN $tag$",
+            "SELECT \"COPY\", \"FROM\", \"STDIN\"",
+            "COPY t TO STDOUT",
+            "COPY (SELECT * FROM stdin) TO STDOUT",
+            "-- COPY t FROM STDIN\nSELECT 1",
+            "/* COPY t FROM STDIN */ SELECT 1",
+        ] {
+            assert!(!may_enter_copy_in(query), "misclassified query: {query}");
         }
     }
 }
