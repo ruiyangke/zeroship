@@ -229,12 +229,28 @@ impl Row {
         };
 
         let ty = self.columns()[idx].type_();
-        if !T::accepts(ty) {
-            return Err(Error::from_sql(
-                Box::new(WrongType::new::<T>(ty.clone())),
-                idx,
-            ));
-        }
+        // A domain decodes as its base, exactly as it BINDS as its base. The
+        // two paths disagreed until now: `crate::query::encode_parameter`
+        // unwrapped, this did not, so a `d[]` column could be written and then
+        // not read back. `underlying_base_type` is the one definition both use.
+        //
+        // The reduction is only consulted when the declared type is refused, so
+        // no ordinary column changes what it decodes as.
+        let reduced = if T::accepts(ty) {
+            None
+        } else {
+            crate::query::underlying_base_type(ty).filter(|base| T::accepts(base))
+        };
+        let ty = match &reduced {
+            Some(base) => base,
+            None if T::accepts(ty) => ty,
+            None => {
+                return Err(Error::from_sql(
+                    Box::new(WrongType::new::<T>(ty.clone())),
+                    idx,
+                ));
+            }
+        };
 
         FromSql::from_sql_nullable(ty, self.col_buffer(idx)).map_err(|e| Error::from_sql(e, idx))
     }
