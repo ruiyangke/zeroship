@@ -778,11 +778,17 @@ async fn null_values() {
 #[compio::test]
 async fn wrong_password() {
     let url = test_url();
-    // Replace the password in the URL with a wrong one.
-    // The default URL uses `zeroship@` as the password-host separator.
-    let bad_url = url
-        .replace(":zeroship@", ":wrong_password_xyz@")
-        .replace(":test@", ":wrong_password_xyz@");
+    // Located structurally, not by a literal. This used to replace the exact
+    // string `:zeroship@`, which is right for the default plaintext DSN and
+    // matches nothing else: against any other server the "bad" DSN was the
+    // GOOD one, the connection succeeded, and the test failed claiming the
+    // server had accepted a wrong password.
+    let bad_url = common::with_password(&url, "wrong_password_xyz")
+        .expect("the test DSN carries no password to make wrong");
+    assert_ne!(
+        bad_url, url,
+        "the password was not replaced, so this would test the opposite of its name"
+    );
 
     let err = match connect(&bad_url).await {
         Err(e) => e,
@@ -2178,7 +2184,9 @@ async fn notify_delivered_on_idle_listener() {
 
     // Listener connection A. Register the async-message sink BEFORE spawning
     // run(), then LISTEN on a channel.
-    let (client_a, mut conn_a) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
+    let (client_a, mut conn_a) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap();
     let mut notifications = conn_a.notifications();
     compio::runtime::spawn(async move {
         if let Err(e) = conn_a.run().await {
@@ -3547,7 +3555,9 @@ async fn concurrent_large_bidirectional_queries_do_not_deadlock() {
 async fn multiplexed_clean_shutdown_completes_without_hang() {
     let Some(url) = require_pg().await else { return };
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap();
     // Retain the handle so we can await the driver's own clean exit.
     let conn_handle = compio::runtime::spawn(async move { connection.run().await });
 
@@ -4198,8 +4208,12 @@ async fn sslmode_require_fails_closed_over_a_plaintext_server() {
     let sep = if url.contains('?') { '&' } else { '?' };
     let require = format!("{url}{sep}sslmode=require");
 
-    // `NoTls` explicitly: no build of this crate lets NoTls satisfy `require`.
-    let err = compio_postgres::connect(&require, common::suite_tls())
+    // `NoTls` explicitly, and NOT `common::suite_tls()`: the claim is that no
+    // build of this crate lets NoTls satisfy `require`, so the transport is
+    // the subject of the test rather than a detail of how it connects. Handing
+    // it the suite connector under `--features suite-over-tls` made it fail on
+    // attestation instead, which asserts something else entirely.
+    let err = compio_postgres::connect(&require, NoTls)
         .await
         .err()
         .expect("sslmode=require must not succeed over a plaintext connection");
@@ -4986,7 +5000,9 @@ async fn a_pool_refuses_a_configuration_it_cannot_honour() {
 async fn dropping_the_client_closes_the_connection_without_an_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
 
     client.execute("SELECT 1", &[]).await.unwrap();
@@ -5011,7 +5027,9 @@ async fn dropping_the_client_closes_the_connection_without_an_error() {
 async fn losing_the_backend_under_a_live_client_is_still_an_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
 
     // Terminating our own backend mid-statement leaves the request in the
@@ -5038,7 +5056,9 @@ async fn losing_the_backend_under_a_live_client_is_still_an_error() {
 async fn dropping_an_unfinished_transaction_and_the_client_closes_without_an_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
+    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
 
     let transaction = client.transaction().await.unwrap();
@@ -5066,7 +5086,9 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
         .await
         .unwrap();
 
-    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
+    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
     let backend_pid: i32 = client
         .query_one_scalar("SELECT pg_backend_pid()", &[])
@@ -5128,7 +5150,9 @@ async fn dropping_the_client_with_a_server_transaction_open_rolls_back() {
 async fn dropping_a_bound_portal_and_its_client_closes_without_an_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
+    let (mut client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap();
     let task = compio::runtime::spawn(async move { connection.run().await });
 
     let statement = client.prepare("SELECT $1::INT4").await.unwrap();
@@ -5155,7 +5179,9 @@ async fn dropping_a_bound_portal_and_its_client_closes_without_an_error() {
 async fn an_awaited_query_queued_before_client_drop_still_reports_its_write_error() {
     let Some(url) = require_pg().await else { return };
 
-    let (client, connection) = compio_postgres::connect(&url, common::suite_tls()).await.unwrap();
+    let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+        .await
+        .unwrap();
     let observer = client.simple_query_raw("SELECT 1").await.unwrap();
     drop(client);
 
