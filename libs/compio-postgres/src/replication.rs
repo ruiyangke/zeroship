@@ -69,6 +69,7 @@ use crate::connect::{
 };
 use crate::connect_socket::connect_socket;
 use crate::connect_tls::negotiate_tls;
+use crate::escape::{escape_literal_body, quote_identifier};
 use crate::maybe_tls_stream::MaybeTlsStream;
 use crate::release::ConnectionRelease;
 use crate::tls::MakeTlsConnect;
@@ -572,18 +573,35 @@ where
         self.in_flight.enter()?;
         self.stream.begin_read_response();
 
+        // Both names below are IDENTIFIERS the server parses, not opaque
+        // strings it hands to pgoutput verbatim, and neither can travel as a
+        // Bind parameter: this is a simple query on a walsender, and
+        // `START_REPLICATION SLOT $1` is not a thing. So they are quoted
+        // here, through the same helper the savepoint statements use.
+        //
+        // `publication_names` needs BOTH escapes, applied in this order: each
+        // name is quoted as an identifier, because the walsender re-parses
+        // the option value with `SplitIdentifierString` (an unquoted element
+        // is case-folded and a comma ends it); then the joined list is
+        // escaped as the body of a single-quoted literal, because that is
+        // what encloses it on the wire. Quoting alone would still let a name
+        // containing `'` close the literal early.
+        let publications = opts
+            .publication_names
+            .iter()
+            .map(|name| quote_identifier(name))
+            .collect::<Vec<_>>()
+            .join(",");
+
         let mut cmd = String::with_capacity(128);
-        cmd.push_str("START_REPLICATION SLOT \"");
-        cmd.push_str(opts.slot_name);
-        cmd.push_str("\" LOGICAL ");
+        cmd.push_str("START_REPLICATION SLOT ");
+        cmd.push_str(&quote_identifier(opts.slot_name));
+        cmd.push_str(" LOGICAL ");
         cmd.push_str(opts.start_lsn);
         cmd.push_str(" (\"proto_version\" '");
         cmd.push_str(&opts.proto_version.to_string());
         cmd.push_str("', \"publication_names\" '");
-        // The publication_names list is single-quoted; commas separate
-        // names. Caller is responsible for sanitising values (slot
-        // setup already validates).
-        cmd.push_str(opts.publication_names);
+        cmd.push_str(&escape_literal_body(&publications));
         cmd.push_str("')");
 
         send_simple_query(&mut self.stream, &cmd).await?;
@@ -649,9 +667,15 @@ pub struct StartReplicationOptions<'a> {
     /// pgoutput protocol version. `1` is widely supported; `2`+ adds
     /// streaming-of-large-transactions. P8a.2 targets `1`.
     pub proto_version: u32,
-    /// Comma-separated list of publication names (no quoting; the
-    /// caller sanitises each name).
-    pub publication_names: &'a str,
+    /// The publications to stream, one name per element, unquoted and
+    /// unescaped as the user wrote them. This driver quotes each one.
+    ///
+    /// A LIST, not a pre-joined string, because a comma is a legal
+    /// character in a publication name and a joined string cannot say
+    /// whether one separates two names or belongs to one. It used to be
+    /// `&str`, and a publication named `eu,us` was streamed as the two
+    /// publications `eu` and `us` - neither of which existed.
+    pub publication_names: &'a [&'a str],
 }
 
 // ---------------------------------------------------------------------------

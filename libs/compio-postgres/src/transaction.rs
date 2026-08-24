@@ -58,9 +58,7 @@ impl Drop for SavepointCreationGuard<'_> {
 /// and every change it was asked to make is gone.
 const ROLLBACK_TAG: &str = "ROLLBACK";
 
-fn quote_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
-}
+use crate::escape::quote_identifier;
 
 /// The SQL that ends a savepoint's scope: undo its work, then take the name
 /// back off the server's savepoint stack.
