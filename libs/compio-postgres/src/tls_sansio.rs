@@ -27,11 +27,12 @@
 //! (`AsyncStream` + `SyncStream`, 524 lines of self-referential pinned
 //! futures). The state machine is driven directly.
 
-use compio::buf::BufResult;
+use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use rustls::ClientConnection;
-
-use crate::Error;
+use std::cell::RefCell;
+use std::io::{self, Read, Write};
+use std::rc::Rc;
 
 /// Bytes requested per socket read while handshaking.
 ///
@@ -50,7 +51,7 @@ const READ_CHUNK: usize = 16 * 1024;
 pub(crate) async fn handshake<S>(
     mut socket: S,
     mut connection: ClientConnection,
-) -> Result<(S, ClientConnection), Error>
+) -> io::Result<(S, ClientConnection)>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -61,14 +62,12 @@ where
         // rather than merely delaying it.
         while connection.wants_write() {
             let mut out = Vec::new();
-            connection
-                .write_tls(&mut out)
-                .map_err(|error| Error::tls(error.into()))?;
+            connection.write_tls(&mut out)?;
             if out.is_empty() {
                 break;
             }
             let BufResult(written, _) = socket.write_all(out).await;
-            written.map_err(|error| Error::io(error))?;
+            written?;
         }
 
         if !connection.is_handshaking() {
@@ -76,17 +75,14 @@ where
         }
 
         let BufResult(read, buffer) = socket.read(Vec::with_capacity(READ_CHUNK)).await;
-        let read = read.map_err(|error| Error::io(error))?;
+        let read = read?;
         if read == 0 {
-            // The peer closed mid-handshake. `Error::tls` rather than a bare
-            // EOF: a truncated handshake is a TLS-level failure, and rustls
-            // treats silent truncation as an attack rather than an ending.
-            return Err(Error::tls(
-                std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "the peer closed the connection during the TLS handshake",
-                )
-                .into(),
+            // A truncated handshake is a TLS-level failure, not an ending:
+            // rustls treats silent truncation as an attack. The message names
+            // the handshake so the cause is legible in a connect error.
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the peer closed the connection during the TLS handshake",
             ));
         }
 
@@ -96,13 +92,378 @@ where
         // and it is where a bad certificate or a protocol violation surfaces.
         let mut pending = &buffer[..read];
         while !pending.is_empty() {
-            connection
-                .read_tls(&mut pending)
-                .map_err(|error| Error::tls(error.into()))?;
+            connection.read_tls(&mut pending)?;
             connection
                 .process_new_packets()
-                .map_err(|error| Error::tls(error.into()))?;
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         }
+    }
+}
+
+/// A rustls session plus the ciphertext it has produced and not yet handed to
+/// a socket.
+///
+/// Every method here is SYNCHRONOUS and none of them may be made async. That is
+/// the invariant that makes sharing the session between two concurrently
+/// running halves sound: a `RefCell` borrow never spans a suspension point, so
+/// the halves can never both hold one.
+pub(crate) struct TlsSession {
+    conn: ClientConnection,
+    outgoing: Vec<u8>,
+}
+
+impl TlsSession {
+    pub(crate) fn new(conn: ClientConnection) -> Self {
+        Self {
+            conn,
+            outgoing: Vec::new(),
+        }
+    }
+
+    pub(crate) fn connection(&self) -> &ClientConnection {
+        &self.conn
+    }
+
+    /// Move any ciphertext rustls is holding into the outbound queue.
+    ///
+    /// The loop stops on no progress rather than on `wants_write()` alone: a
+    /// zero-byte `write_tls` that left the flag set would spin forever.
+    fn collect_outgoing(&mut self) -> io::Result<()> {
+        while self.conn.wants_write() {
+            let before = self.outgoing.len();
+            self.conn.write_tls(&mut self.outgoing)?;
+            if self.outgoing.len() == before {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Hand received ciphertext to rustls.
+    ///
+    /// `read_tls` takes only as much as one record boundary allows, so this
+    /// loops. `process_new_packets` runs after each chunk because rustls will
+    /// not accept further input while packets are pending, and because that is
+    /// where a protocol violation surfaces.
+    fn feed_ciphertext(&mut self, mut src: &[u8]) -> io::Result<()> {
+        while !src.is_empty() {
+            let before = src.len();
+            self.conn.read_tls(&mut src)?;
+            self.conn
+                .process_new_packets()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if src.len() == before {
+                break;
+            }
+        }
+        self.collect_outgoing()
+    }
+
+    /// Decrypted bytes, or 0 when rustls has none buffered.
+    ///
+    /// `WouldBlock` from rustls means "no plaintext yet", which is a state and
+    /// not a failure - the caller answers it by reading more ciphertext.
+    fn read_plaintext(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+        match self.conn.reader().read(dst) {
+            Ok(n) => Ok(n),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(0),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Encrypt plaintext into the outbound queue.
+    fn write_plaintext(&mut self, src: &[u8]) -> io::Result<usize> {
+        let n = self.conn.writer().write(src)?;
+        self.collect_outgoing()?;
+        Ok(n)
+    }
+
+    fn take_outgoing(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.outgoing)
+    }
+
+    fn send_close_notify(&mut self) -> io::Result<()> {
+        self.conn.send_close_notify();
+        self.collect_outgoing()
+    }
+}
+
+/// The handle both halves share.
+pub(crate) type SharedSession = Rc<RefCell<TlsSession>>;
+
+pub(crate) fn share(conn: ClientConnection) -> SharedSession {
+    Rc::new(RefCell::new(TlsSession::new(conn)))
+}
+
+/// Copy `src` into a compio buffer and declare that many bytes valid.
+///
+/// The ONLY `unsafe` in this crate, and the reason is mechanical: compio's
+/// `IoBufMut` describes a buffer that may be partly uninitialized, so nothing
+/// but the buffer itself can be told how much of it is now valid.
+///
+/// The copy is not free, and it is not accidental either. Reading rustls'
+/// plaintext straight into the caller's buffer would need a `&mut [u8]` over
+/// uninitialized memory, which on compio-buf 0.8.1 costs a second `unsafe`
+/// (`assume_init_mut` is unstable, so it would be a raw-pointer cast). One
+/// memcpy of at most a read chunk is the cheaper thing to be sure of.
+fn commit<B: IoBufMut>(buf: &mut B, src: &[u8]) {
+    let uninit = buf.as_uninit();
+    let n = src.len().min(uninit.len());
+    for (slot, byte) in uninit.iter_mut().zip(&src[..n]) {
+        // `MaybeUninit::write` is safe: it initializes the slot.
+        slot.write(*byte);
+    }
+    // SAFETY: `set_len` requires (1) `n <= as_uninit().len()`, which the `min`
+    // above guarantees, and (2) that every byte in `[buf_len(), n)` is
+    // initialized - the loop just wrote all n of them through
+    // `MaybeUninit::write`, and `buf_len() <= n` because a freshly handed-over
+    // read buffer reports length 0.
+    #[allow(unsafe_code)]
+    unsafe {
+        buf.set_len(n);
+    }
+}
+
+/// The read side of a TLS session: a source of ciphertext plus the scratch the
+/// decrypt loop needs.
+///
+/// This owns the socket rather than borrowing it because compio's `AsyncRead`
+/// is a completion API - buffers and streams are passed by value - and because
+/// an inherent `&mut self` method sidesteps the `'static` bound the trait's
+/// returned future imposes on any free-standing `&mut [u8]` argument.
+pub(crate) struct TlsReader<R> {
+    socket: R,
+    session: SharedSession,
+    /// Ciphertext straight off the socket.
+    cipher: Vec<u8>,
+    /// Decrypted bytes, staged before being copied into the caller's buffer.
+    plain: Vec<u8>,
+}
+
+impl<R> TlsReader<R> {
+    pub(crate) fn new(socket: R, session: SharedSession) -> Self {
+        Self {
+            socket,
+            session,
+            cipher: Vec::new(),
+            plain: Vec::new(),
+        }
+    }
+
+    fn socket_mut(&mut self) -> &mut R {
+        &mut self.socket
+    }
+
+    fn session(&self) -> &SharedSession {
+        &self.session
+    }
+}
+
+impl<R> TlsReader<R>
+where
+    R: AsyncRead + Unpin,
+{
+    /// Stage up to `cap` plaintext bytes in `self.plain`, reading ciphertext
+    /// until some arrive.
+    ///
+    /// Returns 0 only at a genuine end of stream. Returning 0 merely because
+    /// rustls had nothing buffered YET would read to the connection loop as the
+    /// server hanging up.
+    async fn fill(&mut self, cap: usize) -> io::Result<usize> {
+        if cap == 0 {
+            return Ok(0);
+        }
+        if self.plain.len() < cap {
+            self.plain.resize(cap, 0);
+        }
+        loop {
+            let n = self
+                .session
+                .borrow_mut()
+                .read_plaintext(&mut self.plain[..cap])?;
+            if n > 0 {
+                return Ok(n);
+            }
+            // Read one chunk of ciphertext and give it to rustls. Inlined
+            // rather than a helper on purpose: every nested async frame here
+            // lands in the layout of the caller's async block, and this one
+            // sits under the connection task of every consumer of this crate.
+            // Splitting it back out pushed five downstream crates past rustc's
+            // default query-depth limit of 128.
+            if self.cipher.is_empty() {
+                self.cipher = vec![0u8; READ_CHUNK];
+            }
+            let buf = std::mem::take(&mut self.cipher);
+            let BufResult(result, buf) = self.socket.read(buf).await;
+            self.cipher = buf;
+            let read = result?;
+            if read == 0 {
+                // The socket is done, but anything rustls decrypted before the
+                // close is still owed to the caller. Only after that is this a
+                // real end of stream.
+                return self
+                    .session
+                    .borrow_mut()
+                    .read_plaintext(&mut self.plain[..cap]);
+            }
+            let chunk = std::mem::take(&mut self.cipher);
+            let outcome = self.session.borrow_mut().feed_ciphertext(&chunk[..read]);
+            self.cipher = chunk;
+            outcome?;
+        }
+    }
+
+    async fn read_into<B: IoBufMut>(&mut self, mut buf: B) -> BufResult<usize, B> {
+        let cap = buf.buf_capacity();
+        match self.fill(cap).await {
+            Ok(n) => {
+                commit(&mut buf, &self.plain[..n]);
+                BufResult(Ok(n), buf)
+            }
+            Err(error) => BufResult(Err(error), buf),
+        }
+    }
+}
+
+/// Push everything queued to `socket`.
+///
+/// Takes the queue by value so the `RefCell` borrow ends before the write is
+/// awaited. Anything the read path appends meanwhile leaves with the next
+/// flush.
+async fn flush_outgoing<W>(socket: &mut W, session: &SharedSession) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    loop {
+        let pending = session.borrow_mut().take_outgoing();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let BufResult(result, _) = socket.write_all(pending).await;
+        result?;
+    }
+}
+
+async fn write_through<W>(socket: &mut W, session: &SharedSession, src: &[u8]) -> io::Result<usize>
+where
+    W: AsyncWrite + Unpin,
+{
+    let n = session.borrow_mut().write_plaintext(src)?;
+    flush_outgoing(socket, session).await?;
+    Ok(n)
+}
+
+async fn shutdown_through<W>(socket: &mut W, session: &SharedSession) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    session.borrow_mut().send_close_notify()?;
+    flush_outgoing(socket, session).await?;
+    socket.shutdown().await
+}
+
+/// A TLS stream that still owns its socket, and so can be split.
+pub(crate) struct TlsStreamCore<S> {
+    reader: TlsReader<S>,
+}
+
+impl<S> TlsStreamCore<S> {
+    pub(crate) fn new(socket: S, session: SharedSession) -> Self {
+        Self {
+            reader: TlsReader::new(socket, session),
+        }
+    }
+
+    pub(crate) fn into_parts(self) -> (S, SharedSession) {
+        (self.reader.socket, self.reader.session)
+    }
+
+    pub(crate) fn session(&self) -> &SharedSession {
+        self.reader.session()
+    }
+}
+
+impl<S> AsyncRead for TlsStreamCore<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+        self.reader.read_into(buf).await
+    }
+}
+
+impl<S> AsyncWrite for TlsStreamCore<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+        let session = self.reader.session.clone();
+        let result = write_through(self.reader.socket_mut(), &session, buf.as_init()).await;
+        BufResult(result, buf)
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        let session = self.reader.session.clone();
+        flush_outgoing(self.reader.socket_mut(), &session).await?;
+        self.reader.socket_mut().flush().await
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        let session = self.reader.session.clone();
+        shutdown_through(self.reader.socket_mut(), &session).await
+    }
+}
+
+/// Owned read half: the socket's read side plus a share of the session.
+pub struct TlsReadHalf<R> {
+    reader: TlsReader<R>,
+}
+
+impl<R> TlsReadHalf<R> {
+    pub(crate) fn new(socket: R, session: SharedSession) -> Self {
+        Self {
+            reader: TlsReader::new(socket, session),
+        }
+    }
+}
+
+impl<R> AsyncRead for TlsReadHalf<R>
+where
+    R: AsyncRead + Unpin,
+{
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+        self.reader.read_into(buf).await
+    }
+}
+
+/// Owned write half: the socket's write side plus a share of the session.
+pub struct TlsWriteHalf<W> {
+    socket: W,
+    session: SharedSession,
+}
+
+impl<W> TlsWriteHalf<W> {
+    pub(crate) fn new(socket: W, session: SharedSession) -> Self {
+        Self { socket, session }
+    }
+}
+
+impl<W> AsyncWrite for TlsWriteHalf<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+        let result = write_through(&mut self.socket, &self.session, buf.as_init()).await;
+        BufResult(result, buf)
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        flush_outgoing(&mut self.socket, &self.session).await?;
+        self.socket.flush().await
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        shutdown_through(&mut self.socket, &self.session).await
     }
 }
 

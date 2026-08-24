@@ -48,15 +48,16 @@
 //   written without waiting for earlier responses (IO-3). See
 //   `run_multiplexed` for the full FIFO / back-pressure argument.
 //
-// * `run_serialized` — the fallback for unsplittable streams (TLS:
-//   rustls keeps shared session state across read/write, so the halves
-//   cannot run independent submissions). Reads and writes never overlap;
-//   every `read_backend().await` runs to completion before control
-//   returns to the dispatch point. Its documented trade-off stands: an idle
-//   connection does
-//   not read (notifications wait for the next request), and a COPY-IN the
-//   server rejects mid-stream can deadlock. Pooled connections that negotiate
-//   TLS take this path, so both limitations are reachable in pool traffic.
+// * `run_serialized` - the fallback for a stream that refuses to split.
+//   Reads and writes never overlap; every `read_backend().await` runs to
+//   completion before control returns to the dispatch point. Its trade-offs
+//   stand: an idle connection does not read (notifications wait for the next
+//   request), and a COPY-IN the server rejects mid-stream can deadlock.
+//   NEITHER TRANSPORT TAKES THIS PATH ANY MORE. TLS took it until 2026-08-24,
+//   not because rustls cannot be shared but because the adapter holding the
+//   socket could not hand it back; the session is driven directly now and the
+//   socket splits (`tls_sansio`). What is left here serves a custom
+//   `TlsConnect` whose stream answers `Err` to `try_into_split`.
 //
 // Both paths share `Dispatch` (backend-frame routing) and the
 // `pending_responses` back-pressure stash, so message handling and FIFO
@@ -69,7 +70,7 @@ use crate::codec::{
 };
 use crate::copy_in::CopyInReceiver;
 use crate::error::DbError;
-use crate::maybe_tls_stream::MaybeTlsStream;
+use crate::maybe_tls_stream::{MaybeTlsReadHalf, MaybeTlsStream, MaybeTlsWriteHalf};
 use crate::{AsyncMessage, Error, Notification, Statement};
 use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
@@ -488,21 +489,29 @@ where
     /// Must be called before [`run`](Self::run). If never called, async
     /// messages are logged at info/debug and discarded.
     ///
-    /// # An idle TLS connection delivers nothing
+    /// # An idle connection delivers, on either transport
     ///
-    /// Over a PLAINTEXT connection this behaves as you would expect: the
-    /// socket is read by a detached task, so a notification arrives whether or
-    /// not the connection is doing anything else.
+    /// The socket is read by a detached task, so a notification arrives
+    /// whether or not the connection is doing anything else. This holds over
+    /// TLS as well as plaintext.
     ///
-    /// Over TLS it does not. A TLS stream cannot be split into owned halves -
-    /// rustls keeps shared session state - so it runs the serialized loop,
-    /// whose idle step awaits the next CLIENT REQUEST and reads no socket. An
-    /// unsolicited frame therefore
-    /// waits in the kernel buffer until the application happens to issue
-    /// another query. For the canonical LISTEN pattern - subscribe once, then
-    /// wait - that means the notification never arrives at all. Measured on
-    /// 2026-08-24: identical listeners, same server, same channel; the
-    /// plaintext one received the NOTIFY and the TLS one did not.
+    /// It did NOT hold over TLS until 2026-08-24, and the shape of that bug is
+    /// worth keeping. A TLS stream ran the serialized loop, whose idle step
+    /// awaits the next CLIENT REQUEST and reads no socket, so an unsolicited
+    /// frame waited in the kernel buffer until the application happened to
+    /// issue another query - and for the canonical LISTEN pattern (subscribe
+    /// once, then wait) it never arrived at all. Measured that day: identical
+    /// listeners, same server, same channel; the plaintext one received the
+    /// NOTIFY and the TLS one did not.
+    ///
+    /// The cause was not that rustls state cannot be shared. It was that the
+    /// adapter owning the socket could never give it back, so the stream could
+    /// not be split. `tls_sansio` drives the session directly and splits the
+    /// socket, and `a_notification_reaches_an_idle_tls_connection` in
+    /// `tests/tls_live.rs` fails if that regresses.
+    ///
+    /// A custom `TlsConnect` whose stream answers `Err` to `try_into_split`
+    /// still gets the serialized loop, and still has this limitation.
     ///
     /// This is a KNOWN DEFECT, not a design decision, and it is being tracked.
     /// It is documented here rather than left silent because the failure has
@@ -519,10 +528,10 @@ where
     ///
     /// Reads run to completion before control returns to the dispatch
     /// point (the cancel-safety invariant documented at the top of this
-    /// file). This is the fallback path for streams that cannot be split
-    /// into independent owned read/write halves (the TLS variant — rustls
-    /// keeps shared session state, so `read_half` and `write_half` cannot
-    /// own disjoint borrows). The splittable plain-socket path uses
+    /// file). This is the fallback path for a stream that cannot be split
+    /// into independent owned read/write halves — today only a custom
+    /// `TlsConnect` whose stream answers `Err` to `try_into_split`. Both
+    /// transports this crate ships (plain socket and rustls) split, and use
     /// [`run_multiplexed`](Self::run_multiplexed) instead.
     async fn run_serialized(mut self) -> Result<(), Error> {
         let mut terminating = false;
@@ -1502,11 +1511,16 @@ where
 impl<S, T> Connection<S, T>
 where
     S: AsyncRead + AsyncWrite + Unpin + SplitStream,
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin + SplitStream,
     // The read half is moved into a detached read task, which must be
     // `'static`. Always satisfied by the real socket halves
-    // (`OwnedReadHalf<TcpStream>` / `OwnedReadHalf<UnixStream>`).
+    // (`OwnedReadHalf<TcpStream>` / `OwnedReadHalf<UnixStream>`) and by the
+    // TLS half, which is those plus a refcounted session. Both transports
+    // appear because the read half is now `MaybeTlsReadHalf<S, T>`.
+    S: 'static,
+    T: 'static,
     <S as SplitStream>::ReadHalf: 'static,
+    <T as SplitStream>::ReadHalf: 'static,
 {
     /// Drive the connection until the client is dropped and all awaited
     /// requests have completed, or a fatal I/O error occurs.
@@ -1520,10 +1534,11 @@ where
     /// way.
     ///
     /// Splits the socket into owned read/write halves and runs the
-    /// [multiplexed loop](Self::run_multiplexed) when possible (always when the
-    /// selected transport is plaintext). TLS streams, including pooled
-    /// connections that negotiate TLS, cannot be split, so they fall back to
-    /// the [serialized loop](Self::run_serialized).
+    /// [multiplexed loop](Self::run_multiplexed). BOTH transports reach it:
+    /// plaintext splits the socket, and TLS splits the same socket while
+    /// sharing one rustls session between the halves. Only a stream that
+    /// answers `Err` to `try_into_split` falls back to the
+    /// [serialized loop](Self::run_serialized).
     ///
     /// # Cancellation
     ///
@@ -1550,9 +1565,9 @@ where
             route_async(&self.parameters, self.async_sender.as_ref(), msg)?;
         }
 
-        // Decompose so the stream can be consumed by the split; on the
-        // unsplittable (TLS) path we put the pieces back together and run
-        // the serialized loop. `delayed_notices` is already empty.
+        // Decompose so the stream can be consumed by the split; if it refuses
+        // we put the pieces back together and run the serialized loop.
+        // `delayed_notices` is already empty.
         let Connection {
             stream,
             parameters,
@@ -1676,9 +1691,11 @@ where
     /// accumulates batches rather than stopping the reader. That is deliberate
     /// - see `deliver_batch`, where making the gate bind deadlocks the driver's
     /// own nested type-info lookups.
-    async fn run_multiplexed(
-        read_half: BufReadHalf<<S as SplitStream>::ReadHalf>,
-        mut write_half: BufWriteHalf<<S as SplitStream>::WriteHalf>,
+    /// Generic over the half types on purpose: the loop is protocol, not
+    /// transport, and must not name whether it is running over TLS.
+    async fn run_multiplexed<R, W>(
+        read_half: BufReadHalf<R>,
+        mut write_half: BufWriteHalf<W>,
         parameters: Arc<Mutex<HashMap<String, String>>>,
         mut receiver: mpsc::UnboundedReceiver<Request>,
         async_sender: Option<mpsc::UnboundedSender<AsyncMessage>>,
@@ -1687,7 +1704,11 @@ where
         read_deadline: Option<ReadDeadline>,
         read_error_release: Option<crate::release::ConnectionDropRelease>,
         _read_live: crate::live::LiveConnectionGuard,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error>
+    where
+        R: AsyncRead + Unpin + 'static,
+        W: AsyncWrite + Unpin,
+    {
         // ---- Spawn the dedicated read task. It OWNS `read_half` and loops
         // `read_backend` forever, forwarding each frame over a bounded
         // (capacity 1) channel. Bounded so back-pressure propagates to the
@@ -2732,13 +2753,13 @@ mod tests {
     ///
     /// MEASURED 2026-08-24 with a peer that withholds every response and
     /// counts the Query messages that arrive anyway: the multiplexed loop
-    /// sends BOTH, the serialized loop sends ONE and waits. That is IO-3, and
-    /// because TLS cannot split its stream it always runs the serialized
-    /// loop, so IO-3 is live on every TLS connection - see task #49.
+    /// sends BOTH, the serialized loop sends ONE and waits. That was IO-3, and
+    /// it was live on every TLS connection for as long as TLS ran the
+    /// serialized loop. TLS runs the multiplexed loop since 2026-08-24, so the
+    /// remaining exposure is a custom `TlsConnect` that refuses to split.
     ///
-    /// This asserts only the transport that works. Asserting the serialized
-    /// count would write the defect into the suite as expected behaviour;
-    /// when #49 lands, extend this to require both.
+    /// This asserts the multiplexed count only. Asserting the serialized one
+    /// would write the trade-off into the suite as though it were desired.
     #[compio::test]
     async fn a_second_query_reaches_the_wire_before_the_first_is_answered() {
         let config: Config = "user=test dbname=test sslmode=disable"

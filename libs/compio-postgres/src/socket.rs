@@ -181,3 +181,18 @@ impl SplitStream for Socket {
         }
     }
 }
+
+/// A bare compio `TcpStream` splits the same way [`Socket`] does.
+///
+/// No connect path uses it - `Socket` is what they build - but a `TlsConnect`
+/// is generic over its transport, and this crate's own TLS tests hand one a
+/// `TcpStream` directly. Without this they could not name a splittable
+/// transport at all.
+impl SplitStream for TcpStream {
+    type ReadHalf = OwnedReadHalf<TcpStream>;
+    type WriteHalf = OwnedWriteHalf<TcpStream>;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        Ok(self.into_split())
+    }
+}

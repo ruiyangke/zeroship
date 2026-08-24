@@ -183,6 +183,19 @@ mod tests {
 
     struct PassthroughStream<S>(S);
 
+    /// Unsplittable on purpose: this fixture exercises the connector
+    /// contract, not a run loop, so it takes the serialized path.
+    impl<S: AsyncRead + AsyncWrite + Unpin + 'static> crate::buf_stream::SplitStream
+        for PassthroughStream<S>
+    {
+        type ReadHalf = PassthroughStream<S>;
+        type WriteHalf = PassthroughStream<S>;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Err(self)
+        }
+    }
+
     impl<S: AsyncRead + Unpin> AsyncRead for PassthroughStream<S> {
         async fn read<B: IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
             self.0.read(buf).await

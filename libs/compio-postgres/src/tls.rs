@@ -158,7 +158,12 @@ pub trait MakeTlsConnect<S> {
 /// An asynchronous function wrapping a stream in a TLS session.
 pub trait TlsConnect<S> {
     /// The stream returned by the future.
-    type Stream: TlsStream + Unpin;
+    ///
+    /// [`SplitStream`](crate::SplitStream) is required, not optional: it is
+    /// how the connection task learns whether this transport can run the
+    /// multiplexed loop. A stream that cannot be torn in two answers
+    /// `Err(self)` and gets the serialized loop.
+    type Stream: TlsStream + crate::buf_stream::SplitStream + Unpin;
     /// The error returned by the future.
     type Error: Into<Box<dyn error::Error + Sync + Send>>;
     /// The future returned by the connector.
@@ -269,6 +274,17 @@ impl Future for NoTlsFuture {
 ///
 /// Since `NoTls` doesn't support TLS, this type is uninhabited.
 pub enum NoTlsStream {}
+
+/// Uninhabited, so this is unreachable. It exists to satisfy the
+/// [`TlsConnect::Stream`] bound.
+impl crate::buf_stream::SplitStream for NoTlsStream {
+    type ReadHalf = NoTlsStream;
+    type WriteHalf = NoTlsStream;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        match self {}
+    }
+}
 
 impl AsyncRead for NoTlsStream {
     async fn read<B: compio::buf::IoBufMut>(&mut self, _buf: B) -> compio::BufResult<usize, B> {

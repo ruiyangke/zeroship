@@ -461,19 +461,30 @@ where
 ///
 /// Implemented for the plain socket (`Socket` → compio `into_split`,
 /// which `clone()`s a refcounted shared fd into two owned halves — one fd,
-/// shared, NOT a `dup`) and for `MaybeTlsStream::Raw`. The plain-socket
-/// halves run concurrent `io_uring` submissions safely because the kernel
-/// allows concurrent read+write SQEs on a single socket fd, and that fd
-/// closes only when BOTH halves drop. The TLS variant deliberately does
-/// **not** split — rustls keeps shared session state behind the read and
-/// write directions, so two owned halves cannot safely run concurrent
-/// `io_uring` submissions against it. `try_into_split` therefore returns
-/// the stream back unchanged for any unsplittable case, letting the
-/// caller fall back to the serialized loop.
-// `pub` (not `pub(crate)`) so it can appear in the bounds of the public
-// `Connection::run` without tripping `private_bounds`. The enclosing
-// `mod buf_stream` is private, so this is not actually part of the crate's
-// external API.
+/// shared, NOT a `dup`) and for BOTH variants of `MaybeTlsStream`. The
+/// plain-socket halves run concurrent `io_uring` submissions safely because
+/// the kernel allows concurrent read+write SQEs on a single socket fd, and
+/// that fd closes only when BOTH halves drop.
+///
+/// **TLS splits too, and why that is sound is worth stating.** rustls does
+/// keep one session behind both directions, so the halves do not each get a
+/// copy of it — they share it (`Rc<RefCell<..>>`) and reach it only through
+/// synchronous helpers that never hold a borrow across an `await` (see
+/// `tls_sansio`). What they own separately is the socket, which is the same
+/// already-safe split as the plaintext case.
+///
+/// This paragraph used to claim the opposite, and the claim cost every TLS
+/// connection the multiplexed loop: a transport was deciding which protocol
+/// implementation ran, so `LISTEN` delivered nothing between queries over
+/// TLS while working perfectly in plaintext.
+///
+/// Returning `Err(self)` remains a legitimate implementation, and the only
+/// one available to a stream that genuinely cannot be torn in two: the
+/// caller falls back to the serialized loop, which is correct but reads only
+/// while a request is outstanding.
+// `pub` because `TlsConnect::Stream` is bounded by it, so an out-of-crate
+// TLS connector must be able to name and implement it. Re-exported at the
+// crate root.
 pub trait SplitStream: Sized {
     /// Owned read half (read side of the socket).
     type ReadHalf: AsyncRead + Unpin;

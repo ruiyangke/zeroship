@@ -50,7 +50,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use compio::io::compat::AsyncStream;
 use compio::io::{AsyncRead, AsyncWrite};
 use pkcs8::der::pem::PemLabel;
 use pkcs8::{EncryptedPrivateKeyInfo, SecretDocument};
@@ -79,6 +78,11 @@ use crate::config::{Config, SslCertMode, SslMode, SslProtocolVersion, SslRootCer
 use crate::tls::{
     ChannelBinding, ClientCertStatus, MakeTlsConnect, ServerVerification, TlsConnect, TlsStream,
 };
+use crate::tls_sansio::{
+    self, SharedSession, TlsReadHalf, TlsSession, TlsStreamCore, TlsWriteHalf,
+};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// `PostgreSQL`'s registered ALPN protocol identifier.
 const POSTGRESQL_ALPN_PROTOCOL: &[u8] = b"postgresql";
@@ -1081,7 +1085,7 @@ impl MakeRustlsConnect {
 
 impl<S> MakeTlsConnect<S> for MakeRustlsConnect
 where
-    S: AsyncRead + AsyncWrite + Unpin + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + crate::buf_stream::SplitStream + 'static,
 {
     type Stream = RustlsStream<S>;
     type TlsConnect = RustlsConnect;
@@ -1121,7 +1125,7 @@ pub struct RustlsConnect {
 
 impl<S> TlsConnect<S> for RustlsConnect
 where
-    S: AsyncRead + AsyncWrite + Unpin + 'static,
+    S: AsyncRead + AsyncWrite + Unpin + crate::buf_stream::SplitStream + 'static,
 {
     type Stream = RustlsStream<S>;
     type Error = io::Error;
@@ -1144,17 +1148,19 @@ where
                 } else {
                     (self.config, None)
                 };
-            let connector = futures_rustls::TlsConnector::from(config);
-            let tls = connector
-                .connect(server_name, AsyncStream::new(stream))
-                .await?;
+            // The handshake is driven against the socket directly rather than
+            // through a poll-based adapter, so the socket is still ours
+            // afterwards. That is the whole point: an adapter that keeps the
+            // socket cannot hand back halves, and a stream that cannot be
+            // split gets the serialized run loop. See `tls_sansio`.
+            let connection = rustls::ClientConnection::new(config, server_name)
+                .map_err(|error| io::Error::other(format!("TLS session setup failed: {error}")))?;
+            let (stream, connection) = tls_sansio::handshake(stream, connection).await?;
 
-            // Read the channel-binding material off the rustls session before
-            // handing the stream to compio-tls, which exposes only the
-            // negotiated ALPN.
-            let tls_server_end_point = tls
-                .get_ref()
-                .1
+            let session: SharedSession = Rc::new(RefCell::new(TlsSession::new(connection)));
+            let tls_server_end_point = session
+                .borrow()
+                .connection()
                 .peer_certificates()
                 .and_then(<[CertificateDer<'_>]>::first)
                 .and_then(tls_server_end_point);
@@ -1163,7 +1169,7 @@ where
                 .map_or(ClientCertStatus::Unknown, ClientCertObservation::status);
 
             Ok(RustlsStream {
-                inner: compio_tls::TlsStream::from(tls),
+                inner: TlsStreamCore::new(stream, session),
                 tls_server_end_point,
                 client_cert_status,
             })
@@ -1185,18 +1191,18 @@ where
 
 /// A TLS-wrapped connection produced by [`RustlsConnect`].
 pub struct RustlsStream<S> {
-    inner: compio_tls::TlsStream<S>,
+    inner: TlsStreamCore<S>,
     tls_server_end_point: Option<Vec<u8>>,
     client_cert_status: ClientCertStatus,
 }
 
-impl<S: AsyncRead + AsyncWrite + 'static> AsyncRead for RustlsStream<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + 'static> AsyncRead for RustlsStream<S> {
     async fn read<B: compio::buf::IoBufMut>(&mut self, buf: B) -> compio::BufResult<usize, B> {
         self.inner.read(buf).await
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + 'static> AsyncWrite for RustlsStream<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + 'static> AsyncWrite for RustlsStream<S> {
     async fn write<B: compio::buf::IoBuf>(&mut self, buf: B) -> compio::BufResult<usize, B> {
         self.inner.write(buf).await
     }
@@ -1210,7 +1216,44 @@ impl<S: AsyncRead + AsyncWrite + 'static> AsyncWrite for RustlsStream<S> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + 'static> TlsStream for RustlsStream<S> {
+/// A TLS stream splits when its SOCKET does.
+///
+/// The rustls session cannot be duplicated, so it is not: both halves share
+/// the one session and reach it only through synchronous helpers that never
+/// hold a borrow across an `await`. What gets split is the socket, which is
+/// the same operation the plaintext path already performs. `tls_sansio` has
+/// the full argument, including the one asymmetry - ciphertext produced by the
+/// read path leaves with the next write.
+impl<S> crate::buf_stream::SplitStream for RustlsStream<S>
+where
+    S: crate::buf_stream::SplitStream,
+{
+    type ReadHalf = TlsReadHalf<S::ReadHalf>;
+    type WriteHalf = TlsWriteHalf<S::WriteHalf>;
+
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        let RustlsStream {
+            inner,
+            tls_server_end_point,
+            client_cert_status,
+        } = self;
+        let (socket, session) = inner.into_parts();
+        match socket.try_into_split() {
+            Ok((read, write)) => Ok((
+                TlsReadHalf::new(read, session.clone()),
+                TlsWriteHalf::new(write, session),
+            )),
+            // The socket refused, so rebuild the stream exactly as it was.
+            Err(socket) => Err(RustlsStream {
+                inner: TlsStreamCore::new(socket, session),
+                tls_server_end_point,
+                client_cert_status,
+            }),
+        }
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + 'static> TlsStream for RustlsStream<S> {
     fn channel_binding(&self) -> ChannelBinding {
         match &self.tls_server_end_point {
             Some(hash) => ChannelBinding::tls_server_end_point(hash.clone()),
