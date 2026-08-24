@@ -332,7 +332,7 @@ where
 
     let ssl_sni = config.get_ssl_sni();
     if !tls.can_honor_sslsni(ssl_sni) {
-        return Err(Error::tls(
+        return Err(Error::tls_unattested(
             format!(
                 "sslsni={} cannot be honoured by the supplied TLS connector",
                 u8::from(ssl_sni)
@@ -343,7 +343,7 @@ where
 
     let ssl_cert_mode = config.get_ssl_cert_mode();
     if !tls.can_honor_sslcertmode(ssl_cert_mode) {
-        return Err(Error::tls(
+        return Err(Error::tls_unattested(
             format!(
                 "sslcertmode={} cannot be honoured by the supplied TLS connector",
                 ssl_cert_mode.as_str()
@@ -359,7 +359,7 @@ where
     let ssl_mode = config.get_ssl_mode();
     let verification = ServerVerification::demanded_by(ssl_mode, config.get_ssl_root_cert())?;
     if !tls.can_honor_server_verification(verification) {
-        return Err(Error::tls(
+        return Err(Error::tls_unattested(
             format!(
                 "sslmode={} asks for server-certificate verification the supplied TLS connector \
                  does not attest to performing",

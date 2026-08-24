@@ -356,6 +356,21 @@ enum Kind {
     /// this failure in plaintext (libpq's `CONNECTION_FAILED()` after
     /// `pqsecure_open_client`) and must retry nothing else.
     TlsHandshake,
+    /// The supplied [`TlsConnect`](crate::tls::TlsConnect) does not attest to a
+    /// TLS parameter the configuration asks for - `sslsni`, `sslcertmode`, or
+    /// the server verification `sslmode` plus `sslrootcert` demand.
+    ///
+    /// Separate from [`Kind::Tls`] for the same reason [`Kind::TlsHandshake`]
+    /// is: it decides a retry. TLS-as-configured is unavailable through this
+    /// connector, which is the condition `sslmode=prefer` exists to handle, so
+    /// `prefer` falls back to plaintext here exactly as it does for a failed
+    /// handshake. The modes that actually promise encryption or verification -
+    /// `require`, `verify-ca`, `verify-full` - have no plaintext leg and so
+    /// still fail, which is what stops the fallback being a silent downgrade.
+    ///
+    /// libpq has no analogue: its TLS implementation IS the attestation, so
+    /// this category only exists for a driver that takes a pluggable connector.
+    TlsUnattested,
     ToSql(usize),
     FromSql(usize),
     Column(String),
@@ -426,6 +441,9 @@ impl fmt::Display for Error {
             Kind::UnexpectedMessage => fmt.write_str("unexpected message from server"),
             Kind::Tls => fmt.write_str("TLS could not be negotiated"),
             Kind::TlsHandshake => fmt.write_str("error performing TLS handshake"),
+            Kind::TlsUnattested => {
+                fmt.write_str("the supplied TLS connector does not attest to the configured TLS parameters")
+            }
             Kind::ToSql(idx) => write!(fmt, "error serializing parameter {idx}"),
             Kind::FromSql(idx) => write!(fmt, "error deserializing column {idx}"),
             Kind::Column(column) => write!(fmt, "invalid column `{column}`"),
@@ -533,6 +551,13 @@ impl Error {
         self.0.kind == Kind::TlsHandshake
     }
 
+    /// Whether the supplied connector could not attest to a configured TLS
+    /// parameter. See [`Kind::TlsUnattested`]: `prefer` treats this as "TLS is
+    /// not available here" and falls back.
+    pub(crate) fn is_tls_unattested(&self) -> bool {
+        self.0.kind == Kind::TlsUnattested
+    }
+
     /// Whether the post-startup session-property check proved that the
     /// endpoint does not meet the requirement. Transport fallback must not
     /// reinterpret this as a TLS failure.
@@ -610,6 +635,10 @@ impl Error {
 
     pub(crate) fn tls_handshake(e: Box<dyn error::Error + Sync + Send>) -> Error {
         Error::new(Kind::TlsHandshake, Some(e))
+    }
+
+    pub(crate) fn tls_unattested(e: Box<dyn error::Error + Sync + Send>) -> Error {
+        Error::new(Kind::TlsUnattested, Some(e))
     }
 
     pub(crate) fn io(e: io::Error) -> Error {
