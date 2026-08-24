@@ -567,7 +567,8 @@ impl DmlRenderer for SqliteDmlRenderer {
         let identity_columns = request
             .catalog_identity_columns
             .filter(|columns| !columns.is_empty())
-            .ok_or_else(|| DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+            .ok_or_else(|| DmlError::LimitedDeleteNeedsUniqueIdentity {
+                dialect: DIALECT,
                 table: table.to_string(),
             })?;
         let quoted_identity: Result<Vec<_>, _> = identity_columns
@@ -1177,7 +1178,8 @@ fn render_sqlite_trigger_stmt(
                 // rowid; the one-shot DML path can use a proven PK/UNIQUE key.
                 Some(_) => {
                     return Err(IrLowerError::DmlAssemble(
-                        zero_migrate_backend::dml::DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+                        zero_migrate_backend::dml::DmlError::LimitedDeleteNeedsUniqueIdentity {
+                            dialect: DIALECT,
                             table: table.clone(),
                         },
                     ));
@@ -1226,8 +1228,9 @@ mod tests {
         assert!(matches!(
             err,
             IrLowerError::DmlAssemble(
-                zero_migrate_backend::dml::DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
-                    ref table
+                zero_migrate_backend::dml::DmlError::LimitedDeleteNeedsUniqueIdentity {
+                    ref table,
+                    ..
                 }
             ) if table == "events"
         ));

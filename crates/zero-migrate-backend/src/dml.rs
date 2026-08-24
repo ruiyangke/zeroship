@@ -152,14 +152,20 @@ pub enum DmlError {
         /// The target table.
         table: String,
     },
-    /// SQLite has no portable native `DELETE ... LIMIT` form. The subquery
-    /// lowering therefore needs a live-catalog key that identifies one row
-    /// exactly. Hidden `rowid` is not sufficient: a declared `rowid` column can
-    /// shadow it, and `WITHOUT ROWID` tables do not have it at all.
+    /// A target with no native `DELETE ... LIMIT` lowers one through a subquery,
+    /// which needs a live-catalog key that identifies one row exactly.
+    ///
+    /// A backend's implicit row identifier is not sufficient and no backend here may
+    /// substitute one: SQLite's hidden `rowid` can be shadowed by a declared column of
+    /// that name and is absent entirely from a `WITHOUT ROWID` table, and that
+    /// unreliability is the general case, not a quirk. The refusal wants a key the
+    /// CATALOG proves.
     #[error(
-        "SQLite limited delete from {table:?} requires a catalog-proven non-null PRIMARY KEY or full UNIQUE key"
+        "{dialect} limited delete from {table:?} requires a catalog-proven non-null PRIMARY KEY or full UNIQUE key"
     )]
-    SqliteLimitedDeleteNeedsUniqueIdentity {
+    LimitedDeleteNeedsUniqueIdentity {
+        /// The target that cannot render the limit, from its own identity.
+        dialect: DialectId,
         /// The target table whose catalog snapshot had no safe identity.
         table: String,
     },
@@ -171,42 +177,59 @@ pub enum DmlError {
         "cannot render expression node ({0}); the structural validator must reject it before assembly"
     )]
     UnrenderableExpr(String),
-    /// A MySQL `doUpdate` target column is absent from the inserted column list.
-    /// MySQL cannot name a conflict target, so the renderer needs the incoming
-    /// value of each target column to guard the update.
+    /// A `doUpdate` target column is absent from the inserted column list, on a
+    /// target that cannot NAME a conflict target in its own grammar.
+    ///
+    /// Such a backend reconstructs the target match from the incoming row, so it needs
+    /// the incoming VALUE of each target column to guard the update. A target column
+    /// nobody inserted has no incoming value, so there is nothing to guard with.
     #[error(
-        "MySQL insert into {table:?} cannot safely apply `onConflict.doUpdate`: \
+        "{dialect} insert into {table:?} cannot safely apply `onConflict.doUpdate`: \
          target column {column:?} is not present in the inserted columns"
     )]
-    MySqlConflictTargetNotInserted {
+    ConflictTargetNotInserted {
+        /// The target that refused it, from its own identity.
+        dialect: DialectId,
         /// The target table.
         table: String,
         /// The target column without an incoming value.
         column: String,
     },
-    /// A MySQL `doUpdate` attempts to assign one of its target columns. MySQL
-    /// evaluates duplicate-key assignments from left to right, so changing a
-    /// target value would invalidate the target-match guard for later assignments.
+    /// A `doUpdate` assigns one of its OWN conflict-target columns, on a target whose
+    /// duplicate-key assignments are evaluated in sequence.
+    ///
+    /// Changing a target value part-way through the list invalidates the target-match
+    /// guard for every later assignment, so the render is refused rather than emitted
+    /// with a guard that stops holding mid-statement.
     #[error(
-        "MySQL insert into {table:?} cannot safely apply `onConflict.doUpdate`: \
+        "{dialect} insert into {table:?} cannot safely apply `onConflict.doUpdate`: \
          assignment to target column {column:?} is not supported; update a \
          non-target column or split the migration into explicit steps"
     )]
-    MySqlConflictTargetUpdated {
+    ConflictTargetAssigned {
+        /// The target that refused it, from its own identity.
+        dialect: DialectId,
         /// The target table.
         table: String,
         /// The conflict target column also present in `doUpdate`.
         column: String,
     },
-    /// A MySQL multi-column assignment reads another column that the same SET
-    /// list also writes. PostgreSQL and SQLite evaluate every RHS from the
-    /// original row, while MySQL exposes earlier assignments to later ones.
+    /// One assignment's right-hand side reads a column the same SET list also writes,
+    /// on a target that evaluates a SET list SEQUENTIALLY rather than simultaneously.
+    ///
+    /// The authored meaning of a multi-column SET is that every RHS reads the ORIGINAL
+    /// row. A backend that exposes an earlier assignment to a later one would compute
+    /// a different answer without failing, so the render is refused. A SELF-reference
+    /// stays legal on every target: its RHS is read before that column's sole
+    /// assignment either way.
     #[error(
-        "MySQL {op} on {table:?} cannot preserve simultaneous SET semantics: \
+        "{dialect} {op} on {table:?} cannot preserve simultaneous SET semantics: \
          assignment to {column:?} reads assigned column {referenced_column:?}; \
          split the operation or compute the value without another assigned column"
     )]
-    MySqlCrossAssignmentDependency {
+    CrossAssignmentDependency {
+        /// The target that refused it, from its own identity.
+        dialect: DialectId,
         /// The authored operation (`update`, `backfill`, or `onConflict.doUpdate`).
         op: &'static str,
         /// The target table.
@@ -216,13 +239,22 @@ pub enum DmlError {
         /// The other assigned column read by that RHS.
         referenced_column: String,
     },
-    /// MySQL has no exact native equivalent for targeted `DO NOTHING`.
+    /// A target has no form that means exactly "on conflict, do nothing" for the
+    /// authored conflict target, so an `onConflict` carrying no `doUpdate` is refused.
+    ///
+    /// `reason` is the REFUSING BACKEND'S own words for which of its near-misses fail
+    /// and how. Core owns the shape of the refusal; naming the constructs would be core
+    /// spelling one vendor's grammar for every target that ever hits this arm.
     #[error(
-        "MySQL cannot safely apply `onConflict` without a non-empty `doUpdate`: \
-         `ON DUPLICATE KEY UPDATE` fires update triggers and `INSERT IGNORE` \
-         suppresses unrelated data errors"
+        "{dialect} cannot safely apply `onConflict` without a non-empty `doUpdate`: \
+         {reason}"
     )]
-    MySqlConflictDoNothingNotExact,
+    ConflictDoNothingNotExact {
+        /// The target that refused it, from its own identity.
+        dialect: DialectId,
+        /// That target's own account of why its near-misses are not exact.
+        reason: &'static str,
+    },
     /// A single `insert` assembled more bind parameters than the wire protocol
     /// admits (PostgreSQL caps a statement at 65535 positional parameters; the
     /// `Bind` message length is a `u16`). Reject at assemble time with a bounded

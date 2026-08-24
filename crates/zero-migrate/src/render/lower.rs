@@ -14514,8 +14514,9 @@ columns = [
         assert!(matches!(
             err,
             IrLowerError::DmlAssemble(
-                crate::render::dml::DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
-                    ref table
+                crate::render::dml::DmlError::LimitedDeleteNeedsUniqueIdentity {
+                    ref table,
+                    ..
                 }
             ) if table == "events"
         ));

@@ -649,7 +649,8 @@ impl DmlRenderer for MysqlDmlRenderer {
             };
             for referenced_column in set.keys() {
                 if referenced_column != column && expr_references_column(expr, referenced_column)? {
-                    return Err(DmlError::MySqlCrossAssignmentDependency {
+                    return Err(DmlError::CrossAssignmentDependency {
+                        dialect: DIALECT,
                         op,
                         table: table.to_string(),
                         column: column.clone(),
@@ -676,12 +677,17 @@ impl DmlRenderer for MysqlDmlRenderer {
         let oc = request.on_conflict;
         let qtarget_columns = request.quoted_target_columns;
         let Some(set) = oc.do_update.as_ref().filter(|set| !set.is_empty()) else {
-            return Err(DmlError::MySqlConflictDoNothingNotExact);
+            return Err(DmlError::ConflictDoNothingNotExact {
+                dialect: DIALECT,
+                reason: "`ON DUPLICATE KEY UPDATE` fires update triggers and \
+                         `INSERT IGNORE` suppresses unrelated data errors",
+            });
         };
 
         for target in &oc.columns {
             if set.contains_key(target) {
-                return Err(DmlError::MySqlConflictTargetUpdated {
+                return Err(DmlError::ConflictTargetAssigned {
+                    dialect: DIALECT,
                     table: table.to_string(),
                     column: target.clone(),
                 });
@@ -704,7 +710,8 @@ impl DmlRenderer for MysqlDmlRenderer {
         let mut target_match = Vec::with_capacity(oc.columns.len());
         for (target, qtarget) in oc.columns.iter().zip(qtarget_columns) {
             let Some(index) = insert_columns.iter().position(|column| column == target) else {
-                return Err(DmlError::MySqlConflictTargetNotInserted {
+                return Err(DmlError::ConflictTargetNotInserted {
+                    dialect: DIALECT,
                     table: table.to_string(),
                     column: target.clone(),
                 });

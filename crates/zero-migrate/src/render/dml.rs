@@ -2138,7 +2138,10 @@ mod tests {
             Some(&oc),
         )
         .unwrap_err();
-        assert!(matches!(err, DmlError::MySqlConflictDoNothingNotExact));
+        assert!(matches!(
+            err,
+            DmlError::ConflictDoNothingNotExact { ref dialect, .. } if *dialect == MYSQL
+        ));
     }
 
     #[test]
@@ -2230,7 +2233,8 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             err,
-            DmlError::MySqlConflictTargetNotInserted { column, .. } if column == "code"
+            DmlError::ConflictTargetNotInserted { ref dialect, ref column, .. }
+                if *dialect == MYSQL && column == "code"
         ));
 
         let target_update = OnConflict {
@@ -2251,7 +2255,8 @@ mod tests {
         .unwrap_err();
         assert!(matches!(
             err,
-            DmlError::MySqlConflictTargetUpdated { column, .. } if column == "code"
+            DmlError::ConflictTargetAssigned { ref dialect, ref column, .. }
+                if *dialect == MYSQL && column == "code"
         ));
     }
 
@@ -2281,7 +2286,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                DmlError::MySqlCrossAssignmentDependency {
+                DmlError::CrossAssignmentDependency {
                     op,
                     column,
                     referenced_column,
@@ -2349,7 +2354,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                DmlError::MySqlCrossAssignmentDependency {
+                DmlError::CrossAssignmentDependency {
                     op,
                     column,
                     referenced_column,
@@ -2495,7 +2500,8 @@ mod tests {
         let err = assemble_delete(SCHEMA, &SQLITE, "t", &pred, Some(1)).unwrap_err();
         assert_eq!(
             err,
-            DmlError::SqliteLimitedDeleteNeedsUniqueIdentity {
+            DmlError::LimitedDeleteNeedsUniqueIdentity {
+                dialect: SQLITE,
                 table: "t".to_string()
             }
         );
@@ -2574,7 +2580,7 @@ mod tests {
         assert!(
             matches!(
                 &error,
-                DmlError::MySqlCrossAssignmentDependency {
+                DmlError::CrossAssignmentDependency {
                     op,
                     column,
                     referenced_column,
