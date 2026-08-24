@@ -31,6 +31,7 @@
 //! came from PostgreSQL 16.14 on 2026-08-24 while the decoder still returned
 //! `DecodeError::UnknownTag` for these tags.
 
+use compio_postgres::error::SqlState;
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage, TupleColumn};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions, Streaming};
 use compio_postgres::{Client, NoTls};
@@ -41,6 +42,8 @@ use std::time::Duration;
 mod common;
 
 const WATCHDOG: Duration = Duration::from_secs(120);
+const SLOT_DETACH_ATTEMPTS: usize = 100;
+const SLOT_DETACH_RETRY: Duration = Duration::from_millis(10);
 
 /// Small enough that a few thousand rows spill, so the test does not have to
 /// write the 64 MB the default would demand. This is the server's minimum.
@@ -231,18 +234,51 @@ impl Fixture {
     }
 
     async fn drop_all(&self) {
-        let _ = self
-            .setup
+        // Dropping the client side of a replication stream closes its socket,
+        // but the walsender may remain attached to the slot for a few more
+        // scheduler turns. Retry that one expected race before dropping the
+        // publication and table; putting all three statements in one batch
+        // leaves every fixture object behind when the first attempt sees
+        // SQLSTATE 55006.
+        let mut last_error = None;
+        for _ in 0..SLOT_DETACH_ATTEMPTS {
+            match self
+                .setup
+                .batch_execute(&format!(
+                    "SELECT pg_drop_replication_slot(slot_name)
+                       FROM pg_replication_slots WHERE slot_name = '{s}';",
+                    s = self.slot,
+                ))
+                .await
+            {
+                Ok(()) => {
+                    last_error = None;
+                    break;
+                }
+                Err(error)
+                    if error
+                        .code()
+                        .is_some_and(|code| code == &SqlState::OBJECT_IN_USE) =>
+                {
+                    last_error = Some(error);
+                }
+                Err(error) => panic!("unexpected replication slot cleanup failure: {error}"),
+            }
+            compio::time::sleep(SLOT_DETACH_RETRY).await;
+        }
+        if let Some(error) = last_error {
+            panic!("replication slot did not detach for cleanup: {error}");
+        }
+
+        self.setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{s}')
-                   FROM pg_replication_slots WHERE slot_name = '{s}';
-                 DROP PUBLICATION IF EXISTS {p};
+                "DROP PUBLICATION IF EXISTS {p};
                  DROP TABLE IF EXISTS {t};",
-                s = self.slot,
                 p = self.publication,
                 t = self.table,
             ))
-            .await;
+            .await
+            .expect("fixture cleanup failed");
     }
 }
 
