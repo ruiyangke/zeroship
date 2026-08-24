@@ -712,3 +712,121 @@ async fn both_drivers_agree_on_prepared_statement_metadata() {
          without it this test does not cover signed attribute numbers"
     );
 }
+
+/// Payloads chosen so the COPY framing has to be reassembled, not just
+/// forwarded.
+///
+/// COPY OUT arrives as CopyData frames whose boundaries the SERVER chooses and
+/// which need not align with rows. A driver that assumes one frame per row, or
+/// that loses a frame at the end, produces output that is plausible and wrong.
+/// Wide rows and a large row count force multiple frames; embedded tabs,
+/// newlines and backslashes make a mis-joined boundary visible in the bytes
+/// rather than silently well-formed.
+const COPY_ROWS: i32 = 2000;
+
+fn copy_out_sql(table: &str) -> String {
+    format!("COPY (SELECT id, pad FROM {table} ORDER BY id) TO STDOUT")
+}
+
+fn tokio_copy_out(url: String, sql: String) -> Vec<u8> {
+    use futures_util::StreamExt;
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let bytes = runtime.block_on(async move {
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let stream = client.copy_out(&sql).await.expect("tokio copy_out");
+            let mut stream = std::pin::pin!(stream);
+            let mut bytes = Vec::new();
+            while let Some(chunk) = stream.next().await {
+                bytes.extend_from_slice(&chunk.expect("tokio copy chunk"));
+            }
+            drop(client);
+            let _ = driver.await;
+            bytes
+        });
+        let _ = sender.send(bytes);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver.recv().expect("no copy bytes came back from tokio")
+}
+
+/// COPY OUT reassembly is the driver's own work, and this crate has had
+/// several defects in it. Both drivers must produce byte-identical output.
+#[compio::test]
+async fn both_drivers_agree_on_copy_out_bytes() {
+    use futures_util::TryStreamExt;
+
+    let url = common::test_url();
+    let table = common::test_object_name("cpg copyout");
+
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    // Permanent, so both connections read the same rows. The pad column
+    // carries the characters COPY has to escape.
+    client
+        .batch_execute(&format!(
+            "DROP TABLE IF EXISTS {table};
+             CREATE TABLE {table} (id int primary key, pad text);
+             INSERT INTO {table}
+               SELECT g, repeat('a\tb\\c' || chr(10) || 'd', 12)
+                 FROM generate_series(1, {COPY_ROWS}) g;"
+        ))
+        .await
+        .expect("copy fixture");
+
+    let sql = copy_out_sql(&table);
+    let theirs = tokio_copy_out(url.clone(), sql.clone());
+
+    let stream = client.copy_out(&sql).await.expect("copy_out");
+    let ours: Vec<u8> = {
+        let chunks: Vec<bytes::Bytes> = stream.try_collect().await.expect("copy chunks");
+        chunks.iter().flat_map(|chunk| chunk.to_vec()).collect()
+    };
+
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+
+    assert!(
+        !theirs.is_empty(),
+        "the reference driver produced no COPY output, so there is nothing to compare"
+    );
+    assert_eq!(
+        ours.len(),
+        theirs.len(),
+        "COPY OUT byte counts differ: ours {} vs tokio-postgres {}",
+        ours.len(),
+        theirs.len()
+    );
+    // Compare content, but report the first divergence rather than dumping
+    // hundreds of kilobytes into the failure message.
+    if ours != theirs {
+        let at = ours
+            .iter()
+            .zip(theirs.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(0);
+        let from = at.saturating_sub(40);
+        panic!(
+            "COPY OUT bytes diverge at offset {at}\n  ours: {:?}\n  tokio-postgres: {:?}",
+            String::from_utf8_lossy(&ours[from..(at + 40).min(ours.len())]),
+            String::from_utf8_lossy(&theirs[from..(at + 40).min(theirs.len())]),
+        );
+    }
+}
