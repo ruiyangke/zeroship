@@ -322,3 +322,65 @@ async fn an_abandoned_query_leaves_the_serialized_session_usable() {
         ),
     }
 }
+
+/// A read timeout fires on this loop, and retires the session rather than
+/// leaving it half-read.
+///
+/// The timeout is armed only while a response is owed, and the serialized loop
+/// is where that bookkeeping is most delicate: it cannot read and write at
+/// once, so the deadline has to be started and cleared around a single
+/// interleaved sequence. A server that is merely slow must trip it; the point
+/// of the assertion is that the call RETURNS rather than hanging.
+#[compio::test]
+async fn a_read_timeout_fires_and_retires_the_serialized_session() {
+    let url = common::test_url();
+    let mut config: Config = url.parse().expect("test DSN did not parse");
+    config.read_timeout(std::time::Duration::from_millis(250));
+
+    let (client, connection, split_refused) =
+        compio_postgres::test_utils::connect_serialized(&config)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    // Well inside the 250ms budget: the deadline must not fire on a healthy
+    // exchange, or the assertion below would pass for the wrong reason.
+    let row = client
+        .query_one("SELECT 1::int4", &[])
+        .await
+        .expect("a prompt query must not trip the read timeout");
+    assert_eq!(row.get::<_, i32>(0), 1);
+    assert!(
+        split_refused.get(),
+        "this test is not on the serialized loop"
+    );
+
+    // Now outlast it. The generous outer bound makes this a hang detector: a
+    // 250ms deadline that fires at all will fire long before 10s, and load
+    // only pushes the measured time up.
+    let started = std::time::Instant::now();
+    let outcome = compio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.query_one("SELECT pg_sleep(3)", &[]),
+    )
+    .await
+    .expect("the read timeout did not fire; the serialized session hung");
+    let elapsed = started.elapsed();
+
+    let Err(error) = outcome else {
+        panic!("a query outlasting the read timeout must not succeed");
+    };
+    assert!(
+        error.is_read_timeout(),
+        "the failure was not reported as a read timeout: {}",
+        common::error_chain(&error)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "the deadline fired after {elapsed:?}, which is not before the query \
+         would have finished on its own"
+    );
+}
