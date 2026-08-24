@@ -68,11 +68,10 @@ const VENDOR_NEEDLES: &[&str] = &["mysql", "sqlite", "postgres", "pgsql", "pg_",
 const ALLOWED: &[(&str, usize, &str)] = &[
     (
         "guard.rs",
-        2,
+        1,
         "`GuardConfig::for_dialect` forces `GuardMode::Enforced` for every id that is \
          not PostgreSQL, so a host-set belt-off posture cannot follow a config onto a \
-         backend with no belt to skip (the import on line 72 is the second hit and \
-         serves only this comparison). It has no fix available from here and the \
+         backend with no belt to skip. It has no fix available from here and the \
          obvious reformulation is a MEASURED regression: \"reset when the target \
          changes\" satisfies every assertion in `zero-migrate-postgres/tests/guard_smoke.rs` \
          but breaks the production path, because `ExecutorConfig::guard_config_for` \
@@ -80,7 +79,15 @@ const ALLOWED: &[(&str, usize, &str)] = &[
          the SAME id purely to trip the fail-safe. Asking the guard — the fix the \
          sibling `destructive_ops` gate took — is not available either: `GuardConfig` \
          holds no guard and cannot resolve one, since the registry is composed one \
-         crate above this one. Closing it is a security-posture decision.",
+         crate above this one. Closing it is a security-posture decision. \
+         \
+         It was TWO. The second hit was `use zero_migrate_ir::dialect::POSTGRES`, an \
+         import that served only this comparison, and it came off when the shipping \
+         ids moved out of the neutral IR crate into the vendors. The comparison \
+         builds its own `DialectId::new(\"postgres\")` now — it cannot import one, \
+         since all three vendor crates depend on THIS one — and `DialectId` compares \
+         by content, so it is the same id `zero_migrate_postgres::DIALECT` declares. \
+         The vendor name did not leave this file; only the import did.",
     ),
     (
         "snapshot.rs",

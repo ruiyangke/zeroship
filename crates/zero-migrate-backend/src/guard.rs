@@ -69,7 +69,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use zero_migrate_ir::dialect::{DialectId, POSTGRES};
+use zero_migrate_ir::dialect::DialectId;
 use zero_migrate_ir::ir::{MigrationIr, Op};
 use zero_migrate_ir::migration::MigrationFlags;
 use zero_migrate_ir::policy::DestructiveOps;
@@ -207,11 +207,20 @@ impl GuardConfig {
     /// Select a target dialect without changing the caller-composed policy.
     /// PostgreSQL preserves the selected guard mode. Every other id forces
     /// [`GuardMode::Enforced`]. This must remain an explicit comparison against
-    /// [`POSTGRES`], never a self-declared capability: a future backend must not be
-    /// able to declare its way out of the fail-safe posture.
+    /// PostgreSQL's id, never a self-declared capability: a future backend must not
+    /// be able to declare its way out of the fail-safe posture.
+    ///
+    /// The id is built here rather than imported. It used to come from
+    /// `zero_migrate_ir::dialect::POSTGRES`, which put the name in a NEUTRAL crate so
+    /// that this one could reach it without depending on a vendor; the ids live in
+    /// the vendor crates now, and this crate cannot depend on one — all three depend
+    /// on it. `DialectId` compares by CONTENT, so the id built here IS the id
+    /// `zero_migrate_postgres::DIALECT` declares. The vendor name has not moved out
+    /// of this file, and closing that is a security-posture decision rather than a
+    /// spelling one; see this crate's `the_contract_names_no_vendor.rs`.
     #[must_use]
     pub fn for_dialect(mut self, dialect: DialectId) -> Self {
-        if dialect != POSTGRES {
+        if dialect != DialectId::new("postgres") {
             self.guard_mode = GuardMode::Enforced;
         }
         self.dialect = dialect;
