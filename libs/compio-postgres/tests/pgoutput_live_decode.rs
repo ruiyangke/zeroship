@@ -128,7 +128,7 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-        common::sweep_stale_replication_slots(&setup).await;
+        common::sweep_stale_test_objects(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -326,7 +326,7 @@ async fn a_key_only_old_tuple_is_not_confusable_with_a_row_that_held_nulls() {
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-        common::sweep_stale_replication_slots(&setup).await;
+        common::sweep_stale_test_objects(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -415,7 +415,7 @@ async fn a_null_column_decodes_as_null_and_not_as_empty_text() {
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-        common::sweep_stale_replication_slots(&setup).await;
+        common::sweep_stale_test_objects(&setup).await;
 
         setup
             .batch_execute(&format!(

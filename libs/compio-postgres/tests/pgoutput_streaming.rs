@@ -155,7 +155,7 @@ impl Fixture {
             slot: format!("{base}_s"),
             setup: client().await,
         };
-        common::sweep_stale_replication_slots(&fixture.setup).await;
+        common::sweep_stale_test_objects(&fixture.setup).await;
         fixture
             .setup
             .batch_execute(&format!(

@@ -261,16 +261,73 @@ pub async fn sweep_stale_replication_slots(client: &compio_postgres::Client) {
     }
 }
 
+/// Drop publications and tables left behind by test processes that are gone.
+///
+/// Same rule and same reason as [`sweep_stale_replication_slots`], applied to
+/// the other objects these suites create. These are not a bounded resource
+/// the way slots are, so a leak does not break the next run - it accumulates.
+/// Measured 2026-08-24: 58 tables and 55 publications had built up from runs
+/// that died before their cleanup, which is slow to notice and tedious to
+/// clear by hand.
+///
+/// Publications first: one can depend on a table, and dropping the table out
+/// from under it fails.
+pub async fn sweep_stale_test_objects(client: &compio_postgres::Client) {
+    sweep_stale_replication_slots(client).await;
+
+    if let Ok(rows) = client
+        .query(
+            "SELECT pubname FROM pg_publication WHERE pubname LIKE '%\\_%'",
+            &[],
+        )
+        .await
+    {
+        for row in rows {
+            let name: String = row.get(0);
+            if pid_embedded_in(&name).is_some_and(|pid| !process_is_alive(pid)) {
+                let _ = client
+                    .execute(&format!("DROP PUBLICATION IF EXISTS \"{name}\""), &[])
+                    .await;
+            }
+        }
+    }
+
+    if let Ok(rows) = client
+        .query(
+            "SELECT tablename FROM pg_tables
+              WHERE schemaname = 'public' AND tablename LIKE '%\\_%'",
+            &[],
+        )
+        .await
+    {
+        for row in rows {
+            let name: String = row.get(0);
+            if pid_embedded_in(&name).is_some_and(|pid| !process_is_alive(pid)) {
+                let _ = client
+                    .execute(&format!("DROP TABLE IF EXISTS \"{name}\" CASCADE"), &[])
+                    .await;
+            }
+        }
+    }
+}
+
 /// The PID [`test_object_name`] put in the middle of `<readable>_<pid>_<hash>`.
 ///
 /// Returns `None` for any name that is not that shape, so a slot this suite
 /// did not create is never a candidate.
-fn pid_embedded_in(slot_name: &str) -> Option<u32> {
-    let parts: Vec<&str> = slot_name.split('_').collect();
-    // <readable...> _ <pid> _ <hash> _ <suffix>: the fixtures append a
-    // one-character suffix, so the PID is third from the end.
-    let candidate = parts.get(parts.len().checked_sub(3)?)?;
-    candidate.parse::<u32>().ok()
+fn pid_embedded_in(object_name: &str) -> Option<u32> {
+    // `test_object_name` builds `<readable>_<pid>_<hash>` with the hash a
+    // fixed 16 hex digits, and callers append their own suffix - `_s`, `_t`,
+    // `_ours`, or nothing at all. Anchoring on the HASH rather than counting
+    // from the end therefore works whatever the suffix is; counting from the
+    // end only worked for the one-component case and silently skipped the
+    // rest, which is how a sweep can look busy while missing most of its
+    // targets.
+    let parts: Vec<&str> = object_name.split('_').collect();
+    let hash_at = parts
+        .iter()
+        .position(|part| part.len() == 16 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
+    parts.get(hash_at.checked_sub(1)?)?.parse::<u32>().ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -399,6 +456,29 @@ mod tests {
                 pid_embedded_in(foreign),
                 None,
                 "{foreign:?} is not this suite's shape and must not be swept"
+            );
+        }
+    }
+
+    /// The suffix varies by caller, and an earlier parser counted components
+    /// from the END, so it found the pid only for a one-component suffix and
+    /// silently returned None for every other shape - including a bare name
+    /// with no suffix at all. A sweep built on that looks busy while missing
+    /// most of what it is meant to collect.
+    #[test]
+    fn the_pid_is_found_whatever_suffix_the_caller_appended() {
+        let base = test_object_name("cpg shapes");
+        for name in [
+            base.clone(),
+            format!("{base}_s"),
+            format!("{base}_t"),
+            format!("{base}_ours"),
+            format!("{base}_theirs"),
+        ] {
+            assert_eq!(
+                pid_embedded_in(&name),
+                Some(std::process::id()),
+                "the pid was not found in {name}"
             );
         }
     }
