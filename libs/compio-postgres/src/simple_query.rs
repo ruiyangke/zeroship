@@ -7,11 +7,12 @@
 // ONE DELIBERATE DIVERGENCE from upstream: a `CopyInResponse` is answered with
 // `CopyFail` rather than reported as an unexpected message and abandoned.
 // Upstream abandons it, and abandoning it leaves the SESSION in copy mode,
-// which costs the connection. See `abort_copy_in`.
+// which costs the connection. See `producerless_request`.
 
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::{RequestDisposition, RequestMessages, TransactionEffect};
+use crate::copy_in::CopyInReceiver;
 use crate::query::extract_row_affected;
 use crate::{Error, SimpleQueryMessage, SimpleQueryRow};
 use bytes::Bytes;
@@ -22,7 +23,7 @@ use pin_project_lite::pin_project;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use std::pin::Pin;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
 /// Information about a column of a single query row.
@@ -50,17 +51,9 @@ pub async fn simple_query(
 
     let must_prequeue_copy_abort = may_enter_copy_in(query);
     let buf = encode(client, query)?;
-    let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
-    if must_prequeue_copy_abort {
-        // Queue this while starting the stream, before it can be handed to a
-        // caller or abandoned. Waiting until `CopyInResponse` is observed is
-        // too late when another multiplexed request is already behind this
-        // Query: PostgreSQL would read that request as COPY data first.
-        abort_copy_in(client)?;
-    }
+    let responses = client.send(producerless_request(buf, must_prequeue_copy_abort))?;
 
     Ok(SimpleQueryStream {
-        client: Arc::downgrade(client),
         responses,
         columns: None,
         copy_out_refused: false,
@@ -69,7 +62,7 @@ pub async fn simple_query(
 
 pub async fn batch_execute(client: &InnerClient, query: &str) -> Result<(), Error> {
     let responses = start_batch_execute(client, query)?;
-    finish_batch_execute(client, responses).await
+    finish_batch_execute(responses).await
 }
 
 /// The reason this driver gives PostgreSQL for aborting a copy it cannot feed.
@@ -88,7 +81,7 @@ const COPY_IN_UNSUPPORTED: &str = "simple query execution cannot supply COPY dat
 pub(crate) const COPY_IN_UNSUPPORTED_EXTENDED: &str =
     "extended query execution cannot supply COPY data; use copy_in";
 
-/// Take the session back out of COPY-IN mode.
+/// Route a possible simple-query COPY through the connection-owned producer.
 ///
 /// A `COPY ... FROM STDIN` sent as a simple query is answered with
 /// `CopyInResponse` and then PostgreSQL WAITS for copy data. The request was
@@ -102,35 +95,27 @@ pub(crate) const COPY_IN_UNSUPPORTED_EXTENDED: &str =
 /// borrower, because nothing about the failing call marks the connection closed
 /// or dirty.
 ///
-/// `CopyFail` is the message that ends copy mode. It costs one extra request
-/// slot and that is deliberate, not an oversight: in simple-query mode
-/// PostgreSQL answers the `CopyFail` with `ErrorResponse` AND its own
-/// `ReadyForQuery` - it does not suppress the terminator the way it does for an
-/// extended-protocol copy, where the error sets `ignore_till_sync` and only the
-/// `Sync` releases a `ReadyForQuery`. That first group belongs to the request
-/// still at the head of the queue - the caller's, which is what turns its drain
-/// into the server's real diagnostic. The trailing `Sync` then produces a
-/// SECOND, bare `ReadyForQuery` for the slot this send registers, so the
-/// connection task's response accounting balances. MEASURED: delete the Sync
-/// below and every assertion in `tests/simple_query_copy_resync.rs` still holds,
-/// because the caller's error is unchanged - the follow-up query simply never
-/// returns. The orphaned slot stays at the head of the queue and is handed the
-/// NEXT request's reply, so a regression here is a HANG, not a wrong answer.
-pub(crate) fn abort_copy_in(client: &InnerClient) -> Result<(), Error> {
-    let buf = client.with_buf(|buf| {
-        frontend::copy_fail(COPY_IN_UNSUPPORTED, buf).map_err(Error::encode)?;
-        frontend::sync(buf);
-        Ok(buf.split().freeze())
-    })?;
-    // Housekeeping: the bare `ReadyForQuery` this earns is bookkeeping, not an
-    // answer anybody reads, and the caller's own response is still awaited so a
-    // failed write is still reported rather than swallowed.
-    drop(client.send_with(
-        RequestMessages::Single(FrontendMessage::Raw(buf)),
-        RequestDisposition::Housekeeping,
-        TransactionEffect::MayChange,
-    )?);
-    Ok(())
+/// `CopyFail` ends simple-query copy mode and PostgreSQL answers it with the
+/// original query's `ErrorResponse + ReadyForQuery`. Extended protocol needs a
+/// trailing `Sync`; simple protocol must not send one because it would earn a
+/// second `ReadyForQuery` with no caller-visible request. A transaction pooler
+/// can release the backend after the first terminator and discard the second,
+/// stranding the driver's synthetic response slot.
+///
+/// The connection owns this producer so it writes no later request ahead of
+/// the abort, still completes the abort if the caller drops its response
+/// stream, and suppresses `CopyFail` when the query is rejected before COPY
+/// mode or the conservative SQL classifier returns a false positive.
+fn producerless_request(buf: Bytes, may_enter_copy_in: bool) -> RequestMessages {
+    let initial = FrontendMessage::Raw(buf);
+    if may_enter_copy_in {
+        RequestMessages::CopyIn(CopyInReceiver::aborting_simple(
+            initial,
+            COPY_IN_UNSUPPORTED,
+        ))
+    } else {
+        RequestMessages::Single(initial)
+    }
 }
 
 /// Enqueue the batch and hand back its response stream, without awaiting it.
@@ -141,18 +126,12 @@ pub(crate) fn abort_copy_in(client: &InnerClient) -> Result<(), Error> {
 /// function does before `send` - logging, encoding - can fail or unwind while
 /// the session is still untouched, and a guard armed across it would undo work
 /// the caller never did.
-pub(crate) fn start_batch_execute(
-    client: &InnerClient,
-    query: &str,
-) -> Result<Responses, Error> {
+pub(crate) fn start_batch_execute(client: &InnerClient, query: &str) -> Result<Responses, Error> {
     debug!("executing statement batch: {query}");
 
+    let must_prequeue_copy_abort = may_enter_copy_in(query);
     let buf = encode(client, query)?;
-    let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
-    if may_enter_copy_in(query) {
-        abort_copy_in(client)?;
-    }
-    Ok(responses)
+    client.send(producerless_request(buf, must_prequeue_copy_abort))
 }
 
 pub(crate) fn start_batch_execute_with_error_cleanup(
@@ -170,8 +149,7 @@ pub(crate) fn start_batch_execute_with_error_cleanup(
             .send_with_error_cleanup(FrontendMessage::Raw(query), FrontendMessage::Raw(cleanup));
     }
 
-    let responses = client.send(RequestMessages::Single(FrontendMessage::Raw(query)))?;
-    abort_copy_in(client)?;
+    let responses = client.send(producerless_request(query, true))?;
     drop(client.send_with(
         RequestMessages::Single(FrontendMessage::Raw(cleanup)),
         RequestDisposition::Housekeeping,
@@ -181,10 +159,7 @@ pub(crate) fn start_batch_execute_with_error_cleanup(
 }
 
 /// Drain the response stream `start_batch_execute` returned.
-pub(crate) async fn finish_batch_execute(
-    client: &InnerClient,
-    mut responses: Responses,
-) -> Result<(), Error> {
+pub(crate) async fn finish_batch_execute(mut responses: Responses) -> Result<(), Error> {
     let mut refused = None;
     loop {
         match responses.next().await? {
@@ -193,11 +168,9 @@ pub(crate) async fn finish_batch_execute(
             | Message::EmptyQueryResponse
             | Message::RowDescription(_)
             | Message::DataRow(_) => {}
-            // Not `unexpected_message`: walking away here leaves the session in
-            // copy mode. See `abort_copy_in`. The abort makes PostgreSQL answer
-            // this very stream with the copy's own error, so the loop keeps
-            // draining and the caller gets that instead.
-            Message::CopyInResponse(_) => abort_copy_in(client)?,
+            // The connection-owned producer is already sending CopyFail. Keep
+            // draining this stream to its server error.
+            Message::CopyInResponse(_) => {}
             // A COPY OUT needs no abort - the server sends its own `CopyDone`
             // and finishes unaided - but it must not RETURN here either. A
             // batch can chain `COPY TO STDOUT; COPY FROM STDIN`, and returning
@@ -232,7 +205,6 @@ pub(crate) async fn finish_batch_execute(
 /// `None` means the batch completed without any `CommandComplete` - an empty
 /// query.
 pub(crate) async fn finish_batch_execute_reporting_tag(
-    client: &InnerClient,
     mut responses: Responses,
 ) -> Result<Option<String>, Error> {
     let mut tag = None;
@@ -244,7 +216,7 @@ pub(crate) async fn finish_batch_execute_reporting_tag(
                 tag = Some(body.tag().map_err(Error::parse)?.to_string());
             }
             Message::EmptyQueryResponse | Message::RowDescription(_) | Message::DataRow(_) => {}
-            Message::CopyInResponse(_) => abort_copy_in(client)?,
+            Message::CopyInResponse(_) => {}
             // See the twin in `finish_batch_execute`: drain the copy-out rather
             // than returning at it, so a chained `COPY FROM STDIN` later in the
             // same batch is still reached and aborted.
@@ -265,13 +237,12 @@ fn encode(client: &InnerClient, query: &str) -> Result<Bytes, Error> {
 
 /// Whether a simple Query message can put PostgreSQL into COPY-IN mode.
 ///
-/// Drop recovery must be selective: an unfinished ordinary stream may belong
-/// to command-timeout recovery, whose next frontend frame is deliberately a
-/// `Sync`. Sending `CopyFail` in front of that barrier changes the protocol.
-/// Conversely, a stream whose SQL contains `COPY ... FROM STDIN` needs its
-/// `CopyFail` queued synchronously on drop, before the caller can reuse the
-/// client. PostgreSQL does not describe all statements in a simple Query ahead
-/// of execution, so the original SQL is the only place that distinction exists.
+/// Recovery must be selective: PostgreSQL does not describe all statements in
+/// a simple Query ahead of execution, so the original SQL is the only way to
+/// decide whether the request needs the connection-owned COPY producer. An
+/// ordinary query must remain a normal request; a possible `COPY ... FROM
+/// STDIN` must keep later writes behind its eventual `CopyFail` even if the
+/// caller drops the response stream.
 ///
 /// This lexer recognises statement-leading COPY and a top-level FROM STDIN
 /// source while excluding strings, quoted identifiers, dollar-quoted bodies,
@@ -280,8 +251,8 @@ pub(crate) fn may_enter_copy_in(query: &str) -> bool {
     // `standard_conforming_strings` is session state and PostgreSQL reports it,
     // but this low-level helper only has the SQL. Accept a COPY found under
     // either interpretation so a backslash-escaped quote can never hide a real
-    // statement. A false positive is safe: PostgreSQL discards CopyFail outside
-    // COPY mode and the paired Sync pays the housekeeping response slot.
+    // statement. A false positive is safe: the connection observes the
+    // request's ReadyForQuery and suppresses CopyFail before polling it.
     may_enter_copy_in_with_string_mode(query, false)
         || may_enter_copy_in_with_string_mode(query, true)
 }
@@ -368,9 +339,7 @@ fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: b
                 }) {
                     tag_end += 1;
                     while bytes.get(tag_end).is_some_and(|byte| {
-                        byte.is_ascii_alphanumeric()
-                            || *byte == b'_'
-                            || !byte.is_ascii()
+                        byte.is_ascii_alphanumeric() || *byte == b'_' || !byte.is_ascii()
                     }) {
                         tag_end += 1;
                     }
@@ -411,9 +380,7 @@ fn may_enter_copy_in_with_string_mode(query: &str, ordinary_backslash_escapes: b
                 let start = index;
                 index += 1;
                 while bytes.get(index).is_some_and(|byte| {
-                    byte.is_ascii_alphanumeric()
-                        || matches!(*byte, b'_' | b'$')
-                        || !byte.is_ascii()
+                    byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'$') || !byte.is_ascii()
                 }) {
                     index += 1;
                 }
@@ -443,15 +410,6 @@ pin_project! {
     /// A stream of simple query results.
     #[project(!Unpin)]
     pub struct SimpleQueryStream {
-        // Held so the stream can end a copy this path cannot feed
-        // (`abort_copy_in`). WEAK, and that is load-bearing: `InnerClient` owns
-        // the request channel, and `Connection::run` finishes only once every
-        // sender is gone. A strong handle here would keep a connection alive for
-        // as long as the caller held the stream - measured, it hangs
-        // `integration::an_awaited_query_queued_before_client_drop_still_reports_its_write_error`
-        // outright. If the client has already gone there is no session left to
-        // rescue, so failing to upgrade is not an error.
-        client: Weak<InnerClient>,
         responses: Responses,
         columns: Option<Arc<[SimpleColumn]>>,
         // A `COPY TO STDOUT` this path cannot deliver is DRAINED rather than
@@ -510,14 +468,8 @@ impl Stream for SimpleQueryStream {
                 Message::CopyOutResponse(_) | Message::CopyData(_) | Message::CopyDone => {
                     *this.copy_out_refused = true;
                 }
-                Message::CopyInResponse(_) => match this.client.upgrade() {
-                    Some(client) => {
-                        if let Err(error) = abort_copy_in(&client) {
-                            return Poll::Ready(Some(Err(error)));
-                        }
-                    }
-                    None => return Poll::Ready(Some(Err(Error::closed()))),
-                },
+                // The connection-owned producer is already sending CopyFail.
+                Message::CopyInResponse(_) => {}
                 _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }
         }

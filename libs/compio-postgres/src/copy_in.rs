@@ -47,12 +47,14 @@ enum CopyInMessage {
 
 /// Stream of frontend messages fed to the connection task for a `COPY FROM
 /// STDIN` request. The connection's request-handler branch polls `next()`
-/// until the stream terminates (cleanly via `CopyDone+Sync`, or abnormally
-/// via `CopyFail+Sync`).
+/// until the stream terminates. Extended protocol uses `CopyDone+Sync` or
+/// `CopyFail+Sync`; a producerless simple query uses `CopyFail` alone because
+/// that protocol emits `ReadyForQuery` without a Sync barrier.
 pub struct CopyInReceiver {
     receiver: mpsc::Receiver<CopyInMessage>,
     done: bool,
     abort_reason: Option<&'static str>,
+    sync_after_terminal: bool,
 }
 
 impl CopyInReceiver {
@@ -61,6 +63,7 @@ impl CopyInReceiver {
             receiver,
             done: false,
             abort_reason: None,
+            sync_after_terminal: true,
         }
     }
 
@@ -74,6 +77,24 @@ impl CopyInReceiver {
     /// terminal frame. Reusing the real COPY state machine is what makes both
     /// paths cost exactly one response slot.
     pub(crate) fn aborting(initial: FrontendMessage, reason: &'static str) -> Self {
+        Self::aborting_with_terminal(initial, reason, true)
+    }
+
+    /// Build the same producerless COPY for a simple-protocol `Query`.
+    ///
+    /// Simple-query `CopyFail` produces its own `ReadyForQuery`; appending a
+    /// `Sync` would produce a second one. A transaction pooler may release the
+    /// backend after the first, so the driver must neither send that redundant
+    /// barrier nor account for a response to it.
+    pub(crate) fn aborting_simple(initial: FrontendMessage, reason: &'static str) -> Self {
+        Self::aborting_with_terminal(initial, reason, false)
+    }
+
+    fn aborting_with_terminal(
+        initial: FrontendMessage,
+        reason: &'static str,
+        sync_after_terminal: bool,
+    ) -> Self {
         let (mut sender, receiver) = mpsc::channel(1);
         sender
             .try_send(CopyInMessage::Message(initial))
@@ -83,12 +104,14 @@ impl CopyInReceiver {
             receiver,
             done: false,
             abort_reason: Some(reason),
+            sync_after_terminal,
         }
     }
 
-    /// True after this stream emitted its terminal CopyDone/CopyFail + Sync
-    /// frame. The connection uses this to start the final server-response
-    /// read clock only after that frame finishes flushing.
+    /// True after this stream emitted its terminal CopyDone/CopyFail frame,
+    /// including the extended-protocol Sync when one is required. The
+    /// connection uses this to start the final server-response read clock only
+    /// after that frame finishes flushing.
     pub(crate) fn is_done(&self) -> bool {
         self.done
     }
@@ -119,7 +142,9 @@ impl Stream for CopyInReceiver {
                 self.done = true;
                 let mut buf = BytesMut::new();
                 frontend::copy_fail(self.abort_reason.unwrap_or(""), &mut buf).unwrap();
-                frontend::sync(&mut buf);
+                if self.sync_after_terminal {
+                    frontend::sync(&mut buf);
+                }
                 Poll::Ready(Some(FrontendMessage::Raw(buf.freeze())))
             }
         }
@@ -369,4 +394,57 @@ where
         state: SinkState::Active,
         _p2: PhantomData,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CopyInReceiver;
+    use crate::codec::FrontendMessage;
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+
+    async fn terminal_bytes(mut receiver: CopyInReceiver) -> Bytes {
+        receiver
+            .next()
+            .await
+            .expect("producerless COPY omitted its initial query");
+        match receiver
+            .next()
+            .await
+            .expect("producerless COPY omitted its abort terminal")
+        {
+            FrontendMessage::Raw(bytes) => bytes,
+            FrontendMessage::CopyData(_) => panic!("COPY abort was encoded as data"),
+        }
+    }
+
+    #[compio::test]
+    async fn simple_query_abort_ends_at_copy_fail_without_sync() {
+        let bytes = terminal_bytes(CopyInReceiver::aborting_simple(
+            FrontendMessage::Raw(Bytes::from_static(b"Q")),
+            "simple abort",
+        ))
+        .await;
+
+        assert_eq!(bytes[0], b'f');
+        let frame_len = 1 + u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        assert_eq!(
+            bytes.len(),
+            frame_len,
+            "simple CopyFail carried an extra frontend frame"
+        );
+    }
+
+    #[compio::test]
+    async fn extended_query_abort_keeps_its_sync_barrier() {
+        let bytes = terminal_bytes(CopyInReceiver::aborting(
+            FrontendMessage::Raw(Bytes::from_static(b"PBE")),
+            "extended abort",
+        ))
+        .await;
+
+        assert_eq!(bytes[0], b'f');
+        let copy_fail_len = 1 + u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
+        assert_eq!(&bytes[copy_fail_len..], &[b'S', 0, 0, 0, 4]);
+    }
 }

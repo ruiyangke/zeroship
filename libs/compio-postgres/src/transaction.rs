@@ -166,9 +166,7 @@ impl<'a> Transaction<'a> {
         // still being built leaves the transaction open on the server with
         // nothing left to undo it.
         self.done = true;
-        let tag =
-            crate::simple_query::finish_batch_execute_reporting_tag(self.client.inner(), responses)
-                .await?;
+        let tag = crate::simple_query::finish_batch_execute_reporting_tag(responses).await?;
         // batch_execute awaited the command to completion - the
         // connection is in a known-clean state. Clear any dirty flag
         // that a previous savepoint rollback or retry may have set.
@@ -203,7 +201,7 @@ impl<'a> Transaction<'a> {
         };
         let responses = crate::simple_query::start_batch_execute(self.client.inner(), &query)?;
         self.done = true;
-        let r = crate::simple_query::finish_batch_execute(self.client.inner(), responses).await;
+        let r = crate::simple_query::finish_batch_execute(responses).await;
         if r.is_ok() {
             // Explicit rollback awaited to completion — the connection is
             // clean regardless of what came before.
@@ -288,11 +286,7 @@ impl<'a> Transaction<'a> {
     /// `zeroship-plugin-db` use this to run the autocommit CRUD path
     /// inside an explicit transaction so `SET LOCAL` role/timeouts
     /// auto-revert on COMMIT/ROLLBACK (including the rollback-on-drop).
-    pub async fn query_text_params(
-        &self,
-        sql: &str,
-        params: &[&str],
-    ) -> Result<Vec<Row>, Error> {
+    pub async fn query_text_params(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, Error> {
         self.client.query_text_params(sql, params).await
     }
 
@@ -520,8 +514,7 @@ impl<'a> Transaction<'a> {
                 name: &name,
                 done: false,
             };
-            let result =
-                crate::simple_query::finish_batch_execute(cleanup.client.inner(), responses).await;
+            let result = crate::simple_query::finish_batch_execute(responses).await;
             cleanup.done = true;
             result?;
         }
