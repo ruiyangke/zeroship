@@ -565,6 +565,42 @@ pub fn with_password(dsn: &str, password: &str) -> Option<String> {
     ))
 }
 
+/// A DSN for a server with TLS switched OFF entirely.
+///
+/// Distinct from [`plaintext_url`], which names the same encrypted server
+/// without asking for encryption - fine for an unencrypted client, useless to
+/// a test whose subject is what happens when the server answers `N` to
+/// `SSLRequest`. Under `--features suite-over-tls` that is the descriptor's
+/// `plain_url` (the setup script's `plain` server, `ssl` off), and outside it
+/// the ordinary test server, which has no TLS either.
+///
+/// `sslmode_require_fails_closed_over_a_plaintext_server` needs this or its
+/// name stops being true: pointed at a TLS-capable server, `sslmode=require`
+/// is SATISFIED and the test measures nothing.
+#[cfg(feature = "suite-over-tls")]
+pub fn tls_disabled_url() -> String {
+    let base = descriptor_field(&tls_descriptor(), "plain_url");
+    let field = |key: &str| {
+        base.split_whitespace()
+            .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("the TLS descriptor's plain_url has no `{key}`"))
+            .to_string()
+    };
+    format!(
+        "postgres://{}:{}@{}:{}/{}",
+        field("user"),
+        field("password"),
+        field("host"),
+        field("port"),
+        field("dbname"),
+    )
+}
+
+#[cfg(not(feature = "suite-over-tls"))]
+pub fn tls_disabled_url() -> String {
+    test_url()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
