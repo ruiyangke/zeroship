@@ -583,7 +583,7 @@ where
 /// This only chooses an ENCODING. The server still applies the domain's
 /// constraints, which is what `a_domain_check_constraint_still_rejects_a_bad_value`
 /// pins.
-fn encode_parameter(
+pub(crate) fn encode_parameter(
     param: &dyn ToSql,
     ty: &Type,
     buf: &mut BytesMut,
