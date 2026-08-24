@@ -62,11 +62,11 @@
 // `pending_responses` back-pressure stash, so message handling and FIFO
 // batch ordering are identical across them.
 
-use crate::buf_stream::{
-    BufReadHalf, BufStream, BufWriteHalf, ReadDeadline, SplitStream,
-};
+use crate::buf_stream::{BufReadHalf, BufStream, BufWriteHalf, ReadDeadline, SplitStream};
 use crate::client::{QueryObservation, ResponseMessages};
-use crate::codec::{BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend};
+use crate::codec::{
+    BackendMessage, BackendMessages, FrontendMessage, read_backend, write_frontend,
+};
 use crate::copy_in::CopyInReceiver;
 use crate::error::DbError;
 use crate::maybe_tls_stream::MaybeTlsStream;
@@ -76,12 +76,12 @@ use fallible_iterator::FallibleIterator;
 use futures_channel::{mpsc, oneshot};
 use futures_util::{SinkExt, StreamExt};
 use log::{debug, trace};
+use parking_lot::Mutex;
 use postgres_protocol::message::backend::Message;
 use postgres_protocol::message::frontend;
 use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::future::poll_fn;
-use parking_lot::Mutex;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
@@ -322,9 +322,9 @@ impl ReadObligation {
     }
 
     fn is_complete(&self) -> bool {
-        self.inner.as_ref().is_some_and(|inner| {
-            inner.state.get() == ReadObligationState::Complete
-        })
+        self.inner
+            .as_ref()
+            .is_some_and(|inner| inner.state.get() == ReadObligationState::Complete)
     }
 }
 
@@ -538,9 +538,7 @@ where
             // Step B — clean shutdown once the client has gone away and
             // all awaited work is done. Drop-time housekeeping has no
             // receiver waiting for its response and must not delay shutdown.
-            if terminating
-                && !has_awaited_response(&self.responses, &self.pending_responses)
-            {
+            if terminating && !has_awaited_response(&self.responses, &self.pending_responses) {
                 // NOT `?`: same reasoning as the Terminate write in Step E -
                 // the client is gone and the socket may already be released.
                 if let Err(e) = self.stream.flush().await {
@@ -706,8 +704,7 @@ where
     fn record_terminal_read(&mut self, error: &Error) {
         // Publish poison before the operation receives its error: a pooled
         // borrower may drop immediately and synchronous return must evict it.
-        self.tx_status
-            .store(READ_RETIRED_STATUS, Ordering::Release);
+        self.tx_status.store(READ_RETIRED_STATUS, Ordering::Release);
         publish_read_timeout(error, &mut self.responses);
     }
 
@@ -726,8 +723,7 @@ where
         } = request;
         let copy_observation = observation.clone();
         let is_copy = matches!(&messages, RequestMessages::CopyIn(_));
-        let read_obligation =
-            ReadObligation::new(self.stream.read_deadline().as_ref(), is_copy);
+        let read_obligation = ReadObligation::new(self.stream.read_deadline().as_ref(), is_copy);
         self.responses.push_back(Response {
             sender,
             disposition,
@@ -772,8 +768,8 @@ where
                     match receiver.next().await {
                         Some(msg) => {
                             let terminal = receiver.is_done();
-                            let resume_terminal = terminal
-                                && read_obligation.prepare_copy_terminal();
+                            let resume_terminal =
+                                terminal && read_obligation.prepare_copy_terminal();
                             if let Some(observation) = &copy_observation {
                                 observation.inspect_frontend(&msg);
                             }
@@ -1013,9 +1009,7 @@ impl Dispatch<'_> {
                 }
             }
         }
-        if request_complete
-            && let Some(observation) = completion_observation
-        {
+        if request_complete && let Some(observation) = completion_observation {
             let completed_at = completed_at.unwrap_or_else(Instant::now);
             observation.server_complete(completed_at);
         }
@@ -1234,9 +1228,11 @@ fn publish_read_timeout(error: &Error, responses: &mut VecDeque<Response>) {
         let Some(response_error) = error.duplicate_read_timeout() else {
             unreachable!("read-timeout classification changed while publishing it");
         };
-        let _ = response.sender.try_send(ResponseMessages::Observed(
-            VecDeque::from([Err(response_error)]),
-        ));
+        let _ = response
+            .sender
+            .try_send(ResponseMessages::Observed(VecDeque::from([Err(
+                response_error,
+            )])));
     }
 }
 
@@ -1269,9 +1265,7 @@ fn classify_read_terminal(
     }
 }
 
-fn take_captured_non_eof_terminal(
-    terminal: &mut Option<Option<Error>>,
-) -> Option<Error> {
+fn take_captured_non_eof_terminal(terminal: &mut Option<Option<Error>>) -> Option<Error> {
     if terminal
         .as_ref()
         .is_some_and(|terminal| terminal.as_ref().is_some_and(|error| !is_eof(error)))
@@ -1403,9 +1397,10 @@ where
             read_terminal = Some(terminal);
         }
 
-        if read_terminal.as_ref().is_some_and(|terminal| {
-            terminal.as_ref().is_some_and(Error::is_read_timeout)
-        }) {
+        if read_terminal
+            .as_ref()
+            .is_some_and(|terminal| terminal.as_ref().is_some_and(Error::is_read_timeout))
+        {
             // The out-of-band timeout has retired this session. No amount of
             // write progress can make it reusable or produce the missing
             // response.
@@ -2975,7 +2970,8 @@ mod tests {
         let address = listener.local_addr().expect("read scripted peer address");
         let handle = std::thread::spawn(move || {
             let (mut peer, _) = listener.accept().expect("accept driver connection");
-            peer.set_nodelay(true).expect("disable Nagle on scripted peer");
+            peer.set_nodelay(true)
+                .expect("disable Nagle on scripted peer");
 
             let mut length = [0; 4];
             peer.read_exact(&mut length).expect("read startup length");
@@ -2996,12 +2992,10 @@ mod tests {
             peer.read_exact(&mut tag).expect("read query tag");
             assert_eq!(tag[0], b'Q', "expected a simple-query request");
             let mut query_length = [0; 4];
-            peer.read_exact(&mut query_length).expect("read query length");
+            peer.read_exact(&mut query_length)
+                .expect("read query length");
             let query_length = u32::from_be_bytes(query_length) as usize;
-            assert!(
-                query_length >= 4,
-                "query packet length includes its header"
-            );
+            assert!(query_length >= 4, "query packet length includes its header");
             let mut query = vec![0; query_length - 4];
             peer.read_exact(&mut query).expect("read query body");
         });
@@ -3046,7 +3040,8 @@ mod tests {
 
         let handle = std::thread::spawn(move || {
             let (mut peer, _) = listener.accept().expect("accept driver connection");
-            peer.set_nodelay(true).expect("disable Nagle on scripted peer");
+            peer.set_nodelay(true)
+                .expect("disable Nagle on scripted peer");
 
             let mut length = [0; 4];
             peer.read_exact(&mut length).expect("read startup length");
@@ -3079,8 +3074,7 @@ mod tests {
             assert_eq!(tag, b'S', "expected Sync after statement preparation");
             assert!(body.is_empty(), "Sync must have an empty body");
 
-            peer.write_all(b"1\0\0\0\x04")
-                .expect("write ParseComplete");
+            peer.write_all(b"1\0\0\0\x04").expect("write ParseComplete");
             peer.write_all(b"t\0\0\0\x06\0\0")
                 .expect("write ParameterDescription");
             peer.write_all(b"n\0\0\0\x04").expect("write NoData");
@@ -3210,12 +3204,11 @@ mod tests {
             );
             let read_half_started = Rc::new(Cell::new(false));
             let read_half_dropped = Rc::new(Cell::new(false));
-            let stream: BufStream<MaybeTlsStream<_, TimeoutSplitStream>> = BufStream::new(
-                MaybeTlsStream::Raw(TimeoutSplitStream {
+            let stream: BufStream<MaybeTlsStream<_, TimeoutSplitStream>> =
+                BufStream::new(MaybeTlsStream::Raw(TimeoutSplitStream {
                     read_half_started: Rc::clone(&read_half_started),
                     read_half_dropped: Rc::clone(&read_half_dropped),
-                }),
-            );
+                }));
             let (_request_tx, request_rx) = mpsc::unbounded();
             let connection = Connection::new(
                 stream,
@@ -3383,7 +3376,10 @@ mod tests {
                 error.as_io().map(std::io::Error::kind),
                 Some(std::io::ErrorKind::ConnectionReset)
             );
-            assert!(write_started.get(), "the read failed before the write started");
+            assert!(
+                write_started.get(),
+                "the read failed before the write started"
+            );
             assert!(
                 write_future_dropped.get(),
                 "the terminal read left the parked write alive"
@@ -3515,7 +3511,9 @@ mod tests {
     /// `false` reports it the moment the script runs out (before the main loop
     /// has dispatched the queued frame), `true` holds it until the frame has
     /// been delivered. Nothing else differs between the two calls.
-    async fn status_seen_by_the_woken_consumer(eof_after_delivery: bool) -> (u8, Result<(), Error>) {
+    async fn status_seen_by_the_woken_consumer(
+        eof_after_delivery: bool,
+    ) -> (u8, Result<(), Error>) {
         let tx_status = Arc::new(AtomicU8::new(b'I'));
         let recorder = StatusRecordingWake::new(&tx_status);
         let waker = Waker::from(Arc::clone(&recorder));
@@ -3539,9 +3537,9 @@ mod tests {
         let (request_tx, request_rx) = mpsc::unbounded();
         request_tx
             .unbounded_send(Request {
-                messages: RequestMessages::Single(FrontendMessage::Raw(
-                    bytes::Bytes::from_static(b"scripted request"),
-                )),
+                messages: RequestMessages::Single(FrontendMessage::Raw(bytes::Bytes::from_static(
+                    b"scripted request",
+                ))),
                 sender: response_tx,
                 disposition: RequestDisposition::Awaited,
                 transaction_effect: TransactionEffect::MayChange,
@@ -4154,9 +4152,9 @@ mod tests {
         // The stash carries a CLONE, exactly as `deliver_batch` does.
         let pending_responses = VecDeque::from([PendingResponse {
             sender: p_sender.clone(),
-            messages: ResponseMessages::Observed(VecDeque::from([Ok(
-                command_complete_message("STASHED"),
-            )])),
+            messages: ResponseMessages::Observed(VecDeque::from([Ok(command_complete_message(
+                "STASHED",
+            ))])),
             disposition: RequestDisposition::Awaited,
         }]);
 
@@ -4214,28 +4212,30 @@ mod tests {
     /// nobody reads again.
     #[compio::test]
     async fn a_copy_startup_read_does_not_overtake_a_stashed_batch() {
-        let (mut connection, mut p_receiver, copy_request) =
-            connection_with_stashed_batch(vec![
-                // Batch for `P`: names itself, and completes `P`.
-                {
-                    let mut batch = Vec::new();
-                    let tag = "OVERTAKING\0";
-                    let body_len = u32::try_from(4 + tag.len()).unwrap();
-                    batch.push(b'C');
-                    batch.extend_from_slice(&body_len.to_be_bytes());
-                    batch.extend_from_slice(tag.as_bytes());
-                    batch.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
-                    batch
-                },
-                // Batch for the COPY: pauses its read obligation and ends the
-                // startup loop.
-                copy_in_response_frame(),
-            ]);
+        let (mut connection, mut p_receiver, copy_request) = connection_with_stashed_batch(vec![
+            // Batch for `P`: names itself, and completes `P`.
+            {
+                let mut batch = Vec::new();
+                let tag = "OVERTAKING\0";
+                let body_len = u32::try_from(4 + tag.len()).unwrap();
+                batch.push(b'C');
+                batch.extend_from_slice(&body_len.to_be_bytes());
+                batch.extend_from_slice(tag.as_bytes());
+                batch.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+                batch
+            },
+            // Batch for the COPY: pauses its read obligation and ends the
+            // startup loop.
+            copy_in_response_frame(),
+        ]);
 
-        compio::time::timeout(Duration::from_secs(5), connection.handle_request(copy_request))
-            .await
-            .expect("COPY startup exceeded its watchdog")
-            .expect("COPY startup failed");
+        compio::time::timeout(
+            Duration::from_secs(5),
+            connection.handle_request(copy_request),
+        )
+        .await
+        .expect("COPY startup exceeded its watchdog")
+        .expect("COPY startup failed");
 
         let mut delivered = Vec::new();
         while let Ok(mut messages) = p_receiver.try_recv() {
@@ -4258,27 +4258,29 @@ mod tests {
     /// delivered at all.
     #[compio::test]
     async fn a_copy_startup_read_with_no_stash_delivers_immediately() {
-        let (mut connection, mut p_receiver, copy_request) =
-            connection_with_stashed_batch(vec![
-                {
-                    let mut batch = Vec::new();
-                    let tag = "OVERTAKING\0";
-                    let body_len = u32::try_from(4 + tag.len()).unwrap();
-                    batch.push(b'C');
-                    batch.extend_from_slice(&body_len.to_be_bytes());
-                    batch.extend_from_slice(tag.as_bytes());
-                    batch.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
-                    batch
-                },
-                copy_in_response_frame(),
-            ]);
+        let (mut connection, mut p_receiver, copy_request) = connection_with_stashed_batch(vec![
+            {
+                let mut batch = Vec::new();
+                let tag = "OVERTAKING\0";
+                let body_len = u32::try_from(4 + tag.len()).unwrap();
+                batch.push(b'C');
+                batch.extend_from_slice(&body_len.to_be_bytes());
+                batch.extend_from_slice(tag.as_bytes());
+                batch.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+                batch
+            },
+            copy_in_response_frame(),
+        ]);
         // THE ONE VARIABLE.
         connection.pending_responses.clear();
 
-        compio::time::timeout(Duration::from_secs(5), connection.handle_request(copy_request))
-            .await
-            .expect("COPY startup exceeded its watchdog")
-            .expect("COPY startup failed");
+        compio::time::timeout(
+            Duration::from_secs(5),
+            connection.handle_request(copy_request),
+        )
+        .await
+        .expect("COPY startup exceeded its watchdog")
+        .expect("COPY startup failed");
 
         let mut delivered = Vec::new();
         while let Ok(mut messages) = p_receiver.try_recv() {
