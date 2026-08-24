@@ -2025,9 +2025,11 @@ pub mod pgoutput {
         // Inside a chunk, every transactional message carries its own xid.
         // This is NOT necessarily the top-level xid in StreamStart: changes
         // made under a SAVEPOINT carry their subtransaction xid, which a later
-        // StreamAbort can name independently. Preserve it around the decoded
-        // payload instead of comparing it to the chunk's top-level xid or
-        // silently throwing it away.
+        // StreamAbort can name independently. Measured on 16.14, one streamed
+        // transaction had 21 StreamStarts carrying 000ab400 while its 4000
+        // Inserts carried both 000ab400 and 000ab401. Preserve that identity
+        // around the decoded payload instead of comparing it to the chunk's
+        // top-level xid or silently throwing it away.
         let carried_xid = if stream_xid.is_some()
             && matches!(tag, b'R' | b'Y' | b'I' | b'U' | b'D' | b'T' | b'M')
         {
