@@ -29,8 +29,9 @@ use compio_postgres::{Client, NoTls};
 #[allow(dead_code)]
 mod common;
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -64,10 +65,7 @@ async fn domain_fixture(client: &Client, suffix: &str) -> (String, String) {
 /// Binding an `i32` to a domain-over-int4 parameter works.
 #[compio::test]
 async fn a_domain_parameter_accepts_its_base_rust_type() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let (domain, table) = domain_fixture(&client, "bind").await;
 
@@ -119,10 +117,7 @@ async fn a_domain_parameter_accepts_its_base_rust_type() {
 /// than merely choosing an encoding for it, this would insert -1 happily.
 #[compio::test]
 async fn a_domain_check_constraint_still_rejects_a_bad_value() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let (domain, table) = domain_fixture(&client, "check").await;
 
@@ -170,10 +165,7 @@ async fn a_binary_copy_into_a_domain_column_accepts_its_base_type() {
     use compio_postgres::binary_copy::BinaryCopyInWriter;
     use futures_util::pin_mut;
 
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let (domain, table) = domain_fixture(&client, "copy").await;
 
@@ -234,10 +226,7 @@ async fn a_binary_copy_into_a_domain_column_accepts_its_base_type() {
 /// `alloc::vec::Vec<i32>` and the Postgres type `_d`".
 #[compio::test]
 async fn a_domain_array_binds_and_reads_with_its_base_element() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let domain = common::test_object_name("cpg_domarr_d");
     let table = common::test_object_name("cpg_domarr_t");
@@ -296,10 +285,7 @@ async fn a_domain_array_binds_and_reads_with_its_base_element() {
 /// -5 happily. It does not: SQLSTATE 23514, per element, from the server.
 #[compio::test]
 async fn a_domain_array_still_enforces_the_element_check() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let domain = common::test_object_name("cpg_domarr_cd");
     let table = common::test_object_name("cpg_domarr_ct");

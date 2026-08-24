@@ -22,8 +22,9 @@ mod common;
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const ABORT_MARKER: &str = "simple query execution cannot supply COPY data";
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -62,9 +63,7 @@ async fn assert_simple_scalar(stream: SimpleQueryStream, expected: &str, failure
 #[compio::test]
 async fn batch_execute_finds_copy_in_after_copy_out_and_recovers() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = copy_table(&client, "batch").await;
 
@@ -98,9 +97,7 @@ async fn batch_execute_finds_copy_in_after_copy_out_and_recovers() {
 #[compio::test]
 async fn simple_query_finds_copy_in_after_copy_out_and_recovers() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = copy_table(&client, "stream").await;
 
@@ -133,9 +130,7 @@ async fn simple_query_finds_copy_in_after_copy_out_and_recovers() {
 #[compio::test]
 async fn two_copy_out_statements_were_already_synchronised() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = copy_table(&client, "control").await;
 
@@ -168,9 +163,7 @@ async fn two_copy_out_statements_were_already_synchronised() {
 #[compio::test]
 async fn dropping_a_partial_simple_query_stream_recovers_a_later_copy_in() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = copy_table(&client, "dropped_stream").await;
 
@@ -215,9 +208,7 @@ async fn dropping_a_partial_simple_query_stream_recovers_a_later_copy_in() {
 #[compio::test]
 async fn dropping_a_partial_simple_query_stream_before_copy_out_stays_usable() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = copy_table(&client, "dropped_stream_control").await;
 
@@ -259,9 +250,7 @@ async fn dropping_a_partial_simple_query_stream_before_copy_out_stays_usable() {
 #[compio::test]
 async fn drop_recovery_stays_usable_when_copy_in_is_rejected_before_start() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let missing = common::test_object_name("cpg_simple_copy_chain_missing");
 
@@ -294,9 +283,7 @@ async fn drop_recovery_stays_usable_when_copy_in_is_rejected_before_start() {
 #[compio::test]
 async fn drop_recovery_tracks_nonconforming_string_escapes_before_copy_in() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = copy_table(&client, "backslash_strings").await;
         client
@@ -337,9 +324,7 @@ async fn drop_recovery_tracks_nonconforming_string_escapes_before_copy_in() {
 #[compio::test]
 async fn drop_recovery_skips_unicode_dollar_quotes_before_copy_in() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = copy_table(&client, "unicode_dollar_quote").await;
 
@@ -372,9 +357,7 @@ async fn drop_recovery_skips_unicode_dollar_quotes_before_copy_in() {
 #[compio::test]
 async fn speculative_copy_recovery_does_not_abort_a_healthy_transaction() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         client
             .batch_execute("SET standard_conforming_strings = on; BEGIN")

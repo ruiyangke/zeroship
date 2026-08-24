@@ -59,8 +59,9 @@ mod common;
 
 const POOL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn single_connection_pool(url: &str) -> Pool {
@@ -83,10 +84,7 @@ async fn single_connection_pool(url: &str) -> Pool {
 /// A session GUC set by one borrower is still set for the next.
 #[compio::test]
 async fn a_session_guc_survives_a_release() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let pool = single_connection_pool(&url).await;
 
     let first_pid = {
@@ -134,10 +132,7 @@ async fn a_session_guc_survives_a_release() {
 /// two callers each believe they own.
 #[compio::test]
 async fn a_session_advisory_lock_survives_a_release() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let pool = single_connection_pool(&url).await;
 
     // Process-scoped so concurrent runs of this suite cannot collide on it.
@@ -202,10 +197,7 @@ async fn a_session_advisory_lock_survives_a_release() {
 /// session state across" from "hands everything across".
 #[compio::test]
 async fn an_open_transaction_does_not_survive_a_release() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let pool = single_connection_pool(&url).await;
 
     let first_pid = {

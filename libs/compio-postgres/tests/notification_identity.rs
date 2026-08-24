@@ -31,8 +31,9 @@ mod common;
 
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Result<Client, Error> {
@@ -57,10 +58,7 @@ async fn backend_pid(client: &Client) -> i32 {
 /// The PID on a notification is the notifier's, not the listener's.
 #[compio::test]
 async fn a_notification_carries_the_notifying_backends_process_id() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
 
     // Listener. The async sink has to be taken before `run()` is spawned.
     let (listener, mut listener_connection) = compio_postgres::connect(&url, NoTls)
@@ -125,10 +123,7 @@ async fn a_notification_carries_the_notifying_backends_process_id() {
 /// still look correct in the test above.
 #[compio::test]
 async fn a_notification_without_a_payload_delivers_an_empty_string() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
 
     let (listener, mut listener_connection) = compio_postgres::connect(&url, NoTls)
         .await
