@@ -486,6 +486,28 @@ where
     /// and LISTEN/NOTIFY notifications). Returns the receiver half.
     /// Must be called before [`run`](Self::run). If never called, async
     /// messages are logged at info/debug and discarded.
+    ///
+    /// # An idle TLS connection delivers nothing
+    ///
+    /// Over a PLAINTEXT connection this behaves as you would expect: the
+    /// socket is read by a detached task, so a notification arrives whether or
+    /// not the connection is doing anything else.
+    ///
+    /// Over TLS it does not. A TLS stream cannot be split into owned halves -
+    /// rustls keeps shared session state - so it runs the serialized loop,
+    /// whose idle step awaits the next CLIENT REQUEST and reads no socket. An
+    /// unsolicited frame therefore
+    /// waits in the kernel buffer until the application happens to issue
+    /// another query. For the canonical LISTEN pattern - subscribe once, then
+    /// wait - that means the notification never arrives at all. Measured on
+    /// 2026-08-24: identical listeners, same server, same channel; the
+    /// plaintext one received the NOTIFY and the TLS one did not.
+    ///
+    /// This is a KNOWN DEFECT, not a design decision, and it is being tracked.
+    /// It is documented here rather than left silent because the failure has
+    /// no error and no log - the events simply never come. Until it is fixed,
+    /// a listener that needs TLS must poll instead of waiting, or run its
+    /// subscription over a plaintext connection.
     pub fn notifications(&mut self) -> mpsc::UnboundedReceiver<AsyncMessage> {
         let (tx, rx) = mpsc::unbounded();
         self.async_sender = Some(tx);

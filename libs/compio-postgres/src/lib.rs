@@ -4,7 +4,11 @@
 //!
 //! Port of [`tokio-postgres`](https://github.com/rust-postgres/rust-postgres), adapted to
 //! compio's completion-based, owned-buffer I/O model. Client/Connection split preserved;
-//! pipelining and async notifications preserved.
+//! pipelining and async notifications preserved - over PLAINTEXT. A TLS stream
+//! cannot be split into owned halves, so it runs a serialized loop that reads
+//! no socket while idle: see
+//! [`Connection::notifications`](crate::Connection::notifications) for what
+//! that costs a LISTEN/NOTIFY subscriber.
 //!
 //! Licensed under MIT or Apache-2.0; see LICENSE files in the tokio-postgres repository.
 //!
