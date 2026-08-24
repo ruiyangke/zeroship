@@ -26,7 +26,12 @@
 #             sslkey are parsed" from "sslcert and sslkey are sent and used".
 #   directtls PostgreSQL 18, ssl=on, using the same certificate as `tls`. This
 #             is the positive server for direct SSL negotiation; `tls` remains
-#             the PostgreSQL 16 discriminator.
+#             the PostgreSQL 16 discriminator. It carries the same logical
+#             decoding and prepared-transaction settings as `tls`, so the whole
+#             suite can be pointed at it - encrypted AND on a second server
+#             version is a combination nothing else covers, and without those
+#             settings 25 replication and two-phase tests fail on server
+#             configuration and read as a version divergence.
 #
 #   usage: tests/tls_live_setup.sh [tls_port] [plain_port] [mismatch_port] [sslonly_port] [clientcert_port] [directtls_port]
 #          tests/tls_live_setup.sh --down     # remove the containers
@@ -230,7 +235,8 @@ docker run -d --name "$directtls_name" \
     -p "127.0.0.1:$directtls_port:5432" \
     -v "$live:/certs:ro" \
     postgres:18 \
-    -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key >/dev/null
+    -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/server.key \
+    -c wal_level=logical -c max_prepared_transactions=10 -c max_replication_slots=20 >/dev/null
 
 for name in "$tls_name" "$plain_name" "$mismatch_name" "$sslonly_name" "$clientcert_name" "$directtls_name"; do
     for _ in $(seq 60); do
