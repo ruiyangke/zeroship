@@ -272,8 +272,7 @@ fn start_options() -> StartReplicationOptions<'static> {
 }
 
 fn test_url() -> String {
-    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::test_url()
 }
 
 /// The credentials and database from the test DSN, with no host or port.

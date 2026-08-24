@@ -8,8 +8,7 @@ use std::io;
 mod common;
 
 fn test_url() -> String {
-    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::test_url()
 }
 
 fn config_for(mode: TargetSessionAttrs, application_name: &str) -> Config {

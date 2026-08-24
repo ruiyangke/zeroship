@@ -286,8 +286,7 @@ fn stub_config(addr: SocketAddr) -> Config {
 }
 
 fn live_url() -> String {
-    let url = common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string());
+    let url = common::test_url();
     let separator = if url.contains('?') { '&' } else { '?' };
     format!("{url}{separator}sslmode=disable")
 }
