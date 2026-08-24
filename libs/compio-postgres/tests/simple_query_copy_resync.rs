@@ -32,11 +32,13 @@
 //! whatever the STDIN case did.
 //!
 //! EVERY TEST HERE IS UNDER A WATCHDOG because the regression this guards is a
-//! HANG as often as an error: `abort_copy_in` sends `CopyFail` AND a `Sync`, and
-//! the `Sync` is what balances the connection task's response accounting.
-//! Removing just that one line (measured) does not fail the assertions - it
-//! leaves the follow-up query waiting for a reply that was handed to the
-//! abort's own orphaned response slot, and the test never returns.
+//! HANG as often as an error. The old recovery queued a second request carrying
+//! `CopyFail + Sync`: simple-protocol `CopyFail` already earns ReadyForQuery,
+//! so Sync earned another terminator and forced the driver to invent a response
+//! slot for it. A transaction pooler can release the backend after the first
+//! terminator and discard the second, leaving the follow-up query behind that
+//! orphaned slot forever. Recovery now uses the connection-owned COPY producer
+//! and its simple-protocol terminal is CopyFail alone.
 
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
@@ -118,6 +120,69 @@ async fn batch_execute_of_copy_from_stdin_leaves_the_session_usable() {
     })
     .await
     .expect("batch COPY resync test exceeded its watchdog");
+}
+
+/// The COPY abort must settle before a transaction pooler releases its backend.
+///
+/// Unlike the session-local fixtures above, this table is durable so a backend
+/// handoff cannot turn the COPY into an unrelated missing-table error. That
+/// makes the watchdog measure the abort protocol itself through both a direct
+/// server and a transaction-mode pooler.
+#[compio::test]
+async fn batch_copy_abort_survives_a_transaction_pooler_handoff() {
+    let url = test_url();
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .expect("connect the durable COPY probe client");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+    let table = common::test_object_name("cpg_copy_resync_pooler");
+    client
+        .batch_execute(&format!("CREATE TABLE {table} (v int)"))
+        .await
+        .expect("create the durable COPY probe table");
+
+    let outcome = compio::time::timeout(TEST_TIMEOUT, async {
+        let failure = client
+            .batch_execute(&format!("COPY {table} FROM STDIN"))
+            .await;
+        let follow_up: Result<i32, _> = client.query_one_scalar("SELECT 46::int4", &[]).await;
+        (failure, follow_up, client.transaction_status())
+    })
+    .await;
+
+    // A red run can leave the connection waiting on the lost ReadyForQuery.
+    // Retire that socket explicitly so a one-backend pooler can serve cleanup.
+    drop(client);
+    let _ = driver.cancel().await;
+    let cleaner = connect_client(&url).await;
+    cleaner
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .expect("drop the durable COPY probe table");
+
+    let (failure, follow_up, status) =
+        outcome.expect("COPY abort or its follow-up hung behind a transaction pooler");
+    let failure = failure.expect_err("batch_execute fed a COPY it has no data channel for");
+    assert_eq!(
+        failure.code(),
+        Some(&SqlState::QUERY_CANCELED),
+        "the copy was not aborted by this driver: {}",
+        common::error_chain(&failure)
+    );
+    assert!(
+        common::error_chain(&failure).contains(ABORT_MARKER),
+        "the failure did not carry this driver's copy-abort reason: {}",
+        common::error_chain(&failure)
+    );
+    assert_eq!(
+        follow_up.expect("the COPY abort consumed the follow-up response"),
+        46
+    );
+    assert_eq!(
+        status,
+        Some(compio_postgres::TransactionStatus::Idle),
+        "the COPY abort left response accounting unsettled"
+    );
 }
 
 /// Same claim for the streaming `simple_query` entry point, which drains
