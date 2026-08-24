@@ -2845,8 +2845,17 @@ mod tests {
     }
 
     /// A TRUNCATE whose relation count exceeds what the frame can hold is
-    /// rejected, and the reservation it triggers is bounded by the frame rather
-    /// than by the claimed count.
+    /// rejected.
+    ///
+    /// It does NOT rule on the reservation, and the second half of this
+    /// sentence used to say it did. The `.min(cur.len() / 4)` clamp is
+    /// invisible from here: `decode` answers `UnexpectedEof` on this frame
+    /// whether the capacity came from the frame or from the claimed count,
+    /// so deleting the clamp leaves the assertion below green. The
+    /// reservation is measured in `tests/pgoutput_allocation.rs`, which
+    /// watches the process's own peak address space instead - the sibling
+    /// above (`pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap`)
+    /// already carried that exclusion; this one kept the claim.
     #[test]
     fn pgoutput_decode_rejects_a_truncate_count_larger_than_the_frame() {
         // count = u32::MAX, options = 0, and no ids at all.
