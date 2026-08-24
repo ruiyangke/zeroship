@@ -3591,7 +3591,8 @@ impl DeclarativeAuthor {
                     other => {
                         if !self.dialect.supports(Capability::AlterTableAddConstraint) {
                             // SQLite cannot ADD CONSTRAINT later → fail closed.
-                            return Err(DeclarativeError::SqliteDeferredFkUnsupported {
+                            return Err(DeclarativeError::DeferredForeignKeyUnsupported {
+                                dialect: self.dialect.clone(),
                                 table: (*table).clone(),
                                 target: other.unwrap_or_default(),
                             });
@@ -3741,7 +3742,7 @@ impl DeclarativeAuthor {
             // `None`, so the deploy died mid-apply on an internal routing-bug message
             // with the plain DDL ahead of it already committed. Refuse before
             // authoring, naming the columns, for the reason on the error variant.
-            // This mirrors the `MysqlAlterColumnUnsupported` arm below and the IR
+            // This mirrors the `ExistingColumnChangeRefused` arm below and the IR
             // lane's `lower_ir_rename`, so an authored rename and a declarative one
             // refuse alike rather than one lane silently planning an apply that
             // cannot finish.
@@ -3750,7 +3751,8 @@ impl DeclarativeAuthor {
                 ColumnRenameStrategy::Refuse(_)
             ) {
                 if let Some(r) = table_renames.first() {
-                    return Err(DeclarativeError::MysqlRenameColumnUnsupported {
+                    return Err(DeclarativeError::ColumnRenameRefused {
+                        dialect: self.dialect.clone(),
                         table: table.clone(),
                         from: r.from.clone(),
                         to: r.to.clone(),
@@ -3851,7 +3853,8 @@ impl DeclarativeAuthor {
                             } else {
                                 "type"
                             };
-                            return Err(DeclarativeError::MysqlAlterColumnUnsupported {
+                            return Err(DeclarativeError::ExistingColumnChangeRefused {
+                                dialect: self.dialect.clone(),
                                 table: table.clone(),
                                 column: c.name.clone(),
                                 change,
@@ -5727,7 +5730,8 @@ impl DeclarativeAuthor {
                     }
                 }
             } else if !self.dialect.supports(Capability::AlterTableAddConstraint) {
-                return Err(DeclarativeError::SqliteDeferredFkUnsupported {
+                return Err(DeclarativeError::DeferredForeignKeyUnsupported {
+                    dialect: self.dialect.clone(),
                     table: table.to_string(),
                     target: target.unwrap_or_default(),
                 });

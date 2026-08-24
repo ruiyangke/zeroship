@@ -1117,7 +1117,7 @@ impl<D: SqlSession> MigrationBackend for MysqlBackend<'_, D> {
         // spelled `PgExpandContract`, a name the same investigation disproved), hit
         // this `None` mid-apply, and left the deploy half-applied. The claim is true
         // NOW because the differ refuses the rename at plan time
-        // (`DeclarativeError::MysqlRenameColumnUnsupported`) rather than because
+        // (`DeclarativeError::ColumnRenameRefused`) rather than because
         // anything about this `None` changed. Keep the two in step: re-enabling MySQL
         // renames means giving this seam a real harness, not relaxing the refusal.
         None

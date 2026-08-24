@@ -306,7 +306,7 @@ async fn sqlite_deferred_fk_is_typed_error() {
     // absent, union-absent table is rejected upstream. The reachable deferred case:
     // a 2-table batch where the child's FK target is declared (union) so topo order
     // puts the parent first; that INLINES fine (covered above). To exercise the
-    // `SqliteDeferredFkUnsupported` arm directly we diff `posts` alone against an
+    // `DeferredForeignKeyUnsupported` arm directly we diff `posts` alone against an
     // empty live with `users` present in the union but filtered — simplest faithful
     // trigger: a self-batch where the target is neither live nor created (a union
     // that declares only `posts`, whose FK names a table the cross-app guard treats
@@ -340,7 +340,7 @@ async fn sqlite_deferred_fk_is_typed_error() {
     assert!(
         matches!(
             err,
-            DeclarativeError::SqliteDeferredFkUnsupported { .. }
+            DeclarativeError::DeferredForeignKeyUnsupported { .. }
                 | DeclarativeError::CrossAppFkTargetMissing { .. }
         ),
         "expected a fail-closed FK rejection, got: {err:?}"

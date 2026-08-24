@@ -567,7 +567,7 @@ async fn the_deploy_path_rename_replays_the_stored_create_and_leaves_the_decimal
     // The WHOLE ordered envelope set, the way the CLI re-presents it on every deploy:
     // `deploy_envelopes` seeds `live.sqlite_schemas` from the CUMULATIVE ops, so the
     // already-applied `CREATE` has to be in view or the rename fails closed with
-    // `SqliteRenameNeedsLiveTable`. Its steps are journaled, so it is skipped, not
+    // `RenameNeedsLiveTable`. Its steps are journaled, so it is skipped, not
     // re-applied.
     deploy(&backend, &["ledger"], &[CREATE, RENAME])
         .await

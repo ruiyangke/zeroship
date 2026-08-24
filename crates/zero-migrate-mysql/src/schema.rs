@@ -555,7 +555,7 @@ fn mysql_canonical_type(data_type: &str) -> String {
     // the same column. Both must fold to the same family or the differ sees a phantom
     // type change on every bounded string and refuses the deploy. Measured: a live
     // MySQL declarative re-deploy of a `character varying(191)` id column was refused
-    // with `MysqlAlterColumnUnsupported { change: "type" }` until this arm existed.
+    // with `ExistingColumnChangeRefused { change: "type" }` until this arm existed.
     if no_width.starts_with("varchar(")
         || no_width.starts_with("character varying(")
         || no_width == "character varying"

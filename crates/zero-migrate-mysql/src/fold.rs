@@ -10,6 +10,7 @@ use zero_migrate_backend::schema::SchemaRenderer;
 use zero_migrate_backend::snapshot::{
     ColumnSnapshot, PartitionSnapshot, SequenceSnapshot, TableSnapshot, ViewSnapshot,
 };
+use zero_migrate_ir::dialect::MYSQL;
 use zero_migrate_ir::expr::{Expr, SynthFn};
 use zero_migrate_ir::ir::{ColType, ValueFormat};
 use zero_migrate_ir::precondition::PreconditionCheck;
@@ -363,7 +364,14 @@ impl CatalogFoldPolicy for MysqlCatalogFoldPolicy {
     }
 
     fn alter_column_refusal(&self, op: &'static str) -> Result<(), IrLowerError> {
-        Err(IrLowerError::MysqlAlterColumnUnsupported(op))
+        Err(IrLowerError::AlterColumnNeedsWholeDefinition {
+            op_kind: op,
+            // This backend names ITSELF, from the shared id constant rather than
+            // from a vendor word written into the message. `CatalogFoldPolicy`
+            // carries no dialect, and giving it one would make core supply the
+            // answer to a question only the refusing backend can answer.
+            dialect: MYSQL,
+        })
     }
 
     fn partition_collapse_mirror_guard(

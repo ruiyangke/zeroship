@@ -35,7 +35,7 @@
 //! promise it was breaking rather than changing what the product offers.
 //!
 //! The precedent sits 60 lines below the rename loop in the same function: the
-//! `MysqlAlterColumnUnsupported` arm, whose comment already argued exactly this -
+//! `ExistingColumnChangeRefused` arm, whose comment already argued exactly this -
 //! refuse before rendering so "an authored change and a declarative one refuse alike
 //! rather than one lane silently planning invalid DDL". That reasoning had been
 //! applied to ALTER COLUMN and not to the rename above it.
@@ -415,8 +415,12 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
         refusal.contains("cannot rename column"),
         "the refusal must be the differ's typed plan-time one: {refusal}"
     );
+    // The dialect is now the resolved `DialectId`, not the word "MySQL" written into
+    // the neutral contract's message. Asserting the id rather than a literal is what
+    // keeps the property ("the refusal names the dialect it stopped for") true for a
+    // backend this test does not know about.
     assert!(
-        refusal.contains("MySQL"),
+        refusal.contains(zero_migrate_ir::dialect::MYSQL.as_str()),
         "the refusal names the dialect it stopped for: {refusal}"
     );
     assert!(

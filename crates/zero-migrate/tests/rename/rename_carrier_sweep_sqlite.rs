@@ -156,7 +156,7 @@ const CREATE_IR: &str = r#"{
 /// path and not a synthetic shortcut.
 ///
 /// Two renames of the SAME table cannot share a document: the SQLite lower refuses with
-/// `SqliteRepeatRenameTarget`, because each rename is a whole-table rebuild and stacking
+/// `RepeatRenameTarget`, because each rename is a whole-table rebuild and stacking
 /// two of them in one plan would have the second rebuild derive its shape from a table
 /// the first has already replaced. So the fixture deploys them as two migrations, which
 /// is also the more honest shape - it is what an operator would actually run.

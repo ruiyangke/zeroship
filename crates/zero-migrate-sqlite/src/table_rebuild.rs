@@ -406,7 +406,10 @@ impl TableRebuildPolicy for SqliteTableRebuildPolicy {
             for inner in effective {
                 if let Op::RenameColumn { table, .. } = inner {
                     if !seen.insert(table.as_str()) {
-                        return Err(IrLowerError::SqliteRepeatRenameTarget(table.clone()));
+                        return Err(IrLowerError::RepeatRenameTarget {
+                            table: table.clone(),
+                            dialect: dialect.clone(),
+                        });
                     }
                 }
             }

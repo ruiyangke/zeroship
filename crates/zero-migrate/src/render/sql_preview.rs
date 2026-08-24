@@ -26,7 +26,7 @@
 //!   runtime BACKFILL (`BackfillSpec`, exact statement stream depends on live row
 //!   count / PK ranges) and a cross-deploy CONTRACT cutover; SQLite needs the live
 //!   12-step rebuild (it does not even lower offline — fails closed with
-//!   [`IrLowerError::SqliteRenameNeedsLiveTable`](crate::render::lower::IrLowerError)).
+//!   [`IrLowerError::RenameNeedsLiveTable`](crate::render::lower::IrLowerError)).
 //! - **`backfill`** — a runtime windowed loop.
 //! - **any DDL migration carrying an existence-guard probe**
 //!   (`ifNotExists`/`ifExists`): apply is a
@@ -756,9 +756,9 @@ fn runtime_resolved_for_lower_error(op: &Op, err: &IrLowerError) -> String {
     let kind = op_kind_tag(op);
     let subject = op_subject(op);
     match err {
-        IrLowerError::SqliteRenameNeedsLiveTable(_) => format!(
-            "{RUNTIME_RESOLVED} {kind} {subject}: SQLite online rename needs the live table \
-             structure (12-step rebuild) — not offline-renderable"
+        IrLowerError::RenameNeedsLiveTable { dialect, .. } => format!(
+            "{RUNTIME_RESOLVED} {kind} {subject}: an online rename on {dialect} needs the live \
+             table structure (it reconciles by rebuilding) — not offline-renderable"
         ),
         IrLowerError::TableRebuildUnavailable { dialect, .. } => format!(
             "{RUNTIME_RESOLVED} {kind} {subject}: reconciled on {dialect} via a whole-table \

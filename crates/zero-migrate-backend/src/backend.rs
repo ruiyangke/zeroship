@@ -614,7 +614,7 @@ pub trait MigrationBackend {
     /// dependent expressions itself during its table rebuild, and the MySQL leg
     /// never reaches an expand-contract rename, because the declarative differ
     /// refuses one at plan time
-    /// (`DeclarativeError::MysqlRenameColumnUnsupported`) and the IR lane answers
+    /// (`DeclarativeError::ColumnRenameRefused`) and the IR lane answers
     /// `UnsupportedInV1`. That refusal is what makes the default safe here; before
     /// it existed, a MySQL rename DID reach this default and took the "nothing
     /// blocks it" answer on a question nobody had asked the server. Only the

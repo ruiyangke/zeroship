@@ -62,22 +62,29 @@ pub enum DeclarativeError {
     /// migrations - neither uses this error.)
     #[error("the declarative differ does not generate this change: {0}; author it as an explicit migration instead")]
     UnsupportedInV1(String),
-    /// An existing MySQL column needs a type or nullability change, which this
-    /// differ renders as PostgreSQL `ALTER COLUMN` DDL that MySQL cannot execute.
+    /// An existing column needs a type or nullability change, on a backend whose
+    /// [`ExistingColumnChangeStrategy`](crate::schema::SchemaRenderer) is `Refuse`.
     ///
-    /// MySQL is not missing the capability - `MODIFY COLUMN` does this work - but
-    /// it requires the COMPLETE column specification restated and silently drops
-    /// every facet omitted. Emitting it from a diff that knows only the changed
-    /// facet would discard the column's default, charset and comment, so the diff
-    /// refuses and says which column it stopped on.
+    /// Such a backend is not MISSING the capability — it has a statement that does
+    /// this work — but that statement requires the COMPLETE column specification
+    /// restated and silently drops every facet omitted. Emitting it from a diff that
+    /// knows only the changed facet would discard the column's default, character set
+    /// and comment, so the diff refuses and says which column it stopped on.
+    ///
+    /// The gate is the backend's own declared strategy, so a target that alters in
+    /// place (`Native`) or reconciles by rebuilding (`TableRebuild`) never arrives
+    /// here. The IR lane's half of the same fact is
+    /// [`IrLowerError::AlterColumnNeedsWholeDefinition`].
     #[error(
-        "cannot change column {table}.{column} ({change}) on MySQL: the differ \
-         renders alter-column DDL in PostgreSQL syntax, and MySQL's MODIFY COLUMN \
-         needs the whole column definition restated (omitting any part of it \
-         silently drops that part). Author the change as an explicit migration \
-         with the SQL you want."
+        "cannot change column {table}.{column} ({change}) on {dialect}: its \
+         alter-column statement needs the whole column definition restated and \
+         silently drops every part omitted, while a declarative diff carries only the \
+         facet that moved. Author the change as an explicit migration with the SQL \
+         you want."
     )]
-    MysqlAlterColumnUnsupported {
+    ExistingColumnChangeRefused {
+        /// The target that refused it, from its own identity.
+        dialect: DialectId,
         /// The table holding the column the diff stopped on.
         table: String,
         /// The column whose change cannot be rendered.
@@ -85,17 +92,17 @@ pub enum DeclarativeError {
         /// Which facet moved, so the message names the change and not just the site.
         change: &'static str,
     },
-    /// A rename hint asked this differ to rename a MySQL column, which it authors as
-    /// the PostgreSQL expand-contract sequence MySQL cannot drive.
+    /// A rename hint asked this differ to rename a column on a backend whose
+    /// [`ColumnRenameStrategy`](crate::schema::ColumnRenameStrategy) is `Refuse`.
     ///
-    /// The rename author is dialect-blind: only SQLite `continue`s past it (its
-    /// renames route through the 12-step rebuild), so PostgreSQL AND MySQL both
-    /// pushed an `ExpandContractPlan` into the plan's `renames`. The engine then maps
-    /// every one of them to `RenameStep::ExpandContract` unconditionally, and the
-    /// MySQL backend exposes no `OnlineSchemaChange` capability to run it - so the
-    /// deploy died mid-apply on an internal "routing bug" message, AFTER the plain
-    /// DDL ahead of it had already committed, leaving a schema that was neither the
-    /// old shape nor the new one and that no retry could complete.
+    /// The rename author is dialect-blind: a backend that rebuilds skips past it, so
+    /// every OTHER backend pushed an `ExpandContractPlan` into the plan's `renames`
+    /// whether or not it could run one. The engine then maps every one of them to
+    /// `RenameStep::ExpandContract` unconditionally, and a backend that exposes no
+    /// `OnlineSchemaChange` capability has nothing to drive it with - so the deploy
+    /// died mid-apply on an internal "routing bug" message, AFTER the plain DDL ahead
+    /// of it had already committed, leaving a schema that was neither the old shape
+    /// nor the new one and that no retry could complete.
     ///
     /// **The engine already declared this unsupported everywhere else**: the
     /// disposition table records `renameColumn | base | mysql: Unsupported`,
@@ -111,13 +118,15 @@ pub enum DeclarativeError {
     /// table-vs-engine disagreement, opposite sign; check which way the next one
     /// points before assuming the table is the thing that needs correcting.
     #[error(
-        "cannot rename column {table}.{from} to {to} on MySQL: the differ authors a \
-         rename as the PostgreSQL expand-contract sequence (add shadow column, \
-         dual-write trigger, backfill, deferred drop) and the MySQL backend has no \
-         online schema-change capability to drive it. Author the rename as an \
-         explicit migration with the SQL you want."
+        "cannot rename column {table}.{from} to {to} on {dialect}: the differ authors \
+         a rename as the expand-contract sequence (add shadow column, dual-write \
+         trigger, backfill, deferred drop) and that backend exposes no online \
+         schema-change capability to drive it. Author the rename as an explicit \
+         migration with the SQL you want."
     )]
-    MysqlRenameColumnUnsupported {
+    ColumnRenameRefused {
+        /// The target that refused it, from its own identity.
+        dialect: DialectId,
         /// The table holding the column the diff stopped on.
         table: String,
         /// The column the hint renames away from.
@@ -439,20 +448,23 @@ pub enum DeclarativeError {
         /// The `<otherApp>` schema prefix that crossed the boundary.
         other_app: String,
     },
-    /// the Confined SQLite path needs an FK inlined at CREATE TABLE
-    /// (SQLite has no `ALTER TABLE … ADD CONSTRAINT FOREIGN KEY`), but the FK's
-    /// target table is neither already live nor created earlier in THIS batch — so
-    /// it cannot be inlined and SQLite cannot add it later without a full table
-    /// rebuild (the 12-step rebuild). Surfaced as a
-    /// clear typed error rather than emitting an invalid `ALTER ADD CONSTRAINT`
-    /// (which the SQLite authorizer/engine would reject anyway) or silently
-    /// dropping the FK.
+    /// A foreign key had to be inlined at CREATE TABLE — because the target answers
+    /// no to [`Capability::AlterTableAddConstraint`](zero_migrate_ir::backend::Capability)
+    /// — but the FK's referenced table is neither already live nor created earlier in
+    /// THIS batch, so there is nothing to inline it against.
+    ///
+    /// Such a target can only add the constraint later by rebuilding the whole table,
+    /// which this path does not author. Surfaced as a typed error rather than emitting
+    /// an `ALTER … ADD CONSTRAINT` the target would reject anyway, and never by
+    /// silently dropping the FK.
     #[error(
-        "SQLite cannot defer the foreign key on table '{table}' → '{target}': SQLite \
+        "{dialect} cannot defer the foreign key on table '{table}' → '{target}': it \
          has no ALTER TABLE ADD CONSTRAINT, and the target is not live nor created \
-         earlier in this batch (a table rebuild is required)"
+         earlier in this batch (a whole-table rebuild would be required)"
     )]
-    SqliteDeferredFkUnsupported {
+    DeferredForeignKeyUnsupported {
+        /// The target that cannot add the constraint later, from its own identity.
+        dialect: DialectId,
         /// The table whose FK could not be inlined.
         table: String,
         /// The FK's target table (not yet available to inline against).
@@ -518,33 +530,55 @@ pub enum IrLowerError {
     /// DDL ops; DML / online-intent ops compile elsewhere). Carries the op tag.
     #[error("IrAuthor::lower does not yet compile op {0:?} (DDL ops only)")]
     UnsupportedOp(&'static str),
-    /// Two `renameColumn` ops targeted one table in one migration on SQLite, which
-    /// reconciles a rename by rebuilding the table from its verbatim stored
-    /// `CREATE TABLE` text. The second rebuild would still carry the first one's
-    /// pre-rename text, and the engine cannot rewrite that text without the lossy
-    /// SQL rewrite the rebuild exists to avoid. Refused before anything runs, rather
-    /// than failing mid-apply against an intermediate table. Carries the table.
+    /// Two `renameColumn` ops targeted one table in one migration, on a target that
+    /// reconciles a rename by REBUILDING the table from its verbatim stored
+    /// `CREATE TABLE` text.
+    ///
+    /// The second rebuild would still be built from the first one's pre-rename text,
+    /// and rewriting that text is exactly the lossy SQL rewrite the rebuild exists to
+    /// avoid. Refused before anything runs, rather than failing mid-apply against an
+    /// intermediate table.
+    ///
+    /// A target whose renames are native or expand-contract never reaches this: the
+    /// gate is a method on the backend's own table-rebuild policy, so the refusal
+    /// belongs to whichever backend rebuilds from stored text, not to a name.
     #[error(
-        "table {0:?} is renamed twice in one migration, which SQLite cannot apply: \
-         each rename rebuilds the table from its stored CREATE TABLE text, and the \
-         second rebuild would still be built from the first one's. Split the renames \
-         across separate migrations."
+        "table {table:?} is renamed twice in one migration, which {dialect} cannot \
+         apply: each rename rebuilds the table from its stored CREATE TABLE text, and \
+         the second rebuild would still be built from the first one's. Split the \
+         renames across separate migrations."
     )]
-    SqliteRepeatRenameTarget(String),
-    /// An alter-column op reached the renderer with MySQL as the target. The
-    /// renderers behind these ops emit PostgreSQL `ALTER COLUMN` syntax on every
-    /// dialect, which MySQL cannot execute. MySQL's own spelling, `MODIFY COLUMN`,
-    /// requires the COMPLETE column specification restated and silently discards
-    /// every facet left out, and the op carries only the facet being changed - so
-    /// rendering it would drop the column's default, nullability, charset and
-    /// comment rather than fail. Refuse instead. Carries the authored op name.
+    RepeatRenameTarget {
+        /// The table renamed twice.
+        table: String,
+        /// The target that cannot apply the pair, from its own identity.
+        dialect: DialectId,
+    },
+    /// An alter-column op reached a target whose alter-column spelling RESTATES the
+    /// whole column definition, while the op carries only the facet being changed.
+    ///
+    /// Such a spelling silently discards every facet left out, so rendering the op
+    /// would drop the column's default, nullability, character set and comment rather
+    /// than fail. It is refused instead. The engine's own alter-column renderers emit
+    /// one in-place `ALTER COLUMN` shape, and a backend that cannot execute that shape
+    /// declares so through `CatalogFoldPolicy::alter_column_refusal` — which is where
+    /// this is constructed, in the backend's own crate, with its own id.
+    ///
+    /// `zero_migrate_backend::fold::CatalogFoldPolicy::restates_column_type_at_apply`
+    /// is the same fact asked as a question rather than raised as an error, and it has
+    /// been spelled neutrally since it was written.
     #[error(
-        "{0} is not supported on MySQL: the engine renders alter-column DDL in \
-         PostgreSQL syntax, and MySQL's MODIFY COLUMN needs the whole column \
-         definition restated (omitting any part of it silently drops that part). \
-         Author the change as an explicit migration with the SQL you want."
+        "{op_kind} is not supported on {dialect}: its alter-column statement needs the \
+         whole column definition restated and silently drops every part omitted, while \
+         the op carries only the facet being changed. Author the change as an explicit \
+         migration with the SQL you want."
     )]
-    MysqlAlterColumnUnsupported(&'static str),
+    AlterColumnNeedsWholeDefinition {
+        /// The authored op name that was refused.
+        op_kind: &'static str,
+        /// The target that refused it, from its own identity.
+        dialect: DialectId,
+    },
     /// A `setColumnType` on an IDENTITY column named a target PostgreSQL will not
     /// let an identity column have.
     ///
@@ -743,23 +777,32 @@ pub enum IrLowerError {
          (the declared shape is not catalog-verifiable); refused fail-closed"
     )]
     GuardProbeUnbuildable(&'static str),
-    /// a SQLite-targeted op whose EFFECTIVE schema is a
-    /// NON-`main` schema (i.e. neither the bound project schema nor the implicit
-    /// `main` target). The SQLite emitter renders UNqualified `main` DDL and carries
-    /// no schema — so honoring a `schema:'reporting'` qualifier would require an
-    /// explicit `ATTACH 'reporting.db' AS reporting`, which the engine does NOT
-    /// auto-perform. Rather than SILENTLY dropping the qualifier (rendering the op
-    /// into `main` — a silent-WRONG-target), lowering FAILS CLOSED here: a non-main
-    /// schema qualifier on the SQLite leg requires an explicit ATTACH the author must
-    /// arrange, never an implicit re-pin to `main`. Carries the offending schema.
-    /// (Confined/Platform on SQLite are unaffected: `eff == project == main`.)
+    /// An op whose EFFECTIVE schema is not the bound project schema, on a target with
+    /// no cross-schema DDL — so it has exactly one namespace and renders every
+    /// statement UNqualified into it.
+    ///
+    /// Honouring the qualifier on such a target would need the operator to attach that
+    /// namespace explicitly, which the engine does NOT do on its behalf. Dropping the
+    /// qualifier instead would render the op into the wrong namespace and report
+    /// success, so lowering FAILS CLOSED here.
+    ///
+    /// The gate is `!backend.supports(Capability::CrossSchemaDdl)`, never an identity
+    /// comparison, so a fourth single-namespace backend is covered without an edit.
+    /// Confined and Platform postures on such a target are unaffected: their effective
+    /// schema IS the project schema.
     #[error(
-        "IrAuthor::lower targets SQLite with a non-main schema qualifier {0:?} — the \
-         SQLite leg renders unqualified `main` DDL and performs NO auto-ATTACH; a \
-         non-main schema requires an explicit `ATTACH … AS {0}` the author must \
-         arrange. Refusing to silently render into `main` (a wrong-target drop)."
+        "IrAuthor::lower targets {dialect} with the out-of-band schema qualifier \
+         {schema:?}, but that target has one namespace and renders every statement \
+         unqualified into it. Attaching {schema:?} is not something the engine does on \
+         your behalf. Refusing to silently render into the bound schema (a \
+         wrong-target drop)."
     )]
-    SqliteSchemaUnsupported(String),
+    SchemaQualifierUnsupported {
+        /// The offending effective schema.
+        schema: String,
+        /// The single-namespace target that refused it, from its own identity.
+        dialect: DialectId,
+    },
     /// the connection `default_schema`
     /// resolved an op's EFFECTIVE schema to a schema the author's
     /// confinement `scope` does NOT permit. The friendly op-level
@@ -805,21 +848,37 @@ pub enum IrLowerError {
          {0:?} in the charter the guarded lower composes."
     )]
     LowerCrossSchema(String),
-    /// a SQLite `renameColumn` whose table's full live structure is not
-    /// in `LiveSchema::table_snapshots` / `LiveSchema::sqlite_schemas`. SQLite
-    /// has no native online rename, so the rename is reconciled by the 12-step
-    /// table REBUILD, which needs the WHOLE live table shape (every column + the
-    /// live SDK schema `Value`) to author the post-rename CREATE + value-copy. The
-    /// PG leg never needs this (it lowers to expand-contract from `{from,to,ty}`).
-    /// Carries the table name. Fail-closed: never emit a rebuild from a partial
-    /// view of the table.
+    /// A `renameColumn` on a target that reconciles renames by REBUILDING the table,
+    /// where the table's full live structure is absent from
+    /// the live schema the lowerer was handed.
+    ///
+    /// Such a rebuild authors a post-rename CREATE plus a value copy, which needs the
+    /// WHOLE live table shape — every column, plus the live stored schema — not just
+    /// the `{from, to, ty}` the op carries. A target whose renames are native or
+    /// expand-contract lowers from those three alone and never reaches this.
+    ///
+    /// Fail-closed: never emit a rebuild from a partial view of the table. Distinct
+    /// from [`Self::RenameNeedsLiveColumn`], which is the narrower "the live FROM
+    /// column's type is absent" that EVERY target needs.
+    ///
+    /// `missing` is the CALLER'S name for the input it could not find, because the
+    /// caller owns that input's type. The message used to enumerate two field paths
+    /// on the engine's own live-schema struct, one of which spells a vendor; the
+    /// caller supplies whichever one it actually looked for now, so the refusal names
+    /// exactly the map that is absent instead of both.
     #[error(
-        "IrAuthor::lower of a SQLite renameColumn on table {0:?} needs the table's \
-         full live structure (LiveSchema::table_snapshots + sqlite_schemas) to \
-         author the 12-step rebuild; it is absent — refusing to emit a rebuild from \
-         a partial view"
+        "IrAuthor::lower of a renameColumn on {dialect} table {table:?} needs \
+         {missing} to author its rebuild; it is absent — refusing to emit a rebuild \
+         from a partial view"
     )]
-    SqliteRenameNeedsLiveTable(String),
+    RenameNeedsLiveTable {
+        /// The table whose live structure is missing.
+        table: String,
+        /// The rebuilding target that needs it, from its own identity.
+        dialect: DialectId,
+        /// The caller's own name for the absent input.
+        missing: &'static str,
+    },
     /// the cross-subsystem `OnlineIntent` bridge or the SQLite rebuild
     /// planner rejected a `renameColumn` lowering (an empty/identical name, an
     /// un-resolvable rename hint, an emitter shape mismatch). Carries the

@@ -346,8 +346,8 @@ fn classify_ir_lower(error: &IrLowerError, detail: String) -> Verdict {
         | IrLowerError::DefaultSchemaOutOfScope(_)
         | IrLowerError::LowerCrossSchema(_) => Verdict::of(Outcome::RefusedByPolicy, detail),
         IrLowerError::UnsupportedOp(_)
-        | IrLowerError::MysqlAlterColumnUnsupported(_)
-        | IrLowerError::SqliteSchemaUnsupported(_)
+        | IrLowerError::AlterColumnNeedsWholeDefinition { .. }
+        | IrLowerError::SchemaQualifierUnsupported { .. }
         | IrLowerError::TableRebuildUnavailable { .. }
         | IrLowerError::VendorUnsupported { .. }
         | IrLowerError::TriggerUnsupported { .. }

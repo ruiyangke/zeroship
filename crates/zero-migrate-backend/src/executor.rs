@@ -925,7 +925,8 @@ pub enum RollbackError {
     /// REFUSED before any statement runs rather than half-rebuilt: nothing was
     /// rolled back. A target that reverses everything natively never reaches here,
     /// which is why the concept is stated once instead of once per backend — the
-    /// refusing target names itself from its own [`DialectId`], and `reason` is its
+    /// refusing target names itself from its own
+    /// [`DialectId`](zero_migrate_ir::dialect::DialectId), and `reason` is its
     /// own account of what specifically needs the rebuild.
     #[error(
         "migration {version} has a {dialect} `down` requiring a whole-table rebuild \

@@ -282,7 +282,7 @@ pub struct LiveSchema {
     /// and the value-copy mapping. The PG leg never reads this map (it lowers the
     /// rename to an expand-contract sequence that needs only `{table, from, to,
     /// ty}`). Empty ⇒ a SQLite `renameColumn` whose table's structure is absent
-    /// fails closed ([`IrLowerError::SqliteRenameNeedsLiveTable`]), never silently
+    /// fails closed ([`IrLowerError::RenameNeedsLiveTable`]), never silently
     /// emitting a wrong rebuild.
     pub table_snapshots: std::collections::BTreeMap<String, crate::model::snapshot::TableSnapshot>,
     /// the SQLite `renameColumn` rebuild facts.** The live per-table SDK
@@ -2692,7 +2692,7 @@ impl IrAuthor {
     /// # Errors
     /// - [`IrLowerError::Snapshot`] — the shared builder rejected an op's fields.
     /// - [`IrLowerError::UnsupportedOp`] — a non-DDL op (DML).
-    /// - [`IrLowerError::SqliteRenameNeedsLiveTable`] / [`IrLowerError::RenameLower`]
+    /// - [`IrLowerError::RenameNeedsLiveTable`] / [`IrLowerError::RenameLower`]
     ///   — a `renameColumn` could not lower (missing live structure / bridge error).
     pub fn lower_steps(
         &self,
@@ -3680,7 +3680,10 @@ impl IrAuthor {
         if !self.backend.supports(Capability::CrossSchemaDdl)
             && !eff_schema.eq_ignore_ascii_case(&self.project_schema)
         {
-            return Err(IrLowerError::SqliteSchemaUnsupported(eff_schema));
+            return Err(IrLowerError::SchemaQualifierUnsupported {
+                schema: eff_schema,
+                dialect: self.dialect.clone(),
+            });
         }
         let decl = self.decl.with_project_schema(&eff_schema);
         // the existence guard is HONORED via an executor-side
@@ -5900,7 +5903,7 @@ impl IrAuthor {
     /// is unchanged — it lives in the scope gate, not in a lower-time refusal.
     ///
     /// The SQLite leg is unaffected: a non-`main` schema is refused EARLIER
-    /// ([`IrLowerError::SqliteSchemaUnsupported`]) before `lower_backfill`, and
+    /// ([`IrLowerError::SchemaQualifierUnsupported`]) before `lower_backfill`, and
     /// SQLite's single `main` db renders the table unqualified.
     // Eight cohesive lowering parameters destructured straight out of the
     // `Op::Backfill` IR variant (schema/table/cursor/batch/set/filter/name); a
@@ -7181,7 +7184,7 @@ impl IrAuthor {
     ///   token the live schema already carries for the dialect-neutral `ColType`.
     ///   The bridge needs the table's full live structure
     ///   ([`LiveSchema::table_snapshots`] + [`LiveSchema::sqlite_schemas`]); absent ⇒
-    ///   [`IrLowerError::SqliteRenameNeedsLiveTable`] (fail-closed).
+    ///   [`IrLowerError::RenameNeedsLiveTable`] (fail-closed).
     ///
     /// **Authoritative IR-vs-live type reconciliation (BOTH legs).** Before EITHER
     /// destination author runs, the IR-carried [`ColType`] is resolved to its
@@ -7205,7 +7208,7 @@ impl IrAuthor {
     ///   absent, so the type reconciliation cannot run (fail-closed, both legs).
     /// - [`IrLowerError::RenameTypeMismatch`] — the IR-carried type disagrees with
     ///   the live `from` column's type (both legs).
-    /// - [`IrLowerError::SqliteRenameNeedsLiveTable`] — SQLite leg missing live facts.
+    /// - [`IrLowerError::RenameNeedsLiveTable`] — the rebuilding leg is missing live facts.
     /// - [`IrLowerError::RenameLower`] — the bridge (author / differ) rejected it.
     fn lower_rename(
         &self,
@@ -7379,14 +7382,20 @@ impl IrAuthor {
                 // the live SDK schema Value). Absent ⇒ fail closed. `expand_contract_ty` is unused
                 // on this leg (the rebuild's affinity comes from the SDK Value), so it
                 // is not computed here — only the live shape drives the rebuild.
-                let live_snapshot = live
-                    .table_snapshots
-                    .get(table)
-                    .ok_or_else(|| IrLowerError::SqliteRenameNeedsLiveTable(table.to_string()))?;
-                let live_schema_value = live
-                    .sqlite_schemas
-                    .get(table)
-                    .ok_or_else(|| IrLowerError::SqliteRenameNeedsLiveTable(table.to_string()))?;
+                let live_snapshot = live.table_snapshots.get(table).ok_or_else(|| {
+                    IrLowerError::RenameNeedsLiveTable {
+                        table: table.to_string(),
+                        dialect: self.dialect.clone(),
+                        missing: "the live column structure (LiveSchema::table_snapshots)",
+                    }
+                })?;
+                let live_schema_value = live.sqlite_schemas.get(table).ok_or_else(|| {
+                    IrLowerError::RenameNeedsLiveTable {
+                        table: table.to_string(),
+                        dialect: self.dialect.clone(),
+                        missing: "the live stored schema (LiveSchema::sqlite_schemas)",
+                    }
+                })?;
                 // The REAL introspected owner of the live table — the subject of the
                 // differ's cross-app drop/ALTER guard. Absent ⇒ fail closed (the
                 // rebuild must NOT fabricate ownership as the deploying app, which
@@ -12035,10 +12044,13 @@ mod tests {
         );
         let err = author.lower(&ir, &LiveSchema::default()).unwrap_err();
         match err {
-            IrLowerError::SqliteSchemaUnsupported(s) => assert_eq!(s, "reporting"),
+            IrLowerError::SchemaQualifierUnsupported { schema, dialect } => {
+                assert_eq!(schema, "reporting");
+                assert_eq!(dialect, SQLITE);
+            }
             other => panic!(
                 "a non-main schema on the SQLite leg must fail closed with \
-                 SqliteSchemaUnsupported, got: {other:?}"
+                 SchemaQualifierUnsupported, got: {other:?}"
             ),
         }
     }

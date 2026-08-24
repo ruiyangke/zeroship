@@ -14,7 +14,7 @@
 //!   dispatch, asserted structurally before apply);
 //! - a neutral `ColType` renders the correct `SQLite` affinity in the rebuilt CREATE;
 //! - a `SQLite` rename whose live table structure is ABSENT fails closed
-//!   (`SqliteRenameNeedsLiveTable`) — never a wrong rebuild from a partial view.
+//!   (`RenameNeedsLiveTable`) — never a wrong rebuild from a partial view.
 //!
 //! No shims, no PG-gated skips: the real `SQLite` runtime + the real journal.
 
@@ -584,7 +584,7 @@ fn renamecolumn_sqlite_rejects_cross_app_rename() {
 // trips that gate first (`RenameNeedsLiveColumn`): a strictly-earlier, equally
 // fail-closed refusal that ALSO needs the live column. Either refusal is correct
 // (both are fail-closed and emit NO rebuild); the type-reconciliation gate is the
-// outermost, so it is the one observed. The deeper `SqliteRenameNeedsLiveTable`
+// outermost, so it is the one observed. The deeper `RenameNeedsLiveTable`
 // arm still guards the case where the live `from` column type IS known but the
 // full rebuild shape (sqlite_schemas) is not — exercised by
 // `renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema`.
@@ -618,7 +618,7 @@ fn renamecolumn_sqlite_fails_closed_without_live_table_structure() {
 // Fail-closed (deeper arm): the live `from` column TYPE is known (so the
 // type reconciliation passes), but the full rebuild shape — the live SDK schema
 // `Value` in `sqlite_schemas` — is absent. The SQLite leg then refuses with
-// `SqliteRenameNeedsLiveTable` rather than emit a rebuild from a partial view.
+// `RenameNeedsLiveTable` rather than emit a rebuild from a partial view.
 // This keeps the rebuild-needs-whole-shape guard exercised after the type gate.
 #[test]
 fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
@@ -685,8 +685,11 @@ fn renamecolumn_sqlite_fails_closed_with_column_but_no_sqlite_schema() {
         .lower_steps(&ir, &live)
         .expect_err("a SQLite rename with the column type but no SDK schema must fail closed");
     match err {
-        IrLowerError::SqliteRenameNeedsLiveTable(t) => assert_eq!(t, "ghost"),
-        other => panic!("expected SqliteRenameNeedsLiveTable, got: {other}"),
+        IrLowerError::RenameNeedsLiveTable { table, dialect, .. } => {
+            assert_eq!(table, "ghost");
+            assert_eq!(dialect, zero_migrate_ir::dialect::SQLITE);
+        }
+        other => panic!("expected RenameNeedsLiveTable, got: {other}"),
     }
 }
 
@@ -898,7 +901,11 @@ async fn two_renames_of_one_table_in_one_migration_are_refused_on_sqlite() {
         .expect_err("two renames of one table must be refused before anything runs");
     let message = error.to_string();
     assert!(
-        matches!(error, IrLowerError::SqliteRepeatRenameTarget(ref t) if t == "people"),
+        matches!(
+            error,
+            IrLowerError::RepeatRenameTarget { ref table, ref dialect }
+                if table == "people" && *dialect == zero_migrate_ir::dialect::SQLITE
+        ),
         "the refusal is the dedicated variant naming the table: {message}"
     );
     assert!(

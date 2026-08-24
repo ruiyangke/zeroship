@@ -32,7 +32,7 @@
 //! `stored_create_sql`, and a `renameColumn` the engine accepts is a pure rename. So the
 //! deploy path takes the STORED-SHAPE arm, and its dependency on `sqlite_schemas` is one
 //! of PRESENCE, not of content: `render/lower.rs` fails closed when the table's entry is
-//! MISSING (`SqliteRenameNeedsLiveTable`) and never looks inside it.
+//! MISSING (`RenameNeedsLiveTable`) and never looks inside it.
 //!
 //! MEASURED, twice, over the whole 229-binary suite:
 //!
