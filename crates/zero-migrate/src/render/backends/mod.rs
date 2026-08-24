@@ -305,6 +305,33 @@ pub fn analyzer_absence(dialect: &DialectId) -> Option<AnalyzerAbsent> {
     advisor(dialect).analyzer_absence()
 }
 
+/// Every identifier prefix any REGISTERED backend reserves for its own catalog,
+/// paired with the backend that reserves it.
+///
+/// The union rather than the selected target's, for the same reason
+/// [`GENERATED_IDENT_MAX_BYTES`] is the tightest cap rather than the selected one: a
+/// declared name that is legal here and reserved on another registered backend is a
+/// re-targeting hazard, and refusing it at declaration is cheaper than discovering it
+/// at deploy. Both halves are returned because the refusal should say WHOSE catalog
+/// claims the prefix, which is the fact the operator needs and the one core cannot
+/// state without asking.
+///
+/// This replaced two literals in `schema::query`: a hand-rolled `pg_` byte comparison
+/// in `validate_collection`, and a `ReservedName::Prefix("sqlite_")` row in the
+/// platform reserved-name table. Between them they made two backends' catalog
+/// conventions part of the neutral name validator, and left a fourth backend's
+/// reservation with nowhere to be declared.
+pub(crate) fn reserved_catalog_prefixes() -> impl Iterator<Item = (&'static str, &'static str)> {
+    VENDORS.as_slice().iter().flat_map(|vendor| {
+        vendor
+            .descriptor
+            .limits
+            .reserved_identifier_prefixes
+            .iter()
+            .map(move |prefix| (*prefix, vendor.descriptor.id.as_str()))
+    })
+}
+
 /// The registered targets that DO declare `capability`, spelled for an operator who
 /// was just refused for want of it.
 ///

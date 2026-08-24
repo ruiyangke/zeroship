@@ -275,18 +275,27 @@ pub fn validate_collection(name: &str) -> Result<(), QueryError> {
             "collection name must not contain null bytes".to_string(),
         ));
     }
-    if name.len() > 63 {
+    let max = crate::render::backends::GENERATED_IDENT_MAX_BYTES;
+    if name.len() > max {
         return Err(QueryError::InvalidCollection(format!(
-            "collection name exceeds 63-byte Postgres identifier limit: {name}"
+            "collection name exceeds the {max}-byte identifier budget, the tightest cap any \
+             registered backend declares: {name}"
         )));
     }
     // Reserved-prefix checks via byte-slice equality avoid an allocating
     // .to_ascii_lowercase() per CRUD dispatch (performance r4 N4-I4).
     let bytes = name.as_bytes();
-    if bytes.len() >= 3 && bytes[..3].eq_ignore_ascii_case(b"pg_") {
-        return Err(QueryError::InvalidCollection(format!(
-            "collection name '{name}' uses reserved prefix 'pg_' (Postgres system catalog)"
-        )));
+    // Every REGISTERED backend's catalog reservations. This was a hard-coded `pg_`
+    // comparison; the prefix and the catalog that claims it are both the backend's
+    // answer now, so the refusal still names whose namespace was hit.
+    for (prefix, owner) in crate::render::backends::reserved_catalog_prefixes() {
+        let claimed = prefix.as_bytes();
+        if bytes.len() >= claimed.len() && bytes[..claimed.len()].eq_ignore_ascii_case(claimed) {
+            return Err(QueryError::InvalidCollection(format!(
+                "collection name '{name}' uses reserved prefix '{prefix}' ({owner} system \
+                 catalog)"
+            )));
+        }
     }
     if bytes.len() >= 14 && bytes[..14].eq_ignore_ascii_case(b"__zero_migrate") {
         return Err(QueryError::InvalidCollection(format!(
@@ -339,10 +348,15 @@ pub(crate) const RESERVED_NAMES: &[ReservedName] = &[
     //
     // SHADOWED, and kept for the mirror rather than for effect: the scan returns on
     // its first match and `Prefix("_")` above catches every name this could, so this
-    // entry is never reached. Do not "restore" it as a live rule. `sqlite_` below IS
-    // reachable, since it does not begin with an underscore.
+    // entry is never reached. Do not "restore" it as a live rule.
     ReservedName::Prefix("__zero_migrate_"),
-    ReservedName::Prefix("sqlite_"),
+    // `ReservedName::Prefix("sqlite_")` USED TO SIT HERE, in a table this file calls
+    // PLATFORM-reserved. It is not a platform reservation: it is one BACKEND's internal
+    // schema namespace, and it was the only row here that belonged to a vendor rather
+    // than to zero-migrate. The backend that owns it declares it now
+    // (`Limits::reserved_identifier_prefixes`), and `validate_field_name` checks every
+    // REGISTERED backend's reservations below — so a fourth backend's namespace is
+    // fenced by the same loop instead of needing a row added to this table.
     // Masked-column sibling suffix. The platform
     // emits `<col>_masked` siblings (Path B); creators must not
     // declare a column ending in `_masked` themselves. Refused at
@@ -396,9 +410,11 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
             "field name must not contain null bytes".to_string(),
         ));
     }
-    if name.len() > 63 {
+    let max = crate::render::backends::GENERATED_IDENT_MAX_BYTES;
+    if name.len() > max {
         return Err(QueryError::InvalidIdent(format!(
-            "field name exceeds 63-byte Postgres identifier limit: {name}"
+            "field name exceeds the {max}-byte identifier budget, the tightest cap any \
+             registered backend declares: {name}"
         )));
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
@@ -434,6 +450,18 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
             };
             return Err(QueryError::InvalidIdent(format!(
                 "reserved field name '{name}': {hint}"
+            )));
+        }
+    }
+    // The BACKEND reservations, which the table above no longer holds. Run after it so
+    // a platform hit keeps its own, more specific hint.
+    for (prefix, owner) in crate::render::backends::reserved_catalog_prefixes() {
+        if name.len() >= prefix.len()
+            && name.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+        {
+            return Err(QueryError::InvalidIdent(format!(
+                "reserved field name '{name}': prefix '{prefix}' is reserved by the {owner} \
+                 system catalog"
             )));
         }
     }

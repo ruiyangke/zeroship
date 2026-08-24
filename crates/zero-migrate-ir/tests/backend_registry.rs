@@ -21,6 +21,7 @@ use zero_migrate_ir::dialect::DialectId;
 
 const NEUTRAL_LIMITS: Limits = Limits {
     identifier: IdentifierLimit::Unbounded,
+    reserved_identifier_prefixes: &[],
 };
 
 const fn descriptor(id: &'static str, display_name: &'static str) -> BackendDescriptor {

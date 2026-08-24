@@ -39,5 +39,9 @@ pub static MYSQL_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
     capabilities: MYSQL_CAPABILITIES,
     limits: Limits {
         identifier: IdentifierLimit::Characters(64),
+        // MySQL keeps its catalog in NAMED schemas (`mysql`, `information_schema`,
+        // `performance_schema`, `sys`) rather than behind an identifier prefix, so
+        // there is no prefix to reserve. Empty is the answer, not an omission.
+        reserved_identifier_prefixes: &[],
     },
 };

@@ -27,5 +27,9 @@ pub static SQLITE_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
     capabilities: SQLITE_CAPABILITIES,
     limits: Limits {
         identifier: IdentifierLimit::Unbounded,
+        // The internal schema namespace: `sqlite_master`, `sqlite_sequence`,
+        // `sqlite_autoindex_*`. `CREATE TABLE sqlite_x` is refused by the server
+        // outright ("object name reserved for internal use").
+        reserved_identifier_prefixes: &["sqlite_"],
     },
 };

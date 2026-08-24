@@ -44,5 +44,9 @@ pub static POSTGRES_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
     limits: Limits {
         // `NAMEDATALEN - 1`. Anything longer is truncated with only a NOTICE.
         identifier: IdentifierLimit::Bytes(63),
+        // The system catalog namespace. `pg_` is reserved for catalog objects and
+        // for the `pg_catalog` schema; a user object under it is a collision the
+        // server does not always refuse. Core used to hold this string itself.
+        reserved_identifier_prefixes: &["pg_"],
     },
 };

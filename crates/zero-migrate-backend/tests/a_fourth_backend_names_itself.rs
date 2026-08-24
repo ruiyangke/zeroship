@@ -77,6 +77,7 @@ static DUCKDB_DESCRIPTOR: BackendDescriptor = BackendDescriptor {
         .with(Capability::Sequence),
     limits: Limits {
         identifier: IdentifierLimit::Unbounded,
+        reserved_identifier_prefixes: &[],
     },
 };
 

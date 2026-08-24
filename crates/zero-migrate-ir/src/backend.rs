@@ -300,6 +300,23 @@ pub enum IdentifierLimit {
 pub struct Limits {
     /// The catalog's identifier-length cap.
     pub identifier: IdentifierLimit,
+    /// Identifier prefixes this catalog reserves for its own objects, lowercase.
+    ///
+    /// A name starting with one of these is refused at declaration, because the
+    /// catalog either already owns it or will collide with it. Declared here rather
+    /// than listed in core for the reason every other backend fact is: core held
+    /// `"pg_"` and `"sqlite_"` as literals in `schema::query`, which made two
+    /// backends' catalog conventions part of the neutral name validator, and left a
+    /// fourth backend's reservation with nowhere to go.
+    ///
+    /// Core checks a declared name against the union across every REGISTERED
+    /// backend, not just the selected one — the same portability argument as the
+    /// generated-identifier budget. A name that is legal on today's target and
+    /// reserved on another is a re-targeting hazard, and it is cheaper to refuse it
+    /// at declaration than to discover it at deploy.
+    ///
+    /// Empty is a legitimate answer: a backend may reserve nothing by prefix.
+    pub reserved_identifier_prefixes: &'static [&'static str],
 }
 
 // ---------------------------------------------------------------------------
