@@ -128,7 +128,7 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-    common::sweep_stale_replication_slots(&setup).await;
+        common::sweep_stale_replication_slots(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -142,9 +142,7 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
             .expect("setup failed");
         setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}')
-                   FROM pg_replication_slots WHERE slot_name = '{slot}';
-                 SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
+                "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
             ))
             .await
             .expect("slot setup failed");
@@ -186,11 +184,10 @@ async fn a_live_walsender_decodes_to_the_values_the_catalog_reports() {
         // Commit run rather than four transactions.
         let messages = decoded_stream(&slot, &publication).await;
 
+        common::drop_replication_slot(&setup, &slot).await;
         let _ = setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}')
-                   FROM pg_replication_slots WHERE slot_name = '{slot}';
-                 DROP PUBLICATION IF EXISTS \"{publication}\";
+                "DROP PUBLICATION IF EXISTS \"{publication}\";
                  DROP TABLE IF EXISTS {table};"
             ))
             .await;
@@ -329,7 +326,7 @@ async fn a_key_only_old_tuple_is_not_confusable_with_a_row_that_held_nulls() {
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-    common::sweep_stale_replication_slots(&setup).await;
+        common::sweep_stale_replication_slots(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -343,9 +340,7 @@ async fn a_key_only_old_tuple_is_not_confusable_with_a_row_that_held_nulls() {
             .expect("setup failed");
         setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}')
-                   FROM pg_replication_slots WHERE slot_name = '{slot}';
-                 SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
+                "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
             ))
             .await
             .expect("slot setup failed");
@@ -364,11 +359,10 @@ async fn a_key_only_old_tuple_is_not_confusable_with_a_row_that_held_nulls() {
 
         let messages = decoded_stream(&slot, &publication).await;
 
+        common::drop_replication_slot(&setup, &slot).await;
         let _ = setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}')
-                   FROM pg_replication_slots WHERE slot_name = '{slot}';
-                 DROP PUBLICATION IF EXISTS \"{publication}\";
+                "DROP PUBLICATION IF EXISTS \"{publication}\";
                  DROP TABLE IF EXISTS {table};"
             ))
             .await;
@@ -421,7 +415,7 @@ async fn a_null_column_decodes_as_null_and_not_as_empty_text() {
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-    common::sweep_stale_replication_slots(&setup).await;
+        common::sweep_stale_replication_slots(&setup).await;
 
         setup
             .batch_execute(&format!(
@@ -434,9 +428,7 @@ async fn a_null_column_decodes_as_null_and_not_as_empty_text() {
             .expect("setup failed");
         setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}')
-                   FROM pg_replication_slots WHERE slot_name = '{slot}';
-                 SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
+                "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
             ))
             .await
             .expect("slot setup failed");
@@ -447,11 +439,10 @@ async fn a_null_column_decodes_as_null_and_not_as_empty_text() {
 
         let messages = decoded_stream(&slot, &publication).await;
 
+        common::drop_replication_slot(&setup, &slot).await;
         let _ = setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}')
-                   FROM pg_replication_slots WHERE slot_name = '{slot}';
-                 DROP PUBLICATION IF EXISTS \"{publication}\";
+                "DROP PUBLICATION IF EXISTS \"{publication}\";
                  DROP TABLE IF EXISTS {table};"
             ))
             .await;

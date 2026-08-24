@@ -134,9 +134,7 @@ async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputM
         .expect("publication setup failed");
     setup
         .batch_execute(&format!(
-            "SELECT pg_drop_replication_slot('{slot}')
-               FROM pg_replication_slots WHERE slot_name = '{slot}';
-             SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
+            "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
         ))
         .await
         .expect("slot setup failed");
@@ -147,11 +145,10 @@ async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputM
 
     let result = read_first_insert(&slot, publication).await;
 
+    common::drop_replication_slot(&setup, &slot).await;
     let _ = setup
         .batch_execute(&format!(
-            "SELECT pg_drop_replication_slot('{slot}')
-               FROM pg_replication_slots WHERE slot_name = '{slot}';
-             DROP PUBLICATION IF EXISTS {pub_q};
+            "DROP PUBLICATION IF EXISTS {pub_q};
              DROP TABLE IF EXISTS {table};",
             pub_q = quoted(publication),
         ))

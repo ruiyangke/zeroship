@@ -109,9 +109,7 @@ impl Fixture {
         fixture
             .setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{s}')
-                   FROM pg_replication_slots WHERE slot_name = '{s}';
-                 SELECT pg_create_logical_replication_slot('{s}', 'pgoutput');",
+                "SELECT pg_create_logical_replication_slot('{s}', 'pgoutput');",
                 s = fixture.slot,
             ))
             .await
@@ -120,14 +118,12 @@ impl Fixture {
     }
 
     async fn drop_all(&self) {
+        common::drop_replication_slot(&self.setup, &self.slot).await;
         let _ = self
             .setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{s}')
-                   FROM pg_replication_slots WHERE slot_name = '{s}';
-                 DROP PUBLICATION IF EXISTS {p};
+                "DROP PUBLICATION IF EXISTS {p};
                  DROP TABLE IF EXISTS {t};",
-                s = self.slot,
                 p = self.publication,
                 t = self.table,
             ))

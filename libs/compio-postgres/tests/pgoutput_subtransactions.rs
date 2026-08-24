@@ -72,9 +72,7 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
             .expect("fixture setup failed");
         setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}')
-                   FROM pg_replication_slots WHERE slot_name = '{slot}';
-                 SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
+                "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput');"
             ))
             .await
             .expect("slot setup failed");
@@ -138,11 +136,10 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
             }
         }
 
+        common::drop_replication_slot(&setup, &slot).await;
         let _ = setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}')
-                   FROM pg_replication_slots WHERE slot_name = '{slot}';
-                 DROP PUBLICATION IF EXISTS {publication};
+                "DROP PUBLICATION IF EXISTS {publication};
                  DROP TABLE IF EXISTS {table};"
             ))
             .await;
