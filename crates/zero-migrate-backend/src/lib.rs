@@ -153,6 +153,12 @@ pub mod conn;
 pub mod constraint_definition;
 pub mod ddl;
 pub mod descriptors;
+// Run-time, vendor-OWNED values keyed by the backend that owns them — the
+// counterpart to `registry::BackendVendor`, which carries everything a vendor
+// knows statically. A value read off a live catalog or handed in by the host
+// cannot be the `&'static dyn` that struct holds, so it rides here instead of
+// becoming a vendor-named field on a neutral struct.
+pub mod dialectal;
 pub mod dml;
 // The drift-report VOCABULARY a backend's drift query hands back: the checksum /
 // tamper / orphan shapes, the structural-divergence shapes, their aggregate and
