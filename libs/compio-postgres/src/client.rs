@@ -1953,13 +1953,35 @@ impl Client {
     where
         T: ?Sized + ToStatement + fmt::Debug,
     {
-        let row = self.query_one(statement, params).await?;
+        // The arity comes from the STATEMENT, as in the two helpers above, and
+        // for the same reason: read off a row it becomes data-dependent.
+        //
+        // Nothing was ever ACCEPTED here that should not have been - `query_one`
+        // guarantees a row exists, so the check always ran. What varied was the
+        // DIAGNOSTIC. Measured before this change, on one query whose column
+        // list is wrong either way:
+        //
+        //   SELECT 1::int4, 2::int4 WHERE false -> "unexpected number of rows"
+        //   SELECT 1::int4, 2::int4             -> "unexpected number of columns"
+        //
+        // The first blames the data for a mistake in the query text. Selecting
+        // two columns is wrong whether or not the table has rows, so the column
+        // verdict is the one that holds, and it now comes first.
+        let stream = self.query_raw(statement, slice_iter(params)).await?;
+        let column_count = stream.columns().len();
+        let rows: Vec<Row> = stream.try_collect().await?;
 
-        if row.len() != 1 {
+        if column_count != 1 {
             return Err(Error::column_count());
         }
+        if rows.len() != 1 {
+            return Err(Error::row_count());
+        }
 
-        row.try_get(0)
+        rows.into_iter()
+            .next()
+            .ok_or_else(Error::row_count)?
+            .try_get(0)
     }
 
     /// Executes a statements which returns zero or one rows, returning it.
