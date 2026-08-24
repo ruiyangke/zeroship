@@ -8338,7 +8338,7 @@ fn validate_default_expr(
                 }
                 Ok(())
             }
-            Expr::PgRegexMatch { .. }
+            Expr::RegexMatch { .. }
             | Expr::PgColumnSize { .. }
             | Expr::PgExtract { .. }
             | Expr::PgInterval { .. }
@@ -9239,7 +9239,7 @@ mod tests {
     fn pg_only_and_pg_mysql_expr_nodes_validate_on_supported_dialects() {
         let c = cols();
         let sc = scope("users", &c);
-        let regex = Expr::PgRegexMatch {
+        let regex = Expr::RegexMatch {
             expr: Box::new(Expr::col("name")),
             pattern: "^[a-z]+$".to_string(),
         };
@@ -9529,7 +9529,7 @@ mod tests {
     fn regex_match_rejects_only_on_sqlite() {
         let c = cols();
         let sc = scope("users", &c);
-        let expr = Expr::PgRegexMatch {
+        let expr = Expr::RegexMatch {
             expr: Box::new(Expr::col("name")),
             pattern: "^[a-z]+$".to_string(),
         };
@@ -9578,7 +9578,7 @@ mod tests {
         assert_eq!(err.code, CODE_UNSUPPORTED);
         assert!(err.reason.contains("bytes are not allowed"));
 
-        let empty_pattern = Expr::PgRegexMatch {
+        let empty_pattern = Expr::RegexMatch {
             expr: Box::new(Expr::col("name")),
             pattern: String::new(),
         };

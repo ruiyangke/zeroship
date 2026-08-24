@@ -87,7 +87,7 @@ const fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
         Expr::PgColumnSize { .. } => Some("PgColumnSize"),
         Expr::PgExtract { .. } => Some("PgExtract"),
         Expr::PgInterval { .. } => Some("PgInterval"),
-        Expr::PgRegexMatch { .. } => None,
+        Expr::RegexMatch { .. } => None,
     }
 }
 
@@ -170,7 +170,7 @@ fn pg_only_expr_nodes_render_on_pg_and_refuse_off_pg_at_validate() {
 fn regex_match_renders_on_pg_and_mysql_and_refuses_sqlite_at_validate() {
     let columns = scope_columns();
     let scope = TargetScope::new("t", &columns);
-    let expr = Expr::PgRegexMatch {
+    let expr = Expr::RegexMatch {
         expr: Box::new(Expr::col("name")),
         pattern: "^a".to_string(),
     };

@@ -87,7 +87,7 @@ fn pg_default_expr_type(expr: &Expr) -> Option<PgDefaultType> {
         | Expr::Like { .. }
         | Expr::DistinctFrom { .. }
         | Expr::InList { .. }
-        | Expr::PgRegexMatch { .. } => Some(PgDefaultType::Boolean),
+        | Expr::RegexMatch { .. } => Some(PgDefaultType::Boolean),
         Expr::Case { branches, r#else } => common(
             branches
                 .iter()
@@ -176,7 +176,7 @@ fn normalize_redundant_pg_default_casts(expr: &Expr) -> Expr {
                     visit(delimiter);
                 }
             }
-            Expr::InList { expr, .. } | Expr::PgRegexMatch { expr, .. } => visit(expr),
+            Expr::InList { expr, .. } | Expr::RegexMatch { expr, .. } => visit(expr),
             Expr::Dialectal { legs } => {
                 for leg in legs.values_mut() {
                     visit(leg);

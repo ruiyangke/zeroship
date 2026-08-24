@@ -2274,7 +2274,7 @@ test("PG-first chain methods and root RLS scalar constructors record PG-only nod
   });
   const checks = ops[0].constraints.map((constraint: any) => constraint.kind.expr);
   assert.deepEqual(checks[0], {
-    node: "pgRegexMatch",
+    node: "regexMatch",
     expr: { node: "colRef", name: "name" },
     pattern: "^[a-z]+$",
   });
@@ -2655,7 +2655,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
     rhs: { node: "literal", value: "S256" },
   });
   assert.deepEqual(checks[1], {
-    node: "pgRegexMatch",
+    node: "regexMatch",
     expr: { node: "colRef", name: "user_id" },
     pattern: "^usr_[0-9A-Za-z]{20,40}$",
   });

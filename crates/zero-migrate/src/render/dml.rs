@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     fn regex_match_renders_postgres_and_mysql_but_refuses_sqlite() {
-        let expr = Expr::PgRegexMatch {
+        let expr = Expr::RegexMatch {
             expr: Box::new(Expr::col("name")),
             pattern: "^a$".to_string(),
         };
@@ -1252,7 +1252,7 @@ mod tests {
                 elems: vec![IrScalar::Str(hostile.into())],
                 negated: false,
             },
-            Expr::PgRegexMatch {
+            Expr::RegexMatch {
                 expr: Box::new(Expr::col("status")),
                 pattern: hostile.into(),
             },

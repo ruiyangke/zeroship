@@ -142,7 +142,7 @@ fn expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlError> {
         | Expr::PgColumnSize { expr: operand }
         | Expr::Extract { from: operand, .. }
         | Expr::PgExtract { from: operand, .. }
-        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::RegexMatch { expr: operand, .. }
         | Expr::InList { expr: operand, .. } => expr_references_column(operand, column)?,
         Expr::Case { branches, r#else } => {
             let mut found = false;

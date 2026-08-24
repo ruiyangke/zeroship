@@ -12,7 +12,7 @@
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
 //! UuidV4 | UuidV7 | Cast | Between | Like | DistinctFrom | Agg | InList |
-//! PgRegexMatch | PgColumnSize | Extract | PgExtract | PgInterval | Dialectal`.
+//! RegexMatch | PgColumnSize | Extract | PgExtract | PgInterval | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -452,9 +452,16 @@ pub enum Expr {
         /// (`NOT IN` / `<> ALL`).
         negated: bool,
     },
-    /// **PG-ONLY** regex match rendered exactly as
-    /// `(<expr> ~ '<pattern>'::text)`.
-    PgRegexMatch {
+    /// A regular-expression match predicate. Each backend spells its own
+    /// operator — `(<expr> ~ <pattern>)` on `PostgreSQL`, `(<expr> REGEXP
+    /// <pattern>)` on `MySQL` — through `DmlRenderer::render_regex_match`.
+    ///
+    /// NOT vendor-only, despite what this node used to be called. A backend
+    /// without a stock regex operation refuses it by answering
+    /// [`ExprDialectFeature::RegexMatch`](crate::validate::ExprDialectFeature::RegexMatch),
+    /// which is how `SQLite` (no built-in `REGEXP`) declines it while `MySQL`
+    /// accepts. That gate was already neutral; only the node name was not.
+    RegexMatch {
         /// The value expression to match.
         expr: Box<Self>,
         /// The regex pattern. It is always rendered as a SQL string literal; never

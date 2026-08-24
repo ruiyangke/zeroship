@@ -134,7 +134,7 @@ fixture:edge_scalars|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73c
 fixture:edge_scalars|Mysql|sha|runtime.json|d667b1af00529add869f337953c8cba252e1674cf89db940f6fabac84b14c39d
 fixture:edge_scalars|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
 fixture:enums_domains|Postgres|sha|runtime.json|99de44572f7a1ffa1af569c92c766c54775d806dbfcd8926326d8faee48a7ad8
-fixture:enums_domains|Postgres|sha|env.db.ts|d62c80b2a268550240637cbeb77ec89108db05371bfc6e6c357b2b1b3bb51e73
+fixture:enums_domains|Postgres|sha|env.db.ts|00b82ce0d687c1ec40ad3353a386fd8cd580a3e7f4857a74f00b9d6adb2095bd
 fixture:enums_domains|Postgres|options|pg_expr_checks|softDelete=false|versioning=false|strictness=strict
 fixture:enums_domains|Postgres|index|pg_expr_checks|0|name=pg_expr_checks_deleted_at_idx|fields=deleted_at|unique=false
 fixture:enums_domains|Postgres|index|pg_expr_checks|1|name=pg_expr_checks_updated_at_idx|fields=updated_at|unique=false

@@ -174,8 +174,8 @@ const fn classify_expr(expr: &Expr) -> ExprCoverage {
             "mysql_jsdriver_e2e::in_list_not_in_and_empty_list_predicates_apply_equivalently",
             ProofClaim::SemanticEquivalence,
         ),
-        Expr::PgRegexMatch { .. } => vendor(
-            "PgRegexMatch",
+        Expr::RegexMatch { .. } => vendor(
+            "RegexMatch",
             "Regex renders with PostgreSQL/MySQL vendor syntax; SQLite has no stock REGEXP",
         ),
         Expr::PgColumnSize { .. } => vendor(
@@ -402,7 +402,7 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
             r#fn: ScalarFn::CurrentUser,
             args: vec![],
         },
-        Expr::PgRegexMatch {
+        Expr::RegexMatch {
             expr: Box::new(Expr::col("name")),
             pattern: "^a".to_string(),
         },

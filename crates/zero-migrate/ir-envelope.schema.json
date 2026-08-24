@@ -3780,7 +3780,7 @@
           ]
         },
         {
-          "description": "**PG-ONLY** regex match rendered exactly as\n`(<expr> ~ '<pattern>'::text)`.",
+          "description": "A regular-expression match predicate. Each backend spells its own\noperator — `(<expr> ~ <pattern>)` on `PostgreSQL`, `(<expr> REGEXP\n<pattern>)` on `MySQL` — through `DmlRenderer::render_regex_match`.\n\nNOT vendor-only, despite what this node used to be called. A backend\nwithout a stock regex operation refuses it by answering\n[`ExprDialectFeature::RegexMatch`](crate::validate::ExprDialectFeature::RegexMatch),\nwhich is how `SQLite` (no built-in `REGEXP`) declines it while `MySQL`\naccepts. That gate was already neutral; only the node name was not.",
           "type": "object",
           "properties": {
             "expr": {
@@ -3793,7 +3793,7 @@
             },
             "node": {
               "type": "string",
-              "const": "pgRegexMatch"
+              "const": "regexMatch"
             }
           },
           "additionalProperties": false,

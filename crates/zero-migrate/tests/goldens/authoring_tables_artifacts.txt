@@ -624,7 +624,7 @@ fixture:enums_domains|Postgres|column|subscriptions|6|deleted_at: t.timestamp(),
 fixture:enums_domains|Postgres|column|subscriptions|7|tier: t.enum("plan_tier").notNull(),
 fixture:enums_domains|Postgres|column|subscriptions|8|period: t.domain("billing_period"),
 fixture:enums_domains|Postgres|constraint|pg_expr_checks|0|{ name: "status_ne_all", expr: () => ({"node":"inList","expr":{"node":"colRef","name":"status"},"elems":["x"],"negated":true} as Expr) },
-fixture:enums_domains|Postgres|constraint|pg_expr_checks|1|{ name: "name_shape", expr: () => ({"node":"pgRegexMatch","expr":{"node":"colRef","name":"name"},"pattern":"^[a-z]+$"} as Expr) },
+fixture:enums_domains|Postgres|constraint|pg_expr_checks|1|{ name: "name_shape", expr: () => ({"node":"regexMatch","expr":{"node":"colRef","name":"name"},"pattern":"^[a-z]+$"} as Expr) },
 fixture:enums_domains|Postgres|constraint|pg_expr_checks|2|{ name: "data_size", expr: () => ({"node":"binOp","op":"le","lhs":{"node":"pgColumnSize","expr":{"node":"colRef","name":"data"}},"rhs":{"node":"literal","value":8192}} as Expr) },
 fixture:enums_domains|Postgres|index|pg_expr_checks|0|{ name: "pg_expr_checks_deleted_at_idx", on: ["deleted_at"] },
 fixture:enums_domains|Postgres|index|pg_expr_checks|1|{ name: "pg_expr_checks_updated_at_idx", on: ["updated_at"] },
@@ -634,7 +634,7 @@ fixture:enums_domains|Postgres|index|subscriptions|1|{ name: "subscriptions_upda
 fixture:enums_domains|Postgres|index|subscriptions|2|{ name: "subscriptions_created_by_idx", on: ["created_by"] },
 fixture:enums_domains|Postgres|primary_key|pg_expr_checks|single:id
 fixture:enums_domains|Postgres|primary_key|subscriptions|single:id
-fixture:enums_domains|Postgres|sha|env.db.ts|d62c80b2a268550240637cbeb77ec89108db05371bfc6e6c357b2b1b3bb51e73
+fixture:enums_domains|Postgres|sha|env.db.ts|00b82ce0d687c1ec40ad3353a386fd8cd580a3e7f4857a74f00b9d6adb2095bd
 fixture:enums_domains|Postgres|sha|runtime.json|99de44572f7a1ffa1af569c92c766c54775d806dbfcd8926326d8faee48a7ad8
 fixture:enums_domains|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:fluent_ddl|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only

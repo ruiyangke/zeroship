@@ -211,7 +211,7 @@ fn a_dml_emitter_holding_a_backend_never_resolves_another() {
         "zero-migrate-backend/src/dml.rs::in_list_text_literal",
         "zero-migrate-backend/src/dml.rs::render_in_list_elem_portable",
         "zero-migrate-backend/src/dml.rs::render_in_list",
-        "zero-migrate-backend/src/dml.rs::render_pg_regex_match",
+        "zero-migrate-backend/src/dml.rs::render_regex_match_node",
         "zero-migrate-backend/src/dml.rs::render_extract",
         "zero-migrate-backend/src/dml.rs::render_binop",
         "zero-migrate-backend/src/dml.rs::render_distinct_from",

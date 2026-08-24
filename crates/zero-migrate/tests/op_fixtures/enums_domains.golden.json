@@ -244,7 +244,7 @@
           "kind": {
             "kind": "check",
             "expr": {
-              "node": "pgRegexMatch",
+              "node": "regexMatch",
               "expr": {
                 "node": "colRef",
                 "name": "name"

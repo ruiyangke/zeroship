@@ -725,7 +725,7 @@ fn first_aggregate(expr: &Expr) -> Option<&'static str> {
         Expr::BinOp { lhs, rhs, .. } => first_aggregate(lhs).or_else(|| first_aggregate(rhs)),
         Expr::UnaryOp { operand, .. }
         | Expr::Cast { operand, .. }
-        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::RegexMatch { expr: operand, .. }
         | Expr::PgColumnSize { expr: operand }
         | Expr::Extract { from: operand, .. }
         | Expr::PgExtract { from: operand, .. } => first_aggregate(operand),
@@ -772,7 +772,7 @@ fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
         }
         Expr::UnaryOp { operand, .. }
         | Expr::Cast { operand, .. }
-        | Expr::PgRegexMatch { expr: operand, .. }
+        | Expr::RegexMatch { expr: operand, .. }
         | Expr::PgColumnSize { expr: operand }
         | Expr::Extract { from: operand, .. }
         | Expr::PgExtract { from: operand, .. } => first_volatile_function(operand),
@@ -1027,7 +1027,7 @@ impl Ctx<'_> {
                 elems,
                 negated: _,
             } => self.check_in_list(expr, elems, d),
-            Expr::PgRegexMatch { expr, pattern } => self.check_pg_regex_match(expr, pattern, d),
+            Expr::RegexMatch { expr, pattern } => self.check_regex_match(expr, pattern, d),
             Expr::PgColumnSize { expr } => {
                 self.validate_feature(ExprDialectFeature::PgColumnSize)?;
                 self.walk_depth(expr, d)
@@ -1323,7 +1323,7 @@ impl Ctx<'_> {
         }
     }
 
-    fn check_pg_text_literal(&self, value: &str, what: &str) -> Result<(), AuthoringError> {
+    fn check_text_literal(&self, value: &str, what: &str) -> Result<(), AuthoringError> {
         if value.is_empty() {
             return Err(self.err(
                 CODE_UNSUPPORTED,
@@ -1362,7 +1362,7 @@ impl Ctx<'_> {
         for (idx, elem) in elems.iter().enumerate() {
             let kind = match elem {
                 crate::ir::IrScalar::Str(s) => {
-                    self.check_pg_text_literal(s, "inList element")?;
+                    self.check_text_literal(s, "inList element")?;
                     ElemKind::Text
                 }
                 crate::ir::IrScalar::Int(_)
@@ -1400,7 +1400,7 @@ impl Ctx<'_> {
         Ok(())
     }
 
-    fn check_pg_regex_match(
+    fn check_regex_match(
         &self,
         expr: &Expr,
         pattern: &str,
@@ -1408,7 +1408,7 @@ impl Ctx<'_> {
     ) -> Result<(), AuthoringError> {
         self.validate_feature(ExprDialectFeature::RegexMatch)?;
         self.walk_depth(expr, depth)?;
-        self.check_pg_text_literal(pattern, "PG regex pattern")
+        self.check_text_literal(pattern, "regex pattern")
     }
 
     fn check_duration(&self, duration: &Duration) -> Result<(), AuthoringError> {

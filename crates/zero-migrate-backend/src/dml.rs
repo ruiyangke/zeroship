@@ -686,14 +686,6 @@ fn render_in_list(
     backend.render_in_list(expr, elems, negated, joiner)
 }
 
-fn render_pg_regex_match(
-    expr: &str,
-    pattern: &str,
-    backend: &dyn DmlRenderer,
-) -> Result<String, DmlError> {
-    backend.render_regex_match(expr, pattern)
-}
-
 pub fn extract_field_name(field: ExtractField) -> &'static str {
     match field {
         ExtractField::Year => "year",
@@ -1074,7 +1066,7 @@ pub fn expr_column_refs_for_backend(
             | Expr::PgColumnSize { expr: operand }
             | Expr::Extract { from: operand, .. }
             | Expr::PgExtract { from: operand, .. }
-            | Expr::PgRegexMatch { expr: operand, .. }
+            | Expr::RegexMatch { expr: operand, .. }
             | Expr::InList { expr: operand, .. } => walk(operand, backend, out)?,
             Expr::Case { branches, r#else } => {
                 for branch in branches {
@@ -1268,9 +1260,9 @@ pub fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlEr
             let e = render_expr_bound(expr, ctx)?;
             render_in_list(&e, elems, *negated, ctx.backend)?
         }
-        Expr::PgRegexMatch { expr, pattern } => {
+        Expr::RegexMatch { expr, pattern } => {
             let e = render_expr_bound(expr, ctx)?;
-            render_pg_regex_match(&e, pattern, ctx.backend)?
+            ctx.backend.render_regex_match(&e, pattern)?
         }
         Expr::PgColumnSize { expr } => {
             if !ctx.backend.supports(Capability::PostgresVendorPrimitives) {
@@ -1521,9 +1513,9 @@ where
             let e = render_expr_inline_walk_for_backend(expr, backend, col_ref)?;
             render_in_list(&e, elems, *negated, backend)?
         }
-        Expr::PgRegexMatch { expr, pattern } => {
+        Expr::RegexMatch { expr, pattern } => {
             let e = render_expr_inline_walk_for_backend(expr, backend, col_ref)?;
-            render_pg_regex_match(&e, pattern, backend)?
+            backend.render_regex_match(&e, pattern)?
         }
         Expr::PgColumnSize { expr } => {
             if !backend.supports(Capability::PostgresVendorPrimitives) {

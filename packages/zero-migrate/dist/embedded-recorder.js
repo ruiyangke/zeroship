@@ -1021,7 +1021,7 @@ function validateDefaultExpr(expr) {
       case "inList":
         walk(n.expr);
         return;
-      case "pgRegexMatch":
+      case "regexMatch":
       case "pgColumnSize":
       case "pgExtract":
       case "pgInterval":
@@ -1697,7 +1697,7 @@ var ExprChainImpl = class {
   // PG-first chain operators. Same IR nodes as the old vendor helpers;
   // the dialect gate lives in the Rust validator (fail-closed off-target).
   regex(pattern) {
-    return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
+    return chain({ node: "regexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
   }
   columnSize() {
     return chain({ node: "pgColumnSize", expr: this.__node });
@@ -2094,11 +2094,11 @@ function validateImmutableExpr(expr, position, opts = {}) {
       case "inList":
         walk(n.expr);
         return;
-      case "pgRegexMatch":
-        if (!opts.allowPgImmutable) rejectPgNode("pgRegexMatch");
+      case "regexMatch":
+        if (!opts.allowPgImmutable) rejectPgNode("regexMatch");
         walk(n.expr);
         if (typeof n.pattern !== "string") {
-          rejectImmutableExpr(position, "pgRegexMatch pattern must be a string");
+          rejectImmutableExpr(position, "regexMatch pattern must be a string");
         }
         return;
       case "pgColumnSize":
