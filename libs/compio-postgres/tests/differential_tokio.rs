@@ -1728,3 +1728,253 @@ async fn both_drivers_agree_on_simple_query_shapes() {
          case it exists for was never exercised"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Stale plans under a result-type change
+// ---------------------------------------------------------------------------
+
+/// The one thing the comparison needs from either driver's error type.
+trait StaleError {
+    fn sqlstate(&self) -> Option<String>;
+}
+
+impl StaleError for tokio_postgres::Error {
+    fn sqlstate(&self) -> Option<String> {
+        self.code().map(|code| code.code().to_owned())
+    }
+}
+
+impl StaleError for compio_postgres::Error {
+    fn sqlstate(&self) -> Option<String> {
+        self.code().map(|code| code.code().to_owned())
+    }
+}
+
+fn record<E: StaleError>(result: Result<u64, E>) -> Outcome {
+    match result {
+        Ok(rows) => Outcome::Rows(rows),
+        Err(error) => match error.sqlstate() {
+            Some(code) => Outcome::SqlState(code),
+            None => Outcome::LocalFailure,
+        },
+    }
+}
+
+/// tokio-postgres holding an explicit prepared statement across a DDL change.
+fn tokio_explicit_prepare(url: String, table: String) -> Vec<Outcome> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let outcomes = runtime.block_on(async move {
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+
+            client
+                .batch_execute(&format!(
+                    "CREATE TABLE {table}(a int); INSERT INTO {table} VALUES (1)"
+                ))
+                .await
+                .expect("tokio fixture");
+            let statement = client
+                .prepare(&format!("SELECT * FROM {table}"))
+                .await
+                .expect("tokio prepare");
+
+            let mut outcomes = vec![record(client.execute(&statement, &[]).await)];
+            client
+                .batch_execute(&format!("ALTER TABLE {table} ADD COLUMN b int"))
+                .await
+                .expect("tokio alter");
+            outcomes.push(record(client.execute(&statement, &[]).await));
+            // The session must survive the refusal.
+            outcomes.push(record(client.execute("SELECT 1::int4", &[]).await));
+
+            let _ = client
+                .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+                .await;
+            drop(client);
+            let _ = driver.await;
+            outcomes
+        });
+        let _ = sender.send(outcomes);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver.recv().expect("no outcomes came back from tokio")
+}
+
+/// This crate doing the same with an explicit prepared statement.
+async fn compio_explicit_prepare(url: &str, table: &str) -> Vec<Outcome> {
+    let (client, connection) = compio_postgres::connect(url, common::suite_tls())
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    client
+        .batch_execute(&format!(
+            "CREATE TABLE {table}(a int); INSERT INTO {table} VALUES (1)"
+        ))
+        .await
+        .expect("fixture");
+    let statement = client
+        .prepare(&format!("SELECT * FROM {table}"))
+        .await
+        .expect("prepare");
+
+    let mut outcomes = vec![record(client.execute(&statement, &[]).await)];
+    client
+        .batch_execute(&format!("ALTER TABLE {table} ADD COLUMN b int"))
+        .await
+        .expect("alter");
+    outcomes.push(record(client.execute(&statement, &[]).await));
+    outcomes.push(record(client.execute("SELECT 1::int4", &[]).await));
+
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+    outcomes
+}
+
+/// A CALLER-OWNED prepared statement whose result type moves under it is
+/// refused by both drivers, identically, and neither session dies of it.
+///
+/// The scenario has to be MATCHED to mean anything, and getting that wrong is
+/// easy: `execute(&str)` prepares afresh on every call in both drivers, so no
+/// plan is ever stale and both simply succeed. The `0A000` only appears when a
+/// statement is HELD across the DDL. An earlier attempt at this surface
+/// compared this crate's implicit cache against a tokio statement held that
+/// way, and reported a divergence that is really two different scenarios.
+///
+/// WHAT THIS DOES NOT CATCH: this crate's implicit statement cache, which is
+/// off by default and behaves differently on purpose - see
+/// `the_implicit_cache_retries_a_stale_plan_outside_a_transaction`.
+#[compio::test]
+async fn both_drivers_refuse_a_stale_explicit_prepared_statement() {
+    let url = common::test_url();
+    let expected = vec![
+        Outcome::Rows(1),
+        Outcome::SqlState("0A000".to_owned()),
+        Outcome::Rows(1),
+    ];
+
+    let theirs = tokio_explicit_prepare(
+        common::plaintext_url(),
+        common::test_object_name("cpg_plan_theirs"),
+    );
+    let ours = compio_explicit_prepare(&url, &common::test_object_name("cpg_plan_ours")).await;
+
+    assert_eq!(
+        ours, theirs,
+        "the drivers disagree about a stale prepared statement:\n  ours: {ours:?}\n  tokio-postgres: {theirs:?}"
+    );
+    // Pinned absolutely as well, so two drivers making the same mistake cannot
+    // pass: 0A000 is the refusal, and the trailing Rows(1) is the session
+    // still being usable afterwards.
+    assert_eq!(ours, expected, "this crate stopped refusing a stale plan");
+    assert_eq!(
+        theirs, expected,
+        "tokio-postgres stopped refusing a stale plan"
+    );
+}
+
+/// The implicit cache hides that refusal, which is this crate's own feature
+/// and has no counterpart in tokio-postgres.
+///
+/// `Config::statement_cache_capacity` promises it: on `0A000` for a cached
+/// statement the stale entry is evicted and the operation is prepared and run
+/// once more, so "the caller sees the result, not the error". It also states
+/// the limit - inside a transaction the error has already aborted it, so
+/// nothing is retried.
+///
+/// The capacity-0 arm is the control, and it is what makes the other two
+/// readable: with no cache no plan is ever stale, so success there proves
+/// nothing about retrying. The three arms MEASURED on 2026-08-24:
+///
+/// ```text
+///   capacity 0   outside txn  Rows(1)   inside txn  Rows(1)
+///   capacity 16  outside txn  Rows(1)   inside txn  0A000
+/// ```
+///
+/// WHAT THIS DOES NOT CATCH: whether a retry re-runs side effects. `0A000`
+/// arrives before execution, so nothing here can observe that; the docs name
+/// `26000` as the case where it could, and that is not exercised.
+#[compio::test]
+async fn the_implicit_cache_retries_a_stale_plan_outside_a_transaction() {
+    let url = common::test_url();
+
+    assert_eq!(
+        compio_implicit_cache(&url, &common::test_object_name("cpg_cache_on"), 16, false).await,
+        vec![Outcome::Rows(1), Outcome::Rows(1), Outcome::Rows(1)],
+        "the stale cached plan was not retried"
+    );
+    assert_eq!(
+        compio_implicit_cache(&url, &common::test_object_name("cpg_cache_txn"), 16, true).await,
+        vec![
+            Outcome::Rows(1),
+            Outcome::Rows(1),
+            Outcome::SqlState("0A000".to_owned())
+        ],
+        "a stale plan inside a transaction must propagate rather than retry"
+    );
+    assert_eq!(
+        compio_implicit_cache(&url, &common::test_object_name("cpg_cache_off"), 0, true).await,
+        vec![Outcome::Rows(1), Outcome::Rows(1), Outcome::Rows(1)],
+        "the default configuration cached a statement it was never asked to cache"
+    );
+}
+
+/// Raw SQL executed twice so the implicit cache admits it, then a result-type
+/// change, then the same SQL again.
+async fn compio_implicit_cache(
+    url: &str,
+    table: &str,
+    capacity: usize,
+    inside_transaction: bool,
+) -> Vec<Outcome> {
+    let mut config: compio_postgres::Config = url.parse().expect("parse the test DSN");
+    config.statement_cache_capacity(capacity);
+    let (client, connection) = config
+        .connect(common::suite_tls())
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    client
+        .batch_execute(&format!(
+            "CREATE TABLE {table}(a int); INSERT INTO {table} VALUES (1)"
+        ))
+        .await
+        .expect("fixture");
+
+    let sql = format!("SELECT * FROM {table}");
+    let mut outcomes = Vec::new();
+    for _ in 0..2 {
+        outcomes.push(record(client.execute(sql.as_str(), &[]).await));
+    }
+    client
+        .batch_execute(&format!("ALTER TABLE {table} ADD COLUMN b int"))
+        .await
+        .expect("alter");
+    if inside_transaction {
+        client.batch_execute("BEGIN").await.expect("begin");
+    }
+    outcomes.push(record(client.execute(sql.as_str(), &[]).await));
+
+    let _ = client.batch_execute("ROLLBACK").await;
+    let _ = client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await;
+    outcomes
+}
