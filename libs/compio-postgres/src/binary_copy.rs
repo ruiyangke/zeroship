@@ -127,9 +127,10 @@ where
     for (i, (value, type_)) in values.zip(types).enumerate() {
         let idx = buf.len();
         buf.put_i32(0);
-        let len = match value
-            .borrow_to_sql()
-            .to_sql_checked(type_, buf)
+        // Shares the bind path's domain fallback: `BinaryCopyInWriter` takes its
+        // column types from the CALLER, who naturally obtains them from the
+        // catalog or a prepared statement, both of which yield the DOMAIN.
+        let len = match crate::query::encode_parameter(value.borrow_to_sql(), type_, buf)
             .map_err(|e| Error::to_sql(e, i))?
         {
             IsNull::Yes => -1,
