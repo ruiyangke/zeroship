@@ -810,6 +810,7 @@ mod type_cache_tests {
             "old".to_string(),
             Vec::new(),
             Vec::new(),
+            false,
         );
         let old_winner =
             client
@@ -822,6 +823,7 @@ mod type_cache_tests {
             "replacement".to_string(),
             Vec::new(),
             Vec::new(),
+            false,
         );
         let displaced = {
             let mut cache = client.inner().statement_cache.lock();
@@ -870,6 +872,7 @@ mod type_cache_tests {
             "stale".to_string(),
             vec![custom.clone()],
             Vec::new(),
+            false,
         );
 
         client.clear_type_cache();

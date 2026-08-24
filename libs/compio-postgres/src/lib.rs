@@ -45,6 +45,14 @@
 //! until the future returned by the method is first polled. Requests are executed in the order that they are first
 //! polled, not in the order that their futures are created.
 //!
+//! Dropping an ordinary command future after polling abandons delivery to that
+//! caller; it does not cancel the PostgreSQL command. The connection continues
+//! draining that response through its `ReadyForQuery` terminator so later
+//! pipelined responses stay in their registered FIFO slots. Use a
+//! [`CancelToken`] when server-side cancellation is required. Dropping
+//! [`Connection::run`] instead retires the whole protocol session and fails
+//! every outstanding operation.
+//!
 //! # Pipelining
 //!
 //! The client supports *pipelined* requests. Pipelining can improve performance in use cases in which multiple,

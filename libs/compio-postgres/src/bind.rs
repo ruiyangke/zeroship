@@ -129,7 +129,11 @@ where
                 });
             }
         }
-        Statement::unnamed(statement.params().to_vec(), columns)
+        Statement::unnamed_with_copy_in(
+            statement.params().to_vec(),
+            columns,
+            statement.may_enter_copy_in(),
+        )
     } else {
         statement
     };
