@@ -61,7 +61,7 @@ fn folded(ops_after_create: &str) -> serde_json::Value {
         "public",
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
@@ -155,7 +155,7 @@ fn folded_with_default(ops_after_create: &str) -> serde_json::Value {
         "public",
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
@@ -226,7 +226,7 @@ fn folded_ref(a_table: &str, rest: &str) -> serde_json::Value {
         "public",
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }
@@ -306,7 +306,7 @@ fn folded_table(a_table: &str, rest: &str) -> serde_json::Value {
         "public",
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the fold succeeds");
     map.get("a").cloned().expect("table a is in the fold")
 }

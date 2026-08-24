@@ -460,7 +460,7 @@ fn refresh_historical_live(
         historical_live.sdk_schemas =
             single_fold::fold(vendors, cumulative_ops, dialect, project, policy)
                 .map_err(|error| error.to_string())?
-                .project_field_defs();
+                .project_field_defs(vendors);
     }
     Ok(())
 }
@@ -703,7 +703,7 @@ impl MigrationEngine {
                                 error,
                             )
                         })?
-                        .project_field_defs();
+                        .project_field_defs(self.vendors);
             }
         }
 

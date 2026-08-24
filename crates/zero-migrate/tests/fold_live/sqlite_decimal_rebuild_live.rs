@@ -212,7 +212,7 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
         &policy,
     )
     .expect("the history folds")
-    .project_field_defs();
+    .project_field_defs(zero_migrate::shipping_vendors());
     live
 }
 
@@ -503,7 +503,7 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
         &policy,
     )
     .expect("the history folds")
-    .project_collection_descriptors()
+    .project_collection_descriptors(zero_migrate::shipping_vendors())
     .into_values()
     // The projection stamps a synthetic `__fold__` owner; a re-deploy presents
     // the descriptors under the app that owns them, and the differ's

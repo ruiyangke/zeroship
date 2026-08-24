@@ -206,8 +206,8 @@ pub(crate) fn add_runtime_index(
 /// any projection re-derive it. See `render/fold/single_fold.rs`'s
 /// `ImplicitUniqueIndex` for why the name is state and not a function of the current
 /// table and column names.
-pub(crate) fn derived_unique_index_name(table: &str, field: &str) -> String {
-    crate::plan::author::cap_ident_name(&format!("{table}_{field}_key"))
+pub(crate) fn derived_unique_index_name(vendors: VendorSet, table: &str, field: &str) -> String {
+    crate::plan::author::cap_ident_name(vendors, &format!("{table}_{field}_key"))
 }
 
 /// Render the v1 runtime descriptor from an ALREADY-FOLDED `FieldDef` map.
@@ -355,11 +355,11 @@ pub fn render_schema_export(
     let folded =
         crate::render::fold::single_fold::fold(vendors, ops, dialect, project_schema, effective)
             .map_err(GenTypesError::Fold)?;
-    let metadata = folded.project_runtime_metadata();
+    let metadata = folded.project_runtime_metadata(vendors);
     let authoring_tables = folded.project_authoring_tables();
     // ONE recovery feeds both the serialized artifact and the structured export: the
     // `FieldDef` map is a map over the typed collections, not a second traversal.
-    let collections = folded.project_collection_descriptors();
+    let collections = folded.project_collection_descriptors(vendors);
     let field_defs = crate::render::fold::single_fold::field_defs_from_collections(&collections);
 
     // (a) RuntimeSchemaDescriptor v1 — fields plus runtime-visible collection
@@ -370,7 +370,7 @@ pub fn render_schema_export(
     runtime_json.push('\n');
 
     // (b) env.db.ts — reconstructed current-authoring-API schema.
-    let env_db_ts = render_env_db_ts(&authoring_tables, &metadata);
+    let env_db_ts = render_env_db_ts(vendors, &authoring_tables, &metadata);
 
     Ok(SchemaExport {
         artifacts: GeneratedArtifacts {
@@ -726,35 +726,43 @@ fn expr_references_column(
     contains(&value, table, column, include_unqualified, dialect)
 }
 
-pub(crate) fn effective_constraint_name(table: &str, constraint: &IrConstraint) -> String {
+pub(crate) fn effective_constraint_name(
+    vendors: VendorSet,
+    table: &str,
+    constraint: &IrConstraint,
+) -> String {
     if let Some(name) = &constraint.name {
         return name.clone();
     }
     match &constraint.kind {
         IrConstraintKind::Fk { columns, .. } => {
-            crate::render::lower::derived_fk_constraint_name(table, columns)
+            crate::render::lower::derived_fk_constraint_name(vendors, table, columns)
         }
         IrConstraintKind::Unique { columns } => {
-            crate::render::lower::derived_constraint_name(table, columns, "key")
+            crate::render::lower::derived_constraint_name(vendors, table, columns, "key")
         }
         IrConstraintKind::Check { expr, .. } => {
-            crate::render::lower::derived_check_constraint_name(table, expr)
+            crate::render::lower::derived_check_constraint_name(vendors, table, expr)
         }
         IrConstraintKind::Exclusion { elements, .. } => {
-            crate::render::lower::derived_exclusion_constraint_name(table, elements)
+            crate::render::lower::derived_exclusion_constraint_name(vendors, table, elements)
         }
     }
 }
 
-pub(crate) fn named_constraint(table: &str, constraint: &IrConstraint) -> IrConstraint {
+pub(crate) fn named_constraint(
+    vendors: VendorSet,
+    table: &str,
+    constraint: &IrConstraint,
+) -> IrConstraint {
     let mut constraint = constraint.clone();
     if constraint.name.is_none() {
-        constraint.name = Some(effective_constraint_name(table, &constraint));
+        constraint.name = Some(effective_constraint_name(vendors, table, &constraint));
     }
     constraint
 }
 
-pub(crate) fn effective_index_name(table: &str, index: &IrIndex) -> String {
+pub(crate) fn effective_index_name(vendors: VendorSet, table: &str, index: &IrIndex) -> String {
     index.name.clone().unwrap_or_else(|| {
         let parts = index
             .columns
@@ -764,19 +772,20 @@ pub(crate) fn effective_index_name(table: &str, index: &IrIndex) -> String {
                 IndexElement::Expr { .. } => "expr",
             })
             .collect::<Vec<_>>();
-        crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", parts.join("_")))
+        crate::plan::author::cap_ident_name(vendors, &format!("{table}_{}_idx", parts.join("_")))
     })
 }
 
-pub(crate) fn named_index(table: &str, index: &IrIndex) -> IrIndex {
+pub(crate) fn named_index(vendors: VendorSet, table: &str, index: &IrIndex) -> IrIndex {
     let mut index = index.clone();
     if index.name.is_none() {
-        index.name = Some(effective_index_name(table, &index));
+        index.name = Some(effective_index_name(vendors, table, &index));
     }
     index
 }
 
 fn render_env_db_ts(
+    vendors: VendorSet,
     tables: &BTreeMap<String, AuthoringTable>,
     metadata: &BTreeMap<String, RuntimeCollectionMetadata>,
 ) -> String {
@@ -790,13 +799,20 @@ fn render_env_db_ts(
     );
     body.push_str("const schema = {\n");
     for (table_name, table) in tables {
-        render_table(&mut body, table_name, table, metadata.get(table_name));
+        render_table(
+            vendors,
+            &mut body,
+            table_name,
+            table,
+            metadata.get(table_name),
+        );
     }
     body.push_str("} satisfies Record<string, CreateTableArgs>;\n\nexport { schema };\n");
     body
 }
 
 fn render_table(
+    vendors: VendorSet,
     body: &mut String,
     table_name: &str,
     table: &AuthoringTable,
@@ -808,7 +824,7 @@ fn render_table(
         .filter(|columns| columns.len() == 1)
         .and_then(|columns| columns.first())
         .map(String::as_str);
-    let (references, lifted_constraints) = lifted_column_references(table_name, table);
+    let (references, lifted_constraints) = lifted_column_references(vendors, table_name, table);
 
     body.push_str("  ");
     body.push_str(&js_key(table_name));
@@ -838,8 +854,8 @@ fn render_table(
         }
         Some(_) => {}
     }
-    render_table_constraints(body, table_name, table, &lifted_constraints);
-    render_indexes(body, table_name, &table.indexes);
+    render_table_constraints(vendors, body, table_name, table, &lifted_constraints);
+    render_indexes(vendors, body, table_name, &table.indexes);
     if let Some(partition_by) = &table.partition_by {
         body.push_str("    partitionBy: ");
         body.push_str(&render_partition(partition_by));
@@ -879,6 +895,7 @@ fn render_runtime_options(body: &mut String, options: &crate::TableRuntimeOption
 /// discarded. An explicit derived name is carried into the modifier so the
 /// authored IR shape round-trips exactly.
 fn lifted_column_references(
+    vendors: VendorSet,
     table_name: &str,
     table: &AuthoringTable,
 ) -> (BTreeMap<String, ColumnReference>, BTreeSet<usize>) {
@@ -953,7 +970,8 @@ fn lifted_column_references(
         if references.contains_key(&columns[0]) {
             continue;
         }
-        let derived_name = crate::render::lower::derived_fk_constraint_name(table_name, columns);
+        let derived_name =
+            crate::render::lower::derived_fk_constraint_name(vendors, table_name, columns);
         if constraint.name.as_deref() != Some(derived_name.as_str()) {
             continue;
         }
@@ -1189,6 +1207,7 @@ fn render_reference_options(reference: &ColumnReference) -> String {
 }
 
 fn render_table_constraints(
+    vendors: VendorSet,
     body: &mut String,
     table_name: &str,
     table: &AuthoringTable,
@@ -1206,7 +1225,9 @@ fn render_table_constraints(
         body.push_str("    uniques: [\n");
         for (constraint, columns) in uniques {
             body.push_str("      { name: ");
-            body.push_str(&js_str(&effective_constraint_name(table_name, constraint)));
+            body.push_str(&js_str(&effective_constraint_name(
+                vendors, table_name, constraint,
+            )));
             body.push_str(", columns: ");
             body.push_str(&render_string_array(columns));
             body.push_str(" },\n");
@@ -1226,7 +1247,9 @@ fn render_table_constraints(
         body.push_str("    checks: [\n");
         for (constraint, expr) in checks {
             body.push_str("      { name: ");
-            body.push_str(&js_str(&effective_constraint_name(table_name, constraint)));
+            body.push_str(&js_str(&effective_constraint_name(
+                vendors, table_name, constraint,
+            )));
             body.push_str(", expr: () => ");
             body.push_str(&render_expr(expr));
             body.push_str(" },\n");
@@ -1259,7 +1282,9 @@ fn render_table_constraints(
                 unreachable!("filtered to FK constraints")
             };
             body.push_str("      { name: ");
-            body.push_str(&js_str(&effective_constraint_name(table_name, constraint)));
+            body.push_str(&js_str(&effective_constraint_name(
+                vendors, table_name, constraint,
+            )));
             body.push_str(", columns: ");
             body.push_str(&render_string_array(columns));
             body.push_str(", references: { table: ");
@@ -1286,10 +1311,15 @@ fn render_table_constraints(
         body.push_str("    ],\n");
     }
 
-    render_exclusions(body, table_name, &table.constraints);
+    render_exclusions(vendors, body, table_name, &table.constraints);
 }
 
-fn render_exclusions(body: &mut String, table_name: &str, constraints: &[IrConstraint]) {
+fn render_exclusions(
+    vendors: VendorSet,
+    body: &mut String,
+    table_name: &str,
+    constraints: &[IrConstraint],
+) {
     let exclusions = constraints
         .iter()
         .filter(|constraint| matches!(constraint.kind, IrConstraintKind::Exclusion { .. }))
@@ -1310,7 +1340,9 @@ fn render_exclusions(body: &mut String, table_name: &str, constraints: &[IrConst
             unreachable!("filtered to exclusion constraints")
         };
         body.push_str("      { name: ");
-        body.push_str(&js_str(&effective_constraint_name(table_name, constraint)));
+        body.push_str(&js_str(&effective_constraint_name(
+            vendors, table_name, constraint,
+        )));
         if *using_method != ExclusionMethod::Gist {
             body.push_str(", using: ");
             body.push_str(&js_str(&serde_token(using_method)));
@@ -1345,14 +1377,14 @@ fn render_exclusions(body: &mut String, table_name: &str, constraints: &[IrConst
     body.push_str("    ],\n");
 }
 
-fn render_indexes(body: &mut String, table_name: &str, indexes: &[IrIndex]) {
+fn render_indexes(vendors: VendorSet, body: &mut String, table_name: &str, indexes: &[IrIndex]) {
     if indexes.is_empty() {
         return;
     }
     body.push_str("    indexes: [\n");
     for index in indexes {
         body.push_str("      { name: ");
-        body.push_str(&js_str(&effective_index_name(table_name, index)));
+        body.push_str(&js_str(&effective_index_name(vendors, table_name, index)));
         body.push_str(", on: [");
         for (position, element) in index.columns.iter().enumerate() {
             if position > 0 {
@@ -1721,7 +1753,8 @@ mod tests {
             partition_by: None,
             schema: None,
         };
-        let (references, lifted) = lifted_column_references("events", &table);
+        let (references, lifted) =
+            lifted_column_references(crate::test_fixtures::VENDORS, "events", &table);
         assert_eq!(references["account_id"].table, "accounts");
         assert_eq!(
             references["account_id"].name.as_deref(),
@@ -1755,7 +1788,8 @@ mod tests {
             schema: None,
         };
 
-        let (references, lifted) = lifted_column_references("entries", &table);
+        let (references, lifted) =
+            lifted_column_references(crate::test_fixtures::VENDORS, "entries", &table);
         assert_eq!(
             references["account_id"].name.as_deref(),
             Some("entries_account_id_fkey")
@@ -1787,7 +1821,8 @@ mod tests {
             schema: None,
         };
 
-        let (references, lifted) = lifted_column_references("entries", &table);
+        let (references, lifted) =
+            lifted_column_references(crate::test_fixtures::VENDORS, "entries", &table);
         assert!(!references.contains_key("account_id"));
         assert!(lifted.is_empty());
     }
@@ -1856,7 +1891,7 @@ mod tests {
             },
         )]);
         let metadata = BTreeMap::new();
-        let dts = render_env_db_ts(&tables, &metadata);
+        let dts = render_env_db_ts(crate::test_fixtures::VENDORS, &tables, &metadata);
         assert!(dts.contains("from \"zero-migrate\";"));
         assert!(dts.contains("const schema = {"));
         assert!(dts.contains("primaryKey: [\"tenant_id\", \"sequence\"]"));
@@ -1896,8 +1931,8 @@ mod tests {
         )
         .expect("confined descriptor ops fold");
         let value = render_runtime_descriptor_v1(
-            &folded.project_field_defs(),
-            &folded.project_runtime_metadata(),
+            &folded.project_field_defs(crate::test_fixtures::VENDORS),
+            &folded.project_runtime_metadata(crate::test_fixtures::VENDORS),
         );
         assert_eq!(value["version"], 1);
         let fields = &value["collections"]["hits"]["fields"];

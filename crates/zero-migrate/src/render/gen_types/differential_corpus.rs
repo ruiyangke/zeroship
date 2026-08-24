@@ -536,7 +536,7 @@ impl Replay {
             fo: fold_ops(vendors, ops, d, SCHEMA, &p).map_err(|e| e.to_string()),
             ffd: folded
                 .as_ref()
-                .map(super::super::fold::single_fold::FoldedSchema::project_field_defs)
+                .map(|folded| folded.project_field_defs(vendors))
                 .map_err(Clone::clone),
             ato: folded
                 .as_ref()
@@ -544,7 +544,7 @@ impl Replay {
                 .map_err(Clone::clone),
             rmo: folded
                 .as_ref()
-                .map(super::super::fold::single_fold::FoldedSchema::project_runtime_metadata)
+                .map(|folded| folded.project_runtime_metadata(vendors))
                 .map_err(Clone::clone),
         }
     }

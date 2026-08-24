@@ -70,7 +70,7 @@ fn standalone_mask_on_plaintext_column_round_trips_through_the_fold() {
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("fold");
     let ssn = &generated["people"]["ssn"];
 

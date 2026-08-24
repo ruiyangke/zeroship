@@ -87,7 +87,7 @@ fn a_fixed_precision_decimal_survives_descriptors_to_ops_and_back() {
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("fold");
 
     assert_eq!(

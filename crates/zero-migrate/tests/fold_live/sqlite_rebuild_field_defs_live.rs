@@ -498,7 +498,7 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
         &policy,
     )
     .expect("the history folds")
-    .project_field_defs();
+    .project_field_defs(zero_migrate::shipping_vendors());
     live
 }
 
@@ -718,7 +718,7 @@ async fn the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content() {
         &policy,
     )
     .expect("the history folds")
-    .project_field_defs();
+    .project_field_defs(zero_migrate::shipping_vendors());
     let real = format!(
         "{:?}",
         author.lower_steps(&resolved, &live).expect("lowers")

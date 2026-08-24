@@ -446,7 +446,7 @@ fn the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps() {
             SCHEMA,
             &support::confined_charter(),
         )
-        .map(|folded| folded.project_field_defs())
+        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
         .expect("field-def fold succeeds");
         let amounts = defs.get("amounts").expect("amounts in the field defs");
         assert_eq!(

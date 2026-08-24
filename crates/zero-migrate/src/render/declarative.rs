@@ -842,7 +842,7 @@ fn field_check_constraints(
         };
         if let Some(def) = expr {
             out.push(ConstraintSnapshot {
-                name: check_constraint_name(table, &f.name, "range"),
+                name: check_constraint_name(vendors, table, &f.name, "range"),
                 kind: "CHECK".into(),
                 definition: def,
                 comment: None,
@@ -859,7 +859,7 @@ fn field_check_constraints(
             .and_then(|value| json_scalar_sql(vendors, value, dialect))
         {
             out.push(ConstraintSnapshot {
-                name: check_constraint_name(table, &f.name, "lit"),
+                name: check_constraint_name(vendors, table, &f.name, "lit"),
                 kind: "CHECK".into(),
                 definition: format!("CHECK ({col} = {rendered})"),
                 comment: None,
@@ -876,7 +876,7 @@ fn field_check_constraints(
             .collect();
         if !rendered.is_empty() {
             out.push(ConstraintSnapshot {
-                name: check_constraint_name(table, &f.name, "enum"),
+                name: check_constraint_name(vendors, table, &f.name, "enum"),
                 kind: "CHECK".into(),
                 definition: format!("CHECK ({col} IN ({}))", rendered.join(", ")),
                 comment: None,
@@ -891,18 +891,18 @@ fn field_check_constraints(
 /// Deterministic CHECK constraint name, capped ≤63 bytes (same NAMEDATALEN
 /// budget as the index/FK names). `kind` distinguishes `lit` / `range` / `enum`
 /// so a field carrying several CHECKs gets distinct, stable names.
-fn check_constraint_name(table: &str, field: &str, kind: &str) -> String {
-    crate::plan::author::cap_ident_name(&format!("{table}_{field}_{kind}_chk"))
+fn check_constraint_name(vendors: VendorSet, table: &str, field: &str, kind: &str) -> String {
+    crate::plan::author::cap_ident_name(vendors, &format!("{table}_{field}_{kind}_chk"))
 }
 
 /// Precompute the deterministic enum-CHECK name for every snapshot column, in
 /// snapshot order. `CreateTableRequest` carries the full exactness proof: this maps
 /// the same pure naming function over the same loop inputs the MySQL emitter used.
-fn enum_check_names(table: &str, snapshot: &TableSnapshot) -> Vec<String> {
+fn enum_check_names(vendors: VendorSet, table: &str, snapshot: &TableSnapshot) -> Vec<String> {
     snapshot
         .columns
         .iter()
-        .map(|column| check_constraint_name(table, &column.name, "enum"))
+        .map(|column| check_constraint_name(vendors, table, &column.name, "enum"))
         .collect()
 }
 
@@ -1676,8 +1676,8 @@ pub(crate) fn push_primary_key_snapshot(snap: &mut TableSnapshot, columns: &[Str
 /// would alter, so both sides of that comparison speak this scheme. It does not
 /// cover PostgreSQL's native truncation of overlong generated names; the fold
 /// rejects those instead of using this authored-name hash cap.
-pub(crate) fn non_unique_index_name(table: &str, col: &str) -> String {
-    crate::plan::author::cap_ident_name(&format!("{table}_{col}_idx"))
+pub(crate) fn non_unique_index_name(vendors: VendorSet, table: &str, col: &str) -> String {
+    crate::plan::author::cap_ident_name(vendors, &format!("{table}_{col}_idx"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1852,7 +1852,7 @@ pub fn desired_snapshot_for_dialect(
     let mut derived_index_aliases: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
 
     for d in descriptors {
-        derived_index_aliases.insert(d.name.clone(), derived_index_aliases_for(d));
+        derived_index_aliases.insert(d.name.clone(), derived_index_aliases_for(vendors, d));
         // Capture the full SDK schema `Value` for this table before the snapshot
         // loop consumes the descriptor. Conflicting declarations are caught on the
         // snapshot in the second pass, so storing per-descriptor here is safe —
@@ -2246,7 +2246,7 @@ fn build_table_snapshot_impl(
         // name mirrors plugin-db's deterministic per-field index name.
         if f.unique {
             indexes.push(IndexSnapshot::btree(
-                unique_index_name(&d.name, &f.name),
+                unique_index_name(vendors, &d.name, &f.name),
                 true,
                 vec![f.name.clone()],
             ));
@@ -2260,7 +2260,7 @@ fn build_table_snapshot_impl(
         // is not: it comes from `non_unique_index_name`, which caps at 63 where
         // the data plane caps at 60, so the two agree only below 61 bytes.
         if f.ty == "vector" {
-            if let Some(spec) = vector_index_snapshot(&d.name, f) {
+            if let Some(spec) = vector_index_snapshot(vendors, &d.name, f) {
                 indexes.extend(fold_ann_index_for_dialect(vendors, spec, dialect));
             }
         }
@@ -2272,7 +2272,7 @@ fn build_table_snapshot_impl(
         // The name agrees with the data plane's only below 61 bytes; see
         // `non_unique_index_name`.
         if f.ty == "geoPoint" {
-            if let Some(spec) = geo_index_snapshot(&d.name, f) {
+            if let Some(spec) = geo_index_snapshot(vendors, &d.name, f) {
                 indexes.extend(fold_ann_index_for_dialect(vendors, spec, dialect));
             }
         }
@@ -2297,7 +2297,7 @@ fn build_table_snapshot_impl(
             validate_ident("ref target", target)?;
             validate_ident("ref target column", target_column)?;
             constraints.push(ConstraintSnapshot {
-                name: fk_constraint_name(&d.name, &f.name, f.reference_name.as_deref()),
+                name: fk_constraint_name(vendors, &d.name, &f.name, f.reference_name.as_deref()),
                 kind: "FOREIGN KEY".into(),
                 // EXACT canonical catalog spelling: the target is
                 // schema-qualified, NO space before `(id)`, policy clauses
@@ -2563,8 +2563,8 @@ pub fn is_system_managed_constraint(
 /// even though neither was truncated. Because `render_drop_index` classifies a
 /// unique index drop as destructive, that disagreement surfaces as a migration
 /// waiting on approval rather than as silent churn.
-pub(crate) fn unique_index_name(table: &str, field: &str) -> String {
-    crate::plan::author::cap_ident_name(&format!("{table}_{field}_key"))
+pub(crate) fn unique_index_name(vendors: VendorSet, table: &str, field: &str) -> String {
+    crate::plan::author::cap_ident_name(vendors, &format!("{table}_{field}_key"))
 }
 
 /// For each index name this collection DERIVED, the OTHER derivation of that same
@@ -2593,7 +2593,10 @@ pub(crate) fn unique_index_name(table: &str, field: &str) -> String {
 /// it has no second spelling to alias. Policy-injected indexes are absent for the
 /// same reason: they are built AND recognised through
 /// `crate::schema::query::index_name` on both sides.
-fn derived_index_aliases_for(d: &CollectionDescriptor) -> BTreeMap<String, String> {
+fn derived_index_aliases_for(
+    vendors: VendorSet,
+    d: &CollectionDescriptor,
+) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut record = |derived: String, column: &str, unique: bool| {
         let data_plane = crate::schema::query::index_name(&d.name, &[column], unique);
@@ -2603,10 +2606,14 @@ fn derived_index_aliases_for(d: &CollectionDescriptor) -> BTreeMap<String, Strin
     };
     for f in &d.fields {
         if f.unique {
-            record(unique_index_name(&d.name, &f.name), &f.name, true);
+            record(unique_index_name(vendors, &d.name, &f.name), &f.name, true);
         }
         if f.ty == "vector" || f.ty == "geoPoint" {
-            record(non_unique_index_name(&d.name, &f.name), &f.name, false);
+            record(
+                non_unique_index_name(vendors, &d.name, &f.name),
+                &f.name,
+                false,
+            );
         }
     }
     out
@@ -2725,9 +2732,14 @@ pub(crate) fn pair_indexes<'a>(
 
 /// Explicit FK constraint name, or the deterministic
 /// `<table>_<field>_fkey` default shared by every authoring path.
-fn fk_constraint_name(table: &str, field: &str, explicit_name: Option<&str>) -> String {
+fn fk_constraint_name(
+    vendors: VendorSet,
+    table: &str,
+    field: &str,
+    explicit_name: Option<&str>,
+) -> String {
     explicit_name.map_or_else(
-        || crate::render::lower::derived_fk_constraint_name(table, &[field.to_string()]),
+        || crate::render::lower::derived_fk_constraint_name(vendors, table, &[field.to_string()]),
         str::to_string,
     )
 }
@@ -2756,9 +2768,9 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
     not_valid: bool,
     dialect: &DialectId,
 ) -> ConstraintSnapshot {
-    let name = explicit_name
-        .map(ToString::to_string)
-        .unwrap_or_else(|| crate::render::lower::derived_fk_constraint_name(table, local_columns));
+    let name = explicit_name.map(ToString::to_string).unwrap_or_else(|| {
+        crate::render::lower::derived_fk_constraint_name(vendors, table, local_columns)
+    });
     zero_migrate_backend::constraint_definition::fk_constraint_snapshot(
         name,
         project_schema,
@@ -2783,6 +2795,7 @@ pub(crate) fn ir_fk_constraint_snapshot_for_columns(
 /// makes the created index an explicit migration/preview unit on every dialect
 /// instead of relying on MySQL's implicit index creation.
 pub(crate) fn ensure_fk_supporting_index(
+    vendors: VendorSet,
     table: &str,
     snapshot: &mut TableSnapshot,
     constraint_name: &str,
@@ -2825,7 +2838,7 @@ pub(crate) fn ensure_fk_supporting_index(
         } else {
             format!("{constraint_name}_idx_{ordinal}")
         };
-        let candidate = crate::plan::author::cap_ident_name(&raw);
+        let candidate = crate::plan::author::cap_ident_name(vendors, &raw);
         if snapshot.indexes.iter().all(|index| index.name != candidate) {
             break candidate;
         }
@@ -2869,7 +2882,11 @@ fn vector_opclass(metric: Option<&str>) -> &'static str {
 /// `expression` stays `None` and the index round-trips clean). The opclass rides
 /// on the emission-only `opclass` field — excluded from drift equality — so
 /// `render_create_index` can spell `USING ivfflat ("col" <opclass>)`.
-fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot> {
+fn vector_index_snapshot(
+    vendors: VendorSet,
+    table: &str,
+    f: &FieldDescriptor,
+) -> Option<IndexSnapshot> {
     if f.ty != "vector" {
         return None;
     }
@@ -2877,7 +2894,7 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
         // `<table>_<col>_idx`. Equal to `crate::schema::query::index_name`
         // (= plugin-db `ensure_vector_index`'s name) below 61 bytes, and
         // different above it; see `non_unique_index_name`.
-        name: non_unique_index_name(table, &f.name),
+        name: non_unique_index_name(vendors, table, &f.name),
         unique: false,
         columns: vec![f.name.clone()],
         elements: vec![IndexElementSnapshot::column(f.name.clone())],
@@ -2905,12 +2922,16 @@ fn vector_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapsh
 /// `crate::schema::query::index_name` below 61 bytes and differs above it. No
 /// opclass and no storage params (`render_create_index` spells the bare
 /// `USING gist ("col")`).
-fn geo_index_snapshot(table: &str, f: &FieldDescriptor) -> Option<IndexSnapshot> {
+fn geo_index_snapshot(
+    vendors: VendorSet,
+    table: &str,
+    f: &FieldDescriptor,
+) -> Option<IndexSnapshot> {
     if f.ty != "geoPoint" {
         return None;
     }
     Some(IndexSnapshot {
-        name: non_unique_index_name(table, &f.name),
+        name: non_unique_index_name(vendors, table, &f.name),
         unique: false,
         columns: vec![f.name.clone()],
         elements: vec![IndexElementSnapshot::column(f.name.clone())],
@@ -3711,7 +3732,7 @@ impl DeclarativeAuthor {
                 snapshot: t,
                 inline_fks: &inline_fks,
                 injected_indexes: &injected_indexes,
-                enum_check_names: enum_check_names(table, t),
+                enum_check_names: enum_check_names(self.vendors, table, t),
             };
             let emitter = self.emitter();
             let inline_create_indexes: BTreeSet<String> = emitter
@@ -4584,7 +4605,7 @@ impl DeclarativeAuthor {
                     snapshot,
                     inline_fks: &[],
                     injected_indexes: &injected_indexes,
-                    enum_check_names: enum_check_names(table, snapshot),
+                    enum_check_names: enum_check_names(self.vendors, table, snapshot),
                 })
                 .into_iter()
                 .next()
@@ -4680,7 +4701,7 @@ impl DeclarativeAuthor {
                     snapshot: desired,
                     inline_fks: &[],
                     injected_indexes: &injected_indexes,
-                    enum_check_names: enum_check_names(table, desired),
+                    enum_check_names: enum_check_names(self.vendors, table, desired),
                 })
                 .into_iter()
                 .next()
@@ -5329,7 +5350,7 @@ impl DeclarativeAuthor {
                 snapshot: t,
                 inline_fks,
                 injected_indexes: &[],
-                enum_check_names: enum_check_names(table, t),
+                enum_check_names: enum_check_names(self.vendors, table, t),
             })
             .join(";\n")
     }
@@ -5878,7 +5899,7 @@ impl DeclarativeAuthor {
             snapshot,
             inline_fks: &inline_fks,
             injected_indexes: &injected_indexes,
-            enum_check_names: enum_check_names(table, snapshot),
+            enum_check_names: enum_check_names(self.vendors, table, snapshot),
         };
         let emitter = self.emitter();
         let inline_create_indexes: BTreeSet<String> = emitter
@@ -6908,10 +6929,13 @@ mod snapshot_builder_refactor_safety_tests {
         };
         let expected = names
             .iter()
-            .map(|name| check_constraint_name(table, name, "enum"))
+            .map(|name| check_constraint_name(crate::test_fixtures::VENDORS, table, name, "enum"))
             .collect::<Vec<_>>();
 
-        assert_eq!(enum_check_names(table, &snapshot), expected);
+        assert_eq!(
+            enum_check_names(crate::test_fixtures::VENDORS, table, &snapshot),
+            expected
+        );
         assert_eq!(expected[0], expected[2], "duplicate columns stay duplicate");
         assert_ne!(expected[0], expected[1], "input order is not sorted away");
     }
@@ -6971,7 +6995,11 @@ mod snapshot_builder_refactor_safety_tests {
             snapshot: &sqlite_snap,
             inline_fks: &[],
             injected_indexes: &injected_indexes,
-            enum_check_names: enum_check_names(&d.name, &sqlite_snap),
+            enum_check_names: enum_check_names(
+                crate::test_fixtures::VENDORS,
+                &d.name,
+                &sqlite_snap,
+            ),
         })
         .join(";\n");
         assert!(
@@ -7825,7 +7853,7 @@ mod derived_index_alias_tests {
         for natural_len in 40..=76usize {
             // `<table>_<col>_idx` with a one-byte table: 1 + 1 + col + 4.
             let col = "c".repeat(natural_len - 6);
-            let author = non_unique_index_name("t", &col);
+            let author = non_unique_index_name(crate::test_fixtures::VENDORS, "t", &col);
             let data_plane = crate::schema::query::index_name("t", &[col.as_str()], false);
             if natural_len <= 60 {
                 assert_eq!(
@@ -7846,7 +7874,7 @@ mod derived_index_alias_tests {
         // The shape of each regime, spelled out.
         let sixty_one = "c".repeat(55);
         assert_eq!(
-            non_unique_index_name("t", &sixty_one).len(),
+            non_unique_index_name(crate::test_fixtures::VENDORS, "t", &sixty_one).len(),
             61,
             "61..=63 keeps the natural name verbatim on the author side"
         );
@@ -7857,7 +7885,7 @@ mod derived_index_alias_tests {
         );
         let sixty_four = "c".repeat(58);
         assert_eq!(
-            non_unique_index_name("t", &sixty_four).len(),
+            non_unique_index_name(crate::test_fixtures::VENDORS, "t", &sixty_four).len(),
             63,
             "above 63 the author's own hash tail lands at 63 bytes"
         );
@@ -7905,7 +7933,7 @@ mod derived_index_alias_tests {
         // 55 bytes puts every one of the three natural names in the disagreeing
         // window (`t_<55>_idx` = 61, `t_<55>_key` = 61).
         let d = descriptor_with_derived_indexes(55);
-        let aliases = derived_index_aliases_for(&d);
+        let aliases = derived_index_aliases_for(crate::test_fixtures::VENDORS, &d);
         assert_eq!(
             aliases.len(),
             3,
@@ -7993,7 +8021,7 @@ mod derived_index_alias_tests {
     fn derived_index_aliases_are_empty_when_the_schemes_agree() {
         let d = descriptor_with_derived_indexes(20);
         assert!(
-            derived_index_aliases_for(&d).is_empty(),
+            derived_index_aliases_for(crate::test_fixtures::VENDORS, &d).is_empty(),
             "short names need no alias"
         );
     }
@@ -8019,7 +8047,7 @@ mod derived_index_alias_tests {
             runtime_options: Default::default(),
         };
         assert!(
-            derived_index_aliases_for(&d).is_empty(),
+            derived_index_aliases_for(crate::test_fixtures::VENDORS, &d).is_empty(),
             "IndexDescriptor.name is first-class; a rename of it must stay a rename"
         );
     }

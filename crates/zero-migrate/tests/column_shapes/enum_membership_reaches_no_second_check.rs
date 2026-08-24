@@ -173,7 +173,7 @@ fn a_sqlite_rebuild_carries_the_membership_exactly_once() {
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the field-def replay folds");
 
     let rename = MigrationIr {

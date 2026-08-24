@@ -299,7 +299,7 @@ async fn measure() -> Measured {
             &cfg.project_schema,
             &policy,
         )
-        .map(|folded| folded.project_field_defs())
+        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
         .map_err(|error| format!("fold the ops to field defs: {error}"))?;
         let descriptor = fields
             .get(TABLE)

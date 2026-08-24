@@ -295,7 +295,7 @@ pub fn validate_ir_authorized(
     validate_no_op_targets_a_renamed_away_table(ir, target_dialect)?;
     validate_no_op_references_a_dropped_column(vendors, ir, target_dialect)?;
     validate_no_column_uses_a_dropped_named_object(ir, target_dialect)?;
-    validate_index_names_across_ops(ir, target_dialect)?;
+    validate_index_names_across_ops(vendors, ir, target_dialect)?;
     validate_column_references(vendors, ir, target_dialect)?;
     validate_table_foreign_keys(vendors, ir, target_dialect)?;
     validate_per_row_destinations(vendors, ir, target_dialect)?;
@@ -444,12 +444,12 @@ fn validate_authored_identifier_lengths_op(
 }
 
 /// Bound one author-supplied identifier at
-/// [`crate::plan::author::GENERATED_IDENT_MAX_BYTES`].
+/// [`crate::render::backends::generated_ident_max_bytes`].
 ///
 /// The bound is BYTES, not characters, because the tightest cap in the registry is a
 /// byte budget: a name short in characters but long in bytes is truncated exactly as an
-/// over-long ASCII name is. `render::backends::tightest_identifier_budget` takes the
-/// safe direction for a CHARACTER-capped backend for the same reason.
+/// over-long ASCII name is. The fold takes the safe direction for a CHARACTER-capped
+/// backend for the same reason.
 ///
 /// The bound is the engine's, not the selected target's, and that is deliberate on the
 /// CREATED side: an authored name is refused here if it would not survive on the
@@ -466,7 +466,7 @@ fn authored_name_within_bound(
     op_index: usize,
     target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
-    let max = crate::plan::author::GENERATED_IDENT_MAX_BYTES;
+    let max = crate::render::backends::generated_ident_max_bytes(vendors);
     if name.len() <= max {
         return Ok(());
     }
@@ -822,6 +822,7 @@ fn declare_logical_column(
 }
 
 fn create_table_candidate_key_sources(
+    vendors: VendorSet,
     table: &str,
     columns: &[crate::model::ir::IrColumn],
     primary_key: Option<&[String]>,
@@ -845,10 +846,10 @@ fn create_table_candidate_key_sources(
         if let IrConstraintKind::Unique { columns } = &constraint.kind {
             if !columns.is_empty() {
                 let name = constraint.name.clone().unwrap_or_else(|| {
-                    crate::plan::author::cap_ident_name(&format!(
-                        "{table}_{}_key",
-                        columns.join("_")
-                    ))
+                    crate::plan::author::cap_ident_name(
+                        vendors,
+                        &format!("{table}_{}_key", columns.join("_")),
+                    )
                 });
                 sources.constraints.insert(name, columns.clone());
             }
@@ -877,7 +878,10 @@ fn create_table_candidate_key_sources(
             .collect::<Option<Vec<_>>>();
         if let Some(key) = key.filter(|key| !key.is_empty()) {
             let name = index.name.clone().unwrap_or_else(|| {
-                crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", key.join("_")))
+                crate::plan::author::cap_ident_name(
+                    vendors,
+                    &format!("{table}_{}_idx", key.join("_")),
+                )
             });
             sources.indexes.insert(name, key);
         }
@@ -972,6 +976,7 @@ fn eligible_unique_index_tuple(
 }
 
 fn reset_create_table_candidate_keys(
+    vendors: VendorSet,
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     schema: Option<&str>,
@@ -981,14 +986,21 @@ fn reset_create_table_candidate_keys(
     constraints: &[crate::model::ir::IrConstraint],
     indexes: &[crate::model::ir::IrIndex],
 ) {
-    let sources =
-        create_table_candidate_key_sources(table, columns, primary_key, constraints, indexes);
+    let sources = create_table_candidate_key_sources(
+        vendors,
+        table,
+        columns,
+        primary_key,
+        constraints,
+        indexes,
+    );
     mutate_table_candidate_keys(declared, schema_mode, schema, table, |candidate_sources| {
         candidate_sources.clone_from(&sources);
     });
 }
 
 fn add_index_candidate_key(
+    vendors: VendorSet,
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     schema: Option<&str>,
@@ -1004,7 +1016,12 @@ fn add_index_candidate_key(
         return;
     };
     let name = name.map_or_else(
-        || crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", tuple.join("_"))),
+        || {
+            crate::plan::author::cap_ident_name(
+                vendors,
+                &format!("{table}_{}_idx", tuple.join("_")),
+            )
+        },
         str::to_string,
     );
     mutate_table_candidate_keys(declared, schema_mode, schema, table, |sources| {
@@ -1025,6 +1042,7 @@ fn drop_index_candidate_key(
 }
 
 fn add_unique_constraint_candidate_key(
+    vendors: VendorSet,
     declared: &mut LogicalColumnContracts,
     schema_mode: LogicalSchemaMode<'_>,
     schema: Option<&str>,
@@ -1038,7 +1056,7 @@ fn add_unique_constraint_candidate_key(
         return;
     }
     let name = constraint.name.clone().unwrap_or_else(|| {
-        crate::plan::author::cap_ident_name(&format!("{table}_{}_key", columns.join("_")))
+        crate::plan::author::cap_ident_name(vendors, &format!("{table}_{}_key", columns.join("_")))
     });
     mutate_table_candidate_keys(declared, schema_mode, schema, table, |sources| {
         sources.constraints.insert(name.clone(), columns.clone());
@@ -1450,6 +1468,7 @@ fn validate_per_row_op(
             let schema = schema_mode.resolve(schema.as_deref());
             remove_declared_per_row_table(declared, schema_mode, schema.as_deref(), name);
             let reference_keys = create_table_candidate_key_sources(
+                vendors,
                 name,
                 columns,
                 primary_key.as_deref(),
@@ -1613,6 +1632,7 @@ fn validate_per_row_op(
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             add_index_candidate_key(
+                vendors,
                 declared,
                 schema_mode,
                 schema.as_deref(),
@@ -1642,6 +1662,7 @@ fn validate_per_row_op(
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             add_unique_constraint_candidate_key(
+                vendors,
                 declared,
                 schema_mode,
                 schema.as_deref(),
@@ -1827,6 +1848,7 @@ fn replay_logical_declarations_for_lower(
 /// only leg that contributes declarations. Catalog state is intentionally absent:
 /// this graph is deterministic authored metadata.
 fn collect_logical_declarations_op(
+    vendors: VendorSet,
     op: &crate::model::ir::Op,
     target_dialect: &DialectId,
     declared: &mut LogicalColumnContracts,
@@ -1837,7 +1859,13 @@ fn collect_logical_declarations_op(
     match op {
         Op::Dialectal { legs } => {
             for inner in dialectal_leg(target_dialect, legs) {
-                collect_logical_declarations_op(inner, target_dialect, declared, schema_mode)?;
+                collect_logical_declarations_op(
+                    vendors,
+                    inner,
+                    target_dialect,
+                    declared,
+                    schema_mode,
+                )?;
             }
         }
         Op::CreateTable {
@@ -1852,6 +1880,7 @@ fn collect_logical_declarations_op(
             let schema = schema_mode.resolve(schema.as_deref());
             remove_declared_per_row_table(declared, schema_mode, schema.as_deref(), name);
             let reference_keys = create_table_candidate_key_sources(
+                vendors,
                 name,
                 columns,
                 primary_key.as_deref(),
@@ -2355,7 +2384,7 @@ fn validate_column_references(
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
     for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
+        collect_logical_declarations_op(vendors, op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_column_references_op(
@@ -2395,7 +2424,7 @@ fn validate_vendor_key_storage(
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
     for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
+        collect_logical_declarations_op(vendors, op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_vendor_key_storage_op(
@@ -2449,7 +2478,7 @@ pub(crate) fn validate_vendor_key_storage_for_lower(
     };
     let mut declared = seed.clone();
     for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
+        collect_logical_declarations_op(vendors, op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_vendor_key_storage_op(
@@ -2731,7 +2760,7 @@ pub(crate) fn validate_column_references_for_lower(
     };
     let mut declared = seed.clone();
     for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
+        collect_logical_declarations_op(vendors, op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_column_references_op(
@@ -4720,6 +4749,7 @@ fn validate_no_op_targets_a_renamed_away_table(
 /// working; only a second creation while the first is still live is the mistake.
 /// A `dropTable` takes its indexes with it, so those names free up too.
 fn validate_index_names_across_ops(
+    vendors: VendorSet,
     ir: &crate::model::ir::MigrationIr,
     target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
@@ -4778,8 +4808,11 @@ fn validate_index_names_across_ops(
                 // and the drift would reopen exactly this hole.
                 for column in columns {
                     if column.unique == Some(true) {
-                        let derived =
-                            crate::render::declarative::unique_index_name(name, &column.name);
+                        let derived = crate::render::declarative::unique_index_name(
+                            vendors,
+                            name,
+                            &column.name,
+                        );
                         claim(&mut live, &derived, name, op_index, target_dialect)?;
                     }
                 }
@@ -5183,6 +5216,7 @@ fn validate_table_foreign_keys_op(
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             reset_create_table_candidate_keys(
+                vendors,
                 declared,
                 schema_mode,
                 schema.as_deref(),
@@ -5217,6 +5251,7 @@ fn validate_table_foreign_keys_op(
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             add_unique_constraint_candidate_key(
+                vendors,
                 declared,
                 schema_mode,
                 schema.as_deref(),
@@ -5250,6 +5285,7 @@ fn validate_table_foreign_keys_op(
         } => {
             let schema = schema_mode.resolve(schema.as_deref());
             add_index_candidate_key(
+                vendors,
                 declared,
                 schema_mode,
                 schema.as_deref(),
@@ -5307,7 +5343,7 @@ fn validate_table_foreign_keys(
     let schema_mode = LogicalSchemaMode::Authored;
     let mut declared = LogicalColumnContracts::new();
     for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
+        collect_logical_declarations_op(vendors, op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_table_foreign_keys_op(
@@ -5344,7 +5380,7 @@ pub(crate) fn validate_table_foreign_keys_for_lower(
     };
     let mut declared = seed.clone();
     for op in &ir.ops {
-        collect_logical_declarations_op(op, target_dialect, &mut declared, schema_mode)?;
+        collect_logical_declarations_op(vendors, op, target_dialect, &mut declared, schema_mode)?;
     }
     for (op_index, op) in ir.ops.iter().enumerate() {
         validate_table_foreign_keys_op(
@@ -8386,9 +8422,9 @@ fn is_safe_schema_ident(s: &str) -> bool {
 
 /// Validate an author-supplied constraint identifier carried by a column
 /// reference. Explicit names must be portable bare identifiers and must fit the
-/// strictest identifier bound used by the engine (PostgreSQL's 63-byte cap), so
-/// no target silently truncates the authored identity.
-fn validate_column_reference_constraint_name(name: &str) -> Result<(), String> {
+/// strictest identifier bound any registered backend declares, so no target
+/// silently truncates the authored identity.
+fn validate_column_reference_constraint_name(vendors: VendorSet, name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("must be non-empty".to_string());
     }
@@ -8398,11 +8434,11 @@ fn validate_column_reference_constraint_name(name: &str) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if name.len() > crate::plan::author::GENERATED_IDENT_MAX_BYTES {
+    let max = crate::render::backends::generated_ident_max_bytes(vendors);
+    if name.len() > max {
         return Err(format!(
-            "is {} bytes; the maximum is {} bytes",
-            name.len(),
-            crate::plan::author::GENERATED_IDENT_MAX_BYTES
+            "is {} bytes; the maximum is {max} bytes",
+            name.len()
         ));
     }
     Ok(())
@@ -8649,8 +8685,8 @@ fn validate_default_expr(
 ///    ([`CODE_VECTOR_METRIC_MISPLACED`]) so a hand-crafted artifact cannot ride a
 ///    dead field in.
 /// 4. **`references.name`** — an optional explicit foreign-key constraint name
-///    must be a non-empty portable bare identifier no longer than PostgreSQL's
-///    63-byte identifier cap.
+///    must be a non-empty portable bare identifier no longer than the registry's
+///    generated-identifier budget.
 ///
 /// # Errors
 /// [`CODE_INVALID_ID_PREFIX`] / [`CODE_INVALID_TYPE_ID_PREFIX`] /
@@ -8685,7 +8721,7 @@ fn validate_column_facets(
         .as_ref()
         .and_then(|reference| reference.name.as_deref())
     {
-        if let Err(reason) = validate_column_reference_constraint_name(name) {
+        if let Err(reason) = validate_column_reference_constraint_name(vendors, name) {
             return Err(mk(
                 CODE_OP_INVALID,
                 format!(
@@ -8694,7 +8730,7 @@ fn validate_column_facets(
                 ),
                 format!(
                     "use a non-empty bare identifier of at most {} bytes, starting with an ASCII letter or '_' and containing only ASCII letters, digits, or '_'",
-                    crate::plan::author::GENERATED_IDENT_MAX_BYTES
+                    crate::render::backends::generated_ident_max_bytes(vendors)
                 ),
             ));
         }
@@ -13121,15 +13157,18 @@ mod tests {
 
     #[test]
     fn column_reference_rejects_an_overlong_explicit_constraint_name() {
-        let name = "f".repeat(crate::plan::author::GENERATED_IDENT_MAX_BYTES + 1);
+        let name = "f".repeat(
+            crate::render::backends::generated_ident_max_bytes(crate::test_fixtures::VENDORS) + 1,
+        );
         let ir = ir_with(vec![create_with_reference_name(&name)]);
         let error = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("an overlong foreign-key constraint name must fail closed");
         assert_eq!(error.code, CODE_OP_INVALID, "got: {error}");
         assert!(
-            error
-                .reason
-                .contains(&crate::plan::author::GENERATED_IDENT_MAX_BYTES.to_string()),
+            error.reason.contains(
+                &crate::render::backends::generated_ident_max_bytes(crate::test_fixtures::VENDORS)
+                    .to_string()
+            ),
             "the error must name the length cap: {error}"
         );
     }

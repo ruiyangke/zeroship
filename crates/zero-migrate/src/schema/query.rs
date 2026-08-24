@@ -287,7 +287,7 @@ pub fn validate_collection(vendors: VendorSet, name: &str) -> Result<(), QueryEr
             "collection name must not contain null bytes".to_string(),
         ));
     }
-    let max = crate::render::backends::GENERATED_IDENT_MAX_BYTES;
+    let max = crate::render::backends::generated_ident_max_bytes(vendors);
     if name.len() > max {
         return Err(QueryError::InvalidCollection(format!(
             "collection name exceeds the {max}-byte identifier budget, the tightest cap any \
@@ -422,7 +422,7 @@ pub fn validate_field_name(vendors: VendorSet, name: &str) -> Result<(), QueryEr
             "field name must not contain null bytes".to_string(),
         ));
     }
-    let max = crate::render::backends::GENERATED_IDENT_MAX_BYTES;
+    let max = crate::render::backends::generated_ident_max_bytes(vendors);
     if name.len() > max {
         return Err(QueryError::InvalidIdent(format!(
             "field name exceeds the {max}-byte identifier budget, the tightest cap any \
@@ -1229,11 +1229,16 @@ pub fn build_drop_foreign_key(
 /// remaining unique under MySQL's schema-wide foreign-key namespace. An explicit
 /// authored name is returned verbatim; only derived names use the shared
 /// identifier cap.
-pub fn fk_constraint_name(table: &str, field: &str, explicit_name: Option<&str>) -> String {
+pub fn fk_constraint_name(
+    vendors: VendorSet,
+    table: &str,
+    field: &str,
+    explicit_name: Option<&str>,
+) -> String {
     if let Some(explicit_name) = explicit_name {
         return explicit_name.to_string();
     }
-    crate::render::lower::derived_fk_constraint_name(table, &[field.to_string()])
+    crate::render::lower::derived_fk_constraint_name(vendors, table, &[field.to_string()])
 }
 
 /// Build the `CONSTRAINT "name" FOREIGN KEY (...) REFERENCES …` clause
@@ -1254,6 +1259,7 @@ fn build_fk_clause(
 ) -> Result<String, QueryError> {
     validate_collection(vendors, target)?;
     let constraint_name = fk_constraint_name(
+        vendors,
         collection,
         field,
         def.get("refName").and_then(serde_json::Value::as_str),
@@ -3328,7 +3334,7 @@ columns = [
     #[test]
     fn b2_fk_constraint_name_short() {
         assert_eq!(
-            fk_constraint_name("posts", "authorId", None),
+            fk_constraint_name(crate::test_fixtures::VENDORS, "posts", "authorId", None),
             "posts_authorId_fkey"
         );
     }
@@ -3336,7 +3342,7 @@ columns = [
     #[test]
     fn b2_fk_constraint_name_truncated() {
         let long = "a".repeat(80);
-        let name = fk_constraint_name("posts", &long, None);
+        let name = fk_constraint_name(crate::test_fixtures::VENDORS, "posts", &long, None);
         assert!(name.len() <= 63, "got {} bytes: {name}", name.len());
     }
 

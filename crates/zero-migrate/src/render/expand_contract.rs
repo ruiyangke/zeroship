@@ -237,22 +237,22 @@ fn rename_id_seed(
 // proves the live trigger against — and a vendor crate cannot reach into the engine.
 // These doors keep the engine's own call sites and its byte budget unchanged: the cap
 // is still read once, from the registered backend that imposes it.
-pub(crate) fn dual_write_fn_name(table: &str, from: &str, to: &str) -> String {
+pub(crate) fn dual_write_fn_name(vendors: VendorSet, table: &str, from: &str, to: &str) -> String {
     zero_migrate_backend::capability::dual_write_fn_name(
         table,
         from,
         to,
-        crate::render::backends::GENERATED_IDENT_MAX_BYTES,
+        crate::render::backends::generated_ident_max_bytes(vendors),
     )
 }
 
 /// Deterministically derive the dual-write trigger name (see [`dual_write_fn_name`]).
-pub(crate) fn dual_write_trg_name(table: &str, from: &str, to: &str) -> String {
+pub(crate) fn dual_write_trg_name(vendors: VendorSet, table: &str, from: &str, to: &str) -> String {
     zero_migrate_backend::capability::dual_write_trg_name(
         table,
         from,
         to,
-        crate::render::backends::GENERATED_IDENT_MAX_BYTES,
+        crate::render::backends::generated_ident_max_bytes(vendors),
     )
 }
 
@@ -418,8 +418,8 @@ impl ExpandContractAuthor {
         let tbl_q = qualified(self.vendors, schema, table, &self.dialect);
         let from_q = quote_ident(self.vendors, from, &self.dialect);
         let to_q = quote_ident(self.vendors, to, &self.dialect);
-        let fn_name = dual_write_fn_name(table, from, to);
-        let trg_name = dual_write_trg_name(table, from, to);
+        let fn_name = dual_write_fn_name(self.vendors, table, from, to);
+        let trg_name = dual_write_trg_name(self.vendors, table, from, to);
         let fn_q = qualified(self.vendors, schema, &fn_name, &self.dialect);
         let trg_q = quote_ident(self.vendors, &trg_name, &self.dialect);
 
@@ -1168,18 +1168,14 @@ mod tests {
         let e2 = &plan.expand[1];
         // The fn/trg names embedded in E2's up must be ≤63 bytes and appear in
         // both E2.up (CREATE) and E2.down (DROP) identically.
-        let fn_name = dual_write_fn_name(&"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
-        let trg_name = dual_write_trg_name(&"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
-        assert!(
-            fn_name.len() <= crate::render::backends::GENERATED_IDENT_MAX_BYTES,
-            "fn {} bytes",
-            fn_name.len()
-        );
-        assert!(
-            trg_name.len() <= crate::render::backends::GENERATED_IDENT_MAX_BYTES,
-            "trg {} bytes",
-            trg_name.len()
-        );
+        let vendors = crate::test_fixtures::VENDORS;
+        let max = crate::render::backends::generated_ident_max_bytes(vendors);
+        let fn_name =
+            dual_write_fn_name(vendors, &"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
+        let trg_name =
+            dual_write_trg_name(vendors, &"t".repeat(40), &"f".repeat(20), &"g".repeat(20));
+        assert!(fn_name.len() <= max, "fn {} bytes", fn_name.len());
+        assert!(trg_name.len() <= max, "trg {} bytes", trg_name.len());
         assert!(e2.up.contains(&fn_name), "up must use capped fn name");
         assert!(e2.down.as_ref().unwrap().contains(&fn_name));
         assert!(e2.down.as_ref().unwrap().contains(&trg_name));

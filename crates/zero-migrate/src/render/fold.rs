@@ -1684,7 +1684,8 @@ impl<'a> CatalogFold<'a> {
                             Some("PRIMARY KEY") => {
                                 let natural =
                                     fold_policy(vendors, dialect).implicit_primary_key_name(name);
-                                if crate::plan::author::cap_ident_name(&natural) != natural {
+                                if crate::plan::author::cap_ident_name(vendors, &natural) != natural
+                                {
                                     return Err(FoldError::Unsupported(
                                         "detachPartition cannot derive an overlong created-partition clone name",
                                     ));
@@ -1695,12 +1696,14 @@ impl<'a> CatalogFold<'a> {
                             }
                             Some("UNIQUE") => {
                                 let natural = format!("{name}_{}_key", index.columns.join("_"));
-                                if crate::plan::author::cap_ident_name(&natural) != natural {
+                                if crate::plan::author::cap_ident_name(vendors, &natural) != natural
+                                {
                                     return Err(FoldError::Unsupported(
                                         "detachPartition cannot derive an overlong created-partition clone name",
                                     ));
                                 }
-                                let base = derived_constraint_name(name, &index.columns, "key");
+                                let base =
+                                    derived_constraint_name(vendors, name, &index.columns, "key");
                                 allocate_implicit_relation_name(
                                     vendors, &base, dialect, tables, partitions, views, sequences,
                                 )
@@ -1717,15 +1720,16 @@ impl<'a> CatalogFold<'a> {
                                     })
                                     .collect::<Vec<_>>();
                                 let natural = format!("{name}_{}_idx", columns.join("_"));
-                                if crate::plan::author::cap_ident_name(&natural) != natural {
+                                if crate::plan::author::cap_ident_name(vendors, &natural) != natural
+                                {
                                     return Err(FoldError::Unsupported(
                                         "detachPartition cannot derive an overlong created-partition clone name",
                                     ));
                                 }
                                 let base = if let [column] = columns.as_slice() {
-                                    non_unique_index_name(name, column)
+                                    non_unique_index_name(vendors, name, column)
                                 } else {
-                                    derived_constraint_name(name, &columns, "idx")
+                                    derived_constraint_name(vendors, name, &columns, "idx")
                                 };
                                 allocate_implicit_relation_name(
                                     vendors, &base, dialect, tables, partitions, views, sequences,
@@ -1735,7 +1739,9 @@ impl<'a> CatalogFold<'a> {
                         // Reject native PostgreSQL truncation rather than compare a
                         // hash-capped name. This does not cover overlong clone bases
                         // or collision suffixes that exceed NAMEDATALEN.
-                        if crate::plan::author::cap_ident_name(&generated_name) != generated_name {
+                        if crate::plan::author::cap_ident_name(vendors, &generated_name)
+                            != generated_name
+                        {
                             return Err(FoldError::Unsupported(
                                 "detachPartition cannot derive an overlong created-partition clone name",
                             ));
@@ -2786,6 +2792,7 @@ impl<'a> CatalogFold<'a> {
                     // snapshot in lockstep so post-apply introspection does not report
                     // that planned index as unexplained drift.
                     crate::render::declarative::ensure_fk_supporting_index(
+                        vendors,
                         table,
                         snap,
                         &constraint_name,
@@ -4185,7 +4192,7 @@ fn fold_create_table_specs(
                     ));
                 }
                 let name = c.name.as_deref().map_or_else(
-                    || derived_check_constraint_name(table, expr),
+                    || derived_check_constraint_name(vendors, table, expr),
                     str::to_string,
                 );
                 let rendered = crate::render::dml::render_expr_inline(vendors, expr, dialect)
@@ -4268,7 +4275,7 @@ fn fold_create_table_specs(
                     ));
                 }
                 let name = c.name.as_deref().map_or_else(
-                    || derived_constraint_name(table, columns, "key"),
+                    || derived_constraint_name(vendors, table, columns, "key"),
                     str::to_string,
                 );
                 push_folded_constraint(
@@ -4285,7 +4292,7 @@ fn fold_create_table_specs(
                     ));
                 }
                 let name = c.name.as_deref().map_or_else(
-                    || derived_exclusion_constraint_name(table, elements),
+                    || derived_exclusion_constraint_name(vendors, table, elements),
                     str::to_string,
                 );
                 render_exclusion_constraint_body(vendors, &c.kind, dialect)
@@ -4345,6 +4352,7 @@ fn fold_create_table_specs(
     }
     for (constraint_name, columns) in table_foreign_keys {
         crate::render::declarative::ensure_fk_supporting_index(
+            vendors,
             table,
             snap,
             &constraint_name,
@@ -4680,7 +4688,7 @@ fn add_constraint_snapshot(
         }
         IrConstraintKind::Unique { columns } => {
             let cname = name.map_or_else(
-                || derived_constraint_name(table, columns, "key"),
+                || derived_constraint_name(vendors, table, columns, "key"),
                 str::to_string,
             );
             Ok(unique_constraint(vendors, &cname, columns, dialect))
@@ -4693,7 +4701,7 @@ fn add_constraint_snapshot(
                 ));
             }
             let cname = name.map_or_else(
-                || derived_check_constraint_name(table, expr),
+                || derived_check_constraint_name(vendors, table, expr),
                 str::to_string,
             );
             let rendered = crate::render::dml::render_expr_inline(vendors, expr, dialect)
@@ -4720,7 +4728,7 @@ fn add_constraint_snapshot(
                 ));
             }
             let cname = name.map_or_else(
-                || derived_exclusion_constraint_name(table, elements),
+                || derived_exclusion_constraint_name(vendors, table, elements),
                 str::to_string,
             );
             render_exclusion_constraint_body(vendors, &constraint.kind, dialect)
@@ -8985,7 +8993,7 @@ columns = [
             schema,
             effective,
         )?
-        .project_field_defs())
+        .project_field_defs(crate::test_fixtures::VENDORS))
     }
 
     fn defs(ops: &[Op]) -> std::collections::BTreeMap<String, serde_json::Value> {

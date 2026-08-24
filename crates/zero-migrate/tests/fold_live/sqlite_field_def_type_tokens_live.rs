@@ -169,7 +169,7 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
         &policy,
     )
     .expect("the history folds")
-    .project_field_defs();
+    .project_field_defs(zero_migrate::shipping_vendors());
     live
 }
 

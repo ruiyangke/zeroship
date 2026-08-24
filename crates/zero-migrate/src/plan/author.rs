@@ -167,22 +167,21 @@ fn column_def(vendors: VendorSet, c: &Column, dialect: &DialectId) -> Result<Str
     ))
 }
 
-/// The Postgres identifier length limit (`NAMEDATALEN - 1`), in bytes. An index
-/// name longer than this is silently truncated *by the server* on `CREATE`, which
-/// would break `IF NOT EXISTS` / `DROP INDEX` round-tripping (the name we emit in
-/// the `down` would not match the truncated name on disk). So we truncate
-/// deterministically *ourselves* and keep the result ≤ this many bytes.
-///
-/// Read off the PostgreSQL [`BackendDescriptor`](zero_migrate_ir::backend::BackendDescriptor)
-/// rather than restated here, so the number the author truncates to and the
-/// number the backend DECLARES cannot drift apart. The `Bytes` arm is not
-/// incidental: MySQL's cap is 64 CHARACTERS and SQLite has none, which is why
-/// this bound is PostgreSQL's and not everyone's.
-pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
-    crate::render::backends::GENERATED_IDENT_MAX_BYTES;
+// `pub(crate) const GENERATED_IDENT_MAX_BYTES` USED TO LIVE HERE, aliasing a `const`
+// in the registry module so this file could spell the budget without naming the
+// composition. The budget is a query on the carried registry now —
+// `crate::render::backends::generated_ident_max_bytes(vendors)` — so an alias would be
+// a second door onto one call, and every reader here takes the set as an argument
+// anyway. See that function for what the lost compile-time evaluation cost.
+//
+// An index name longer than the budget is silently truncated *by the server* on
+// `CREATE` for a backend that truncates, which would break `IF NOT EXISTS` /
+// `DROP INDEX` round-tripping (the name emitted in the `down` would not match the
+// truncated name on disk). So the engine truncates deterministically ITSELF and keeps
+// the result within the budget.
 
-/// Cap an arbitrary generated identifier to ≤ `GENERATED_IDENT_MAX_BYTES` (63 bytes),
-/// deterministically: when `natural` fits, return it verbatim; when it would
+/// Cap an arbitrary generated identifier to ≤ the registry's generated-identifier
+/// budget, deterministically: when `natural` fits, return it verbatim; when it would
 /// overflow, keep a readable prefix and append a short hash of the *full* name so
 /// distinct long inputs still map to distinct, stable names.
 ///
@@ -208,19 +207,20 @@ pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
 /// interchangeable with `query::index_name(table, &[col], false)` only below 61
 /// bytes; a name that crosses the two subsystems has to be compared, not assumed
 /// equal.
-pub fn cap_ident_name(natural: &str) -> String {
+pub fn cap_ident_name(vendors: VendorSet, natural: &str) -> String {
     use sha2::{Digest, Sha256};
-    if natural.len() <= GENERATED_IDENT_MAX_BYTES {
+    let max = crate::render::backends::generated_ident_max_bytes(vendors);
+    if natural.len() <= max {
         return natural.to_string();
     }
     // Overflow: deterministic 10-hex-char hash of the full natural name, plus a
-    // truncated readable prefix. `<prefix>_<10 hex>` stays ≤ 63 bytes.
+    // truncated readable prefix. `<prefix>_<10 hex>` stays within the budget.
     let digest = Sha256::digest(natural.as_bytes());
     let suffix = hex::encode(&digest[..5]); // 10 hex chars
                                             // Reserve room for the `_<suffix>` (1 + 10 = 11 bytes). Truncate the readable
                                             // part on a char boundary so we never split a multi-byte UTF-8 sequence
                                             // (identifiers are ASCII in practice, but be safe).
-    let budget = GENERATED_IDENT_MAX_BYTES - (1 + suffix.len());
+    let budget = max - (1 + suffix.len());
     let mut prefix = String::with_capacity(budget);
     for ch in natural.chars() {
         if prefix.len() + ch.len_utf8() > budget {
@@ -233,10 +233,10 @@ pub fn cap_ident_name(natural: &str) -> String {
 
 /// Derive an index name for a deterministic `CREATE INDEX` so `IF NOT EXISTS`
 /// has a stable target (idempotent across re-authors of the same shape). The
-/// natural `idx_<table>_<cols>` form is capped to ≤63 bytes by
+/// natural `idx_<table>_<cols>` form is capped to the registry's budget by
 /// [`cap_ident_name`].
-fn index_name(table: &str, columns: &[String]) -> String {
-    cap_ident_name(&format!("idx_{}_{}", table, columns.join("_")))
+fn index_name(vendors: VendorSet, table: &str, columns: &[String]) -> String {
+    cap_ident_name(vendors, &format!("idx_{}_{}", table, columns.join("_")))
 }
 
 /// The deterministic, no-AI author for trivial additive ops.
@@ -381,7 +381,7 @@ impl MigrationAuthor for DeterministicAuthor {
                         "CreateIndex on '{table}' has no columns"
                     )));
                 }
-                let idx = index_name(table, columns);
+                let idx = index_name(self.vendors, table, columns);
                 let cols = columns
                     .iter()
                     .map(|c| quote_ident(self.vendors, c, &self.dialect))
@@ -658,27 +658,29 @@ mod tests {
         // limit (and so be silently truncated server-side, desyncing up vs down).
         let long_table = "a".repeat(50);
         let long_cols: Vec<String> = (0..5).map(|i| format!("{}{i}", "c".repeat(20))).collect();
-        let n1 = index_name(&long_table, &long_cols);
-        // Must fit Postgres's NAMEDATALEN-1 limit so the name we emit in `up`
+        let vendors = crate::test_fixtures::VENDORS;
+        let max = crate::render::backends::generated_ident_max_bytes(vendors);
+        let n1 = index_name(vendors, &long_table, &long_cols);
+        // Must fit the tightest declared identifier cap so the name we emit in `up`
         // matches the on-disk name and the `down`'s DROP INDEX.
         assert!(
-            n1.len() <= GENERATED_IDENT_MAX_BYTES,
-            "index name {} bytes exceeds {GENERATED_IDENT_MAX_BYTES}",
+            n1.len() <= max,
+            "index name {} bytes exceeds {max}",
             n1.len()
         );
         // Deterministic: same inputs → same name (so re-authoring the same shape
         // is idempotent and the `down` can target it).
-        assert_eq!(n1, index_name(&long_table, &long_cols));
+        assert_eq!(n1, index_name(vendors, &long_table, &long_cols));
         // Distinct long shapes → distinct names (the hash suffix disambiguates,
         // unlike a blind truncation that would collide on the shared prefix).
         let mut other_cols = long_cols;
         other_cols.push("d".repeat(20));
-        let n2 = index_name(&long_table, &other_cols);
+        let n2 = index_name(vendors, &long_table, &other_cols);
         assert_ne!(
             n1, n2,
             "distinct column sets must yield distinct index names"
         );
-        assert!(n2.len() <= GENERATED_IDENT_MAX_BYTES);
+        assert!(n2.len() <= max);
         // A valid Postgres identifier (starts with a letter, then [a-z0-9_]).
         assert!(
             n1.starts_with("idx_"),
@@ -694,7 +696,11 @@ mod tests {
     fn index_name_short_case_is_unchanged() {
         // The common (fitting) case is emitted verbatim — no surprise hashing.
         assert_eq!(
-            index_name("users", &["email".to_string()]),
+            index_name(
+                crate::test_fixtures::VENDORS,
+                "users",
+                &["email".to_string()]
+            ),
             "idx_users_email"
         );
     }
@@ -710,8 +716,9 @@ mod tests {
             concurrently: false,
         };
         let m = &det().author(&req).expect("author")[0];
-        let expected = index_name(&long_table, &["x".repeat(30), "y".repeat(30)]);
-        assert!(expected.len() <= GENERATED_IDENT_MAX_BYTES);
+        let vendors = crate::test_fixtures::VENDORS;
+        let expected = index_name(vendors, &long_table, &["x".repeat(30), "y".repeat(30)]);
+        assert!(expected.len() <= crate::render::backends::generated_ident_max_bytes(vendors));
         assert!(m.up.contains(&format!("\"{expected}\"")), "up = {}", m.up);
         assert!(
             m.down

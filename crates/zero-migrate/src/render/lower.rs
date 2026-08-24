@@ -3669,9 +3669,9 @@ impl IrAuthor {
                             },
                         ..
                     } if constraint_table == table => {
-                        let name = name
-                            .clone()
-                            .unwrap_or_else(|| derived_constraint_name(table, columns, "key"));
+                        let name = name.clone().unwrap_or_else(|| {
+                            derived_constraint_name(vendors, table, columns, "key")
+                        });
                         snapshot
                             .constraints
                             .retain(|candidate| candidate.name != name);
@@ -6875,7 +6875,7 @@ impl IrAuthor {
                         ));
                     }
                     let name = c.name.as_deref().map_or_else(
-                        || derived_check_constraint_name(table, expr),
+                        || derived_check_constraint_name(self.vendors, table, expr),
                         str::to_string,
                     );
                     let rendered =
@@ -6944,7 +6944,7 @@ impl IrAuthor {
                         ));
                     }
                     let name = c.name.as_deref().map_or_else(
-                        || derived_constraint_name(table, columns, "key"),
+                        || derived_constraint_name(self.vendors, table, columns, "key"),
                         str::to_string,
                     );
                     snap.constraints.push(ConstraintSnapshot {
@@ -6972,7 +6972,7 @@ impl IrAuthor {
                         });
                     }
                     let name = c.name.as_deref().map_or_else(
-                        || derived_exclusion_constraint_name(table, elements),
+                        || derived_exclusion_constraint_name(self.vendors, table, elements),
                         str::to_string,
                     );
                     let definition =
@@ -7013,6 +7013,7 @@ impl IrAuthor {
         }
         for (constraint_name, columns) in table_foreign_keys {
             crate::render::declarative::ensure_fk_supporting_index(
+                self.vendors,
                 table,
                 snap,
                 &constraint_name,
@@ -7897,6 +7898,7 @@ impl IrAuthor {
         }
         desired.constraints.push(fk.clone());
         crate::render::declarative::ensure_fk_supporting_index(
+            self.vendors,
             table,
             &mut desired,
             &fk.name,
@@ -8029,6 +8031,7 @@ impl IrAuthor {
                             .map(|index| index.name.as_str())
                             .collect();
                         crate::render::declarative::ensure_fk_supporting_index(
+                            self.vendors,
                             table,
                             &mut planned,
                             &fk.name,
@@ -8046,7 +8049,10 @@ impl IrAuthor {
                         }
                     } else {
                         let index = IndexSnapshot::btree(
-                            crate::plan::author::cap_ident_name(&format!("{}_idx", fk.name)),
+                            crate::plan::author::cap_ident_name(
+                                self.vendors,
+                                &format!("{}_idx", fk.name),
+                            ),
                             false,
                             columns.clone(),
                         );
@@ -8067,7 +8073,7 @@ impl IrAuthor {
                     crate::render::declarative::constraintdef_cols(columns)
                 );
                 let cname = name.map_or_else(
-                    || derived_constraint_name(table, columns, "key"),
+                    || derived_constraint_name(self.vendors, table, columns, "key"),
                     str::to_string,
                 );
                 // A UNIQUE add on an existing table scans + locks and can fail on
@@ -8084,7 +8090,7 @@ impl IrAuthor {
                     ));
                 }
                 let cname = name.map_or_else(
-                    || derived_check_constraint_name(table, expr),
+                    || derived_check_constraint_name(self.vendors, table, expr),
                     str::to_string,
                 );
                 let rendered =
@@ -8100,7 +8106,7 @@ impl IrAuthor {
             }
             IrConstraintKind::Exclusion { elements, .. } => {
                 let cname = name.map_or_else(
-                    || derived_exclusion_constraint_name(table, elements),
+                    || derived_exclusion_constraint_name(self.vendors, table, elements),
                     str::to_string,
                 );
                 let body = render_exclusion_constraint_body(
@@ -9391,7 +9397,12 @@ pub(crate) fn create_index_snapshot(
         );
     }
     let idx_name = name.map_or_else(
-        || crate::plan::author::cap_ident_name(&format!("{table}_{}_idx", name_parts.join("_"))),
+        || {
+            crate::plan::author::cap_ident_name(
+                vendors,
+                &format!("{table}_{}_idx", name_parts.join("_")),
+            )
+        },
         ToString::to_string,
     );
     let unique = unique.unwrap_or(false);
@@ -10135,6 +10146,7 @@ fn exclusion_operator_sql(operator: ExclusionOperator) -> &'static str {
 }
 
 pub(crate) fn derived_exclusion_constraint_name(
+    vendors: VendorSet,
     table: &str,
     elements: &[ExclusionElement],
 ) -> String {
@@ -10145,7 +10157,7 @@ pub(crate) fn derived_exclusion_constraint_name(
             ColumnOrExpr::Expr { .. } => "expr".to_string(),
         })
         .collect::<Vec<_>>();
-    derived_constraint_name(table, &parts, "excl")
+    derived_constraint_name(vendors, table, &parts, "excl")
 }
 
 /// A deterministic constraint name for an unnamed UNIQUE/PK add:
@@ -10156,19 +10168,32 @@ pub(crate) fn derived_exclusion_constraint_name(
 ///
 /// **Offline replay**: `pub(crate)` so the offline [`crate::render::fold`] derives an
 /// unnamed UNIQUE/PK constraint name byte-identically to the lower.
-pub(crate) fn derived_constraint_name(table: &str, cols: &[String], suffix: &str) -> String {
-    crate::plan::author::cap_ident_name(&format!("{table}_{}_{suffix}", cols.join("_")))
+pub(crate) fn derived_constraint_name(
+    vendors: VendorSet,
+    table: &str,
+    cols: &[String],
+    suffix: &str,
+) -> String {
+    crate::plan::author::cap_ident_name(vendors, &format!("{table}_{}_{suffix}", cols.join("_")))
 }
 
 /// Deterministic default foreign-key constraint name:
 /// `<table>_<cols>_fkey`, with the same identifier cap as every other derived
 /// constraint name. MySQL scopes foreign-key names across the schema, so the
 /// table component is required for cross-table uniqueness.
-pub(crate) fn derived_fk_constraint_name(table: &str, cols: &[String]) -> String {
-    derived_constraint_name(table, cols, "fkey")
+pub(crate) fn derived_fk_constraint_name(
+    vendors: VendorSet,
+    table: &str,
+    cols: &[String],
+) -> String {
+    derived_constraint_name(vendors, table, cols, "fkey")
 }
 
-pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String {
+pub(crate) fn derived_check_constraint_name(
+    vendors: VendorSet,
+    table: &str,
+    expr: &Expr,
+) -> String {
     use sha2::{Digest, Sha256};
 
     fn collect_col_refs(expr: &Expr, out: &mut BTreeSet<String>) {
@@ -10249,7 +10274,7 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
     let expr_json = serde_json::to_vec(expr).expect("Expr serialization is infallible");
     let digest = Sha256::digest(expr_json);
     let suffix = hex::encode(&digest[..5]);
-    crate::plan::author::cap_ident_name(&format!("{table}_{cols}_check_{suffix}"))
+    crate::plan::author::cap_ident_name(vendors, &format!("{table}_{cols}_check_{suffix}"))
 }
 
 /// the catalog `(name, kind)` an `addConstraint` op will create,
@@ -10298,21 +10323,21 @@ fn ir_constraint_name_and_kind(
         }
         IrConstraintKind::Unique { columns } => (
             explicit.map_or_else(
-                || derived_constraint_name(table, columns, "key"),
+                || derived_constraint_name(vendors, table, columns, "key"),
                 str::to_string,
             ),
             "UNIQUE".to_string(),
         ),
         IrConstraintKind::Check { expr, .. } => (
             explicit.map_or_else(
-                || derived_check_constraint_name(table, expr),
+                || derived_check_constraint_name(vendors, table, expr),
                 str::to_string,
             ),
             "CHECK".to_string(),
         ),
         IrConstraintKind::Exclusion { elements, .. } => (
             explicit.map_or_else(
-                || derived_exclusion_constraint_name(table, elements),
+                || derived_exclusion_constraint_name(vendors, table, elements),
                 str::to_string,
             ),
             "EXCLUDE".to_string(),

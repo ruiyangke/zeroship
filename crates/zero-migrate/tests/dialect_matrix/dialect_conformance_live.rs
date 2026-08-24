@@ -1367,7 +1367,7 @@ async fn run_row<B: MigrationBackend>(
             &cfg.project_schema,
             policy,
         )
-        .map(|folded| folded.project_field_defs())
+        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
         {
             live.sdk_schemas = defs;
         }

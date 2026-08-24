@@ -238,7 +238,7 @@ fn folded_live_schema(history: &[Op]) -> LiveSchema {
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the history folds to field defs");
     let mut live = LiveSchema::from_catalog_snapshot(snapshot, APP);
     live.sdk_schemas = sdk_schemas;
@@ -589,7 +589,7 @@ async fn the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite() {
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the history folds to field defs");
 
     let decision = |live: &LiveSchema| {
@@ -678,7 +678,7 @@ async fn a_catalog_sourced_rename_still_replays_the_stored_body() {
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the history folds to field defs");
 
     let steps = author

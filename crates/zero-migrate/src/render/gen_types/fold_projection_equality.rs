@@ -1037,7 +1037,7 @@ fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint(
     )
     .expect("fold");
     assert_eq!(
-        folded.project_field_defs()["users"]["email"].get("unique"),
+        folded.project_field_defs(crate::test_fixtures::VENDORS)["users"]["email"].get("unique"),
         None,
         "the projection derives uniqueness from the constraints the model still holds, \
          so a dropped constraint cannot outlive itself"
@@ -1101,7 +1101,7 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
         &effective,
     )
     .expect("fold")
-    .project_field_defs();
+    .project_field_defs(crate::test_fixtures::VENDORS);
     assert_eq!(
         with_check["scores"]["score"].get("min"),
         Some(&serde_json::json!(1.0)),
@@ -1132,7 +1132,7 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
         &effective,
     )
     .expect("fold");
-    let projected = folded.project_field_defs();
+    let projected = folded.project_field_defs(crate::test_fixtures::VENDORS);
     assert_eq!(
         projected["scores"]["score"].get("min"),
         None,

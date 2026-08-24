@@ -283,6 +283,7 @@ pub fn fold(
     let empty = SchemaSnapshot::default();
     let mut catalog = CatalogFold::seed(vendors, &empty, dialect, project_schema, effective);
     let mut state = AuthoredState {
+        vendors,
         tables: BTreeMap::new(),
         named_types: NamedTypeRegistry::default(),
         dialect,
@@ -311,6 +312,9 @@ pub fn fold(
 
 /// The authored half's accumulator.
 struct AuthoredState<'a> {
+    /// The backends this build ships. The authored half derives implicit index and
+    /// constraint names, and those are capped at the registry's identifier budget.
+    vendors: VendorSet,
     tables: BTreeMap<String, AuthoredTable>,
     named_types: NamedTypeRegistry,
     dialect: &'a DialectId,
@@ -354,7 +358,7 @@ impl AuthoredState<'_> {
                     }
                     if column.unique.unwrap_or(false) {
                         implicit_unique_indexes.push(ImplicitUniqueIndex {
-                            name: derived_unique_index_name(name, &column.name),
+                            name: derived_unique_index_name(self.vendors, name, &column.name),
                             column: column.name.clone(),
                         });
                     }
@@ -371,11 +375,11 @@ impl AuthoredState<'_> {
                             primary_key: primary_key.clone(),
                             constraints: constraints
                                 .iter()
-                                .map(|constraint| named_constraint(name, constraint))
+                                .map(|constraint| named_constraint(self.vendors, name, constraint))
                                 .collect(),
                             indexes: indexes
                                 .iter()
-                                .map(|index| named_index(name, index))
+                                .map(|index| named_index(self.vendors, name, index))
                                 .collect(),
                             partition_by: partition_by.clone(),
                             schema: schema.clone(),
@@ -723,15 +727,14 @@ impl AuthoredState<'_> {
                     state
                         .core
                         .constraints
-                        .push(named_constraint(table, constraint));
+                        .push(named_constraint(self.vendors, table, constraint));
                 }
             }
             Op::DropConstraint { table, name, .. } => {
                 if let Some(state) = self.tables.get_mut(table) {
-                    state
-                        .core
-                        .constraints
-                        .retain(|constraint| effective_constraint_name(table, constraint) != *name);
+                    state.core.constraints.retain(|constraint| {
+                        effective_constraint_name(self.vendors, table, constraint) != *name
+                    });
                 }
             }
             Op::CreateIndex {
@@ -759,7 +762,10 @@ impl AuthoredState<'_> {
                         only: *only,
                         nulls_not_distinct: *nulls_not_distinct,
                     };
-                    state.core.indexes.push(named_index(table, &index));
+                    state
+                        .core
+                        .indexes
+                        .push(named_index(self.vendors, table, &index));
                 }
             }
             Op::DropIndex { table, name, .. } => {
@@ -768,20 +774,18 @@ impl AuthoredState<'_> {
                 // leaves the COLUMN in place; only the index goes.
                 if let Some(table) = table {
                     if let Some(state) = self.tables.get_mut(table) {
-                        state
-                            .core
-                            .indexes
-                            .retain(|index| effective_index_name(table, index) != *name);
+                        state.core.indexes.retain(|index| {
+                            effective_index_name(self.vendors, table, index) != *name
+                        });
                         state
                             .implicit_unique_indexes
                             .retain(|index| index.name != *name);
                     }
                 } else {
                     for (table, state) in &mut self.tables {
-                        state
-                            .core
-                            .indexes
-                            .retain(|index| effective_index_name(table, index) != *name);
+                        state.core.indexes.retain(|index| {
+                            effective_index_name(self.vendors, table, index) != *name
+                        });
                         state
                             .implicit_unique_indexes
                             .retain(|index| index.name != *name);
@@ -924,8 +928,8 @@ impl FoldedSchema {
     /// constraints the model holds, so `recover_check_facet` reads a closed AST the
     /// fold carried forward rather than SQL text some other projection emitted.
     #[must_use]
-    pub fn project_field_defs(&self) -> BTreeMap<String, serde_json::Value> {
-        field_defs_from_collections(&self.project_collection_descriptors())
+    pub fn project_field_defs(&self, vendors: VendorSet) -> BTreeMap<String, serde_json::Value> {
+        field_defs_from_collections(&self.project_collection_descriptors(vendors))
     }
 
     /// **Projection 5: the TYPED per-collection descriptor set.** The same recovery
@@ -952,8 +956,11 @@ impl FoldedSchema {
     /// keys. A consumer of this projection can rebuild the runtime descriptor; it
     /// cannot rebuild the TypeScript.
     #[must_use]
-    pub fn project_collection_descriptors(&self) -> BTreeMap<String, CollectionDescriptor> {
-        let mut metadata = self.project_runtime_metadata();
+    pub fn project_collection_descriptors(
+        &self,
+        vendors: VendorSet,
+    ) -> BTreeMap<String, CollectionDescriptor> {
+        let mut metadata = self.project_runtime_metadata(vendors);
         let mut out = BTreeMap::new();
         for (name, table) in &self.authored {
             let mut fields: IndexMap<String, crate::render::declarative::FieldDescriptor> =
@@ -1065,7 +1072,10 @@ impl FoldedSchema {
     /// every `renameTable` and `renameColumn` - a rename PostgreSQL and SQLite do not
     /// perform, which would put a name in `schema.runtime.json` that no catalog has.
     #[must_use]
-    pub(crate) fn project_runtime_metadata(&self) -> BTreeMap<String, RuntimeCollectionMetadata> {
+    pub(crate) fn project_runtime_metadata(
+        &self,
+        vendors: VendorSet,
+    ) -> BTreeMap<String, RuntimeCollectionMetadata> {
         let mut out: BTreeMap<String, RuntimeCollectionMetadata> = BTreeMap::new();
         for (name, table) in &self.authored {
             let mut metadata = RuntimeCollectionMetadata {
@@ -1097,7 +1107,7 @@ impl FoldedSchema {
                 add_runtime_index(
                     &mut metadata.indexes,
                     RuntimeIndexDescriptor {
-                        name: effective_index_name(name, index),
+                        name: effective_index_name(vendors, name, index),
                         fields,
                         unique: index.unique.unwrap_or(false),
                     },

@@ -96,7 +96,7 @@ fn descriptor(create_col: &str, to_type: &str) -> serde_json::Value {
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the descriptor fold succeeds")
     .get("a")
     .and_then(|table| table.get("v"))
@@ -563,7 +563,7 @@ fn the_value_format_refusal_reaches_both_artifact_replays() {
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect_err("the descriptor fold inherits the refusal");
     assert!(error.to_string().contains("value format"), "{error}");
 

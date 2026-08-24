@@ -49,7 +49,8 @@ pub enum ColumnRenameStrategy {
 ///
 /// Every field arrives QUOTED, by the same renderer that is being asked for the SQL —
 /// the engine composes the names (the generated function and trigger names are its
-/// own, bounded by `GENERATED_IDENT_MAX_BYTES`) and the backend spells them. Passing
+/// own, bounded by the registry's generated-identifier budget) and the backend spells
+/// them. Passing
 /// the quoted forms rather than the bare ones keeps the one identifier-quoting seam
 /// the tree already has instead of opening a second one inside this method.
 #[derive(Debug, Clone, Copy)]

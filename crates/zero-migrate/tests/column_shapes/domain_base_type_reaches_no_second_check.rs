@@ -191,7 +191,7 @@ fn the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage() {
             PROJECT,
             &effective,
         )
-        .map(|folded| folded.project_field_defs())
+        .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
         .expect("the field-def replay folds");
         assert_eq!(
             defs["amounts"]["amount"]["type"], "int",
@@ -242,7 +242,7 @@ fn a_sqlite_rebuild_keeps_the_domain_storage_and_one_check() {
         PROJECT,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the field-def replay folds");
 
     let rename = MigrationIr {

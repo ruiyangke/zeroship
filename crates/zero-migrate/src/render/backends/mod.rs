@@ -157,9 +157,9 @@ static SHIPPING: [&BackendVendor; 3] = [POSTGRES_VENDOR, SQLITE_VENDOR, MYSQL_VE
 
 pub(crate) const VENDORS: VendorSet = VendorSet::new(&SHIPPING);
 
-/// The engine's stable generated-identifier byte budget: the TIGHTEST cap any
-/// registered backend declares. Generated names are precomputed once and then handed
-/// to every emitter, so this is one composition fact rather than a per-call vendor
+/// The engine's generated-identifier byte budget: the TIGHTEST cap any backend in
+/// `vendors` declares. Generated names are precomputed once and then handed to every
+/// emitter, so this is one fact about the whole registry rather than a per-call vendor
 /// dispatch — which means it has to fit the strictest target in the build, not a
 /// chosen one.
 ///
@@ -175,30 +175,37 @@ pub(crate) const VENDORS: VendorSet = VendorSet::new(&SHIPPING);
 /// `panic!("PostgreSQL declares a BYTE identifier cap")` on the other two arms. The
 /// doc directly above it already said "the registered backend that imposes the
 /// limiting byte-counted cap" — so the sentence was a description of the intended
-/// fold and the code was a hard-coded lookup of one vendor. Today the two agree by
-/// accident: PostgreSQL declares `Bytes(63)`, MySQL `Characters(64)` and SQLite
-/// `Unbounded`, so the tightest IS PostgreSQL's and the value below is still 63. A
-/// fourth backend declaring a cap under 63 would have been silently ignored, and the
-/// engine would have precomputed names its own registry says do not fit.
+/// fold and the code was a hard-coded lookup of one vendor. The two agree by
+/// accident today: PostgreSQL declares `Bytes(63)`, MySQL `Characters(64)` and SQLite
+/// `Unbounded`, so the tightest IS PostgreSQL's. A fourth backend declaring a cap
+/// under 63 would have been silently ignored, and the engine would have precomputed
+/// names its own registry says do not fit.
 ///
-/// [`tightest_identifier_budget`] is that fold. It also removes the panic, which
-/// existed only because a one-vendor lookup had two arms it could not answer.
+/// # IT WAS A `const`, AND THE COMPILE-TIME EVALUATION IS GONE
 ///
-/// # It is the one reader of the set that cannot take it as an argument
+/// This was `pub(crate) const GENERATED_IDENT_MAX_BYTES: usize =
+/// tightest_identifier_budget(VENDORS);` — a `const`, folded by the compiler over the
+/// shipping set, consumed by five files that never saw a registry. It was the ONE
+/// reader of the composition that did not take it as an argument, and that is exactly
+/// why it could not survive the composition leaving the crate: an engine that cannot
+/// name the vendors cannot fold over them at compile time either.
 ///
-/// Every other reader was threaded: the resolvers take a [`VendorSet`], and their
-/// callers carry one. This is a `const`, so it is evaluated where the composition is
-/// visible and consumed by callers who never see the set at all — five files spell
-/// `GENERATED_IDENT_MAX_BYTES` and none of them holds a registry.
+/// So the budget is a RUNTIME QUERY on the registry the caller already carries, and
+/// the loss is real and is not being described as a wash. What went:
 ///
-/// That is a real property and not an oversight: the budget is a COMPILE-TIME fact
-/// about the build, checked before any name is minted rather than recomputed per
-/// call. Turning it into a runtime fold would buy neutrality at the cost of the
-/// evaluation, which is a trade worth making deliberately rather than absorbing as a
-/// side effect of moving the composition out.
-pub(crate) const GENERATED_IDENT_MAX_BYTES: usize = tightest_identifier_budget(VENDORS);
-
-/// The smallest generated-name byte budget every backend in `vendors` can hold.
+/// * the fold ran ONCE per build; it now runs once per minted or checked name;
+/// * a wrong answer was a build-time impossibility rather than a runtime value;
+/// * `cap_ident_name` and its siblings grew a `vendors` parameter, so a caller that
+///   mints a generated name has to be handed the set — which is the same threading
+///   every other resolution in this module already pays for.
+///
+/// What was bought is the only thing that matters here: ONE source of truth, and it
+/// stays beside the registry rather than becoming a number the composing crate
+/// computes and passes in. A budget passed as a bare `usize` from outside would be a
+/// second place the tightest cap is decided, and nothing would notice it disagreeing
+/// with the set the same call resolves its renderer from.
+///
+/// # The fold
 ///
 /// Each declared limit is converted to a BYTE budget, taking the safe direction in
 /// both cases where the two units differ:
@@ -212,9 +219,13 @@ pub(crate) const GENERATED_IDENT_MAX_BYTES: usize = tightest_identifier_budget(V
 /// * `IdentifierLimit::Unbounded` imposes nothing, so it contributes `usize::MAX`
 ///   and cannot be the minimum unless it is the only kind present.
 ///
-/// An empty registry would yield `usize::MAX`, which cannot arise: `SHIPPING` is a
-/// fixed-size array and the registry refuses to be composed empty.
-const fn tightest_identifier_budget(vendors: VendorSet) -> usize {
+/// An empty registry would yield `usize::MAX`, which cannot arise: the registry
+/// refuses to be composed empty.
+///
+/// It stays a `const fn` so a caller that DOES hold a compile-time set can still get
+/// the fold at compile time. Nothing in the engine can any more; the composing crate
+/// can.
+pub(crate) const fn generated_ident_max_bytes(vendors: VendorSet) -> usize {
     let vendors = vendors.as_slice();
     let mut budget = usize::MAX;
     let mut at = 0;
@@ -350,7 +361,7 @@ pub fn analyzer_absence(vendors: VendorSet, dialect: &DialectId) -> Option<Analy
 /// paired with the backend that reserves it.
 ///
 /// The union rather than the selected target's, for the same reason
-/// [`GENERATED_IDENT_MAX_BYTES`] is the tightest cap rather than the selected one: a
+/// [`generated_ident_max_bytes`] is the tightest cap rather than the selected one: a
 /// declared name that is legal here and reserved on another registered backend is a
 /// re-targeting hazard, and refusing it at declaration is cheaper than discovering it
 /// at deploy. Both halves are returned because the refusal should say WHOSE catalog
@@ -503,11 +514,12 @@ mod tests {
     /// engine's own registry says do not fit, and no test in the tree would have
     /// moved.
     ///
-    /// Deliberately NOT `assert_eq!(GENERATED_IDENT_MAX_BYTES, 63)`. That restates
-    /// the constant instead of checking it, and it is exactly as true of the broken
-    /// one-vendor lookup as of the fold.
+    /// Deliberately NOT `assert_eq!(generated_ident_max_bytes(VENDORS), 63)`. That
+    /// restates the answer instead of checking it, and it is exactly as true of the
+    /// broken one-vendor lookup as of the fold.
     #[test]
     fn the_generated_ident_budget_fits_every_registered_backend() {
+        let budget = generated_ident_max_bytes(VENDORS);
         let mut tightest = usize::MAX;
         for v in VENDORS.as_slice() {
             let declared = match v.descriptor.limits.identifier {
@@ -516,16 +528,15 @@ mod tests {
                 zero_migrate_ir::backend::IdentifierLimit::Unbounded => usize::MAX,
             };
             assert!(
-                GENERATED_IDENT_MAX_BYTES <= declared,
+                budget <= declared,
                 "{} declares an identifier cap of {declared}, but the engine mints \
-                 generated names up to {GENERATED_IDENT_MAX_BYTES} bytes and hands \
-                 them to every emitter",
+                 generated names up to {budget} bytes and hands them to every emitter",
                 v.descriptor.display_name
             );
             tightest = tightest.min(declared);
         }
         assert_eq!(
-            GENERATED_IDENT_MAX_BYTES, tightest,
+            budget, tightest,
             "the budget is below the tightest declared cap, so it is costing every \
              backend name length no registrant asked for"
         );

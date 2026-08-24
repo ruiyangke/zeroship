@@ -128,7 +128,7 @@ fn a_rename_follows_the_generated_expressions_that_read_the_column() {
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the op stream folds");
 
     let table = &fields["line_items"];
@@ -337,7 +337,7 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the unrenamed stream folds");
     let bounded = &before["line_items"]["qty"];
     assert_eq!(
@@ -358,7 +358,7 @@ fn a_rename_carries_a_recovered_check_bound_onto_the_new_column_name() {
         SCHEMA,
         &effective,
     )
-    .map(|folded| folded.project_field_defs())
+    .map(|folded| folded.project_field_defs(zero_migrate::shipping_vendors()))
     .expect("the renamed stream folds");
     let renamed = &after["line_items"]["quantity"];
     assert_eq!(

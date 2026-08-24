@@ -120,7 +120,7 @@
 //! `render::backends` holds thirteen `pub(crate)` items. This file covers eleven of
 //! them. The two it does not are named here rather than left to be discovered:
 //!
-//! * `GENERATED_IDENT_MAX_BYTES` is a byte budget, not a resolution. A vendor reading
+//! * `generated_ident_max_bytes` is a byte budget, not a resolution. A vendor reading
 //!   it would be leaking one backend's declared identifier limit into another, which
 //!   is a real rule but a DIFFERENT one, and a census whose subject is two rules is a
 //!   census nobody can read.
