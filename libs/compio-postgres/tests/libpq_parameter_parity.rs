@@ -594,3 +594,36 @@ fn an_empty_ssl_path_is_refused_even_though_libpq_accepts_it() {
             .unwrap_or_else(|error| panic!("{key} with a path must parse: {error}"));
     }
 }
+
+/// `sslcrl` and `sslcrldir` ACCEPT an empty path; the other three refuse it.
+///
+/// Five ssl file-path options, and they deliberately split two ways. The test
+/// above pins the strict three. This pins the lenient two, so the split reads
+/// as a decision rather than an oversight -- it is exactly the shape that looks
+/// like someone forgot a guard.
+///
+/// The reason they differ: `tls_rustls.rs` states "Preserve sslcrl's libpq
+/// behaviour: a file OpenSSL cannot load is ignored", and an empty path is
+/// simply a file that cannot be loaded, so it folds into an existing
+/// deliberate leniency. The strict three have no such fallback -- this driver
+/// never reads libpq's default certificate files -- so for them an empty value
+/// can only be a mistake worth naming.
+#[test]
+fn the_crl_paths_accept_an_empty_value_unlike_the_certificate_paths() {
+    for key in ["sslcrl", "sslcrldir"] {
+        format!("host=h {key}=''")
+            .parse::<Config>()
+            .unwrap_or_else(|error| {
+                panic!("{key} is lenient about an unloadable path, including empty: {error}")
+            });
+    }
+
+    // The contrast, in one variable: the certificate paths refuse the same
+    // spelling. If a future change made these lenient too, only this half of
+    // the pair would still pass, and the split would have silently collapsed.
+    for key in ["sslcert", "sslkey", "sslrootcert"] {
+        format!("host=h {key}=''")
+            .parse::<Config>()
+            .expect_err("the certificate paths stay strict");
+    }
+}
