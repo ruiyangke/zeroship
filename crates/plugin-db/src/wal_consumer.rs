@@ -43,7 +43,7 @@ use futures::FutureExt;
 
 use compio_postgres::replication::{
     self as repl, ReplicationMessage, ReplicationStream, StartReplicationOptions,
-    pgoutput::{self, PgOutputMessage, TupleColumn, TupleData},
+    pgoutput::{self, OldTuple, PgOutputMessage, TupleColumn, TupleData},
 };
 
 use crate::broker::{has_subscribers, publish, ChangeEvent, ChangeOp};
@@ -532,16 +532,34 @@ impl WalConsumer {
                 old_tuple,
                 ..
             } => {
+                // Only a FULL old tuple carries the row's prior VALUES. A
+                // `Key` tuple names the row and pads every other column with
+                // NULL, so handing it to the broker as a before-image would
+                // have it evaluate subscription predicates against NULLs the
+                // server never claimed the row held.
                 self.emit_for_tuple(
                     relations,
                     *rel_id,
                     ChangeOp::Update,
                     new_tuple,
-                    old_tuple.as_ref(),
+                    old_tuple.as_ref().and_then(OldTuple::full),
                 );
             }
             PgOutputMessage::Delete { rel_id, old_tuple } => {
-                self.emit_for_tuple(relations, *rel_id, ChangeOp::Delete, old_tuple, None);
+                // A DELETE has no after-image, so the old tuple IS the event's
+                // tuple. Under the default replica identity that is a `Key`,
+                // whose non-key columns are placeholders - which is why a
+                // subscription filtered on a non-key column can miss a delete.
+                // Fixing that needs REPLICA IDENTITY FULL on published tables,
+                // not a change here; this at least no longer pretends the
+                // placeholders are values it verified.
+                self.emit_for_tuple(
+                    relations,
+                    *rel_id,
+                    ChangeOp::Delete,
+                    old_tuple.tuple(),
+                    None,
+                );
             }
             // Begin/Commit/Origin/Type/Truncate/Message: not surfaced
             // to subscribers. Truncate could fan out to all
@@ -1181,9 +1199,9 @@ mod tests {
             &mut rels,
             &PgOutputMessage::Delete {
                 rel_id: 16384,
-                old_tuple: TupleData {
+                old_tuple: OldTuple::Key(TupleData {
                     columns: vec![TupleColumn::Text("7".into()), TupleColumn::Null],
-                },
+                }),
             },
         );
 
