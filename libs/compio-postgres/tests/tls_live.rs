@@ -55,6 +55,8 @@ struct Servers {
     /// `ssl=on` with `ssl_ca_file` and `cert` authentication: no password is
     /// accepted and the client must present a certificate.
     clientcert_url: String,
+    /// PostgreSQL 18 with `ssl=on` and the same certificate as `tls`.
+    directtls_url: String,
     /// The private CA that signed the certificates above. It is in no system
     /// trust store, which is what makes the `sslrootcert=system` case a real
     /// negative.
@@ -96,6 +98,7 @@ impl Servers {
             mismatch_url: field("mismatch_url"),
             sslonly_url: field("sslonly_url"),
             clientcert_url: field("clientcert_url"),
+            directtls_url: field("directtls_url"),
             ca: field("ca"),
             client_cert: field("client_cert"),
             client_key: field("client_key"),
@@ -269,6 +272,86 @@ async fn sslsni_controls_the_client_hello_extension() {
         sni_offered_by("sslsni=0").await,
         None,
         "sslsni=0 must omit SNI"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// sslnegotiation - PostgreSQL SSLRequest or direct TLS
+// ---------------------------------------------------------------------------
+
+/// PostgreSQL 18 completes both negotiation methods over the same verified
+/// endpoint, and the server reports both sessions as encrypted.
+///
+/// This test does NOT catch an ignored `sslnegotiation=direct`: PostgreSQL 18
+/// accepts the PostgreSQL negotiation method too, so the discriminator below
+/// is what makes the direct success meaningful.
+#[compio::test]
+async fn postgres_18_accepts_direct_and_postgres_tls_negotiation() {
+    let s = servers();
+    let base = format!(
+        "{} sslmode=verify-full sslrootcert={}",
+        s.directtls_url, s.ca
+    );
+
+    assert!(
+        transport_of(&format!("{base} sslnegotiation=direct"))
+            .await
+            .expect("PostgreSQL 18 must complete direct TLS"),
+        "the direct PostgreSQL 18 session was not encrypted"
+    );
+    assert!(
+        transport_of(&format!("{base} sslnegotiation=postgres"))
+            .await
+            .expect("PostgreSQL 18 must complete PostgreSQL SSL negotiation"),
+        "the PostgreSQL-negotiated PostgreSQL 18 session was not encrypted"
+    );
+}
+
+/// Direct negotiation must fail on PostgreSQL 16 while the same direct client
+/// path succeeds on PostgreSQL 18 and ordinary PostgreSQL negotiation still
+/// succeeds on PostgreSQL 16. Together those controls prove the setting changes
+/// bytes on the wire instead of being accepted and ignored.
+///
+/// This test does NOT inspect the negotiated ALPN: neither `Client` nor
+/// `Connection` exposes it. PostgreSQL 18 accepting the direct session is the
+/// live server-side result; the connector's wire-level ALPN offer is covered by
+/// the in-crate rustls tests.
+#[compio::test]
+async fn direct_negotiation_distinguishes_postgres_18_from_postgres_16() {
+    let s = servers();
+    let pg16 = format!(
+        "{} sslmode=verify-full sslrootcert={}",
+        s.tls_url, s.ca
+    );
+    let pg18 = format!(
+        "{} sslmode=verify-full sslrootcert={}",
+        s.directtls_url, s.ca
+    );
+
+    println!("  [direct discriminator] PostgreSQL 16, sslnegotiation=direct");
+    let pg16_direct = transport_of(&format!("{pg16} sslnegotiation=direct"))
+        .await
+        .expect_err("PostgreSQL 16 must reject direct TLS negotiation");
+    let refusal = describe(&pg16_direct);
+    assert!(
+        refusal.contains("TLS handshake"),
+        "PostgreSQL 16 direct TLS failed before reaching the handshake: {refusal}"
+    );
+
+    println!("  [direct discriminator] PostgreSQL 18, sslnegotiation=direct");
+    assert!(
+        transport_of(&format!("{pg18} sslnegotiation=direct"))
+            .await
+            .expect("the same direct TLS path must connect to PostgreSQL 18"),
+        "the direct PostgreSQL 18 control was not encrypted"
+    );
+
+    println!("  [direct discriminator] PostgreSQL 16, sslnegotiation=postgres");
+    assert!(
+        transport_of(&format!("{pg16} sslnegotiation=postgres"))
+            .await
+            .expect("PostgreSQL negotiation must still connect to PostgreSQL 16"),
+        "the PostgreSQL-negotiated PostgreSQL 16 control was not encrypted"
     );
 }
 
