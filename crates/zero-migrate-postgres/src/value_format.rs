@@ -122,7 +122,6 @@ fn pg_default_expr_type(expr: &Expr) -> Option<PgDefaultType> {
         Expr::StorageSize { .. } => Some(PgDefaultType::Integer),
         Expr::Agg { .. }
         | Expr::Extract { .. }
-        | Expr::PgExtract { .. }
         | Expr::Interval { .. }
         | Expr::Dialectal { .. }
         | Expr::ColRef { .. } => None,
@@ -139,8 +138,7 @@ fn normalize_redundant_pg_default_casts(expr: &Expr) -> Expr {
             Expr::UnaryOp { operand, .. }
             | Expr::Cast { operand, .. }
             | Expr::StorageSize { expr: operand }
-            | Expr::Extract { from: operand, .. }
-            | Expr::PgExtract { from: operand, .. } => visit(operand),
+            | Expr::Extract { from: operand, .. } => visit(operand),
             Expr::Case { branches, r#else } => {
                 for branch in branches {
                     visit(&mut branch.when);

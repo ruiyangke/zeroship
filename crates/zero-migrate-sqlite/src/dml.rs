@@ -67,6 +67,10 @@ pub(super) struct SqliteDmlRenderer;
 pub(super) static RENDERER: SqliteDmlRenderer = SqliteDmlRenderer;
 
 fn unsupported_expr(name: &'static str) -> ExprDialectRejection {
+    unsupported_expr_owned(name.to_string())
+}
+
+fn unsupported_expr_owned(name: String) -> ExprDialectRejection {
     ExprDialectRejection {
         code: CODE_UNSUPPORTED,
         kind: Some(UnsupportedKind::Expr),
@@ -195,7 +199,16 @@ impl ExprDialectValidator for SqliteDmlRenderer {
                 ),
             }),
             ExprDialectFeature::StorageSize => Err(unsupported_expr("storageSize")),
-            ExprDialectFeature::PgExtract => Err(unsupported_expr("PG EXTRACT")),
+            // Answered by asking this backend's OWN renderer, so the validator
+            // and the render seam cannot drift apart about which parts exist here.
+            ExprDialectFeature::Extract(field) => DmlRenderer::render_extract(self, field, "x")
+                .map(|_| ())
+                .map_err(|_| {
+                    unsupported_expr_owned(format!(
+                        "the {} extract field",
+                        dml::extract_field_name(field)
+                    ))
+                }),
             ExprDialectFeature::Interval => Err(unsupported_expr("PG interval literal")),
         }
     }
@@ -606,7 +619,10 @@ impl DmlRenderer for SqliteDmlRenderer {
         ))
     }
 
-    fn render_extract(&self, field: ExtractField, expr: &str) -> String {
+    fn render_extract(&self, field: ExtractField, expr: &str) -> Result<String, DmlError> {
+        // SQLite has no EXTRACT at all; every part it can answer goes through a
+        // strftime format, which is exactly why the keyword table in the shared
+        // crate is an option rather than an instruction.
         let fmt = match field {
             ExtractField::Year => "%Y",
             ExtractField::Month => "%m",
@@ -614,8 +630,28 @@ impl DmlRenderer for SqliteDmlRenderer {
             ExtractField::Hour => "%H",
             ExtractField::Minute => "%M",
             ExtractField::Dow => "%w",
+            ExtractField::Second
+            | ExtractField::Doy
+            | ExtractField::Epoch
+            | ExtractField::Quarter
+            | ExtractField::Week
+            | ExtractField::Isodow
+            | ExtractField::Isoyear
+            | ExtractField::Century
+            | ExtractField::Decade
+            | ExtractField::Millennium
+            | ExtractField::Microseconds
+            | ExtractField::Milliseconds
+            | ExtractField::Timezone
+            | ExtractField::TimezoneHour
+            | ExtractField::TimezoneMinute => {
+                return Err(DmlError::UnrenderableExpr(format!(
+                    "SQLite has no proven strftime form for the {} extract field; use dialect({{...}}) to port",
+                    dml::extract_field_name(field)
+                )))
+            }
         };
-        format!("CAST(strftime('{fmt}', {expr}) AS INTEGER)")
+        Ok(format!("CAST(strftime('{fmt}', {expr}) AS INTEGER)"))
     }
 
     fn render_concat(&self, l: &str, r: &str) -> String {

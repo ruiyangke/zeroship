@@ -35,7 +35,6 @@ import type {
   PartitionBounds,
   PartitionSpec,
   PerRowGenerator,
-  PgExtractField,
   PolicyCmd,
   RaiseLevel,
   SelectAst,
@@ -74,7 +73,6 @@ export type {
   PartitionBounds,
   PartitionSpec,
   PerRowGenerator,
-  PgExtractField,
   Classification,
   RaiseLevel,
   SelectAst,
@@ -682,8 +680,8 @@ export interface ExprChain {
   substr(start: unknown, len?: unknown): ExprChain;
   /** `replace(s, from, to)` — portable string replace. */
   replace(from: unknown, to: unknown): ExprChain;
-  /** Date/time part extraction. PG-only fields record pgExtract and validate fail-closed off-PG. */
-  extract(field: ExtractField | PgExtractField): ExprChain;
+  /** Date/time part extraction. A field the target cannot render fails closed at validate. */
+  extract(field: ExtractField): ExprChain;
   /** The engine-synthesized portable split helper, in-envelope-only. */
   splitPart(delim: string, n: number): ExprChain;
   // aggregate nodes: receiver-first authoring for COUNT(expr),

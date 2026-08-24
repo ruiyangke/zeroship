@@ -3823,7 +3823,7 @@
           ]
         },
         {
-          "description": "**PORTABLE** scalar expression extracting a date/time part whose numeric\nsemantics are identical on `PostgreSQL`, `SQLite`, and `MySQL`.",
+          "description": "Scalar `EXTRACT(<field> FROM <expr>)` — a date/time part of a value.\n\nTHE extraction node; there is no second one. Whether a given target can\nrender a given field is that backend's answer to\n[`ExprDialectFeature::Extract`](crate::validate::ExprDialectFeature::Extract),\nnot a property of the node and not a split baked into this enum.",
           "type": "object",
           "properties": {
             "field": {
@@ -3847,31 +3847,7 @@
           ]
         },
         {
-          "description": "**PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.",
-          "type": "object",
-          "properties": {
-            "field": {
-              "description": "Closed `PostgreSQL` EXTRACT field.",
-              "$ref": "#/$defs/PgExtractField"
-            },
-            "from": {
-              "description": "Source expression.",
-              "$ref": "#/$defs/Expr"
-            },
-            "node": {
-              "type": "string",
-              "const": "pgExtract"
-            }
-          },
-          "additionalProperties": false,
-          "required": [
-            "node",
-            "field",
-            "from"
-          ]
-        },
-        {
-          "description": "**PG-ONLY** structured interval literal rendered as `INTERVAL '<parts>'`.",
+          "description": "A structured interval literal. The [`Duration`] is neutral; each backend\nwrites its own interval syntax through `DmlRenderer::render_interval`, or\nrefuses when it has none.",
           "type": "object",
           "properties": {
             "duration": {
@@ -4221,7 +4197,7 @@
       ]
     },
     "ExtractField": {
-      "description": "CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.\n\nEach admitted field has a live three-dialect proof and a faithful renderer on\n`PostgreSQL`, `SQLite`, and `MySQL`. Fields with PostgreSQL-only semantics live in\n[`PgExtractField`] instead.",
+      "description": "The CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.\n\nONE set for one SQL construct. This used to be two enums — a six-member\n`ExtractField` and a fifteen-member `PgExtractField` — split on a claim about\nwhich parts are portable. That claim is not core's to make: it is a fact\nabout the shipping backends, it cannot be right for a backend that does not\nexist yet, and it was already wrong (MySQL renders `QUARTER`, `WEEK` and\n`MICROSECOND` natively, all three of which sat under the PostgreSQL name).\n\nWhich parts a target can actually render is asked per field, per backend,\nthrough\n[`ExprDialectFeature::Extract`](crate::validate::ExprDialectFeature::Extract),\nand spelled by that backend's `DmlRenderer::render_extract`.",
       "oneOf": [
         {
           "description": "Calendar year.",
@@ -4252,14 +4228,9 @@
           "description": "Day-of-week, 0=Sunday through 6=Saturday.",
           "type": "string",
           "const": "dow"
-        }
-      ]
-    },
-    "PgExtractField": {
-      "description": "CLOSED PostgreSQL-only field set for `EXTRACT(<field> FROM <expr>)`.\n\nThese fields either have no portable SQLite/MySQL analogue or have semantics\nthat diverge under the mandated portable renderers.",
-      "oneOf": [
+        },
         {
-          "description": "Seconds including fractional seconds on `PostgreSQL`.",
+          "description": "Seconds, including the fractional part where the backend keeps one.",
           "type": "string",
           "const": "second"
         },
@@ -4326,12 +4297,12 @@
         {
           "description": "Time-zone offset hour.",
           "type": "string",
-          "const": "timezone_hour"
+          "const": "timezoneHour"
         },
         {
           "description": "Time-zone offset minute.",
           "type": "string",
-          "const": "timezone_minute"
+          "const": "timezoneMinute"
         }
       ]
     },

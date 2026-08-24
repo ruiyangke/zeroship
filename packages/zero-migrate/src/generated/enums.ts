@@ -68,21 +68,27 @@ export type EmptyContainerKind = "object" | "array";
 export type CastTarget = "text" | "int" | "real" | "boolean" | "bytes" | "uuid";
 
 /**
- * CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.
+ * The CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
  *
- * Each admitted field has a live three-dialect proof and a faithful renderer on
- * `PostgreSQL`, `SQLite`, and `MySQL`. Fields with PostgreSQL-only semantics live in
- * [`PgExtractField`] instead.
- */
-export type ExtractField = "year" | "month" | "day" | "hour" | "minute" | "dow";
-
-/**
- * CLOSED PostgreSQL-only field set for `EXTRACT(<field> FROM <expr>)`.
+ * ONE set for one SQL construct. This used to be two enums — a six-member
+ * `ExtractField` and a fifteen-member `PgExtractField` — split on a claim about
+ * which parts are portable. That claim is not core's to make: it is a fact
+ * about the shipping backends, it cannot be right for a backend that does not
+ * exist yet, and it was already wrong (MySQL renders `QUARTER`, `WEEK` and
+ * `MICROSECOND` natively, all three of which sat under the PostgreSQL name).
  *
- * These fields either have no portable SQLite/MySQL analogue or have semantics
- * that diverge under the mandated portable renderers.
+ * Which parts a target can actually render is asked per field, per backend,
+ * through
+ * [`ExprDialectFeature::Extract`](crate::validate::ExprDialectFeature::Extract),
+ * and spelled by that backend's `DmlRenderer::render_extract`.
  */
-export type PgExtractField =
+export type ExtractField =
+  | "year"
+  | "month"
+  | "day"
+  | "hour"
+  | "minute"
+  | "dow"
   | "second"
   | "doy"
   | "epoch"
@@ -96,8 +102,8 @@ export type PgExtractField =
   | "microseconds"
   | "milliseconds"
   | "timezone"
-  | "timezone_hour"
-  | "timezone_minute";
+  | "timezoneHour"
+  | "timezoneMinute";
 
 /**
  * The CLOSED set of PORTABLE aggregate functions (`c.agg.*`).

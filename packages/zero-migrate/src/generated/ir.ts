@@ -38,7 +38,6 @@ import type {
   OnlinePhase,
   OrderDir,
   PolicyCmd,
-  PgExtractField,
   Privilege,
   RaiseLevel,
   RefAction,
@@ -71,7 +70,6 @@ export type {
   OnlinePhase,
   OrderDir,
   PolicyCmd,
-  PgExtractField,
   Privilege,
   RaiseLevel,
   RefAction,
@@ -217,7 +215,7 @@ export type Expr =
   | { node: "regexMatch"; expr: Expr; pattern: string }
   | { node: "storageSize"; expr: Expr }
   | { node: "extract"; field: ExtractField; from: Expr }
-  | { node: "pgExtract"; field: PgExtractField; from: Expr }
+
   | { node: "interval"; duration: Duration }
   // The one Layer-2 portability escape: a per-backend value divergence. Legs
   // are keyed by canonical DialectId strings; there is no alias or fallback.

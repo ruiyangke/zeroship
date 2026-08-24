@@ -1553,7 +1553,6 @@ function validateDefaultExpr(expr: Node): void {
         return;
       case "regexMatch":
       case "storageSize":
-      case "pgExtract":
       case "interval":
       case "dialect":
         throw structuredError(
@@ -2127,11 +2126,15 @@ function pgRegexPattern(pattern: unknown): string {
   return pattern;
 }
 
+// The parts every shipping backend renders. This is NOT what makes a field
+// legal — the engine's per-target validator decides that — it is only what the
+// builder's immutable-context check treats as needing no vendor position.
 const portableExtractFields = ["year", "month", "day", "hour", "minute", "dow"] as const;
-type PortableExtractField = typeof portableExtractFields[number];
 const portableExtractFieldSet = new Set<string>(portableExtractFields);
 
-const pgExtractFields = [
+// ONE field list, matching the single `ExtractField` in the wire contract.
+const extractFields = [
+  ...portableExtractFields,
   "second",
   "doy",
   "epoch",
@@ -2145,11 +2148,11 @@ const pgExtractFields = [
   "microseconds",
   "milliseconds",
   "timezone",
-  "timezone_hour",
-  "timezone_minute",
+  "timezoneHour",
+  "timezoneMinute",
 ] as const;
-type PgExtractFieldToken = typeof pgExtractFields[number];
-const pgExtractFieldSet = new Set<string>(pgExtractFields);
+type ExtractFieldToken = typeof extractFields[number];
+const extractFieldSet = new Set<string>(extractFields);
 
 const castTargets = ["text", "int", "real", "boolean", "bytes", "uuid"] as const;
 const castTargetSet = new Set<string>(castTargets);
@@ -2168,16 +2171,13 @@ function castTarget(args: unknown): CastTarget {
   return to as CastTarget;
 }
 
-function pgExtractField(field: unknown): PortableExtractField | PgExtractFieldToken {
-  if (typeof field === "string" && portableExtractFieldSet.has(field)) {
-    return field as PortableExtractField;
-  }
-  if (typeof field === "string" && pgExtractFieldSet.has(field)) {
-    return field as PgExtractFieldToken;
+function extractField(field: unknown): ExtractFieldToken {
+  if (typeof field === "string" && extractFieldSet.has(field)) {
+    return field as ExtractFieldToken;
   }
   throw structuredError(
     "OP_INVALID",
-    `.extract(field): field must be one of ${[...portableExtractFields, ...pgExtractFields].map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
+    `.extract(field): field must be one of ${extractFields.map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`,
   );
 }
 
@@ -2352,12 +2352,7 @@ class ExprChainImpl implements ExprChainType {
     return chain({ node: "fnCall", fn: "replace", args: [this.__node, exprArg(from), exprArg(to)] });
   }
   extract(field: unknown) {
-    const f = pgExtractField(field);
-    return chain({
-      node: portableExtractFieldSet.has(f) ? "extract" : "pgExtract",
-      field: f,
-      from: this.__node,
-    });
+    return chain({ node: "extract", field: extractField(field), from: this.__node });
   }
   splitPart(delim: string, n: number) {
     splitPartGrammarLint(delim, n);
@@ -2822,15 +2817,14 @@ function validateImmutableExpr(expr: Node, position: string, opts: { allowPgImmu
         walk(n.expr);
         return;
       case "extract":
-        if (typeof n.field !== "string" || !portableExtractFieldSet.has(n.field)) {
-          rejectImmutableExpr(position, `extract field ${JSON.stringify(n.field)} is not portable here`);
+        if (typeof n.field !== "string" || !extractFieldSet.has(n.field)) {
+          rejectImmutableExpr(position, `extract field ${JSON.stringify(n.field)} is not an extract field`);
         }
-        walk(n.from);
-        return;
-      case "pgExtract":
-        if (!opts.allowPgImmutable) rejectPgNode("pgExtract");
-        if (typeof n.field !== "string" || !pgExtractFieldSet.has(n.field)) {
-          rejectImmutableExpr(position, `pgExtract field ${JSON.stringify(n.field)} is not a PG extract field`);
+        // One node, so the vendor-position rule keys on the FIELD: the parts
+        // every shipping backend renders are fine anywhere, the rest need the
+        // same vendor-only position the split node used to require.
+        if (!portableExtractFieldSet.has(n.field as string) && !opts.allowPgImmutable) {
+          rejectPgNode(`extract(${JSON.stringify(n.field)})`);
         }
         walk(n.from);
         return;

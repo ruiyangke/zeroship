@@ -79,8 +79,18 @@ impl ExprDialectValidator for PostgresDmlRenderer {
             | ExprDialectFeature::UuidV7Generation
             | ExprDialectFeature::RegexMatch
             | ExprDialectFeature::StorageSize
-            | ExprDialectFeature::PgExtract
             | ExprDialectFeature::Interval => Ok(()),
+            // PostgreSQL renders the whole EXTRACT field set, so every part is
+            // accepted — asserted through its own renderer rather than restated,
+            // so the two can never disagree.
+            ExprDialectFeature::Extract(field) => DmlRenderer::render_extract(self, field, "x")
+                .map(|_| ())
+                .map_err(|e| ExprDialectRejection {
+                    code: zero_migrate_ir::validate::CODE_UNSUPPORTED,
+                    kind: Some(zero_migrate_ir::validate::UnsupportedKind::Expr),
+                    reason: format!("{e}"),
+                    suggested_fix: None,
+                }),
         }
     }
 }
@@ -349,8 +359,14 @@ impl DmlRenderer for PostgresDmlRenderer {
         ))
     }
 
-    fn render_extract(&self, field: ExtractField, expr: &str) -> String {
-        format!("EXTRACT({} FROM {expr})", dml::extract_field_name(field))
+    fn render_extract(&self, field: ExtractField, expr: &str) -> Result<String, DmlError> {
+        // PostgreSQL implements the whole field set, so there is no refusal arm
+        // here — and that is a fact about PostgreSQL, stated by PostgreSQL,
+        // rather than a shape the IR was built around.
+        Ok(format!(
+            "EXTRACT({} FROM {expr})",
+            dml::extract_field_name(field)
+        ))
     }
 
     fn render_concat(&self, l: &str, r: &str) -> String {

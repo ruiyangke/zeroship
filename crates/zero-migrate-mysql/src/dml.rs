@@ -49,6 +49,10 @@ pub(super) struct MysqlDmlRenderer;
 pub(super) static RENDERER: MysqlDmlRenderer = MysqlDmlRenderer;
 
 fn unsupported_expr(name: &'static str) -> ExprDialectRejection {
+    unsupported_expr_owned(name.to_string())
+}
+
+fn unsupported_expr_owned(name: String) -> ExprDialectRejection {
     ExprDialectRejection {
         code: CODE_UNSUPPORTED,
         kind: Some(UnsupportedKind::Expr),
@@ -121,7 +125,16 @@ impl ExprDialectValidator for MysqlDmlRenderer {
                 ),
             }),
             ExprDialectFeature::StorageSize => Err(unsupported_expr("storageSize")),
-            ExprDialectFeature::PgExtract => Err(unsupported_expr("PG EXTRACT")),
+            // Answered by asking this backend's OWN renderer, so the validator
+            // and the render seam cannot drift apart about which parts exist here.
+            ExprDialectFeature::Extract(field) => DmlRenderer::render_extract(self, field, "x")
+                .map(|_| ())
+                .map_err(|_| {
+                    unsupported_expr_owned(format!(
+                        "the {} extract field",
+                        dml::extract_field_name(field)
+                    ))
+                }),
             ExprDialectFeature::Interval => Err(unsupported_expr("PG interval literal")),
         }
     }
@@ -141,7 +154,6 @@ fn expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlError> {
         | Expr::Cast { operand, .. }
         | Expr::StorageSize { expr: operand }
         | Expr::Extract { from: operand, .. }
-        | Expr::PgExtract { from: operand, .. }
         | Expr::RegexMatch { expr: operand, .. }
         | Expr::InList { expr: operand, .. } => expr_references_column(operand, column)?,
         Expr::Case { branches, r#else } => {
@@ -766,13 +778,40 @@ impl DmlRenderer for MysqlDmlRenderer {
         ))
     }
 
-    fn render_extract(&self, field: ExtractField, expr: &str) -> String {
+    fn render_extract(&self, field: ExtractField, expr: &str) -> Result<String, DmlError> {
         match field {
-            ExtractField::Dow => format!("(DAYOFWEEK({expr}) - 1)"),
-            _ => format!(
+            ExtractField::Dow => Ok(format!("(DAYOFWEEK({expr}) - 1)")),
+            ExtractField::Year
+            | ExtractField::Month
+            | ExtractField::Day
+            | ExtractField::Hour
+            | ExtractField::Minute => Ok(format!(
                 "EXTRACT({} FROM {expr})",
                 dml::extract_field_name(field).to_ascii_uppercase()
-            ),
+            )),
+            // The parts MySQL does not render TODAY. `Quarter`, `Week` and
+            // `Microseconds` are native MySQL EXTRACT units and belong in the arm
+            // above, but admitting them is a behaviour change that needs its own
+            // live three-dialect proof; carrying them here keeps this commit a
+            // pure relocation of the decision.
+            ExtractField::Second
+            | ExtractField::Doy
+            | ExtractField::Epoch
+            | ExtractField::Quarter
+            | ExtractField::Week
+            | ExtractField::Isodow
+            | ExtractField::Isoyear
+            | ExtractField::Century
+            | ExtractField::Decade
+            | ExtractField::Millennium
+            | ExtractField::Microseconds
+            | ExtractField::Milliseconds
+            | ExtractField::Timezone
+            | ExtractField::TimezoneHour
+            | ExtractField::TimezoneMinute => Err(DmlError::UnrenderableExpr(format!(
+                "MySQL has no proven renderer for the {} extract field; use dialect({{...}}) to port",
+                dml::extract_field_name(field)
+            ))),
         }
     }
 

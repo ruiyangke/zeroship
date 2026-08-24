@@ -123,7 +123,6 @@ export type {
   ExprChain,
   ExprFn,
   ExtractField,
-  PgExtractField,
   CheckBuilder,
   CheckDef,
   CheckExprFn,

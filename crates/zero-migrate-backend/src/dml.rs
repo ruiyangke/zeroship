@@ -113,7 +113,7 @@ use zero_migrate_ir::dialect::DialectId;
 
 use crate::step::BindValue;
 use zero_migrate_ir::expr::{
-    AggFunc, BinaryOp, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
+    AggFunc, BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
 };
 use zero_migrate_ir::ir::{IrScalar, IrValue};
 
@@ -686,6 +686,12 @@ fn render_in_list(
     backend.render_in_list(expr, elems, negated, joiner)
 }
 
+/// The standard SQL keyword for an `EXTRACT` field.
+///
+/// A convenience a backend may CALL, not a decision made for it: which fields it
+/// admits is its own `render_extract`, and a backend spelling a part differently
+/// (SQLite reaches for `strftime`) simply does not use this.
+#[must_use]
 pub fn extract_field_name(field: ExtractField) -> &'static str {
     match field {
         ExtractField::Year => "year",
@@ -694,53 +700,23 @@ pub fn extract_field_name(field: ExtractField) -> &'static str {
         ExtractField::Hour => "hour",
         ExtractField::Minute => "minute",
         ExtractField::Dow => "dow",
+        ExtractField::Second => "second",
+        ExtractField::Doy => "doy",
+        ExtractField::Epoch => "epoch",
+        ExtractField::Quarter => "quarter",
+        ExtractField::Week => "week",
+        ExtractField::Isodow => "isodow",
+        ExtractField::Isoyear => "isoyear",
+        ExtractField::Century => "century",
+        ExtractField::Decade => "decade",
+        ExtractField::Millennium => "millennium",
+        ExtractField::Microseconds => "microseconds",
+        ExtractField::Milliseconds => "milliseconds",
+        ExtractField::Timezone => "timezone",
+        ExtractField::TimezoneHour => "timezone_hour",
+        ExtractField::TimezoneMinute => "timezone_minute",
     }
 }
-
-fn render_extract(
-    field: ExtractField,
-    expr: &str,
-    backend: &dyn DmlRenderer,
-) -> Result<String, DmlError> {
-    Ok(backend.render_extract(field, expr))
-}
-
-fn render_pg_extract_field(field: PgExtractField) -> &'static str {
-    match field {
-        PgExtractField::Second => "second",
-        PgExtractField::Doy => "doy",
-        PgExtractField::Epoch => "epoch",
-        PgExtractField::Quarter => "quarter",
-        PgExtractField::Week => "week",
-        PgExtractField::Isodow => "isodow",
-        PgExtractField::Isoyear => "isoyear",
-        PgExtractField::Century => "century",
-        PgExtractField::Decade => "decade",
-        PgExtractField::Millennium => "millennium",
-        PgExtractField::Microseconds => "microseconds",
-        PgExtractField::Milliseconds => "milliseconds",
-        PgExtractField::Timezone => "timezone",
-        PgExtractField::TimezoneHour => "timezone_hour",
-        PgExtractField::TimezoneMinute => "timezone_minute",
-    }
-}
-
-fn render_pg_extract(
-    field: PgExtractField,
-    expr: &str,
-    backend: &dyn DmlRenderer,
-) -> Result<String, DmlError> {
-    if !backend.supports(Capability::PostgresVendorPrimitives) {
-        return Err(DmlError::UnrenderableExpr(
-            "PG EXTRACT is PostgreSQL-only".to_string(),
-        ));
-    }
-    Ok(format!(
-        "EXTRACT({} FROM {expr})",
-        render_pg_extract_field(field)
-    ))
-}
-
 
 /// The SQL spelling of a binary operator (the method↔node table). `Concat` is
 /// `||` — the one place PG/SQLite NULL semantics agree.
@@ -1030,7 +1006,6 @@ pub fn expr_column_refs_for_backend(
             | Expr::Cast { operand, .. }
             | Expr::StorageSize { expr: operand }
             | Expr::Extract { from: operand, .. }
-            | Expr::PgExtract { from: operand, .. }
             | Expr::RegexMatch { expr: operand, .. }
             | Expr::InList { expr: operand, .. } => walk(operand, backend, out)?,
             Expr::Case { branches, r#else } => {
@@ -1235,11 +1210,7 @@ pub fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlEr
         }
         Expr::Extract { field, from } => {
             let e = render_expr_bound(from, ctx)?;
-            render_extract(*field, &e, ctx.backend)?
-        }
-        Expr::PgExtract { field, from } => {
-            let e = render_expr_bound(from, ctx)?;
-            render_pg_extract(*field, &e, ctx.backend)?
+            ctx.backend.render_extract(*field, &e)?
         }
         Expr::Interval { duration } => ctx.backend.render_interval(duration)?,
         Expr::Dialectal { legs } => {
@@ -1483,11 +1454,7 @@ where
         }
         Expr::Extract { field, from } => {
             let e = render_expr_inline_walk_for_backend(from, backend, col_ref)?;
-            render_extract(*field, &e, backend)?
-        }
-        Expr::PgExtract { field, from } => {
-            let e = render_expr_inline_walk_for_backend(from, backend, col_ref)?;
-            render_pg_extract(*field, &e, backend)?
+            backend.render_extract(*field, &e)?
         }
         Expr::Interval { duration } => backend.render_interval(duration)?,
         Expr::Dialectal { legs } => {

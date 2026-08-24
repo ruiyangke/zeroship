@@ -12,7 +12,7 @@
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
 //! UuidV4 | UuidV7 | Cast | Between | Like | DistinctFrom | Agg | InList |
-//! RegexMatch | StorageSize | Extract | PgExtract | Interval | Dialectal`.
+//! RegexMatch | StorageSize | Extract | Interval | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -183,11 +183,19 @@ pub enum CastTarget {
     Uuid,
 }
 
-/// CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.
+/// The CLOSED field set for SQL `EXTRACT(<field> FROM <expr>)`.
 ///
-/// Each admitted field has a live three-dialect proof and a faithful renderer on
-/// `PostgreSQL`, `SQLite`, and `MySQL`. Fields with PostgreSQL-only semantics live in
-/// [`PgExtractField`] instead.
+/// ONE set for one SQL construct. This used to be two enums — a six-member
+/// `ExtractField` and a fifteen-member `PgExtractField` — split on a claim about
+/// which parts are portable. That claim is not core's to make: it is a fact
+/// about the shipping backends, it cannot be right for a backend that does not
+/// exist yet, and it was already wrong (MySQL renders `QUARTER`, `WEEK` and
+/// `MICROSECOND` natively, all three of which sat under the PostgreSQL name).
+///
+/// Which parts a target can actually render is asked per field, per backend,
+/// through
+/// [`ExprDialectFeature::Extract`](crate::validate::ExprDialectFeature::Extract),
+/// and spelled by that backend's `DmlRenderer::render_extract`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum ExtractField {
@@ -203,16 +211,7 @@ pub enum ExtractField {
     Minute,
     /// Day-of-week, 0=Sunday through 6=Saturday.
     Dow,
-}
-
-/// CLOSED PostgreSQL-only field set for `EXTRACT(<field> FROM <expr>)`.
-///
-/// These fields either have no portable SQLite/MySQL analogue or have semantics
-/// that diverge under the mandated portable renderers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PgExtractField {
-    /// Seconds including fractional seconds on `PostgreSQL`.
+    /// Seconds, including the fractional part where the backend keeps one.
     Second,
     /// Day-of-year.
     Doy,
@@ -483,22 +482,21 @@ pub enum Expr {
         /// The expression whose stored size in bytes is measured.
         expr: Box<Self>,
     },
-    /// **PORTABLE** scalar expression extracting a date/time part whose numeric
-    /// semantics are identical on `PostgreSQL`, `SQLite`, and `MySQL`.
+    /// Scalar `EXTRACT(<field> FROM <expr>)` — a date/time part of a value.
+    ///
+    /// THE extraction node; there is no second one. Whether a given target can
+    /// render a given field is that backend's answer to
+    /// [`ExprDialectFeature::Extract`](crate::validate::ExprDialectFeature::Extract),
+    /// not a property of the node and not a split baked into this enum.
     Extract {
         /// Closed EXTRACT field.
         field: ExtractField,
         /// Source expression.
         from: Box<Self>,
     },
-    /// **PG-ONLY** scalar expression `EXTRACT(<field> FROM <expr>)`.
-    PgExtract {
-        /// Closed `PostgreSQL` EXTRACT field.
-        field: PgExtractField,
-        /// Source expression.
-        from: Box<Self>,
-    },
-    /// **PG-ONLY** structured interval literal rendered as `INTERVAL '<parts>'`.
+    /// A structured interval literal. The [`Duration`] is neutral; each backend
+    /// writes its own interval syntax through `DmlRenderer::render_interval`, or
+    /// refuses when it has none.
     Interval {
         /// Structured duration fields. Fields serialize in canonical order
         /// (`years`, `months`, `days`, `hours`, `minutes`, `seconds`) and absent
@@ -630,7 +628,7 @@ mod dialectal_tests {
                 | ExprDialectFeature::RegexMatch
                 | ExprDialectFeature::Aggregate(_)
                 | ExprDialectFeature::StorageSize
-                | ExprDialectFeature::PgExtract
+                | ExprDialectFeature::Extract(_)
                 | ExprDialectFeature::Interval => Ok(()),
             }
         }

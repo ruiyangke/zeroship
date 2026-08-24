@@ -355,8 +355,14 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// a shared formatter with a capability check in front of it.
     fn render_interval(&self, duration: &Duration) -> Result<String, DmlError>;
 
-    /// The vendor's spelling of a portable date-part extraction.
-    fn render_extract(&self, field: ExtractField, expr: &str) -> String;
+    /// The vendor's spelling of a date-part extraction, or a refusal for a part
+    /// it cannot render.
+    ///
+    /// Fallible because the field set is the WHOLE SQL one and no backend covers
+    /// all of it. An infallible signature would make a backend invent SQL for a
+    /// part it does not have and lean on the validator having refused first —
+    /// a correct answer held in place by something other than this method.
+    fn render_extract(&self, field: ExtractField, expr: &str) -> Result<String, DmlError>;
 
     /// The vendor's string-concatenation spelling for two rendered operands.
     fn render_concat(&self, l: &str, r: &str) -> String;

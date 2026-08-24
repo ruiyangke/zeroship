@@ -2986,7 +2986,7 @@ test("chain extract and root interval build extract and interval nodes", () => {
   assert.deepEqual(ops[2].constraint.kind.expr, {
     node: "binOp",
     op: "gt",
-    lhs: { node: "pgExtract", field: "epoch", from: { node: "colRef", name: "created_at" } },
+    lhs: { node: "extract", field: "epoch", from: { node: "colRef", name: "created_at" } },
     rhs: { node: "literal", value: 0 },
   });
   assert.deepEqual(ops[3].constraints[0].kind.expr, {

@@ -2133,7 +2133,7 @@ fn collect_expr_database_requirements(
         | Expr::StorageSize { expr } => {
             collect_expr_database_requirements(expr, dialect, requirements);
         }
-        Expr::Extract { from, .. } | Expr::PgExtract { from, .. } => {
+        Expr::Extract { from, .. } => {
             collect_expr_database_requirements(from, dialect, requirements);
         }
         Expr::Dialectal { legs } => {
@@ -9768,9 +9768,6 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
                 collect_col_refs(expr, out);
             }
             Expr::Extract { from, .. } => {
-                collect_col_refs(from, out);
-            }
-            Expr::PgExtract { from, .. } => {
                 collect_col_refs(from, out);
             }
             Expr::Between { operand, low, high } => {

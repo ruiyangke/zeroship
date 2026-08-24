@@ -1023,7 +1023,6 @@ function validateDefaultExpr(expr) {
         return;
       case "regexMatch":
       case "storageSize":
-      case "pgExtract":
       case "interval":
       case "dialect":
         throw structuredError(
@@ -1514,7 +1513,8 @@ function pgRegexPattern(pattern) {
 }
 var portableExtractFields = ["year", "month", "day", "hour", "minute", "dow"];
 var portableExtractFieldSet = new Set(portableExtractFields);
-var pgExtractFields = [
+var extractFields = [
+  ...portableExtractFields,
   "second",
   "doy",
   "epoch",
@@ -1528,10 +1528,10 @@ var pgExtractFields = [
   "microseconds",
   "milliseconds",
   "timezone",
-  "timezone_hour",
-  "timezone_minute"
+  "timezoneHour",
+  "timezoneMinute"
 ];
-var pgExtractFieldSet = new Set(pgExtractFields);
+var extractFieldSet = new Set(extractFields);
 var castTargets = ["text", "int", "real", "boolean", "bytes", "uuid"];
 var castTargetSet = new Set(castTargets);
 function castTarget(args) {
@@ -1547,16 +1547,13 @@ function castTarget(args) {
   }
   return to;
 }
-function pgExtractField(field) {
-  if (typeof field === "string" && portableExtractFieldSet.has(field)) {
-    return field;
-  }
-  if (typeof field === "string" && pgExtractFieldSet.has(field)) {
+function extractField(field) {
+  if (typeof field === "string" && extractFieldSet.has(field)) {
     return field;
   }
   throw structuredError(
     "OP_INVALID",
-    `.extract(field): field must be one of ${[...portableExtractFields, ...pgExtractFields].map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`
+    `.extract(field): field must be one of ${extractFields.map((f) => JSON.stringify(f)).join(", ")}; got ${JSON.stringify(field)}`
   );
 }
 var durationFields = ["years", "months", "days", "hours", "minutes", "seconds"];
@@ -1750,12 +1747,7 @@ var ExprChainImpl = class {
     return chain({ node: "fnCall", fn: "replace", args: [this.__node, exprArg(from), exprArg(to)] });
   }
   extract(field) {
-    const f = pgExtractField(field);
-    return chain({
-      node: portableExtractFieldSet.has(f) ? "extract" : "pgExtract",
-      field: f,
-      from: this.__node
-    });
+    return chain({ node: "extract", field: extractField(field), from: this.__node });
   }
   splitPart(delim, n) {
     splitPartGrammarLint(delim, n);
@@ -2106,15 +2098,11 @@ function validateImmutableExpr(expr, position, opts = {}) {
         walk(n.expr);
         return;
       case "extract":
-        if (typeof n.field !== "string" || !portableExtractFieldSet.has(n.field)) {
-          rejectImmutableExpr(position, `extract field ${JSON.stringify(n.field)} is not portable here`);
+        if (typeof n.field !== "string" || !extractFieldSet.has(n.field)) {
+          rejectImmutableExpr(position, `extract field ${JSON.stringify(n.field)} is not an extract field`);
         }
-        walk(n.from);
-        return;
-      case "pgExtract":
-        if (!opts.allowPgImmutable) rejectPgNode("pgExtract");
-        if (typeof n.field !== "string" || !pgExtractFieldSet.has(n.field)) {
-          rejectImmutableExpr(position, `pgExtract field ${JSON.stringify(n.field)} is not a PG extract field`);
+        if (!portableExtractFieldSet.has(n.field) && !opts.allowPgImmutable) {
+          rejectPgNode(`extract(${JSON.stringify(n.field)})`);
         }
         walk(n.from);
         return;

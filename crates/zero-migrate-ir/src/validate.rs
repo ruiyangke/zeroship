@@ -44,7 +44,7 @@
 use std::collections::BTreeMap;
 
 use crate::dialect::DialectId;
-use crate::expr::{AggFunc, CaseBranch, Duration, Expr, ScalarFn, SynthFn};
+use crate::expr::{AggFunc, CaseBranch, Duration, Expr, ExtractField, ScalarFn, SynthFn};
 use crate::ir::AlterPrimaryKeyAction;
 
 // ── Canonical authoring-time error codes ────────────────────────────────────
@@ -480,9 +480,13 @@ pub enum ExprDialectFeature<'a> {
     Aggregate(AggFunc),
     /// Whether the backend can measure the STORED byte size of a value.
     StorageSize,
-    /// The vendor-named PostgreSQL `EXTRACT` IR node.
-    PgExtract,
-    /// The vendor-named PostgreSQL interval-literal IR node.
+    /// Whether the backend can render THIS date/time part of an `EXTRACT`.
+    ///
+    /// Per-field rather than per-node on purpose: the parts a target supports
+    /// are that target's business, and core holding a "portable subset" is the
+    /// judgement this request exists to move out of it.
+    Extract(ExtractField),
+    /// Whether the backend has an interval literal.
     Interval,
 }
 
@@ -727,8 +731,7 @@ fn first_aggregate(expr: &Expr) -> Option<&'static str> {
         | Expr::Cast { operand, .. }
         | Expr::RegexMatch { expr: operand, .. }
         | Expr::StorageSize { expr: operand }
-        | Expr::Extract { from: operand, .. }
-        | Expr::PgExtract { from: operand, .. } => first_aggregate(operand),
+        | Expr::Extract { from: operand, .. } => first_aggregate(operand),
         Expr::Case { branches, r#else } => branches
             .iter()
             .find_map(|CaseBranch { when, then }| {
@@ -774,8 +777,7 @@ fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
         | Expr::Cast { operand, .. }
         | Expr::RegexMatch { expr: operand, .. }
         | Expr::StorageSize { expr: operand }
-        | Expr::Extract { from: operand, .. }
-        | Expr::PgExtract { from: operand, .. } => first_volatile_function(operand),
+        | Expr::Extract { from: operand, .. } => first_volatile_function(operand),
         Expr::Case { branches, r#else } => branches
             .iter()
             .find_map(|CaseBranch { when, then }| {
@@ -1032,9 +1034,10 @@ impl Ctx<'_> {
                 self.validate_feature(ExprDialectFeature::StorageSize)?;
                 self.walk_depth(expr, d)
             }
-            Expr::Extract { field: _, from } => self.walk_depth(from, d),
-            Expr::PgExtract { field: _, from } => {
-                self.validate_feature(ExprDialectFeature::PgExtract)?;
+            // Every field is asked, not just the ones core used to file under a
+            // vendor: the target answers for the part actually authored.
+            Expr::Extract { field, from } => {
+                self.validate_feature(ExprDialectFeature::Extract(*field))?;
                 self.walk_depth(from, d)
             }
             Expr::Interval { duration } => {

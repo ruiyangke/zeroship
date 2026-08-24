@@ -8340,7 +8340,6 @@ fn validate_default_expr(
             }
             Expr::RegexMatch { .. }
             | Expr::StorageSize { .. }
-            | Expr::PgExtract { .. }
             | Expr::Interval { .. }
             | Expr::Dialectal { .. } => Err(mk_err(
                 "a column default cannot use volatile, dialect-specific, or vendor-only expression nodes"
@@ -9073,7 +9072,7 @@ pub fn validate_op_resolved(
 mod tests {
     use super::*;
     use crate::model::expr::{
-        AggFunc, BinaryOp, CastTarget, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn,
+        AggFunc, BinaryOp, CastTarget, Expr, ExtractField, ScalarFn, SynthFn,
         UnaryOp,
     };
     use crate::model::ir::{IndexElement, IrScalar, IrValue};
@@ -9255,8 +9254,8 @@ mod tests {
                 }),
                 rhs: Box::new(Expr::lit(IrScalar::Int(8192))),
             },
-            Expr::PgExtract {
-                field: PgExtractField::Epoch,
+            Expr::Extract {
+                field: ExtractField::Epoch,
                 from: Box::new(Expr::col("total")),
             },
         ] {
@@ -9509,8 +9508,8 @@ mod tests {
             Expr::StorageSize {
                 expr: Box::new(Expr::col("name")),
             },
-            Expr::PgExtract {
-                field: PgExtractField::Epoch,
+            Expr::Extract {
+                field: ExtractField::Epoch,
                 from: Box::new(Expr::col("total")),
             },
         ] {

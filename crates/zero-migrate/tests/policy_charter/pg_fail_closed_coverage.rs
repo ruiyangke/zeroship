@@ -2,7 +2,7 @@ use crate::support;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use zero_migrate::model::expr::{Expr, PgExtractField, ScalarFn};
+use zero_migrate::model::expr::{Expr, ExtractField, ScalarFn};
 use zero_migrate::model::ir::{
     FuncLanguage, GrantTarget, IrScalar, IrValue, MigrationIr, Op, PartitionBounds, PolicyCmd,
     Privilege, SelectAst, TableRef, ViewQuery, CURRENT_IR_VERSION,
@@ -18,7 +18,7 @@ const EXPECTED_PG_ONLY_EXPR_NODES: &[&str] = &[
     "FnCall::CurrentSetting",
     "FnCall::CurrentUser",
     "StorageSize",
-    "PgExtract",
+    "Extract::vendorField",
     "Interval",
     "UuidV7",
 ];
@@ -64,7 +64,6 @@ const fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
         | Expr::DistinctFrom { .. }
         | Expr::Agg { .. }
         | Expr::InList { .. }
-        | Expr::Extract { .. }
         | Expr::Dialectal { .. } => None,
         Expr::UuidV7 => Some("UuidV7"),
         Expr::FnCall { r#fn, .. } => match r#fn {
@@ -85,7 +84,34 @@ const fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
             ScalarFn::CurrentUser => Some("FnCall::CurrentUser"),
         },
         Expr::StorageSize { .. } => Some("StorageSize"),
-        Expr::PgExtract { .. } => Some("PgExtract"),
+        // One node now, so the census is per FIELD: the parts every shipping
+        // backend renders are portable, the rest must still fail closed off PG.
+        Expr::Extract { field, .. } => match field {
+            ExtractField::Year
+            | ExtractField::Month
+            | ExtractField::Day
+            | ExtractField::Hour
+            | ExtractField::Minute
+            | ExtractField::Dow => None,
+            // Spelled out rather than left to a `_` arm: a wildcard here would
+            // silently classify a future field, and this census exists to make
+            // that a decision somebody wrote down.
+            ExtractField::Second
+            | ExtractField::Doy
+            | ExtractField::Epoch
+            | ExtractField::Quarter
+            | ExtractField::Week
+            | ExtractField::Isodow
+            | ExtractField::Isoyear
+            | ExtractField::Century
+            | ExtractField::Decade
+            | ExtractField::Millennium
+            | ExtractField::Microseconds
+            | ExtractField::Milliseconds
+            | ExtractField::Timezone
+            | ExtractField::TimezoneHour
+            | ExtractField::TimezoneMinute => Some("Extract::vendorField"),
+        },
         Expr::Interval { .. } => Some("Interval"),
         Expr::RegexMatch { .. } => None,
     }
@@ -107,8 +133,8 @@ fn pg_only_expr_samples() -> Vec<Expr> {
         Expr::StorageSize {
             expr: Box::new(Expr::col("name")),
         },
-        Expr::PgExtract {
-            field: PgExtractField::Epoch,
+        Expr::Extract {
+            field: ExtractField::Epoch,
             from: Box::new(Expr::col("ts")),
         },
         Expr::Interval {

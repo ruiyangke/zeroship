@@ -480,7 +480,7 @@ impl ExprDialectValidator for DuckDbDmlRenderer {
             | ExprDialectFeature::UuidV7Generation
             | ExprDialectFeature::RegexMatch
             | ExprDialectFeature::StorageSize
-            | ExprDialectFeature::PgExtract
+            | ExprDialectFeature::Extract(_)
             | ExprDialectFeature::Interval => Ok(()),
         }
     }
@@ -683,8 +683,8 @@ impl DmlRenderer for DuckDbDmlRenderer {
         ))
     }
 
-    fn render_extract(&self, field: ExtractField, expr: &str) -> String {
-        format!("date_part('{field:?}', {expr})")
+    fn render_extract(&self, field: ExtractField, expr: &str) -> Result<String, DmlError> {
+        Ok(format!("date_part('{field:?}', {expr})"))
     }
 
     fn render_concat(&self, l: &str, r: &str) -> String {

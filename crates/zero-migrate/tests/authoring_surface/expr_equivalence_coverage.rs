@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use zero_migrate::model::expr::{
-    AggFunc, BinaryOp, CaseBranch, CastTarget, Expr, ExtractField, PgExtractField, ScalarFn,
+    AggFunc, BinaryOp, CaseBranch, CastTarget, Expr, ExtractField, ScalarFn,
     SynthFn, UnaryOp,
 };
 use zero_migrate::model::ir::{IrScalar, IrValue};
@@ -58,6 +58,25 @@ const fn portable(variant: &'static str, proof: &'static str, claim: ProofClaim)
 
 const fn vendor(variant: &'static str, reason: &'static str) -> ExprCoverage {
     ExprCoverage::Vendor { variant, reason }
+}
+
+/// The EXTRACT fields all three shipping backends render today.
+///
+/// This expectation belongs in a test, not in the IR. It used to be structural —
+/// `ExtractField` vs `PgExtractField` — which made a claim about backends part of
+/// the wire contract and froze it there. Now widening it (MySQL's native
+/// `QUARTER`/`WEEK`/`MICROSECOND` are the obvious candidates) is a visible diff
+/// here plus a live proof, instead of a schema change.
+const fn is_tri_dialect_extract_field(field: ExtractField) -> bool {
+    matches!(
+        field,
+        ExtractField::Year
+            | ExtractField::Month
+            | ExtractField::Day
+            | ExtractField::Hour
+            | ExtractField::Minute
+            | ExtractField::Dow
+    )
 }
 
 const fn classify_expr(expr: &Expr) -> ExprCoverage {
@@ -182,14 +201,18 @@ const fn classify_expr(expr: &Expr) -> ExprCoverage {
             "StorageSize",
             "pg_column_size is a PG-only storage-layout expression",
         ),
-        Expr::Extract { .. } => portable(
+        // One node, so the claim is now per FIELD. The six parts every shipping
+        // backend renders carry the live three-dialect equivalence proof; the
+        // rest are vendor-shaped until a backend proves otherwise, which is a
+        // claim about the backends and therefore lives here rather than in the IR.
+        Expr::Extract { field, .. } if is_tri_dialect_extract_field(*field) => portable(
             "Extract",
             "extract_equivalence::portable_extract_fields_are_live_equivalent_on_all_three_dialects",
             ProofClaim::SemanticEquivalence,
         ),
-        Expr::PgExtract { .. } => vendor(
-            "PgExtract",
-            "PG-only EXTRACT fields have no portable SQLite/MySQL equivalent",
+        Expr::Extract { .. } => vendor(
+            "Extract::vendorField",
+            "these EXTRACT fields have no proven SQLite/MySQL renderer today",
         ),
         Expr::Interval { .. } => vendor(
             "Interval",
@@ -409,8 +432,8 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
         Expr::StorageSize {
             expr: Box::new(Expr::col("name")),
         },
-        Expr::PgExtract {
-            field: PgExtractField::Epoch,
+        Expr::Extract {
+            field: ExtractField::Epoch,
             from: Box::new(Expr::col("ts")),
         },
         Expr::Interval {

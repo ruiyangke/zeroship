@@ -184,7 +184,7 @@ mod tests {
     use zero_migrate_backend::step::BindValue;
     use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
     use zero_migrate_ir::expr::{
-        BinaryOp, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
+        BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
     };
 
     const SCHEMA: &str = "app_proj";
@@ -932,9 +932,9 @@ mod tests {
     }
 
     #[test]
-    fn pg_extract_renders_only_on_postgres() {
-        let expr = Expr::PgExtract {
-            field: PgExtractField::Epoch,
+    fn extract_fields_render_only_where_the_backend_admits_them() {
+        let expr = Expr::Extract {
+            field: ExtractField::Epoch,
             from: Box::new(Expr::col("ts")),
         };
         assert_eq!(
@@ -943,20 +943,24 @@ mod tests {
         );
         for dialect in [&SQLITE, &MYSQL] {
             let err = render_expr_inline(&expr, dialect).unwrap_err();
+            // Stricter than the old `contains("PostgreSQL-only")`, which was one
+            // shared sentence every refusal produced: the refusal must now name
+            // the FIELD it could not render, so a backend refusing the wrong part
+            // no longer satisfies this.
             assert!(
-                err.to_string().contains("PostgreSQL-only"),
-                "pgExtract must refuse {dialect:?}: {err}"
+                err.to_string().contains("epoch"),
+                "an extract refusal must name the field it declined on {dialect:?}: {err}"
             );
         }
 
-        let second = Expr::PgExtract {
-            field: PgExtractField::Second,
+        let second = Expr::Extract {
+            field: ExtractField::Second,
             from: Box::new(Expr::col("ts")),
         };
         assert_eq!(
             render_expr_inline(&second, &POSTGRES).unwrap(),
             "EXTRACT(second FROM \"ts\")",
-            "second stays PG-only because PG preserves fractional seconds"
+            "PostgreSQL keeps fractional seconds, so it admits this field"
         );
     }
 

@@ -45,7 +45,6 @@ const ENUM_DEFS = [
   "EmptyContainerKind",
   "CastTarget",
   "ExtractField",
-  "PgExtractField",
   // Aggregate function tokens (§3.4/§3.6): count/sum/avg/min/max plus PG-first
   // stringAgg/arrayAgg/boolAnd/boolOr — the closed `AggFunc` enum consumed by the
   // `agg` Expr node.

@@ -461,7 +461,7 @@ pub use render::lower::{
 // The closed expression AST the IR's transform/predicate positions
 // carry. Constructed in JS, serialized as data, NEVER parsed from text.
 pub use model::expr::{
-    BinaryOp, CaseBranch, CastTarget, Duration, Expr, ExtractField, PgExtractField, ScalarFn,
+    BinaryOp, CaseBranch, CastTarget, Duration, Expr, ExtractField, ScalarFn,
     SynthFn, UnaryOp,
 };
 // The STRUCTURAL expression-AST validator + the structured-error envelope.
