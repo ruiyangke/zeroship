@@ -188,12 +188,19 @@ impl TlsSession {
     /// back, and the connection died with `error communicating with the
     /// server` - this error, surfacing as an I/O failure several layers up.
     /// The caller loops back to `reader()` between every step now.
-    fn feed_ciphertext_step(&mut self, src: &mut &[u8]) -> io::Result<()> {
+    /// Returns whether the peer has sent `close_notify`, which the caller needs
+    /// to tell a clean shutdown from a stall: `read_tls` answers `Ok(0)`
+    /// unconditionally once that alert has arrived, so "rustls took nothing"
+    /// means END OF STREAM in that case and a protocol failure otherwise.
+    fn feed_ciphertext_step(&mut self, src: &mut &[u8]) -> io::Result<bool> {
         self.conn.read_tls(src)?;
-        self.conn
+        let state = self
+            .conn
             .process_new_packets()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        self.collect_outgoing()
+        let peer_has_closed = state.peer_has_closed();
+        self.collect_outgoing()?;
+        Ok(peer_has_closed)
     }
 
     /// Decrypted bytes, or 0 when rustls has none buffered.
@@ -352,11 +359,21 @@ where
                 let before = src.len();
                 let outcome = self.session.borrow_mut().feed_ciphertext_step(&mut src);
                 self.cipher_read += before - src.len();
-                outcome?;
+                let peer_has_closed = outcome?;
                 if before == src.len() {
-                    // rustls took nothing and raised nothing. Dropping the
-                    // remainder would silently desynchronise the stream, so
-                    // treat it as a protocol failure rather than looping.
+                    // rustls took nothing. That is END OF STREAM when the peer
+                    // has sent close_notify - `read_tls` answers `Ok(0)`
+                    // unconditionally from then on - and a protocol failure
+                    // otherwise, where dropping the remainder would silently
+                    // desynchronise the stream. Treating the first case as the
+                    // second turns an orderly shutdown with trailing buffered
+                    // ciphertext into a spurious error.
+                    if peer_has_closed {
+                        return self
+                            .session
+                            .borrow_mut()
+                            .read_plaintext(&mut self.plain[..cap]);
+                    }
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "the TLS session stopped accepting ciphertext",
@@ -579,6 +596,156 @@ mod tests {
         async fn shutdown(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A peer that hands over one scripted chunk per read, then EOF.
+    ///
+    /// One chunk per read is the whole point. `read_tls` will happily swallow
+    /// an entire buffer in a single call, so a peer that delivered everything
+    /// at once could never leave bytes sitting behind an already-processed
+    /// `close_notify` - which is the state under test.
+    struct ScriptedPeer {
+        chunks: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl AsyncRead for ScriptedPeer {
+        async fn read<B: IoBufMut>(&mut self, mut buf: B) -> BufResult<usize, B> {
+            match self.chunks.pop_front() {
+                Some(bytes) => {
+                    assert!(
+                        bytes.len() <= buf.buf_capacity(),
+                        "the test peer's chunk must fit in one read"
+                    );
+                    let n = bytes.len();
+                    commit(&mut buf, &bytes);
+                    BufResult(Ok(n), buf)
+                }
+                None => BufResult(Ok(0), buf),
+            }
+        }
+    }
+
+    /// Drive a real client/server handshake entirely in memory and return the
+    /// finished client session plus a sink for whatever the server says next.
+    ///
+    /// A real handshake, not a stub: the state this test is about
+    /// (`read_tls` answering `Ok(0)` forever once `close_notify` has arrived)
+    /// only exists behind live keys.
+    fn handshaken_pair() -> (ClientConnection, rustls::ServerConnection) {
+        let issued = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("generate a self-signed certificate");
+        let cert = rustls::pki_types::CertificateDer::from(issued.cert.der().to_vec());
+        let key = rustls::pki_types::PrivateKeyDer::try_from(issued.signing_key.serialize_der())
+            .expect("serialize the test key");
+
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let server_config = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("server protocol versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .expect("server config");
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(cert).expect("trust the test certificate");
+        let client_config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        let mut client = ClientConnection::new(
+            Arc::new(client_config),
+            rustls::pki_types::ServerName::try_from("localhost").expect("server name"),
+        )
+        .expect("client connection");
+        let mut server =
+            rustls::ServerConnection::new(Arc::new(server_config)).expect("server connection");
+
+        // Pump both directions until neither has anything left to say.
+        for _ in 0..16 {
+            let mut to_server = Vec::new();
+            while client.wants_write() {
+                client.write_tls(&mut to_server).expect("client write_tls");
+            }
+            if !to_server.is_empty() {
+                let mut cursor = &to_server[..];
+                while !cursor.is_empty() {
+                    server.read_tls(&mut cursor).expect("server read_tls");
+                    server.process_new_packets().expect("server process");
+                }
+            }
+            let mut to_client = Vec::new();
+            while server.wants_write() {
+                server.write_tls(&mut to_client).expect("server write_tls");
+            }
+            if !to_client.is_empty() {
+                let mut cursor = &to_client[..];
+                while !cursor.is_empty() {
+                    client.read_tls(&mut cursor).expect("client read_tls");
+                    client.process_new_packets().expect("client process");
+                }
+            }
+            if !client.is_handshaking() && !server.is_handshaking() {
+                return (client, server);
+            }
+        }
+        panic!("the in-memory handshake did not converge");
+    }
+
+    /// An orderly `close_notify` with ciphertext still buffered behind it is
+    /// END OF STREAM, not a protocol error.
+    ///
+    /// `read_tls` answers `Ok(0)` unconditionally once that alert has been
+    /// processed. The decrypt loop reads "rustls took nothing" as a stall and
+    /// refuses, which is right for a genuine stall and wrong here - so it has
+    /// to ask whether the peer closed before deciding. Anything after the alert
+    /// is unreachable by definition, and a trailing byte is what forces the
+    /// loop to look at the buffer again after the close.
+    ///
+    /// This test does NOT cover a stall that is NOT a close: that arm still
+    /// returns the protocol error, and nothing here exercises it.
+    #[compio::test]
+    async fn a_close_notify_with_trailing_ciphertext_ends_the_stream() {
+        let (client, mut server) = handshaken_pair();
+
+        let mut wire = Vec::new();
+        server
+            .writer()
+            .write_all(b"payload")
+            .expect("queue application data");
+        server.send_close_notify();
+        while server.wants_write() {
+            server.write_tls(&mut wire).expect("server write_tls");
+        }
+        // A SEPARATE read, delivered after the alert has been processed. It is
+        // unreachable by the protocol, and that is the point: the loop has to
+        // consult rustls once more with bytes in hand, and see `Ok(0)`. Put in
+        // the same chunk it would simply be swallowed with everything else.
+        let session = share(client);
+        let mut reader = TlsReader::new(
+            ScriptedPeer {
+                chunks: std::collections::VecDeque::from(vec![wire, vec![0x17]]),
+            },
+            session,
+        );
+
+        let mut out = vec![0u8; 64];
+        let n = reader
+            .fill(out.len())
+            .await
+            .expect("the application data before the alert must still arrive");
+        out[..n].copy_from_slice(&reader.plain[..n]);
+        assert_eq!(&out[..n], b"payload");
+
+        assert_eq!(
+            reader
+                .fill(64)
+                .await
+                .expect("a close_notify is an ending, not a protocol failure"),
+            0,
+            "the stream must report end of file after close_notify"
+        );
     }
 
     fn client_connection() -> ClientConnection {
