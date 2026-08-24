@@ -148,6 +148,13 @@ workspace = true
 optional = true
 
 [dev-dependencies]
+# Differential oracle. tokio-postgres is the crate this one was ported from,
+# so running both against the same server and comparing answers is the
+# strongest check available for a port. Permitted here and ONLY here: the
+# zero-tokio invariant bans a normal or build dependency, and dev is exempt by
+# the 2026-08-24 decision recorded in AGENTS.md.
+tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }
+tokio = { version = "1", features = ["rt", "macros"] }
 compio = { workspace = true }
 criterion = { workspace = true }
 # Integration tests consume the LISTEN/NOTIFY async-message stream
