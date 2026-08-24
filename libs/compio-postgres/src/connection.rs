@@ -124,8 +124,8 @@ pub enum RequestMessages {
     /// A fully pre-encoded batch of frontend messages.
     Single(FrontendMessage),
     /// A streaming COPY FROM STDIN source: the connection task drains
-    /// frames from the receiver until it terminates with `CopyDone+Sync`
-    /// or `CopyFail+Sync`.
+    /// frames from the receiver until it terminates with `CopyDone+Sync`,
+    /// extended-protocol `CopyFail+Sync`, or simple-protocol `CopyFail`.
     CopyIn(CopyInReceiver),
 }
 
@@ -179,8 +179,9 @@ enum ReadObligationState {
     Active,
     /// COPY IN entered input mode and PostgreSQL is waiting for caller data.
     PausedForCopyInput,
-    /// CopyDone/CopyFail + Sync is flushing; the server does not owe its final
-    /// response until that flush succeeds.
+    /// The terminal CopyDone/CopyFail frame is flushing, including Sync when
+    /// the protocol requires it; the server does not owe its final response
+    /// until that flush succeeds.
     PendingCopyTerminalFlush,
     /// `ReadyForQuery` arrived, possibly while the matching flush was still in
     /// progress. This state never contributes to the shared count.
@@ -2132,8 +2133,8 @@ where
                         }
                     }
                     MuxEvent::CopyFrame(None) => {
-                        // COPY stream ended (the receiver already appended
-                        // CopyDone+Sync / CopyFail+Sync as its terminal frame).
+                        // COPY stream ended (the receiver already emitted its
+                        // protocol-appropriate CopyDone/CopyFail terminal).
                         copy_in = None;
                         copy_in_observation = None;
                         copy_read_obligation = None;
