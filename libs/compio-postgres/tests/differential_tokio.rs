@@ -179,3 +179,214 @@ async fn both_drivers_agree_on_command_tags_and_sqlstates() {
         divergences.join("\n")
     );
 }
+
+/// A TEMPORARY table lives in a per-SESSION schema, so its name carries an
+/// ordinal that differs between the two connections - `pg_temp_3` against
+/// `pg_temp_4`. That is server state, not driver output, and comparing it
+/// would fail every run while proving nothing. Only the ordinal is erased.
+fn normalise_schema(schema: Option<&str>) -> Option<String> {
+    schema.map(|name| {
+        if name.starts_with("pg_temp_") {
+            "pg_temp_N".to_owned()
+        } else {
+            name.to_owned()
+        }
+    })
+}
+
+/// Every field of a server error, from both drivers.
+///
+/// Rendered to strings so the comparison cannot compare two views of one
+/// object: these values crossed a thread boundary as plain data.
+#[derive(Debug, PartialEq, Eq)]
+struct Fields {
+    severity: String,
+    code: String,
+    message: String,
+    detail: Option<String>,
+    hint: Option<String>,
+    position: Option<String>,
+    where_: Option<String>,
+    schema: Option<String>,
+    table: Option<String>,
+    column: Option<String>,
+    datatype: Option<String>,
+    constraint: Option<String>,
+    routine: Option<String>,
+    line_present: bool,
+    file_present: bool,
+}
+
+/// Failures chosen to populate DIFFERENT field sets.
+///
+/// A single failing statement would compare one shape and call the parser
+/// checked. A constraint violation carries schema/table/constraint; a syntax
+/// error carries a position; a bad column carries a column name; a domain
+/// violation carries a datatype. Between them nearly every optional field is
+/// exercised at least once.
+fn error_cases() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "SELECT * FROM cpg_absent_relation",
+            "undefined table - message and code only, so it pins the required fields",
+        ),
+        (
+            "SELECT 1 FROM WHERE",
+            "syntax error - carries a position, the field whose parse this crate got wrong once",
+        ),
+        (
+            "INSERT INTO cpg_diff_err VALUES (1)",
+            "not-null / constraint violation - carries schema, table and constraint",
+        ),
+        (
+            "SELECT cpg_absent_column FROM cpg_diff_err",
+            "undefined column - carries a column-ish diagnostic",
+        ),
+        (
+            "SELECT 'x'::integer",
+            "invalid text representation - carries a datatype-flavoured message",
+        ),
+        (
+            "DO $$ BEGIN RAISE EXCEPTION 'boom' USING HINT = 'try less', DETAIL = 'the detail'; END $$",
+            "a raised exception - the only reliable way to force DETAIL and HINT together",
+        ),
+    ]
+}
+
+const ERROR_FIXTURE: &str = "CREATE TEMPORARY TABLE cpg_diff_err (id int, tag text NOT NULL, CONSTRAINT cpg_diff_uq UNIQUE (id))";
+
+fn tokio_fields(url: String, statements: Vec<&'static str>) -> Vec<Option<Fields>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle =
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build the tokio runtime");
+            let collected =
+                runtime.block_on(async move {
+                    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                        .await
+                        .expect("tokio-postgres connect");
+                    let driver = tokio::spawn(async move {
+                        let _ = connection.await;
+                    });
+                    client
+                        .execute(ERROR_FIXTURE, &[])
+                        .await
+                        .expect("fixture table");
+
+                    let mut collected = Vec::new();
+                    for statement in statements {
+                        collected.push(client.execute(statement, &[]).await.err().and_then(
+                            |error| {
+                                error.as_db_error().map(|db| Fields {
+                                    severity: db.severity().to_owned(),
+                                    code: db.code().code().to_owned(),
+                                    message: db.message().to_owned(),
+                                    detail: db.detail().map(str::to_owned),
+                                    hint: db.hint().map(str::to_owned),
+                                    position: db.position().map(|position| format!("{position:?}")),
+                                    where_: db.where_().map(str::to_owned),
+                                    schema: normalise_schema(db.schema()),
+                                    table: db.table().map(str::to_owned),
+                                    column: db.column().map(str::to_owned),
+                                    datatype: db.datatype().map(str::to_owned),
+                                    constraint: db.constraint().map(str::to_owned),
+                                    routine: db.routine().map(str::to_owned),
+                                    line_present: db.line().is_some(),
+                                    file_present: db.file().is_some(),
+                                })
+                            },
+                        ));
+                    }
+                    drop(client);
+                    let _ = driver.await;
+                    collected
+                });
+            let _ = sender.send(collected);
+        });
+    handle.join().expect("the tokio thread panicked");
+    receiver.recv().expect("no fields came back from tokio")
+}
+
+async fn compio_fields(url: &str, statements: &[&'static str]) -> Vec<Option<Fields>> {
+    let (client, connection) = compio_postgres::connect(url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+    client
+        .execute(ERROR_FIXTURE, &[])
+        .await
+        .expect("fixture table");
+
+    let mut collected = Vec::new();
+    for statement in statements {
+        collected.push(
+            client
+                .execute(*statement, &[])
+                .await
+                .err()
+                .and_then(|error| {
+                    error.as_db_error().map(|db| Fields {
+                        severity: db.severity().to_owned(),
+                        code: db.code().code().to_owned(),
+                        message: db.message().to_owned(),
+                        detail: db.detail().map(str::to_owned),
+                        hint: db.hint().map(str::to_owned),
+                        position: db.position().map(|position| format!("{position:?}")),
+                        where_: db.where_().map(str::to_owned),
+                        schema: normalise_schema(db.schema()),
+                        table: db.table().map(str::to_owned),
+                        column: db.column().map(str::to_owned),
+                        datatype: db.datatype().map(str::to_owned),
+                        constraint: db.constraint().map(str::to_owned),
+                        routine: db.routine().map(str::to_owned),
+                        line_present: db.line().is_some(),
+                        file_present: db.file().is_some(),
+                    })
+                }),
+        );
+    }
+    collected
+}
+
+/// Both drivers parse ErrorResponse themselves. They must agree field for
+/// field.
+#[compio::test]
+async fn both_drivers_agree_on_every_error_field() {
+    let url = common::test_url();
+    let cases = error_cases();
+    let statements: Vec<&'static str> = cases.iter().map(|(sql, _)| *sql).collect();
+
+    let theirs = tokio_fields(url.clone(), statements.clone());
+    let ours = compio_fields(&url, &statements).await;
+
+    let mut divergences = Vec::new();
+    for (index, (sql, why)) in cases.iter().enumerate() {
+        if ours[index] != theirs[index] {
+            divergences.push(format!(
+                "  {sql}\n    ours: {:?}\n    tokio-postgres: {:?}\n    matters because {why}",
+                ours[index], theirs[index]
+            ));
+        }
+    }
+    assert!(
+        divergences.is_empty(),
+        "the two hand-written ErrorResponse parsers disagree:\n{}",
+        divergences.join("\n")
+    );
+
+    // The cases must actually have produced errors, or the comparison above
+    // is agreement about nothing.
+    let errors = ours.iter().filter(|fields| fields.is_some()).count();
+    assert_eq!(
+        errors,
+        cases.len(),
+        "expected every case to fail with a server error, got {errors} of {}",
+        cases.len()
+    );
+}

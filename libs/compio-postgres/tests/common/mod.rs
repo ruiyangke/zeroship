@@ -330,9 +330,7 @@ pub fn replication_config(application_name: &str) -> compio_postgres::Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MAX_POSTGRES_IDENTIFIER_LEN, pid_embedded_in, redact_dsn, test_object_name,
-    };
+    use super::{MAX_POSTGRES_IDENTIFIER_LEN, pid_embedded_in, redact_dsn, test_object_name};
 
     #[test]
     fn a_slot_named_by_this_suite_yields_the_pid_that_made_it() {
@@ -370,7 +368,10 @@ mod tests {
 
     #[test]
     fn a_pid_that_is_not_a_number_is_refused_rather_than_coerced() {
-        assert_eq!(pid_embedded_in("cpg_thing_notapid_abcdef0123456789_s"), None);
+        assert_eq!(
+            pid_embedded_in("cpg_thing_notapid_abcdef0123456789_s"),
+            None
+        );
         // Negative and overflowing values are not pids either.
         assert_eq!(pid_embedded_in("cpg_thing_-1_abcdef0123456789_s"), None);
         assert_eq!(
