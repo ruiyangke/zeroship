@@ -9,7 +9,7 @@ use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
 use crate::prepare::get_type;
-use crate::types::{BorrowToSql, IsNull};
+use crate::types::{BorrowToSql, IsNull, Kind, ToSql};
 use crate::{Column, Error, Portal, Row, Statement};
 use bytes::{Bytes, BytesMut};
 use fallible_iterator::FallibleIterator;
@@ -548,6 +548,65 @@ where
     )
 }
 
+/// Encode one bind parameter, falling back to a domain's BASE type.
+///
+/// PostgreSQL reports the DECLARED parameter type in `Describe`, so binding to
+/// a domain column hands us the domain's own oid. Every `ToSql` impl in
+/// `postgres-types` gates on the base oid (`ToSql for i32` accepts `INT4` and
+/// nothing else), so `INSERT INTO t (v) VALUES ($1)` against a domain column
+/// was refused outright with "error serializing parameter" -- a statement psql
+/// executes without complaint, because libpq type-checks nothing client-side.
+/// The result direction never had this problem: `RowDescription` reports the
+/// BASE type, which is why decoding a domain column always worked.
+///
+/// The domain type is tried FIRST and the base only as a fallback, rather than
+/// unwrapping up front. A caller may legitimately implement `ToSql` for a
+/// domain by name -- that is the natural way to model `CREATE DOMAIN email` --
+/// and unwrapping unconditionally would hand such an impl the base type it
+/// does not accept, breaking code that works today.
+///
+/// The buffer is REWOUND between attempts. `to_sql` may write bytes before it
+/// fails, and leaving them would prepend garbage to the retry's encoding: the
+/// same defect that let a refused row reach the server in `binary_copy`'s
+/// `write_raw`, where `[count][len=0]` was a legal empty value PostgreSQL
+/// happily inserted.
+///
+/// THAT REWIND IS DEFENSIVE AND UNEXERCISED, measured rather than assumed:
+/// deleting it leaves `tests/domain_parameters.rs` green. `to_sql_checked`
+/// consults `accepts` BEFORE calling `to_sql`, so the rejection this function
+/// exists to recover from writes no bytes at all. The rewind covers the other
+/// shape -- an impl whose `accepts` admits the domain and whose `to_sql` then
+/// fails partway -- which no test here reaches. Keep it: it costs one `len()`
+/// on a path that already failed once, and the failure it prevents is a
+/// silently malformed parameter rather than an error.
+///
+/// This only chooses an ENCODING. The server still applies the domain's
+/// constraints, which is what `a_domain_check_constraint_still_rejects_a_bad_value`
+/// pins.
+fn encode_parameter(
+    param: &dyn ToSql,
+    ty: &Type,
+    buf: &mut BytesMut,
+) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+    let checkpoint = buf.len();
+    let first = param.to_sql_checked(ty, buf);
+    if first.is_ok() {
+        return first;
+    }
+
+    // Walk the whole chain: a domain may be defined over another domain.
+    let mut base = ty;
+    while let Kind::Domain(inner) = base.kind() {
+        base = inner;
+    }
+    if std::ptr::eq(base, ty) {
+        return first;
+    }
+
+    buf.truncate(checkpoint);
+    param.to_sql_checked(base, buf)
+}
+
 fn encode_bind_raw<P, I>(
     statement_name: &str,
     params: I,
@@ -570,7 +629,7 @@ where
         statement_name,
         param_formats,
         params.into_iter().enumerate(),
-        |(idx, (param, ty)), buf| match param.borrow_to_sql().to_sql_checked(&ty, buf) {
+        |(idx, (param, ty)), buf| match encode_parameter(param.borrow_to_sql(), &ty, buf) {
             Ok(IsNull::No) => Ok(postgres_protocol::IsNull::No),
             Ok(IsNull::Yes) => Ok(postgres_protocol::IsNull::Yes),
             Err(e) => {
