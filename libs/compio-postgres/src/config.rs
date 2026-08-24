@@ -1618,30 +1618,39 @@ impl Config {
                     .map_err(|_| Error::config_parse(Box::new(InvalidValue("keepalives"))))?;
                 self.keepalives(keepalives != 0);
             }
+            // The three arms below share one rule, and each used to break it
+            // differently. libpq reads all three with a SIGNED parse and
+            // clamps a negative to zero (measured 2026-08-23 against
+            // PostgreSQL 16: `psql ... keepalives_idle=-1` reaches
+            // `setsockopt(TCP_KEEPIDLE) failed: Invalid argument`, so it
+            // parsed and clamped rather than refusing the DSN), and this
+            // crate reads a zero as the system default - see
+            // `keepalive::TcpKeepalive::from`, which drops it. So a clamped
+            // zero MUST reach `KeepaliveConfig`.
+            //
+            // `keepalives_idle` and `keepalives_interval` guarded their
+            // setters with `> 0`, which discarded the zero before it could be
+            // dropped: `keepalives_idle=0` left this crate's OWN two-hour
+            // default in place, which is neither libpq's failure nor the
+            // system default PostgreSQL documents. `keepalives_count` parsed
+            // unsigned instead, so a negative was a config-parse error where
+            // libpq clamps. Only `keepalives_count=0` reached the conversion,
+            // which is why the conversion's claim to be "the single point
+            // every entry path passes through" measured as true.
             #[cfg(not(target_arch = "wasm32"))]
             "keepalives_idle" => {
-                let keepalives_idle = value
-                    .parse::<i64>()
-                    .map_err(|_| Error::config_parse(Box::new(InvalidValue("keepalives_idle"))))?;
-                if keepalives_idle > 0 {
-                    self.keepalives_idle(Duration::from_secs(keepalives_idle as u64));
-                }
+                let keepalives_idle = clamped_keepalive_seconds(value, "keepalives_idle")?;
+                self.keepalives_idle(Duration::from_secs(keepalives_idle));
             }
             #[cfg(not(target_arch = "wasm32"))]
             "keepalives_interval" => {
-                let keepalives_interval = value.parse::<i64>().map_err(|_| {
-                    Error::config_parse(Box::new(InvalidValue("keepalives_interval")))
-                })?;
-                if keepalives_interval > 0 {
-                    self.keepalives_interval(Duration::from_secs(keepalives_interval as u64));
-                }
+                let keepalives_interval = clamped_keepalive_seconds(value, "keepalives_interval")?;
+                self.keepalives_interval(Duration::from_secs(keepalives_interval));
             }
             #[cfg(not(target_arch = "wasm32"))]
             "keepalives_count" => {
-                let keepalives_count = value.parse::<u32>().map_err(|_| {
-                    Error::config_parse(Box::new(InvalidValue("keepalives_count")))
-                })?;
-                self.keepalives_count(keepalives_count);
+                let keepalives_count = clamped_keepalive_seconds(value, "keepalives_count")?;
+                self.keepalives_count(u32::try_from(keepalives_count).unwrap_or(u32::MAX));
             }
             "target_session_attrs" => {
                 let target_session_attrs = match value {
@@ -1956,6 +1965,22 @@ impl fmt::Display for InvalidValue {
 }
 
 impl error::Error for InvalidValue {}
+
+/// Parse one keepalive option the way libpq does: signed, negative clamped to
+/// zero.
+///
+/// ONE definition, so the three options cannot drift apart again - which is
+/// exactly what they had done. A zero survives on purpose: this crate reads it
+/// as "use the system default" and drops it in
+/// [`crate::keepalive`]'s `TcpKeepalive` conversion, so discarding it here
+/// would leave that conversion nothing to drop.
+#[cfg(not(target_arch = "wasm32"))]
+fn clamped_keepalive_seconds(value: &str, option: &'static str) -> Result<u64, Error> {
+    let seconds = value
+        .parse::<i64>()
+        .map_err(|_| Error::config_parse(Box::new(InvalidValue(option))))?;
+    Ok(u64::try_from(seconds).unwrap_or(0))
+}
 
 /// Whether `value` names the only text encoding this driver can decode.
 ///
@@ -2519,12 +2544,93 @@ impl<'a> UrlParser<'a> {
 mod tests {
     use std::net::IpAddr;
     use std::num::NonZeroUsize;
+    use std::time::Duration;
 
     use crate::config::{
         AuthMethod, AuthMethods, RequireAuth, SslCertMode, SslMode, SslNegotiation,
         SslProtocolVersion, SslRootCert, TargetSessionAttrs,
     };
     use crate::{Config, config::Host};
+
+    /// A DSN zero must reach `KeepaliveConfig` so the one conversion that
+    /// drops it can.
+    ///
+    /// `keepalive.rs` says the zero is dropped in `TcpKeepalive::from` because
+    /// "this is the single point every entry path passes through". It was not:
+    /// the DSN arms guarded their setters with `> 0`, so a zero never became a
+    /// value at all and `keepalives_idle` kept this crate's OWN default of two
+    /// hours - neither the failure libpq produces nor the system default
+    /// PostgreSQL documents. Only `keepalives_count` reached the conversion,
+    /// which is why only it was measured.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_zero_keepalive_in_a_dsn_reaches_the_conversion_that_drops_it() {
+        let config = "host=h keepalives_idle=0 keepalives_interval=0 keepalives_count=0"
+            .parse::<Config>()
+            .expect("a zero keepalive is a legal DSN value");
+        assert_eq!(
+            config.get_keepalives_idle(),
+            Duration::ZERO,
+            "keepalives_idle=0 was discarded and left this crate's two-hour default in place"
+        );
+        assert_eq!(
+            config.get_keepalives_interval(),
+            Some(Duration::ZERO),
+            "keepalives_interval=0 was discarded rather than recorded"
+        );
+        assert_eq!(
+            config.get_keepalives_count(),
+            Some(0),
+            "keepalives_count=0 was discarded rather than recorded"
+        );
+    }
+
+    /// One variable away: a POSITIVE value must still land, or the assertions
+    /// above would be satisfied by a parser that ignored these keys entirely.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_positive_keepalive_in_a_dsn_still_lands() {
+        let config = "host=h keepalives_idle=30 keepalives_interval=5 keepalives_count=7"
+            .parse::<Config>()
+            .expect("a positive keepalive is a legal DSN value");
+        assert_eq!(config.get_keepalives_idle(), Duration::from_secs(30));
+        assert_eq!(
+            config.get_keepalives_interval(),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(config.get_keepalives_count(), Some(7));
+    }
+
+    /// libpq reads all three with a SIGNED parse and clamps a negative to
+    /// zero (measured 2026-08-23: `psql ... keepalives_idle=-1` fails at
+    /// `setsockopt(TCP_KEEPIDLE)`, i.e. it parsed and clamped rather than
+    /// refusing the DSN). This crate reads a clamped zero as the system
+    /// default, so a negative must mean that too - not a config-parse error,
+    /// which is what `keepalives_count` produced because it alone parsed
+    /// unsigned.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_negative_keepalive_in_a_dsn_clamps_to_the_system_default() {
+        let config = "host=h keepalives_idle=-1 keepalives_interval=-1 keepalives_count=-1"
+            .parse::<Config>()
+            .expect("libpq parses a negative keepalive rather than refusing the DSN");
+        assert_eq!(config.get_keepalives_idle(), Duration::ZERO);
+        assert_eq!(config.get_keepalives_interval(), Some(Duration::ZERO));
+        assert_eq!(config.get_keepalives_count(), Some(0));
+    }
+
+    /// A value that is not an integer at all is still refused, so the signed
+    /// parse above is not read as "accept anything".
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_non_integer_keepalive_in_a_dsn_is_still_refused() {
+        "host=h keepalives_count=abc"
+            .parse::<Config>()
+            .expect_err("`keepalives_count=abc` is not an integer");
+        "host=h keepalives_idle=abc"
+            .parse::<Config>()
+            .expect_err("`keepalives_idle=abc` is not an integer");
+    }
 
     fn assert_target_session_attrs_parses(value: &str, expected: TargetSessionAttrs) {
         for dsn in [
