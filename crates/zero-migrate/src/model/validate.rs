@@ -7532,12 +7532,22 @@ fn validate_vendor_op(
 
     // (1) Ask the selected backend for its own fail-closed refusal before the
     // operator-capability gate. Raw surfaces that backend supports return None.
-    if let Some(refusal) = caps.iter().find_map(|cap| {
-        registered_vendor(target_dialect, op_index)
-            .expect("target registration was checked above")
-            .validation
-            .vendor_capability_refusal(*cap)
-    }) {
+    //
+    // The list read here is the one naming the privileged primitive this op RENDERS,
+    // NOT every capability its author must hold. Those are two questions, and a
+    // backend can only answer the first: a `createTrigger` executing a named function
+    // needs the FUNCTION capability of its author while rendering a TRIGGER, and
+    // asking a backend that renders no functions about it produced a refusal telling
+    // the operator to deploy the trigger against a different dialect.
+    if let Some(refusal) = crate::model::op_support::rendered_vendor_capabilities(op)
+        .iter()
+        .find_map(|cap| {
+            registered_vendor(target_dialect, op_index)
+                .expect("target registration was checked above")
+                .validation
+                .vendor_capability_refusal(*cap)
+        })
+    {
         return Err(AuthoringError {
             code: CODE_UNSUPPORTED.to_string(),
             kind: Some(UnsupportedKind::Op),

@@ -295,6 +295,39 @@ fn unsupported_reason(
     }
 }
 
+/// The capabilities this op requires **because of the privileged primitive it
+/// RENDERS**, as opposed to [`vendor_capabilities`], which is every capability its
+/// AUTHOR must hold.
+///
+/// The two lists answer different questions and have already been conflated once. A
+/// `createTrigger` executing a named function requires the FUNCTION capability of its
+/// author - conscripting existing code is the same power as writing it - but the
+/// primitive it renders is a TRIGGER, which every backend renders. Asking a backend
+/// "do you render a function?" about that op produced a refusal claiming the trigger
+/// belonged to the privileged catalog-object family and telling the operator to
+/// deploy it elsewhere, in place of the accurate facet refusal.
+///
+/// So the non-renderer gate reads THIS list, and the authority gate reads the other.
+///
+/// Every op answers with its [`vendor_capabilities`] except where that list carries a
+/// capability the op does not render. `createTrigger { executeFunction }` is the only
+/// such shape today, and it is spelled out rather than derived so a future addition
+/// has to state which of the two lists it is joining.
+#[must_use]
+pub fn rendered_vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapability> {
+    use crate::model::capability::VendorCapability as C;
+    if matches!(
+        op,
+        Op::CreateTrigger {
+            action: TriggerAction::ExecuteFunction { .. },
+            ..
+        }
+    ) {
+        return vec![C::Trigger];
+    }
+    vendor_capabilities(op)
+}
+
 /// The support TIER (core vs vendor + its capabilities) for this op shape.
 /// Tier cannot be read off the generated table's dispositions — a vendor op
 /// can be unsupported on every dialect (e.g. `createRole` superuser+ifNotExists,
@@ -916,6 +949,18 @@ pub fn vendor_capabilities(op: &Op) -> Vec<crate::model::capability::VendorCapab
         // declaration; what the grant governs is the authority to arrange for work to
         // fire on every affected row without a later statement naming it. The same
         // core-tier-plus-capability shape the raw view body already has.
+        //
+        // A trigger whose action EXECUTES A NAMED FUNCTION requires the FUNCTION
+        // capability as well. `C::Function`'s meaning is "this charter may introduce
+        // code into the database", and arranging for existing code to run on every
+        // affected row - with no later statement naming it - is that same power
+        // reached by a different door. An author who may not write a function may not
+        // conscript one either. A trigger carrying a closed inline BODY introduces no
+        // pre-existing code and keeps the trigger capability alone.
+        Op::CreateTrigger {
+            action: TriggerAction::ExecuteFunction { .. },
+            ..
+        } => vec![C::Trigger, C::Function],
         Op::CreateTrigger { .. } | Op::DropTrigger { .. } => vec![C::Trigger],
         Op::Raw { .. } => vec![C::RawSql],
     }

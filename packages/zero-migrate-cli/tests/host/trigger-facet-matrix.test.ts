@@ -38,6 +38,15 @@ const OWNER_APP = "app_trigger_facet_matrix";
 
 type TriggerArgs = Parameters<ReturnType<ReturnType<typeof table>["trigger"]>["create"]>[0];
 
+/**
+ * The operator posture this matrix probes from. It grants `code.function` as well as
+ * `code.trigger` because one probed facet is `execute_function`, and authoring a
+ * trigger that binds existing code needs authority over CODE, not only over triggers.
+ *
+ * That grant is what keeps the `execute_function` cell measuring what it claims to.
+ * Without it the cell still refuses, but for want of a GRANT rather than because
+ * SQLite cannot render the shape — and this file exists to read the FACET column.
+ */
 function charter(scopeName: string): string {
   const scope = `{ include = [${JSON.stringify(scopeName)}] }`;
   return `policy_version = 1
@@ -56,6 +65,11 @@ scope = ${scope}
 key = "code.trigger"
 value = true
 scope = ${scope}
+
+[[grant]]
+key = "code.function"
+value = true
+scope = "all"
 `;
 }
 
