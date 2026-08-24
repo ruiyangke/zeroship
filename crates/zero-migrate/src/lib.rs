@@ -92,7 +92,17 @@ pub use zero_migrate_backend::approval;
 // argument of. Re-exported so every `crate::conn::…` and `zero_migrate::conn::…`
 // reference resolves unchanged.
 pub use zero_migrate_backend::conn;
-pub mod db_url;
+// `pub mod db_url` USED TO LIVE HERE. It held one function, `is_sqlite_url`, a DSN
+// classifier that decided which backend a URL selects by string-matching
+// `postgres://` / `sqlite:` / `file:` in core — the engine resolving a vendor without
+// asking the registry. It was also DEAD: a sweep of `crates` and `packages` found zero
+// callers, in this crate or any other. Its own module doc already recorded that the
+// upstream it was "copied byte-identically" from is not in this repository and that no
+// guard checks the copy, calling that "a HOLE, not a handoff".
+//
+// So there was nothing to reformulate. A URL classifier that must exist belongs behind
+// the vendor that owns the scheme, the way every other backend surface resolves; this
+// one had no consumer to reformulate FOR.
 pub mod engine;
 // The crash-simulation seam moved down to the backend contract: all three
 // `MigrationBackend` implementations trip it on their own apply paths, so it has to
