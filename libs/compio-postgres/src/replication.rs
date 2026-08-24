@@ -570,6 +570,33 @@ where
             )
         })?;
 
+        // An option the running `proto_version` cannot carry is refused here,
+        // not sent. The server does reject it - `requested proto_version=1
+        // does not support streaming, need 2 or higher` - but only after the
+        // command goes out, and these floors are properties of the message
+        // formats THIS decoder implements, so they are ours to state.
+        //
+        // There is deliberately NO client-side maximum. The server owns that
+        // ceiling (16.14 answers `server only supports protocol 4 or lower`),
+        // and a number hardcoded here would refuse a future server that
+        // supports more.
+        for (needed, what) in [
+            (opts.streaming.minimum_proto_version(), "streaming"),
+            (opts.two_phase.then_some(3), "two_phase"),
+        ] {
+            if let Some(needed) = needed
+                && opts.proto_version < needed
+            {
+                return Err(Error::config(
+                    format!(
+                        "{what} needs proto_version {needed} or higher, but {} was requested",
+                        opts.proto_version
+                    )
+                    .into(),
+                ));
+            }
+        }
+
         self.in_flight.enter()?;
         self.stream.begin_read_response();
 
@@ -618,6 +645,14 @@ where
         }
         if opts.origin == OriginFilter::None {
             cmd.push_str(", \"origin\" 'none'");
+        }
+        if opts.streaming != Streaming::Off {
+            cmd.push_str(", \"streaming\" '");
+            cmd.push_str(opts.streaming.option_value());
+            cmd.push('\'');
+        }
+        if opts.two_phase {
+            cmd.push_str(", \"two_phase\" 'true'");
         }
         cmd.push(')');
 
@@ -706,6 +741,19 @@ pub struct StartReplicationOptions<'a> {
     pub messages: bool,
     /// Which changes to send, by replication origin.
     pub origin: OriginFilter,
+    /// Deliver a large transaction in chunks as it happens, rather than
+    /// buffering it on the server until commit.
+    ///
+    /// This REPLACES `Begin`/`Commit` with
+    /// [`pgoutput::PgOutputMessage::StreamStart`] / `StreamStop` /
+    /// `StreamCommit`, measured against 16.14: the same 4000-row transaction
+    /// decodes as `B:1 C:1 I:4000 R:1` without it and `S:21 E:21 c:1 I:4000
+    /// R:1` with it. A consumer that only handles `Commit` therefore sees a
+    /// transaction that never ends.
+    pub streaming: Streaming,
+    /// Deliver `PREPARE TRANSACTION` as its own message rather than waiting
+    /// for `COMMIT PREPARED`. Requires a slot created with `TWO_PHASE`.
+    pub two_phase: bool,
 }
 
 impl Default for StartReplicationOptions<'_> {
@@ -718,6 +766,44 @@ impl Default for StartReplicationOptions<'_> {
             binary: false,
             messages: false,
             origin: OriginFilter::Any,
+            streaming: Streaming::Off,
+            two_phase: false,
+        }
+    }
+}
+
+/// Whether the server may send a large transaction before it commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Streaming {
+    /// `off` - buffer each transaction on the server until commit.
+    #[default]
+    Off,
+    /// `on` - stream chunks as they spill past `logical_decoding_work_mem`.
+    /// Needs `proto_version` 2 or higher.
+    On,
+    /// `parallel` - stream, and mark the chunks so a subscriber can apply
+    /// them with parallel workers. Needs `proto_version` 4 or higher; the
+    /// server refuses it below that with `does not support parallel
+    /// streaming, need 4 or higher`.
+    Parallel,
+}
+
+impl Streaming {
+    /// The lowest `proto_version` that carries this setting, or `None` when
+    /// it imposes no floor.
+    const fn minimum_proto_version(self) -> Option<u32> {
+        match self {
+            Self::Off => None,
+            Self::On => Some(2),
+            Self::Parallel => Some(4),
+        }
+    }
+
+    const fn option_value(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Parallel => "parallel",
         }
     }
 }
@@ -1539,6 +1625,45 @@ pub mod pgoutput {
             options: u8,
             relation_ids: Vec<u32>,
         },
+        /// `S` - a chunk of a not-yet-committed transaction begins.
+        ///
+        /// Arrives only under [`super::Streaming`]. Layout measured on 16.14:
+        /// `53 000a8649 01` - tag, xid, then the first-segment flag, which is
+        /// `01` on the first chunk of a transaction and `00` on every later
+        /// one.
+        StreamStart {
+            xid: u32,
+            /// True on the first chunk of this transaction only.
+            first_segment: bool,
+        },
+        /// `E` - the current chunk ends. Carries no payload at all: the whole
+        /// message is the single byte `45`.
+        StreamStop,
+        /// `c` - a streamed transaction committed. Replaces [`Self::Commit`]
+        /// when streaming is on, and adds the `xid`, which `Commit` has no
+        /// room for because a non-streamed commit needs no correlation.
+        StreamCommit {
+            xid: u32,
+            flags: u8,
+            commit_lsn: u64,
+            end_lsn: u64,
+            commit_timestamp: i64,
+        },
+        /// `A` - a streamed transaction, or one of its subtransactions,
+        /// aborted. Everything already delivered for `subxid` must be
+        /// discarded.
+        ///
+        /// Measured 9 bytes on 16.14 (`41 000a864b 000a864b`) at every
+        /// proto_version 2 through 4, and with `two_phase` on or off. Later
+        /// servers may append an abort LSN and timestamp; the decoder ignores
+        /// trailing bytes rather than failing, so such a frame still decodes
+        /// - without those fields, which is a limitation, not a guess.
+        StreamAbort {
+            xid: u32,
+            /// The subtransaction that aborted. Equals `xid` when the whole
+            /// transaction did.
+            subxid: u32,
+        },
         /// A logical-replication "Message" (pg_logical_emit_message).
         Message {
             flags: u8,
@@ -1643,6 +1768,17 @@ pub mod pgoutput {
         InvalidUtf8,
         UnknownTag(u8),
         UnknownTupleFormat(u8),
+        /// A streaming frame reached the stateless [`decode`], which cannot
+        /// track the chunk state the rest of the transaction needs. Use
+        /// [`Decoder`].
+        StreamingNeedsDecoder,
+        /// A message inside a stream chunk named a different transaction than
+        /// the chunk it arrived in - the frames are out of step, and decoding
+        /// on would produce values that look real.
+        StreamXidMismatch {
+            expected: u32,
+            carried: u32,
+        },
     }
 
     impl std::fmt::Display for DecodeError {
@@ -1654,6 +1790,17 @@ pub mod pgoutput {
                 DecodeError::UnknownTupleFormat(t) => {
                     write!(f, "pgoutput: unknown tuple column format 0x{t:02x}")
                 }
+                DecodeError::StreamingNeedsDecoder => write!(
+                    f,
+                    "pgoutput: this frame belongs to a streamed transaction, whose framing is \
+                     stateful; decode the stream with pgoutput::Decoder rather than the \
+                     stateless decode()"
+                ),
+                DecodeError::StreamXidMismatch { expected, carried } => write!(
+                    f,
+                    "pgoutput: a message inside the chunk for xid {expected} carried xid \
+                     {carried}; the stream is out of step"
+                ),
             }
         }
     }
@@ -1751,9 +1898,80 @@ pub mod pgoutput {
     }
 
     /// Decode one pgoutput message.
+    /// Decode ONE pgoutput frame from a stream that is not using
+    /// [`super::Streaming`].
+    ///
+    /// Streamed transactions cannot be decoded here, and this refuses them
+    /// rather than guessing: inside a stream chunk every transactional
+    /// message carries a 4-byte xid between the tag and its body, and NOTHING
+    /// IN THE BYTES SAYS SO. A `Relation` is 45 bytes outside a stream and 49
+    /// inside it, same relation. Reading the longer form with the shorter
+    /// layout walks the namespace string four bytes early, which surfaces as
+    /// `InvalidUtf8` if you are lucky and as a plausible wrong answer if you
+    /// are not.
+    ///
+    /// Whether the prefix is there is a property of the CONVERSATION, so it
+    /// takes a decoder that remembers one: [`Decoder`].
     pub fn decode(input: &[u8]) -> Result<PgOutputMessage, DecodeError> {
+        match input.first() {
+            Some(b'S' | b'E' | b'c' | b'A') => Err(DecodeError::StreamingNeedsDecoder),
+            _ => Decoder::new().decode(input),
+        }
+    }
+
+    /// A pgoutput decoder that tracks whether it is inside a stream chunk.
+    ///
+    /// Hold ONE of these per replication stream and feed it every frame in
+    /// order. It is only stateful because the protocol is: `StreamStart`
+    /// opens a chunk in which transactional messages gain an xid prefix, and
+    /// `StreamStop` closes it.
+    #[derive(Debug, Default)]
+    pub struct Decoder {
+        /// The transaction whose chunk is open, if any.
+        stream_xid: Option<u32>,
+    }
+
+    impl Decoder {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// The transaction whose chunk is currently open.
+        pub fn stream_xid(&self) -> Option<u32> {
+            self.stream_xid
+        }
+
+        /// Decode one frame, updating the stream state.
+        pub fn decode(&mut self, input: &[u8]) -> Result<PgOutputMessage, DecodeError> {
+            let message = decode_frame(input, self.stream_xid)?;
+            match &message {
+                PgOutputMessage::StreamStart { xid, .. } => self.stream_xid = Some(*xid),
+                PgOutputMessage::StreamStop => self.stream_xid = None,
+                _ => {}
+            }
+            Ok(message)
+        }
+    }
+
+    fn decode_frame(input: &[u8], stream_xid: Option<u32>) -> Result<PgOutputMessage, DecodeError> {
         let mut cur = input;
         let tag = read_u8(&mut cur)?;
+
+        // Inside a chunk, every message that belongs to the transaction
+        // repeats its xid here. Measured on 16.14: `52 000a8649 0003853e ...`
+        // streamed against `52 0003853e ...` not. It is redundant with the
+        // enclosing StreamStart, so rather than read and drop it - which
+        // would make a desynchronised stream decode into plausible nonsense -
+        // it is CHECKED against the chunk we believe is open.
+        if let Some(expected) = stream_xid
+            && matches!(tag, b'R' | b'Y' | b'I' | b'U' | b'D' | b'T' | b'M')
+        {
+            let carried = read_u32(&mut cur)?;
+            if carried != expected {
+                return Err(DecodeError::StreamXidMismatch { expected, carried });
+            }
+        }
+
         let msg = match tag {
             b'B' => {
                 let final_lsn = read_u64(&mut cur)?;
@@ -1918,6 +2136,22 @@ pub mod pgoutput {
                     content,
                 }
             }
+            b'S' => PgOutputMessage::StreamStart {
+                xid: read_u32(&mut cur)?,
+                first_segment: read_u8(&mut cur)? != 0,
+            },
+            b'E' => PgOutputMessage::StreamStop,
+            b'c' => PgOutputMessage::StreamCommit {
+                xid: read_u32(&mut cur)?,
+                flags: read_u8(&mut cur)?,
+                commit_lsn: read_u64(&mut cur)?,
+                end_lsn: read_u64(&mut cur)?,
+                commit_timestamp: read_i64(&mut cur)?,
+            },
+            b'A' => PgOutputMessage::StreamAbort {
+                xid: read_u32(&mut cur)?,
+                subxid: read_u32(&mut cur)?,
+            },
             other => return Err(DecodeError::UnknownTag(other)),
         };
         // We do NOT enforce `cur.is_empty()` — a future pgoutput proto
