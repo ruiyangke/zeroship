@@ -19,8 +19,9 @@ mod common;
 const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 const ABORT_MARKER: &str = "extended query execution cannot supply COPY data";
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -39,9 +40,7 @@ async fn connect_client(url: &str) -> Client {
 #[compio::test]
 async fn copy_out_of_copy_from_stdin_leaves_the_session_usable() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = common::test_object_name("cpg_copy_out_wrong_direction");
         client
@@ -86,9 +85,7 @@ async fn copy_out_of_copy_from_stdin_leaves_the_session_usable() {
 #[compio::test]
 async fn refused_copy_out_of_copy_from_stdin_was_already_synchronised() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let missing = common::test_object_name("cpg_copy_out_missing");
 

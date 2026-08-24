@@ -26,8 +26,9 @@ use compio_postgres::{Client, NoTls};
 #[allow(dead_code)]
 mod common;
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -47,10 +48,7 @@ async fn connect_client(url: &str) -> Client {
 /// only in case each resolve to themselves.
 #[compio::test]
 async fn an_exact_name_match_wins_over_the_case_insensitive_fallback() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     // Column 0 is `x`, column 1 is `X`. A fallback-first lookup would answer
@@ -81,10 +79,7 @@ async fn an_exact_name_match_wins_over_the_case_insensitive_fallback() {
 /// change worth making on purpose rather than by accident.
 #[compio::test]
 async fn a_case_mismatched_name_still_resolves_when_nothing_matches_exactly() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let row = client
@@ -113,10 +108,7 @@ async fn a_case_mismatched_name_still_resolves_when_nothing_matches_exactly() {
 /// `SELECT 1 AS x, 2 AS x`.
 #[compio::test]
 async fn a_duplicate_column_name_resolves_to_the_first() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let row = client

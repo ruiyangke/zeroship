@@ -22,8 +22,9 @@ use compio_postgres::{Client, NoTls};
 #[allow(dead_code)]
 mod common;
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -42,10 +43,7 @@ async fn connect_client(url: &str) -> Client {
 /// Every row-affecting command reports its real count, and DDL reports zero.
 #[compio::test]
 async fn execute_reports_the_count_from_each_command_tag_shape() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let table = common::test_object_name("cpg_rowcount");
 
@@ -127,10 +125,7 @@ async fn execute_reports_the_count_from_each_command_tag_shape() {
 /// two numbers, which the existing single-row assertions cannot.
 #[compio::test]
 async fn the_count_is_rows_affected_not_parameters_supplied() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
     let table = common::test_object_name("cpg_rowcount_params");
 
@@ -177,10 +172,7 @@ async fn the_count_is_rows_affected_not_parameters_supplied() {
 async fn rows_affected_is_available_once_an_empty_query_stream_is_exhausted() {
     use futures_util::TryStreamExt;
 
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let client = connect_client(&url).await;
 
     let stream = client

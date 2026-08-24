@@ -40,8 +40,9 @@ mod common;
 
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 /// Raise `level` with `message`, and return the first async message that
@@ -75,10 +76,7 @@ async fn raise_and_collect(url: &str, level: &str, message: &str) -> AsyncMessag
 /// A NOTICE arrives, carrying its message and its parsed severity.
 #[compio::test]
 async fn a_server_notice_reaches_the_caller() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
 
     match raise_and_collect(&url, "NOTICE", "hello-from-a-notice").await {
         AsyncMessage::Notice(notice) => {
@@ -106,10 +104,7 @@ async fn a_server_notice_reaches_the_caller() {
 /// plausibly assume for a message called a notice.
 #[compio::test]
 async fn a_warning_is_not_reported_as_a_notice() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
 
     match raise_and_collect(&url, "WARNING", "hello-from-a-warning").await {
         AsyncMessage::Notice(notice) => {
@@ -132,10 +127,7 @@ async fn a_warning_is_not_reported_as_a_notice() {
 /// error.
 #[compio::test]
 async fn a_notice_carries_its_sqlstate() {
-    let Some(url) = test_url() else {
-        eprintln!("PG_TEST_URL unset; skipping");
-        return;
-    };
+    let url = test_url();
     let (client, mut connection) = compio_postgres::connect(&url, NoTls)
         .await
         .expect("connect to PostgreSQL");

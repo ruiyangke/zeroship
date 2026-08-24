@@ -40,8 +40,9 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// is shared between the two and cannot tell them apart.
 const ABORT_MARKER: &str = "cannot supply COPY data";
 
-fn test_url() -> Option<String> {
+fn test_url() -> String {
     common::env::get(common::env::TestEnvKey::PgTestUrl)
+        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
 async fn connect_client(url: &str) -> Client {
@@ -75,9 +76,7 @@ async fn probe_table(client: &Client, suffix: &str) -> String {
 #[compio::test]
 async fn execute_of_copy_from_stdin_leaves_the_session_usable() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = probe_table(&client, "exec").await;
 
@@ -121,9 +120,7 @@ async fn execute_of_copy_from_stdin_leaves_the_session_usable() {
 #[compio::test]
 async fn query_of_copy_from_stdin_leaves_the_session_usable() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = probe_table(&client, "query").await;
 
@@ -157,9 +154,7 @@ async fn query_of_copy_from_stdin_leaves_the_session_usable() {
 #[compio::test]
 async fn a_transaction_survives_an_abandoned_extended_copy_from_stdin() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let mut client = connect_client(&url).await;
         let table = probe_table(&client, "txn").await;
 
@@ -204,9 +199,7 @@ async fn a_transaction_survives_an_abandoned_extended_copy_from_stdin() {
 #[compio::test]
 async fn execute_of_copy_to_stdout_was_never_desynchronised() {
     compio::time::timeout(TEST_TIMEOUT, async {
-        let Some(url) = test_url() else {
-            return;
-        };
+        let url = test_url();
         let client = connect_client(&url).await;
         let table = probe_table(&client, "out").await;
         client
