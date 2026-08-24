@@ -1,8 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use zero_migrate::model::expr::{
-    AggFunc, BinaryOp, CaseBranch, CastTarget, Expr, ExtractField, ScalarFn,
-    SynthFn, UnaryOp,
+    AggFunc, BinaryOp, CaseBranch, CastTarget, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
 };
 use zero_migrate::model::ir::{IrScalar, IrValue};
 use zero_migrate::model::validate::{validate_expr, TargetScope};

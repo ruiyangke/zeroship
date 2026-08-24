@@ -2128,9 +2128,7 @@ fn collect_expr_database_requirements(
                 collect_expr_database_requirements(delimiter, dialect, requirements);
             }
         }
-        Expr::InList { expr, .. }
-        | Expr::RegexMatch { expr, .. }
-        | Expr::StorageSize { expr } => {
+        Expr::InList { expr, .. } | Expr::RegexMatch { expr, .. } | Expr::StorageSize { expr } => {
             collect_expr_database_requirements(expr, dialect, requirements);
         }
         Expr::Extract { from, .. } => {
@@ -5278,8 +5276,11 @@ impl IrAuthor {
             | Op::CreateFunction { .. }
             | Op::DropFunction { .. }
             | Op::Raw { .. } => {
-                if !self.backend.supports(Capability::PostgresVendorPrimitives) {
-                    return Err(IrLowerError::VendorPgOnly(op_kind_tag(op)));
+                if !self.backend.supports(Capability::PrivilegedCatalogObjects) {
+                    return Err(IrLowerError::VendorUnsupported {
+                        op_kind: op_kind_tag(op),
+                        dialect: self.backend.dialect(),
+                    });
                 }
                 enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?;
                 let stmts = self.backend.render_vendor_op(op, &eff_schema)?;

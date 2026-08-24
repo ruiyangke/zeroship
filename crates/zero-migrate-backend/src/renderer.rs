@@ -448,7 +448,7 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// Measured rather than assumed: `zero-migrate-sqlite` and `zero-migrate-mysql`
     /// contain no vendor-op renderer and never did, every one of the sixteen op kinds
     /// is `dialect_scope = PgOnly`, and the engine's lower seam refuses a target
-    /// without `Capability::PostgresVendorPrimitives` before it ever gets here.
+    /// without `Capability::PrivilegedCatalogObjects` before it ever gets here.
     ///
     /// So the obvious shape was an `Option` or a default body returning a refusal —
     /// and it is the wrong one, for the reason

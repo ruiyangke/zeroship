@@ -892,7 +892,7 @@ impl DmlRenderer for SqliteDmlRenderer {
     /// `dialect_scope = PgOnly` and SQLite has no analogue for any of them, so there
     /// is nothing to render and no partial answer worth giving. The engine refuses
     /// earlier and more informatively — the lower seam checks
-    /// `Capability::PostgresVendorPrimitives` and reports the op KIND — so nothing in
+    /// `Capability::PrivilegedCatalogObjects` and reports the op KIND — so nothing in
     /// the shipping paths reaches this. It is here because
     /// [`zero_migrate_backend::renderer::DmlRenderer`] gives no method a default
     /// body: a vendor's posture has to be visible in that vendor's own diff.

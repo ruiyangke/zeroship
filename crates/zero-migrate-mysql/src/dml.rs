@@ -1041,7 +1041,7 @@ impl DmlRenderer for MysqlDmlRenderer {
     /// extensions, schemas, `raw` — are every one of them `dialect_scope = PgOnly`.
     /// MySQL has no analogue for any of them, so there is nothing to render. The
     /// engine refuses earlier and more informatively (the lower seam checks
-    /// `Capability::PostgresVendorPrimitives` and reports the op KIND), so nothing in
+    /// `Capability::PrivilegedCatalogObjects` and reports the op KIND), so nothing in
     /// the shipping paths reaches this.
     ///
     /// It is written out anyway because

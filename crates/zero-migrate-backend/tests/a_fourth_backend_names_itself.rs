@@ -1270,7 +1270,7 @@ fn a_fourth_backend_answers_dialect_with_its_own_id() {
     // ones it declared — not the "no to everything" a core-owned id->capability
     // table would have to give a name it does not recognise.
     assert!(dml.supports(Capability::CreateOrReplaceView));
-    assert!(!dml.supports(Capability::PostgresVendorPrimitives));
+    assert!(!dml.supports(Capability::PrivilegedCatalogObjects));
     assert!(!dml.supports(Capability::MaterializedView));
     // The outsider's PARTITION posture, stated in the same one place it states
     // everything else about itself. This used to be a required

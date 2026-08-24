@@ -22,7 +22,7 @@
 //!   on MySQL) and nothing else.
 //! * Every one of the sixteen op kinds is `dialect_scope = PgOnly`.
 //! * The engine's lower seam refuses a non-PostgreSQL target BEFORE it renders, and it
-//!   refuses on a CAPABILITY (`Capability::PostgresVendorPrimitives`), not on a dialect
+//!   refuses on a CAPABILITY (`Capability::PrivilegedCatalogObjects`), not on a dialect
 //!   match.
 //!
 //! So the two other vendors have nothing to render and the honest answer is a refusal

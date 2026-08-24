@@ -183,9 +183,7 @@ mod tests {
     use zero_migrate_backend::dml::{render_expr_bound, BindCtx};
     use zero_migrate_backend::step::BindValue;
     use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};
-    use zero_migrate_ir::expr::{
-        BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
-    };
+    use zero_migrate_ir::expr::{BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp};
 
     const SCHEMA: &str = "app_proj";
 

@@ -2804,7 +2804,7 @@
           ]
         },
         {
-          "description": "**VENDOR** — the gated raw-statement escape. Records\nthe verbatim SQL plus required audit metadata. Operator-only and STILL\nparse-scanned by the guard deny-list at lower.\n\nThe NODE is dialect-neutral; the `sql` it carries is not. Raw text is\nwritten against one server, and nothing here can check that, so the op is\nadmitted only on a backend answering\n[`Capability::PostgresVendorPrimitives`](crate::backend::Capability::PostgresVendorPrimitives)\nand the rendered statement still faces the guard's parse-time deny-list.\nTo scope raw text to a target explicitly, put it in a leg:\n`dialect({ postgres: [raw(...)] })` ([`Op::Dialectal`]).",
+          "description": "**VENDOR** — the gated raw-statement escape. Records\nthe verbatim SQL plus required audit metadata. Operator-only and STILL\nparse-scanned by the guard deny-list at lower.\n\nThe NODE is dialect-neutral; the `sql` it carries is not. Raw text is\nwritten against one server, and nothing here can check that, so the op is\nadmitted only on a backend answering\n[`Capability::PrivilegedCatalogObjects`](crate::backend::Capability::PrivilegedCatalogObjects)\nand the rendered statement still faces the guard's parse-time deny-list.\nTo scope raw text to a target explicitly, put it in a leg:\n`dialect({ postgres: [raw(...)] })` ([`Op::Dialectal`]).",
           "type": "object",
           "properties": {
             "sql": {

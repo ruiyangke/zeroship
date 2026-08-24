@@ -3886,7 +3886,7 @@ pub enum Op {
     /// The NODE is dialect-neutral; the `sql` it carries is not. Raw text is
     /// written against one server, and nothing here can check that, so the op is
     /// admitted only on a backend answering
-    /// [`Capability::PostgresVendorPrimitives`](crate::backend::Capability::PostgresVendorPrimitives)
+    /// [`Capability::PrivilegedCatalogObjects`](crate::backend::Capability::PrivilegedCatalogObjects)
     /// and the rendered statement still faces the guard's parse-time deny-list.
     /// To scope raw text to a target explicitly, put it in a leg:
     /// `dialect({ postgres: [raw(...)] })` ([`Op::Dialectal`]).

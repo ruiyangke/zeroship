@@ -82,7 +82,7 @@ pub use zero_migrate_ir::validate::{
     CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED, CODE_PARTITION_BOUNDS_NOT_TOTAL,
     CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, CODE_PARTITION_HASH_DROP_UNDERIVABLE,
     CODE_PARTITION_KEY_COVERAGE, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE,
-    CODE_RAW_REASON_REQUIRED, CODE_PRIMARY_KEY_INVALID, CODE_SEQUENCE_OPTION_INVALID,
+    CODE_PRIMARY_KEY_INVALID, CODE_RAW_REASON_REQUIRED, CODE_SEQUENCE_OPTION_INVALID,
     CODE_TABLE_SHAPE_POLICY, CODE_UNSUPPORTED, CODE_VECTOR_METRIC_MISPLACED, CODE_VENDOR_OP_DENIED,
     MAX_EXPR_DEPTH, MAX_ID_PREFIX_LEN,
 };
@@ -9072,8 +9072,7 @@ pub fn validate_op_resolved(
 mod tests {
     use super::*;
     use crate::model::expr::{
-        AggFunc, BinaryOp, CastTarget, Expr, ExtractField, ScalarFn, SynthFn,
-        UnaryOp,
+        AggFunc, BinaryOp, CastTarget, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
     };
     use crate::model::ir::{IndexElement, IrScalar, IrValue};
     use zero_migrate_ir::dialect::{MYSQL, POSTGRES, SQLITE};

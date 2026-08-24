@@ -90,7 +90,7 @@ fn every_shipping_capability_answer_is_pinned() {
             [true, false, false],
         ),
         (Capability::InsertOnConflictClause, [true, true, true]),
-        (Capability::PostgresVendorPrimitives, [true, false, false]),
+        (Capability::PrivilegedCatalogObjects, [true, false, false]),
         (Capability::MaterializedView, [true, false, false]),
         (Capability::CreateOrReplaceView, [true, false, true]),
         (Capability::TriggerTruncateEvent, [true, false, false]),

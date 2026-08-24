@@ -1434,7 +1434,7 @@ impl<'a> CatalogFold<'a> {
                 // POSTGRESQL ONLY. SQLite and MySQL have no row-level security and
                 // their introspection leaves the map empty, so seeding there would
                 // make the folded snapshot differ from the live one for every table.
-                if supports(dialect, Capability::PostgresVendorPrimitives) {
+                if supports(dialect, Capability::PrivilegedCatalogObjects) {
                     table_rls.insert(name.clone(), false);
                 }
                 if tables.contains_key(name) {
@@ -3197,7 +3197,7 @@ impl<'a> CatalogFold<'a> {
         // `synchronize_identity_fold_validates_target_without_changing_schema` folds a
         // PostgreSQL base under all three dialects and asserts the result is unchanged,
         // and the dialect test alone failed it on `None` against `Some({})`.
-        let speaks = supports(dialect, Capability::PostgresVendorPrimitives)
+        let speaks = supports(dialect, Capability::PrivilegedCatalogObjects)
             || base.vendor_objects.is_some();
         let vendor_objects = speaks.then(|| VendorObjectIdentities {
             // The body comes from the SAME `functions` map the rollback history uses, so

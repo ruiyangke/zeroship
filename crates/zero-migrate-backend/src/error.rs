@@ -823,18 +823,26 @@ pub enum IrLowerError {
     /// builder.
     #[error("IrAuthor::lower of renameColumn failed: {0}")]
     RenameLower(String),
-    /// **VENDOR** — a vendor (`zero-migrate`) op was lowered against a
-    /// SQLite target. Every vendor primitive (roles/grants/RLS/policies/triggers/
-    /// functions/extensions/schemas/`raw`) is `dialect_scope = PgOnly` and has no
-    /// SQLite analogue — refused fail-closed at lower (the
-    /// validate gate already refuses it at load on a SQLite target). Carries the op
-    /// kind tag.
+    /// A privileged vendor op (roles/grants/RLS/policies/triggers/functions/
+    /// extensions/schemas/`raw`) was lowered against a target that does not
+    /// answer [`Capability::PrivilegedCatalogObjects`](zero_migrate_ir::backend::Capability::PrivilegedCatalogObjects).
+    /// Refused fail-closed at lower; the validate gate already refuses it at load.
+    ///
+    /// The refusing target is CARRIED rather than written into the message. The
+    /// old text named Postgres and SQLite as constants, which made a two-backend
+    /// world part of an error string in the contract crate; the dialect comes
+    /// from the `DialectId` the caller resolved, so a fourth backend refuses in
+    /// its own name for free.
     #[error(
-        "IrAuthor::lower of vendor op {0:?} is Postgres-only — the zero-migrate \
-         vendor primitives have no SQLite analogue (PgOnly); a SQLite deploy of them is \
-         refused fail-closed"
+        "IrAuthor::lower of vendor op {op_kind:?} needs the privileged \
+         catalog-object family, which {dialect} does not provide; refused fail-closed"
     )]
-    VendorPgOnly(&'static str),
+    VendorUnsupported {
+        /// The op kind tag that was refused.
+        op_kind: &'static str,
+        /// The target that refused it, from its own identity.
+        dialect: zero_migrate_ir::dialect::DialectId,
+    },
     /// A vendor op reached lower without the
     /// capability validated by the load gate. Lower refuses it before rendering so
     /// direct `lower`/`lower_guarded` callers cannot rely on the SQL guard's

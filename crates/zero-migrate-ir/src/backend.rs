@@ -70,8 +70,17 @@ pub enum Capability {
     AlterTableValidateConstraint,
     /// An upsert clause on `INSERT`.
     InsertOnConflictClause,
-    /// The PostgreSQL-only vendor object family (extensions, roles, policies, …).
-    PostgresVendorPrimitives,
+    /// The privileged catalog-object family a backend renders through its own
+    /// vendor-op renderer: namespaces, server extensions, roles and the grants
+    /// over them, row-level security and its policies, stored functions and
+    /// triggers — plus the audited raw-statement escape, which is gated with them
+    /// because it is equally privileged rather than because it is an object.
+    ///
+    /// One question rather than eight because it is answered all-or-nothing: a
+    /// backend either supplies a vendor-op renderer or it does not. That is a
+    /// coarser grain than the rest of this enum and worth splitting if a backend
+    /// ever arrives that has roles but no policies.
+    PrivilegedCatalogObjects,
     /// Materialized views.
     MaterializedView,
     /// `CREATE OR REPLACE VIEW`.
@@ -188,7 +197,7 @@ impl Capability {
         Capability::AlterTableDropConstraint,
         Capability::AlterTableValidateConstraint,
         Capability::InsertOnConflictClause,
-        Capability::PostgresVendorPrimitives,
+        Capability::PrivilegedCatalogObjects,
         Capability::MaterializedView,
         Capability::CreateOrReplaceView,
         Capability::TriggerTruncateEvent,

@@ -102,8 +102,8 @@ pub enum VendorError {
     ///
     /// Reaching this is defence in depth rather than the live refusal path: the
     /// engine's lower seam already refuses a target that lacks
-    /// `Capability::PostgresVendorPrimitives` BEFORE it asks a renderer, and it
-    /// refuses with `IrLowerError::VendorPgOnly`, which names the op kind. This
+    /// `Capability::PrivilegedCatalogObjects` BEFORE it asks a renderer, and it
+    /// refuses with `IrLowerError::VendorUnsupported`, which names the op kind. This
     /// variant is what a vendor returns when something reaches it anyway.
     ///
     /// # Why this carries a `DialectId` and not the enum

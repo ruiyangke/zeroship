@@ -112,9 +112,7 @@ use crate::renderer::{Capability, DmlRenderer};
 use zero_migrate_ir::dialect::DialectId;
 
 use crate::step::BindValue;
-use zero_migrate_ir::expr::{
-    AggFunc, BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp,
-};
+use zero_migrate_ir::expr::{AggFunc, BinaryOp, Expr, ExtractField, ScalarFn, SynthFn, UnaryOp};
 use zero_migrate_ir::ir::{IrScalar, IrValue};
 
 /// A failure assembling a DML op into a statement (template + binds, or a backfill

@@ -349,7 +349,7 @@ fn classify_ir_lower(error: &IrLowerError, detail: String) -> Verdict {
         | IrLowerError::MysqlAlterColumnUnsupported(_)
         | IrLowerError::SqliteSchemaUnsupported(_)
         | IrLowerError::SqliteRebuildOnly(_)
-        | IrLowerError::VendorPgOnly(_)
+        | IrLowerError::VendorUnsupported { .. }
         | IrLowerError::TriggerUnsupported { .. }
         | IrLowerError::ViewUnsupported { .. }
         | IrLowerError::SequenceUnsupported { .. }
