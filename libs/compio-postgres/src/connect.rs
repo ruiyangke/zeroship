@@ -467,6 +467,24 @@ where
         // a deliberate divergence from libpq rather than a bug fix, and if it
         // is ever wanted it belongs here, in this one arm.
         (SslMode::Prefer, Encryption::Tls) if err.is_tls_handshake() => Encryption::Plaintext,
+        // The connector cannot attest to a TLS parameter this config asks for,
+        // so TLS-as-configured is unavailable through it - the same situation
+        // as a failed handshake, reached before any bytes are sent.
+        //
+        // This arm is what the paragraph above says belongs here. The
+        // attestation gate escalates `prefer` to chain verification the moment
+        // `sslrootcert` is set, and the default `can_honor_server_verification`
+        // attests to nothing, so WITHOUT this arm adding `sslrootcert` to a
+        // working `prefer` DSN turns it into a hard error - which is precisely
+        // the "refuse to downgrade once trust anchors were named" divergence
+        // the comment above weighs and declines. It was never decided here; it
+        // arrived from `connect_raw` as a side effect.
+        //
+        // `require` and the `verify-*` modes are unaffected: they have no
+        // plaintext leg and fall through to the `_` arm below, so an
+        // unattesting connector still fails them. That is what keeps this from
+        // downgrading a guarantee anyone actually has.
+        (SslMode::Prefer, Encryption::Tls) if err.is_tls_unattested() => Encryption::Plaintext,
         // Plaintext first, and it failed for any reason: dial again, with TLS.
         (SslMode::Allow, Encryption::Plaintext) => Encryption::Tls,
         // Every other mode has one transport in its allowed set, so there is
