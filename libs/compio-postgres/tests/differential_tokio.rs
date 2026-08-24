@@ -390,3 +390,138 @@ async fn both_drivers_agree_on_every_error_field() {
         cases.len()
     );
 }
+
+/// A NOTICE, as each driver reports it.
+///
+/// Notices travel in the same wire format as errors but on a different path:
+/// they arrive UNSOLICITED, outside any request's response, so each driver
+/// routes them itself. This crate sends them to `Connection::notifications()`;
+/// tokio-postgres yields them from `Connection::poll_message`. Different
+/// plumbing, same bytes, so the parsed result must match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Notice {
+    severity: String,
+    code: String,
+    message: String,
+    detail: Option<String>,
+    hint: Option<String>,
+}
+
+/// A statement that raises one notice carrying a detail and a hint.
+///
+/// RAISE NOTICE is the only reliable way to control every field: a
+/// server-generated notice (say, "relation already exists, skipping") differs
+/// by server version and would make this test a version detector.
+const NOTICE_SQL: &str = "DO $$ BEGIN \
+     RAISE NOTICE 'differential notice %', 7 \
+     USING DETAIL = 'the detail', HINT = 'the hint'; \
+     END $$";
+
+fn tokio_notices(url: String) -> Vec<Notice> {
+    use futures_util::StreamExt;
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let collected = runtime.block_on(async move {
+            let (client, mut connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+
+            // The connection must be POLLED for async messages to surface, so
+            // it cannot simply be spawned and forgotten as elsewhere in this
+            // file.
+            let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = messages.clone();
+            let stream =
+                futures_util::stream::poll_fn(move |context| connection.poll_message(context));
+            let pump = tokio::spawn(async move {
+                let mut stream = std::pin::pin!(stream);
+                while let Some(Ok(message)) = stream.next().await {
+                    if let tokio_postgres::AsyncMessage::Notice(notice) = message {
+                        sink.lock().expect("notice sink").push(Notice {
+                            severity: notice.severity().to_owned(),
+                            code: notice.code().code().to_owned(),
+                            message: notice.message().to_owned(),
+                            detail: notice.detail().map(str::to_owned),
+                            hint: notice.hint().map(str::to_owned),
+                        });
+                    }
+                }
+            });
+
+            client
+                .batch_execute(NOTICE_SQL)
+                .await
+                .expect("raise notice");
+            drop(client);
+            let _ = pump.await;
+            messages.lock().expect("notice sink").clone()
+        });
+        let _ = sender.send(collected);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver.recv().expect("no notices came back from tokio")
+}
+
+async fn compio_notices(url: &str) -> Vec<Notice> {
+    use futures_util::StreamExt;
+
+    let (client, mut connection) = compio_postgres::connect(url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(url, &error));
+    let mut messages = connection.notifications();
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    client
+        .batch_execute(NOTICE_SQL)
+        .await
+        .expect("raise notice");
+
+    let mut collected = Vec::new();
+    // One notice is expected; bound the wait so a driver that never delivers
+    // fails the test instead of hanging the suite.
+    if let Ok(Some(message)) =
+        compio::time::timeout(std::time::Duration::from_secs(10), messages.next()).await
+        && let compio_postgres::AsyncMessage::Notice(notice) = message
+    {
+        collected.push(Notice {
+            severity: notice.severity().to_owned(),
+            code: notice.code().code().to_owned(),
+            message: notice.message().to_owned(),
+            detail: notice.detail().map(str::to_owned),
+            hint: notice.hint().map(str::to_owned),
+        });
+    }
+    collected
+}
+
+/// Notices arrive outside any response, so each driver routes them itself.
+/// The parsed result must still agree.
+#[compio::test]
+async fn both_drivers_agree_on_a_raised_notice() {
+    let url = common::test_url();
+    let theirs = tokio_notices(url.clone());
+    let ours = compio_notices(&url).await;
+
+    assert_eq!(
+        ours.len(),
+        1,
+        "this driver delivered {} notices, expected exactly one: {ours:?}",
+        ours.len()
+    );
+    assert!(
+        !theirs.is_empty(),
+        "the reference driver delivered no notice, so there is nothing to compare against"
+    );
+    assert_eq!(
+        ours[0], theirs[0],
+        "the two drivers disagree about the same NOTICE"
+    );
+}
