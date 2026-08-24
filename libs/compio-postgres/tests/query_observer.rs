@@ -14,8 +14,7 @@ const OBJECT_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn test_url() -> String {
-    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::test_url()
 }
 
 async fn connect() -> Client {

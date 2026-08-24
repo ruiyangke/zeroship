@@ -11,8 +11,7 @@ mod common;
 const TEST_WATCHDOG: Duration = Duration::from_secs(10);
 
 fn test_url() -> String {
-    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::test_url()
 }
 
 async fn connect() -> Client {
