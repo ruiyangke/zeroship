@@ -183,3 +183,7 @@ harness = false
 [[bench]]
 name = "hot_path"
 harness = false
+
+[[test]]
+name = "serialized_loop"
+required-features = ["test-utils"]

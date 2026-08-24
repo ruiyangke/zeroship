@@ -17,10 +17,17 @@
 //! produced by a real query (same `RowIndex` paths, same
 //! `column_to_json` branches).
 
+use crate::buf_stream::SplitStream;
+use crate::config::Host;
+use crate::socket::{Socket, SocketReadHalf, SocketWriteHalf};
 use crate::statement::{Column, Statement};
+use crate::tls::NoTlsStream;
 use crate::types::Type;
+use crate::{Client, Config, Connection, NoTls};
 use crate::{Error, Row};
 use bytes::BytesMut;
+use compio::buf::{BufResult, IoBuf, IoBufMut};
+use compio::io::{AsyncRead, AsyncWrite};
 use postgres_protocol::message::backend::{DataRowBody, Message};
 
 /// Construct a [`Column`] for tests. Mirrors the `pub(crate)` field
@@ -129,4 +136,108 @@ fn build_data_row_body(values: &[Option<Vec<u8>>]) -> DataRowBody {
         Some(_) => panic!("synthetic DataRow buffer parsed as a non-DataRow message"),
         None => panic!("synthetic DataRow buffer underflowed Message::parse"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reaching the serialized connection loop without TLS
+// ---------------------------------------------------------------------------
+
+/// A socket that refuses to split, forcing [`crate::Connection::run`] onto its
+/// SERIALIZED loop.
+///
+/// `Connection::run` chooses its loop by whether the transport splits into
+/// owned halves. A plain socket does, and takes the multiplexed loop; a TLS
+/// stream cannot, because rustls keeps shared session state, so every TLS
+/// connection takes the serialized one. The two loops are not equivalent -
+/// the serialized loop does not read while idle and does not write a second
+/// request before the first is answered - so behaviour proven over plaintext
+/// is not thereby proven over TLS.
+///
+/// This makes that loop reachable WITHOUT TLS, so the suites that exercise
+/// behaviour can cover it directly rather than inferring. Before this existed
+/// the only way in was a TLS server, which is why the two loops diverged with
+/// nothing going red.
+#[derive(Debug)]
+pub struct SerializedSocket {
+    inner: Socket,
+    /// Set when `Connection::run` asks this socket to split and is refused.
+    /// That refusal is what routes the connection onto the serialized loop, so
+    /// observing it is the only honest evidence a test is really on that loop
+    /// - a shared backend pid, a working query and a committed transaction are
+    /// all equally true on the multiplexed one.
+    split_refused: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl AsyncRead for SerializedSocket {
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+        self.inner.read(buf).await
+    }
+}
+
+impl AsyncWrite for SerializedSocket {
+    async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+        self.inner.write(buf).await
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush().await
+    }
+
+    async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.inner.shutdown().await
+    }
+}
+
+impl SplitStream for SerializedSocket {
+    type ReadHalf = SocketReadHalf;
+    type WriteHalf = SocketWriteHalf;
+
+    /// Always refuses. This is the whole point of the type.
+    fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        self.split_refused.set(true);
+        Err(self)
+    }
+}
+
+/// Connect to `config`'s first TCP endpoint and drive it on the SERIALIZED
+/// loop, the one every TLS connection uses.
+///
+/// Plaintext only, deliberately: the point is to exercise that loop without
+/// needing a TLS server, so the transport here is as simple as possible and
+/// the only thing being varied is which loop runs.
+pub async fn connect_serialized(
+    config: &Config,
+) -> Result<
+    (
+        Client,
+        Connection<SerializedSocket, NoTlsStream>,
+        std::rc::Rc<std::cell::Cell<bool>>,
+    ),
+    Error,
+> {
+    let host = match config.get_hosts().first() {
+        Some(Host::Tcp(host)) => host.clone(),
+        _ => {
+            return Err(Error::config("connect_serialized needs a TCP host".into()));
+        }
+    };
+    let port = config.get_ports().first().copied().unwrap_or(5432);
+    let tcp = compio::net::TcpStream::connect((host.as_str(), port))
+        .await
+        .map_err(Error::io)?;
+    let split_refused = std::rc::Rc::new(std::cell::Cell::new(false));
+    let socket = SerializedSocket {
+        inner: Socket::new_tcp(tcp),
+        split_refused: std::rc::Rc::clone(&split_refused),
+    };
+    let (client, connection) = crate::connect_raw::connect_raw(
+        socket,
+        NoTls,
+        crate::connect_tls::Encryption::Plaintext,
+        true,
+        config,
+        None,
+    )
+    .await?;
+    Ok((client, connection, split_refused))
 }
