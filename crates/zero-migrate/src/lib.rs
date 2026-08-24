@@ -206,7 +206,7 @@ pub use apply::drift::{
     diff_snapshots, diff_snapshots_with_index_aliases, AlteredObject, ChecksumDrift,
     ChecksumDriftReport, DriftError, DriftReport, OrphanJournal, StructuralDrift,
 };
-pub use conn::{ConfinementConfig, ConnectError, ExecutorConfig, PostgresConfinement};
+pub use conn::{ConfinementConfig, ConnectError, ExecutorConfig};
 pub use driver::{Bind, ColIndex, DbError, FromValue, Row, SqlSession, Value};
 pub use engine::{
     recognizes_contract_apply, AggregateOutcome, DeclarativeApplyError, DeclarativeDeployOutcome,

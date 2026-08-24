@@ -392,8 +392,7 @@ pub(super) fn set_local_session_sql(
 pub(super) fn set_local_role_sql(
     cfg: &ExecutorConfig,
 ) -> Result<Option<String>, zero_migrate_backend::dml::IdentQuoteError> {
-    cfg.confinement
-        .postgres
+    crate::confinement::of(cfg)
         .migrator_role
         .as_ref()
         .map(|role| {
@@ -772,7 +771,7 @@ pub(crate) async fn apply_transactional<D: SqlSession>(
         // journal INSERT below runs as the admin (the migrator cannot write the
         // journal). `RESET ROLE` mid-transaction is supported and does not end the
         // txn, so atomicity of `<up>` + journal is preserved.
-        if cfg.confinement.postgres.migrator_role.is_some() {
+        if crate::confinement::of(cfg).migrator_role.is_some() {
             if let Err(e) = conn.batch("RESET ROLE").await {
                 let _ = conn.batch("ROLLBACK").await;
                 return Err(ApplyError::Db(e.into()));
@@ -947,7 +946,7 @@ pub(crate) async fn apply_dml_transactional<D: SqlSession>(
             source: e.into(),
         });
     }
-    if cfg.confinement.postgres.migrator_role.is_some() {
+    if crate::confinement::of(cfg).migrator_role.is_some() {
         if let Err(e) = conn.batch("RESET ROLE").await {
             let _ = conn.batch("ROLLBACK").await;
             return Err(ApplyError::Db(e.into()));
@@ -1134,7 +1133,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
     // admin. `RESET ROLE` runs on ALL exit paths (including the error path) so
     // the role never leaks onto the session even if the `<up>` fails — and
     // `apply`'s `restore_session` is an unconditional backstop.
-    if let Some(role) = &cfg.confinement.postgres.migrator_role {
+    if let Some(role) = &crate::confinement::of(cfg).migrator_role {
         let role_q = zero_migrate_backend::dml::quote_ident_checked_for_backend(
             role,
             &crate::dml::RENDERER,
@@ -1142,7 +1141,7 @@ pub(crate) async fn apply_non_transactional<D: SqlSession>(
         conn.batch(&format!("SET ROLE {role_q}")).await?;
     }
     let up_result = conn.batch(&m.up).await;
-    if cfg.confinement.postgres.migrator_role.is_some() {
+    if crate::confinement::of(cfg).migrator_role.is_some() {
         // RESET ROLE regardless of the up's success, so the journal writes below
         // run as admin and no role leaks onto the session.
         if let Err(e) = conn.batch("RESET ROLE").await {
@@ -1512,7 +1511,7 @@ pub(crate) async fn rollback_one_transactional<D: SqlSession>(
     }
     // RESET ROLE back to admin — still inside the txn — so the journal append runs
     // as the admin (the migrator cannot write the journal).
-    if cfg.confinement.postgres.migrator_role.is_some() {
+    if crate::confinement::of(cfg).migrator_role.is_some() {
         if let Err(e) = conn.batch("RESET ROLE").await {
             let _ = conn.batch("ROLLBACK").await;
             return Err(RollbackError::Db(e.into()));
@@ -1618,7 +1617,7 @@ pub(crate) async fn rollback_dml_plan_transactional<D: SqlSession>(
         }
     }
 
-    if cfg.confinement.postgres.migrator_role.is_some() {
+    if crate::confinement::of(cfg).migrator_role.is_some() {
         if let Err(error) = conn.batch("RESET ROLE").await {
             let _ = conn.batch("ROLLBACK").await;
             return Err(RollbackError::Db(error.into()));
@@ -1685,8 +1684,10 @@ mod pg_confinement_shape_tests {
     /// (or restored the old long 30000 ms lock_timeout) flips this assertion RED.
     #[test]
     fn pg_confinement_bracket_is_emitted_from_the_pg_block() {
-        let cfg = ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x"))
-            .with_migrator_role("migrator_proj_x");
+        let cfg = crate::confinement::PostgresConfinementExt::with_migrator_role(
+            ExecutorConfig::new("prj_x", "proj_x", crate::test_fixtures::no_inject("proj_x")),
+            "migrator_proj_x",
+        );
         let m = trivial_migration();
 
         let session = set_local_session_sql(&cfg, &m).expect("session sql renders");
@@ -1715,7 +1716,7 @@ mod pg_confinement_shape_tests {
             cfg.statement_timeout_ms(),
         );
 
-        // The migrator role bracket comes from cfg.confinement.postgres.migrator_role.
+        // The migrator role bracket comes from crate::confinement::of(cfg).migrator_role.
         let role = set_local_role_sql(&cfg)
             .expect("role ident quotable")
             .expect("migrator role set");
@@ -1784,7 +1785,7 @@ mod pg_confinement_shape_tests {
             crate::test_fixtures::no_inject("app_test"),
         );
         assert!(
-            cfg.confinement.postgres.migrator_role.is_none(),
+            crate::confinement::of(&cfg).migrator_role.is_none(),
             "a SQLite-shaped config must carry no PG migrator role (SET ROLE) — \
              it confines via the runtime authorizer mode-flip, not the PG bracket"
         );
@@ -2145,7 +2146,7 @@ pub(crate) fn search_path_clause(
     // schema), followed by the extension schema(s) so an UNQUALIFIED extension
     // type (`vector(N)`, `geography(...)`) resolves.
     let mut parts = vec![quote(&cfg.project_schema)?];
-    for ext in &cfg.confinement.postgres.extension_schemas {
+    for ext in &crate::confinement::of(cfg).extension_schemas {
         // Avoid duplicating the project schema if it (oddly) appears.
         if ext != &cfg.project_schema {
             parts.push(quote(ext)?);

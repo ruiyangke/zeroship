@@ -1871,7 +1871,7 @@ async fn initialize_progress<D: SqlSession>(
             verify_guard(conn, cfg, spec, guard).await?;
         }
 
-        if let Some(role) = &cfg.confinement.postgres.migrator_role {
+        if let Some(role) = &crate::confinement::of(cfg).migrator_role {
             conn.batch(&format!("SET LOCAL ROLE {}", quote_ident(role)?))
                 .await?;
         }
@@ -1882,7 +1882,7 @@ async fn initialize_progress<D: SqlSession>(
             .first()
             .map(|row| tuple_from_row(row, "_bf_end_", cursor))
             .transpose()?;
-        if cfg.confinement.postgres.migrator_role.is_some() {
+        if crate::confinement::of(cfg).migrator_role.is_some() {
             conn.batch("RESET ROLE").await?;
         }
 
@@ -2037,7 +2037,7 @@ async fn run_batch<D: SqlSession>(
         )
         .await?;
 
-        if let Some(role) = &cfg.confinement.postgres.migrator_role {
+        if let Some(role) = &crate::confinement::of(cfg).migrator_role {
             conn.batch(&format!("SET LOCAL ROLE {}", quote_ident(role)?))
                 .await?;
         }
@@ -2103,7 +2103,7 @@ async fn run_batch<D: SqlSession>(
             let next_cursor = selected_tuples.last().cloned();
             (selected, updated, next_cursor)
         };
-        if cfg.confinement.postgres.migrator_role.is_some() {
+        if crate::confinement::of(cfg).migrator_role.is_some() {
             conn.batch("RESET ROLE").await?;
         }
 

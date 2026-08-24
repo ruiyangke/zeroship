@@ -45,8 +45,10 @@ pub enum ConnectError {}
 /// | `lock_timeout`         | yes (`SET lock_timeout`) | yes (`innodb_lock_wait_timeout`) | no |
 /// | `project_lock_timeout` | **no** (`pg_advisory_lock` takes no timeout) | yes (`GET_LOCK`) | yes (application-file lock) |
 ///
-/// The genuinely PostgreSQL-only settings — the ones no other engine has any
-/// use for — stay visibly PostgreSQL under [`postgres`](Self::postgres).
+/// A setting only ONE engine has any use for does not get a field here at all. It
+/// rides [`vendor`](Self::vendor), keyed by the backend that reads it and typed by
+/// that backend's own crate, so this struct stays a table of shared concepts rather
+/// than growing a per-engine annex.
 ///
 /// The confinement STRATEGY still lives in each backend's apply leaf (PG's
 /// `SET ROLE`/`search_path`/timeout bracket; SQLite's two-mode authorizer
@@ -124,92 +126,20 @@ pub struct ConfinementConfig {
     /// the open question in the queue-versus-fail-fast ticket rather than
     /// something this field decides.
     pub project_lock_timeout: Duration,
-    /// The settings **only PostgreSQL reads** — its `SET ROLE` principal and the
-    /// extension-resolution schemas its `search_path` needs. Kept under a
-    /// PostgreSQL-named block because no other engine has a use for either: they
-    /// are not shared concepts wearing a vendor hat, they are genuinely one
-    /// vendor's.
-    pub postgres: PostgresConfinement,
-}
-
-/// The confinement settings **only the PostgreSQL backend reads**.
-///
-/// The MySQL and SQLite backends read neither field, and would have nothing to do
-/// with them if they did — MySQL has no `SET ROLE`-per-transaction confinement
-/// model and SQLite has neither roles nor schemas.
-///
-/// # Where they are read from, measured
-///
-/// This doc used to claim every field was referenced "solely from
-/// `apply/backend/postgres/` and the precondition evaluator". Half of that has
-/// become true — the precondition evaluator IS the PostgreSQL backend now — and the
-/// other half was never true, which is why the claim is replaced by the measurement
-/// rather than trimmed. (That backend is `zero-migrate-postgres/src/backend/` since
-/// the execution half left the engine; the paths below are relative to it.)
-///
-/// `migrator_role` is read only from the PostgreSQL backend
-/// (`session`, `backfill_sql`, `primary_key_sql`, `precondition`) and written by
-/// [`ExecutorConfig::with_migrator_role`], the host's provisioning seam.
-///
-/// `extension_schemas` is read from exactly ONE place, and that place is now the
-/// PostgreSQL backend too: `search_path_clause`, in that crate's
-/// `backend/session.rs`. It used to be a method on the neutral
-/// [`ExecutorConfig`] in this file, and this doc named that as the real reason the
-/// neutral [`ConfinementConfig`] still carried a vendor-typed field — "relocating
-/// the field without first relocating `search_path_clause` would only move the
-/// coupling". That relocation has happened: a `search_path` is PostgreSQL's
-/// concept, all three callers were already in that file, and all three passed
-/// `POSTGRES` as the dialect.
-///
-/// So what is left here is only DATA, and only the vendor that reads it reads it.
-/// The block stays because a per-dialect carrier for run-time config does not
-/// exist: `BackendVendor` holds `&'static dyn` policy objects, and these are
-/// per-project host input.
-#[derive(Debug, Clone)]
-pub struct PostgresConfinement {
-    /// The least-privilege `migrator` role the apply flow runs each migration's
-    /// DDL + journal writes under, via `SET ROLE` / `RESET ROLE` (the
-    /// DB-privilege defense layer). `None` runs as the connecting
-    /// (admin) role — used only by tests / single-tenant dev where the role
-    /// model is not provisioned. In the platform this is always `Some`, matching
-    /// the deterministic name returned by the PostgreSQL backend crate's
-    /// `role::migrator_role_name` and provisioned by the host.
-    pub migrator_role: Option<String>,
-    /// The schema(s) that host shared **extension types/functions** the engine
-    /// emits UNQUALIFIED (e.g. pgvector's `vector(N)`, `PostGIS`'s
-    /// `geography(POINT,4326)`). pgvector / `PostGIS` install into `public` on the
-    /// platform image (and the dev `pgvector/pgvector:pg16`), so this defaults to
-    /// `["public"]`.
+    /// The run-time confinement settings each BACKEND reads, keyed by the backend
+    /// that reads them.
     ///
-    /// These schemas are appended (after the project schema) to the migrator's
-    /// `search_path` so unqualified extension types/functions RESOLVE, and the
-    /// migrator is granted **`USAGE` only** on them (lookup, never CREATE/write).
-    /// This matches plugin-db's RUNTIME, which references the same unqualified
-    /// `vector`/`geography` types with `public` reachable on its connection path.
+    /// A backend whose confinement model needs per-project host input — a principal
+    /// to run as, a namespace to resolve through — records it here and reads it back
+    /// by downcasting to a type declared in its own crate. That keeps a setting only
+    /// one vendor has out of the neutral vocabulary WITHOUT pushing it into
+    /// [`BackendVendor`](crate::registry::BackendVendor), which cannot hold it: that
+    /// table is `&'static dyn` policy objects and this is per-project input.
     ///
-    /// SECURITY: `USAGE` permits *resolving* objects in the schema; it does NOT
-    /// permit creating objects there (that needs `CREATE`, which stays revoked)
-    /// nor writing existing tables (that needs per-table grants the migrator never
-    /// receives). So the cross-schema **write** confinement is unchanged — these
-    /// schemas are resolution-only.
-    pub extension_schemas: Vec<String>,
-}
-
-impl Default for PostgresConfinement {
-    /// No `SET ROLE` (the platform sets it via
-    /// [`ExecutorConfig::with_migrator_role`]) and `public` as the
-    /// extension-type resolution schema.
-    fn default() -> Self {
-        Self {
-            // Defaults to no SET ROLE; the platform sets this to the provisioned
-            // deterministic per-project migrator role. Tests opt in explicitly.
-            migrator_role: None,
-            // Extension types/functions (pgvector `vector`, PostGIS `geography`)
-            // live in `public` on the platform/dev image. Resolution-only; the
-            // migrator gets USAGE (not CREATE) on these — see the field doc.
-            extension_schemas: vec!["public".to_string()],
-        }
-    }
+    /// A backend with no leg here resolves its OWN default, which is why a miss is
+    /// safe: the value that fills in is the one the owning vendor would have chosen,
+    /// and no other vendor can observe the difference.
+    pub vendor: crate::dialectal::Dialectal<dyn crate::dialectal::VendorConfinement>,
 }
 
 impl ConfinementConfig {
@@ -235,7 +165,7 @@ impl ConfinementConfig {
             // same concept. A deploy queueing behind a peer is not competing with
             // live application traffic, so it does not want the 3s DDL budget.
             project_lock_timeout: Duration::from_secs(10),
-            postgres: PostgresConfinement::default(),
+            vendor: crate::dialectal::Dialectal::new(),
         }
     }
 }
@@ -244,9 +174,9 @@ impl ConfinementConfig {
 ///
 /// The project identity + trust posture live directly on this struct; the
 /// **confinement parameters** (journal namespace + the three timeout budgets)
-/// are grouped under [`confinement`](Self::confinement), and the settings only
-/// PostgreSQL reads sit one level further in
-/// [`confinement.postgres`](ConfinementConfig::postgres).
+/// are grouped under [`confinement`](Self::confinement), and the settings only ONE
+/// backend reads sit one level further in
+/// [`confinement.vendor`](ConfinementConfig::vendor), keyed by that backend.
 ///
 /// The `statement_timeout` + `lock_timeout` budgets are **mandatory** (no
 /// indefinite locks / `DoS`) and are applied per migration before its SQL runs —
@@ -265,9 +195,9 @@ pub struct ExecutorConfig {
     /// guard's confinement target.
     pub project_schema: String,
     /// The **confinement parameters** — the journal's meta schema and the three
-    /// timeout budgets, each read by more than one dialect, plus the
-    /// PostgreSQL-only role and extension-schema settings nested under
-    /// [`postgres`](ConfinementConfig::postgres).
+    /// timeout budgets, each read by more than one dialect, plus whatever
+    /// single-engine settings a host supplied, keyed by their engine under
+    /// [`vendor`](ConfinementConfig::vendor).
     pub confinement: ConfinementConfig,
     /// PRIVATE (`pub(crate)`). The caller-authored composed policy every
     /// executor-path guard uses. The guard is built from this single policy source
@@ -421,14 +351,6 @@ impl ExecutorConfig {
         // `migrator_role` stays `None` (the `new()` default): Trusted runs as the
         // connecting role, exactly like Platform's admin (no `SET ROLE`).
         cfg
-    }
-
-    /// Set the least-privilege `migrator_role` the apply
-    /// flow runs migrations under. Builder convenience.
-    #[must_use]
-    pub fn with_migrator_role(mut self, role: impl Into<String>) -> Self {
-        self.confinement.postgres.migrator_role = Some(role.into());
-        self
     }
 
     /// The caller-authored composed policy this config was built with.

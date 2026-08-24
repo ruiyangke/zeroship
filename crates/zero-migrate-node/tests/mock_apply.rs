@@ -36,6 +36,7 @@ use zero_migrate::model::migration::{
     Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId,
 };
 use zero_migrate::{BindValue, MigrationEngine, PlanStep};
+use zero_migrate_postgres::confinement::PostgresConfinementExt;
 use zero_migrate_postgres::PostgresBackend;
 
 use zero_migrate_node::marshal::{JsCell, JsReply, JsRequest, JsRow};

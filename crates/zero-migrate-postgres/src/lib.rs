@@ -33,6 +33,11 @@ pub mod analysis;
 /// reaches nothing but `zero-migrate-backend`, `zero-migrate-ir` and this crate's
 /// own renderers, descriptor and guard.
 pub mod backend;
+// The confinement settings only this backend reads, and the host seam that sets
+// them. `pub` because a host has to be able to name `PostgresConfinement` and reach
+// `PostgresConfinementExt::with_migrator_role`; the neutral crate cannot offer either
+// without naming this one.
+pub mod confinement;
 mod ddl;
 mod descriptor;
 mod dml;

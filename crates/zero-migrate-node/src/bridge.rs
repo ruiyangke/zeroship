@@ -74,6 +74,7 @@ use zero_migrate::model::migration::{Migration, MigrationId};
 // (`ops::status::history` still names `zero_migrate::POSTGRES` in full, on the
 // PG-only status path — a different coupling, untouched here.)
 use zero_migrate::{MigrationEngine, MigrationIr, SQLITE};
+use zero_migrate_postgres::confinement::PostgresConfinementExt;
 use zero_migrate_sqlite::SqliteBackend;
 
 use crate::api;

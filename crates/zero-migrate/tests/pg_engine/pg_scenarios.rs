@@ -980,7 +980,10 @@ async fn backfill_rolls_back_when_update_policy_hides_a_selected_row() {
     let tok = token();
     let mut cfg = cfg_for(&tok);
     let role = format!("bf_role_{tok}");
-    cfg.confinement.postgres.migrator_role = Some(role.clone());
+    cfg = zero_migrate_postgres::confinement::PostgresConfinementExt::with_migrator_role(
+        cfg,
+        role.clone(),
+    );
     drop_schemas(&session, &cfg).await;
     let _schemas = ensure_project_schema(&session, &cfg).await;
 

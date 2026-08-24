@@ -60,6 +60,7 @@ use zero_migrate::{
     Approval, ExecutorConfig, GuardConfig, Migration, MigrationEngine, POSTGRES, SqlSession,
     effective_policy_from_charter_toml,
 };
+use zero_migrate_postgres::confinement::PostgresConfinementExt;
 use zero_migrate_postgres::PostgresBackend;
 
 const POLICY_CHARTER: &str = r#"policy_version = 1
@@ -116,7 +117,10 @@ migration. `Approval::None` fails when the plan requires approval.
 
 `ExecutorConfig::new` does not select a PostgreSQL migrator role automatically.
 `with_migrator_role` is the least-privilege option when the role has already been
-provisioned.
+provisioned. It comes from `PostgresConfinementExt`, in the PostgreSQL backend
+crate, because the setting is one only that backend reads: a neutral
+`ExecutorConfig` carries per-backend confinement in `confinement.vendor`, keyed by
+dialect, and each backend supplies the builder and the type for its own leg.
 
 ## PostgreSQL and MySQL sessions
 

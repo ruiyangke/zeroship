@@ -191,7 +191,7 @@ async fn apply_inside_transaction<D: SqlSession>(
             source: error.into(),
         });
     }
-    if cfg.confinement.postgres.migrator_role.is_some() {
+    if crate::confinement::of(cfg).migrator_role.is_some() {
         conn.batch("RESET ROLE").await?;
     }
 
