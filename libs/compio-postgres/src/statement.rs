@@ -138,11 +138,23 @@ impl Column {
     }
 
     /// Returns the OID of the underlying database table.
+    ///
+    /// `None` when the column does not come from a table - a computed
+    /// expression reports oid 0, which is mapped away here. A SYSTEM column
+    /// such as `ctid` DOES report its relation.
     pub fn table_oid(&self) -> Option<u32> {
         self.table_oid
     }
 
     /// Return the column ID within the underlying database table.
+    ///
+    /// `None` when the column is not a table column at all - a computed
+    /// expression reports attribute number 0, which is mapped away here.
+    ///
+    /// CAN BE NEGATIVE. PostgreSQL numbers user columns from 1 but gives its
+    /// SYSTEM columns negative attribute numbers, so `ctid` comes back as
+    /// `Some(-1)` (measured). Treating this as a 1-based index into the
+    /// relation is therefore wrong for those.
     pub fn column_id(&self) -> Option<i16> {
         self.column_id
     }

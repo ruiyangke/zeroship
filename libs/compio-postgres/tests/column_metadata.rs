@@ -139,3 +139,49 @@ async fn a_computed_column_has_no_table_or_attribute_number() {
         "an unconstrained int4 carries the no-typmod sentinel"
     );
 }
+
+/// A SYSTEM column reports its relation and a NEGATIVE attribute number.
+///
+/// This is the case the two above leave out, and it is the one that bites: a
+/// caller that reads `column_id()` as a 1-based index into the relation is
+/// correct for `id` and `label`, correct-by-accident for a computed column
+/// (`None`), and WRONG here. PostgreSQL numbers user columns from 1 and its own
+/// from -1 downward, so `ctid` is `Some(-1)`.
+///
+/// Measured against the live server rather than assumed, since the sign is the
+/// whole point.
+#[compio::test]
+async fn a_system_column_reports_a_negative_attribute_number() {
+    let client = connect_client(&common::test_url()).await;
+    let table = common::test_object_name("cpg_colmeta_sys");
+    client
+        .batch_execute(&format!("CREATE TEMPORARY TABLE {table} (id int4)"))
+        .await
+        .expect("create the probe table");
+
+    let statement = client
+        .prepare(&format!("SELECT ctid, id FROM {table}"))
+        .await
+        .expect("prepare a select over a system column");
+
+    let ctid = &statement.columns()[0];
+    assert_eq!(ctid.name(), "ctid");
+    assert!(
+        ctid.table_oid().is_some(),
+        "a system column still belongs to its relation"
+    );
+    assert_eq!(
+        ctid.column_id(),
+        Some(-1),
+        "ctid's attribute number is negative, not an index"
+    );
+
+    // One variable away: the ordinary column beside it is still positive.
+    let id = &statement.columns()[1];
+    assert_eq!(id.column_id(), Some(1));
+
+    client
+        .batch_execute(&format!("DROP TABLE IF EXISTS {table}"))
+        .await
+        .ok();
+}
