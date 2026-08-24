@@ -17,7 +17,7 @@ use crate::keepalive::KeepaliveConfig;
 use crate::query::RowStream;
 use crate::release::ConnectionRelease;
 use crate::simple_query::SimpleQueryStream;
-use crate::tls::{MakeTlsConnect, TlsConnect};
+use crate::tls::{MakeTlsConnect, ServerVerification, TlsConnect};
 use crate::types::{Oid, ToSql, Type};
 use crate::{
     CancelToken, Error, Row, SimpleQueryMessage, Socket, Statement, ToStatement, Transaction,
@@ -1575,6 +1575,16 @@ pub(crate) struct SocketConfig {
     /// second leg, so guessing wrong either puts the cancel key on the wire in
     /// the clear or fails the cancel outright.
     pub encryption: Encryption,
+    /// The server verification this session's `sslmode` and `sslrootcert`
+    /// demanded - recorded here for the same reason as `encryption` above.
+    ///
+    /// A cancel carries the backend PID and secret key, which are a BEARER
+    /// CREDENTIAL: anything holding them can cancel this session's queries. The
+    /// connector used to send them is supplied by the CALLER at cancel time
+    /// (`CancelToken::cancel_query` takes it as an argument) and need not be
+    /// the one the session was vetted with, so the demand has to travel with
+    /// the session rather than be taken on trust from whatever turns up later.
+    pub server_verification: ServerVerification,
 }
 
 /// Resolved transport endpoint: either a concrete IP or a Unix socket
