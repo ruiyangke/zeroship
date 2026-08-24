@@ -530,9 +530,46 @@ pub fn plaintext_url() -> String {
     test_url()
 }
 
+/// Replace the password in a `postgres://user:pass@host/db` DSN.
+///
+/// Returns `None` when the DSN carries no password to replace, which is the
+/// whole reason this exists. `wrong_password` used to build its bad DSN with
+/// `url.replace(":zeroship@", ":wrong_password_xyz@")` - a literal that is
+/// correct for the default plaintext DSN and matches NOTHING otherwise. Under
+/// `--features suite-over-tls` the password is different, so the replacement
+/// silently did nothing and the test connected with the RIGHT password and
+/// then failed at "expected connection to fail". A test that can degrade into
+/// asserting the opposite of its name should not depend on a string literal.
+///
+/// The userinfo is located exactly as [`redact_dsn`] locates it: the scan for
+/// the `@` runs to the end of the authority, so a password containing `@`
+/// cannot cut it short.
+pub fn with_password(dsn: &str, password: &str) -> Option<String> {
+    let scheme_end = dsn.find("://")?;
+    let authority_start = scheme_end + 3;
+    let authority_end = dsn[authority_start..]
+        .find(['/', '?'])
+        .map_or(dsn.len(), |offset| authority_start + offset);
+    let authority = &dsn[authority_start..authority_end];
+
+    let at = authority.rfind('@')?;
+    let userinfo = &authority[..at];
+    let colon = userinfo.find(':')?;
+
+    Some(format!(
+        "{}{}:{}{}",
+        &dsn[..authority_start],
+        &userinfo[..colon],
+        password,
+        &dsn[authority_start + at..]
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MAX_POSTGRES_IDENTIFIER_LEN, pid_embedded_in, redact_dsn, test_object_name};
+    use super::{
+        MAX_POSTGRES_IDENTIFIER_LEN, pid_embedded_in, redact_dsn, test_object_name, with_password,
+    };
 
     #[test]
     fn a_slot_named_by_this_suite_yields_the_pid_that_made_it() {
@@ -677,6 +714,46 @@ mod tests {
         assert_eq!(
             redact_dsn("postgres://u:p@host/db?options=-c%20search_path%3Da@b"),
             "postgres://u:***@host/db?options=-c%20search_path%3Da@b"
+        );
+    }
+
+    /// The shape that matters: the suite's TLS DSN carries a query string, and
+    /// the replacement must not disturb it.
+    #[test]
+    fn a_password_is_replaced_without_touching_the_query_string() {
+        assert_eq!(
+            with_password(
+                "postgres://postgres:secret@localhost:5447/postgres?sslmode=verify-full&sslrootcert=/tmp/ca.crt",
+                "wrong"
+            )
+            .as_deref(),
+            Some(
+                "postgres://postgres:wrong@localhost:5447/postgres?sslmode=verify-full&sslrootcert=/tmp/ca.crt"
+            )
+        );
+    }
+
+    /// Same rule as `redact_dsn`: the scan for the separator runs to the end of
+    /// the authority, so an `@` inside the password cannot cut it short.
+    #[test]
+    fn a_password_containing_an_at_sign_is_replaced_whole() {
+        assert_eq!(
+            with_password("postgres://user:p@ss@localhost:5440/db", "wrong").as_deref(),
+            Some("postgres://user:wrong@localhost:5440/db")
+        );
+    }
+
+    /// `None`, not a silently unchanged DSN. This is the whole point: the
+    /// caller asked to make a password wrong, and a DSN with no password
+    /// cannot honour that. Returning the input would let `wrong_password`
+    /// connect with valid credentials and then fail claiming the server had
+    /// accepted a bad one.
+    #[test]
+    fn a_dsn_without_a_password_is_refused_rather_than_returned_unchanged() {
+        assert_eq!(with_password("postgres://user@localhost/db", "wrong"), None);
+        assert_eq!(
+            with_password("host=localhost port=5440 user=postgres", "wrong"),
+            None
         );
     }
 }
