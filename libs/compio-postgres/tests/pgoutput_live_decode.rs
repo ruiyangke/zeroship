@@ -16,7 +16,7 @@
 
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage, TupleColumn};
 use compio_postgres::replication::{ReplicationMessage, StartReplicationOptions};
-use compio_postgres::{Client, Config, NoTls};
+use compio_postgres::Client;
 use std::time::Duration;
 
 #[allow(dead_code)]
@@ -40,36 +40,6 @@ async fn client() -> Client {
     }
 }
 
-fn replication_config() -> Config {
-    let parsed: Config = common::test_url().parse().expect("test DSN did not parse");
-    let mut config = Config::new();
-    if let Some(user) = parsed.get_user() {
-        config.user(user);
-    }
-    if let Some(password) = parsed.get_password() {
-        config.password(password);
-    }
-    if let Some(dbname) = parsed.get_dbname() {
-        config.dbname(dbname);
-    }
-    for host in parsed.get_hosts() {
-        match host {
-            compio_postgres::config::Host::Tcp(name) => {
-                config.host(name.clone());
-            }
-            #[cfg(unix)]
-            compio_postgres::config::Host::Unix(path) => {
-                panic!("this test needs a TCP endpoint, got {}", path.display())
-            }
-        }
-    }
-    for port in parsed.get_ports() {
-        config.port(*port);
-    }
-    config.application_name("cpg_pgoutput_live");
-    config
-}
-
 /// Every pgoutput message one transaction produced, in wire order.
 ///
 /// Reads until the `Commit` that closes the first transaction, NOT until a
@@ -79,9 +49,12 @@ fn replication_config() -> Config {
 /// them, not four - and a count that guesses high simply waits forever.
 async fn decoded_stream(slot: &str, publication: &str) -> Vec<PgOutputMessage> {
     let mut replication =
-        compio_postgres::replication::connect_replication(common::suite_tls(), &replication_config())
-            .await
-            .expect("replication connect failed");
+        compio_postgres::replication::connect_replication(
+            common::suite_tls(),
+            &common::replication_config("cpg_pgoutput_live"),
+        )
+        .await
+        .expect("replication connect failed");
 
     let mut stream = replication
         .start_logical_replication(StartReplicationOptions {
