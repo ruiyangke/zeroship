@@ -33,6 +33,36 @@ async fn client() -> Client {
     }
 }
 
+/// Drop a replication slot once its walsender has actually let go.
+///
+/// Dropping the stream closes the connection CLIENT-side; the server takes a
+/// moment longer to retire the walsender, and until it does the slot is still
+/// `active` and `pg_drop_replication_slot` fails with 55006. That window is
+/// invisible when the test runs alone and opens up under full-suite load,
+/// which is exactly the shape that produces a flake nobody can reproduce.
+///
+/// Polls the server rather than sleeping a fixed amount: a sleep long enough
+/// to be safe on a loaded machine is wasted on every green run, and one
+/// tuned on an idle machine is the flake again.
+async fn drop_slot_when_released(client: &Client, slot: &str) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match client
+            .execute(&format!("SELECT pg_drop_replication_slot('{slot}')"), &[])
+            .await
+        {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                let still_held = error.code().is_some_and(|code| code.code() == "55006");
+                if !still_held || std::time::Instant::now() >= deadline {
+                    return Err(common::error_chain(&error));
+                }
+                compio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
+}
+
 async fn current_xid(client: &Client) -> u32 {
     let row = client
         .query_one("SELECT (txid_current() % 4294967296)::text", &[])
@@ -167,13 +197,14 @@ async fn two_phase_start_option_enables_a_plain_slot_before_commit() {
         let finish_result = setup.batch_execute(&format!("{finish} '{gid}'")).await;
 
         drop(stream);
+        let slot_dropped = drop_slot_when_released(&setup, &slot).await;
         let cleanup_result = setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}');
-                 DROP PUBLICATION {publication};
+                "DROP PUBLICATION {publication};
                  DROP TABLE {table};"
             ))
             .await;
+        slot_dropped.unwrap_or_else(|error| panic!("slot cleanup failed: {error}"));
         finish_result.unwrap_or_else(|error| panic!("{finish} failed: {error}"));
         cleanup_result.expect("fixture cleanup failed");
 
@@ -363,14 +394,15 @@ async fn prepared_transactions_expose_every_two_phase_frame() {
             produced.expect("two-phase transaction sequence failed");
         let (messages, decode_error) = observed;
         drop(stream);
+        let slot_dropped = drop_slot_when_released(&setup, &slot).await;
         setup
             .batch_execute(&format!(
-                "SELECT pg_drop_replication_slot('{slot}');
-                 DROP PUBLICATION {publication};
+                "DROP PUBLICATION {publication};
                  DROP TABLE {table};"
             ))
             .await
             .expect("fixture cleanup failed");
+        slot_dropped.unwrap_or_else(|error| panic!("slot cleanup failed: {error}"));
 
         if let Some((tag, error)) = decode_error {
             panic!("two-phase frame 0x{tag:02x} did not decode: {error:?}");
