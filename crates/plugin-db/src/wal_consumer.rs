@@ -456,6 +456,41 @@ impl WalConsumer {
                             .await
                             .map_err(|e| ConsumerError::Io(e.to_string()))?;
                     } else {
+                        // Mid-transaction. This reports `wal_end` as flushed
+                        // for records that have only been DISPATCHED into the
+                        // broker, and `advance_lsn` feeds `flush_lsn`, which
+                        // compio-postgres documents as "a durability promise
+                        // that lets the server recycle WAL". That reads like a
+                        // premature promise; it is not, for two reasons that
+                        // are worth writing down because neither is local.
+                        //
+                        // Replay is decided by COMMIT lsn, not by this one. The
+                        // server re-sends any transaction whose commit record
+                        // sorts after `confirmed_flush_lsn`. A commit record is
+                        // written after every data record of its transaction,
+                        // so a mid-transaction `wal_end` is strictly below the
+                        // commit lsn of the very transaction it belongs to --
+                        // this position can never suppress replay of the
+                        // transaction in progress. That is an ordering property
+                        // of WAL, not an accident of pgoutput. It would stop
+                        // holding under protocol-v2 `streaming=on`, where
+                        // in-progress transactions interleave; we do not enable
+                        // it, and turning it on means revisiting this branch.
+                        //
+                        // WAL retention is governed by `restart_lsn`, which the
+                        // client cannot move. MEASURED 2026-08-23 against
+                        // PostgreSQL in `zs-cpg-review-5455`: with a write
+                        // transaction verifiably open (`backend_xid IS NOT
+                        // NULL`, checked before AND after), forcing the slot's
+                        // `confirmed_flush_lsn` forward past that transaction's
+                        // uncommitted records left `restart_lsn` pinned at
+                        // 1/1D4D2A30 -- at or before the position preceding the
+                        // transaction -- with `catalog_xmin` held. The server
+                        // pins retention itself, independently of what the
+                        // client reports.
+                        //
+                        // So the position is safe to report here, and `Commit`
+                        // above is what actually promises durability.
                         stream.advance_lsn(wal_end);
                     }
                 }
