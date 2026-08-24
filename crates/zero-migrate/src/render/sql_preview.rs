@@ -392,7 +392,21 @@ fn render_ir_envelope_rendered(
     )
     .map_err(|e| format!("table-shape resolve for IR envelope: {e}"))?;
 
-    crate::model::validate::validate_ir(&ir, dialect)
+    // Thread the charter this function already holds as VENDOR AUTHORITY.
+    //
+    // The unauthorised entry derives its capability set from a schema scope, and with
+    // no scope that set is the Confined creator's, which grants NOTHING. So the
+    // preview refused EVERY capability-gated op — a `createFunction`, a `createRole`,
+    // a `createPolicy` — no matter what the operator's charter said, while the very
+    // same `effective_policy` was being trusted two statements above to inject
+    // columns and one statement below to author the SQL. That is not a widening: it
+    // is the same authority, asked the same way the deploy path asks it, instead of a
+    // fallback that could not see the charter at all.
+    let authority = crate::model::validate::VendorAuthority {
+        effective: &opts.effective_policy,
+        default_schema: &opts.default_schema,
+    };
+    crate::model::validate::validate_ir_authorized(&ir, dialect, None, Some(authority))
         .map_err(|e| format!("validate IR envelope: {e}"))?;
 
     // The general operator preview renders into the chosen default schema:
@@ -1180,6 +1194,49 @@ mod tests {
             owner_app: "app_preview".to_string(),
             effective_policy: crate::test_fixtures::no_inject("public"),
         }
+    }
+
+    /// The operator preview reads the CHARTER for vendor authority.
+    ///
+    /// It used to derive that authority from a schema scope it never had, so the
+    /// derived set was the Confined creator's and every capability-gated op was
+    /// refused here no matter what the charter granted. The subject is
+    /// `createFunction` rather than any newer gated op precisely because it was
+    /// already gated when the defect was live: it measures the preview seam, not one
+    /// op's capability mapping.
+    #[test]
+    fn the_preview_reads_vendor_authority_off_the_charter_it_was_given() {
+        const IR: &str = r#"{"ir_version":1,"name":"n","ops":[
+            {"op":"createFunction","name":"f","returns":"trigger",
+             "language":"procedural","body":"BEGIN RETURN NEW; END"}]}"#;
+
+        let granted = PreviewOpts {
+            effective_policy: crate::test_fixtures::operator_with_data_security(
+                &["public"],
+                &[],
+                false,
+                crate::model::policy::DestructiveOps::Allow,
+            ),
+            ..opts()
+        };
+        let (_name, statements) = render_ir_envelope_sql_statements(IR, &POSTGRES, &granted)
+            .expect("a charter granting code.function must preview a createFunction");
+        assert!(
+            statements
+                .iter()
+                .any(|s| s.to_ascii_uppercase().contains("FUNCTION")),
+            "the granted preview emitted no function DDL: {statements:?}"
+        );
+
+        // The control: the SAME call under a charter that grants no vendor capability
+        // still refuses. Without it the arm above would pass on a build where the
+        // preview had stopped asking the capability question at all.
+        let error = render_ir_envelope_sql_statements(IR, &POSTGRES, &opts())
+            .expect_err("a charter granting nothing must still refuse a createFunction");
+        assert!(
+            error.contains(crate::model::validate::CODE_VENDOR_OP_DENIED),
+            "the control was refused for the wrong reason: {error}"
+        );
     }
 
     fn assert_appears_in_order(text: &str, needles: &[&str]) {
