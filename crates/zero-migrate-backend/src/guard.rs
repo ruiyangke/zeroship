@@ -750,6 +750,35 @@ pub trait MigrationGuard {
     /// Vendor-specific, in the same vocabulary as [`MigrationGuard::check`].
     fn check_raw_island_body(&self, body: &str, raw: &str) -> Result<(), GuardError>;
 
+    /// Does THIS guard already refuse a destructive operation under
+    /// `data_security.destructive_ops = forbid`, on its own?
+    ///
+    /// # Answering `true` TURNS OFF a belt, so answer it deliberately
+    ///
+    /// [`check_ir_data_security_policy`] runs a neutral posture walk over the
+    /// structured ops, and skips it for a guard that answers `true` here. For a guard
+    /// that reads the knob itself, running the neutral walk as well would produce a
+    /// second, EARLIER denial and change a refusal existing assertions pin, for no
+    /// behavioural gain. For a guard that does NOT read it, the neutral walk is the
+    /// only enforcement that knob has: a guard constructed without the policy cannot
+    /// see it at all, and before the walk existed the posture was silently inert —
+    /// a `DROP TABLE` applied under the default `forbid` while the policy registry
+    /// classified the knob as enforced.
+    ///
+    /// So `false` is the SAFE answer and it is the one a guard should give unless it
+    /// can point at where it refuses. Required with no default body, like every other
+    /// method here, so a new backend cannot acquire `true` by omission.
+    ///
+    /// # It replaced a vendor comparison, and that is the point
+    ///
+    /// The walk's gate was literally `if cfg.dialect() != &POSTGRES` — core deciding a
+    /// SECURITY posture by naming one vendor, and a fourth backend inheriting the
+    /// answer from not being that vendor rather than from anything about its guard.
+    /// This module's own header states the general move it now follows: when neutral
+    /// code seems to need a vendor's tool, find the single question it is using the
+    /// tool to answer and make THAT the vendor's method.
+    fn refuses_destructive_ops_itself(&self) -> bool;
+
     /// Can this vendor NOT enumerate the net table state of a raw SQL island — i.e.
     /// does the island escape [`check_ir_data_security_policy`]'s `safety.require_rls`
     /// net-state walk?
@@ -891,17 +920,21 @@ pub fn check_ir_data_security_policy(
     // The destructive posture is a property of the OPERATION, not of any SQL text,
     // so it is enforced here, where every dialect can see it.
     //
-    // PostgreSQL reads the same knob in its SQL-text guard and refuses there with
-    // its own rendered statement, so this pass skips it: a second, earlier denial
-    // would change a refusal that existing assertions pin, for no behavioural gain.
-    //
-    // MySQL and SQLite run a guard constructed WITHOUT the policy, which therefore
-    // cannot read this knob at all. Before this pass the posture was silently inert
-    // on both: a `DROP TABLE` applied under the default `forbid`, while the registry
+    // A guard that reads the same knob in its own text guard and refuses there is
+    // skipped, because a second, earlier denial would change a refusal that existing
+    // assertions pin, for no behavioural gain. A guard constructed WITHOUT the policy
+    // cannot read the knob at all, and for those this walk is the only enforcement it
+    // has: before the walk existed the posture was silently inert on both such
+    // backends — a `DROP TABLE` applied under the default `forbid`, while the registry
     // classified the knob `Enforcement::Enforced` ("a guard, executor or validator
     // path reads them and they do what they say"). `Enforcement` has no dialect
     // dimension, so the load-time refusal that protects `DeclaredOnly` knobs could
     // not fire either.
+    //
+    // WHICH of the two a guard is is the GUARD's answer
+    // ([`MigrationGuard::refuses_destructive_ops_itself`]), not a dialect comparison.
+    // The gate here was `cfg.dialect() != &POSTGRES` — core deciding a security
+    // posture by naming a vendor.
     //
     // `policy_ops` is used rather than `ir.ops` so a `Dialectal` op is judged by
     // the leg THIS dialect will actually run.
@@ -918,8 +951,9 @@ pub fn check_ir_data_security_policy(
     // regression, not parity. Row DML is therefore excluded, leaving the
     // object-drop and lossy-DDL family that PostgreSQL's guard does deny.
     //
-    // `Raw` is excluded because it cannot reach these dialects at all: PostgreSQL's
-    // line-1 refuses non-Postgres raw text outright.
+    // `Raw` is excluded because it cannot reach a guard that answers `false` above:
+    // a backend with no raw door refuses the island in its own name, and the
+    // parser-backed guard refuses text it cannot vet.
     let posture_denies = |op: &Op| {
         op.is_destructive()
             && !matches!(
@@ -927,7 +961,9 @@ pub fn check_ir_data_security_policy(
                 Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } | Op::Raw { .. }
             )
     };
-    if cfg.dialect() != &POSTGRES && matches!(cfg.destructive_ops(), DestructiveOps::Forbid) {
+    if !guard.refuses_destructive_ops_itself()
+        && matches!(cfg.destructive_ops(), DestructiveOps::Forbid)
+    {
         if let Some(&(op_index, _)) = policy_ops.iter().find(|(_, op)| posture_denies(op)) {
             return Err(IrDataSecurityError {
                 op_index,

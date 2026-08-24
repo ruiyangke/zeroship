@@ -101,6 +101,19 @@ impl MigrationGuard for PgGuard {
         self.0.raw_island_within_require_rls(sql)
     }
 
+    /// `true` — this guard reads `data_security.destructive_ops` in its own SQL-text
+    /// walk and refuses there, naming the rendered statement.
+    ///
+    /// The neutral posture walk in
+    /// [`check_ir_data_security_policy`](zero_migrate_backend::guard::check_ir_data_security_policy)
+    /// therefore skips this backend: a second, EARLIER denial would replace a refusal
+    /// that names the statement with one that names an op index, changing a message
+    /// existing assertions pin, for no behavioural gain. The knob is enforced either
+    /// way, which is the only reason `true` is safe to answer here.
+    fn refuses_destructive_ops_itself(&self) -> bool {
+        true
+    }
+
     /// PostgreSQL can classify its own statements, so the flags are read back out of
     /// the text: destructive ⇒ `requires_approval`, any non-transactional statement ⇒
     /// `transactional: false`, plus the bare-rename and `SET NOT NULL` gates.

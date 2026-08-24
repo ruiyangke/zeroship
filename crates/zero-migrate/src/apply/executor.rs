@@ -2063,6 +2063,9 @@ mod rollback_selection_tests {
         fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
             unreachable!("gate tests never run the require_rls net-state walk")
         }
+        fn refuses_destructive_ops_itself(&self) -> bool {
+            unreachable!("gate tests never run the destructive-posture walk either")
+        }
         fn flags_for_sql(
             &self,
             _up: &str,
@@ -2096,6 +2099,9 @@ mod rollback_selection_tests {
         }
         fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
             unreachable!("gate tests never run the require_rls net-state walk")
+        }
+        fn refuses_destructive_ops_itself(&self) -> bool {
+            unreachable!("gate tests never run the destructive-posture walk either")
         }
         fn flags_for_sql(
             &self,
@@ -2772,6 +2778,9 @@ mod rollback_selection_ordering_tests {
         }
         fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
             unreachable!("gate tests never run the require_rls net-state walk")
+        }
+        fn refuses_destructive_ops_itself(&self) -> bool {
+            unreachable!("gate tests never run the destructive-posture walk either")
         }
         fn flags_for_sql(
             &self,

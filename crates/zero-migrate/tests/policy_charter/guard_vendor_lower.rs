@@ -1569,9 +1569,16 @@ fn trusted_early_return_is_gated_on_trust_trusted_only() {
 ///
 /// Every one of the sibling `destructive_ops` tests above runs at
 /// the PostgreSQL identity, where the denial comes from the SQL-TEXT deny-list instead.
-/// So before this test, deleting the `cfg.dialect() != &POSTGRES`
-/// gate left the whole suite green while silently making `forbid` inert on two of the
-/// three shipping dialects — the precise regression the posture was added to fix.
+/// So before this test, deleting the gate left the whole suite green while silently
+/// making `forbid` inert on two of the three shipping dialects — the precise
+/// regression the posture was added to fix.
+///
+/// The gate WAS `cfg.dialect() != &POSTGRES` — core deciding a security posture by
+/// naming one vendor. It is `!guard.refuses_destructive_ops_itself()` now, and the
+/// equivalent regression this test still catches is a backend answering `true` while
+/// refusing nothing: SQLite and MySQL answer `false` because their guards are
+/// constructed without the policy, and the fourth-backend stub answers `false` for
+/// itself rather than being covered by not being a named id.
 ///
 /// PostgreSQL is asserted alongside as the CONTROL, and deliberately with the OPPOSITE
 /// assertion: this arm must NOT fire there, because PostgreSQL's denial comes from the
@@ -1580,11 +1587,19 @@ fn trusted_early_return_is_gated_on_trust_trusted_only() {
 /// A stand-in for a backend nobody has written yet — the guard a fourth vendor would
 /// have to supply, since `MigrationGuard` has no default body on any method.
 ///
-/// Every method panics rather than answering. The walk under test reaches the
-/// destructive-posture gate before it consults a guard at all, so a correct
-/// implementation calls NONE of these; a panic here means the walk started asking a
-/// vendor questions on a path that is supposed to be decided from the structured IR
-/// alone.
+/// EXACTLY ONE method answers, and which one is the point.
+/// `refuses_destructive_ops_itself` is the question the destructive-posture gate now
+/// asks, and `false` is the answer a backend gives when its own guard cannot read
+/// `data_security.destructive_ops` — which is every backend that has not written the
+/// refusal. That is what keeps the neutral walk below enforcing the knob for it.
+///
+/// Every OTHER method panics rather than answering, because the gate decides from the
+/// structured IR and this guard's one answer; a panic here means the walk started
+/// asking a vendor questions on a path that is supposed to need none.
+///
+/// The gate used to be `cfg.dialect() != &POSTGRES`, so this stub answered nothing at
+/// all and the fourth backend was covered by not being one named id. It is covered by
+/// its own answer now, which is strictly more of what this file exists to prove.
 struct FourthBackendGuard;
 
 impl MigrationGuard for FourthBackendGuard {
@@ -1599,6 +1614,11 @@ impl MigrationGuard for FourthBackendGuard {
     }
     fn raw_island_escapes_rls_net_state(&self, _sql: &str) -> bool {
         unreachable!("this IR carries no raw island, and no require_rls obligation")
+    }
+    /// The one answer. See the type doc for why it is `false` and why that is not a
+    /// stub's convenience.
+    fn refuses_destructive_ops_itself(&self) -> bool {
+        false
     }
     fn flags_for_sql(
         &self,
@@ -1623,10 +1643,10 @@ fn destructive_ops_forbid_is_enforced_over_the_ir_for_every_non_postgres_id() {
         let cfg = GuardConfig::from_policy(policy(), dialect.clone());
         // `duckdb` is not a REGISTERED backend — that is the point of including it. It
         // stands for a fourth backend that has not been written yet, and it proves the
-        // gate below is an OPEN `!= POSTGRES` comparison rather than a closed match
-        // over the three shipping ids. The registry cannot resolve it (`guard_for`
-        // panics on an unregistered id), so it brings the guard a fourth backend would
-        // have to write for itself.
+        // gate below asks the GUARD rather than matching a closed set of ids. The
+        // registry cannot resolve it (`guard_for` panics on an unregistered id), so it
+        // brings the guard a fourth backend would have to write for itself, including
+        // the `refuses_destructive_ops_itself` answer that decides this gate.
         let guard: Box<dyn MigrationGuard> = if dialect == DialectId::new("duckdb") {
             Box::new(FourthBackendGuard)
         } else {

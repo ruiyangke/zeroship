@@ -85,6 +85,19 @@ impl MigrationGuard for MysqlGuard {
         false
     }
 
+    /// `false` — this guard is constructed WITHOUT the composed policy, so it cannot
+    /// read `data_security.destructive_ops` at all, let alone refuse on it.
+    ///
+    /// The neutral posture walk in
+    /// [`check_ir_data_security_policy`](zero_migrate_backend::guard::check_ir_data_security_policy)
+    /// is consequently the ONLY enforcement that knob has on this backend. Answering
+    /// `true` would turn it off and make the knob silently inert — which is exactly
+    /// what it was before that walk existed: a `DROP TABLE` applied under the default
+    /// `forbid`.
+    fn refuses_destructive_ops_itself(&self) -> bool {
+        false
+    }
+
     /// CONSERVATIVE, because MySQL cannot classify SQL text at all.
     ///
     /// There is no MySQL parser in this workspace, so no `destructive` /
