@@ -94,24 +94,91 @@ where
     }
 }
 
+/// Read half of a split [`MaybeTlsStream`].
+///
+/// An enum rather than `S::ReadHalf`, because the two transports produce
+/// different half types: plaintext yields the socket's own read half, TLS
+/// yields a decrypting one that shares the session with its write half.
+pub enum MaybeTlsReadHalf<S: SplitStream, T: SplitStream> {
+    /// Read half of the plain transport.
+    Raw(S::ReadHalf),
+    /// Read half of the TLS transport.
+    Tls(T::ReadHalf),
+}
+
+/// Write half of a split [`MaybeTlsStream`].
+pub enum MaybeTlsWriteHalf<S: SplitStream, T: SplitStream> {
+    /// Write half of the plain transport.
+    Raw(S::WriteHalf),
+    /// Write half of the TLS transport.
+    Tls(T::WriteHalf),
+}
+
+impl<S, T> AsyncRead for MaybeTlsReadHalf<S, T>
+where
+    S: SplitStream,
+    T: SplitStream,
+{
+    async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+        match self {
+            MaybeTlsReadHalf::Raw(s) => s.read(buf).await,
+            MaybeTlsReadHalf::Tls(s) => s.read(buf).await,
+        }
+    }
+}
+
+impl<S, T> AsyncWrite for MaybeTlsWriteHalf<S, T>
+where
+    S: SplitStream,
+    T: SplitStream,
+{
+    async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+        match self {
+            MaybeTlsWriteHalf::Raw(s) => s.write(buf).await,
+            MaybeTlsWriteHalf::Tls(s) => s.write(buf).await,
+        }
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        match self {
+            MaybeTlsWriteHalf::Raw(s) => s.flush().await,
+            MaybeTlsWriteHalf::Tls(s) => s.flush().await,
+        }
+    }
+
+    async fn shutdown(&mut self) -> io::Result<()> {
+        match self {
+            MaybeTlsWriteHalf::Raw(s) => s.shutdown().await,
+            MaybeTlsWriteHalf::Tls(s) => s.shutdown().await,
+        }
+    }
+}
+
 impl<S, T> SplitStream for MaybeTlsStream<S, T>
 where
     S: SplitStream,
+    T: SplitStream,
 {
-    type ReadHalf = S::ReadHalf;
-    type WriteHalf = S::WriteHalf;
+    type ReadHalf = MaybeTlsReadHalf<S, T>;
+    type WriteHalf = MaybeTlsWriteHalf<S, T>;
 
     fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+        // Both transports split, so both reach the multiplexed loop. A
+        // connector whose stream genuinely cannot be torn in two answers
+        // `Err` and is handed back for the serialized loop.
         match self {
-            // The plain transport splits into two owned, independently
-            // pollable halves, so plaintext connections use the multiplexed
-            // path.
-            MaybeTlsStream::Raw(s) => s.try_into_split().map_err(MaybeTlsStream::Raw),
-            // rustls keeps shared session state across the read and write
-            // directions, so a TLS stream cannot be torn into halves that
-            // run concurrent io_uring submissions. Hand it back so the
-            // caller falls back to the serialized loop.
-            MaybeTlsStream::Tls(_) => Err(self),
+            MaybeTlsStream::Raw(s) => match s.try_into_split() {
+                Ok((read, write)) => {
+                    Ok((MaybeTlsReadHalf::Raw(read), MaybeTlsWriteHalf::Raw(write)))
+                }
+                Err(s) => Err(MaybeTlsStream::Raw(s)),
+            },
+            MaybeTlsStream::Tls(s) => match s.try_into_split() {
+                Ok((read, write)) => {
+                    Ok((MaybeTlsReadHalf::Tls(read), MaybeTlsWriteHalf::Tls(write)))
+                }
+                Err(s) => Err(MaybeTlsStream::Tls(s)),
+            },
         }
     }
 }

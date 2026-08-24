@@ -1937,7 +1937,12 @@ impl std::fmt::Debug for Pool {
 /// graceful Terminate+drain+exit path in `Connection::run`).
 fn spawn_connection_task<T>(connection: Connection<Socket, T>)
 where
-    T: compio::io::AsyncRead + compio::io::AsyncWrite + Unpin + 'static,
+    T: compio::io::AsyncRead
+        + compio::io::AsyncWrite
+        + Unpin
+        + crate::buf_stream::SplitStream
+        + 'static,
+    <T as crate::buf_stream::SplitStream>::ReadHalf: 'static,
 {
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {

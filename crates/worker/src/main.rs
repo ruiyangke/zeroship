@@ -1,3 +1,10 @@
+// The connection future of `compio-postgres` carries both transports' split
+// halves (`MaybeTlsReadHalf`), and computing the layout of the version-poll
+// async block walks that whole type. It lands ~130 deep, just past rustc's
+// default of 128. A compile-time budget only - nothing here recurses at run
+// time.
+#![recursion_limit = "256"]
+
 mod handler;
 mod health;
 mod sync;

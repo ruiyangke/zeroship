@@ -177,12 +177,16 @@
 #![allow(missing_debug_implementations)]
 #![allow(dead_code)]
 
+pub use crate::buf_stream::SplitStream;
 pub use crate::cancel_token::CancelToken;
 pub use crate::client::{Client, QueryEvent, QueryOutcome, TransactionStatus};
 pub use crate::config::Config;
 pub use crate::connection::Connection;
 pub use crate::copy_in::CopyInSink;
 pub use crate::copy_out::CopyOutStream;
+pub use crate::maybe_tls_stream::{MaybeTlsReadHalf, MaybeTlsWriteHalf};
+#[cfg(feature = "tls")]
+pub use crate::tls_sansio::{TlsReadHalf, TlsWriteHalf};
 use crate::error::DbError;
 pub use crate::error::Error;
 pub use crate::generic_client::GenericClient;

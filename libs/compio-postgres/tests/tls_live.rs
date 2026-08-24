@@ -1276,3 +1276,106 @@ async fn copy_in_error_does_not_deadlock_over_tls() {
         ),
     }
 }
+
+/// A notification that arrives while the connection is IDLE must be delivered.
+///
+/// This is IO-2, and TLS is the only transport that reaches it in a normal
+/// deployment: an unsplittable stream runs the serialized loop, which reads
+/// only while a request is outstanding. Between requests nobody is reading the
+/// socket, so `NOTIFY` from another session sits in the kernel buffer
+/// indefinitely and `LISTEN` is silently useless over TLS.
+///
+/// The CONTROL is the second half: the same channel, the same two sessions,
+/// except the listener issues a query afterwards. That makes the loop read, so
+/// the notification arrives. Without it, a red first half is equally consistent
+/// with "notifications never work over TLS", which would be a different bug.
+#[compio::test]
+async fn a_notification_reaches_an_idle_tls_connection() {
+    use futures_util::StreamExt;
+
+    let s = servers();
+    let dsn = format!("{} sslmode=verify-full sslrootcert={}", s.tls_url, s.ca);
+    let config = dsn.parse::<Config>().expect("parse the listener DSN");
+    let make = MakeRustlsConnect::from_config(&config).expect("build the listener connector");
+
+    let channel = format!("cpg_tls_idle_{}", std::process::id());
+
+    let (listener, mut connection) = config
+        .connect(make.clone())
+        .await
+        .expect("connect the TLS listener");
+    let mut messages = connection.notifications();
+    let task = compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    });
+    listener
+        .batch_execute(&format!("LISTEN {channel}"))
+        .await
+        .expect("LISTEN over TLS");
+
+    // A second session, so the NOTIFY cannot travel on the listener's own
+    // request/response exchange.
+    let (notifier, notifier_connection) = config
+        .connect(make.clone())
+        .await
+        .expect("connect the TLS notifier");
+    let notifier_task = compio::runtime::spawn(async move {
+        let _ = notifier_connection.run().await;
+    });
+    notifier
+        .batch_execute(&format!("NOTIFY {channel}, 'while idle'"))
+        .await
+        .expect("NOTIFY over TLS");
+
+    let idle_delivery = compio::time::timeout(std::time::Duration::from_secs(10), messages.next())
+        .await
+        .map(|message| match message {
+            Some(compio_postgres::AsyncMessage::Notification(n)) => n.payload().to_owned(),
+            other => panic!("expected a notification, got {other:?}"),
+        });
+
+    // The control: whatever happened above, a notification delivered while the
+    // listener is ACTIVELY reading must arrive. If this half is also red the
+    // failure is not about idleness.
+    notifier
+        .batch_execute(&format!("NOTIFY {channel}, 'while active'"))
+        .await
+        .expect("second NOTIFY over TLS");
+    let active_delivery = compio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let pumped: i32 = listener
+                .query_one_scalar("SELECT 1::int4", &[])
+                .await
+                .expect("pump the listener with a request");
+            assert_eq!(pumped, 1);
+            if let Ok(Some(message)) =
+                compio::time::timeout(std::time::Duration::from_millis(200), messages.next()).await
+            {
+                match message {
+                    compio_postgres::AsyncMessage::Notification(n) => {
+                        return n.payload().to_owned();
+                    }
+                    other => panic!("expected a notification, got {other:?}"),
+                }
+            }
+        }
+    })
+    .await;
+
+    drop(listener);
+    drop(notifier);
+    let _ = task.await;
+    let _ = notifier_task.await;
+
+    assert!(
+        active_delivery.is_ok(),
+        "no notification arrived over TLS even while the connection was reading; \
+         the idle claim below cannot be interpreted"
+    );
+    let idle = idle_delivery.expect(
+        "IO-2 is live on TLS: a NOTIFY sent while the connection was idle was never \
+         delivered (10s). TLS takes the serialized loop, which reads only while a \
+         request is outstanding, so LISTEN is silently useless between queries.",
+    );
+    assert_eq!(idle, "while idle");
+}

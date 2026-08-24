@@ -91,6 +91,9 @@ pub mod test_utils;
 #[path = "../src/tls.rs"]
 pub mod tls;
 #[cfg(feature = "tls")]
+#[path = "../src/tls_sansio.rs"]
+mod tls_sansio;
+#[cfg(feature = "tls")]
 #[path = "../src/tls_rustls.rs"]
 pub mod tls_rustls;
 #[path = "../src/to_statement.rs"]
