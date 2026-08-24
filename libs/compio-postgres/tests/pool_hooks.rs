@@ -429,8 +429,20 @@ async fn before_acquire_that_always_rejects_reopens_until_the_acquire_timeout() 
          once; a mismatch means connections are being opened without being \
          inspected"
     );
+    // NO FLOOR ON `created`. This asserted `>= 2` when it was written, and
+    // that assertion FAILED at load ~32 having managed only one connect inside
+    // the 300ms window -- the same load-dependence its own comment predicts
+    // above, which I wrote and then asserted against anyway. Raising the
+    // timeout until it passes would be widening a budget to make a test green,
+    // which is exactly what this suite refuses elsewhere.
+    //
+    // Nothing is lost by dropping it: that the loop RETRIES at all is proved
+    // deterministically, with no timing, by
+    // `before_acquire_false_discards_and_retries` above, which rejects exactly
+    // once and asserts the hook saw two candidates. What only this test can
+    // show is the RATE, and a rate is reported, not asserted.
     assert!(
-        created >= 2,
-        "the loop must actually retry, or this measures nothing: {created}"
+        created >= 1,
+        "the pool must open at least one connection to offer the hook: {created}"
     );
 }
