@@ -2508,13 +2508,13 @@ impl<'a> CatalogFold<'a> {
                 //     it; measured, `citext → character varying(40)` reported
                 //     `case_sensitive expected "false" actual ""` forever after.
                 //
-                // `mysql_physical_type` is NOT copied here, and that is the point of
-                // where it IS handled: it is a projection of the finished column, so
-                // `finalize_physical_types` re-derives it for every column this
-                // replay decided, after every arm has stopped writing. Copying it
-                // from `new_col` would have been a second correct-looking spelling
-                // that the arms below (`ColType::Uuid`, `source_was_native_uuid`)
-                // could still invalidate.
+                // The vendor carrier (`col.vendor`) is NOT copied here, and that is
+                // the point of where it IS handled: a backend's physical contract is a
+                // projection of the FINISHED column, so `finalize_physical_types` has
+                // the backend re-derive its leg for every column this replay decided,
+                // after every arm has stopped writing. Copying it from `new_col` would
+                // have been a second correct-looking spelling that the arms below
+                // (`ColType::Uuid`, `source_was_native_uuid`) could still invalidate.
                 col.inline_checks = new_col.inline_checks;
                 col.collation = new_col.collation;
                 col.case_sensitive = new_col.case_sensitive;
@@ -3272,9 +3272,12 @@ pub fn fold_ops_onto(
 /// so it can settle whatever vendor projection it keeps on a finished column.
 ///
 /// Core does not know what that projection IS, and deliberately: it asks
-/// `SchemaRenderer::finalize_column_snapshot` and the backend decides. On MySQL that
-/// is `ColumnSnapshot::mysql_physical_type`; PostgreSQL and SQLite keep no separate
-/// physical projection and only consume the now-spent neutral `type_def`.
+/// `SchemaRenderer::finalize_column_snapshot` and the backend decides. On MySQL that is
+/// a parsed physical contract recorded as its own leg of `ColumnSnapshot::vendor`;
+/// PostgreSQL and SQLite record no leg and only consume the now-spent neutral
+/// `type_def`. Core cannot read any of these - a leg opens only to a `downcast_ref` in
+/// the crate that declared it - which is what makes "core does not know what that
+/// projection IS" structural rather than a convention.
 ///
 /// A vendor projection like the MySQL one is not an independent fact about a column,
 /// it is a projection of the type the renderer would emit for it - which is why the

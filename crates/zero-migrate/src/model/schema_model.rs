@@ -64,11 +64,17 @@
 //! ## Why the vendor fields LEAVE the model
 //!
 //! [`VendorFacts`] is a side table, not a field on [`Column`]. The distinction is
-//! load-bearing: [`drift_identity`] cannot compare
-//! `mysql_physical_type` because [`Column`] does not HAVE a `mysql_physical_type`. The
-//! comparison is not excluded by discipline, it is unreachable by construction, which is
-//! the only form of "vendor facts are compared only by code that knows the vendor" that
-//! survives the next person in a hurry.
+//! load-bearing: [`drift_identity`] cannot compare a backend's physical contract
+//! because [`Column`] does not HAVE one. The comparison is not excluded by discipline,
+//! it is unreachable by construction, which is the only form of "vendor facts are
+//! compared only by code that knows the vendor" that survives the next person in a
+//! hurry.
+//!
+//! Since the vendor facts moved into a `Dialectal` carrier that reachability argument
+//! holds TWICE, and the second half is the stronger one. Even holding a
+//! [`VendorFacts::column_vendor`] leg, neutral code cannot read it: the value comes back
+//! only through a `downcast_ref` to a type declared in the owning vendor's crate, which
+//! core may not name. So a comparator here can ASK a leg and cannot inspect one.
 //!
 //! The shape - `BTreeMap` keyed by object, absent meaning "this producer did not look" -
 //! is not new here. [`crate::model::snapshot::SchemaSnapshot::table_rls`] already argues
@@ -298,11 +304,12 @@ impl VendorFacts {
     ///   portable facet.
     /// * `text_storage` - the portable schema surface records collation INTENT,
     ///   not a server-default MySQL collation name.
-    /// * `mysql_physical_type` - NOT part of table shape. It IS part of drift, and it
-    ///   is compared by [`Self::column_drift_identity`] below. Its field doc already
-    ///   asks for exactly this split: "folding it into the general equality would
-    ///   change what every consumer of `ColumnSnapshot` equality means by 'the same
-    ///   column' [...] when only a MySQL-aware comparator should be asking."
+    /// * `column_vendor` - a backend's own physical contract. NOT part of table shape.
+    ///   It IS part of drift, and [`Self::column_drift_identity`] below asks it. Its
+    ///   field doc asks for exactly this split: "folding a vendor's physical answer into
+    ///   the general equality would change what every consumer of `ColumnSnapshot`
+    ///   equality means by 'the same column' [...] when only the vendor should be
+    ///   asked."
     #[must_use]
     pub fn column_shape_identity(&self, left: &ColumnKey, right: &ColumnKey) -> bool {
         self.sqlite_rowid.get(left).copied().unwrap_or(false)
@@ -312,19 +319,33 @@ impl VendorFacts {
     /// The VENDOR half of STRUCTURAL DRIFT for one column.
     ///
     /// A DIFFERENT set from [`Self::column_shape_identity`], and that is the finding
-    /// rather than a design choice: `apply::drift::column_data_types_eq`
-    /// (`apply/drift.rs:2799-2840`) reads `mysql_physical_type` on both sides and
-    /// `sqlite_rowid`, while `ColumnSnapshot::eq` reads `sqlite_rowid` only. Two
-    /// definitions of "the same column" already exist in the tree; naming both is what
-    /// stops the next reader assuming there is one.
+    /// rather than a design choice: `apply::drift::column_data_types_eq` consults the
+    /// vendor carrier AND `sqlite_rowid`, while `ColumnSnapshot::eq` reads
+    /// `sqlite_rowid` only. Two definitions of "the same column" already exist in the
+    /// tree; naming both is what stops the next reader assuming there is one.
     ///
-    /// `mysql_physical_type` declines when EITHER side is absent, exactly as
-    /// `column_data_types_eq` does, because an author-built desired snapshot has not
-    /// derived one and accusing it of a type change would be a phantom.
-    /// `MysqlPhysicalType::Unknown` is deliberately not resolved here: its own doc
-    /// requires each consumer to decide what an unmodelled type means for it, and a
-    /// DIFFER must refuse to report a difference it cannot establish, so an `Unknown`
-    /// on either side declines too.
+    /// (That reference used to carry a line range. It is a bare function name now,
+    /// deliberately: the range had rotted to 622 lines past the end of the file it
+    /// named, so it pointed at nothing while still reading as precise. A name resolves;
+    /// a line number rots silently.)
+    ///
+    /// The "declines when EITHER side is absent" rule survives the move to the carrier
+    /// and is now enforced by its SHAPE rather than restated here.
+    /// [`Dialectal::physical_identity`] pairs legs by dialect, so a contract on one side
+    /// only is never yielded and the answer is `None` - which this comparator reads as
+    /// "no difference established". An author-built desired snapshot has derived no
+    /// contract, and accusing it of a type change would be a phantom.
+    ///
+    /// What an UNMODELLED type means is likewise no longer decided here. It cannot be:
+    /// core cannot see inside a leg. The owning vendor answers, and it is held to the
+    /// same rule - a DIFFER must refuse to report a difference it cannot establish - by
+    /// [`VendorColumnFacts::physical_identity`]'s contract, which requires `true` from a
+    /// vendor that cannot ESTABLISH a difference.
+    ///
+    /// [`Dialectal::physical_identity`]:
+    ///     zero_migrate_backend::dialectal::Dialectal::physical_identity
+    /// [`VendorColumnFacts::physical_identity`]:
+    ///     zero_migrate_backend::dialectal::VendorColumnFacts::physical_identity
     #[must_use]
     pub fn column_drift_identity(&self, left: &ColumnKey, right: &ColumnKey) -> bool {
         if !self.column_shape_identity(left, right) {
@@ -832,7 +853,8 @@ impl SchemaModel {
 
     /// The FULL structural-drift verdict for one column. Strictly stronger than
     /// [`Self::column_shape_identity`] on both halves: it adds `generated_kind`
-    /// neutrally and `mysql_physical_type` vendor-side.
+    /// neutrally and the backend's own physical contract vendor-side, via the
+    /// [`VendorFacts::column_vendor`] carrier.
     #[must_use]
     pub fn column_drift_identity(
         &self,
@@ -1019,11 +1041,14 @@ pub fn column_shape_identity(left: &Column, right: &Column) -> bool {
 /// comparator is asking". With the comparators named, that sentence stops being a reason
 /// to decline and becomes a routing instruction.
 ///
-/// The vendor half is [`VendorFacts::column_drift_identity`], which adds
-/// `mysql_physical_type`. `default` is NOT here: `apply::drift` compares it only through
-/// the dialect-gated `comparable_column_default` (`apply/drift.rs:2515-2538`), so it
-/// belongs to a backend rather than to the neutral model, and this comparator declining
-/// to guess is the whole point of the dialect boundary.
+/// The vendor half is [`VendorFacts::column_drift_identity`], which adds the backend's
+/// own physical contract by asking its carrier leg. `default` is NOT here:
+/// `apply::drift` compares it only through the dialect-gated
+/// `comparable_column_default`, so it belongs to a backend rather than to the neutral
+/// model, and this comparator declining to guess is the whole point of the dialect
+/// boundary. (Named without a line range for the reason
+/// [`VendorFacts::column_drift_identity`] gives: the range that used to be here had
+/// rotted past the end of the file.)
 #[must_use]
 pub fn drift_identity(left: &Column, right: &Column) -> bool {
     // EXHAUSTIVE, no `..`.

@@ -1341,10 +1341,12 @@ const ROWS: &[Row] = &[
 
     // Row 4 (`setColumnType` losing a parameter going in and keeping it coming
     // out, docs/review-log.md:26632-26654): FIXED on Postgres and SQLite when that
-    // row shipped, and FIXED on MySQL afterwards - the MySQL half rode on
-    // `mysql_physical_type`, a field that row never looked at, and the fold now
-    // re-derives that contract from the column the replay finished with rather than
-    // from the type it briefly had. The three walkers needed no matching change:
+    // row shipped, and FIXED on MySQL afterwards - the MySQL half rode on that
+    // backend's parsed physical contract, which that row never looked at, and the fold
+    // now re-derives the contract from the column the replay finished with rather than
+    // from the type it briefly had. (The contract was the `mysql_physical_type` field
+    // then; it is a `ColumnSnapshot::vendor` leg owned by `zero-migrate-mysql` now.
+    // The history is left as it happened, with the current home named beside it.) The three walkers needed no matching change:
     // FFD and ATO already answered `no` here, and only FO was wrong.
     Row { key: "c_retype_type_parameters|Postgres|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },
     Row { key: "c_retype_type_parameters|Sqlite|column_carries(shapes.narrow ~ 24)", verdict: "AGREED no", status: Status::Consistent },
