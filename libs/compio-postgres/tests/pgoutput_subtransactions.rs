@@ -59,7 +59,7 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
         let publication = format!("{base}_p");
         let slot = format!("{base}_s");
         let setup = client().await;
-        common::sweep_stale_replication_slots(&setup).await;
+        common::sweep_stale_test_objects(&setup).await;
 
         setup
             .batch_execute(&format!(
