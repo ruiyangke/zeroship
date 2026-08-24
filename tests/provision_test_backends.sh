@@ -16,14 +16,12 @@
 # else:
 #
 #   postgres  deploy/compose's `postgres` service, on 127.0.0.1:5440.
-#             It runs `postgres -c wal_level=logical`, which is LOAD-BEARING
-#             and is the reason this script uses the compose definition rather
-#             than a `docker run` of its own. See the 25-line comment on that
-#             service: on the postgres:16 default (`replica`) CREATE PUBLICATION
-#             succeeds with only a WARNING while the replication slot fails, so
-#             a subscription serves its initial snapshot and then hangs. Ten
-#             guarded tests in crates/plugin-db/tests/integration.rs skip
-#             themselves on a `replica` server.
+#             It runs with `wal_level=logical` and
+#             `max_prepared_transactions=10`, which are LOAD-BEARING and are
+#             the reason this script uses the compose definition rather than a
+#             `docker run` of its own. The former enables plugin-db's logical
+#             subscriptions; the latter lets compio-postgres exercise the real
+#             pgoutput two-phase frames instead of skipping them.
 #   redis     deploy/compose's `redis` service, on 127.0.0.1:6390.
 #
 # WHAT IT DOES NOT PROVISION, so a green here is not over-read: MinIO (the
@@ -228,8 +226,8 @@ wait_for_backend redis "$REDIS_HOST" "$REDIS_PORT" "Redis" \
   || fatal "Redis never came up on ${REDIS_HOST}:${REDIS_PORT} within ${READY_TIMEOUT_SECONDS}s.
        docker compose -f $COMPOSE_FILE logs redis"
 
-# The wal_level check is not decoration. A Postgres that answers on 5440 is not
-# necessarily THIS Postgres: on a shared development machine the port is
+# These settings checks are not decoration. A Postgres that answers on 5440 is
+# not necessarily THIS Postgres: on a shared development machine the port is
 # routinely held by a hand-started container nobody owns, and the one that was
 # holding it while this script was written ran the postgres:16 default. Ten
 # plugin-db tests then skip themselves and still report as passed, so the
@@ -237,9 +235,8 @@ wait_for_backend redis "$REDIS_HOST" "$REDIS_PORT" "Redis" \
 # HERE, where the answer is one query, is the difference between a provisioning
 # step and a hope.
 #
-# Reported, not fatal: `compio-postgres`, `compio-redis` and the auth/billing
-# suites do not need logical decoding, and failing them for a plugin-db
-# requirement would be its own kind of wrong. The line is loud enough to act on.
+# Reported, not fatal: `--check` also describes service containers owned by
+# auth and billing jobs, which do not run these logical-replication tests.
 if command -v docker >/dev/null 2>&1; then
   pg_cid="$(dc ps -q postgres 2>/dev/null || true)"
   if [ -n "$pg_cid" ]; then
@@ -250,6 +247,14 @@ if command -v docker >/dev/null 2>&1; then
       echo "  WARN PostgreSQL wal_level=${wal:-unknown}, not 'logical'." >&2
       echo "       The 10 pg_has_logical_wal-guarded tests in" >&2
       echo "       crates/plugin-db/tests/integration.rs will announce skips." >&2
+    fi
+    prepared="$(docker exec "$pg_cid" psql -U postgres -tAc \
+      'show max_prepared_transactions' 2>/dev/null || true)"
+    if [[ "$prepared" =~ ^[1-9][0-9]*$ ]]; then
+      echo "  ok   PostgreSQL max_prepared_transactions=$prepared (two-phase tests will run)"
+    else
+      echo "  WARN PostgreSQL max_prepared_transactions=${prepared:-unknown}." >&2
+      echo "       compio-postgres' pgoutput two-phase test requires a nonzero value." >&2
     fi
   else
     echo "  WARN no compose-managed postgres container found; something else is" >&2

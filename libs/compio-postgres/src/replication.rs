@@ -576,10 +576,13 @@ where
         // command goes out, and these floors are properties of the message
         // formats THIS decoder implements, so they are ours to state.
         //
-        // There is deliberately NO client-side maximum. The server owns that
-        // ceiling (16.14 answers `server only supports protocol 4 or lower`),
-        // and a number hardcoded here would refuse a future server that
-        // supports more.
+        if opts.proto_version > 4 {
+            return Err(Error::config(format!(
+                "proto_version {} is not supported; use proto_version 4 or lower",
+                opts.proto_version
+            )
+            .into()));
+        }
         for (needed, what) in [
             (opts.streaming.minimum_proto_version(), "streaming"),
             (opts.two_phase.then_some(3), "two_phase"),
@@ -716,8 +719,9 @@ pub struct StartReplicationOptions<'a> {
     /// Hex-formatted LSN string (e.g. `"0/16B3750"`). `"0/0"` resumes
     /// from the slot's `confirmed_flush_lsn`.
     pub start_lsn: &'a str,
-    /// pgoutput protocol version. `1` is widely supported; `2`+ adds
-    /// streaming-of-large-transactions. P8a.2 targets `1`.
+    /// pgoutput protocol version. This decoder supports versions 1 through 4:
+    /// `2` adds streaming, `3` adds two-phase transactions, and `4` adds
+    /// parallel streaming.
     pub proto_version: u32,
     /// The publications to stream, one name per element, unquoted and
     /// unescaped as the user wrote them. This driver quotes each one.
@@ -750,9 +754,14 @@ pub struct StartReplicationOptions<'a> {
     /// decodes as `B:1 C:1 I:4000 R:1` without it and `S:21 E:21 c:1 I:4000
     /// R:1` with it. A consumer that only handles `Commit` therefore sees a
     /// transaction that never ends.
+    ///
+    /// Inside a chunk, transactional messages such as `Insert` carry
+    /// `xid: Some(...)`. That value can be a SAVEPOINT's subtransaction xid,
+    /// not just the top-level xid in `StreamStart`.
     pub streaming: Streaming,
     /// Deliver `PREPARE TRANSACTION` as its own message rather than waiting
-    /// for `COMMIT PREPARED`. Requires a slot created with `TWO_PHASE`.
+    /// for `COMMIT PREPARED`. This enables two-phase decoding for the slot;
+    /// creating the slot with `TWO_PHASE` enables it ahead of time instead.
     pub two_phase: bool,
 }
 
@@ -838,8 +847,9 @@ pub enum OriginFilter {
 ///
 /// Note: this struct intentionally does NOT decode pgoutput payloads.
 /// The XLogData's body is handed to the caller verbatim; the caller
-/// runs [`pgoutput::decode`] on it. The split keeps the wire layer
-/// agnostic to the logical-decoding plugin.
+/// runs [`pgoutput::decode`] when streaming is off or keeps one
+/// [`pgoutput::Decoder`] for an ordered streaming conversation. The split
+/// keeps the wire layer agnostic to the logical-decoding plugin.
 pub struct ReplicationStream<S, T> {
     stream: BufStream<MaybeTlsStream<S, T>>,
     /// The two StandbyStatusUpdate positions (received vs flushed).
@@ -1547,13 +1557,12 @@ fn postgres_microseconds_since_epoch() -> i64 {
 
 /// pgoutput logical-decoding message decoder.
 ///
-/// Pure parser. The replication stream layer hands the caller raw
-/// pgoutput frames (the body of each XLogData); the caller feeds them
-/// to [`pgoutput::decode`] to obtain a [`pgoutput::PgOutputMessage`].
-///
-/// Implements protocol version 1 — the minimum every PG 12+ server
-/// speaks. Streaming-of-large-transactions (proto v2+) is not
-/// implemented; we don't subscribe to in-progress transactions.
+/// The replication stream layer hands the caller raw pgoutput frames (the
+/// body of each XLogData). When streaming is disabled, feed individual frames
+/// to [`pgoutput::decode`]. Protocols 2 through 4 can interleave chunks from
+/// in-progress transactions when streaming is enabled, so feed their frames in
+/// order to a [`pgoutput::Decoder`], which retains the current chunk's
+/// transaction id.
 ///
 /// Reference: https://www.postgresql.org/docs/16/protocol-logicalrep-message-formats.html
 pub mod pgoutput {
@@ -1589,6 +1598,8 @@ pub mod pgoutput {
         /// `rel_id -> (namespace, name, columns)` for use when the
         /// tuple messages reference it.
         Relation {
+            /// Transaction or subtransaction xid when streamed.
+            xid: Option<u32>,
             rel_id: u32,
             namespace: String,
             name: String,
@@ -1599,16 +1610,25 @@ pub mod pgoutput {
         },
         /// A user-defined type descriptor.
         Type {
+            /// Transaction or subtransaction xid when streamed.
+            xid: Option<u32>,
             type_id: u32,
             namespace: String,
             name: String,
         },
         /// INSERT.
-        Insert { rel_id: u32, new_tuple: TupleData },
+        Insert {
+            /// Transaction or subtransaction xid when streamed.
+            xid: Option<u32>,
+            rel_id: u32,
+            new_tuple: TupleData,
+        },
         /// UPDATE. `old_tuple` is absent unless the replica identity
         /// columns changed (`DEFAULT`/`INDEX`) or the relation is
         /// `REPLICA IDENTITY FULL`.
         Update {
+            /// Transaction or subtransaction xid when streamed.
+            xid: Option<u32>,
             rel_id: u32,
             old_tuple: Option<OldTuple>,
             new_tuple: TupleData,
@@ -1616,14 +1636,55 @@ pub mod pgoutput {
         /// DELETE. Under the default replica identity `old_tuple` is
         /// [`OldTuple::Key`] - the row's identity, NOT its contents.
         Delete {
+            /// Transaction or subtransaction xid when streamed.
+            xid: Option<u32>,
             rel_id: u32,
             old_tuple: OldTuple,
         },
         /// TRUNCATE.
         Truncate {
+            /// Transaction or subtransaction xid when streamed.
+            xid: Option<u32>,
             /// Bit 0 = CASCADE, bit 1 = RESTART IDENTITY.
             options: u8,
             relation_ids: Vec<u32>,
+        },
+        /// A prepared transaction begins. Its changes follow before
+        /// [`Self::Prepare`].
+        BeginPrepare {
+            prepare_lsn: u64,
+            end_lsn: u64,
+            prepare_timestamp: i64,
+            xid: u32,
+            gid: String,
+        },
+        /// A non-streamed transaction has been prepared.
+        Prepare {
+            flags: u8,
+            prepare_lsn: u64,
+            end_lsn: u64,
+            prepare_timestamp: i64,
+            xid: u32,
+            gid: String,
+        },
+        /// A prepared transaction has been committed.
+        CommitPrepared {
+            flags: u8,
+            commit_lsn: u64,
+            end_lsn: u64,
+            commit_timestamp: i64,
+            xid: u32,
+            gid: String,
+        },
+        /// A prepared transaction has been rolled back.
+        RollbackPrepared {
+            flags: u8,
+            prepare_end_lsn: u64,
+            rollback_end_lsn: u64,
+            prepare_timestamp: i64,
+            rollback_timestamp: i64,
+            xid: u32,
+            gid: String,
         },
         /// `S` - a chunk of a not-yet-committed transaction begins.
         ///
@@ -1649,23 +1710,36 @@ pub mod pgoutput {
             end_lsn: u64,
             commit_timestamp: i64,
         },
+        /// `p` - a streamed transaction has been prepared.
+        StreamPrepare {
+            flags: u8,
+            prepare_lsn: u64,
+            end_lsn: u64,
+            prepare_timestamp: i64,
+            xid: u32,
+            gid: String,
+        },
         /// `A` - a streamed transaction, or one of its subtransactions,
         /// aborted. Everything already delivered for `subxid` must be
         /// discarded.
         ///
-        /// Measured 9 bytes on 16.14 (`41 000a864b 000a864b`) at every
-        /// proto_version 2 through 4, and with `two_phase` on or off. Later
-        /// servers may append an abort LSN and timestamp; the decoder ignores
-        /// trailing bytes rather than failing, so such a frame still decodes
-        /// - without those fields, which is a limitation, not a guess.
+        /// Measured 9 bytes on 16.14 (`41 000a864b 000a864b`) with streaming
+        /// `on`. Parallel streaming under protocol 4 appends the abort LSN and
+        /// timestamp, making the frame 25 bytes.
         StreamAbort {
             xid: u32,
             /// The subtransaction that aborted. Equals `xid` when the whole
             /// transaction did.
             subxid: u32,
+            /// Present only for protocol-4 parallel streaming.
+            abort_lsn: Option<u64>,
+            /// Present only for protocol-4 parallel streaming.
+            abort_timestamp: Option<i64>,
         },
         /// A logical-replication "Message" (pg_logical_emit_message).
         Message {
+            /// Transaction or subtransaction xid when streamed.
+            xid: Option<u32>,
             flags: u8,
             lsn: u64,
             prefix: String,
@@ -1885,7 +1959,6 @@ pub mod pgoutput {
         Ok(TupleData { columns })
     }
 
-    /// Decode one pgoutput message.
     /// Decode ONE pgoutput frame from a stream that is not using
     /// [`super::Streaming`].
     ///
@@ -1902,7 +1975,7 @@ pub mod pgoutput {
     /// takes a decoder that remembers one: [`Decoder`].
     pub fn decode(input: &[u8]) -> Result<PgOutputMessage, DecodeError> {
         match input.first() {
-            Some(b'S' | b'E' | b'c' | b'A') => Err(DecodeError::StreamingNeedsDecoder),
+            Some(b'S' | b'E' | b'c' | b'A' | b'p') => Err(DecodeError::StreamingNeedsDecoder),
             _ => Decoder::new().decode(input),
         }
     }
@@ -1912,7 +1985,8 @@ pub mod pgoutput {
     /// Hold ONE of these per replication stream and feed it every frame in
     /// order. It is only stateful because the protocol is: `StreamStart`
     /// opens a chunk in which transactional messages gain an xid prefix, and
-    /// `StreamStop` closes it.
+    /// `StreamStop` closes it. The prefix is retained in those messages'
+    /// `xid: Option<u32>` field and may name a subtransaction.
     #[derive(Debug, Default)]
     pub struct Decoder {
         /// The transaction whose chunk is open, if any.
@@ -1934,7 +2008,10 @@ pub mod pgoutput {
             let message = decode_frame(input, self.stream_xid)?;
             match &message {
                 PgOutputMessage::StreamStart { xid, .. } => self.stream_xid = Some(*xid),
-                PgOutputMessage::StreamStop => self.stream_xid = None,
+                PgOutputMessage::StreamStop
+                | PgOutputMessage::StreamCommit { .. }
+                | PgOutputMessage::StreamPrepare { .. }
+                | PgOutputMessage::StreamAbort { .. } => self.stream_xid = None,
                 _ => {}
             }
             Ok(message)
@@ -1945,25 +2022,21 @@ pub mod pgoutput {
         let mut cur = input;
         let tag = read_u8(&mut cur)?;
 
-        // Inside a chunk, every message that belongs to the transaction
-        // repeats an xid here. Measured on 16.14: `52 000a8649 0003853e ...`
-        // streamed against `52 0003853e ...` not.
-        //
-        // It is NOT a redundant copy of the chunk's xid, and must not be
-        // checked against one. A change made after a SAVEPOINT carries the
-        // SUBTRANSACTION's xid while the enclosing StreamStart carries the
-        // top-level one. Measured: one streamed transaction with a savepoint
-        // in the middle gave 21 StreamStarts with a single xid 000ab400 and
-        // 4000 Inserts with two, 000ab400 and 000ab401.
-        //
-        // This code did compare them, and returned StreamXidMismatch. That
-        // rejected every streamed transaction containing a subtransaction -
-        // including any PL/pgSQL block with an EXCEPTION handler, which opens
-        // one implicitly. Consumed and passed over here; the message's own
-        // identity comes from the chunk.
-        if stream_xid.is_some() && matches!(tag, b'R' | b'Y' | b'I' | b'U' | b'D' | b'T' | b'M') {
-            let _subtransaction_xid = read_u32(&mut cur)?;
-        }
+        // Inside a chunk, every transactional message carries its own xid.
+        // This is NOT necessarily the top-level xid in StreamStart: changes
+        // made under a SAVEPOINT carry their subtransaction xid, which a later
+        // StreamAbort can name independently. Measured on 16.14, one streamed
+        // transaction had 21 StreamStarts carrying 000ab400 while its 4000
+        // Inserts carried both 000ab400 and 000ab401. Preserve that identity
+        // around the decoded payload instead of comparing it to the chunk's
+        // top-level xid or silently throwing it away.
+        let carried_xid = if stream_xid.is_some()
+            && matches!(tag, b'R' | b'Y' | b'I' | b'U' | b'D' | b'T' | b'M')
+        {
+            Some(read_u32(&mut cur)?)
+        } else {
+            None
+        };
 
         let msg = match tag {
             b'B' => {
@@ -1988,6 +2061,38 @@ pub mod pgoutput {
                     commit_timestamp,
                 }
             }
+            b'b' => PgOutputMessage::BeginPrepare {
+                prepare_lsn: read_u64(&mut cur)?,
+                end_lsn: read_u64(&mut cur)?,
+                prepare_timestamp: read_i64(&mut cur)?,
+                xid: read_u32(&mut cur)?,
+                gid: read_cstr(&mut cur)?,
+            },
+            b'P' => PgOutputMessage::Prepare {
+                flags: read_u8(&mut cur)?,
+                prepare_lsn: read_u64(&mut cur)?,
+                end_lsn: read_u64(&mut cur)?,
+                prepare_timestamp: read_i64(&mut cur)?,
+                xid: read_u32(&mut cur)?,
+                gid: read_cstr(&mut cur)?,
+            },
+            b'K' => PgOutputMessage::CommitPrepared {
+                flags: read_u8(&mut cur)?,
+                commit_lsn: read_u64(&mut cur)?,
+                end_lsn: read_u64(&mut cur)?,
+                commit_timestamp: read_i64(&mut cur)?,
+                xid: read_u32(&mut cur)?,
+                gid: read_cstr(&mut cur)?,
+            },
+            b'r' => PgOutputMessage::RollbackPrepared {
+                flags: read_u8(&mut cur)?,
+                prepare_end_lsn: read_u64(&mut cur)?,
+                rollback_end_lsn: read_u64(&mut cur)?,
+                prepare_timestamp: read_i64(&mut cur)?,
+                rollback_timestamp: read_i64(&mut cur)?,
+                xid: read_u32(&mut cur)?,
+                gid: read_cstr(&mut cur)?,
+            },
             b'O' => {
                 let commit_lsn = read_u64(&mut cur)?;
                 let name = read_cstr(&mut cur)?;
@@ -2013,6 +2118,7 @@ pub mod pgoutput {
                     });
                 }
                 PgOutputMessage::Relation {
+                    xid: carried_xid,
                     rel_id,
                     namespace,
                     name,
@@ -2025,6 +2131,7 @@ pub mod pgoutput {
                 let namespace = read_cstr(&mut cur)?;
                 let name = read_cstr(&mut cur)?;
                 PgOutputMessage::Type {
+                    xid: carried_xid,
                     type_id,
                     namespace,
                     name,
@@ -2038,7 +2145,11 @@ pub mod pgoutput {
                     return Err(DecodeError::UnknownTupleFormat(kind));
                 }
                 let new_tuple = read_tuple(&mut cur)?;
-                PgOutputMessage::Insert { rel_id, new_tuple }
+                PgOutputMessage::Insert {
+                    xid: carried_xid,
+                    rel_id,
+                    new_tuple,
+                }
             }
             b'U' => {
                 let rel_id = read_u32(&mut cur)?;
@@ -2069,6 +2180,7 @@ pub mod pgoutput {
                     other => return Err(DecodeError::UnknownTupleFormat(other)),
                 };
                 PgOutputMessage::Update {
+                    xid: carried_xid,
                     rel_id,
                     old_tuple,
                     new_tuple,
@@ -2085,7 +2197,11 @@ pub mod pgoutput {
                     b'O' => OldTuple::Full(read_tuple(&mut cur)?),
                     other => return Err(DecodeError::UnknownTupleFormat(other)),
                 };
-                PgOutputMessage::Delete { rel_id, old_tuple }
+                PgOutputMessage::Delete {
+                    xid: carried_xid,
+                    rel_id,
+                    old_tuple,
+                }
             }
             b'T' => {
                 let nrelations = read_u32(&mut cur)? as usize;
@@ -2109,6 +2225,7 @@ pub mod pgoutput {
                     relation_ids.push(read_u32(&mut cur)?);
                 }
                 PgOutputMessage::Truncate {
+                    xid: carried_xid,
                     options,
                     relation_ids,
                 }
@@ -2123,6 +2240,7 @@ pub mod pgoutput {
                 }
                 let content = Bytes::copy_from_slice(&cur[..len]);
                 PgOutputMessage::Message {
+                    xid: carried_xid,
                     flags,
                     lsn,
                     prefix,
@@ -2141,10 +2259,29 @@ pub mod pgoutput {
                 end_lsn: read_u64(&mut cur)?,
                 commit_timestamp: read_i64(&mut cur)?,
             },
-            b'A' => PgOutputMessage::StreamAbort {
+            b'p' => PgOutputMessage::StreamPrepare {
+                flags: read_u8(&mut cur)?,
+                prepare_lsn: read_u64(&mut cur)?,
+                end_lsn: read_u64(&mut cur)?,
+                prepare_timestamp: read_i64(&mut cur)?,
                 xid: read_u32(&mut cur)?,
-                subxid: read_u32(&mut cur)?,
+                gid: read_cstr(&mut cur)?,
             },
+            b'A' => {
+                let xid = read_u32(&mut cur)?;
+                let subxid = read_u32(&mut cur)?;
+                let (abort_lsn, abort_timestamp) = if cur.is_empty() {
+                    (None, None)
+                } else {
+                    (Some(read_u64(&mut cur)?), Some(read_i64(&mut cur)?))
+                };
+                PgOutputMessage::StreamAbort {
+                    xid,
+                    subxid,
+                    abort_lsn,
+                    abort_timestamp,
+                }
+            }
             other => return Err(DecodeError::UnknownTag(other)),
         };
         // We do NOT enforce `cur.is_empty()` — a future pgoutput proto
@@ -3101,6 +3238,7 @@ mod tests {
                 name,
                 replica_identity,
                 columns,
+                ..
             } => {
                 assert_eq!(rel_id, 16384);
                 assert_eq!(namespace, "public");
@@ -3122,7 +3260,9 @@ mod tests {
         let bytes = pgoutput::encode::insert(16384, &[Some("42"), Some("hello"), None]);
         let msg = pgoutput::decode(&bytes).unwrap();
         match msg {
-            PgOutputMessage::Insert { rel_id, new_tuple } => {
+            PgOutputMessage::Insert {
+                rel_id, new_tuple, ..
+            } => {
                 assert_eq!(rel_id, 16384);
                 assert_eq!(new_tuple.columns.len(), 3);
                 assert_eq!(new_tuple.columns[0], TupleColumn::Text("42".into()));
@@ -3142,6 +3282,7 @@ mod tests {
                 rel_id,
                 old_tuple,
                 new_tuple,
+                ..
             } => {
                 assert_eq!(rel_id, 16384);
                 assert!(old_tuple.is_none());
@@ -3157,7 +3298,9 @@ mod tests {
         let bytes = pgoutput::encode::delete_key(16384, &[Some("42")]);
         let msg = pgoutput::decode(&bytes).unwrap();
         match msg {
-            PgOutputMessage::Delete { rel_id, old_tuple } => {
+            PgOutputMessage::Delete {
+                rel_id, old_tuple, ..
+            } => {
                 assert_eq!(rel_id, 16384);
                 // The encoder writes a 'K' frame, so this must come back as
                 // Key - a Full here would mean the kind byte was ignored.
