@@ -102,60 +102,42 @@ use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_backend::renderer::DmlRenderer;
 use zero_migrate_ir::dialect::DialectId;
 
-// A `pub(crate) use zero_migrate_sqlite::VENDOR;` USED TO LIVE HERE, so that the
-// `SQLITE_VENDOR` entry below could be written `&VENDOR` while its two siblings wrote
-// the vendor crate's full path. It had no other reader: nothing in core named
-// `render::backends::VENDOR`. So it was a fourth place the engine spelled a vendor
-// crate, at `pub(crate)` visibility, purely to make one of the three registry entries
-// asymmetric with the other two. The entries are now spelled the same way as each
-// other, and the composition names each vendor exactly once.
+// ---------------------------------------------------------------------------
+// THE COMPOSITION USED TO LIVE HERE, AND IT IS THE REASON THIS CRATE EXISTS
+// ---------------------------------------------------------------------------
 //
-// (An earlier note here recorded that `SqliteSequencePolicy` had been re-exported on
-// the same line for SQLite's rebuild executor, which reads the type from its own crate
-// since that half moved out. Both halves of that coupling are gone now.)
+// Three `const`s naming `zero_migrate_postgres::VENDOR`, `zero_migrate_sqlite::VENDOR`
+// and `zero_migrate_mysql::VENDOR`, a `static SHIPPING` array over them, and a
+// `pub(crate) const VENDORS: VendorSet` folded from that array. Those three lines were
+// the whole of why this crate had to depend on all three backends.
+//
+// They are `crates/zero-migrate/src/lib.rs` now — the COMPOSITION ROOT, which depends
+// on this crate rather than the other way round. `zero-migrate-core` declares no
+// vendor `[dependencies]` at all, so writing one of those idents in this crate's
+// production source is an unresolved-crate error. The rule *the core should be
+// neutral* stopped being something a census asserts about source text and became
+// something the build cannot express.
+//
+// The resolvers below did NOT move, and that is the other half of the design: the
+// engine RESOLVES, and it resolves against the set its caller hands it. Every one of
+// them takes `vendors: VendorSet` as its first argument, and every caller of one takes
+// it from its own caller — as a parameter, or as a field on a struct that already
+// carries the dialect it is about to resolve. `IrAuthor`, `DeclarativeAuthor`,
+// `ExpandContractAuthor`, `CatalogFold`, `MigrationEngine` and the raw/deterministic
+// authors all carry it, so their methods pay no signature for it at all.
+//
+// `zero_migrate::shipping_vendors()` is how a host asks for the composed value, and
+// `tests/dialect_matrix/the_registry_travels_as_a_value.rs` is what keeps the list of
+// places that may name it from growing back — a rule Cargo now enforces for this crate
+// but not for the `#[cfg(test)]` modules that reach the vendors through dev edges.
+//
+// (Earlier notes here recorded a `pub(crate) use zero_migrate_sqlite::VENDOR;` that
+// made one registry entry asymmetric with the other two, and a `SqliteSequencePolicy`
+// re-export riding the same line. Both were closed before the split; nothing of either
+// is left to move.)
 
 #[cfg(test)]
 use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
-
-/// The shipping backends, named ONCE for the whole engine.
-///
-/// This is the registry composition that replaced the hard-coded three-arm `match`.
-/// The difference is not cosmetic: the `match` named three statics in the engine's
-/// own crate, which is precisely why the vendors could not leave it. A fourth backend
-/// is now a `[dependencies]` line plus an entry here, with no edit to the contract
-/// crate and no edit to any other vendor.
-///
-/// The set is still a compile-time constant rather than a global the host fills at
-/// startup, and that is deliberate — see `zero_migrate_backend::registry` for why a
-/// growable registry would trade a compile error for a runtime one.
-///
-/// # It is READ here and nowhere else, and that is the point
-///
-/// Every resolver below takes the set as its first argument, and every caller of one
-/// takes it from its own caller — as a parameter, or as a field on a struct that
-/// already carries the dialect it is about to resolve. `IrAuthor`,
-/// `DeclarativeAuthor`, `ExpandContractAuthor`, `CatalogFold`, `MigrationEngine` and
-/// the raw/deterministic authors all carry it, so their methods pay no signature for
-/// it at all.
-///
-/// The set used to be named directly from all over the engine — validation, folding,
-/// lowering, drift, support — because it was a `const` in the same crate and there
-/// was nothing to stop it. Each of those was the engine reaching past its own caller
-/// to the one place that knows which vendor crates exist, which is exactly the
-/// dependency the composition is supposed to be the ONLY holder of. Threading it
-/// makes that dependency an argument, and an argument can be supplied from outside
-/// the crate.
-///
-/// [`crate::shipping_vendors`] is how a host asks for the same value, and
-/// `tests/dialect_matrix/the_registry_travels_as_a_value.rs` is what keeps the list
-/// of places that may name it from growing back.
-const POSTGRES_VENDOR: &BackendVendor = &zero_migrate_postgres::VENDOR;
-const SQLITE_VENDOR: &BackendVendor = &zero_migrate_sqlite::VENDOR;
-const MYSQL_VENDOR: &BackendVendor = &zero_migrate_mysql::VENDOR;
-
-static SHIPPING: [&BackendVendor; 3] = [POSTGRES_VENDOR, SQLITE_VENDOR, MYSQL_VENDOR];
-
-pub(crate) const VENDORS: VendorSet = VendorSet::new(&SHIPPING);
 
 /// The engine's generated-identifier byte budget: the TIGHTEST cap any backend in
 /// `vendors` declares. Generated names are precomputed once and then handed to every
@@ -430,10 +412,16 @@ mod tests {
 
     #[test]
     fn dispatch_returns_expected_dml_renderer() {
-        assert_eq!(renderer(VENDORS, &POSTGRES).synth_now(), "now()");
-        assert_eq!(renderer(VENDORS, &SQLITE).synth_now(), "CURRENT_TIMESTAMP");
         assert_eq!(
-            renderer(VENDORS, &MYSQL).synth_now(),
+            renderer(crate::test_fixtures::VENDORS, &POSTGRES).synth_now(),
+            "now()"
+        );
+        assert_eq!(
+            renderer(crate::test_fixtures::VENDORS, &SQLITE).synth_now(),
+            "CURRENT_TIMESTAMP"
+        );
+        assert_eq!(
+            renderer(crate::test_fixtures::VENDORS, &MYSQL).synth_now(),
             "CURRENT_TIMESTAMP(6)"
         );
     }
@@ -447,10 +435,10 @@ mod tests {
     /// arrangement that happens to hold.
     #[test]
     fn the_shipping_vendor_set_composes_into_a_registry() {
-        let registry = VENDORS
+        let registry = crate::test_fixtures::VENDORS
             .descriptors()
             .expect("the shipping vendors must satisfy the dialect-id rule");
-        assert_eq!(registry.len(), VENDORS.len());
+        assert_eq!(registry.len(), crate::test_fixtures::VENDORS.len());
         assert_eq!(registry.len(), 3);
         for dialect in [POSTGRES, SQLITE, MYSQL] {
             assert!(
@@ -469,7 +457,7 @@ mod tests {
     /// two vendors that agree on identifier quoting.
     #[test]
     fn every_vendor_agrees_with_its_own_descriptor() {
-        for v in VENDORS.as_slice() {
+        for v in crate::test_fixtures::VENDORS.as_slice() {
             assert_eq!(
                 v.schema.dialect(),
                 v.descriptor.id,
@@ -514,14 +502,14 @@ mod tests {
     /// engine's own registry says do not fit, and no test in the tree would have
     /// moved.
     ///
-    /// Deliberately NOT `assert_eq!(generated_ident_max_bytes(VENDORS), 63)`. That
+    /// Deliberately NOT `assert_eq!(generated_ident_max_bytes(crate::test_fixtures::VENDORS), 63)`. That
     /// restates the answer instead of checking it, and it is exactly as true of the
     /// broken one-vendor lookup as of the fold.
     #[test]
     fn the_generated_ident_budget_fits_every_registered_backend() {
-        let budget = generated_ident_max_bytes(VENDORS);
+        let budget = generated_ident_max_bytes(crate::test_fixtures::VENDORS);
         let mut tightest = usize::MAX;
-        for v in VENDORS.as_slice() {
+        for v in crate::test_fixtures::VENDORS.as_slice() {
             let declared = match v.descriptor.limits.identifier {
                 zero_migrate_ir::backend::IdentifierLimit::Bytes(n)
                 | zero_migrate_ir::backend::IdentifierLimit::Characters(n) => n,
@@ -541,10 +529,10 @@ mod tests {
              backend name length no registrant asked for"
         );
         assert!(
-            VENDORS.len() >= 3,
+            crate::test_fixtures::VENDORS.len() >= 3,
             "the sweep ran over {} vendors; a budget checked against an empty or \
              truncated registry is vacuous",
-            VENDORS.len()
+            crate::test_fixtures::VENDORS.len()
         );
     }
 
@@ -563,8 +551,10 @@ mod tests {
         };
         let expected = "CONSTRAINT \"fk\"\"child\" FOREIGN KEY (\"child\"\"col\") REFERENCES \"project\"\"schema\".\"parents\" (id, \"parent\"\"col\") ON DELETE CASCADE";
 
-        let sqlite = ddl_emitter(VENDORS, &SQLITE, "project\"schema").fk_clause(&fk);
-        let postgres = ddl_emitter(VENDORS, &POSTGRES, "project\"schema").fk_clause(&fk);
+        let sqlite =
+            ddl_emitter(crate::test_fixtures::VENDORS, &SQLITE, "project\"schema").fk_clause(&fk);
+        let postgres =
+            ddl_emitter(crate::test_fixtures::VENDORS, &POSTGRES, "project\"schema").fk_clause(&fk);
         assert_eq!(sqlite, expected);
         assert_eq!(sqlite, postgres);
     }

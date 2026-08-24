@@ -419,7 +419,7 @@ mod tests {
                     .unwrap()
                     .display()
                     .to_string();
-                if rel == "zero-migrate/src/render/dml.rs" {
+                if rel == "zero-migrate-core/src/render/dml.rs" {
                     continue;
                 }
                 let body = std::fs::read_to_string(&path).expect("read src file");

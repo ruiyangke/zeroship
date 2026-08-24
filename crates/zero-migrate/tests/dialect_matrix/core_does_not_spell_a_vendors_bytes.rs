@@ -1,6 +1,6 @@
 //! The census that replaces a VISIBILITY the crate split could not carry across a
 //! crate boundary. Both `zero-migrate-backend/src/spelling.rs` and
-//! `zero-migrate/src/render/backends/mod.rs` name this file by path as their
+//! `zero-migrate-core/src/render/backends/mod.rs` name this file by path as their
 //! replacement; until this commit neither of those sentences was true.
 //!
 //! # What was lost, exactly
@@ -73,7 +73,7 @@ use std::path::PathBuf;
 /// would produce AND the fully-qualified `zero_migrate_backend::spelling::…(` form
 /// the vendors currently write. Anything that reaches the primitive has to spell its
 /// name somewhere; a name with no `(` after it is prose, and prose is not a call.
-/// That distinction is load-bearing and is measured, not assumed: `zero-migrate/src`
+/// That distinction is load-bearing and is measured, not assumed: `zero-migrate-core/src`
 /// MENTIONS `ansi_double_quote_ident` six times today, across `render/backends/mod.rs`,
 /// `render/dml.rs` and `schema/query.rs`, every one of them a doc comment explaining
 /// why the engine must not call it. A census that counted mentions would be red on
@@ -94,7 +94,7 @@ type SpellingCall = (String, &'static str, usize);
 /// `pub(in crate::render::backends)`; a copy left behind there would be a second
 /// physical home for byte-logic whose entire discipline is having exactly one.
 const SPELLING_HOME: &str = "zero-migrate-backend/src/spelling.rs";
-const FORMER_SPELLING_HOME: &str = "zero-migrate/src/render/backends/mod.rs";
+const FORMER_SPELLING_HOME: &str = "zero-migrate-core/src/render/backends/mod.rs";
 
 /// The crates that MAY call a raw spelling primitive, and the crates that MUST NOT.
 ///
@@ -116,10 +116,16 @@ const CRATES_THAT_MAY_SPELL: &[&str] = &[
 /// The engine and the non-vendor libraries. Named rather than inferred, so that a
 /// RENAME goes red instead of quietly moving a crate from "denied" to "unknown".
 ///
-/// `zero-migrate` is the one the lost visibility was actually about. The other three
-/// are here because the same argument applies verbatim: none of them is a vendor, so
-/// none of them has a vendor to name, so a raw spelling in any of them is bytes
-/// emitted on behalf of nobody.
+/// `zero-migrate-core` is the one the lost visibility was actually about — it is the
+/// ENGINE, and the primitives were `pub(in crate::render::backends)` inside it. The
+/// others are here because the same argument applies verbatim: none of them is a
+/// vendor, so none of them has a vendor to name, so a raw spelling in any of them is
+/// bytes emitted on behalf of nobody.
+///
+/// `zero-migrate` is on this list too, and after the crate split that is a stronger
+/// claim rather than a formality. It is the COMPOSITION: it names all three vendors on
+/// purpose, so it is the one non-vendor crate with a plausible-looking excuse to spell
+/// a vendor's bytes. It has none. Composing a registry is not emitting SQL.
 ///
 /// `zero-migrate-guard` came OFF this list when it was dissolved. It is not a rename:
 /// its contents moved into `zero-migrate-postgres`, which sits on
@@ -130,6 +136,7 @@ const CRATES_THAT_MAY_SPELL: &[&str] = &[
 /// name.
 const CRATES_THAT_MUST_NOT_SPELL: &[&str] = &[
     "zero-migrate",
+    "zero-migrate-core",
     "zero-migrate-ir",
     "zero-migrate-node",
     "zero-migrate-policy",
@@ -148,7 +155,12 @@ const CRATES_THAT_MUST_NOT_SPELL: &[&str] = &[
 /// it is under a different root — so this is the count following a real removal, not
 /// a narrowed discovery. The `crates/` listing itself is the check: eight entries,
 /// nine before.
-const WORKSPACE_CRATE_FLOOR: usize = 8;
+///
+/// RAISED 8 -> 9: `zero-migrate-core` was ADDED. The engine and the composition that
+/// names the vendors are two crates now, so `crates/` holds nine entries and the walk
+/// must find all of them. This is the direction the doc above prescribes for an added
+/// crate, and the new root is the one this census is most about: the engine.
+const WORKSPACE_CRATE_FLOOR: usize = 9;
 
 /// The NEEDLE-LIVENESS floor: the calls the vendors are known to make today.
 ///
@@ -191,7 +203,7 @@ fn core_does_not_spell_a_vendors_bytes() {
     // binary, so the anchor cannot silently drift out from under the census, and a
     // dangling path is a build error rather than a quiet zero.
     let home = include_str!("../../../zero-migrate-backend/src/spelling.rs");
-    let former = include_str!("../../src/render/backends/mod.rs");
+    let former = include_str!("../../../zero-migrate-core/src/render/backends/mod.rs");
     assert_primitives_are_where_this_file_says_they_are(home, former);
 
     let crates_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -396,7 +408,7 @@ fn assert_primitives_are_where_this_file_says_they_are(home: &str, former: &str)
 ///
 /// The `(` is what separates a call from a mention. It matters here more than in most
 /// censuses: the engine's doc comments explain at length why the engine must not call
-/// these, so the name appears in `zero-migrate/src` six times WITHOUT ever being
+/// these, so the name appears in `zero-migrate-core/src` six times WITHOUT ever being
 /// called. Counting mentions would make this file red on an unmodified tree and the
 /// only way to green would be deleting the documentation that explains the rule.
 ///

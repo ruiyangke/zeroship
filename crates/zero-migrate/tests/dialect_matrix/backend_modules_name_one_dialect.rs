@@ -191,7 +191,14 @@ const DECL_CONTROL_FLOOR: usize = 80;
 /// The NEEDLE control for [`code_identifier_hits`] over vendor crate idents: the
 /// registry composition, which names all three shipping crates exactly once each and
 /// is the one place designed to.
-const IDENT_CONTROL: &str = "zero-migrate/src/render/backends/mod.rs";
+///
+/// REPOINTED from `zero-migrate-core/src/render/backends/mod.rs` when the composition
+/// root became its own crate. The engine no longer names a vendor crate ANYWHERE in
+/// production source — it cannot, since it no longer declares one as a dependency —
+/// so the file that used to vouch for this needle now returns zero for all three
+/// idents, which is the census succeeding rather than the matcher failing. The
+/// composition moved to `zero-migrate/src/lib.rs` and took the control with it.
+const IDENT_CONTROL: &str = "zero-migrate/src/lib.rs";
 
 /// The walk's floor across the three vendor `src` trees.
 ///

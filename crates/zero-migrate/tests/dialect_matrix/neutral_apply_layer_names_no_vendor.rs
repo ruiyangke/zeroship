@@ -105,6 +105,9 @@ fn is_code(line: &str) -> bool {
 /// is to separate that storey from `backend/<dialect>/` below it.
 fn neutral_layer_files() -> Vec<PathBuf> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate lives at <workspace>/crates/<name>")
+        .join("zero-migrate-core")
         .join("src")
         .join("apply");
     let mut out: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -195,7 +198,7 @@ fn the_neutral_apply_layer_names_no_vendor_backend() {
 #[test]
 fn the_backend_contract_declares_no_vendor_named_item() {
     const CONTRACT: &str = "apply/backend/mod.rs";
-    let src = include_str!("../../src/apply/backend/mod.rs");
+    let src = include_str!("../../../zero-migrate-core/src/apply/backend/mod.rs");
 
     let mut offenders: Vec<(usize, String)> = Vec::new();
     for (i, line) in src.lines().enumerate() {

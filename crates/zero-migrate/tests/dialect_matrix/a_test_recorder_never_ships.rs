@@ -93,7 +93,13 @@ const RECORDERS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The engine manifest that ENABLES them, relative to `crates/`.
+/// The manifest that ENABLES them, relative to `crates/`.
+///
+/// It is the COMPOSITION's, not the engine's. The suites that drive these recorders
+/// while ALSO driving `MigrationEngine` are integration tests, and an integration test
+/// is a host — so they live in `zero-migrate` and its manifest is where the dev edge
+/// sits. `zero-migrate-core` names the same vendor crates under `[dev-dependencies]`
+/// for its own `#[cfg(test)]` vendor set, but WITHOUT this feature.
 const ENGINE_MANIFEST: &str = "zero-migrate/Cargo.toml";
 
 fn crates_root() -> PathBuf {

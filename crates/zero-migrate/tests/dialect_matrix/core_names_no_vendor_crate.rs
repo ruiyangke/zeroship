@@ -1,21 +1,41 @@
 //! The RATCHET on the owner's governing rule: *the core should be neutral, this is
 //! the hard limit*. Core must not NAME, CARRY or RESOLVE a vendor — and this file
-//! measures the first of the three, because it is the one a grep can see.
+//! measures the first of the three, over the ONE part of it Cargo cannot see.
+//!
+//! # CARGO SUBSUMED THIS CENSUS'S PRODUCTION HALF, AND THAT IS WHY IT NARROWED
+//!
+//! `zero-migrate-core` declares no vendor `[dependencies]`. Writing
+//! `zero_migrate_postgres` in its production source is an unresolved-crate error, so
+//! the rule this file used to hold over production code is now held by the build. That
+//! is strictly stronger than a census: it is checked at every compile, it cannot go
+//! blind, and it names the offending line itself.
+//!
+//! WHAT IT DOES NOT COVER is `[dev-dependencies]`. Core's own `#[cfg(test)]` modules
+//! hand a `VendorSet` to every resolution door they exercise, and a set has to be
+//! composed from real vendors — a fake would make several hundred unit tests assert
+//! against a double instead of against the backends that ship. So the three vendor
+//! crates ARE dev-dependencies of the engine, and `#[cfg(test)]` code anywhere under
+//! `src` can reach them and compile clean.
+//!
+//! That is the hole, and this file is what keeps it one file wide.
 //!
 //! # What "name a vendor" means here, precisely
 //!
-//! The three shipping backends are their own crates. `zero-migrate` therefore has
-//! three `[dependencies]` lines it cannot avoid, and three crate idents —
-//! `zero_migrate_postgres`, `zero_migrate_sqlite`, `zero_migrate_mysql` — that any
-//! module in core is free to write. Every place core writes one is a place where the
-//! engine has resolved a vendor WITHOUT going through the registry, and the registry
-//! is the whole point of the crate split: it is what makes a vendor deletable and a
-//! fourth backend a `[dependencies]` line plus one entry.
+//! Three crate idents — `zero_migrate_postgres`, `zero_migrate_sqlite`,
+//! `zero_migrate_mysql` — appearing anywhere in the engine's source. Every place a
+//! `#[cfg(test)]` module writes one is a place where a test resolved a vendor WITHOUT
+//! going through the registry it was handed, and that is exactly the drift the
+//! production rule exists to prevent, wearing test clothes: twenty-two files knowing
+//! which vendors exist is twenty-two files that a fourth backend has to be added to.
 //!
-//! So the target is not zero. It is ONE FILE: `render/backends/mod.rs`, which IS the
-//! registry composition. Three lines there — the three entries in the `SHIPPING`
-//! array — are the engine naming its vendors once, on purpose, in the place designed
-//! to hold that knowledge. Dispatch itself is now a `VendorSet` lookup by open id.
+//! So the target is not zero. It is ONE FILE: `test_fixtures.rs`, which composes the
+//! `#[cfg(test)]` vendor set once and hands it to everything else. The ratchet is the
+//! three entries of that composition.
+//!
+//! Its previous single entry was `render/backends/mod.rs`, the PRODUCTION registry
+//! composition, at the same count of three. That file names no vendor crate now — the
+//! composition is `crates/zero-migrate/src/lib.rs` — so the ratchet did not move
+//! sideways, it moved from a rule Cargo could not enforce to the residue of one it can.
 //!
 //! # Why a ratchet and not an assertion of the target
 //!
@@ -53,7 +73,7 @@
 //!
 //! # Mentions are not names, and that distinction is LIVE in this tree
 //!
-//! `crates/zero-migrate/src` is dense with prose about the vendor crates — the
+//! `crates/zero-migrate-core/src` is dense with prose about the vendor crates — the
 //! registry module alone spends eighty lines explaining which coupling it removed and
 //! which it could not. A census that counted every occurrence would be red on day one
 //! for exactly the wrong reason, and the only way to green it would be deleting the
@@ -73,8 +93,8 @@
 //! Narrow the walk and it iterates nothing, finds nothing, reports clean. Break the
 //! needle and it reads every file and still finds nothing. Those are two different
 //! blindnesses with the same green, so there are two floors: [`SRC_FILE_FLOOR`] for
-//! the walk and the `render/backends/mod.rs` entry in [`ALLOWED`] for the needle —
-//! the registry's three lines are a positive control that must keep matching.
+//! the walk and the `test_fixtures.rs` entry in [`ALLOWED`] for the needle — that
+//! composition's three lines are a positive control that must keep matching.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -93,12 +113,13 @@ const VENDOR_CRATES: &[&str] = &[
 
 /// The ratchet: which core files may name a vendor crate, and exactly how many times.
 ///
-/// Paths are relative to `crates/zero-migrate/src`. See the module header for what
+/// Paths are relative to `crates/zero-migrate-core/src`. See the module header for what
 /// each entry is and which of them is permanent.
 const ALLOWED: &[(&str, usize)] = &[
-    // PERMANENT. The registry composition's three `SHIPPING` entries. Dispatch is a
-    // `VendorSet` lookup and names no vendor crate itself.
-    ("render/backends/mod.rs", 3),
+    // The `#[cfg(test)]` fixture module's three-vendor composition. It is the ONE
+    // reachable-by-`cfg(test)` naming of a vendor crate left in the engine, and the
+    // reason this census outlived the crate split — see the module header.
+    ("test_fixtures.rs", 3),
 ];
 
 /// The walk's floor — the WEAKER of this file's two anti-blindness checks. See
@@ -185,10 +206,25 @@ fn src_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The ENGINE's source root, which is `zero-migrate-core/src` and no longer this
+/// crate's own `src`.
+///
+/// This crate is the COMPOSITION now: its `src` is one file that names the three
+/// vendors on purpose. Walking it would give this census a one-file tree in which
+/// every finding is by design — a green that means nothing. The floors below caught
+/// exactly that when the split landed, which is why they exist.
+fn engine_src() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate lives at <workspace>/crates/<name>")
+        .join("zero-migrate-core")
+        .join("src")
+}
+
 /// The census.
 #[test]
 fn core_names_no_vendor_crate_outside_the_registry() {
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let src = engine_src();
     let files = src_files(&src);
 
     // FLOOR ONE — the WALK. A scan over a discovered set fails open.
@@ -246,15 +282,22 @@ fn core_names_no_vendor_crate_outside_the_registry() {
 
     let allowed: BTreeMap<&str, usize> = ALLOWED.iter().copied().collect();
 
-    // FLOOR TWO — the NEEDLE. The registry is a positive control: it names all three
-    // vendor crates once each, and it is not going to stop. If this stops matching,
-    // the census has gone blind and every other zero below it is meaningless.
-    let registry = found.get("render/backends/mod.rs").copied().unwrap_or(0);
+    // FLOOR TWO — the NEEDLE. The `#[cfg(test)]` fixture composition is a positive
+    // control: it names all three vendor crates once each, and it is not going to stop
+    // — several hundred unit tests need a real vendor set to hand the resolution
+    // doors. If this stops matching, the census has gone blind and every other zero
+    // below it is meaningless.
+    //
+    // It USED TO BE `render/backends/mod.rs`, the production registry composition.
+    // That file now returns zero for all three idents, and that zero is this census
+    // succeeding rather than the matcher failing: the composition left the crate, and
+    // the engine no longer declares a vendor dependency to name.
+    let fixtures = found.get("test_fixtures.rs").copied().unwrap_or(0);
     assert_eq!(
-        registry, 3,
-        "the needle found {registry} vendor-crate names in render/backends/mod.rs, \
-         expected 3 (the three `SHIPPING` entries). Either the \
-         registry was restructured — update this control deliberately — or \
+        fixtures, 3,
+        "the needle found {fixtures} vendor-crate names in test_fixtures.rs, \
+         expected 3 (the three entries of its `#[cfg(test)]` composition). Either the \
+         fixture module was restructured — update this control deliberately — or \
          `VENDOR_CRATES` stopped matching, in which case the whole census is blind."
     );
 
@@ -291,5 +334,106 @@ fn core_names_no_vendor_crate_outside_the_registry() {
         violations.is_empty(),
         "core names a vendor crate outside the registry:\n{}",
         violations.join("\n")
+    );
+}
+
+/// The engine's manifest declares no vendor `[dependencies]`, which is the PREMISE
+/// everything above rests on.
+///
+/// # Why this test exists, and why the census alone is not enough
+///
+/// The census above is a source scan. It measures what the engine's code NAMES. The
+/// thing that makes naming a vendor impossible in production code is one level down
+/// and is not source at all: `crates/zero-migrate-core/Cargo.toml` lists
+/// `zero-migrate-backend`, `zero-migrate-ir` and `zero-migrate-policy` under
+/// `[dependencies]` and no backend implementation, so `zero_migrate_postgres` does not
+/// resolve there.
+///
+/// ONE LINE IN THAT MANIFEST UNDOES IT. Add `zero-migrate-postgres = { workspace =
+/// true }` to `[dependencies]` and the whole structural argument evaporates silently:
+/// nothing fails, the tree stays green, and the rule quietly reverts to being whatever
+/// this file's ratchet happens to allow. That is the shape of failure this repository
+/// keeps finding — a rule whose enforcement mechanism has no artifact of its own.
+///
+/// So the manifest edge gets its own check. It lives HERE rather than in a new file
+/// because it is the same rule as the census above, measured one level down: the census
+/// says the engine does not name a vendor, and this says the engine COULD not.
+///
+/// The vendor crates ARE allowed under `[dev-dependencies]`, and are: the engine's own
+/// `#[cfg(test)]` modules compose a real `VendorSet` from them, which is the bounded
+/// hole the ratchet above exists to keep bounded.
+#[test]
+fn the_engine_manifest_declares_no_vendor_dependency() {
+    /// The engine's manifest, relative to `crates/`.
+    const ENGINE_MANIFEST: &str = "zero-migrate-core/Cargo.toml";
+
+    /// The section a vendor edge may appear under, and only that one.
+    const ALLOWED_SECTION: &str = "[dev-dependencies]";
+
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate lives at <workspace>/crates/<name>")
+        .join(ENGINE_MANIFEST);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+
+    // The hyphenated spelling: a manifest key, never a Rust path. `VENDOR_CRATES`
+    // holds the underscore form the source census needs, so the two needles are
+    // deliberately different and neither can vouch for the other.
+    let vendor_keys: Vec<String> = VENDOR_CRATES.iter().map(|c| c.replace('_', "-")).collect();
+
+    let mut section = String::new();
+    let mut edges: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            section = trimmed.to_string();
+            continue;
+        }
+        if vendor_keys.iter().any(|k| trimmed.starts_with(k.as_str())) {
+            edges.push((section.clone(), trimmed.to_string()));
+        }
+    }
+
+    // ---- THE PROPERTY RUNS FIRST, and the order is deliberate. -----------------
+    //
+    // The floor below is a needle-liveness control, and a control that fires FIRST on
+    // a real violation reports the wrong defect: adding a shipping edge also changes
+    // the count, so a count check placed first says "the needle went blind" about a
+    // manifest that is simply wrong. Measured, not reasoned — the first version of
+    // this test did exactly that when poisoned.
+    let shipping: Vec<String> = edges
+        .iter()
+        .filter(|(section, _)| section != ALLOWED_SECTION)
+        .map(|(section, line)| format!("  {section}: {line}"))
+        .collect();
+    assert!(
+        shipping.is_empty(),
+        "{ENGINE_MANIFEST} declares a vendor crate outside `{ALLOWED_SECTION}`:\n{}\n\n\
+         That one line dissolves the whole structural rule this crate split exists for. \
+         The engine is NEUTRAL BY CONSTRUCTION: it cannot name a backend because it \
+         cannot see one, and a normal dependency edge makes `zero_migrate_postgres` \
+         resolve in every module under `src`. Whatever this edge was added for, the \
+         answer is a `VendorSet` parameter the composition supplies — that is what \
+         every resolution door in `render::backends` already takes.",
+        shipping.join("\n")
+    );
+
+    // ---- THE FLOOR. Zero dev edges would mean the needle went blind, not that the
+    // ---- engine got stricter: the `#[cfg(test)]` composition needs all three, and if
+    // ---- it ever stops needing them the ratchet above goes red first.
+    let dev = edges.iter().filter(|(s, _)| s == ALLOWED_SECTION).count();
+    assert_eq!(
+        dev,
+        VENDOR_CRATES.len(),
+        "found {dev} vendor edge(s) under `{ALLOWED_SECTION}` in {ENGINE_MANIFEST}, \
+         expected {} (one per shipping backend, for the `#[cfg(test)]` composition). \
+         Either the fixture set stopped needing them — in which case the ratchet above \
+         is red too — or this needle stopped matching a manifest key, in which case the \
+         property above means nothing.\nfound: {edges:?}",
+        VENDOR_CRATES.len()
     );
 }

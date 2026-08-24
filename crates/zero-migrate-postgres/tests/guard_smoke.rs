@@ -404,7 +404,7 @@ scope = "all"
 /// `check_body_text` re-parses every single-quoted fragment as SQL and recurses into
 /// `check_node`, so a literal reaches the rename checks even though a raw view body is
 /// refused unless it is a single top-level SELECT
-/// (crates/zero-migrate/src/model/validate.rs:5480). The cross-schema arm is the
+/// (crates/zero-migrate-core/src/model/validate.rs:5480). The cross-schema arm is the
 /// positive control: it proves the literal really is walked rather than ignored, which
 /// is what makes the permissive arm below a statement about the rule and not about
 /// whether the code runs.
@@ -441,7 +441,7 @@ fn a_rename_inside_a_view_body_literal_is_walked_but_never_meets_the_injected_ru
 /// was ADMITTED.
 ///
 /// The engine's own path is unaffected: `validate_raw_view_body_sql`
-/// (crates/zero-migrate/src/model/validate.rs) refuses the same shapes first, with the
+/// (crates/zero-migrate-core/src/model/validate.rs) refuses the same shapes first, with the
 /// authoring diagnostics this layer has no context to produce.
 #[test]
 fn the_public_body_scanner_refuses_text_that_is_not_a_view_body() {

@@ -2,7 +2,7 @@
 //!
 //! The same shape as the view case (`replace_view_rollback_sqlite.rs`): a flag turns a
 //! create into a MODIFY, and the inverse still assumes the create brought the object into
-//! being. `crates/zero-migrate/src/render/vendor.rs` renders the `createFunction` down as
+//! being. `crates/zero-migrate-core/src/render/vendor.rs` renders the `createFunction` down as
 //! `DROP FUNCTION IF EXISTS` unconditionally, with `replace` reaching only the up.
 //!
 //! It differs from the view case in two ways that both matter.

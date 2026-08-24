@@ -86,7 +86,7 @@
 //!    IDENTICAL matcher where each name must appear. Stated per item rather than as a
 //!    total, because a total lets one popular name carry the dead ones.
 //!
-//! The control's home is ONE file for all ten: `zero-migrate/src/render/value_format.rs`,
+//! The control's home is ONE file for all ten: `zero-migrate-core/src/render/value_format.rs`,
 //! the engine's dialect-resolving doors plus the comparison's own test module, which
 //! stayed there because it needs all three vendors and the contract crate has none.
 //! Every one of the ten is named there today, so no needle is uncontrolled — which is
@@ -166,7 +166,7 @@ const COMPARISON_CONTROL_FLOOR: &[(&str, usize)] = &[
 /// The engine's dialect-resolving doors, relative to `crates/`. It carries the
 /// comparison's own test module too, which is why every one of the ten is reachable
 /// from this single control.
-const ENGINE_DOORS: &str = "zero-migrate/src/render/value_format.rs";
+const ENGINE_DOORS: &str = "zero-migrate-core/src/render/value_format.rs";
 
 /// Whether a source line is CODE rather than a comment.
 ///

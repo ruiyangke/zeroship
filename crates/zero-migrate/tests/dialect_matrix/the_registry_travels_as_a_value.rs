@@ -13,22 +13,33 @@
 //! three vendors, and it is what this file forbids.
 //!
 //! The header is phrased in terms of the RULE and not the current file layout,
-//! because the layout is about to change underneath it. At the time of writing the
-//! composition is `zero_migrate::render::backends::VENDORS`; that is a fact about
-//! today, not the thing being asserted.
+//! because the layout changed underneath it exactly as it warned it would. The
+//! composition is `zero_migrate::shipping_vendors()` now, in the crate that names the
+//! vendors; the engine is `zero-migrate-core` and can no longer see it.
 //!
-//! # Why the compiler will NOT catch this for you
+//! # THE SPLIT HAPPENED, AND IT COST NOTHING — WHICH IS THIS FILE'S RESULT
 //!
-//! Today it cannot: the composition is a `pub(crate) const`, so a new
-//! `crate::render::backends::VENDORS` written anywhere under `src` compiles, emits
-//! byte-identical SQL, and passes every behaviour test in the workspace. The engine
-//! and the composition are still one crate.
+//! When this file was written the composition was a `pub(crate) const` in the engine's
+//! own crate, so a new `crate::render::backends::VENDORS` written anywhere under `src`
+//! compiled, emitted byte-identical SQL, and passed every behaviour test in the
+//! workspace. The prediction recorded here was that each such reach re-added before
+//! the split would become a compile error the split had to discover the hard way.
 //!
-//! After the composition root moves out they will not be, and the same line becomes
-//! a compile error — which is exactly why the failure is dangerous BEFORE then. Each
-//! reach re-added between now and the split is a site the split has to discover the
-//! hard way, one compile error at a time, in a commit that is supposed to be
-//! mechanical. This file is what notices them while they are still cheap.
+//! MEASURED at the split: the engine's manifest dropped all three vendor
+//! `[dependencies]` and the workspace compiled with ZERO errors. Not one resolution
+//! site had grown back. That is what this census was for, and it is the only evidence
+//! that it worked.
+//!
+//! # Why the compiler still will NOT catch this for you
+//!
+//! For PRODUCTION code it now does, and that half of the rule has been handed over:
+//! `zero-migrate-core` declares no vendor dependency, so it cannot compose a set.
+//!
+//! What is left is the `#[cfg(test)]` half. The vendor crates ARE dev-dependencies of
+//! the engine — several hundred unit tests need a real `VendorSet` to hand the
+//! resolution doors — so a second composition written in any `#[cfg(test)]` module
+//! under `src` compiles clean. [`ALLOWED`] holds that to ONE file, and the third
+//! needle below is what sees a new one arrive under another name.
 //!
 //! # Three needles, because there are three ways back to a global
 //!
@@ -38,10 +49,11 @@
 //!    exclusion and not a region one.
 //! 2. **CALL an accessor for it.** [`zero_migrate::shipping_vendors`] and
 //!    [`zero_migrate::shipping_backends`] hand the composition to a HOST. They are
-//!    `pub`, so engine code can call them too, and a call from inside `src` is the
-//!    same reach wearing a function's clothes. It survives the crate split — the
-//!    accessors move to the composing crate, but core could re-export or re-declare
-//!    one — so this needle outlives the compile error the first one becomes.
+//!    `pub`, so a `#[cfg(test)]` module in the engine could call one through the
+//!    dev-dependency edge, and a call from inside `src` is the same reach wearing a
+//!    function's clothes. It SURVIVED the crate split, exactly as this entry predicted
+//!    it would: the accessors moved to the composing crate, but core could re-export or
+//!    re-declare one and nothing but this needle would say so.
 //! 3. **DECLARE a second one.** A `static`/`const` of type `VendorSet`, or one
 //!    parked in a `OnceLock`/`LazyLock`/`Mutex`/`RwLock`, is the composition
 //!    re-created under a new name. This is the quiet path the registry module
@@ -52,12 +64,17 @@
 //! # What this file does NOT cover, said out loud
 //!
 //! It does not check that the value threaded to a door is the RIGHT set — nothing
-//! textual can, and there is only one set to pass. It reads `src` only: the engine's
-//! own `tests/` binaries are hosts and are entitled to compose, which is why
-//! [`zero_migrate::shipping_vendors`] exists at all. [`is_code`] is a line-oriented
-//! comment filter, not a Rust parser: it cannot see inside a block comment that
-//! opens mid-line and does not try. It over-counts prose into code, never the
-//! reverse, which is the safe direction for a census asserting a ZERO.
+//! textual can. There are TWO sets in the workspace now, and that is new: the shipping
+//! one this crate composes, and the `#[cfg(test)]` one `test_fixtures.rs` composes for
+//! the engine's own unit tests. [`the_two_compositions_list_the_same_vendors`] is what
+//! keeps them from disagreeing, and it is a source comparison because the test set is
+//! `#[cfg(test)] pub(crate)` and no integration test can hold both values at once.
+//!
+//! It reads `src` only: this crate's `tests/` binaries are HOSTS and are entitled to
+//! compose, which is why [`zero_migrate::shipping_vendors`] exists at all. [`is_code`]
+//! is a line-oriented comment filter, not a Rust parser: it cannot see inside a block
+//! comment that opens mid-line and does not try. It over-counts prose into code, never
+//! the reverse, which is the safe direction for a census asserting a ZERO.
 //!
 //! # The floors, because a scan over a DISCOVERED set fails OPEN
 //!
@@ -106,33 +123,29 @@ const ACCESSOR_CONTROL_CRATE: &str = "zero-migrate-node";
 const ACCESSOR_CONTROL_FLOOR: usize = 5;
 
 /// Where the composition may be named OR declared, relative to
-/// `crates/zero-migrate/src`, and what each site is for.
+/// `crates/zero-migrate-core/src`, and what each site is for.
 ///
-/// These are the ENTRY POINTS in the invariant's sense: the place the set is
-/// composed, and the places it is handed out. Every one of them is also a positive
-/// control — see [`ALLOWED`]'s use below.
+/// ONE ENTRY, and the fall from three to one is what the crate split bought.
 ///
-/// A site earns its place by being unable to take the set as an argument:
+/// The list used to hold `render/backends/mod.rs` (which composed the set and folded
+/// the identifier budget from it) and `lib.rs` (which handed it to a host). Both left
+/// the engine with the composition: the shipping list is
+/// `crates/zero-migrate/src/lib.rs` now, and so are `shipping_vendors` and
+/// `shipping_backends`. Neither entry was lowered — both became unrepresentable,
+/// because the engine cannot name a vendor crate it does not depend on.
 ///
-/// * `render/backends/mod.rs` composes it. Its own budget fold and its own unit
-///   tests read it because they are the composition's tests.
-/// * `lib.rs` is the crate's public surface, where a host asks what it got.
-/// * `test_fixtures.rs` is `#[cfg(test)]` and answers the same question for core's
-///   own unit tests, in one place, for the reason its header already gives about the
-///   three dialect ids.
-const ALLOWED: &[(&str, &str)] = &[
-    (
-        "render/backends/mod.rs",
-        "composes the set, folds the identifier budget from it, and tests both",
-    ),
-    ("lib.rs", "hands the set to a host"),
-    (
-        "test_fixtures.rs",
-        "hands the set to core's own `#[cfg(test)]` modules",
-    ),
-];
+/// What remains is `test_fixtures.rs`, which is `#[cfg(test)]` and composes a set for
+/// core's own unit tests from the three vendor crates reached through
+/// `[dev-dependencies]`. That is the one edge Cargo does not close, it is deliberate,
+/// and it is the reason this file did not retire with the two entries above it.
+///
+/// It is also a positive control — see [`ALLOWED`]'s use below.
+const ALLOWED: &[(&str, &str)] = &[(
+    "test_fixtures.rs",
+    "composes the `#[cfg(test)]` set and hands it to core's own unit tests",
+)];
 
-/// Files the walk MUST reach, relative to `crates/zero-migrate/src`.
+/// Files the walk MUST reach, relative to `crates/zero-migrate-core/src`.
 ///
 /// The real defence against a census that fails open, because they bound WHICH
 /// files were seen rather than how many. `lib.rs` is the walk root and cannot move;
@@ -315,9 +328,24 @@ fn src_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The ENGINE's source root, which is `zero-migrate-core/src` and no longer this
+/// crate's own `src`.
+///
+/// This crate is the COMPOSITION now: its `src` is one file that names the three
+/// vendors on purpose. Walking it would give this census a one-file tree in which
+/// every finding is by design — a green that means nothing. The floors below caught
+/// exactly that when the split landed, which is why they exist.
+fn engine_src() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate lives at <workspace>/crates/<name>")
+        .join("zero-migrate-core")
+        .join("src")
+}
+
 #[test]
 fn the_engine_receives_the_registry_instead_of_reaching_for_it() {
-    let engine_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let engine_src = engine_src();
     assert!(
         engine_src.is_dir(),
         "the engine source root {} does not exist, so the census would walk nothing \
@@ -435,11 +463,11 @@ fn the_engine_receives_the_registry_instead_of_reaching_for_it() {
     }
     if !second_composition_at
         .iter()
-        .any(|(rel, _, _)| rel == "render/backends/mod.rs")
+        .any(|(rel, _, _)| rel == "test_fixtures.rs")
     {
         blind.push(
-            "  second-composition: `render/backends/mod.rs` declares the ONE \
-             composition and the matcher no longer sees it"
+            "  second-composition: `test_fixtures.rs` declares the engine's only \
+             `VendorSet` binding and the matcher no longer sees it"
                 .to_string(),
         );
     }
@@ -469,12 +497,13 @@ fn the_engine_receives_the_registry_instead_of_reaching_for_it() {
             violations.push(format!("  [names the composition] {rel}:{line}: {text}"));
         }
     }
+    // No exemption: the accessors are `zero-migrate`'s now, and the engine cannot even
+    // name that crate. The rule used to be "only `lib.rs`, which DEFINES them"; both
+    // definitions left with the composition, so the target is a flat zero.
     for (rel, line, text) in &accessor_at {
-        if rel != "lib.rs" {
-            violations.push(format!(
-                "  [calls a composition accessor] {rel}:{line}: {text}"
-            ));
-        }
+        violations.push(format!(
+            "  [calls a composition accessor] {rel}:{line}: {text}"
+        ));
     }
     for (rel, line, text) in &second_composition_at {
         if !allowed.contains(rel.as_str()) {
@@ -494,5 +523,101 @@ fn the_engine_receives_the_registry_instead_of_reaching_for_it() {
          one crate; it is a compile error the moment they are not, and finding it \
          then costs a mechanical commit its mechanical-ness.",
         violations.join("\n")
+    );
+}
+
+/// The engine's `#[cfg(test)]` vendor set lists the SAME vendors, in the same order, as
+/// the shipping composition.
+///
+/// # Why this test exists, and why it is textual
+///
+/// The crate split left the workspace with TWO `VendorSet` compositions where it had
+/// one. The shipping list is `crates/zero-migrate/src/lib.rs`. The other is
+/// `crates/zero-migrate-core/src/test_fixtures.rs`, which composes a set for the
+/// engine's own unit tests from the same three crates reached through
+/// `[dev-dependencies]` — because the engine cannot see the shipping one, and a
+/// hand-rolled fake would make several hundred unit tests assert against a double
+/// instead of against the backends that ship.
+///
+/// Two copies of a list drift silently. That is the standing hazard the sibling
+/// censuses record about recorders and normal forms, and it now applies here.
+///
+/// It cannot be a value comparison: `test_fixtures::VENDORS` is `#[cfg(test)]
+/// pub(crate)`, so no integration test can hold both. Making it `pub` to enable the
+/// comparison would publish a test double on the engine's API — a worse trade than a
+/// source scan, and one this file's whole subject argues against.
+///
+/// So it compares the two composition sites as TEXT: the ordered sequence of vendor
+/// crate idents each one names. A backend added to one list and not the other changes
+/// that sequence, which is the drift worth catching.
+///
+/// WHAT IT DOES NOT SEE, said rather than implied: the shipping site names each vendor
+/// crate at its `const <NAME>_VENDOR` line and then builds `SHIPPING` out of those
+/// CONSTS, so this reads the declaration order, not the array's. Reordering the array
+/// alone is invisible here. That is a smaller fact than it sounds — resolution is a
+/// lookup by dialect id, so array order changes only the order a few union answers
+/// (`reserved_catalog_prefixes`, `targets_declaring`) are spelled in — but it is a real
+/// gap and not a claim this test can make.
+#[test]
+fn the_two_compositions_list_the_same_vendors() {
+    /// The shipping composition, and the engine's test composition.
+    const SHIPPING_SITE: &str = "zero-migrate/src/lib.rs";
+    const FIXTURE_SITE: &str = "zero-migrate-core/src/test_fixtures.rs";
+
+    /// The idents to look for. The ORDER is not asserted from this list — it is read
+    /// out of each file, so a reordering in one and not the other is a red.
+    const VENDOR_CRATES: &[&str] = &[
+        "zero_migrate_mysql",
+        "zero_migrate_postgres",
+        "zero_migrate_sqlite",
+    ];
+
+    /// The vendor crate idents `text` names, in the order its CODE lines name them.
+    fn vendors_in_order(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in text.lines().filter(|l| is_code(l)) {
+            let mut hits: Vec<(usize, &str)> = VENDOR_CRATES
+                .iter()
+                .filter_map(|c| line.find(c).map(|at| (at, *c)))
+                .collect();
+            hits.sort_unstable();
+            out.extend(hits.into_iter().map(|(_, c)| c.to_string()));
+        }
+        out
+    }
+
+    let crates = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate lives at <workspace>/crates/<name>")
+        .to_path_buf();
+    let read = |rel: &str| {
+        let path = crates.join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+    };
+
+    let shipping = vendors_in_order(&read(SHIPPING_SITE));
+    let fixture = vendors_in_order(&read(FIXTURE_SITE));
+
+    // ---- The FLOOR. Two empty lists are equal, and would mean the matcher went blind
+    // ---- on both sites at once rather than that the compositions agree.
+    assert_eq!(
+        shipping.len(),
+        VENDOR_CRATES.len(),
+        "the shipping composition {SHIPPING_SITE} names {} vendor crate(s); the \
+         workspace ships {}. Either a backend was added or removed — update this floor \
+         in that commit — or the matcher stopped seeing the composition, in which case \
+         the comparison below is vacuous.",
+        shipping.len(),
+        VENDOR_CRATES.len()
+    );
+
+    assert_eq!(
+        shipping, fixture,
+        "the shipping composition ({SHIPPING_SITE}) and the engine's `#[cfg(test)]` \
+         composition ({FIXTURE_SITE}) list different vendors, or list them in a \
+         different order. The engine's unit tests would then be resolving against a set \
+         that is not the one that ships, and every dialect answer they assert would be \
+         about a build nobody deploys. Add the backend to BOTH, in the same order, in \
+         the same commit."
     );
 }

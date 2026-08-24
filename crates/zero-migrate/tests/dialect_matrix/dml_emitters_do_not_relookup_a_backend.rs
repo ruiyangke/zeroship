@@ -185,14 +185,14 @@
 #[test]
 fn a_dml_emitter_holding_a_backend_never_resolves_another() {
     // THE SUBJECT MOVED. Fourteen of the nineteen carriers below were in
-    // `zero-migrate/src/render/dml.rs`; the crate extraction took that module into
+    // `zero-migrate-core/src/render/dml.rs`; the crate extraction took that module into
     // `zero-migrate-backend`, leaving a thin engine-side shim at the old path whose
     // functions take a `dialect` and resolve ONE backend at the door. This census
     // scans all three, so it still sees every carrier AND it now watches the shim
     // for a carrier that starts re-resolving.
     const BACKEND_DML: &str = include_str!("../../../zero-migrate-backend/src/dml.rs");
-    const ENGINE_DML: &str = include_str!("../../src/render/dml.rs");
-    const LOWER: &str = include_str!("../../src/render/lower.rs");
+    const ENGINE_DML: &str = include_str!("../../../zero-migrate-core/src/render/dml.rs");
+    const LOWER: &str = include_str!("../../../zero-migrate-core/src/render/lower.rs");
     const CARRIER_NAME: &str = "backend:";
     // Deliberately NOT `"dyn DmlRenderer"`. Writing this test found two carriers in
     // `render/lower.rs` spelled `&dyn crate::render::renderer::DmlRenderer` that a
@@ -226,25 +226,25 @@ fn a_dml_emitter_holding_a_backend_never_resolves_another() {
         "zero-migrate-backend/src/dml.rs::render_expr_inline_walk_for_backend",
         // `render/lower.rs`: the two that already carried, plus the view-query
         // subtree below its `render_view_query` door.
-        "zero-migrate/src/render/lower.rs::trigger_inverse_from_history",
+        "zero-migrate-core/src/render/lower.rs::trigger_inverse_from_history",
         // Added when the vendor-op surface went behind
         // `DmlRenderer::render_vendor_op`: this one used to call
         // `crate::render::vendor::render_vendor_op` — a re-export of one vendor
         // crate — where its trigger sibling directly above had always taken the
         // resolved backend. It takes one now too.
-        "zero-migrate/src/render/lower.rs::vendor_inverse_from_history",
-        "zero-migrate/src/render/lower.rs::render_view_op",
-        "zero-migrate/src/render/lower.rs::render_select_ast",
-        "zero-migrate/src/render/lower.rs::render_join",
-        "zero-migrate/src/render/lower.rs::render_table_ref",
+        "zero-migrate-core/src/render/lower.rs::vendor_inverse_from_history",
+        "zero-migrate-core/src/render/lower.rs::render_view_op",
+        "zero-migrate-core/src/render/lower.rs::render_select_ast",
+        "zero-migrate-core/src/render/lower.rs::render_join",
+        "zero-migrate-core/src/render/lower.rs::render_table_ref",
     ];
 
     let mut carriers: Vec<(&str, &str, Vec<&str>)> = Vec::new();
 
     for (file, src) in [
         ("zero-migrate-backend/src/dml.rs", BACKEND_DML),
-        ("zero-migrate/src/render/dml.rs", ENGINE_DML),
-        ("zero-migrate/src/render/lower.rs", LOWER),
+        ("zero-migrate-core/src/render/dml.rs", ENGINE_DML),
+        ("zero-migrate-core/src/render/lower.rs", LOWER),
     ] {
         let lines: Vec<&str> = src.lines().collect();
 

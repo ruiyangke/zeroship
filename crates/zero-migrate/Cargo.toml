@@ -3,203 +3,132 @@ name = "zero-migrate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Portable, security-first, multi-dialect DB migration engine — driver-neutral Postgres seam (host-callback / napi bridge) plus in-process SQLite. Runs V8-free: authoring, MySQL, and Postgres execution all run in the Node process (npm drivers) reached through the zero-migrate-node napi bridge; the engine ships NO embedded V8."
+description = "Portable, security-first, multi-dialect DB migration engine — the whole product: the vendor-neutral `zero-migrate-core` engine composed with the PostgreSQL, SQLite and MySQL backends this build ships. Driver-neutral Postgres/MySQL seam (host-callback / napi bridge) plus in-process SQLite. Runs V8-free: authoring, MySQL, and Postgres execution all run in the Node process (npm drivers) reached through the zero-migrate-node napi bridge; it ships NO embedded V8."
 
-# The engine is a clean, runtime-free, V8-FREE, tokio-AND-compio-free LIBRARY.
-# Authoring, MySQL, and Postgres all execute in the Node process (the
-# `zero-migrate` host-recorder evals the DSL → op-IR envelope; the
-# `zero-migrate-node` napi addon LOWERs + applies it over the host `pg` / `mysql2`
-# npm drivers). There is NO native Rust network Postgres driver and NO embedded V8
-# in the Rust build graph: the PG/MySQL path is the dialect-neutral
-# `driver::SqlSession` seam (host-callback / napi bridge), which supplies no
-# in-Rust `SqlSession` impl — the in-crate recording driver (behind `cfg(test)`)
-# is the first host-shaped producer and the napi bridge is the production one.
-# SQLite does NOT ride that seam; it runs in-process on a sync rusqlite actor.
-# The addon build stays cross-platform (no io_uring) because no native network PG
-# driver is ever present. The command-line surface is the `zero-migrate-cli` TS CLI
-# (`packages/zero-migrate-cli/src/cli.ts`); this crate ships NO Rust bin, so the
-# shipped library links neither tokio nor compio (compio is a dev-dependency, used
-# only by the async-apply test harness's `#[compio::test]` sites).
+# THE COMPOSITION ROOT, and almost nothing else.
 #
-# This crate has NO cargo features: the crate split expresses the separation
-# structurally, so there is no build configuration left to select.
+# `src/lib.rs` is a re-export of `zero-migrate-core` plus ONE fact: which vendors
+# exist. That is the entire content of this crate, and it is why it exists — the three
+# `[dependencies]` lines below used to sit in the engine's own manifest, where nothing
+# but a hand-written census stopped any engine module from reaching a vendor directly.
+# Moving them here makes the neutrality rule STRUCTURAL: `zero-migrate-core` cannot see
+# these crates, so it cannot name them.
+#
+# The consumer-facing name did not move. `zero-migrate` is what a host depends on and
+# "the whole product" is the right meaning for it; the engine is the part that got a
+# new name.
+#
+# The engine's INTEGRATION TESTS live here, under `tests/`, and that is the correct
+# home rather than a leftover: an integration test is a HOST. It composes the product
+# and drives it through the public surface, which is precisely what this crate is for,
+# and it is why `tests/dialect_matrix/the_registry_travels_as_a_value.rs` reads only
+# `src` when it asserts that nothing reaches for the composition.
+#
+# This crate has NO cargo features.
 
 [dependencies]
-sha2 = { workspace = true }
-hmac = { workspace = true }
-hex = { workspace = true }
-# JSON Schema derive for the `op.*` IR types (MigrationIr + the closed Op enum).
-# Emits `ir-envelope.schema.json` (the discriminated union the JS builder targets) via
-# `schemars::schema_for!`. Sync + leaf — zero tokio; does not widen the trust
-# domain (it only describes the IR shape, it does not parse untrusted SQL).
-schemars = { workspace = true }
-# Strict base64 decode + canonical encode for `IrScalar::Bytes`. The payload is
-# stored DECODED internally and re-encoded with the canonical STANDARD (padded)
-# alphabet on serialize, so two non-canonical encodings of the same bytes cannot
-# hash differently across the JS/Rust front doors. The strict decoder
-# refuses an invalid alphabet / wrong padding at LOAD, before any checksum.
-base64 = { workspace = true }
-thiserror = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-# The wire `FieldDef` map preserves the createTable column ORDER (the parity check
-# compares serialized FieldDef maps, so a sorted-vs-declared order would
-# false-mismatch). An insertion-ordered map is the clean carrier. The map was built by
-# the `fold_to_field_defs` walker until step 4 consumer 3 of
-# docs/proposals/single-fold-and-effects.md; it is a projection of the single fold now,
-# and the ordering requirement is unchanged - the fold's authored column map is an
-# `IndexMap` for this reason.
-indexmap = { workspace = true }
-# The wire contract: MigrationIr, the closed Op enum, the
-# closed Expr AST, IrScalar, the precondition/probe vocabulary, the typed-id
-# machinery, the canonical checksum, the fail-closed load gate's policy-free half,
-# and the STRUCTURAL validator. The engine re-exports the whole surface
-# (`pub use zero_migrate_ir as ir;` + flattened root re-exports) so downstream
-# `zero_migrate::{MigrationIr, Op, …}` names are unchanged.
-zero-migrate-ir = { workspace = true }
-# The backend CONTRACT: the `DmlRenderer` / `SchemaRenderer` traits, the render
-# errors their signatures name (`IrLowerError`, `DeclarativeError`, `DmlError`,
-# `VendorError`), the identifier/expression spelling seam, and the vendor-registry
-# shape. The engine re-exports the whole surface under its historical paths
-# (`render::{renderer, dml, vendor}`, `render::lower::IrLowerError`,
-# `render::declarative::DeclarativeError`, `render::step::BindValue`,
-# `schema::query::SchemaRenderer`, `schema::{descriptors, mask_codec, error}`), so
-# no downstream name moved.
-zero-migrate-backend = { workspace = true }
-# The three SHIPPING BACKENDS. The engine names them exactly once each, in
-# `render::backends::VENDORS`, which is the registry composition that replaced the
-# hard-coded match over the former closed SQL-dialect enum. The arrow only points
-# this way: no vendor
-# crate depends on the engine, which is what let them be extracted at all.
+# THE ENGINE. Re-exported wholesale by `src/lib.rs`, so every `zero_migrate::…` path a
+# host already wrote resolves unchanged across the split.
+zero-migrate-core = { workspace = true }
+# THE THREE SHIPPING BACKENDS. Named exactly once each, in the `SHIPPING` array in
+# `src/lib.rs`, which is the registry composition that replaced the hard-coded match
+# over the former closed SQL-dialect enum. The arrow only points this way: no vendor
+# crate depends on the engine or on this crate, which is what let them be extracted at
+# all, and what lets `zero-migrate-core` name none of them.
 zero-migrate-postgres = { workspace = true }
 zero-migrate-sqlite = { workspace = true }
 zero-migrate-mysql = { workspace = true }
-# The Policy Decision Point (PDP): the scope lattice + composition algebra +
-# unforgeable `EffectivePolicy`. `resolve_create_table_policy` drives its
-# column/index/PK injection off `EffectivePolicy::injects_for(object)` (the
-# injection-as-rule model), replacing the old `PolicyProfile.system_shape`. This
-# crate is a pure LEAF (no SQL deps) — the engine maps its opaque inject `ty`
-# tokens to `ColType`.
-zero-migrate-policy = { workspace = true }
-# The canonical version→id derivation (in the loader) builds a UUIDv7-SHAPED id
-# (numeric version in the high 48 bits) and base62-encodes it via
-# `crate::id::uuid_to_base62` (the vendored typed-id module), which takes a
-# `&uuid::Uuid`.
-uuid = { workspace = true }
-# NOTE: `compio` is NOT a runtime dependency. The Rust CLI that
-# used `#[compio::main]` was retired into the `zero-migrate-cli` TS CLI, and no
-# shipped engine code drives an executor: the network (PG/MySQL) apply flow always
-# runs host-side through the dialect-neutral `driver::SqlSession` seam (fed by the
-# napi/Node host in production, or the in-crate recording driver in tests), and the
-# SQLite backend is a sync rusqlite actor. `compio` remains only a `dev-dependency`
-# below — the async-apply test harness (`#[compio::test]`) drives the seam-generic
-# apply path over the recording driver. The shipped library links no async runtime.
-# `rusqlite` and `flume` USED TO BE DEPENDENCIES HERE, for the SQLite migration
-# actor. That actor is `zero-migrate-sqlite/src/backend/` now and declares both
-# itself. `flume` had no other caller in this crate and is gone outright; `rusqlite`
-# moved to `[dev-dependencies]` below, where its remaining callers are. No shipped
-# engine code opens a SQLite connection.
-# `FutureExt::catch_unwind` for panic-safe shadow-DB teardown — mirrors the
-# runtime crate's panic_util seam. Zero tokio: `futures` is the executor-agnostic
-# combinator crate, not a runtime.
-futures = { workspace = true }
-tracing = { workspace = true }
-# The `.migrate/dialect_table.toml` portability tables + the policy-profile
-# `from_toml`/`to_string` round-trip (`model/{profile,dialect_table,op_support}.rs`).
-# SYNC + leaf — zero tokio; the library trust domain is unchanged.
-toml = { workspace = true }
+# The backend CONTRACT, for the two types the composition itself is written in:
+# `BackendVendor` (what each vendor registers) and `VendorSet` (what this crate hands
+# out). No renderer, no guard, no emitter is named here — resolving one is the
+# engine's job, against the set it is given.
+zero-migrate-backend = { workspace = true }
 
 [dev-dependencies]
-# TEST-ONLY now, and this is the commit that made it so. Every engine parse site the
-# `[dependencies]` entry justified was PostgreSQL's and reached only through
-# `MigrationBackend`: the non-transactional idempotence / crash-recovery scans, the
-# assembled-backfill cursor mutation check, and the `SqlBoolean` precondition shape
-# gate. All three left with `apply/backend/postgres/` for
-# `zero-migrate-postgres/src/backend/`, which is the exit condition the old comment
-# named. The engine's own code opens no PostgreSQL parser anywhere.
+# The wire contract, named DIRECTLY by the suites that build IR envelopes and dialect
+# ids rather than reading them off the engine's re-exports. It is not a `[dependencies]`
+# entry: `shipping_backends()` returns a `BackendRegistry`, but that name reaches this
+# crate through the engine's own root re-export, so the composition needs no edge of
+# its own to the leaf.
+zero-migrate-ir = { workspace = true }
+# The integration suites under `tests/` are HOSTS: they compose the product and drive
+# it through its public surface, so their dependencies are this crate's dev edges
+# rather than the engine's. Everything below is TEST-ONLY and none of it ships.
+#
+# The PDP, named directly by the charter/policy suites rather than through the
+# engine's re-export, because those tests construct policy inputs rather than consume
+# an `EffectivePolicy` the engine handed them.
+zero-migrate-policy = { workspace = true }
+# TEST-ONLY. Every engine parse site the old `[dependencies]` entry justified was
+# PostgreSQL's and reached only through `MigrationBackend`; all of them left with
+# `apply/backend/postgres/` for `zero-migrate-postgres/src/backend/`.
 #
 # COUNT THE CALL SITES BEFORE EDITING THIS COMMENT — the entry it replaces was wrong
-# twice before for exactly that reason. Today there is ONE, in a test:
+# twice before for exactly that reason. Today there is ONE:
 # `tests/authoring_surface/sequences_exclusion.rs` parses a rendered exclusion
 # constraint to prove the bytes the author emitted are bytes PostgreSQL accepts.
 # pg_query carries a C build dep (libpg_query).
 pg_query = "6"
-# TEST-ONLY, and it is the SAME crate the `[dependencies]` entry above names — this
-# line exists only for the `testing` feature. That feature publishes MySQL's canned
-# `SqlSession` recorder, which fourteen tests in `tests/mysql_engine/` drive while
-# ALSO driving `apply_with_lock_backend` / `MigrationEngine` / `diff_snapshots` /
-# `fold_ops`. Those four are the engine's, so those tests cannot live in the vendor
-# crate (the edge back is a cycle Cargo refuses) — and a second copy of the recorder
-# over here would be worse than the feature: its canned `information_schema` rows are
-# the shared premise of both suites, and two copies drift silently.
-#
-# Resolver 3 keeps dev-dependency features out of the normal build, so
-# `cargo build -p zero-migrate` links none of it.
-zero-migrate-mysql = { workspace = true, features = ["testing"] }
-# TEST-ONLY FEATURE on a crate this manifest already depends on: it publishes
-# `zero_migrate_postgres::backend::recording`, the canned `SqlSession` that crate's
-# own unit tests drive. Five tests over that SAME recorder additionally drive
-# `MigrationEngine` / `AppliedPlan` / `ops::status::history_via_backend`. Those three
-# are the engine's, so those tests cannot live in the vendor crate (the edge back is a
-# cycle Cargo refuses) — and a second copy of the recorder over here would be worse
-# than the feature: its canned rows are the shared premise of both suites, and two
+# TEST-ONLY FEATURES on crates this manifest already depends on. Each publishes that
+# vendor's canned `SqlSession` recorder, which the vendor's own unit tests drive — and
+# which the suites here drive while ALSO driving `apply_with_lock_backend` /
+# `MigrationEngine` / `diff_snapshots` / `fold_ops`. Those four are the engine's, so
+# those tests cannot live in the vendor crate (the edge back is a cycle Cargo refuses)
+# — and a second copy of a recorder over here would be worse than the feature: its
+# canned `information_schema` rows are the shared premise of both suites, and two
 # copies drift silently.
 #
-# Resolver 3 keeps dev-dependency features out of the normal build, so
-# `cargo build -p zero-migrate` links none of it.
+# Resolver 3 keeps dev-dependency features out of the normal build, so a shipping
+# `zero-migrate` compiles none of it.
+zero-migrate-mysql = { workspace = true, features = ["testing"] }
 zero-migrate-postgres = { workspace = true, features = ["testing"] }
-# TEST-ONLY: the SEAM-generic async apply/backend surface is
-# `async`, so the test harness drives it on a runtime. `#[compio::test]` spins a
-# throwaway compio run loop per test (zero tokio) to `.await` the seam-generic
-# apply/journal/drift/status paths over the in-crate recording driver + the
-# in-process SQLite actor. NO shipped engine code links compio — it is a
-# dev-dependency only.
+# TEST-ONLY: the SEAM-generic async apply/backend surface is `async`, so the test
+# harness drives it on a runtime. `#[compio::test]` spins a throwaway compio run loop
+# per test (zero tokio) to `.await` the seam-generic apply/journal/drift/status paths
+# over the in-crate recording driver + the in-process SQLite actor. NO shipped code
+# links compio.
 compio = { workspace = true }
 # Per-test temp SQLite files for the confinement/journal/atomic-apply proofs
 # (every confinement claim proven on a REAL temp-file SQLite, never a shim).
 # Auto-cleaning; workspace-pinned.
 tempfile = { workspace = true }
-# TEST-ONLY, and it used to be a `[dependencies]` entry: the SQLite migration actor
-# it was added for is `zero-migrate-sqlite`'s now. What is left here is a CONTROL —
-# three `#[cfg(test)]` blocks in `render/dml.rs` that run an assembled backfill
-# statement on a real in-memory SQLite, and the SQLite integration suites, which open
-# the app file raw to check what the hardened backend actually wrote. `bundled` pins
-# the SQLite build; `load_extension` matches the vendor crate's feature set so the
-# workspace resolves one rusqlite rather than two.
+# TEST-ONLY: the SQLite integration suites open the app file raw to check what the
+# hardened backend actually wrote. `bundled` pins the SQLite build; `load_extension`
+# matches the vendor crate's feature set so the workspace resolves one rusqlite rather
+# than two.
 rusqlite = { workspace = true, features = ["bundled", "load_extension"] }
-# TEST-ONLY live-Postgres driver. The blocking `postgres` crate
-# backs `PgDevSession`, a `driver::SqlSession` impl that drives the SHIPPED generic
-# PostgresBackend/executor/journal/drift path against a live PG (:5440) in-crate, so
-# the host-PG apply path has in-crate live-DB regression coverage.
+# TEST-ONLY live-Postgres driver. The blocking `postgres` crate backs `PgDevSession`,
+# a `driver::SqlSession` impl that drives the SHIPPED generic
+# PostgresBackend/executor/journal/drift path against a live PG, so the host-PG apply
+# path has in-repo live-DB regression coverage.
 # It is a `[dev-dependency]` ONLY — it pulls `tokio` TRANSITIVELY (the blocking
 # `postgres` client wraps `tokio-postgres` on a private runtime), which is ACCEPTABLE
 # because it NEVER ships: `cargo tree -p zero-migrate -e normal` stays tokio-free.
-# The shipped engine's PG path is the dialect-neutral `driver::SqlSession` seam (fed
-# by the napi/Node `pg` host in production); this dev driver is the in-crate test
-# producer. Pinned to the `postgres` sync client (the `Client::batch_execute` /
-# `Client::query` blocking API `PgDevSession` forwards each verb to).
 postgres = "0.19"
 # TEST-ONLY (with `postgres`, above): the `exec_text` text-format param wrapper
 # (`TextParam`) implements `postgres::types::ToSql`, whose `to_sql` writes into a
 # `bytes::BytesMut`. Pinned to the version `tokio-postgres` already resolves, so the
-# buffer type matches exactly. Dev-dependency only — never ships.
+# buffer type matches exactly.
 bytes = "1"
 # TEST-ONLY live-MySQL driver, the exact sibling of the `postgres` entry above and
 # added for the same reason: until it existed, NO Rust test had ever asked a live
-# MySQL server what the engine actually did. MySQL was covered at render level (unit
-# tests over emitted SQL) and at CLI/host level (TypeScript over `mysql2`), and
-# nowhere in between - `ZERO_MIGRATE_MYSQL_URL` appeared in 52 files under
-# `packages/` and in ONE file under `crates/`, which was source, not a test.
+# MySQL server what the engine actually did.
 #
-# The blocking `mysql` crate backs `MysqlDevSession`, a `driver::SqlSession` impl
-# that drives the SHIPPED generic `MysqlBackend`/executor/journal/drift path against
-# a live server in-crate, the same way `PgDevSession` does for Postgres.
-#
-# `default-features = false` with `minimal` only: the default set pulls
-# `native-tls` (OpenSSL) and the `derive` proc-macro, and this driver connects to a
-# loopback container over a plaintext socket and derives nothing. Dev-dependency
-# ONLY - it never ships, and `cargo tree -p zero-migrate -e normal` stays free of it.
+# `default-features = false` with `minimal` only: the default set pulls `native-tls`
+# (OpenSSL) and the `derive` proc-macro, and this driver connects to a loopback
+# container over a plaintext socket and derives nothing.
 mysql = { version = "28", default-features = false, features = ["minimal"] }
+# TEST-ONLY, for the suites that build their own inputs rather than reading the
+# engine's outputs: JSON schema-field maps and IR envelopes (`serde_json`), charter
+# TOML (`toml`), checksum expectations (`sha2`, `hex`), the seam-generic async
+# harness's combinators (`futures`), and the `ir-envelope.schema.json` golden gate
+# (`schemars`).
+serde_json = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+futures = { workspace = true }
+schemars = { workspace = true }
 
 [lints]
 workspace = true

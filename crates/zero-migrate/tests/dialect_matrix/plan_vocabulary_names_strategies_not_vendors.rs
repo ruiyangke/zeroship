@@ -114,7 +114,7 @@ fn the_lowered_plan_vocabulary_names_no_vendor() {
     /// ZERO arms — which the floor below caught, and which is the entire reason the
     /// floor is written as a floor and not as a comment.
     const STEP_SRC: &str = include_str!("../../../zero-migrate-backend/src/step.rs");
-    const PLAN_SRC: &str = include_str!("../../src/render/plan.rs");
+    const PLAN_SRC: &str = include_str!("../../../zero-migrate-core/src/render/plan.rs");
     /// `DatabaseFeature` and `DatabaseRequirements` moved OUT of `render/plan.rs`
     /// and into the backend contract crate, beside the
     /// `MigrationBackend::verify_database_requirements` signature that asks the

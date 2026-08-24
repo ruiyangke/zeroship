@@ -9,7 +9,7 @@ use crate::model::op_support::FEATURE_SUPPORT_REGISTRY;
 use crate::model::support::{Feature, SupportDecision};
 use crate::test_fixtures::{MYSQL, POSTGRES, SQLITE};
 
-const REGENERATE_COMMAND: &str = "ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX=1 cargo test -p zero-migrate --lib model::support_matrix::committed_support_matrix_is_current -- --exact";
+const REGENERATE_COMMAND: &str = "ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX=1 cargo test -p zero-migrate-core --lib model::support_matrix::committed_support_matrix_is_current -- --exact";
 
 fn feature_label(feature: Feature) -> &'static str {
     match feature {
@@ -75,7 +75,7 @@ pub(crate) fn render_support_matrix(vendors: VendorSet) -> String {
     writeln!(markdown, "# Feature support matrix\n").expect("writing to a String cannot fail");
     writeln!(
         markdown,
-        "> **GENERATED from `crates/zero-migrate/src/model/support.rs`. Do not edit by hand.**"
+        "> **GENERATED from `crates/zero-migrate-core/src/model/support.rs`. Do not edit by hand.**"
     )
     .expect("writing to a String cannot fail");
     writeln!(markdown, ">").expect("writing to a String cannot fail");

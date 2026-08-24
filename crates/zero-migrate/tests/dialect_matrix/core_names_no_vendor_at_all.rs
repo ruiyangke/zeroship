@@ -110,20 +110,31 @@ const VENDOR_NEEDLES: &[&str] = &["mysql", "sqlite", "postgres", "pgsql", "pg_",
 ///
 /// Every entry carries its ARGUMENT, not just a number, because a bare count tells the
 /// next reader nothing about whether it may come off.
-const ALLOWED: &[(&str, usize, &str)] = &[(
-    "render/backends/mod.rs",
-    4,
-    "PERMANENT, and the one place designed to hold this. Three lines are the \
-         `POSTGRES_VENDOR` / `SQLITE_VENDOR` / `MYSQL_VENDOR` consts — the registry \
-         composition naming each shipping crate exactly once — and the fourth is the \
-         `SHIPPING` array that lists those three consts. A fourth backend is a \
-         `[dependencies]` line plus an entry here, with no edit to the contract crate \
-         and none to any other vendor. Everything else in this module resolves by \
-         `VendorSet` lookup on an open `DialectId`. It was FIVE until a \
-         `pub(crate) use zero_migrate_sqlite::VENDOR` came out: it had no reader, and \
-         existed only so one of the three entries could be spelled `&VENDOR` while its \
-         siblings spelled a full path.",
-)];
+const ALLOWED: &[(&str, usize, &str)] = &[];
+
+// `render/backends/mod.rs` WAS THE LAST ENTRY, at four, and it is GONE rather than
+// lowered. The ratchet is EMPTY: no file in the engine's production source names a
+// vendor at all.
+//
+// Its four were the `POSTGRES_VENDOR` / `SQLITE_VENDOR` / `MYSQL_VENDOR` consts and
+// the `SHIPPING` array that listed them — the registry composition, described here as
+// "PERMANENT, and the one place designed to hold this". It was permanent in the crate
+// it was in. The crate split moved it to `crates/zero-migrate/src/lib.rs`, a crate
+// whose entire job is to hold that knowledge, and `zero-migrate-core` stopped
+// declaring a vendor dependency at all.
+//
+// So this entry did not close the way the three above it did, by finding a neutral
+// formulation for a coupling. It closed by MOVING the coupling to a crate where it is
+// not a coupling, and the engine now cannot name a vendor even if someone tries: the
+// idents do not resolve. A fourth backend is a `[dependencies]` line in that manifest
+// plus an entry in that array, with no edit to the contract crate, the engine, or any
+// other vendor.
+//
+// AN EMPTY RATCHET IS NOT A RETIRED FILE. This census matches vendor PRODUCT NAMES —
+// "PostgreSQL", "SQLite", "MySQL" and their spellings — not crate idents, and Cargo
+// cannot see a product name in a diagnostic string, a `format!`, or a hard-coded
+// catalog prefix. The four things the sweep behind this file found were all of that
+// shape, and every one of them would still compile today.
 
 // `lib.rs` USED TO BE THE SECOND ENTRY, at one, and it is GONE rather than lowered.
 //
@@ -619,6 +630,11 @@ fn census(dir: &Path) -> (usize, BTreeMap<String, usize>) {
     census_with(dir, names_a_vendor)
 }
 
+/// The ENGINE crate. It is `zero-migrate-core`, not `zero-migrate`: this crate is the
+/// COMPOSITION now, and its `src` is one file that names all three vendors on purpose.
+/// Censusing THAT would be a one-file walk in which every finding is by design.
+const ENGINE_CRATE: &str = "zero-migrate-core";
+
 fn crate_src(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -629,7 +645,7 @@ fn crate_src(name: &str) -> PathBuf {
 
 #[test]
 fn core_names_no_vendor_outside_its_recorded_exceptions() {
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let src = crate_src(ENGINE_CRATE);
     let (file_count, hits) = census(&src);
 
     // FLOOR ONE, part one — the ANCHORS. These answer "did the walk reach the tree at
@@ -816,7 +832,7 @@ fn the_pg_word_matcher_sees_the_spelling_that_escaped_both_others() {
 /// vacuous.
 #[test]
 fn the_test_half_splitter_is_still_seeing_the_test_half() {
-    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let src = crate_src(ENGINE_CRATE);
 
     // Half one: a `#[cfg(test)] mod x;` in a PARENT file makes the whole child file
     // test code. `differential_corpus.rs` alone held 296 vendor-naming lines and was

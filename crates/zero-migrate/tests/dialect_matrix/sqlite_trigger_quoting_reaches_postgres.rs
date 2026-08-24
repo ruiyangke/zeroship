@@ -87,7 +87,7 @@ const PINNED_CALLS_IN_THE_TRIGGER_PATH: usize = 0;
 /// Both are named because the anchor is two-sided: "it is here" alone would pass on a
 /// copy, and "it is not there" alone would pass on a deletion.
 const SUBJECT_FILE: &str = "zero-migrate-sqlite/src/dml.rs";
-const FORMER_SUBJECT_FILE: &str = "zero-migrate/src/render/lower.rs";
+const FORMER_SUBJECT_FILE: &str = "zero-migrate-core/src/render/lower.rs";
 
 /// The census floor for the crate-wide half below.
 ///
@@ -105,7 +105,11 @@ const FORMER_SUBJECT_FILE: &str = "zero-migrate/src/render/lower.rs";
 /// (all of it needed `libpg_query`, so all of it was one vendor's) and deleted from
 /// the workspace. The walk still reaches every line it used to reach, at a different
 /// root — this is a real removal, not a narrowed discovery.
-const WORKSPACE_CRATE_FLOOR: usize = 8;
+///
+/// RAISED 8 -> 9: `zero-migrate-core` was ADDED. The engine and the composition that
+/// names the vendors are two crates now, so `crates/` holds nine entries and the walk
+/// must find all of them.
+const WORKSPACE_CRATE_FLOOR: usize = 9;
 
 /// The subject itself. `render_sqlite_trigger_op` is the entry point
 /// `SqliteDmlRenderer::render_trigger_op` calls, and the two helpers under it are
@@ -150,7 +154,7 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
     // binary, so neither the count nor the anchor can silently drift out from under
     // the pin.
     let subject = include_str!("../../../zero-migrate-sqlite/src/dml.rs");
-    let former = include_str!("../../src/render/lower.rs");
+    let former = include_str!("../../../zero-migrate-core/src/render/lower.rs");
     assert_subject_is_where_this_file_says_it_is(subject, former);
 
     let in_subject = count_pinned_calls(subject);
@@ -180,7 +184,7 @@ fn no_sqlite_render_path_is_quoted_by_the_postgres_pinned_wrapper() {
     // IT WALKS EVERY CRATE, NOT JUST THIS ONE'S `src`, AND THAT IS THE POINT. A walk
     // rooted at `CARGO_MANIFEST_DIR` is a census whose UNIVERSE SHRINKS when the
     // thing it guards moves away: once the backend crates are extracted,
-    // `zero-migrate/src` simply stops containing the vendor modules, the walk finds
+    // `zero-migrate-core/src` simply stops containing the vendor modules, the walk finds
     // zero in a smaller tree, and this half passes while guarding nothing. That is
     // not a hypothetical - the crate-scoped version was MEASURED blind, reporting
     // clean with a pinned call planted in `zero-migrate-ir`.

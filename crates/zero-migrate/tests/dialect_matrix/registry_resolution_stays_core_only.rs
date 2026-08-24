@@ -217,7 +217,7 @@ const WALK_ANCHORS: &[&str] = &[
     "zero-migrate-mysql/src/lib.rs",
 ];
 
-/// Files the POSITIVE-CONTROL walk must reach, relative to `crates/zero-migrate/src`.
+/// Files the POSITIVE-CONTROL walk must reach, relative to `crates/zero-migrate-core/src`.
 ///
 /// The same pair the sibling census `core_names_no_vendor_crate.rs` uses and for the
 /// same reasons: `lib.rs` is the walk root, and `render/backends/mod.rs` is three
@@ -476,7 +476,7 @@ fn no_vendor_crate_resolves_a_vendor() {
     // The identical matchers, run where the answer must not be zero. A broken
     // pathspec or a broken matcher returns a confident ZERO, and every vendor zero
     // below would then mean nothing.
-    let engine_src = crates.join("zero-migrate").join("src");
+    let engine_src = crates.join("zero-migrate-core").join("src");
     let engine_files = src_files(&engine_src);
     let engine_reached: std::collections::BTreeSet<String> = engine_files
         .iter()

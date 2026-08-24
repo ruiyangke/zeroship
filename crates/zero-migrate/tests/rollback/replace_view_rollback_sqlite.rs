@@ -3,7 +3,7 @@
 //! A replace changes an existing view's body. Its inverse is therefore "put the previous
 //! body back", not "remove the view" - the view predates the migration being undone.
 //!
-//! `crates/zero-migrate/src/render/lower.rs` used to synthesise the `createView`
+//! `crates/zero-migrate-core/src/render/lower.rs` used to synthesise the `createView`
 //! statement's `down` as `DROP VIEW IF EXISTS` unconditionally, with `replace` reaching
 //! the `up` prefix and the replace prelude but never the `down`. That was harmless while
 //! the fold refused a replace against a view an applied migration had created: the arm

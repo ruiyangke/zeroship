@@ -15,7 +15,7 @@
 //! WHAT `false` DOES NOT MEAN: that the artifacts are dialect-independent. Other
 //! fold rules key on the dialect too - the materialized enum/domain capability gates
 //! and the identity/primary-key reuse rules, per the `render_artifacts` contract at
-//! `crates/zero-migrate/src/render/gen_types.rs`. The field answers one narrow
+//! `crates/zero-migrate-core/src/render/gen_types.rs`. The field answers one narrow
 //! question and the reply doc says so.
 //!
 //! Runs on the napi-free build (`--no-default-features`), so no `.node` and no Node

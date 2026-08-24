@@ -1,8 +1,8 @@
 # Feature support matrix
 
-> **GENERATED from `crates/zero-migrate/src/model/support.rs`. Do not edit by hand.**
+> **GENERATED from `crates/zero-migrate-core/src/model/support.rs`. Do not edit by hand.**
 >
-> Regenerate with `ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX=1 cargo test -p zero-migrate --lib model::support_matrix::committed_support_matrix_is_current -- --exact`.
+> Regenerate with `ZERO_MIGRATE_UPDATE_SUPPORT_MATRIX=1 cargo test -p zero-migrate-core --lib model::support_matrix::committed_support_matrix_is_current -- --exact`.
 
 `Yes` means the feature's capability decision is supported for that dialect; `No` means it is unsupported for the reason in the linked note.
 

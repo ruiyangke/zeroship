@@ -117,8 +117,29 @@ pub(super) struct Stream {
     pub(super) ops: &'static str,
 }
 
+/// The recorded op corpus, which lives with the PRODUCT rather than with this crate.
+///
+/// `crates/zero-migrate/tests/op_fixtures/` is 26 `<stem>.mig.js` inputs paired with
+/// `<stem>.golden.json` envelopes plus one `recorded.json`, and it has six other
+/// readers: four integration suites in that crate, one PostgreSQL live test, and
+/// `packages/zero-migrate/tests/recorded-corpus.test.ts`, which drives the `.mig.js`
+/// halves through the JS recorder and compares the drained envelopes. It is the
+/// product's corpus, not the engine's, and this module is its newest consumer rather
+/// than its owner.
+///
+/// So the path reaches SIDEWAYS, out of `zero-migrate-core` and into the composing
+/// crate's test tree, and that is worth seeing rather than hiding behind a helper. It
+/// is a `#[cfg(test)]` DATA read: no Cargo edge, no `use`, nothing in the compiled
+/// engine. Moving the corpus down here instead would have repointed seven readers —
+/// including a hard-coded path in a published JS package's tests — to make one
+/// `#[cfg(test)]` path shorter.
 fn fixtures_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/op_fixtures")
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("this crate lives at <workspace>/crates/<name>")
+        .join("zero-migrate")
+        .join("tests")
+        .join("op_fixtures")
 }
 
 pub(super) fn read_golden(stem: &str) -> MigrationIr {

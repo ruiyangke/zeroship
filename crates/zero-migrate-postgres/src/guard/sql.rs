@@ -585,7 +585,7 @@ impl GuardDecisions for BodyScopeDecisions<'_> {
     ///
     /// `check_raw_view_body_text` is the sole constructor of this adapter, and it DOES
     /// have a production caller: `validate_raw_view_body` at
-    /// crates/zero-migrate/src/model/validate.rs:5499, on every raw `viewBody`.
+    /// crates/zero-migrate-core/src/model/validate.rs:5499, on every raw `viewBody`.
     ///
     /// What bounds the damage is the gate directly above that call, not the caller's
     /// absence. A raw view body is refused unless it parses as a single top-level

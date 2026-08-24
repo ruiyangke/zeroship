@@ -281,7 +281,7 @@ fn no_vendor_crate_calls_an_engine_snapshot_comparison() {
     // FLOOR TWO — the NEEDLE, as a positive control. The identical matcher, over the
     // engine, where these names live and are called. A zero here means the matcher is
     // broken and every vendor zero below it is meaningless.
-    let engine_src = crates.join("zero-migrate").join("src");
+    let engine_src = crates.join("zero-migrate-core").join("src");
     let all_items: Vec<&str> = VERDICT_ITEMS
         .iter()
         .chain(SHARED_NORMAL_FORM_ITEMS.iter())

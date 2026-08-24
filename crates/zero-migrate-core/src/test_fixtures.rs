@@ -1,7 +1,7 @@
 //! TEST-ONLY fixtures for this crate's own unit tests. `lib.rs` declares this module
 //! `#[cfg(test)]`, so none of it ships.
 
-use zero_migrate_backend::registry::VendorSet;
+use zero_migrate_backend::registry::{BackendVendor, VendorSet};
 use zero_migrate_ir::dialect::DialectId;
 
 use crate::model::policy::DestructiveOps;
@@ -13,21 +13,23 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 //
 // The ids belong to the vendors: `zero_migrate_postgres::DIALECT` is the workspace's
 // one declaration of `"postgres"`, and every consumer OUTSIDE this crate — including
-// core's own `tests/` binaries — reads it from there.
+// the composition's `tests/` binaries — reads it from there.
 //
-// Core's `src` cannot. Two censuses forbid any non-comment line under `src/` from
-// naming a vendor crate, and neither of them excludes test code:
-// `dialect_matrix/core_names_no_vendor_crate.rs` allows `zero_migrate_postgres` only
-// in the registry composition, and `core_names_no_vendor_backend_module.rs` allows
-// `postgres::` in path position NOWHERE. A `#[cfg(test)] use zero_migrate_postgres::DIALECT`
+// Core's `src` does not, and this file is the ONLY place in it that could: the vendor
+// crates are dev-dependencies, so `#[cfg(test)]` code can reach them, and
+// `dialect_matrix/core_names_no_vendor_crate.rs` is the ratchet that keeps that one
+// file at one. `core_names_no_vendor_backend_module.rs` allows `postgres::` in path
+// position NOWHERE, test code included. A `#[cfg(test)] use zero_migrate_postgres::DIALECT`
 // in `render/lower.rs` would be a real regression of both, not a technicality — the
 // compiled engine would still not link differently, but the rule those censuses hold
 // is about what core's source is ALLOWED to know, and twenty-two files knowing it is
 // exactly the drift they exist to catch.
 //
 // So these are re-declared, which is what `DialectId`'s content equality is for:
-// `DialectId::new("postgres")` IS the PostgreSQL id, whoever writes it.
-// `zero-migrate-ir`'s own tests do the same thing one crate lower, for the same
+// `DialectId::new("postgres")` IS the PostgreSQL id, whoever writes it. Re-declaring
+// rather than importing keeps the ID literals out of the vendor-crate count below, so
+// the ratchet measures the composition and not three more mentions of it.
+// `zero-migrate-ir`'s own tests do the same thing two crates lower, for the same
 // reason: a crate that cannot depend on a vendor builds the id it needs.
 //
 // # Why one module and not a const per test module
@@ -41,11 +43,36 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 
 /// The shipping registry, for core's `#[cfg(test)]` modules.
 ///
-/// One place, for the same reason the three ids above are one place: core's unit
-/// tests need a vendor set to hand the resolution doors, and a test module that
-/// reached for the composition directly would be a second name for it in every file
-/// that has one.
-pub(crate) const VENDORS: VendorSet = crate::render::backends::VENDORS;
+/// # This is the ONE place in core that names a backend crate, and it is a TEST double
+/// in the same sense the composition is not
+///
+/// It USED TO BE `crate::render::backends::VENDORS` — an alias for the composition,
+/// which lived in this crate. The composition is `zero-migrate`'s now, and this crate
+/// cannot see it: `zero-migrate` depends on `zero-migrate-core`, so the edge back
+/// would be a cycle Cargo refuses even as a dev edge in the direction that matters.
+///
+/// So core's tests compose their own, from the same three vendor crates, reached
+/// through `[dev-dependencies]`. That is deliberate rather than a workaround, and both
+/// halves are worth stating:
+///
+/// * It is REAL. A hand-rolled fake `BackendVendor` would make several hundred unit
+///   tests assert against a double instead of against the backends that ship, which
+///   would quietly make the engine's own tests unable to see a vendor regression.
+/// * It is a SECOND composition, and the workspace has a rule against those. It is the
+///   one exception, it is `#[cfg(test)]`, and it must never disagree with
+///   `zero_migrate::shipping_vendors()` — `tests/dialect_matrix/the_registry_travels_as_a_value.rs`
+///   is where that is asserted, from the composing crate, where both are visible.
+///
+/// One place, for the same reason the three ids above are one place: core's unit tests
+/// need a vendor set to hand the resolution doors, and a test module that composed its
+/// own would be a third registry in every file that has one.
+static TEST_SHIPPING: [&BackendVendor; 3] = [
+    &zero_migrate_postgres::VENDOR,
+    &zero_migrate_sqlite::VENDOR,
+    &zero_migrate_mysql::VENDOR,
+];
+
+pub(crate) const VENDORS: VendorSet = VendorSet::new(&TEST_SHIPPING);
 
 /// The PostgreSQL id. The declaration that SHIPS is `zero_migrate_postgres::DIALECT`.
 pub(crate) const POSTGRES: DialectId = DialectId::new("postgres");
