@@ -7,6 +7,7 @@
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
+use crate::simple_query::{CopyAbortProtocol, abort_copy_in};
 use crate::{Error, Statement, query, slice_iter};
 use bytes::Bytes;
 use futures_util::Stream;
@@ -60,9 +61,19 @@ async fn start(
         _ => return Err(Error::unexpected_message()),
     }
 
-    match responses.next().await? {
-        Message::CopyOutResponse(_) => {}
-        _ => return Err(Error::unexpected_message()),
+    loop {
+        match responses.next().await? {
+            Message::CopyOutResponse(_) => break,
+            // A caller can hand `copy_out` a COPY in the opposite direction.
+            // PostgreSQL is now waiting for data this API cannot supply, and
+            // the Sync already in the extended-protocol batch was ignored.
+            // Keep reading after the abort so its ErrorResponse is returned to
+            // this caller while the second Sync pays the housekeeping slot.
+            Message::CopyInResponse(_) => {
+                abort_copy_in(client, CopyAbortProtocol::Extended)?;
+            }
+            _ => return Err(Error::unexpected_message()),
+        }
     }
 
     Ok(responses)
