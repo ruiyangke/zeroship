@@ -158,8 +158,10 @@ const ALLOWED: &[(&str, usize, &str)] = &[
 /// Never lower it to silence a walk that broke — [`WALK_ANCHORS`] is what tells those
 /// two apart, so check it first and trust it over this number.
 ///
-/// Measured at 41 `.rs` files under `src` when this landed (`db_url.rs` left in the
-/// same pass, having had zero callers).
+/// Measured at 47 `.rs` files under `src` when this landed — `db_url.rs` left in the
+/// same pass, having had zero callers, taking the sibling census's own recorded 48 down
+/// by one. 36 sits under that with room for churn and nowhere near a walk that found
+/// nothing.
 const SRC_FILE_FLOOR: usize = 36;
 
 /// Files the walk MUST reach, which is the real defence against a census that fails
