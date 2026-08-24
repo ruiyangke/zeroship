@@ -12,7 +12,7 @@
 //! The type now lives here, where its parser and its speller already had to be, and
 //! reaches the neutral snapshot as an opaque leg of
 //! [`Dialectal<dyn VendorColumnFacts>`](zero_migrate_backend::dialectal::Dialectal)
-//! keyed by [`MYSQL`]. The engine carries it, clones it and compares it by ASKING
+//! keyed by [`crate::DIALECT`]. The engine carries it, clones it and compares it by ASKING
 //! it; the engine cannot read it, because reading takes a `downcast_ref` to a type
 //! declared in this crate.
 //!
@@ -376,7 +376,8 @@ impl VendorColumnFacts for MysqlPhysicalType {
 
 /// Record `physical` as MySQL's leg of `column`'s vendor facts.
 ///
-/// The one place a `MysqlPhysicalType` is paired with the [`MYSQL`] key, so a leg
+/// The one place a `MysqlPhysicalType` is paired with the [`crate::DIALECT`] key,
+/// so a leg
 /// keyed by one dialect holding another's type is not expressible outside this
 /// function.
 pub fn record(column: &mut ColumnSnapshot, physical: MysqlPhysicalType) {

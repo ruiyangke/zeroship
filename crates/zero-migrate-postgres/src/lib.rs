@@ -109,7 +109,7 @@ const NAME: &str = "postgres";
 /// backend "declares its own — `DialectId::new(\"duckdb\")` — without editing this
 /// crate". It used to declare three anyway, and core re-exported them, so every
 /// consumer that wanted to name PostgreSQL reached a neutral crate to get it. This
-/// is the declaration that ended that: [`NAME`] above is the workspace's only
+/// is the declaration that ended that: the `NAME` const above is the workspace's only
 /// spelling of it, and [`VENDOR`]'s descriptor, this crate's own
 /// modules, the engine's tests and the Node host all read it from here.
 ///

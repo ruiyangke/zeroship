@@ -57,9 +57,12 @@ The example begins after your host has produced a reviewed `Vec<Migration>`:
 
 ```rust
 use zero_migrate::{
-    Approval, ExecutorConfig, GuardConfig, Migration, MigrationEngine, POSTGRES, SqlSession,
+    Approval, ExecutorConfig, GuardConfig, Migration, MigrationEngine, SqlSession,
     effective_policy_from_charter_toml,
 };
+// The dialect id comes from the crate that IS the backend. The engine does not
+// re-export it: it names no vendor, so it cannot hand you one.
+use zero_migrate_postgres::DIALECT as POSTGRES;
 use zero_migrate_postgres::confinement::PostgresConfinementExt;
 use zero_migrate_postgres::PostgresBackend;
 
@@ -256,7 +259,7 @@ let policy =
     zero_migrate::effective_policy_from_charter_toml(policy_toml)?;
 let guard = zero_migrate::GuardConfig::from_policy(
     policy.clone(),
-    zero_migrate::POSTGRES,
+    zero_migrate_postgres::DIALECT,
 );
 let executor = zero_migrate::ExecutorConfig::new(
     "project_demo",

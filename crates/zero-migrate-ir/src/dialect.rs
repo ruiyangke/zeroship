@@ -4,19 +4,29 @@
 //! declares its own — `DialectId::new("duckdb")` — without editing this crate.
 //! Backend spellings, capabilities, validation, guards, and refusal policy live
 //! behind the registered backend contracts rather than an identity match here.
+//!
+//! # This module declares NO ids
+//!
+//! It used to declare three — `POSTGRES`, `SQLITE`, `MYSQL` — directly above the
+//! sentence promising that a backend declares its own without editing this crate,
+//! and the engine re-exported all three. So the neutral vocabulary crate at the
+//! bottom of the stack named three vendors it does not own, and 2,583 references
+//! across 287 files reached a vendor's identity through a crate that had no business
+//! knowing it.
+//!
+//! They live in the vendors now: `zero_migrate_postgres::DIALECT`,
+//! `zero_migrate_sqlite::DIALECT`, `zero_migrate_mysql::DIALECT`, each beside the
+//! `BackendVendor` it identifies. Nothing in this crate resolves a dialect by name,
+//! and nothing in it can — [`DialectId::new`] is `const` and `pub`, so a crate that
+//! must name one and cannot depend on a vendor (this one, and
+//! `zero-migrate-backend`, which all three vendors depend on) builds it. Equality is
+//! by CONTENT, so an id built that way IS the vendor's.
 
 use core::fmt;
 use std::borrow::Cow;
 
 use schemars::JsonSchema;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
-
-/// The canonical id of the PostgreSQL backend.
-pub const POSTGRES: DialectId = DialectId::new("postgres");
-/// The canonical id of the `SQLite` backend.
-pub const SQLITE: DialectId = DialectId::new("sqlite");
-/// The canonical id of the `MySQL` backend.
-pub const MYSQL: DialectId = DialectId::new("mysql");
 
 /// An opaque dialect identity with a stable string name.
 ///
@@ -214,12 +224,18 @@ impl FromIterator<DialectId> for DialectSet {
 mod tests {
     use super::*;
 
-    #[test]
-    fn shipping_ids_are_well_formed() {
-        for id in [POSTGRES, SQLITE, MYSQL] {
-            assert!(id.is_well_formed(), "{id} must satisfy the id rule");
-        }
-    }
+    // `shipping_ids_are_well_formed` USED TO LIVE HERE. It looped over the three
+    // constants this module declared and asserted the id rule on each. Both halves of
+    // it moved and the proposition is now checked more strongly than a test can:
+    //
+    // * the three ids live in the vendor crates, so this crate cannot see them; and
+    // * each vendor asserts its own with `const _: () = assert!(
+    //   DialectId::is_well_formed_name(NAME));`, which is a COMPILE error naming the
+    //   offending line rather than a test failure naming a value.
+    //
+    // A fourth backend gets the same check by writing the same line, which the old
+    // test could never have given it — it enumerated three names it had to be
+    // edited to extend.
 
     #[test]
     fn equality_is_by_content_not_pointer() {

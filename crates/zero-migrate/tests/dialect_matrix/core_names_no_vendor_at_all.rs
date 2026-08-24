@@ -110,11 +110,10 @@ const VENDOR_NEEDLES: &[&str] = &["mysql", "sqlite", "postgres", "pgsql", "pg_",
 ///
 /// Every entry carries its ARGUMENT, not just a number, because a bare count tells the
 /// next reader nothing about whether it may come off.
-const ALLOWED: &[(&str, usize, &str)] = &[
-    (
-        "render/backends/mod.rs",
-        4,
-        "PERMANENT, and the one place designed to hold this. Three lines are the \
+const ALLOWED: &[(&str, usize, &str)] = &[(
+    "render/backends/mod.rs",
+    4,
+    "PERMANENT, and the one place designed to hold this. Three lines are the \
          `POSTGRES_VENDOR` / `SQLITE_VENDOR` / `MYSQL_VENDOR` consts — the registry \
          composition naming each shipping crate exactly once — and the fourth is the \
          `SHIPPING` array that lists those three consts. A fourth backend is a \
@@ -124,28 +123,45 @@ const ALLOWED: &[(&str, usize, &str)] = &[
          `pub(crate) use zero_migrate_sqlite::VENDOR` came out: it had no reader, and \
          existed only so one of the three entries could be spelled `&VENDOR` while its \
          siblings spelled a full path.",
-    ),
-    (
-        "lib.rs",
-        1,
-        "`pub use zero_migrate_ir::dialect::{DialectId, DialectSet, MYSQL, POSTGRES, \
-         SQLITE}` — core re-exporting three id constants it does not define. The \
-         violation is UPSTREAM of core and this line is its symptom: the constants \
-         live in `zero-migrate-ir/src/dialect.rs`, a crate whose own doc says a \
-         backend 'declares its own — `DialectId::new(\"duckdb\")` — without editing \
-         this crate', while itself declaring three. The correct end state is that each \
-         VENDOR crate exports its own id and the IR crate exports none. \
-         \
-         MEASURED before deferring, because 'too big' is a claim: 2,356 references \
-         across 286 files name these three constants, and 200 files reach them THROUGH \
-         this re-export. Deleting only the re-export would relocate the same three \
-         names from one neutral crate to another, rewrite 200 files' imports, and add \
-         a `zero-migrate-ir` dependency to the Node addon, which has none — churn for \
-         no neutrality. Closing this means moving the constants into the vendors, \
-         which is a decision about `zero-migrate-ir`'s public API and a tranche of its \
-         own.",
-    ),
-];
+)];
+
+// `lib.rs` USED TO BE THE SECOND ENTRY, at one, and it is GONE rather than lowered.
+//
+// The line was `pub use zero_migrate_ir::dialect::{DialectId, DialectSet, MYSQL,
+// POSTGRES, SQLITE}` — core re-exporting three id constants it does not define. The
+// violation was UPSTREAM of core and that line was its symptom: the constants lived
+// in `zero-migrate-ir/src/dialect.rs`, a crate whose own doc says a backend "declares
+// its own — `DialectId::new(\"duckdb\")` — without editing this crate", while itself
+// declaring three.
+//
+// The end state that entry named is the one that landed: each VENDOR crate exports
+// its own id and the IR crate exports none. `zero_migrate_postgres::DIALECT`,
+// `zero_migrate_sqlite::DIALECT` and `zero_migrate_mysql::DIALECT` are the
+// declarations; core re-exports `DialectId` and `DialectSet` from that module and
+// nothing else.
+//
+// TWO CLAIMS IN THAT ARGUMENT WERE WRONG, and both were arguments for deferring:
+//
+// * "add a `zero-migrate-ir` dependency to the Node addon, which has none". The
+//   addon already carries all three VENDOR crates in `[dependencies]` and already
+//   names two of their backend types in `bridge.rs`. It gained no dependency and
+//   needed no `zero-migrate-ir`.
+// * "relocate the same three names from one neutral crate to another". They did not
+//   go to another neutral crate. They went to the three crates that ARE those
+//   vendors, which is the only move that makes the bottom of the stack neutral.
+//
+// The size was right in shape and low in magnitude: 2,583 references across 287
+// files, not 2,356 across 286 — the smaller number counted matching LINES, and 224
+// lines name more than one id.
+//
+// WHAT CORE'S OWN `src` DOES INSTEAD is the part worth knowing before anyone
+// "simplifies" it. Twenty-two `#[cfg(test)]` modules under `src/` name a dialect and
+// they do NOT read the vendor crates: `core_names_no_vendor_crate.rs` counts every
+// non-comment line under `src/`, test lines included, and
+// `core_names_no_vendor_backend_module.rs` allows `postgres::` in path position
+// nowhere. They read three `DialectId::new` consts in `crate::test_fixtures`, which
+// this census already excludes as a `#[cfg(test)] mod` file. Repointing them at the
+// vendors would trade this entry for forty-eight in the two sibling censuses.
 
 /// The walk's floor — the WEAKER of the two anti-blindness checks. See [`WALK_ANCHORS`]
 /// for the one that actually holds.

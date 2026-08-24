@@ -191,6 +191,7 @@ pub const fn variants() -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dialect::DialectId;
     use crate::policy_registry::builtin_registry;
     use zero_migrate_policy::{admit, LoadContext, PolicyDoc, RootCharter};
 
@@ -298,8 +299,11 @@ mod tests {
     fn dialectal(legs: (Option<Vec<Op>>, Option<Vec<Op>>)) -> Op {
         Op::Dialectal {
             legs: [
-                legs.0.map(|ops| (crate::dialect::POSTGRES, ops)),
-                legs.1.map(|ops| (crate::dialect::MYSQL, ops)),
+                // Built rather than imported: the crates that DECLARE these ids
+                // depend on this one, so the dependency cannot run the other way.
+                // `DialectId` compares by content, so these ARE those ids.
+                legs.0.map(|ops| (DialectId::new("postgres"), ops)),
+                legs.1.map(|ops| (DialectId::new("mysql"), ops)),
             ]
             .into_iter()
             .flatten()

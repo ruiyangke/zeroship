@@ -354,7 +354,14 @@ pub use zero_migrate_ir::backend::{
     BackendDescriptor, BackendRegistry, Capability, CapabilitySet, IdentifierLimit, Limits,
     RegistryError,
 };
-pub use zero_migrate_ir::dialect::{DialectId, DialectSet, MYSQL, POSTGRES, SQLITE};
+// The dialect IDS are deliberately absent from this line. It read
+// `{DialectId, DialectSet, MYSQL, POSTGRES, SQLITE}`, and those three were core
+// handing out identities it does not define, from a neutral crate that had no
+// business defining them either. A host names a backend through the crate that IS
+// that backend — `zero_migrate_postgres::DIALECT` — or builds one with
+// `DialectId::new`, which is `const` and `pub` for exactly that. Re-adding them here
+// would put the engine back in the business of knowing which vendors exist.
+pub use zero_migrate_ir::dialect::{DialectId, DialectSet};
 
 /// The backends THIS BUILD ships, validated into a [`BackendRegistry`].
 ///
