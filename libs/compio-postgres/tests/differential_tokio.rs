@@ -1306,3 +1306,188 @@ async fn both_drivers_agree_on_binary_copy_roundtrip() {
         "the NULL rows did not survive, so the -1 field length was never exercised"
     );
 }
+
+/// One simple-query response, flattened to plain data.
+///
+/// The simple protocol answers a whole SCRIPT: each statement contributes its
+/// own RowDescription, its rows, and its CommandComplete, all on one stream
+/// with no Sync between them. Turning that back into a per-statement structure
+/// is the driver's own work, and the interesting cases are the ones where a
+/// statement contributes an unusual combination - no rows, no description, or
+/// an empty statement that has neither.
+#[derive(Debug, PartialEq, Eq)]
+enum Flattened {
+    Description(Vec<String>),
+    Row(Vec<Option<String>>),
+    Complete(u64),
+}
+
+/// Scripts whose response shape differs from "one description, some rows, one
+/// complete".
+fn simple_query_scripts() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "SELECT 1::int4 AS a, 'x'::text AS b",
+            "the ordinary shape, as the control",
+        ),
+        (
+            "SELECT 1; SELECT 2, 3",
+            "two statements on one stream, with no Sync between them - the \
+             driver must not merge their descriptions",
+        ),
+        (
+            "SELECT 1 WHERE false",
+            "a description with no rows behind it",
+        ),
+        (
+            "CREATE TEMPORARY TABLE cpg_simple (id int); DROP TABLE cpg_simple",
+            "two statements that describe nothing at all",
+        ),
+        (
+            "SELECT NULL::text AS nothing",
+            "a NULL is absent, not empty - the two are different values here",
+        ),
+        (
+            "",
+            "the empty query: no description, no rows, and an EmptyQueryResponse \
+             rather than a CommandComplete",
+        ),
+    ]
+}
+
+fn flatten_tokio(messages: &[tokio_postgres::SimpleQueryMessage]) -> Vec<Flattened> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            tokio_postgres::SimpleQueryMessage::RowDescription(columns) => {
+                Some(Flattened::Description(
+                    columns
+                        .iter()
+                        .map(|column| column.name().to_owned())
+                        .collect(),
+                ))
+            }
+            tokio_postgres::SimpleQueryMessage::Row(row) => Some(Flattened::Row(
+                (0..row.len())
+                    .map(|index| row.get(index).map(str::to_owned))
+                    .collect(),
+            )),
+            tokio_postgres::SimpleQueryMessage::CommandComplete(rows) => {
+                Some(Flattened::Complete(*rows))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn flatten_ours(messages: &[compio_postgres::SimpleQueryMessage]) -> Vec<Flattened> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            compio_postgres::SimpleQueryMessage::RowDescription(columns) => {
+                Some(Flattened::Description(
+                    columns
+                        .iter()
+                        .map(|column| column.name().to_owned())
+                        .collect(),
+                ))
+            }
+            compio_postgres::SimpleQueryMessage::Row(row) => Some(Flattened::Row(
+                (0..row.len())
+                    .map(|index| row.get(index).map(str::to_owned))
+                    .collect(),
+            )),
+            compio_postgres::SimpleQueryMessage::CommandComplete(rows) => {
+                Some(Flattened::Complete(*rows))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn tokio_simple_queries(url: String, scripts: Vec<&'static str>) -> Vec<Vec<Flattened>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        let collected = runtime.block_on(async move {
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect");
+            let driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let mut collected = Vec::new();
+            for script in scripts {
+                collected.push(match client.simple_query(script).await {
+                    Ok(messages) => flatten_tokio(&messages),
+                    Err(_) => Vec::new(),
+                });
+            }
+            drop(client);
+            let _ = driver.await;
+            collected
+        });
+        let _ = sender.send(collected);
+    });
+    handle.join().expect("the tokio thread panicked");
+    receiver
+        .recv()
+        .expect("no simple-query results came back from tokio")
+}
+
+/// Both drivers reassemble a multi-statement simple-query response
+/// themselves, so the flattened shape must agree.
+#[compio::test]
+async fn both_drivers_agree_on_simple_query_shapes() {
+    let url = common::test_url();
+    let scripts = simple_query_scripts();
+    let sql: Vec<&'static str> = scripts.iter().map(|(script, _)| *script).collect();
+
+    let theirs = tokio_simple_queries(url.clone(), sql.clone());
+
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let mut ours = Vec::new();
+    for script in &sql {
+        ours.push(match client.simple_query(script).await {
+            Ok(messages) => flatten_ours(&messages),
+            Err(_) => Vec::new(),
+        });
+    }
+
+    let mut divergences = Vec::new();
+    for (index, (script, why)) in scripts.iter().enumerate() {
+        if ours[index] != theirs[index] {
+            divergences.push(format!(
+                "  {script:?}\n    ours: {:?}\n    tokio-postgres: {:?}\n    matters because {why}",
+                ours[index], theirs[index]
+            ));
+        }
+    }
+    assert!(
+        divergences.is_empty(),
+        "the two simple-query readers disagree:\n{}",
+        divergences.join("\n")
+    );
+
+    // The two-statement script must really have produced two descriptions, or
+    // the agreement says nothing about keeping them apart.
+    let descriptions = ours[1]
+        .iter()
+        .filter(|item| matches!(item, Flattened::Description(_)))
+        .count();
+    assert_eq!(
+        descriptions, 2,
+        "the two-statement script produced {descriptions} descriptions, so the \
+         case it exists for was never exercised"
+    );
+}
