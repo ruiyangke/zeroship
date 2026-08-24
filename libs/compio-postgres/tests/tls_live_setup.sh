@@ -29,6 +29,17 @@
 #          tests/tls_live_setup.sh --down     # remove the containers
 #
 # Everything it generates lives in tests/data/live/, which is gitignored.
+#
+# ONE CHECKOUT AT A TIME, unless you pass different ports. The container names
+# and default ports are fixed, and this script generates a FRESH CA into the
+# tests/data/live/ of whichever tree it runs from, then mounts that directory
+# into the containers. Run it from a second worktree and the shared servers
+# start presenting certificates signed by the second tree's CA while the first
+# tree still holds the old ca.crt - so every connection from the first tree
+# fails verify-full and reports `error performing TLS handshake`, which reads
+# like a driver bug. Measured 2026-08-24, it cost a wrong diagnosis. Give a
+# concurrent worktree its own ports (all five are positional) and re-run this
+# in your own tree before trusting a TLS result.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

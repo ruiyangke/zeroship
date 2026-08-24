@@ -41,6 +41,16 @@ use std::rc::Rc;
 /// which is a handful of records.
 const READ_CHUNK: usize = 16 * 1024;
 
+/// How much unsent ciphertext the outbound queue holds before `collect_outgoing`
+/// stops draining rustls.
+///
+/// Matches rustls' own outbound limit, so the two together bound what one
+/// connection can hold to roughly twice it rather than to nothing at all.
+/// SOFT because it is checked before a `write_tls`, not inside one: a single
+/// call may carry the queue past it, and that is fine - the point is that the
+/// queue cannot grow without end, not that it never exceeds one figure.
+const OUTGOING_SOFT_CAP: usize = 64 * 1024;
+
 /// Complete a TLS handshake over `socket`, returning both halves of the result.
 ///
 /// On success the connection is past `is_handshaking`, and any application
@@ -90,6 +100,14 @@ where
         // loops until the chunk is drained. `process_new_packets` must run
         // between reads, not after them: it is what advances the state machine,
         // and it is where a bad certificate or a protocol violation surfaces.
+        //
+        // This loop does NOT return to `reader()` between steps, which is the
+        // shape that broke the steady-state path (see `feed_ciphertext_step`).
+        // It is safe HERE and only here: PostgreSQL sends nothing before it has
+        // seen the startup packet, and the startup packet cannot be sent until
+        // this function returns, so there is no application plaintext to
+        // accumulate. `read_tls` refuses on unread PLAINTEXT, and pre-startup
+        // there is none. Do not copy this loop into a path that runs later.
         let mut pending = &buffer[..read];
         while !pending.is_empty() {
             connection.read_tls(&mut pending)?;
@@ -124,12 +142,27 @@ impl TlsSession {
         &self.conn
     }
 
-    /// Move any ciphertext rustls is holding into the outbound queue.
+    /// Move any ciphertext rustls is holding into the outbound queue, up to
+    /// [`OUTGOING_SOFT_CAP`].
     ///
     /// The loop stops on no progress rather than on `wants_write()` alone: a
     /// zero-byte `write_tls` that left the flag set would spin forever.
+    ///
+    /// The cap RESTORES a bound that draining rustls removes. rustls holds its
+    /// own outbound ciphertext behind a 64 KiB limit, so a peer cannot make it
+    /// buffer without end; `write_tls` moves those bytes into a plain `Vec`
+    /// that has no such limit. That matters because the READ path also
+    /// produces ciphertext (a `KeyUpdate` or an alert is answered), while only
+    /// the WRITE half empties the queue - so on an idle `LISTEN` connection,
+    /// which reads forever and never writes, a server that sent key updates in
+    /// a loop would grow this `Vec` unboundedly. Leaving the surplus inside
+    /// rustls hands the back-pressure back to rustls, which is where the
+    /// bookkeeping for it already exists.
     fn collect_outgoing(&mut self) -> io::Result<()> {
         while self.conn.wants_write() {
+            if self.outgoing.len() >= OUTGOING_SOFT_CAP {
+                break;
+            }
             let before = self.outgoing.len();
             self.conn.write_tls(&mut self.outgoing)?;
             if self.outgoing.len() == before {
@@ -553,6 +586,50 @@ mod tests {
     /// A peer that vanishes mid-handshake is a TLS-level failure, not a quiet
     /// end. rustls treats silent truncation as an attack rather than a close,
     /// and a caller that saw a bare EOF here could not tell "the server hung
+
+    /// Draining rustls must not turn its bounded outbound buffer into an
+    /// unbounded one of ours.
+    ///
+    /// rustls caps what it will hold; `write_tls` moves those bytes into a
+    /// plain `Vec`. Since the READ path also produces ciphertext while only
+    /// the WRITE half empties the queue, an idle connection whose peer keeps
+    /// generating responses would grow that `Vec` forever if nothing stopped
+    /// it. The queue is pre-loaded to the cap here, which is the state an idle
+    /// connection reaches; a fresh session has only a ClientHello to give and
+    /// could never demonstrate the bound.
+    #[test]
+    fn a_full_outbound_queue_stops_draining_the_session() {
+        let mut session = TlsSession::new(client_connection());
+        assert!(
+            session.conn.wants_write(),
+            "the fixture must have something to write, or this asserts nothing"
+        );
+
+        session.outgoing = vec![0u8; OUTGOING_SOFT_CAP];
+        session
+            .collect_outgoing()
+            .expect("collecting into a full queue is not an error");
+        assert_eq!(
+            session.outgoing.len(),
+            OUTGOING_SOFT_CAP,
+            "a queue already at the cap must not grow"
+        );
+        assert!(
+            session.conn.wants_write(),
+            "the ciphertext must still be inside rustls, which is what bounds it"
+        );
+
+        // The control: with room, the same call DOES drain. Without this the
+        // assertion above would also pass if `collect_outgoing` never worked.
+        session.outgoing.clear();
+        session
+            .collect_outgoing()
+            .expect("collecting into an empty queue");
+        assert!(
+            !session.outgoing.is_empty(),
+            "collect_outgoing moved nothing even with an empty queue"
+        );
+    }
     /// up" from "someone cut the connection during key exchange".
     #[compio::test]
     async fn a_peer_that_closes_mid_handshake_is_refused() {
