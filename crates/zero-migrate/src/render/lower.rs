@@ -2141,7 +2141,7 @@ fn collect_expr_database_requirements(
                 collect_expr_database_requirements(selected, dialect, requirements);
             }
         }
-        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => {}
+        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::Interval { .. } => {}
     }
 }
 
@@ -9794,7 +9794,7 @@ pub(crate) fn derived_check_constraint_name(table: &str, expr: &Expr) -> String 
                     collect_col_refs(delimiter, out);
                 }
             }
-            Expr::PgInterval { .. } => {}
+            Expr::Interval { .. } => {}
             // The Layer-2 dialect() escape: collect refs from EVERY present
             // leg so a derived CHECK name is stable regardless of which dialect the
             // divergence resolves to at render time.

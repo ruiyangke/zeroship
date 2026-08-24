@@ -1024,7 +1024,7 @@ function validateDefaultExpr(expr) {
       case "regexMatch":
       case "storageSize":
       case "pgExtract":
-      case "pgInterval":
+      case "interval":
       case "dialect":
         throw structuredError(
           "OP_INVALID",
@@ -1116,7 +1116,7 @@ function currentUser() {
 }
 function interval(duration) {
   return chain({
-    node: "pgInterval",
+    node: "interval",
     duration: pgDuration(duration)
   });
 }
@@ -2118,15 +2118,15 @@ function validateImmutableExpr(expr, position, opts = {}) {
         }
         walk(n.from);
         return;
-      case "pgInterval":
-        if (!opts.allowPgImmutable) rejectPgNode("pgInterval");
+      case "interval":
+        if (!opts.allowPgImmutable) rejectPgNode("interval");
         if (!isPlainObject(n.duration)) {
-          rejectImmutableExpr(position, "pgInterval duration must be an object");
+          rejectImmutableExpr(position, "interval duration must be an object");
         }
         try {
           pgDuration(n.duration);
         } catch (error) {
-          rejectImmutableExpr(position, error instanceof Error ? error.message : "pgInterval duration is invalid");
+          rejectImmutableExpr(position, error instanceof Error ? error.message : "interval duration is invalid");
         }
         return;
       case "dialect":

@@ -12,7 +12,7 @@ use zero_migrate_backend::renderer::{
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::{DialectId, POSTGRES};
-use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
+use zero_migrate_ir::expr::{CastTarget, Duration, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::TableRef;
 use zero_migrate_ir::ir::{
     ColType, CommentTarget, ExistenceGuard, IrScalar, IrValue, Op, SafeI64, SequenceOwnedBy,
@@ -80,7 +80,7 @@ impl ExprDialectValidator for PostgresDmlRenderer {
             | ExprDialectFeature::RegexMatch
             | ExprDialectFeature::StorageSize
             | ExprDialectFeature::PgExtract
-            | ExprDialectFeature::PgInterval => Ok(()),
+            | ExprDialectFeature::Interval => Ok(()),
         }
     }
 }
@@ -315,6 +315,38 @@ impl DmlRenderer for PostgresDmlRenderer {
         // PostgreSQL measures the bytes a value actually occupies, TOAST and
         // compression included, which is why this is not `length()`.
         Ok(format!("pg_column_size({expr})"))
+    }
+
+    fn render_interval(&self, duration: &Duration) -> Result<String, DmlError> {
+        // PostgreSQL takes the whole duration as ONE quoted parts string
+        // (`INTERVAL '1 year 2 days'`), and pluralises each unit.
+        let mut parts = Vec::new();
+        for (value, singular, plural) in [
+            (duration.years, "year", "years"),
+            (duration.months, "month", "months"),
+            (duration.days, "day", "days"),
+            (duration.hours, "hour", "hours"),
+            (duration.minutes, "minute", "minutes"),
+            (duration.seconds, "second", "seconds"),
+        ] {
+            if let Some(value) = value {
+                let unit = if value == 1 || value == -1 {
+                    singular
+                } else {
+                    plural
+                };
+                parts.push(format!("{value} {unit}"));
+            }
+        }
+        if parts.is_empty() {
+            return Err(DmlError::UnrenderableExpr(
+                "an interval duration must include at least one field".to_string(),
+            ));
+        }
+        Ok(format!(
+            "INTERVAL {}",
+            dml::sql_string_literal(&parts.join(" "))
+        ))
     }
 
     fn render_extract(&self, field: ExtractField, expr: &str) -> String {

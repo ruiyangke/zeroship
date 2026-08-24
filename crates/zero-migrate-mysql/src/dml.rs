@@ -16,7 +16,7 @@ use zero_migrate_backend::renderer::{
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::{DialectId, MYSQL};
-use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
+use zero_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
     ForEach, IrScalar, IrValue, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
     TriggerTiming,
@@ -122,7 +122,7 @@ impl ExprDialectValidator for MysqlDmlRenderer {
             }),
             ExprDialectFeature::StorageSize => Err(unsupported_expr("storageSize")),
             ExprDialectFeature::PgExtract => Err(unsupported_expr("PG EXTRACT")),
-            ExprDialectFeature::PgInterval => Err(unsupported_expr("PG interval literal")),
+            ExprDialectFeature::Interval => Err(unsupported_expr("PG interval literal")),
         }
     }
 }
@@ -133,7 +133,7 @@ impl ExprDialectValidator for MysqlDmlRenderer {
 fn expr_references_column(expr: &Expr, column: &str) -> Result<bool, DmlError> {
     Ok(match expr {
         Expr::ColRef { name, .. } => name == column,
-        Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::PgInterval { .. } => false,
+        Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::Interval { .. } => false,
         Expr::BinOp { lhs, rhs, .. } => {
             expr_references_column(lhs, column)? || expr_references_column(rhs, column)?
         }
@@ -750,6 +750,18 @@ impl DmlRenderer for MysqlDmlRenderer {
     fn render_storage_size(&self, _expr: &str) -> Result<String, DmlError> {
         Err(DmlError::UnrenderableExpr(
             "MySQL exposes no per-value stored-size function; use dialect({...}) to port"
+                .to_string(),
+        ))
+    }
+
+    fn render_interval(&self, _duration: &Duration) -> Result<String, DmlError> {
+        // MySQL DOES have interval literals, but its grammar is one unit per
+        // `INTERVAL <n> <UNIT>` rather than a single quoted parts string, so a
+        // multi-field duration has no one-to-one spelling. Refusing keeps the
+        // posture this backend has always had; widening it needs its own change
+        // with a live proof behind it, not a rename.
+        Err(DmlError::UnrenderableExpr(
+            "MySQL interval literals take one unit at a time and have no faithful multi-field form here; use dialect({...}) to port"
                 .to_string(),
         ))
     }

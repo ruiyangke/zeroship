@@ -19,7 +19,7 @@ const EXPECTED_PG_ONLY_EXPR_NODES: &[&str] = &[
     "FnCall::CurrentUser",
     "StorageSize",
     "PgExtract",
-    "PgInterval",
+    "Interval",
     "UuidV7",
 ];
 
@@ -86,7 +86,7 @@ const fn pg_only_expr_kind(expr: &Expr) -> Option<&'static str> {
         },
         Expr::StorageSize { .. } => Some("StorageSize"),
         Expr::PgExtract { .. } => Some("PgExtract"),
-        Expr::PgInterval { .. } => Some("PgInterval"),
+        Expr::Interval { .. } => Some("Interval"),
         Expr::RegexMatch { .. } => None,
     }
 }
@@ -111,7 +111,7 @@ fn pg_only_expr_samples() -> Vec<Expr> {
             field: PgExtractField::Epoch,
             from: Box::new(Expr::col("ts")),
         },
-        Expr::PgInterval {
+        Expr::Interval {
             duration: zero_migrate::Duration {
                 years: None,
                 months: None,

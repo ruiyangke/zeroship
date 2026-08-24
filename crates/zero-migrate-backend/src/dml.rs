@@ -113,7 +113,7 @@ use zero_migrate_ir::dialect::DialectId;
 
 use crate::step::BindValue;
 use zero_migrate_ir::expr::{
-    AggFunc, BinaryOp, Duration, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
+    AggFunc, BinaryOp, Expr, ExtractField, PgExtractField, ScalarFn, SynthFn, UnaryOp,
 };
 use zero_migrate_ir::ir::{IrScalar, IrValue};
 
@@ -741,41 +741,6 @@ fn render_pg_extract(
     ))
 }
 
-fn render_pg_interval_literal(
-    duration: &Duration,
-    backend: &dyn DmlRenderer,
-) -> Result<String, DmlError> {
-    if !backend.supports(Capability::PostgresVendorPrimitives) {
-        return Err(DmlError::UnrenderableExpr(
-            "PG interval literal is PostgreSQL-only".to_string(),
-        ));
-    }
-
-    let mut parts = Vec::new();
-    for (value, singular, plural) in [
-        (duration.years, "year", "years"),
-        (duration.months, "month", "months"),
-        (duration.days, "day", "days"),
-        (duration.hours, "hour", "hours"),
-        (duration.minutes, "minute", "minutes"),
-        (duration.seconds, "second", "seconds"),
-    ] {
-        if let Some(value) = value {
-            let unit = if value == 1 || value == -1 {
-                singular
-            } else {
-                plural
-            };
-            parts.push(format!("{value} {unit}"));
-        }
-    }
-    if parts.is_empty() {
-        return Err(DmlError::UnrenderableExpr(
-            "PG interval duration must include at least one field".to_string(),
-        ));
-    }
-    Ok(format!("INTERVAL {}", sql_string_literal(&parts.join(" "))))
-}
 
 /// The SQL spelling of a binary operator (the method↔node table). `Concat` is
 /// `||` — the one place PG/SQLite NULL semantics agree.
@@ -1056,7 +1021,7 @@ pub fn expr_column_refs_for_backend(
             Expr::ColRef { name, .. } => {
                 out.insert(name.clone());
             }
-            Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::PgInterval { .. } => {}
+            Expr::Literal { .. } | Expr::UuidV4 | Expr::UuidV7 | Expr::Interval { .. } => {}
             Expr::BinOp { lhs, rhs, .. } => {
                 walk(lhs, backend, out)?;
                 walk(rhs, backend, out)?;
@@ -1276,7 +1241,7 @@ pub fn render_expr_bound(expr: &Expr, ctx: &mut BindCtx) -> Result<String, DmlEr
             let e = render_expr_bound(from, ctx)?;
             render_pg_extract(*field, &e, ctx.backend)?
         }
-        Expr::PgInterval { duration } => render_pg_interval_literal(duration, ctx.backend)?,
+        Expr::Interval { duration } => ctx.backend.render_interval(duration)?,
         Expr::Dialectal { legs } => {
             let leg = select_dialect_leg(ctx.backend.dialect(), legs)?;
             render_expr_bound(leg, ctx)?
@@ -1524,7 +1489,7 @@ where
             let e = render_expr_inline_walk_for_backend(from, backend, col_ref)?;
             render_pg_extract(*field, &e, backend)?
         }
-        Expr::PgInterval { duration } => render_pg_interval_literal(duration, backend)?,
+        Expr::Interval { duration } => backend.render_interval(duration)?,
         Expr::Dialectal { legs } => {
             let leg = select_dialect_leg(backend.dialect(), legs)?;
             render_expr_inline_walk_for_backend(leg, backend, col_ref)?

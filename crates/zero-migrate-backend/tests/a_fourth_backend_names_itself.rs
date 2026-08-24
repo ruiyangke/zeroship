@@ -50,7 +50,7 @@ use zero_migrate_ir::backend::{
     BackendDescriptor, Capability, CapabilitySet, IdentifierLimit, Limits,
 };
 use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
+use zero_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{ColType, IrScalar, IrValue, Op, TableRef, ValueFormat};
 use zero_migrate_ir::precondition::PreconditionCheck;
 use zero_migrate_ir::validate::{
@@ -481,7 +481,7 @@ impl ExprDialectValidator for DuckDbDmlRenderer {
             | ExprDialectFeature::RegexMatch
             | ExprDialectFeature::StorageSize
             | ExprDialectFeature::PgExtract
-            | ExprDialectFeature::PgInterval => Ok(()),
+            | ExprDialectFeature::Interval => Ok(()),
         }
     }
 }
@@ -674,6 +674,12 @@ impl DmlRenderer for DuckDbDmlRenderer {
     fn render_storage_size(&self, _expr: &str) -> Result<String, DmlError> {
         Err(DmlError::UnrenderableExpr(
             "DuckDB exposes no per-value stored-size function".to_string(),
+        ))
+    }
+
+    fn render_interval(&self, _duration: &Duration) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "this fourth backend declines interval literals".to_string(),
         ))
     }
 

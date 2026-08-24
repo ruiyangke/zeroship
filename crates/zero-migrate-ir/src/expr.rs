@@ -12,7 +12,7 @@
 //!
 //! `ColRef | Literal | BinOp | UnaryOp | Case | FnCall(allow-listed) | FnSynth |
 //! UuidV4 | UuidV7 | Cast | Between | Like | DistinctFrom | Agg | InList |
-//! RegexMatch | StorageSize | Extract | PgExtract | PgInterval | Dialectal`.
+//! RegexMatch | StorageSize | Extract | PgExtract | Interval | Dialectal`.
 //!
 //! # Why a closed enum, internally tagged
 //!
@@ -499,7 +499,7 @@ pub enum Expr {
         from: Box<Self>,
     },
     /// **PG-ONLY** structured interval literal rendered as `INTERVAL '<parts>'`.
-    PgInterval {
+    Interval {
         /// Structured duration fields. Fields serialize in canonical order
         /// (`years`, `months`, `days`, `hours`, `minutes`, `seconds`) and absent
         /// fields are omitted from the wire.
@@ -631,7 +631,7 @@ mod dialectal_tests {
                 | ExprDialectFeature::Aggregate(_)
                 | ExprDialectFeature::StorageSize
                 | ExprDialectFeature::PgExtract
-                | ExprDialectFeature::PgInterval => Ok(()),
+                | ExprDialectFeature::Interval => Ok(()),
             }
         }
     }

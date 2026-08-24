@@ -42,7 +42,7 @@ use crate::dml::{BindCtx, DmlError, LimitedDeleteRenderRequest, OnConflictRender
 use crate::error::IrLowerError;
 use crate::step::BindValue;
 use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::expr::{CastTarget, ExtractField, ScalarFn};
+use zero_migrate_ir::expr::{CastTarget, Duration, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{IrScalar, IrValue, Op, TableRef};
 
 /// Neutral inputs to one backend's materialized enum/domain DDL renderer.
@@ -347,6 +347,13 @@ pub trait DmlRenderer: std::fmt::Debug + Sync {
     /// [`Self::render_regex_match`] is: most engines have no such operation, and a
     /// backend must say so in its own crate rather than inherit a stand-in.
     fn render_storage_size(&self, expr: &str) -> Result<String, DmlError>;
+
+    /// The vendor's spelling of an interval literal for a structured
+    /// [`Duration`], or a refusal if it has none. The DURATION is neutral data;
+    /// the syntax around it is not — PostgreSQL wants a quoted parts string,
+    /// MySQL an unquoted `INTERVAL <n> <UNIT>` — so the seam is here rather than
+    /// a shared formatter with a capability check in front of it.
+    fn render_interval(&self, duration: &Duration) -> Result<String, DmlError>;
 
     /// The vendor's spelling of a portable date-part extraction.
     fn render_extract(&self, field: ExtractField, expr: &str) -> String;

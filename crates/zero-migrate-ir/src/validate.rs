@@ -483,7 +483,7 @@ pub enum ExprDialectFeature<'a> {
     /// The vendor-named PostgreSQL `EXTRACT` IR node.
     PgExtract,
     /// The vendor-named PostgreSQL interval-literal IR node.
-    PgInterval,
+    Interval,
 }
 
 /// A backend's structured refusal of one [`ExprDialectFeature`].
@@ -721,7 +721,7 @@ fn first_aggregate(expr: &Expr) -> Option<&'static str> {
         | Expr::Literal { .. }
         | Expr::UuidV4
         | Expr::UuidV7
-        | Expr::PgInterval { .. } => None,
+        | Expr::Interval { .. } => None,
         Expr::BinOp { lhs, rhs, .. } => first_aggregate(lhs).or_else(|| first_aggregate(rhs)),
         Expr::UnaryOp { operand, .. }
         | Expr::Cast { operand, .. }
@@ -764,7 +764,7 @@ fn first_aggregate(expr: &Expr) -> Option<&'static str> {
 
 fn first_volatile_function(expr: &Expr) -> Option<&'static str> {
     match expr {
-        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::PgInterval { .. } => None,
+        Expr::ColRef { .. } | Expr::Literal { .. } | Expr::Interval { .. } => None,
         Expr::UuidV4 => Some("uuidV4"),
         Expr::UuidV7 => Some("uuidV7"),
         Expr::BinOp { lhs, rhs, .. } => {
@@ -1037,8 +1037,8 @@ impl Ctx<'_> {
                 self.validate_feature(ExprDialectFeature::PgExtract)?;
                 self.walk_depth(from, d)
             }
-            Expr::PgInterval { duration } => {
-                self.validate_feature(ExprDialectFeature::PgInterval)?;
+            Expr::Interval { duration } => {
+                self.validate_feature(ExprDialectFeature::Interval)?;
                 self.check_duration(duration)
             }
             // The one Layer-2 portability escape: a per-dialect value

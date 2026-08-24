@@ -8341,7 +8341,7 @@ fn validate_default_expr(
             Expr::RegexMatch { .. }
             | Expr::StorageSize { .. }
             | Expr::PgExtract { .. }
-            | Expr::PgInterval { .. }
+            | Expr::Interval { .. }
             | Expr::Dialectal { .. } => Err(mk_err(
                 "a column default cannot use volatile, dialect-specific, or vendor-only expression nodes"
                     .to_string(),

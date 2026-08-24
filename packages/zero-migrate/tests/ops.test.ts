@@ -2707,7 +2707,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
       node: "binOp",
       op: "add",
       lhs: { node: "colRef", name: "created_at" },
-      rhs: { node: "pgInterval", duration: { minutes: 1 } },
+      rhs: { node: "interval", duration: { minutes: 1 } },
     },
   });
   assert.deepEqual(checks[8], {
@@ -2997,7 +2997,7 @@ test("chain extract and root interval build extract and interval nodes", () => {
       node: "binOp",
       op: "add",
       lhs: { node: "colRef", name: "issued_at" },
-      rhs: { node: "pgInterval", duration: { minutes: 1 } },
+      rhs: { node: "interval", duration: { minutes: 1 } },
     },
   });
 });

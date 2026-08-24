@@ -123,7 +123,7 @@ fn pg_default_expr_type(expr: &Expr) -> Option<PgDefaultType> {
         Expr::Agg { .. }
         | Expr::Extract { .. }
         | Expr::PgExtract { .. }
-        | Expr::PgInterval { .. }
+        | Expr::Interval { .. }
         | Expr::Dialectal { .. }
         | Expr::ColRef { .. } => None,
     }
@@ -186,7 +186,7 @@ fn normalize_redundant_pg_default_casts(expr: &Expr) -> Expr {
             | Expr::Literal { .. }
             | Expr::UuidV4
             | Expr::UuidV7
-            | Expr::PgInterval { .. } => {}
+            | Expr::Interval { .. } => {}
         }
 
         let replacement = match expr {

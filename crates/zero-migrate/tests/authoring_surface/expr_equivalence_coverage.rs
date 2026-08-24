@@ -191,8 +191,8 @@ const fn classify_expr(expr: &Expr) -> ExprCoverage {
             "PgExtract",
             "PG-only EXTRACT fields have no portable SQLite/MySQL equivalent",
         ),
-        Expr::PgInterval { .. } => vendor(
-            "PgInterval",
+        Expr::Interval { .. } => vendor(
+            "Interval",
             "PostgreSQL interval literals have no portable SQLite/MySQL equivalent",
         ),
         Expr::Dialectal { .. } => vendor(
@@ -413,7 +413,7 @@ fn vendor_expr_variants_are_classified_out_of_the_portable_gate() {
             field: PgExtractField::Epoch,
             from: Box::new(Expr::col("ts")),
         },
-        Expr::PgInterval {
+        Expr::Interval {
             duration: zero_migrate::Duration {
                 years: None,
                 months: None,

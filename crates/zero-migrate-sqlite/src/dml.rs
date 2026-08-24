@@ -21,7 +21,7 @@ use zero_migrate_backend::renderer::{
 use zero_migrate_backend::step::BindValue;
 use zero_migrate_ir::backend::BackendDescriptor;
 use zero_migrate_ir::dialect::{DialectId, SQLITE};
-use zero_migrate_ir::expr::{AggFunc, CastTarget, Expr, ExtractField, ScalarFn};
+use zero_migrate_ir::expr::{AggFunc, CastTarget, Duration, Expr, ExtractField, ScalarFn};
 use zero_migrate_ir::ir::{
     ForEach, IrScalar, IrValue, Op, RaiseLevel, TableRef, TriggerAction, TriggerEvent, TriggerStmt,
 };
@@ -196,7 +196,7 @@ impl ExprDialectValidator for SqliteDmlRenderer {
             }),
             ExprDialectFeature::StorageSize => Err(unsupported_expr("storageSize")),
             ExprDialectFeature::PgExtract => Err(unsupported_expr("PG EXTRACT")),
-            ExprDialectFeature::PgInterval => Err(unsupported_expr("PG interval literal")),
+            ExprDialectFeature::Interval => Err(unsupported_expr("PG interval literal")),
         }
     }
 }
@@ -595,6 +595,13 @@ impl DmlRenderer for SqliteDmlRenderer {
     fn render_storage_size(&self, _expr: &str) -> Result<String, DmlError> {
         Err(DmlError::UnrenderableExpr(
             "SQLite exposes no per-value stored-size function; use dialect({...}) to port"
+                .to_string(),
+        ))
+    }
+
+    fn render_interval(&self, _duration: &Duration) -> Result<String, DmlError> {
+        Err(DmlError::UnrenderableExpr(
+            "SQLite has no interval type or literal (date maths goes through datetime() modifiers); use dialect({...}) to port"
                 .to_string(),
         ))
     }

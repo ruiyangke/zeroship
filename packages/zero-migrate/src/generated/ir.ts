@@ -218,7 +218,7 @@ export type Expr =
   | { node: "storageSize"; expr: Expr }
   | { node: "extract"; field: ExtractField; from: Expr }
   | { node: "pgExtract"; field: PgExtractField; from: Expr }
-  | { node: "pgInterval"; duration: Duration }
+  | { node: "interval"; duration: Duration }
   // The one Layer-2 portability escape: a per-backend value divergence. Legs
   // are keyed by canonical DialectId strings; there is no alias or fallback.
   // Scope math is validated per-target by the engine.

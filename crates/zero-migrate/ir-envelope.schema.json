@@ -3880,7 +3880,7 @@
             },
             "node": {
               "type": "string",
-              "const": "pgInterval"
+              "const": "interval"
             }
           },
           "additionalProperties": false,
