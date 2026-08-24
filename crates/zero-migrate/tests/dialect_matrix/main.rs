@@ -14,6 +14,7 @@ mod dialect_corpus;
 
 mod a_test_recorder_never_ships;
 mod alter_column_dialect_support;
+mod alter_column_grammar_comes_from_the_backend;
 mod backend_modules_name_one_dialect;
 mod backend_snapshot_privates_stay_core_only;
 mod checksum_corpus_stability;

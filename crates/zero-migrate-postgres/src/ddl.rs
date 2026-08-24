@@ -290,8 +290,81 @@ impl DdlEmitter for PgEmitter {
         ))
     }
 
-    fn alter_column_refs(&self, table: &str, column: &str) -> (String, String) {
-        (self.qualified(table), quote_ident(column))
+    /// The `USING <col>::<type>` cast is emitted so a compatible widening (e.g.
+    /// `integer` → `double precision`) applies without a manual cast; an
+    /// incompatible change still fails loudly at apply (never silently).
+    ///
+    /// A GENERATED column takes NO `USING`, and this is the server's rule rather
+    /// than a preference. MEASURED on PostgreSQL 18.4: the cast this statement used
+    /// to attach unconditionally is answered with `cannot specify USING when
+    /// altering type of generated column` — for `int → bigint` as much as for
+    /// anything else, so the clause made even the otherwise-legal widening
+    /// undeployable. WITHOUT it the same `ALTER` is ACCEPTED and
+    /// `pg_attribute.attgenerated` survives: the server recomputes the expression
+    /// under the new type, which is exactly why it will not take a cast of the old
+    /// value. `cast_value` is core's answer to that question.
+    fn alter_column_type_up(
+        &self,
+        table: &str,
+        column: &str,
+        ty: &str,
+        cast_value: bool,
+    ) -> Option<String> {
+        let using = if cast_value {
+            format!(" USING {}::{}", quote_ident(column), ty)
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "ALTER TABLE {} ALTER COLUMN {} TYPE {}{}",
+            self.qualified(table),
+            quote_ident(column),
+            ty,
+            using,
+        ))
+    }
+
+    fn alter_column_nullability(
+        &self,
+        table: &str,
+        column: &str,
+        nullable: bool,
+    ) -> Option<(String, String)> {
+        let (verb, reverse) = if nullable {
+            ("DROP NOT NULL", "SET NOT NULL")
+        } else {
+            ("SET NOT NULL", "DROP NOT NULL")
+        };
+        Some((
+            format!(
+                "ALTER TABLE {} ALTER COLUMN {} {}",
+                self.qualified(table),
+                quote_ident(column),
+                verb
+            ),
+            format!(
+                "ALTER TABLE {} ALTER COLUMN {} {}",
+                self.qualified(table),
+                quote_ident(column),
+                reverse
+            ),
+        ))
+    }
+
+    fn alter_column_default(
+        &self,
+        table: &str,
+        column: &str,
+        default_sql: Option<&str>,
+    ) -> Option<String> {
+        let (table_ref, col_ref) = (self.qualified(table), quote_ident(column));
+        let action = match default_sql {
+            Some(default_sql) => format!("SET DEFAULT {default_sql}"),
+            None => "DROP DEFAULT".to_string(),
+        };
+        Some(format!(
+            "ALTER TABLE {table_ref} ALTER COLUMN {col_ref} {action}"
+        ))
     }
 
     fn indexes_inlined_by_create(&self, _req: &CreateTableRequest<'_>) -> Vec<String> {

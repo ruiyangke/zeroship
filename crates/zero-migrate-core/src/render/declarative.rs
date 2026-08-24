@@ -5432,50 +5432,41 @@ impl DeclarativeAuthor {
     /// Render a GATED `ALTER TABLE … ALTER COLUMN … TYPE …` (type change).
     ///
     /// A type change is `destructive` + `requires_approval`; there is NO
-    /// auto type-change. It can rewrite the whole table under `ACCESS EXCLUSIVE`
+    /// auto type-change. It can rewrite the whole table under an exclusive lock
     /// and can be lossy (e.g. `text` → `integer` fails / truncates), so it flows
-    /// through the gate exactly like a drop. The `USING <col>::<type>` cast is
-    /// emitted so a compatible widening (e.g. `integer` → `double precision`)
-    /// applies without a manual cast; an incompatible change still fails loudly at
-    /// apply (never silently). Type spelling goes through [`validate_type`] (via
-    /// `validate_desired`) + the guard.
+    /// through the gate exactly like a drop. Type spelling goes through
+    /// [`validate_type`] (via `validate_desired`) + the guard.
     ///
     /// `down` is `None`: a type change is treated as irreversible (the reverse
     /// cast may not round-trip — `double precision` → `integer` loses the
     /// fraction), so there is no structural down. A re-diff after applying it is
     /// clean because live then matches desired.
     ///
-    /// A GENERATED column takes NO `USING`, and this is the server's rule rather
-    /// than a preference. MEASURED on PostgreSQL 18.4: the cast this method used to
-    /// attach unconditionally is answered with `cannot specify USING when altering
-    /// type of generated column` — for `int → bigint` as much as for anything else,
-    /// so the clause made even the otherwise-legal widening undeployable. WITHOUT
-    /// it the same `ALTER` is ACCEPTED and `pg_attribute.attgenerated` survives:
-    /// the server recomputes the expression under the new type, which is exactly
-    /// why it will not take a cast of the old value. Dropping the clause is
-    /// therefore the whole fix — refusing the op would deny a migration the
-    /// database accepts and honours.
+    /// # What this method owns and what it asks for
     ///
-    /// The predicate is [`is_engine_computed_column`], the same one the SQLite
-    /// rebuild uses to keep a generated column out of its value-copy list, so both
-    /// carriers count: the emission body (`generated`, from the descriptor compiler
-    /// and the fold) and the structural kind (`generated_kind`, from the fold and
-    /// the PostgreSQL catalog read).
+    /// It owns the migration identity, the flags and the absent `down` — all three
+    /// safety judgements about the OPERATION. It owns none of the STATEMENT. The
+    /// verb, any cast clause and any cast operator are three separate vendor
+    /// decisions and are asked of [`DdlEmitter::alter_column_type_up`]; before that
+    /// method existed they were written here, and a backend that disagreed with any
+    /// of the three had nowhere to say so.
+    ///
+    /// The one question core still answers is whether the existing value may be
+    /// cast at all, because that is a fact about the COLUMN rather than about the
+    /// dialect. The predicate is [`is_engine_computed_column`], the same one the
+    /// table rebuild uses to keep a generated column out of its value-copy list, so
+    /// both carriers count: the emission body (`generated`, from the descriptor
+    /// compiler and the fold) and the structural kind (`generated_kind`, from the
+    /// fold and the catalog read). The `expect` is the shape every refusing emitter
+    /// method has here — a backend arrives only after its own capability and its own
+    /// `alter_column_refusal` have admitted it.
     fn render_alter_column_type(&self, table: &str, c: &ColumnSnapshot) -> Migration {
         let ty = crate::render::backends::schema_renderer(self.vendors, &self.dialect)
             .column_type(c, false);
-        let using = if is_engine_computed_column(c) {
-            String::new()
-        } else {
-            format!(" USING {}::{}", self.quote_ident(&c.name), ty)
-        };
-        let up = format!(
-            "ALTER TABLE {} ALTER COLUMN {} TYPE {}{}",
-            self.qualified(table),
-            self.quote_ident(&c.name),
-            ty,
-            using,
-        );
+        let up = self
+            .emitter()
+            .alter_column_type_up(table, &c.name, &ty, !is_engine_computed_column(c))
+            .expect("a backend admitted to an in-place retype must spell one");
         self.make(
             &format!("alter_column_type_{table}_{}", c.name),
             up,
@@ -5492,38 +5483,32 @@ impl DeclarativeAuthor {
     ///   SAFE: it only removes a constraint, never rewrites data, so it is ungated
     ///   (default flags) and applies like an additive op. `down` re-tightens.
     /// - **`SET NOT NULL`** (`nullable` false — tightening required false→true) is
-    ///   lock-heavy (full scan under `ACCESS EXCLUSIVE`) and FAILS if any existing
+    ///   lock-heavy (a full scan under an exclusive lock) and FAILS if any existing
     ///   row is NULL, so it is GATED (`destructive` is false — no data is lost —
     ///   but `requires_approval` is true; a later analyzer-lint plan will suggest
     ///   the `CHECK … NOT VALID` → `VALIDATE` online path). `down` relaxes it.
+    ///
+    /// The two FLAGS above are this method's; the two STATEMENTS are the backend's,
+    /// from [`DdlEmitter::alter_column_nullability`]. That split is the whole
+    /// content of the seam: which direction is dangerous is a judgement about the
+    /// operation and holds on every server, while how either direction is spelled
+    /// holds on none of them by default.
     fn render_alter_column_nullability(&self, table: &str, col: &str, nullable: bool) -> Migration {
-        let (verb, reverse, flags) = if nullable {
+        let flags = if nullable {
             // DROP NOT NULL — safe, ungated; down re-adds NOT NULL.
-            ("DROP NOT NULL", "SET NOT NULL", MigrationFlags::default())
+            MigrationFlags::default()
         } else {
             // SET NOT NULL — gated (lock-heavy, can fail on existing NULLs). Not
             // "destructive" (no data is lost) but requires_approval. down relaxes it.
-            (
-                "SET NOT NULL",
-                "DROP NOT NULL",
-                MigrationFlags {
-                    requires_approval: true,
-                    ..MigrationFlags::default()
-                },
-            )
+            MigrationFlags {
+                requires_approval: true,
+                ..MigrationFlags::default()
+            }
         };
-        let up = format!(
-            "ALTER TABLE {} ALTER COLUMN {} {}",
-            self.qualified(table),
-            self.quote_ident(col),
-            verb
-        );
-        let down = format!(
-            "ALTER TABLE {} ALTER COLUMN {} {}",
-            self.qualified(table),
-            self.quote_ident(col),
-            reverse
-        );
+        let (up, down) = self
+            .emitter()
+            .alter_column_nullability(table, col, nullable)
+            .expect("a backend admitted to an in-place nullability change must spell one");
         self.make(
             &format!("alter_column_null_{table}_{col}"),
             up,
@@ -5533,35 +5518,31 @@ impl DeclarativeAuthor {
         )
     }
 
-    /// The ONE spelling of `ALTER TABLE … ALTER COLUMN … {SET|DROP} DEFAULT`, for
-    /// every dialect and both directions.
+    /// Ask the registered backend for a column-DEFAULT change, in either direction.
     ///
-    /// These two statements are spelled the same way on all three dialects -
-    /// MEASURED on MySQL 8.4.11, which accepts `ALTER TABLE t ALTER COLUMN `c` SET
-    /// DEFAULT 'new'` and the matching `DROP DEFAULT` and reports the new value in
-    /// `information_schema.COLUMNS.COLUMN_DEFAULT`. Only the identifier quoting
-    /// differed, which is why these two are corrected rather than refused like the
-    /// type and nullability changes: MySQL has no `ALTER COLUMN ... TYPE`, but it
-    /// does have this.
+    /// `default_sql` is `Some(literal)` for a set and `None` for a drop. The two are
+    /// the same statement with two tails, which is why the `down` of a set and the
+    /// `up` of a drop are byte-identical.
     ///
-    /// NOT a [`DdlEmitter`] method, and that is the whole point of it being one
-    /// function rather than three. The three sites that spell this statement
-    /// (`SET DEFAULT`'s `up`, its inverse `down`, and the stand-alone `DROP
-    /// DEFAULT`) each used to write the `format!` out again; a per-dialect
-    /// contract method would instead have written the SAME `format!` out three
-    /// times, once per impl, because the STATEMENT does not vary — only the two
-    /// identifiers do, and they vary through the `match` below, which is the one
-    /// place in this file that has to know.
+    /// # Why this is one core function over a vendor method rather than three
     ///
-    /// `default_sql` is `Some(literal)` for `SET DEFAULT <literal>` and `None`
-    /// for `DROP DEFAULT`. The two are the same statement with two tails, which
-    /// is why the `down` of a set and the `up` of a drop are byte-identical.
+    /// The three sites that need this statement — a set's `up`, its inverse `down`,
+    /// and the stand-alone drop — would otherwise each ask the emitter themselves.
+    /// The forwarding is here so the direction argument is built once.
     ///
-    /// HOW THINLY COVERED THIS IS, MEASURED. Collapsing the `Some` arm into the
-    /// `None` arm — so every caller emits `DROP DEFAULT` and the literal is never
-    /// spelled — took the workspace from `37 / 3373 / 0 / 11` to
-    /// `37 / 3370 / 3 / 11`. THREE tests out of 3373 can tell `SET DEFAULT` from
-    /// `DROP DEFAULT`, one per binary that sees the path at all:
+    /// It USED TO spell the statement, on the grounds that all three dialects agree
+    /// on it and only the identifier quoting differs. The agreement was real and
+    /// MEASURED — MySQL 8.4.11 accepts this statement and reports the new value in
+    /// its catalog — and it was still the wrong reason to write it here: an
+    /// agreement among the backends that ship is not a property of the ones that do
+    /// not, and a statement written for a vendor that was never asked comes out
+    /// right until it does not. This is the member of the family a second shipping
+    /// backend actually reaches, which is what makes the point concrete rather than
+    /// precautionary.
+    ///
+    /// HOW THINLY COVERED THIS IS, MEASURED. Collapsing the set direction into the
+    /// drop direction — so every caller emits a drop and the literal is never
+    /// spelled — reddened THREE tests, one per binary that sees the path at all:
     ///
     /// | binary | test |
     /// |---|---|
@@ -5573,23 +5554,20 @@ impl DeclarativeAuthor {
     /// silence is NOT a coverage hole — I asserted it was one and was wrong. Both
     /// `Op::SetColumnDefault` and `Op::DropColumnDefault` call
     /// `require_capability_for(Capability::NativeAlterColumn, …)`, and that
-    /// capability is FALSE for SQLite, so the SQLite leg of the
-    /// `match` below is dead for the same reason the stand-alone constraint
-    /// renderers' SQLite arms are dead: a gate several frames up, not the render.
-    /// `pg_drift`'s silence is the real reportable one — that suite contains the
-    /// string `SET DEFAULT`, which is exactly why it looked like coverage.
+    /// capability is FALSE for SQLite, so the SQLite leg is dead for the same reason
+    /// the stand-alone constraint renderers' SQLite arms are dead: a gate several
+    /// frames up, not the render. `pg_drift`'s silence is the real reportable one —
+    /// that suite contains the string `SET DEFAULT`, which is exactly why it looked
+    /// like coverage.
     fn alter_column_default_stmt(
         &self,
         table: &str,
         col: &str,
         default_sql: Option<&str>,
     ) -> String {
-        let (table_ref, col_ref) = self.emitter().alter_column_refs(table, col);
-        let action = match default_sql {
-            Some(default_sql) => format!("SET DEFAULT {default_sql}"),
-            None => "DROP DEFAULT".to_string(),
-        };
-        format!("ALTER TABLE {table_ref} ALTER COLUMN {col_ref} {action}")
+        self.emitter()
+            .alter_column_default(table, col, default_sql)
+            .expect("a backend admitted to an in-place default change must spell one")
     }
 
     /// Render an `ALTER TABLE … ALTER COLUMN … SET DEFAULT …` from a pre-rendered

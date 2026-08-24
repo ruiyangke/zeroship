@@ -185,9 +185,73 @@ pub trait DdlEmitter {
     /// refuse when this backend must rebuild a table instead.
     fn drop_foreign_key_up(&self, table: &str, name: &str) -> Option<String>;
 
-    /// Render the table and column identifier references used by a neutral
-    /// `ALTER TABLE … ALTER COLUMN …` statement.
-    fn alter_column_refs(&self, table: &str, column: &str) -> (String, String);
+    /// Render the `up` of an in-place column RETYPE, or explicitly refuse when this
+    /// backend has no offline spelling for one.
+    ///
+    /// `ty` is the target type as this backend's own
+    /// [`SchemaRenderer::column_type`](crate::schema::SchemaRenderer::column_type)
+    /// spelled it, so the vendor is reading back its own bytes rather than being
+    /// handed a neutral name to re-map.
+    ///
+    /// `cast_value` is CORE's answer to a question core owns: whether the column's
+    /// generation contract permits the existing value to be cast into the new type.
+    /// It is carried as an answer rather than as the snapshot the predicate reads
+    /// for the same reason [`CreateTableRequest::injected_indexes`] is a name list —
+    /// the predicate lives above this contract and must not be copied into a vendor.
+    /// A backend whose retype takes no cast clause ignores it.
+    ///
+    /// # Why this is `Option` and what the `None` means
+    ///
+    /// The same thing it means on [`Self::drop_foreign_key_up`] and the partition
+    /// family: *this backend does not spell this operation here*. A backend that
+    /// restates the whole column definition at APPLY, from the definition the server
+    /// itself reports, cannot write the statement offline — the definition is not in
+    /// the op. It says so by declaring
+    /// [`CatalogFoldPolicy::restates_column_type_at_apply`]
+    /// and returning `None` here, and the render layer never arrives.
+    ///
+    /// Required, with no default body. That is the whole point of the method: the
+    /// verb, any cast clause, and any cast operator are three separate vendor
+    /// decisions, and before this seam existed a backend had nowhere to state any of
+    /// them. It received one vendor's answers to all three by omission.
+    fn alter_column_type_up(
+        &self,
+        table: &str,
+        column: &str,
+        ty: &str,
+        cast_value: bool,
+    ) -> Option<String>;
+
+    /// Render the `(up, down)` of a NULLABILITY change, or explicitly refuse.
+    ///
+    /// `nullable` is the DESIRED state, so `true` relaxes and `false` tightens; the
+    /// `down` is the inverse statement. Which of the two directions is gated is not
+    /// asked here — that is a safety judgement core makes about the operation, not a
+    /// spelling — so a backend states only the two statements.
+    ///
+    /// Required, with no default body.
+    fn alter_column_nullability(
+        &self,
+        table: &str,
+        column: &str,
+        nullable: bool,
+    ) -> Option<(String, String)>;
+
+    /// Render a column DEFAULT change, or explicitly refuse.
+    ///
+    /// `default_sql` is `Some(literal)` for a set and `None` for a drop. The two are
+    /// one method because they are one statement with two tails, which is why the
+    /// `down` of a set and the `up` of a drop come out byte-identical.
+    ///
+    /// Required, with no default body — and this is the member of the family a
+    /// SHIPPING backend other than the one whose grammar core used to write already
+    /// reaches, so the seam is not a precaution here.
+    fn alter_column_default(
+        &self,
+        table: &str,
+        column: &str,
+        default_sql: Option<&str>,
+    ) -> Option<String>;
 
     /// Names of snapshot indexes this vendor emits inside [`Self::create_table`]
     /// rather than as follow-on `CREATE INDEX` units.

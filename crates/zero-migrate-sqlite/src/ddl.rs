@@ -136,8 +136,43 @@ impl DdlEmitter for SqliteEmitter {
         None
     }
 
-    fn alter_column_refs(&self, table: &str, column: &str) -> (String, String) {
-        (sqlite_ident(table), sqlite_ident(column))
+    /// SQLite has NO `ALTER COLUMN` in any form — its `ALTER TABLE` does only
+    /// `RENAME TO`, `RENAME COLUMN`, `ADD COLUMN` and `DROP COLUMN`. Every member of
+    /// the family is therefore refused here, and every one is reconciled instead by
+    /// the differ's table REBUILD, which this backend selects by answering
+    /// `ExistingColumnChangeStrategy::TableRebuild` and by declining
+    /// `Capability::NativeAlterColumn`.
+    ///
+    /// Three `None`s rather than three dormant strings. The identifier-only helper
+    /// these replaced returned bytes for a statement this dialect cannot execute; a
+    /// spelling that exists only to be unreachable is the thing a reader has to
+    /// verify is unreachable, and a refusal is not.
+    fn alter_column_type_up(
+        &self,
+        _table: &str,
+        _column: &str,
+        _ty: &str,
+        _cast_value: bool,
+    ) -> Option<String> {
+        None
+    }
+
+    fn alter_column_nullability(
+        &self,
+        _table: &str,
+        _column: &str,
+        _nullable: bool,
+    ) -> Option<(String, String)> {
+        None
+    }
+
+    fn alter_column_default(
+        &self,
+        _table: &str,
+        _column: &str,
+        _default_sql: Option<&str>,
+    ) -> Option<String> {
+        None
     }
 
     fn indexes_inlined_by_create(&self, req: &CreateTableRequest<'_>) -> Vec<String> {

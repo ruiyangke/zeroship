@@ -266,8 +266,61 @@ impl DdlEmitter for MysqlEmitter {
         ))
     }
 
-    fn alter_column_refs(&self, table: &str, column: &str) -> (String, String) {
-        (self.qualified(table), mysql_quote_ident(column))
+    /// MySQL has no `ALTER COLUMN … TYPE`. Its retype is `MODIFY COLUMN`, which takes
+    /// the COMPLETE column definition and silently DISCARDS every facet the statement
+    /// omits — so the statement cannot be written until the definition is known, and
+    /// the definition is not in the op. It is written at APPLY instead, from
+    /// `SHOW CREATE TABLE` under an explicit table lock; see
+    /// `crate::backend::alter_column_type_sql`.
+    ///
+    /// This backend declares that by answering `true` to
+    /// `CatalogFoldPolicy::restates_column_type_at_apply`, which routes a retype away
+    /// from the render layer before it ever reaches here. The `None` is the same
+    /// refusal restated where a caller that arrived anyway would meet it.
+    fn alter_column_type_up(
+        &self,
+        _table: &str,
+        _column: &str,
+        _ty: &str,
+        _cast_value: bool,
+    ) -> Option<String> {
+        None
+    }
+
+    /// A nullability change is the same shape as a retype — `MODIFY COLUMN` with one
+    /// facet changed instead of the type — and carries the same discard-what-you-omit
+    /// rule. It is refused rather than restated because no one has driven one end to
+    /// end against a live server, which is the bar the retype had to clear; the
+    /// refusal itself is issued upstream by `CatalogFoldPolicy::alter_column_refusal`.
+    fn alter_column_nullability(
+        &self,
+        _table: &str,
+        _column: &str,
+        _nullable: bool,
+    ) -> Option<(String, String)> {
+        None
+    }
+
+    /// The one member of the family MySQL DOES spell, and the one it reaches on the
+    /// live path. MEASURED on MySQL 8.4.11: the server accepts
+    /// ``ALTER TABLE t ALTER COLUMN `c` SET DEFAULT 'new'`` and the matching
+    /// `DROP DEFAULT`, and reports the new value in
+    /// `information_schema.COLUMNS.COLUMN_DEFAULT`. Neither statement restates the
+    /// definition, so neither takes the `MODIFY COLUMN` route the two above do.
+    fn alter_column_default(
+        &self,
+        table: &str,
+        column: &str,
+        default_sql: Option<&str>,
+    ) -> Option<String> {
+        let (table_ref, col_ref) = (self.qualified(table), mysql_quote_ident(column));
+        let action = match default_sql {
+            Some(default_sql) => format!("SET DEFAULT {default_sql}"),
+            None => "DROP DEFAULT".to_string(),
+        };
+        Some(format!(
+            "ALTER TABLE {table_ref} ALTER COLUMN {col_ref} {action}"
+        ))
     }
 
     fn indexes_inlined_by_create(&self, req: &CreateTableRequest<'_>) -> Vec<String> {
