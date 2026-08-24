@@ -19,6 +19,7 @@ mod backend_snapshot_privates_stay_core_only;
 mod checksum_corpus_stability;
 mod constraint_definition_is_comparison_text;
 mod core_does_not_spell_a_vendors_bytes;
+mod core_names_no_vendor_at_all;
 mod core_names_no_vendor_backend_module;
 mod core_names_no_vendor_crate;
 mod created_tables_dialect_legs;
