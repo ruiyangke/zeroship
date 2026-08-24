@@ -524,7 +524,9 @@ impl WalConsumer {
                     },
                 );
             }
-            PgOutputMessage::Insert { rel_id, new_tuple } => {
+            PgOutputMessage::Insert {
+                rel_id, new_tuple, ..
+            } => {
                 self.emit_for_tuple(relations, *rel_id, ChangeOp::Insert, new_tuple, None);
             }
             PgOutputMessage::Update {
@@ -546,7 +548,9 @@ impl WalConsumer {
                     old_tuple.as_ref().and_then(OldTuple::full),
                 );
             }
-            PgOutputMessage::Delete { rel_id, old_tuple } => {
+            PgOutputMessage::Delete {
+                rel_id, old_tuple, ..
+            } => {
                 // A DELETE has no after-image, so the old tuple IS the event's
                 // tuple. Under the default replica identity that is a `Key`,
                 // whose non-key columns are placeholders - which is why a
@@ -1038,6 +1042,7 @@ mod tests {
         cols: &[(u8, &str)],
     ) -> PgOutputMessage {
         PgOutputMessage::Relation {
+            xid: None,
             rel_id,
             namespace: ns.into(),
             name: name.into(),
@@ -1056,6 +1061,7 @@ mod tests {
 
     fn make_insert_msg(rel_id: u32, values: &[Option<&str>]) -> PgOutputMessage {
         PgOutputMessage::Insert {
+            xid: None,
             rel_id,
             new_tuple: TupleData {
                 columns: values
@@ -1186,6 +1192,7 @@ mod tests {
         c.dispatch(
             &mut rels,
             &PgOutputMessage::Update {
+                xid: None,
                 rel_id: 16384,
                 old_tuple: None,
                 new_tuple: TupleData {
@@ -1199,6 +1206,7 @@ mod tests {
         c.dispatch(
             &mut rels,
             &PgOutputMessage::Delete {
+                xid: None,
                 rel_id: 16384,
                 old_tuple: OldTuple::Key(TupleData {
                     columns: vec![TupleColumn::Text("7".into()), TupleColumn::Null],
