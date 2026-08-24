@@ -207,6 +207,23 @@ impl IndexElementKey {
 /// family cannot drift on it. That reasoning is copied deliberately from
 /// [`crate::model::snapshot::SchemaSnapshot::table_rls`], which already chose a
 /// side map over a field for the same reason.
+///
+/// # The families are named for the FACT, not for the backend that answers
+///
+/// Six of them used to carry a vendor prefix — `sqlite_stored_create_sql` and five
+/// `pg_index_*` — while the other five already used the contract's own spelling. That
+/// was not a distinction, it was an inconsistency inside one struct: every family here
+/// is a straight split of a field the neutral
+/// [`zero_migrate_backend::snapshot`] surface ALREADY names neutrally
+/// (`TableSnapshot::stored_create_sql`, `IndexSnapshot::only` / `opclass` /
+/// `nulls_not_distinct`, `IndexElementSnapshot::Column::opclass` / `collation`), and
+/// this side table is the only place in the round trip where core reached for a vendor
+/// name the contract had not used. The remaining `index_` / `column_` prefixes are the
+/// KEY type (`IndexKey`, `ColumnKey`, `TableKey`), not a backend.
+///
+/// WHICH backend populates a family is still recorded, in the per-field doc, where it
+/// is a fact a reader wants and not a name the vocabulary carries. `absorb`'s
+/// exhaustive destructure is what keeps that list honest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VendorFacts {
     /// Whether this column is the table's physical row-identifier alias. SQLite is
@@ -220,7 +237,7 @@ pub struct VendorFacts {
     /// list kept implicit.
     pub rowid_alias: BTreeMap<ColumnKey, bool>,
     /// SQLite: the verbatim `sqlite_master.sql` body for this table.
-    pub sqlite_stored_create_sql: BTreeMap<TableKey, String>,
+    pub stored_create_sql: BTreeMap<TableKey, String>,
     /// MySQL and SQLite: whether the live catalog carries the engine's own UUID
     /// spelling CHECK for this column. PostgreSQL never sets it.
     pub catalog_uuid_format_check: BTreeMap<ColumnKey, bool>,
@@ -234,15 +251,15 @@ pub struct VendorFacts {
     /// Opaque here - the owning vendor is what interprets and compares it.
     pub column_vendor: BTreeMap<ColumnKey, Dialectal<dyn VendorColumnFacts>>,
     /// PostgreSQL: `ON ONLY` on a partitioned parent's index.
-    pub pg_index_only: BTreeMap<IndexKey, bool>,
+    pub index_only: BTreeMap<IndexKey, bool>,
     /// PostgreSQL: the ANN operator class for an `ivfflat`/`hnsw` index.
-    pub pg_index_opclass: BTreeMap<IndexKey, String>,
+    pub index_opclass: BTreeMap<IndexKey, String>,
     /// PostgreSQL 15+: `NULLS NOT DISTINCT` on a UNIQUE index.
-    pub pg_index_nulls_not_distinct: BTreeMap<IndexKey, bool>,
+    pub index_nulls_not_distinct: BTreeMap<IndexKey, bool>,
     /// PostgreSQL: per-element operator class (`text_pattern_ops`).
-    pub pg_index_element_opclass: BTreeMap<IndexElementKey, String>,
+    pub index_element_opclass: BTreeMap<IndexElementKey, String>,
     /// PostgreSQL: per-element collation (`"C"`).
-    pub pg_index_element_collation: BTreeMap<IndexElementKey, String>,
+    pub index_element_collation: BTreeMap<IndexElementKey, String>,
 }
 
 impl VendorFacts {
@@ -252,33 +269,33 @@ impl VendorFacts {
         // EXHAUSTIVE, no `..`: a new fact family breaks this line until it is merged.
         let Self {
             rowid_alias,
-            sqlite_stored_create_sql,
+            stored_create_sql,
             catalog_uuid_format_check,
             expression_default,
             text_storage,
             column_vendor,
-            pg_index_only,
-            pg_index_opclass,
-            pg_index_nulls_not_distinct,
-            pg_index_element_opclass,
-            pg_index_element_collation,
+            index_only,
+            index_opclass,
+            index_nulls_not_distinct,
+            index_element_opclass,
+            index_element_collation,
         } = other;
         self.rowid_alias.extend(rowid_alias);
-        self.sqlite_stored_create_sql
-            .extend(sqlite_stored_create_sql);
+        self.stored_create_sql
+            .extend(stored_create_sql);
         self.catalog_uuid_format_check
             .extend(catalog_uuid_format_check);
         self.expression_default.extend(expression_default);
         self.text_storage.extend(text_storage);
         self.column_vendor.extend(column_vendor);
-        self.pg_index_only.extend(pg_index_only);
-        self.pg_index_opclass.extend(pg_index_opclass);
-        self.pg_index_nulls_not_distinct
-            .extend(pg_index_nulls_not_distinct);
-        self.pg_index_element_opclass
-            .extend(pg_index_element_opclass);
-        self.pg_index_element_collation
-            .extend(pg_index_element_collation);
+        self.index_only.extend(index_only);
+        self.index_opclass.extend(index_opclass);
+        self.index_nulls_not_distinct
+            .extend(index_nulls_not_distinct);
+        self.index_element_opclass
+            .extend(index_element_opclass);
+        self.index_element_collation
+            .extend(index_element_collation);
     }
 
     /// The VENDOR half of TABLE-SHAPE identity for one column: the vendor term
@@ -379,7 +396,7 @@ impl VendorFacts {
 
     /// The VENDOR half of TABLE-SHAPE identity for one table.
     ///
-    /// Always `true`. `sqlite_stored_create_sql` is introspection-only
+    /// Always `true`. `stored_create_sql` is introspection-only
     /// (`sqlite_master.sql`), `None` on PostgreSQL and on author-built desired
     /// snapshots, and `TableSnapshot::eq` excludes it today for exactly that reason.
     #[must_use]
@@ -618,12 +635,12 @@ impl Index {
     #[must_use]
     pub fn from_snapshot(table: &str, snapshot: &IndexSnapshot, vendor: &mut VendorFacts) -> Self {
         let key = IndexKey::new(table, &snapshot.name);
-        vendor.pg_index_only.insert(key.clone(), snapshot.only);
+        vendor.index_only.insert(key.clone(), snapshot.only);
         vendor
-            .pg_index_nulls_not_distinct
+            .index_nulls_not_distinct
             .insert(key.clone(), snapshot.nulls_not_distinct);
         if let Some(opclass) = snapshot.opclass.clone() {
-            vendor.pg_index_opclass.insert(key, opclass);
+            vendor.index_opclass.insert(key, opclass);
         }
 
         let elements = snapshot
@@ -640,12 +657,12 @@ impl Index {
                     let element_key = IndexElementKey::new(table, &snapshot.name, position);
                     if let Some(opclass) = opclass.clone() {
                         vendor
-                            .pg_index_element_opclass
+                            .index_element_opclass
                             .insert(element_key.clone(), opclass);
                     }
                     if let Some(collation) = collation.clone() {
                         vendor
-                            .pg_index_element_collation
+                            .index_element_collation
                             .insert(element_key, collation);
                     }
                     IndexElement::Column {
@@ -689,8 +706,8 @@ impl Index {
                         IndexElementSnapshot::Column {
                             name: name.clone(),
                             order: *order,
-                            opclass: vendor.pg_index_element_opclass.get(&element_key).cloned(),
-                            collation: vendor.pg_index_element_collation.get(&element_key).cloned(),
+                            opclass: vendor.index_element_opclass.get(&element_key).cloned(),
+                            collation: vendor.index_element_collation.get(&element_key).cloned(),
                         }
                     }
                     IndexElement::Expr(expr) => IndexElementSnapshot::Expr(expr.clone()),
@@ -700,10 +717,10 @@ impl Index {
             predicate: self.predicate.clone(),
             include: self.include.clone(),
             with: self.with.clone(),
-            only: vendor.pg_index_only.get(&key).copied().unwrap_or(false),
-            opclass: vendor.pg_index_opclass.get(&key).cloned(),
+            only: vendor.index_only.get(&key).copied().unwrap_or(false),
+            opclass: vendor.index_opclass.get(&key).cloned(),
             nulls_not_distinct: vendor
-                .pg_index_nulls_not_distinct
+                .index_nulls_not_distinct
                 .get(&key)
                 .copied()
                 .unwrap_or(false),
@@ -746,7 +763,7 @@ impl Table {
     pub fn from_snapshot(name: &str, snapshot: &TableSnapshot, vendor: &mut VendorFacts) -> Self {
         if let Some(stored) = snapshot.stored_create_sql.clone() {
             vendor
-                .sqlite_stored_create_sql
+                .stored_create_sql
                 .insert(TableKey::new(name), stored);
         }
         Self {
@@ -794,7 +811,7 @@ impl Table {
             partition_by: self.partition_by.clone(),
             comment: self.comment.clone(),
             stored_create_sql: vendor
-                .sqlite_stored_create_sql
+                .stored_create_sql
                 .get(&TableKey::new(name))
                 .cloned(),
         }
