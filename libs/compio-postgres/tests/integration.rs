@@ -4202,9 +4202,15 @@ async fn release_rollback_keeps_session_state_the_next_borrower_may_rely_on() {
 
 #[compio::test]
 async fn sslmode_require_fails_closed_over_a_plaintext_server() {
-    let Some(url) = require_pg().await else {
+    if require_pg().await.is_none() {
         return;
-    };
+    }
+    // A server with TLS switched OFF, not merely a connection that is not
+    // using it - the second assertion below turns on the server answering `N`
+    // to `SSLRequest`. Under `--features suite-over-tls` the ordinary test URL
+    // names an ENCRYPTED server, where `sslmode=require` is satisfied and this
+    // test would be asserting the opposite of its own name.
+    let url = common::tls_disabled_url();
     let sep = if url.contains('?') { '&' } else { '?' };
     let require = format!("{url}{sep}sslmode=require");
 
