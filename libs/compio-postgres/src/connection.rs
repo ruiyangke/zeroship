@@ -2700,6 +2700,90 @@ mod tests {
         }
     }
 
+    fn pipelining_peer() -> (SocketAddr, std_mpsc::Receiver<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind pipelining peer");
+        let address = listener.local_addr().expect("pipelining peer address");
+        let (tx, rx) = std_mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("accept pipelining client");
+            peer.set_read_timeout(Some(Duration::from_millis(750)))
+                .expect("bound pipelining reads");
+            let mut length = [0; 4];
+            peer.read_exact(&mut length).expect("startup length");
+            let length = u32::from_be_bytes(length) as usize;
+            let mut startup = vec![0; length - 4];
+            peer.read_exact(&mut startup).expect("startup body");
+            peer.write_all(b"R\0\0\0\x08\0\0\0\0").expect("auth ok");
+            peer.write_all(b"K\0\0\0\x0c\0\0\0\x01\0\0\0\x02")
+                .expect("key data");
+            peer.write_all(b"Z\0\0\0\x05I").expect("ready");
+            peer.flush().expect("flush startup");
+            let mut queries = 0usize;
+            let mut buf = [0u8; 4096];
+            loop {
+                match peer.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => queries += buf[..n].iter().filter(|b| **b == b'Q').count(),
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(queries);
+        });
+        (address, rx)
+    }
+
+    /// A second query must reach the wire before the first is answered.
+    ///
+    /// MEASURED 2026-08-24 with a peer that withholds every response and
+    /// counts the Query messages that arrive anyway: the multiplexed loop
+    /// sends BOTH, the serialized loop sends ONE and waits. That is IO-3, and
+    /// because TLS cannot split its stream it always runs the serialized
+    /// loop, so IO-3 is live on every TLS connection - see task #49.
+    ///
+    /// This asserts only the transport that works. Asserting the serialized
+    /// count would write the defect into the suite as expected behaviour;
+    /// when #49 lands, extend this to require both.
+    #[compio::test]
+    async fn a_second_query_reaches_the_wire_before_the_first_is_answered() {
+        let config: Config = "user=test dbname=test sslmode=disable"
+            .parse()
+            .expect("config");
+
+        let (address, rx) = pipelining_peer();
+        let tcp = compio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        let (client, connection) = connect_raw(
+            Socket::new_tcp(tcp),
+            NoTls,
+            Encryption::Plaintext,
+            true,
+            &config,
+            None,
+        )
+        .await
+        .expect("connect_raw multiplexed");
+        let driver = compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        });
+        let _ = compio::time::timeout(
+            Duration::from_millis(400),
+            futures_util::future::join(client.simple_query(""), client.simple_query("")),
+        )
+        .await;
+        drop(client);
+        let _ = compio::time::timeout(Duration::from_millis(400), driver).await;
+        let multiplexed = rx
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap_or(usize::MAX);
+
+        assert_eq!(
+            multiplexed, 2,
+            "the multiplexed loop must put both queries on the wire before the \
+             first is answered; got {multiplexed}"
+        );
+    }
+
     fn serialized_deadline_peer(
         answer_query: bool,
     ) -> (
