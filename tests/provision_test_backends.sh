@@ -35,8 +35,10 @@
 # THE DEFAULTS LINE UP ON PURPOSE. The addresses above are exactly what
 # `PG_TEST_URL` and `REDIS_TEST_URL` fall back to when unset, so a developer who
 # runs this script needs to export nothing at all. If you change a port here,
-# change the two defaults in libs/compio-postgres/tests/integration.rs and
-# libs/compio-redis/tests/common/mod.rs in the same commit.
+# change the two defaults in libs/compio-postgres/tests/common/mod.rs and
+# libs/compio-redis/tests/common/mod.rs in the same commit. (The compio-postgres
+# default moved out of integration.rs when it had drifted into 42 test files;
+# every target now calls `common::test_url()`.)
 #
 # USAGE
 # -----

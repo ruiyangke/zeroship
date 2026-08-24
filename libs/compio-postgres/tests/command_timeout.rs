@@ -14,8 +14,7 @@ mod common;
 const OUTER_WATCHDOG: Duration = Duration::from_secs(5);
 
 fn test_url() -> String {
-    let url = common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string());
+    let url = common::test_url();
     let separator = if url.contains('?') { '&' } else { '?' };
     format!("{url}{separator}sslmode=disable")
 }

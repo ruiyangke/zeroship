@@ -13,8 +13,7 @@ const CALLERS: usize = 8;
 const LONG_WINDOW: Duration = Duration::from_secs(6 * 60 * 60);
 
 fn test_url() -> String {
-    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::test_url()
 }
 
 fn config(max_size: usize, min_idle: usize) -> PoolConfig {

@@ -8,8 +8,7 @@ const QUERY_START_TIMEOUT: Duration = Duration::from_secs(5);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn test_url() -> String {
-    common::env::get(common::env::TestEnvKey::PgTestUrl)
-        .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
+    common::test_url()
 }
 
 async fn connect() -> Client {
