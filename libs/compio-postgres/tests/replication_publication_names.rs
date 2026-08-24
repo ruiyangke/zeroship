@@ -177,6 +177,7 @@ async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMess
             start_lsn: "0/0",
             proto_version: 1,
             publication_names: &[publication],
+            ..Default::default()
         })
         .await
         .map_err(|error| format!("START_REPLICATION failed: {}", common::error_chain(&error)))?;

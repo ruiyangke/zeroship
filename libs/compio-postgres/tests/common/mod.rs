@@ -217,6 +217,49 @@ pub fn test_url() -> String {
         .unwrap_or_else(|| "postgres://postgres:zeroship@localhost:5440/zeroship".to_string())
 }
 
+/// A `Config` for a replication connection to the test server.
+///
+/// Carries the test DSN's credentials, host and port, and nothing else - a
+/// replication connection cannot be opened by parsing the DSN alone, because
+/// `connect_replication` needs a `Config` rather than a URL.
+///
+/// Here for the same reason [`test_url`] is: three test binaries had grown
+/// their own copy, and a fourth was about to.
+pub fn replication_config(application_name: &str) -> compio_postgres::Config {
+    use compio_postgres::Config;
+    use compio_postgres::config::Host;
+
+    let url = test_url();
+    let parsed: Config = url.parse().expect("test DSN did not parse");
+    let mut config = Config::new();
+    if let Some(user) = parsed.get_user() {
+        config.user(user);
+    }
+    if let Some(password) = parsed.get_password() {
+        config.password(password);
+    }
+    if let Some(dbname) = parsed.get_dbname() {
+        config.dbname(dbname);
+    }
+    for host in parsed.get_hosts() {
+        match host {
+            Host::Tcp(name) => {
+                config.host(name.clone());
+            }
+            #[cfg(unix)]
+            Host::Unix(path) => panic!(
+                "the replication tests need a TCP endpoint, got the socket {}",
+                path.display()
+            ),
+        }
+    }
+    for port in parsed.get_ports() {
+        config.port(*port);
+    }
+    config.application_name(application_name);
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MAX_POSTGRES_IDENTIFIER_LEN, redact_dsn, test_object_name};
