@@ -231,7 +231,13 @@ pub async fn prepare(
     )?;
 
     let (parameters, columns) = read_prepare_response(client, &mut responses).await?;
-    Ok(Statement::new(client, guard.disarm(), parameters, columns))
+    Ok(Statement::new(
+        client,
+        guard.disarm(),
+        parameters,
+        columns,
+        crate::simple_query::may_enter_copy_in(query),
+    ))
 }
 
 /// Describe one execution without allocating a session-lived server name.
@@ -245,7 +251,11 @@ async fn prepare_unnamed(
     let buf = encode(client, "", query, types)?;
     let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
     let (parameters, columns) = read_prepare_response(client, &mut responses).await?;
-    Ok(Statement::unnamed(parameters, columns))
+    Ok(Statement::unnamed_with_copy_in(
+        parameters,
+        columns,
+        crate::simple_query::may_enter_copy_in(query),
+    ))
 }
 
 async fn read_prepare_response(

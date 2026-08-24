@@ -148,6 +148,81 @@ async fn query_of_copy_from_stdin_leaves_the_session_usable() {
     .expect("extended query COPY resync test exceeded its watchdog");
 }
 
+/// Dropping the row stream after `BindComplete` must not suppress the abort.
+/// PostgreSQL may put `BindComplete` and `CopyInResponse` in the same decoder
+/// batch, so this also covers the case where the response channel accepted the
+/// COPY frame but the consumer never pulled it out of its local batch.
+#[compio::test]
+async fn dropping_copy_from_stdin_row_stream_keeps_the_session_usable() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let client = connect_client(&url).await;
+        let table = probe_table(&client, "dropped_query").await;
+        let statement = client
+            .prepare(&format!("COPY {table} FROM STDIN"))
+            .await
+            .expect("prepare COPY FROM STDIN");
+
+        let stream = client
+            .query_raw(&statement, std::iter::empty::<&i32>())
+            .await
+            .expect("start producerless COPY query");
+        drop(stream);
+
+        let value: i32 = client
+            .query_one_scalar("SELECT 46::int4", &[])
+            .await
+            .expect("dropping the COPY row stream stranded its response slot");
+        assert_eq!(value, 46);
+        assert_eq!(
+            client.transaction_status(),
+            Some(compio_postgres::TransactionStatus::Idle),
+            "the dropped COPY left an in-flight response behind"
+        );
+    })
+    .await
+    .expect("dropped extended COPY response exceeded its watchdog");
+}
+
+/// CONTROL FOR TERMINATOR ACCOUNTING. The abort is armed before execution,
+/// but a startup error means PostgreSQL never entered COPY mode. The initial
+/// batch's `ReadyForQuery` must retire the only slot and suppress `CopyFail +
+/// Sync`; emitting it would leave an extra response for the barrier below.
+#[compio::test]
+async fn rejected_copy_startup_suppresses_the_prearmed_abort() {
+    compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let client = connect_client(&url).await;
+        let table = probe_table(&client, "startup_rejected").await;
+        let statement = client
+            .prepare(&format!("COPY {table} FROM STDIN"))
+            .await
+            .expect("prepare COPY before dropping its table");
+        client
+            .batch_execute(&format!("DROP TABLE {table}"))
+            .await
+            .expect("drop the COPY target");
+
+        client
+            .execute(&statement, &[])
+            .await
+            .expect_err("COPY startup unexpectedly survived its missing table");
+
+        let value: i32 = client
+            .query_one_scalar("SELECT 47::int4", &[])
+            .await
+            .expect("the rejected COPY emitted an unowned abort response");
+        assert_eq!(value, 47);
+        assert_eq!(
+            client.transaction_status(),
+            Some(compio_postgres::TransactionStatus::Idle),
+            "the rejected COPY left an in-flight response behind"
+        );
+    })
+    .await
+    .expect("rejected extended COPY startup exceeded its watchdog");
+}
+
 /// Inside a transaction the abandoned COPY must leave a session the
 /// transaction's own rollback can still reach.
 #[compio::test]

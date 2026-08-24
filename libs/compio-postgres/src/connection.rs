@@ -39,9 +39,11 @@
 //   plus a write flush. Each request/COPY flush is interleaved with
 //   read-channel draining (`flush_with_read_draining`) so reads and writes
 //   make progress in the same poll, mirroring upstream tokio-postgres: the
-//   owned flush future is awaited to completion (never dropped) while inbound
-//   frames are dispatched, so a large bidirectional exchange cannot wedge the
-//   cap-1 channel (MUX-DEADLOCK-1). COPY-IN no longer deadlocks (COPY-1/IO-1),
+//   owned flush future is awaited to completion while the session is live and
+//   inbound frames are dispatched, so a large bidirectional exchange cannot
+//   wedge the cap-1 channel (MUX-DEADLOCK-1). A terminal read retires the
+//   session and cancels any now-useless write. COPY-IN no longer deadlocks
+//   (COPY-1/IO-1),
 //   idle listeners receive notifications (IO-2), and later requests are
 //   written without waiting for earlier responses (IO-3). See
 //   `run_multiplexed` for the full FIFO / back-pressure argument.
@@ -1306,8 +1308,8 @@ enum MuxEvent {
     CopyFrame(Option<FrontendMessage>),
 }
 
-/// Flush `write_half` to completion while concurrently draining the read
-/// channel — the cancel-safe interleave that keeps the multiplexed loop's
+/// Drive `write_half`'s flush while concurrently draining the read channel —
+/// the cancel-safe interleave that keeps the multiplexed loop's
 /// "reads and writes proceed in the same poll" property even across a large
 /// write (MUX-DEADLOCK-1).
 ///
@@ -1321,11 +1323,11 @@ enum MuxEvent {
 /// `Dispatch` / `handle_message` / `pending_responses` machinery the main
 /// loop uses) until the flush resolves.
 ///
-/// Cancel-safety: the owned `flush` future is polled to completion and is
-/// NEVER dropped mid-submission — the never-drop invariant holds (it borrows
-/// only `write_half`; the read-draining touches only the disjoint response
-/// state, so there is no borrow conflict and no `read_backend` future is
-/// raced here either).
+/// Cancel-safety: while the session is live, the owned `flush` future is polled
+/// to completion (it borrows only `write_half`; the read-draining touches only
+/// disjoint response state). A terminal read is the sole exception: the
+/// protocol session cannot be reused, so dropping a pending write loses no
+/// usable bytes. No `read_backend` future is raced here either.
 ///
 /// FIFO is preserved: a stashed batch is delivered before any further inbound
 /// frame is dispatched (the read branch is gated on `pending_responses`
@@ -1333,16 +1335,15 @@ enum MuxEvent {
 /// concurrently so the socket keeps draining even when a consumer is briefly
 /// behind.
 ///
-/// Returns once the flush resolves. If a terminal read event (`Err` /
-/// channel-closed) arrived from the read task during the flush, it is
-/// returned as the second tuple element for the caller to act on with the
-/// same logic as the main loop's `Read` arms; further read polling stops
-/// after the first terminal event (but the flush is still driven to
-/// completion, and any already-stashed batches keep draining). A read timeout
-/// is different: the session is already irrecoverable, so the helper returns
-/// immediately and deliberately drops a pending write rather than letting it
-/// keep `Connection::run` alive forever on a raw stream without a shutdown
-/// handle.
+/// Returns once the flush resolves or the read side reports a terminal event.
+/// A terminal read (`Err`, channel close, dispatch failure, or read timeout)
+/// makes the protocol session irrecoverable, so the helper returns it as the
+/// second tuple element and deliberately drops any pending write. Waiting for
+/// that write after the peer has stopped producing responses can otherwise
+/// keep `Connection::run` and every registered response sender alive forever;
+/// `Config::connect_raw` has no descriptor release handle with which to wake
+/// it. Losing partially written bytes is harmless once the session is already
+/// retired, just as it is on the read-timeout path.
 #[allow(clippy::type_complexity)]
 async fn flush_with_read_draining<W>(
     write_half: &mut BufWriteHalf<W>,
@@ -1359,14 +1360,14 @@ where
     W: AsyncWrite + Unpin,
 {
     // The cancel-unsafe primitive is the socket read in the detached read
-    // task; here we only own the WRITE flush plus channel ops, all of which
-    // are safe to poll repeatedly. The flush is the only future we hold
-    // across polls and we never drop it before it resolves.
+    // task; here we only own the WRITE flush plus channel ops. The flush is
+    // the only future we hold across polls, and we retain it until it resolves
+    // unless a terminal read has already made the session unreusable.
     let flush = write_half.flush();
     futures_util::pin_mut!(flush);
 
-    // At most one terminal read event (Err / closed) is recorded; once seen
-    // we stop polling the read channel but keep driving the flush.
+    // At most one terminal read event (Err / closed) is recorded. Once seen,
+    // we stop polling both the read channel and the now-useless flush.
     let mut read_terminal: Option<Option<Error>> = None;
 
     let flush_result = poll_fn(|cx| -> Poll<Result<(), Error>> {
@@ -1382,14 +1383,13 @@ where
         if read_terminal.as_ref().is_some_and(|terminal| {
             terminal.as_ref().is_some_and(Error::is_read_timeout)
         }) {
-            // This is the one safe write-cancellation point: the timed-out
-            // read may already have consumed half a frame, so this connection
-            // cannot be reused regardless of how much of the write completed.
+            // The out-of-band timeout has retired this session. No amount of
+            // write progress can make it reusable or produce the missing
+            // response.
             return Poll::Ready(Ok(()));
         }
 
-        // (2) Drive the flush; finishing it is required for cancel safety even
-        // after the read side has retired the physical socket.
+        // (2) Drive the flush to completion while the session is live.
         if let Poll::Ready(res) = flush.as_mut().poll(cx) {
             return Poll::Ready(res);
         }
@@ -1398,6 +1398,15 @@ where
         // delivered batch immediately frees the FIFO gate for the next read
         // within this single wake.
         loop {
+            // A normal terminal event travels through `read_rx`, so it is first
+            // recorded inside step (4) below rather than by the out-of-band
+            // check above. Observe it on the next trip around this inner loop;
+            // returning Pending here would strand the parked flush because the
+            // terminal event has already consumed its only wakeup.
+            if read_terminal.is_some() {
+                return Poll::Ready(Ok(()));
+            }
+
             // (3) Deliver a stashed batch whose sender now has room. Honour
             // the FIFO gate: while a batch is stashed, no new inbound frame
             // may be dispatched ahead of it.
@@ -1444,8 +1453,8 @@ where
                             let _ = acknowledgement.send(());
                         }
                         if let Err(e) = result {
-                            // A dispatch error is terminal; surface it after
-                            // the flush completes (do not drop the flush).
+                            // A dispatch error retires the session, so the next
+                            // trip around the loop abandons this useless flush.
                             read_terminal = Some(Some(e));
                         }
                         continue;
@@ -1497,6 +1506,15 @@ where
     /// selected transport is plaintext). TLS streams, including pooled
     /// connections that negotiate TLS, cannot be split, so they fall back to
     /// the [serialized loop](Self::run_serialized).
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping this future retires the protocol session. Every registered
+    /// response sender is dropped and socket teardown is initiated, so
+    /// outstanding client operations fail rather than remaining parked, but
+    /// this connection cannot be resumed or reused. An in-flight
+    /// completion-based read or write may already have transferred a partial
+    /// `PostgreSQL` frame.
     pub async fn run(mut self) -> Result<(), Error> {
         // The field covers a Connection discarded before `run`; this local
         // spans every poll so cancellation and unwinding release it too.
@@ -1596,11 +1614,13 @@ where
     /// * The **main loop** owns `write_half` and the request/response
     ///   bookkeeping. It only ever `select`s over **channels** (the read
     ///   channel, the request receiver, the COPY receiver, a sender's
-    ///   `poll_ready`) and drives the write **flush** to completion. Channel
-    ///   ops are cancel-safe, and each request/COPY flush runs through
+    ///   `poll_ready`) and drives the write **flush** to completion while the
+    ///   session remains live. Channel ops are cancel-safe, and each
+    ///   request/COPY flush runs through
     ///   [`flush_with_read_draining`], which carries the owned flush future to
-    ///   completion (never dropping it) while concurrently draining inbound
-    ///   frames — so the cancel-unsafe read is never raced here either.
+    ///   completion while the session is live and concurrently drains inbound
+    ///   frames. A terminal read drops that write because the connection is
+    ///   already unreusable; the cancel-unsafe read is never raced here either.
     ///
     /// Because the read channel is drained concurrently with the flush (both
     /// by the dedicated read task AND by the in-flush draining), the main loop
@@ -1963,9 +1983,9 @@ where
                         match messages {
                             RequestMessages::Single(msg) => {
                                 let write_result = write_frontend(&mut write_half, msg);
-                                // Flush to completion while concurrently draining
-                                // the read channel, then attribute a write failure
-                                // to the request that caused that flush.
+                                // Drive the flush while concurrently draining the
+                                // read channel, then attribute a write failure to
+                                // the request that caused that flush.
                                 let (write_result, mut terminal) = if write_result.is_ok() {
                                     flush_with_read_draining(
                                         &mut write_half,
@@ -2164,6 +2184,28 @@ mod tests {
     struct TimeoutSplitStream {
         read_half_started: Rc<Cell<bool>>,
         read_half_dropped: Rc<Cell<bool>>,
+    }
+
+    struct ReadFailureDuringWriteSplitStream {
+        write_started: Rc<Cell<bool>>,
+        write_future_dropped: Rc<Cell<bool>>,
+    }
+
+    struct ReadFailureAfterWriteStarts {
+        write_started: Rc<Cell<bool>>,
+    }
+
+    struct ParkedWriteHalf {
+        write_started: Rc<Cell<bool>>,
+        write_future_dropped: Rc<Cell<bool>>,
+    }
+
+    struct WriteFutureDrop(Rc<Cell<bool>>);
+
+    impl Drop for WriteFutureDrop {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
     }
 
     struct ParkedReadHalf {
@@ -2436,6 +2478,58 @@ mod tests {
         }
     }
 
+    impl AsyncRead for ReadFailureDuringWriteSplitStream {
+        async fn read<B: IoBufMut>(&mut self, _buf: B) -> BufResult<usize, B> {
+            unreachable!("the coordinated failure fixture must split before reading")
+        }
+    }
+
+    impl AsyncWrite for ReadFailureDuringWriteSplitStream {
+        async fn write<B: IoBuf>(&mut self, _buf: B) -> BufResult<usize, B> {
+            unreachable!("the coordinated failure fixture must split before writing")
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            unreachable!("the coordinated failure fixture must split before flushing")
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            unreachable!("the coordinated failure fixture must split before shutdown")
+        }
+    }
+
+    impl AsyncRead for ReadFailureAfterWriteStarts {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            while !self.write_started.get() {
+                yield_once().await;
+            }
+            BufResult(
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "scripted read failure during write",
+                )),
+                buf,
+            )
+        }
+    }
+
+    impl AsyncWrite for ParkedWriteHalf {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            self.write_started.set(true);
+            let _drop = WriteFutureDrop(Rc::clone(&self.write_future_dropped));
+            std::future::pending::<()>().await;
+            BufResult(Ok(buf.buf_len()), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl AsyncWrite for TimeoutSplitStream {
         async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
             let len = buf.buf_len();
@@ -2563,6 +2657,23 @@ mod tests {
                     dropped: self.read_half_dropped,
                 },
                 SuccessfulWriteHalf,
+            ))
+        }
+    }
+
+    impl SplitStream for ReadFailureDuringWriteSplitStream {
+        type ReadHalf = ReadFailureAfterWriteStarts;
+        type WriteHalf = ParkedWriteHalf;
+
+        fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
+            Ok((
+                ReadFailureAfterWriteStarts {
+                    write_started: Rc::clone(&self.write_started),
+                },
+                ParkedWriteHalf {
+                    write_started: self.write_started,
+                    write_future_dropped: self.write_future_dropped,
+                },
             ))
         }
     }
@@ -3108,6 +3219,76 @@ mod tests {
         })
         .await
         .expect("write-error teardown test exceeded its watchdog");
+    }
+
+    /// A terminal read makes the protocol session unreusable, so an in-flight
+    /// write can no longer be allowed to hold every registered response sender
+    /// alive. The two halves coordinate rather than race: the read half refuses
+    /// to fail until the write future has started and parked.
+    #[compio::test]
+    async fn read_error_during_write_fails_the_registered_response() {
+        compio::time::timeout(Duration::from_secs(5), async {
+            let write_started = Rc::new(Cell::new(false));
+            let write_future_dropped = Rc::new(Cell::new(false));
+            let stream = BufStream::new(ReadFailureDuringWriteSplitStream {
+                write_started: Rc::clone(&write_started),
+                write_future_dropped: Rc::clone(&write_future_dropped),
+            });
+            let (read_half, write_half) = match stream.try_into_split() {
+                Ok(halves) => halves,
+                Err(_) => panic!("the read-during-write fixture did not split"),
+            };
+            let (request_tx, request_rx) = mpsc::unbounded();
+            let (response_tx, mut response_rx) = mpsc::channel(1);
+            request_tx
+                .unbounded_send(Request {
+                    messages: RequestMessages::Single(FrontendMessage::Raw(
+                        bytes::Bytes::from_static(b"scripted request"),
+                    )),
+                    sender: response_tx,
+                    disposition: RequestDisposition::Awaited,
+                    transaction_effect: TransactionEffect::MayChange,
+                    prepare_cleanup: None,
+                    statement: None,
+                    observation: None,
+                })
+                .expect("queue the coordinated request");
+
+            let result = Connection::<
+                ReadFailureDuringWriteSplitStream,
+                ReadFailureDuringWriteSplitStream,
+            >::run_multiplexed(
+                read_half,
+                write_half,
+                Arc::default(),
+                request_rx,
+                None,
+                Arc::new(AtomicU8::new(b'I')),
+                Arc::new(AtomicUsize::new(1)),
+                None,
+                None,
+                crate::live::LiveConnectionGuard::new(),
+            )
+            .await;
+
+            let error = result.expect_err("the scripted terminal read was ignored");
+            assert_eq!(
+                error.as_io().map(std::io::Error::kind),
+                Some(std::io::ErrorKind::ConnectionReset)
+            );
+            assert!(write_started.get(), "the read failed before the write started");
+            assert!(
+                write_future_dropped.get(),
+                "the terminal read left the parked write alive"
+            );
+            assert!(
+                response_rx.next().await.is_none(),
+                "the terminal read left the registered response sender alive"
+            );
+            drop(request_tx);
+        })
+        .await
+        .expect("terminal read stayed trapped behind the in-flight write");
     }
 
     #[compio::test]
