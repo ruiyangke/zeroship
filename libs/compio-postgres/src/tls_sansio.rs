@@ -26,6 +26,28 @@
 //! Nothing here duplicates `futures-rustls`'s poll bridge
 //! (`AsyncStream` + `SyncStream`, 524 lines of self-referential pinned
 //! futures). The state machine is driven directly.
+//!
+//! # `close_notify` on teardown is BEST EFFORT, and that is not a bug here
+//!
+//! `TlsWriteHalf::shutdown` sends `close_notify`, and the multiplexed loop
+//! calls it after `Terminate`. It frequently does not arrive, for the reason
+//! `crate::release` documents about `Terminate` itself: dropping the `Client`
+//! shuts the socket down SYNCHRONOUSLY through a dup of the descriptor, so by
+//! the time the connection task next runs there is often nothing left to write
+//! through.
+//!
+//! What is new under TLS is that the SERVER now has something to say back. It
+//! answers a client close with its own `close_notify`, that write lands on a
+//! socket already shut down for reading, and the kernel replies RST - so
+//! PostgreSQL logs `could not receive data from client: Connection reset by
+//! peer`. MEASURED 2026-08-24: the same 16 tests logged 3 of those lines on the
+//! TLS server and none at all on the plaintext one.
+//!
+//! It is log noise, not data loss - this side is closing either way - but it
+//! looks exactly like a driver defect to anyone reading a server log, and it
+//! was nearly diagnosed as one. Making it orderly means sending `close_notify`
+//! BEFORE the synchronous release, which is a change to the release design and
+//! not to this file.
 
 use compio::buf::{BufResult, IoBuf, IoBufMut};
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
