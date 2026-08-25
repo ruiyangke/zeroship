@@ -29,44 +29,46 @@ pub(crate) fn quote_identifier(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-/// Render `value` as a complete SQL string literal, quotes included.
+/// Escape `value` for placement inside a single-quoted SQL string literal.
 ///
-/// Returns the WHOLE literal rather than a body the caller wraps, because
-/// which quoting is correct depends on the content: a value containing a
-/// backslash needs escape-string syntax, and a caller that supplied its own
-/// `'` could not know that.
+/// Returns the BODY, without the surrounding `'`, because the callers embed
+/// it in a larger literal they are already building.
 ///
-/// # Why this does not just double the quote
+/// Doubling `'` is sufficient for a standard-conforming literal, which is
+/// what PostgreSQL parses when `standard_conforming_strings` is `on` - the
+/// default since 9.1, and a value this driver never turns off. With it
+/// `off`, a backslash would also escape, and `\'` would slip a quote past
+/// this function; that is why `E''`-style literals are never generated here.
 ///
-/// Doubling `'` is sufficient only while `standard_conforming_strings` is
-/// `on`. That has been the default since 9.1 and this driver never turns it
-/// off - but the driver does not OWN the setting. A session can `SET` it, and
-/// the server accepts that; a DSN can carry
-/// `options=-c standard_conforming_strings=off`; an operator can change the
-/// default. Relying on it made correctness depend on ambient state nothing
-/// here checks.
+/// # Do not "fix" this to emit `E'...'`
 ///
-/// MEASURED against PostgreSQL 16.14 with the setting `off`, using the old
-/// body-only form:
+/// It looks unsafe next to `quote_literal()` on the server, which renders
+/// `back\slash` as `E'back\\slash'` so the result holds under either setting.
+/// Copying that here BREAKS REPLICATION, measured on PostgreSQL 16.14:
 ///
 /// ```text
-/// 'back\slash'      -> backslash        (the \s was eaten as an escape)
-/// 'quote\'injected' -> syntax error     (the \' closed the literal early)
+/// START_REPLICATION ... ("publication_names" E'..."back\slash"...')
+///   -> ERROR: syntax error (SQLSTATE 42601)
 /// ```
 ///
-/// The second is the injection this module exists to prevent. So the rule is
-/// now PostgreSQL's own, taken from what `quote_literal()` emits: plain
-/// `'...'` when there is no backslash, and `E'...'` with both `'` and `\`
-/// doubled when there is. `E''` syntax means the same thing under either
-/// setting.
-pub(crate) fn quote_literal(value: &str) -> String {
-    if value.contains('\\') {
-        // `E'...'`: backslash escapes are ACTIVE here by definition, so the
-        // backslashes themselves have to be doubled as well as the quotes.
-        format!("E'{}'", value.replace('\\', r"\\").replace('\'', "''"))
-    } else {
-        format!("'{}'", value.replace('\'', "''"))
-    }
+/// The only caller is `START_REPLICATION`, and a walsender does not parse its
+/// commands with the SQL parser. That grammar takes `'...'` with `''`
+/// doubling and nothing else - no `E'...'`, and no backslash escapes to
+/// defend against. A backslash inside a publication name reaches pgoutput
+/// intact through the plain form, which
+/// `tests/replication_publication_names.rs` now pins.
+///
+/// Verifying the escape by evaluating it with `SELECT` is what makes this
+/// mistake attractive: `SELECT E'...'` works perfectly and exercises a
+/// different parser from the one the value is actually going to.
+///
+/// NOT ESTABLISHED: whether the walsender grammar consults
+/// `standard_conforming_strings` at all. A replication connection does accept
+/// `SET standard_conforming_strings = off`, and this driver never issues it;
+/// if a caller ever does, the question becomes live and wants measuring
+/// rather than assuming.
+pub(crate) fn escape_literal_body(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 #[cfg(test)]
@@ -90,36 +92,14 @@ mod tests {
 
     #[test]
     fn a_quote_inside_a_literal_is_doubled_not_dropped() {
-        assert_eq!(quote_literal("it's"), "'it''s'");
+        assert_eq!(escape_literal_body("it's"), "it''s");
     }
 
-    /// A value with no backslash needs no escape-string syntax, and gets the
-    /// plain form - which is what `quote_literal()` on the server produces
-    /// too, measured.
     #[test]
-    fn a_literal_without_a_backslash_stays_plain() {
-        assert_eq!(quote_literal("plain"), "'plain'");
-        assert_eq!(quote_literal(""), "''");
-    }
-
-    /// THE ONE THAT WAS WRONG. A backslash must not depend on
-    /// `standard_conforming_strings`.
-    ///
-    /// MEASURED against PostgreSQL 16.14: `SELECT quote_literal('back\slash')`
-    /// returns `E'back\\slash'`, and with `standard_conforming_strings = off`
-    /// the old plain form `'back\slash'` came back as `backslash` - the `\s`
-    /// eaten as an escape. Worse, `\'` inside a plain literal terminated it
-    /// early, which is the injection this module exists to prevent.
-    #[test]
-    fn a_backslash_forces_escape_string_syntax() {
-        assert_eq!(quote_literal(r"a\b"), r"E'a\\b'");
-        assert_eq!(quote_literal(r"back\slash"), r"E'back\\slash'");
-    }
-
-    /// Both escapes at once, which is the shape an attacker would reach for:
-    /// under the old form `\'` closed the literal.
-    #[test]
-    fn a_backslash_and_a_quote_are_both_escaped() {
-        assert_eq!(quote_literal(r"quote\'injected"), r"E'quote\\''injected'");
+    fn a_backslash_in_a_literal_is_left_alone() {
+        // Under `standard_conforming_strings = on` a backslash is an ordinary
+        // character. Doubling it here would corrupt the value instead of
+        // protecting it.
+        assert_eq!(escape_literal_body(r"a\b"), r"a\b");
     }
 }

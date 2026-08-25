@@ -250,3 +250,36 @@ async fn an_ordinary_publication_name_still_streams_its_changes() {
         Err(error) => panic!("an ordinary publication name must stream its changes: {error}"),
     }
 }
+
+/// A backslash in the name is what drives `quote_literal` onto its `E'...'`
+/// branch, so this is the only case in the suite that puts an escape-string
+/// literal in front of a real walsender.
+///
+/// That branch exists because doubling the quote alone is correct only while
+/// `standard_conforming_strings` is on, which the driver does not own.
+/// Switching to `E'...'` fixed that - and introduced a new way to be wrong:
+/// if `START_REPLICATION`'s option parser did not accept escape-string
+/// syntax, replication would break outright for every caller. Nothing else
+/// here would notice, because every other name in this file takes the plain
+/// branch.
+///
+/// A publication may legally be named with a backslash:
+/// `CREATE PUBLICATION "back\slash"` succeeds.
+#[compio::test]
+async fn a_publication_name_containing_a_backslash_still_streams_its_changes() {
+    let publication = format!("{}_back\\slash", common::test_object_name("cpg bs pub"));
+    let outcome = compio::time::timeout(WATCHDOG, stream_one_insert("cpg bs pub", &publication))
+        .await
+        .expect("the backslash-named publication exchange exceeded its watchdog");
+
+    match outcome {
+        Ok(PgOutputMessage::Insert { .. }) => {}
+        Ok(other) => panic!("expected an Insert, got {other:?}"),
+        Err(error) => panic!(
+            "a publication whose name legally contains a backslash must reach \
+             pgoutput whole. If this says syntax error, the walsender does not \
+             accept the E'...' literal `quote_literal` now emits, and every \
+             replication caller is affected, not just this name: {error}"
+        ),
+    }
+}
