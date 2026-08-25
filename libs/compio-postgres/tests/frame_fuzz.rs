@@ -41,8 +41,8 @@
 //! be about, and a test demanding one would be measuring which side of the
 //! channel won a race.
 
+use compio_postgres::Config;
 use compio_postgres::config::SslMode;
-use compio_postgres::{Config, NoTls};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
@@ -69,7 +69,11 @@ struct Rng(u64);
 impl Rng {
     fn new(seed: u64) -> Self {
         // A zero state is a fixed point for xorshift, so never allow one.
-        Self(if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed })
+        Self(if seed == 0 {
+            0x9e37_79b9_7f4a_7c15
+        } else {
+            seed
+        })
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -419,11 +423,14 @@ async fn drive_one_handshake(seed: u64, response: Vec<u8>) {
     // A connection that SUCCEEDS is a legitimate outcome: some generated
     // sequences are a valid trust handshake. Both arms are acceptable; only a
     // hang or a panic is not.
-    let outcome = compio::time::timeout(OPERATION_WATCHDOG, stub_config(server.addr).connect(common::suite_tls()))
-        .await
-        .unwrap_or_else(|_| {
-            panic!("seed {seed:#x}: connect hung on a generated handshake instead of returning")
-        });
+    let outcome = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        stub_config(server.addr).connect(common::suite_tls()),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!("seed {seed:#x}: connect hung on a generated handshake instead of returning")
+    });
 
     if let Ok((client, connection)) = outcome {
         let driver = compio::runtime::spawn(async move { connection.run().await });

@@ -40,8 +40,8 @@
 //! orphaned slot forever. Recovery now uses the connection-owned COPY producer
 //! and its simple-protocol terminal is CopyFail alone.
 
+use compio_postgres::Client;
 use compio_postgres::error::SqlState;
-use compio_postgres::{Client, NoTls};
 use std::time::Duration;
 
 #[allow(dead_code)]

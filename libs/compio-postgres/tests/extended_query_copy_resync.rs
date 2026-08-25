@@ -24,8 +24,8 @@
 //! EVERY TEST HERE IS UNDER A WATCHDOG: the regression is a HANG as often as an
 //! error, because it is response-slot accounting that goes wrong.
 
+use compio_postgres::Client;
 use compio_postgres::error::SqlState;
-use compio_postgres::{Client, NoTls};
 use std::time::Duration;
 
 #[allow(dead_code)]

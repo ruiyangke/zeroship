@@ -15,7 +15,7 @@
 //! -0.0` is true, so an `==` assertion cannot see a lost sign bit at all. Bit
 //! equality is the only comparison that can fail for the right reason here.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 
 mod common;
 

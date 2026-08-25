@@ -22,7 +22,7 @@
 //! last `ParameterStatus` of the startup batch would pass (1) and (3); that
 //! mutation was run, and it leaves ten of the eleven names missing.
 
-use compio_postgres::{Client, Error, NoTls};
+use compio_postgres::{Client, Error};
 
 #[allow(dead_code)]
 mod common;

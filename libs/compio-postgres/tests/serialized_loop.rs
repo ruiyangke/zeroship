@@ -21,7 +21,7 @@
 //! serialized loop: they must keep passing when TLS and plaintext share one.
 
 use compio_postgres::test_utils::connect_serialized;
-use compio_postgres::{Client, Config, NoTls};
+use compio_postgres::{Client, Config};
 
 #[allow(dead_code)]
 mod common;

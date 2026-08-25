@@ -2,7 +2,7 @@
 
 use compio_postgres::types::{ToSql, Type};
 use compio_postgres::{
-    Client, Error, GenericClient, NoTls, Row, SimpleQueryMessage, Transaction,
+    Client, Error, GenericClient, Row, SimpleQueryMessage, Transaction,
 };
 use futures_util::TryStreamExt;
 use std::time::Duration;

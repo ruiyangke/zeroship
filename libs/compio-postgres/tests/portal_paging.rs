@@ -1,6 +1,6 @@
 //! Boundary coverage for PostgreSQL extended-protocol portal paging.
 
-use compio_postgres::{Client, Error, NoTls, Portal, Transaction};
+use compio_postgres::{Client, Error, Portal, Transaction};
 use futures_util::TryStreamExt;
 
 #[allow(dead_code)]

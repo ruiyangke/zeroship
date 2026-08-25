@@ -18,7 +18,7 @@
 //! what is NOT excluded is the zero mapping, a wrong `atttypmod`, or a column
 //! resolved against the wrong relation.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 
 #[allow(dead_code)]
 mod common;

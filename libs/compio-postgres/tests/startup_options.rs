@@ -19,7 +19,7 @@
 //! pg_catalog
 //! ```
 
-use compio_postgres::{Client, Config, NoTls};
+use compio_postgres::{Client, Config};
 use std::str::FromStr;
 use std::time::Duration;
 

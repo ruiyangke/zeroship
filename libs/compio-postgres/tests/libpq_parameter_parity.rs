@@ -110,7 +110,9 @@ fn every_libpq_parameter_is_implemented_or_refused_by_name() {
                  tell which option is wrong ({error})"
             )),
             (Accepted, Err(error)) => {
-                wrong.push(format!("{key}: expected to be implemented, refused ({error})"));
+                wrong.push(format!(
+                    "{key}: expected to be implemented, refused ({error})"
+                ));
             }
             (Refused, Ok(_)) => wrong.push(format!(
                 "{key}: accepted but unimplemented, so it is silently ignored"
@@ -118,7 +120,11 @@ fn every_libpq_parameter_is_implemented_or_refused_by_name() {
         }
     }
 
-    assert!(wrong.is_empty(), "libpq parameter parity:\n  {}", wrong.join("\n  "));
+    assert!(
+        wrong.is_empty(),
+        "libpq parameter parity:\n  {}",
+        wrong.join("\n  ")
+    );
 }
 
 /// `host` and `hostaddr` are positional in a URL and covered above only as
@@ -262,10 +268,16 @@ fn a_repeated_key_replaces_rather_than_appending() {
 
     // The one-variable partner: a comma is still a list, in both drivers.
     let listed = "host=a,b user=u".parse::<Config>().expect("comma form");
-    assert_eq!(listed.get_hosts().len(), 2, "the comma form must stay multi-host");
+    assert_eq!(
+        listed.get_hosts().len(),
+        2,
+        "the comma form must stay multi-host"
+    );
 
     // And a repeated key after a comma list replaces the whole list.
-    let overridden = "host=a,b host=c user=u".parse::<Config>().expect("override");
+    let overridden = "host=a,b host=c user=u"
+        .parse::<Config>()
+        .expect("override");
     assert_eq!(
         overridden.get_hosts().len(),
         1,
@@ -318,10 +330,16 @@ fn the_value_lexer_matches_libpq() {
                     wrong.push(format!("{dsn}: libpq reads {expected:?}, we read {ours:?}"));
                 }
             }
-            Err(error) => wrong.push(format!("{dsn}: libpq reads {expected:?}, we refuse ({error})")),
+            Err(error) => wrong.push(format!(
+                "{dsn}: libpq reads {expected:?}, we refuse ({error})"
+            )),
         }
     }
-    assert!(wrong.is_empty(), "value lexing diverges from libpq:\n  {}", wrong.join("\n  "));
+    assert!(
+        wrong.is_empty(),
+        "value lexing diverges from libpq:\n  {}",
+        wrong.join("\n  ")
+    );
 
     // The known divergence, pinned so it cannot change unnoticed in either
     // direction. libpq yields the empty string for both of these.
@@ -358,7 +376,9 @@ fn a_url_authority_keeps_a_port_per_host() {
     assert_eq!(listed.get_hosts().len(), 2);
 
     // Default port per host, mixed with an explicit one.
-    let mixed = "postgres://a,b:2/db".parse::<Config>().expect("mixed ports");
+    let mixed = "postgres://a,b:2/db"
+        .parse::<Config>()
+        .expect("mixed ports");
     assert_eq!(mixed.get_ports(), [5432, 2]);
 
     // The query string overrides the whole list, as libpq does: it is parsed
@@ -421,8 +441,6 @@ fn a_url_authority_appends_every_host() {
 /// being incidental.
 #[compio::test]
 async fn url_shapes_parse_like_libpq_and_an_empty_host_is_refused_at_connect() {
-    use compio_postgres::NoTls;
-
     // Accepted by libpq; must parse here.
     for url in [
         "postgresql://postgres@127.0.0.1:5432/postgres",

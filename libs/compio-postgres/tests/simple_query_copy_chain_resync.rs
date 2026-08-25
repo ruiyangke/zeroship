@@ -12,7 +12,7 @@
 //! fix and must remain safe when the recovery code is mutation-removed.
 
 use compio_postgres::error::SqlState;
-use compio_postgres::{Client, NoTls, SimpleQueryMessage, SimpleQueryStream};
+use compio_postgres::{Client, SimpleQueryMessage, SimpleQueryStream};
 use futures_util::TryStreamExt;
 use std::time::Duration;
 

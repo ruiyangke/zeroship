@@ -22,7 +22,7 @@
 //! Lives in its own target rather than in `integration.rs` so it is legible on
 //! its own and does not depend on that file's fixtures.
 
-use compio_postgres::{AsyncMessage, Client, Error, NoTls};
+use compio_postgres::{AsyncMessage, Client, Error};
 use futures_util::StreamExt;
 use std::time::Duration;
 

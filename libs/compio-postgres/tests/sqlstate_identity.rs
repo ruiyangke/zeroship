@@ -15,8 +15,8 @@
 //! This also covers the plumbing: `Error::as_db_error` has to actually find the
 //! `DbError` in the source chain for any of it to be readable.
 
+use compio_postgres::Client;
 use compio_postgres::error::SqlState;
-use compio_postgres::{Client, NoTls};
 
 #[allow(dead_code)]
 mod common;

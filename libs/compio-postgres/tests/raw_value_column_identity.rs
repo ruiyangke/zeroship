@@ -17,7 +17,7 @@
 //! and a fixture cannot be wrong about a wire format in the same direction the
 //! driver is.
 
-use compio_postgres::{Client, Error, NoTls};
+use compio_postgres::{Client, Error};
 use std::time::Duration;
 
 #[allow(dead_code)]

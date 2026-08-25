@@ -8,7 +8,7 @@
 //! bytes, or a blocked socket write.
 
 use compio_postgres::config::SslMode;
-use compio_postgres::{AsyncMessage, Config, NoTls, Pool, PoolConfig};
+use compio_postgres::{AsyncMessage, Config, Pool, PoolConfig};
 use futures_util::{StreamExt, TryStreamExt};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

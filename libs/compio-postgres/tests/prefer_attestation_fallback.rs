@@ -30,8 +30,6 @@
 //! these DSNs fell back, which is why it reads as a regression rather than a
 //! tightening.
 
-use compio_postgres::NoTls;
-
 #[allow(dead_code)]
 mod common;
 
@@ -54,11 +52,13 @@ async fn prefer_with_a_root_cert_falls_back_when_the_connector_cannot_attest() {
         "sslmode=prefer&sslrootcert=/etc/ssl/certs/ca-certificates.crt",
     );
 
-    let (client, connection) = compio_postgres::connect(&dsn, common::suite_tls()).await.expect(
-        "sslmode=prefer must fall back to plaintext when the connector cannot attest to the \
+    let (client, connection) = compio_postgres::connect(&dsn, common::suite_tls())
+        .await
+        .expect(
+            "sslmode=prefer must fall back to plaintext when the connector cannot attest to the \
          verification sslrootcert asks for; refusing here breaks a DSN that connected before the \
          attestation gate existed",
-    );
+        );
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })

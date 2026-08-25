@@ -1,5 +1,5 @@
+use compio_postgres::Client;
 use compio_postgres::types::Type;
-use compio_postgres::{Client, NoTls};
 use std::time::Duration;
 
 mod common;
@@ -50,11 +50,8 @@ async fn text_params_resolves_custom_types_without_response_backpressure_deadloc
     let query = "\
         SELECT 'value'::pg_temp.cpg_query_text_enum, repeat('x', 16384) \
         FROM generate_series(1, 2048)";
-    let result = compio::time::timeout(
-        QUERY_START_TIMEOUT,
-        client.query_text_params(query, &[]),
-    )
-    .await;
+    let result =
+        compio::time::timeout(QUERY_START_TIMEOUT, client.query_text_params(query, &[])).await;
     let completed = match result {
         Ok(Ok(stream)) => {
             drop(stream);

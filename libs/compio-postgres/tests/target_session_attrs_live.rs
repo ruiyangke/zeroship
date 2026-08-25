@@ -1,7 +1,7 @@
 //! Live `target_session_attrs` routing tests.
 
 use compio_postgres::config::{Host, SslMode, TargetSessionAttrs};
-use compio_postgres::{Client, Config, Error, NoTls, SimpleQueryMessage};
+use compio_postgres::{Client, Config, Error, SimpleQueryMessage};
 use std::error::Error as _;
 use std::io;
 

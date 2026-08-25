@@ -1,6 +1,6 @@
 //! Server-observed coverage for the public transaction builder.
 
-use compio_postgres::{Client, Error, IsolationLevel, NoTls, Transaction};
+use compio_postgres::{Client, Error, IsolationLevel, Transaction};
 use std::time::Duration;
 
 #[allow(dead_code)]

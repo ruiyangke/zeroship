@@ -21,7 +21,7 @@
 //! `psql -c "INSERT ...; SELECT 1/0"` leaves 0 rows, while the same two
 //! statements as `-c "INSERT ..." -c "SELECT 1/0"` leave 1.
 
-use compio_postgres::{Client, NoTls};
+use compio_postgres::Client;
 
 #[allow(dead_code)]
 mod common;

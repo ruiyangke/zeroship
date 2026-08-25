@@ -30,8 +30,8 @@
 //! THREE tests below red on the delivery timeout, and restoring it makes them
 //! green. So a notice that stops reaching the caller now fails here.
 
+use compio_postgres::AsyncMessage;
 use compio_postgres::error::Severity;
-use compio_postgres::{AsyncMessage, NoTls};
 use futures_util::StreamExt;
 use std::time::Duration;
 

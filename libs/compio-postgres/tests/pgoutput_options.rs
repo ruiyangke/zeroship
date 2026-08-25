@@ -12,9 +12,9 @@
 //! was unreachable. The decoder had an arm for the `b` tuple kind while no
 //! request this driver could build would make any server emit one.
 
+use compio_postgres::Client;
 use compio_postgres::replication::pgoutput::{self, PgOutputMessage, TupleColumn};
 use compio_postgres::replication::{OriginFilter, ReplicationMessage, StartReplicationOptions};
-use compio_postgres::{Client, NoTls};
 use std::time::Duration;
 
 #[allow(dead_code)]
