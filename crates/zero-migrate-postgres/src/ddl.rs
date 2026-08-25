@@ -13,9 +13,7 @@ use zero_migrate_backend::snapshot::{
 
 use zero_migrate_ir::attribute::Attributes;
 use zero_migrate_ir::dialect::DialectId;
-use zero_migrate_ir::ir::{
-    IndexStorageParams, IrScalar, PartitionBoundValue, PartitionBounds, PartitionSpec,
-};
+use zero_migrate_ir::ir::{IrScalar, PartitionBoundValue, PartitionBounds, PartitionSpec};
 
 // This module's vendor identity, read from the crate's ONE declaration of it.
 use crate::DIALECT;
@@ -242,13 +240,20 @@ fn render_index_include_pg(include: &[String]) -> String {
     }
 }
 
-fn render_index_storage_params_pg(params: &IndexStorageParams) -> String {
+/// Render this backend's declared index attributes as a PostgreSQL `WITH (...)` list.
+///
+/// Every index storage parameter IS a reloption, so unlike the table case there is no
+/// second clause to split out. The order is the attribute map's canonical one -
+/// alphabetical by full key - rather than the order two struct fields were declared in,
+/// which is what makes the rendered DDL reproducible now that the set is open.
+fn render_index_storage_params_pg(attributes: &Attributes) -> String {
     let mut entries = Vec::new();
-    if let Some(pages_per_range) = params.pages_per_range {
-        entries.push(format!("pages_per_range='{pages_per_range}'"));
-    }
-    if let Some(fillfactor) = params.fillfactor {
-        entries.push(format!("fillfactor='{fillfactor}'"));
+    for (key, value) in attributes.for_dialect(DIALECT.as_str()) {
+        entries.push(format!(
+            "{}='{}'",
+            key.name(),
+            attribute_value_pg(value).replace('\'', "''")
+        ));
     }
     if entries.is_empty() {
         String::new()
@@ -596,8 +601,8 @@ impl DdlEmitter for PgEmitter {
         } else {
             ""
         };
-        let with_clause = if let Some(params) = &idx.with {
-            render_index_storage_params_pg(params)
+        let with_clause = if !idx.attributes.is_empty() {
+            render_index_storage_params_pg(&idx.attributes)
         } else if idx.access_method == "ivfflat" {
             " WITH (lists = 100)".to_string()
         } else {

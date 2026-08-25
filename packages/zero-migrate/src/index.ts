@@ -214,8 +214,6 @@ export type {
   ViewQueryBuilder,
   GroupByItem,
   IndexMethod,
-  IndexStorageParams,
-  IndexStorageParamsArg,
   PartitionSpec,
   PartitionBounds,
   PartitionBoundValue,

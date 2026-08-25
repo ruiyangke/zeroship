@@ -1055,7 +1055,7 @@ fn create_index_omits_all_absent_optionals() {
         using: None,
         r#where: None,
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: None,
         nulls_not_distinct: None,
         concurrently: None,
@@ -1124,7 +1124,7 @@ fn nested_ir_column_index_constraint_omit_absent_optionals() {
         using: None,
         r#where: None,
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: None,
         nulls_not_distinct: None,
     };

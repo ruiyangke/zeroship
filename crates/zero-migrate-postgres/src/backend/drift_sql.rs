@@ -17,6 +17,8 @@
 use std::collections::BTreeMap;
 
 use super::journal_sql;
+use crate::DIALECT;
+use zero_migrate_backend::attribute::AttrShape;
 use zero_migrate_backend::conn::ExecutorConfig;
 use zero_migrate_backend::drift::{
     compare_applied_to_set, AuthoredViewBody, ChecksumDriftReport, DriftError,
@@ -31,10 +33,11 @@ use zero_migrate_backend::snapshot::{
     SchemaObjectSnapshot, SchemaSnapshot, SequenceDataTypeSnapshot, SequenceSnapshot,
     TableSnapshot, TriggerIdentity, TriggerKey, VendorObjectIdentities, ViewSnapshot,
 };
+use zero_migrate_ir::attribute::{AttrKey, Attributes};
+use zero_migrate_ir::ir::IrScalar;
 use zero_migrate_ir::ir::{
-    IdentityCol, IndexSortOrder, IndexStorageParams, PartitionBoundValue, PartitionBounds,
-    PartitionSpec, PolicyCmd, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TriggerEvent,
-    TriggerTiming,
+    IdentityCol, IndexSortOrder, PartitionBoundValue, PartitionBounds, PartitionSpec, PolicyCmd,
+    SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TriggerEvent, TriggerTiming,
 };
 use zero_migrate_ir::migration::Migration;
 // The value-format comparison seam, entered with THIS vendor's own renderers. The
@@ -361,27 +364,47 @@ fn parse_partition_bounds_pg(raw: &str) -> Result<PartitionBounds, String> {
     Err(format!("unsupported partition bounds `{raw}`"))
 }
 
+/// Read an index's live `reloptions` into this backend's declared attribute namespace.
+///
+/// The FILTER is the vocabulary, not a hand-written pair of field names. This used to
+/// keep exactly `pages_per_range` and `fillfactor` because those were the two fields
+/// `IndexStorageParams` had; it now keeps whatever this crate DECLARES on `createIndex`,
+/// which is the same two today and extends itself when a third is declared.
+///
+/// Anything the server reports that is NOT declared is dropped, exactly as before. That
+/// is deliberate and it is the conservative direction: an undeclared reloption carried
+/// into the snapshot would be compared against a desired side that can never contain it,
+/// so every such index would report drift forever.
 fn parse_index_storage_params_pg(
     reloptions: Option<Vec<String>>,
-) -> Result<Option<IndexStorageParams>, DriftError> {
-    let mut params = IndexStorageParams::default();
+) -> Result<Attributes, DriftError> {
+    let mut attributes = Attributes::new();
     for option in reloptions.unwrap_or_default() {
         let Some((key, value)) = option.split_once('=') else {
             continue;
         };
-        if key.eq_ignore_ascii_case("pages_per_range") {
-            params.pages_per_range = Some(value.parse::<u32>().map_err(|_| {
-                DriftError::Snapshot(format!(
-                    "invalid index pages_per_range reloption `{option}`"
-                ))
-            })?);
-        } else if key.eq_ignore_ascii_case("fillfactor") {
-            params.fillfactor = Some(value.parse::<u32>().map_err(|_| {
-                DriftError::Snapshot(format!("invalid index fillfactor reloption `{option}`"))
-            })?);
-        }
+        // The server lowercases reloption names; the declarations use the manual's
+        // spelling, which is lowercase for every one of them.
+        let Ok(attr_key) = AttrKey::parse(&format!("{}.{}", DIALECT.as_str(), key.to_lowercase()))
+        else {
+            continue;
+        };
+        let Some(def) = crate::attribute::VOCABULARY.get(&attr_key, "createIndex") else {
+            continue;
+        };
+        // Typed by the DECLARED shape rather than assumed to be an integer, so a text or
+        // boolean reloption declared later lands as the right `IrScalar` and compares
+        // against an authored value of the same kind.
+        let scalar = match def.shape {
+            AttrShape::Int { .. } => IrScalar::Int(value.parse::<i64>().map_err(|_| {
+                DriftError::Snapshot(format!("invalid index reloption `{option}`"))
+            })?),
+            AttrShape::Bool => IrScalar::Bool(value.eq_ignore_ascii_case("true")),
+            AttrShape::Enum { .. } | AttrShape::Text => IrScalar::Str(value.to_string()),
+        };
+        attributes.insert(attr_key, scalar);
     }
-    Ok((!params.is_empty()).then_some(params))
+    Ok(attributes)
 }
 
 pub async fn snapshot_schema<D: SqlSession>(
@@ -1417,7 +1440,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 access_method: r.try_get("access_method")?,
                 predicate: r.try_get("index_pred").ok().flatten(),
                 include,
-                with: parse_index_storage_params_pg(reloptions)?,
+                attributes: parse_index_storage_params_pg(reloptions)?,
                 only: false,
                 // Emission-only; never recovered from the catalog.
                 opclass: None,

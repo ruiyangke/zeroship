@@ -349,17 +349,14 @@ fn validate_vendor_attributes(
             crate::model::ir::Op::CreateTable { attributes, .. } => Some(attributes),
             crate::model::ir::Op::CreatePartition { attributes, .. } => Some(attributes),
             crate::model::ir::Op::SetTableOptions { attributes, .. } => Some(attributes),
+            crate::model::ir::Op::CreateIndex { attributes, .. } => Some(attributes),
             crate::model::ir::Op::AddColumn { attributes, .. } => Some(attributes),
             crate::model::ir::Op::AddConstraint { attributes, .. } => Some(attributes),
             // Every other op kind carries no attributes, so there is nothing to judge.
             //
-            // NOT the same as "five of six carriers". `op_attributes!` mints SIX, and
-            // `CreateIndexAttributes` is the one with no field on its op: `Op::CreateIndex`
-            // still carries `IndexStorageParams` — named `fillfactor` / `pages_per_range`
-            // fields in the neutral IR — which is the mechanism the index declarations in
-            // the PostgreSQL crate exist to retire. Until that retirement lands, an index
-            // attribute cannot be authored, so there is nothing here for this pass to
-            // refuse rather than something it fails to.
+            // These SIX are exactly the six carriers `op_attributes!` mints, and a seventh
+            // cannot be added without adding its field, which does not compile until it is
+            // listed here. Not a fail-open `_ =>` over attribute-bearing ops.
             _ => None,
         };
         let Some(carried) = carried else { continue };
@@ -7338,10 +7335,6 @@ fn validate_op_support(
         !matches!(using, None | Some(IndexMethod::Btree))
     }
 
-    fn with_storage_params(with: &Option<crate::model::ir::IndexStorageParams>) -> bool {
-        with.as_ref().is_some_and(|params| !params.is_empty())
-    }
-
     fn index_elements_have_opclass(columns: &[IndexElement]) -> bool {
         columns.iter().any(|element| {
             matches!(
@@ -7537,7 +7530,7 @@ fn validate_op_support(
                 if !index.include.is_empty() {
                     check(Feature::IndexInclude)?;
                 }
-                if with_storage_params(&index.with) {
+                if !index.attributes.is_empty() {
                     check(Feature::IndexStorageParams)?;
                 }
                 if index.only.unwrap_or(false) {
@@ -7576,7 +7569,7 @@ fn validate_op_support(
             using,
             r#where,
             include,
-            with,
+            attributes,
             only,
             nulls_not_distinct,
             ..
@@ -7593,7 +7586,7 @@ fn validate_op_support(
             if !include.is_empty() {
                 check(Feature::IndexInclude)?;
             }
-            if with_storage_params(with) {
+            if !attributes.is_empty() {
                 check(Feature::IndexStorageParams)?;
             }
             if only.unwrap_or(false) {
@@ -10912,7 +10905,7 @@ mod tests {
             using: None,
             r#where: None,
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: None,
             nulls_not_distinct: None,
         }
@@ -12184,7 +12177,7 @@ mod tests {
                         operand: Box::new(Expr::col("first")),
                     }),
                     include: Vec::new(),
-                    with: None,
+                    attributes: Default::default(),
                     only: None,
                     nulls_not_distinct: None,
                 }],
@@ -12493,7 +12486,7 @@ mod tests {
                     operand: Box::new(Expr::col("deleted_at")),
                 }),
                 include: Vec::new(),
-                with: None,
+                attributes: Default::default(),
                 only: None,
                 nulls_not_distinct: None,
             }],
@@ -12663,7 +12656,7 @@ mod tests {
             r#where: Some(split(", ", 1)),
 
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: None,
             nulls_not_distinct: None,
             concurrently: None,
@@ -12699,7 +12692,7 @@ mod tests {
                 distinct: false,
             }),
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: None,
             nulls_not_distinct: None,
             concurrently: None,
@@ -12743,7 +12736,7 @@ mod tests {
             }),
 
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: None,
             nulls_not_distinct: None,
             concurrently: None,
@@ -13366,7 +13359,7 @@ mod tests {
             using: None,
             r#where: None,
             include: vec![],
-            with: None,
+            attributes: Default::default(),
             only: None,
             nulls_not_distinct: None,
         });
@@ -13450,7 +13443,7 @@ mod tests {
             using: None,
             r#where: None,
             include: vec![],
-            with: None,
+            attributes: Default::default(),
             only: None,
             nulls_not_distinct: None,
         });

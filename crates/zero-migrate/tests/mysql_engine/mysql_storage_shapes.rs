@@ -99,7 +99,7 @@ fn create_index(table: &str, name: &str, column: &str) -> Op {
         r#where: None,
         concurrently: None,
         include: vec![],
-        with: None,
+        attributes: Default::default(),
         only: None,
         nulls_not_distinct: None,
         schema: None,
@@ -124,7 +124,7 @@ fn inline_index(name: &str, column: &str) -> IrIndex {
         using: None,
         r#where: None,
         include: vec![],
-        with: None,
+        attributes: Default::default(),
         only: None,
         nulls_not_distinct: None,
     }

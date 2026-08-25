@@ -3152,7 +3152,7 @@ test("table index widening records the same createIndex op as the shared runtime
     using: "gin",
     where: (col: any) => col("active").isTrue(),
     include: ["id"],
-    with: { fillfactor: 90 },
+    postgres: { fillfactor: 90 },
     only: true,
     unique: true,
     nullsNotDistinct: true,
@@ -3439,7 +3439,7 @@ test("index builder records include/with/brin/only", () => {
       on: ["ts"],
       using: "brin",
       include: ["tenant_id"],
-      with: { pagesPerRange: 32 },
+      postgres: { pages_per_range: 32 },
       only: true,
     }),
   );
@@ -3452,7 +3452,9 @@ test("index builder records include/with/brin/only", () => {
       name: "events_ts_brin_idx",
       using: "brin",
       include: ["tenant_id"],
-      with: { pagesPerRange: 32 },
+      // The WIRE form: the authored `postgres: { … }` namespace is flattened to
+      // `<dialect>.<name>` keys, exactly as a table's options are.
+      attributes: { "postgres.pages_per_range": 32 },
       only: true,
     },
   ]);

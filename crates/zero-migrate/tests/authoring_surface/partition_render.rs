@@ -1,8 +1,8 @@
 use crate::support;
 
 use zero_migrate::model::ir::{
-    ColType, IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrScalar, IrValue,
-    MigrationIr, Op, PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
+    ColType, IndexElement, IndexMethod, IrColumn, IrScalar, IrValue, MigrationIr, Op,
+    PartitionBoundValue, PartitionBounds, PartitionSpec, SafeI64,
 };
 use zero_migrate::{
     fold_ops, Approval, ExecutorConfig, IrAuthor, IrFlagsOverride, LiveSchema, LockMode,
@@ -293,10 +293,23 @@ fn collapse_events_ops() -> Vec<Op> {
     ]
 }
 
+/// Index attributes in the wire form the op now carries, for fixtures that used to build
+/// an `IndexStorageParams` literal.
+fn index_attrs(pairs: &[(&str, i64)]) -> zero_migrate_ir::attribute::CreateIndexAttributes {
+    let mut carried = zero_migrate_ir::attribute::Attributes::new();
+    for (key, value) in pairs {
+        carried.insert(
+            zero_migrate_ir::attribute::AttrKey::parse(key).expect("a well-formed key"),
+            zero_migrate::IrScalar::Int(*value),
+        );
+    }
+    zero_migrate_ir::attribute::CreateIndexAttributes::from(carried)
+}
+
 fn create_index(
     using: Option<IndexMethod>,
     include: Vec<String>,
-    with: Option<IndexStorageParams>,
+    attributes: zero_migrate_ir::attribute::CreateIndexAttributes,
     only: Option<bool>,
 ) -> Op {
     Op::CreateIndex {
@@ -307,7 +320,7 @@ fn create_index(
         using,
         r#where: None,
         include,
-        with,
+        attributes,
         only,
         nulls_not_distinct: None,
         concurrently: None,
@@ -682,7 +695,7 @@ fn create_index_enriched(
         using: None,
         r#where: None,
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: None,
         nulls_not_distinct,
         concurrently: None,
@@ -977,13 +990,25 @@ fn render_drop_partition_pg() {
 
 #[test]
 fn render_brin_index_pg() {
-    let sql = pg_sql(create_index(Some(IndexMethod::Brin), vec![], None, None)).join("\n");
+    let sql = pg_sql(create_index(
+        Some(IndexMethod::Brin),
+        vec![],
+        index_attrs(&[]),
+        None,
+    ))
+    .join("\n");
     assert!(sql.contains("USING brin"), "BRIN index SQL was:\n{sql}");
 }
 
 #[test]
 fn render_include_index_pg() {
-    let sql = pg_sql(create_index(None, vec!["kind".into()], None, None)).join("\n");
+    let sql = pg_sql(create_index(
+        None,
+        vec!["kind".into()],
+        index_attrs(&[]),
+        None,
+    ))
+    .join("\n");
     assert!(
         sql.contains("INCLUDE (\"kind\")"),
         "INCLUDE index SQL was:\n{sql}"
@@ -995,23 +1020,27 @@ fn render_with_storage_param_index_pg() {
     let sql = pg_sql(create_index(
         Some(IndexMethod::Brin),
         vec![],
-        Some(IndexStorageParams {
-            pages_per_range: Some(32),
-            fillfactor: Some(70),
-        }),
+        index_attrs(&[
+            ("postgres.pages_per_range", 32),
+            ("postgres.fillfactor", 70),
+        ]),
         None,
     ))
     .join("\n");
 
     assert!(
-        sql.contains("WITH (pages_per_range='32', fillfactor='70')"),
+        // CANONICAL KEY ORDER, alphabetical by full key, so `fillfactor` precedes
+        // `pages_per_range`. This used to be the order two struct fields were declared in.
+        // Both spellings are the same statement to PostgreSQL; a canonical one is what
+        // keeps rendered DDL reproducible now that the set of parameters is open.
+        sql.contains("WITH (fillfactor='70', pages_per_range='32')"),
         "WITH storage param SQL was:\n{sql}"
     );
 }
 
 #[test]
 fn render_on_only_index_pg() {
-    let sql = pg_sql(create_index(None, vec![], None, Some(true))).join("\n");
+    let sql = pg_sql(create_index(None, vec![], index_attrs(&[]), Some(true))).join("\n");
     assert!(
         sql.contains("ON ONLY \"app\".\"events\""),
         "ON ONLY SQL was:\n{sql}"

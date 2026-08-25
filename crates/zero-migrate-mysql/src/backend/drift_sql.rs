@@ -479,7 +479,7 @@ pub(crate) async fn snapshot_schema_for<D: SqlSession>(
                 access_method: parts.access_method,
                 predicate: None,
                 include: Vec::new(),
-                with: None,
+                attributes: Default::default(),
                 only: false,
                 opclass: None,
                 nulls_not_distinct: false,

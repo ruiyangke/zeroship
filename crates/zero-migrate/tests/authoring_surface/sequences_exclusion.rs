@@ -542,7 +542,7 @@ fn postgres_and_sqlite_render_partial_index_where() {
         r#where: Some(active_true_expr()),
 
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: None,
         concurrently: None,
         schema: None,
@@ -580,7 +580,7 @@ fn postgres_and_sqlite_render_expression_index_elements() {
         r#where: Some(active_true_expr()),
 
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: None,
         concurrently: None,
         schema: None,
@@ -617,7 +617,7 @@ fn mysql_fail_closes_on_expression_index_elements() {
             r#where: None,
 
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: None,
             concurrently: None,
             schema: None,
@@ -645,7 +645,7 @@ fn mysql_fail_closes_on_partial_index_predicate() {
             r#where: Some(active_true_expr()),
 
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: None,
             concurrently: None,
             schema: None,
@@ -835,7 +835,7 @@ fn an_over_long_index_name_is_refused() {
         schema: None,
         concurrently: None,
         include: vec![],
-        with: None,
+        attributes: Default::default(),
         nulls_not_distinct: None,
         existence_guard: None,
     };
@@ -886,7 +886,7 @@ fn an_over_long_index_name_is_refused() {
         schema: None,
         concurrently: None,
         include: vec![],
-        with: None,
+        attributes: Default::default(),
         nulls_not_distinct: None,
         existence_guard: None,
     };

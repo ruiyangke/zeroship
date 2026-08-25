@@ -29,7 +29,7 @@ export function schema() {
       on: ["ts"],
       using: "brin",
       include: ["tenant_id"],
-      with: { pagesPerRange: 32 },
+      postgres: { pages_per_range: 32 },
       only: true,
     });
 }

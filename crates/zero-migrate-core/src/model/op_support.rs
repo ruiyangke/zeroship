@@ -17,11 +17,12 @@
 
 use crate::model::expr::Expr;
 use crate::model::ir::{
-    index_has_element_opclass_or_collation, ForEach, IndexElement, IndexMethod, IndexStorageParams,
-    IrColumn, IrConstraintKind, IrDefault, IrIndex, Op, PartitionSpec, RaiseLevel, TriggerAction,
+    index_has_element_opclass_or_collation, ForEach, IndexElement, IndexMethod, IrColumn,
+    IrConstraintKind, IrDefault, IrIndex, Op, PartitionSpec, RaiseLevel, TriggerAction,
     TriggerEvent, TriggerStmt, TriggerTiming, ViewQuery,
 };
 use zero_migrate_backend::registry::VendorSet;
+use zero_migrate_ir::attribute::CreateIndexAttributes;
 
 pub fn is_vendor(op: &Op) -> bool {
     !vendor_capabilities(op).is_empty()
@@ -556,7 +557,7 @@ pub(crate) fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
             using,
             r#where,
             include,
-            with,
+            attributes,
             only,
             nulls_not_distinct,
             ..
@@ -567,7 +568,7 @@ pub(crate) fn op_kind_and_variant(op: &Op) -> (&'static str, &'static str) {
                 using,
                 r#where,
                 include,
-                with,
+                attributes,
                 *only,
                 *nulls_not_distinct,
             ),
@@ -725,7 +726,7 @@ fn create_table_variant(
     let has_nonportable_index_feature = indexes.iter().any(|index| {
         matches!(index.using, Some(IndexMethod::Brin))
             || !index.include.is_empty()
-            || index.with.as_ref().is_some_and(|params| !params.is_empty())
+            || !index.attributes.is_empty()
             || index.only.unwrap_or(false)
             || index.nulls_not_distinct.unwrap_or(false)
             || index_has_element_opclass_or_collation(&index.columns)
@@ -765,7 +766,7 @@ fn create_index_variant(
     using: &Option<IndexMethod>,
     r#where: &Option<Expr>,
     include: &[String],
-    with: &Option<IndexStorageParams>,
+    attributes: &CreateIndexAttributes,
     only: Option<bool>,
     nulls_not_distinct: Option<bool>,
 ) -> &'static str {
@@ -779,7 +780,7 @@ fn create_index_variant(
                 | IndexMethod::Hnsw
         )
     ) || !include.is_empty()
-        || with.as_ref().is_some_and(|params| !params.is_empty())
+        || !attributes.is_empty()
         || only.unwrap_or(false)
         || nulls_not_distinct.unwrap_or(false)
         || index_has_element_opclass_or_collation(columns);

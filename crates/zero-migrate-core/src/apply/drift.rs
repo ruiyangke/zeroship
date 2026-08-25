@@ -46,10 +46,10 @@
 
 use std::collections::BTreeMap;
 use zero_migrate_backend::registry::VendorSet;
+use zero_migrate_ir::attribute::Attributes;
+use zero_migrate_ir::ir::IrScalar;
 
-use crate::model::ir::{
-    IndexSortOrder, IndexStorageParams, SafeI64, SequenceOwnedBy, TriggerEvent,
-};
+use crate::model::ir::{IndexSortOrder, SafeI64, SequenceOwnedBy, TriggerEvent};
 use crate::model::snapshot::{
     canonical_index_sort_order, index_elements_canonically_eq, index_predicates_canonically_eq,
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, ExtensionSnapshot,
@@ -1013,18 +1013,28 @@ fn diff_attrs(
             .collect::<Vec<_>>()
             .join(",")
     };
-    let format_index_storage_params = |params: Option<&IndexStorageParams>| {
-        let Some(params) = params else {
-            return String::new();
-        };
-        let mut entries = Vec::new();
-        if let Some(pages_per_range) = params.pages_per_range {
-            entries.push(format!("pages_per_range={pages_per_range}"));
-        }
-        if let Some(fillfactor) = params.fillfactor {
-            entries.push(format!("fillfactor={fillfactor}"));
-        }
-        entries.join(",")
+    // NAMES NO VENDOR. This used to spell `pages_per_range=` and `fillfactor=` -- two
+    // PostgreSQL reloptions -- inside the crate whose governing rule is to name none. The
+    // keys now arrive already namespaced from whichever backend introspected them, so the
+    // comparison is a walk over a sorted map and the vendor half stays in the vendor.
+    let format_index_attributes = |attributes: &Attributes| {
+        attributes
+            .iter()
+            .map(|(key, value)| {
+                // The canonical text of one attribute value. Neutral by construction:
+                // every arm is an `IrScalar` shape, and none of them is a dialect.
+                let rendered = match value {
+                    IrScalar::Bool(b) => b.to_string(),
+                    IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
+                    IrScalar::Str(text) => text.clone(),
+                    IrScalar::Decimal(d) => d.clone(),
+                    IrScalar::Null => "null".to_string(),
+                    IrScalar::Bytes(_) => "bytes".to_string(),
+                };
+                format!("{key}={rendered}")
+            })
+            .collect::<Vec<_>>()
+            .join(",")
     };
 
     push(
@@ -1241,8 +1251,8 @@ fn diff_attrs(
             push(
                 &obj,
                 "with",
-                &format_index_storage_params(ei.with.as_ref()),
-                &format_index_storage_params(ai.with.as_ref()),
+                &format_index_attributes(&ei.attributes),
+                &format_index_attributes(&ai.attributes),
             );
             // `only` is deliberately absent. PostgreSQL renders `ON ONLY` in
             // `pg_get_indexdef` for every index on a partitioned parent, whether or

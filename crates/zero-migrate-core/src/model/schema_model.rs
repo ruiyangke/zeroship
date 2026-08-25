@@ -95,8 +95,7 @@ use zero_migrate_backend::dialectal::{Dialectal, VendorColumnFacts};
 use zero_migrate_ir::attribute::Attributes;
 
 use crate::model::ir::{
-    IdentityCol, IndexSortOrder, IndexStorageParams, PartitionSpec, TableRuntimeOptions,
-    ValueFormat,
+    IdentityCol, IndexSortOrder, PartitionSpec, TableRuntimeOptions, ValueFormat,
 };
 use crate::model::snapshot::{
     canonical_index_sort_order, index_predicates_canonically_eq, ColumnCollationSnapshot,
@@ -494,7 +493,10 @@ pub struct Index {
     /// Non-key covering columns (`INCLUDE (...)`).
     pub include: Vec<String>,
     /// Typed storage parameters (`WITH (...)`).
-    pub with: Option<IndexStorageParams>,
+    /// Vendor storage parameters, keyed `<dialect>.<name>`. COMPARED by
+    /// [`index_shape_identity`], because PostgreSQL introspects an index's reloptions
+    /// and both sides of the comparison are therefore populated.
+    pub attributes: Attributes,
     /// User-authored catalog comment on this index.
     pub comment: Option<String>,
     /// Provenance-only local columns read by this index's rendered-SQL sites.
@@ -685,7 +687,7 @@ impl Index {
             access_method: snapshot.access_method.clone(),
             predicate: snapshot.predicate.clone(),
             include: snapshot.include.clone(),
-            with: snapshot.with.clone(),
+            attributes: snapshot.attributes.clone(),
             comment: snapshot.comment.clone(),
             expr_cascade_columns: snapshot.expr_cascade_columns.clone(),
         }
@@ -719,7 +721,7 @@ impl Index {
             access_method: self.access_method.clone(),
             predicate: self.predicate.clone(),
             include: self.include.clone(),
-            with: self.with.clone(),
+            attributes: self.attributes.clone(),
             only: vendor.index_only.get(&key).copied().unwrap_or(false),
             opclass: vendor.index_opclass.get(&key).cloned(),
             nulls_not_distinct: vendor
@@ -1132,7 +1134,7 @@ pub fn index_pairing_identity(left: &Index, right: &Index) -> bool {
         access_method,
         predicate,
         include,
-        with,
+        attributes,
         comment,
         expr_cascade_columns: _ignored_expr_cascade_columns_provenance,
     } = left;
@@ -1143,7 +1145,7 @@ pub fn index_pairing_identity(left: &Index, right: &Index) -> bool {
         && *access_method == right.access_method
         && index_predicates_canonically_eq(predicate.as_deref(), right.predicate.as_deref())
         && *include == right.include
-        && *with == right.with
+        && *attributes == right.attributes
         && *comment == right.comment
 }
 

@@ -29,6 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use zero_migrate_backend::registry::VendorSet;
+use zero_migrate_ir::attribute::CreateIndexAttributes;
 use zero_migrate_ir::attribute::OpAttributes;
 
 use crate::guard::{GuardConfig, GuardError, MigrationGuard};
@@ -38,10 +39,10 @@ use crate::model::backfill::{
 use crate::model::expr::Expr;
 use crate::model::ir::{
     ColType, ColumnCollation, ColumnOrExpr, EmptyContainerKind, ExclusionElement, ExistenceGuard,
-    IndexElement, IndexMethod, IndexStorageParams, IrColumn, IrConstraint, IrConstraintKind,
-    IrDefault, IrIndex, IrMask, Join, MigrationIr, Op, OrderDir, OrderItem, PartitionBoundValue,
-    PartitionBounds, PartitionSpec, RefAction, SelectAst, SelectItem, TableRef,
-    TableRuntimeOptions, TriggerAction, TriggerStmt, ValueFormat, VectorMetric, ViewQuery,
+    IndexElement, IndexMethod, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex,
+    IrMask, Join, MigrationIr, Op, OrderDir, OrderItem, PartitionBoundValue, PartitionBounds,
+    PartitionSpec, RefAction, SelectAst, SelectItem, TableRef, TableRuntimeOptions, TriggerAction,
+    TriggerStmt, ValueFormat, VectorMetric, ViewQuery,
 };
 use crate::model::load::ir_created_tables;
 use crate::model::migration::{Checksum, ChecksumInput, Migration, MigrationFlags, MigrationId};
@@ -3633,7 +3634,7 @@ impl IrAuthor {
                         using,
                         r#where,
                         include,
-                        with,
+                        attributes,
                         only,
                         nulls_not_distinct,
                         ..
@@ -3647,7 +3648,7 @@ impl IrAuthor {
                             *using,
                             r#where.as_ref(),
                             include,
-                            with.as_ref(),
+                            attributes,
                             *only,
                             *nulls_not_distinct,
                             &author.dialect,
@@ -4472,7 +4473,7 @@ impl IrAuthor {
                 using,
                 r#where,
                 include,
-                with,
+                attributes,
                 only,
                 nulls_not_distinct,
                 ..
@@ -4486,7 +4487,7 @@ impl IrAuthor {
                     *using,
                     r#where.as_ref(),
                     include,
-                    with.as_ref(),
+                    attributes,
                     *only,
                     *nulls_not_distinct,
                     &self.dialect,
@@ -7013,7 +7014,7 @@ impl IrAuthor {
                 ix.using,
                 ix.r#where.as_ref(),
                 &ix.include,
-                ix.with.as_ref(),
+                &ix.attributes,
                 ix.only,
                 ix.nulls_not_distinct,
                 &self.dialect,
@@ -9330,7 +9331,7 @@ pub(crate) fn create_index_snapshot(
     using: Option<IndexMethod>,
     predicate: Option<&Expr>,
     include: &[String],
-    with: Option<&IndexStorageParams>,
+    attributes: &CreateIndexAttributes,
     only: Option<bool>,
     nulls_not_distinct: Option<bool>,
     dialect: &DialectId,
@@ -9428,7 +9429,7 @@ pub(crate) fn create_index_snapshot(
         idx.access_method = index_method_access(m).to_string();
     }
     idx.include = include.to_vec();
-    idx.with = with.cloned();
+    idx.attributes = attributes.attributes().clone();
     idx.only = only.unwrap_or(false);
     idx.nulls_not_distinct = nulls_not_distinct.unwrap_or(false);
     // `Some(vec![])` on an index that HAS an expression site reading no column at all

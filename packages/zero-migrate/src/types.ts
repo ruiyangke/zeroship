@@ -10,7 +10,10 @@
 // and re-exported from `./generated/ir` AS ERGONOMICS — the goldens remain the
 // contract source of truth. This module imports the generated wire types
 // where a manual type wants to reference the exact serde shape.
-import type { VendorAttributeArgs } from "./vendor-attributes.js";
+import type {
+  VendorAttributeArgs,
+  VendorIndexAttributeArgs,
+} from "./vendor-attributes.js";
 
 import type {
   Classification,
@@ -23,7 +26,6 @@ import type {
   ExclusionOperator,
   IndexElement,
   IndexSortOrder,
-  IndexStorageParams,
   IrBatch,
   IrJsonValue,
   IrScalar,
@@ -61,7 +63,6 @@ export type {
   ExclusionOperator,
   IndexElement,
   IndexSortOrder,
-  IndexStorageParams,
   IrBatch,
   IrJsonValue,
   IrScalar,
@@ -823,7 +824,6 @@ export interface AttachPartitionArgs {
   schema?: string;
 }
 
-export type IndexStorageParamsArg = IndexStorageParams;
 
 /** A non-empty, ordered tuple of column names. Array order is schema semantics
  *  for primary keys and foreign keys: position `n` on the local side maps to
@@ -1150,7 +1150,6 @@ export interface CreateTableArgs extends VendorAttributeArgs {
      *  it fail-closed because MySQL has no partial indexes. */
     where?: IndexExprFn;
     include?: readonly string[];
-    with?: IndexStorageParamsArg;
     only?: boolean;
     /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor: fails closed at
      *  validate on SQLite/MySQL. */
@@ -1263,7 +1262,7 @@ export interface ConstraintRef {
 }
 
 /** The `.index(name)` selector sub-handle. */
-export interface IndexAddArgs {
+export interface IndexAddArgs extends VendorIndexAttributeArgs {
   on: IndexElementArg[];
   unique?: boolean;
   ifNotExists?: boolean;
@@ -1272,7 +1271,6 @@ export interface IndexAddArgs {
   /** Partial-index predicate. Renders on PostgreSQL and SQLite; MySQL fails closed. */
   where?: IndexExprFn;
   include?: readonly string[];
-  with?: IndexStorageParamsArg;
   only?: boolean;
   /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor: fails closed at
    *  validate on SQLite/MySQL. */

@@ -6,9 +6,8 @@ use zero_migrate_ir::attribute::Attributes;
 use zero_migrate_ir::expr::Expr;
 use zero_migrate_ir::ir::{
     ColType, ForEach, FuncArg, FuncArgMode, FuncLanguage, FuncVolatility, IdentityCol,
-    IndexSortOrder, IndexStorageParams, PartitionBounds, PartitionSpec, PolicyCmd, SafeI64,
-    SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions, TriggerAction, TriggerEvent,
-    TriggerTiming, ValueFormat,
+    IndexSortOrder, PartitionBounds, PartitionSpec, PolicyCmd, SafeI64, SafeU64, SequenceOwnedBy,
+    SequenceRef, TableRuntimeOptions, TriggerAction, TriggerEvent, TriggerTiming, ValueFormat,
 };
 
 /// Quote one identifier in the canonical constraint-definition normal form.
@@ -776,8 +775,17 @@ pub struct IndexSnapshot {
     pub predicate: Option<String>,
     /// Non-key covering columns (`INCLUDE (...)`).
     pub include: Vec<String>,
-    /// Typed storage parameters (`WITH (...)`).
-    pub with: Option<IndexStorageParams>,
+    /// Vendor storage parameters, keyed by their full `<dialect>.<name>` wire spelling.
+    ///
+    /// COMPARED by [`Self::definition_differences_except_name`], unlike
+    /// [`TableSnapshot::attributes`], and that difference is the whole point: PostgreSQL's
+    /// drift pass DOES introspect an index's `reloptions`, so both sides of the comparison
+    /// are populated and a real difference is real drift.
+    ///
+    /// Which keys survive introspection is the owning backend's business: it keeps the
+    /// ones it DECLARES on `createIndex` and ignores the rest, which is exactly what the
+    /// two named fields this replaced did for `fillfactor` and `pages_per_range`.
+    pub attributes: Attributes,
     /// **Emission-only** PostgreSQL `ON ONLY` for partitioned parents. Like
     /// [`Self::opclass`] and [`Self::nulls_not_distinct`] it is spelled by the PG
     /// emitter and EXCLUDED from equality, because the catalog cannot
@@ -914,10 +922,10 @@ impl IndexSnapshot {
         if self.include != other.include {
             out.push(format!("include {:?} -> {:?}", self.include, other.include));
         }
-        if self.with != other.with {
+        if self.attributes != other.attributes {
             out.push(format!(
                 "storage parameters {:?} -> {:?}",
-                self.with, other.with
+                self.attributes, other.attributes
             ));
         }
         if self.comment != other.comment {
@@ -956,7 +964,7 @@ impl IndexSnapshot {
             access_method: "btree".to_string(),
             predicate: None,
             include: Vec::new(),
-            with: None,
+            attributes: Attributes::new(),
             only: false,
             opclass: None,
             nulls_not_distinct: false,

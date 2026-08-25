@@ -5,9 +5,8 @@ use std::path::PathBuf;
 
 use zero_migrate::model::capability::VendorCapability;
 use zero_migrate::model::ir::{
-    ColType, IdentityCol, IndexElement, IndexMethod, IndexStorageParams, IrColumn,
-    IrConstraintKind, IrDefault, Op, PartitionBounds, PartitionSpec, SequenceRef, TriggerAction,
-    ViewQuery,
+    ColType, IdentityCol, IndexElement, IndexMethod, IrColumn, IrConstraintKind, IrDefault, Op,
+    PartitionBounds, PartitionSpec, SequenceRef, TriggerAction, ViewQuery,
 };
 use zero_migrate::model::op_support;
 use zero_migrate::model::support::{RenderMode, SupportDecision, SupportTier};
@@ -382,6 +381,21 @@ fn support_declarations_cover_every_op_and_dialect() {
     }
 }
 
+/// A BRIN index's `pages_per_range`, in the wire form the op now carries.
+///
+/// This fixture used to build `IndexStorageParams { pages_per_range: Some(16), .. }`. The
+/// same value is now an ordinary declared attribute, so the case still exercises "this
+/// index has storage parameters" rather than quietly becoming an empty one.
+fn brin_pages_per_range(value: i64) -> zero_migrate_ir::attribute::CreateIndexAttributes {
+    let mut carried = zero_migrate_ir::attribute::Attributes::new();
+    carried.insert(
+        zero_migrate_ir::attribute::AttrKey::parse("postgres.pages_per_range")
+            .expect("a well-formed key"),
+        zero_migrate::IrScalar::Int(value),
+    );
+    zero_migrate_ir::attribute::CreateIndexAttributes::from(carried)
+}
+
 fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
         name: name.into(),
@@ -455,7 +469,7 @@ fn partition_feature_ops() -> Vec<Op> {
             using: Some(IndexMethod::Brin),
             r#where: None,
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: None,
             concurrently: None,
             schema: None,
@@ -470,7 +484,7 @@ fn partition_feature_ops() -> Vec<Op> {
             using: None,
             r#where: None,
             include: vec!["kind".into()],
-            with: None,
+            attributes: Default::default(),
             only: None,
             concurrently: None,
             schema: None,
@@ -485,10 +499,7 @@ fn partition_feature_ops() -> Vec<Op> {
             using: Some(IndexMethod::Brin),
             r#where: None,
             include: Vec::new(),
-            with: Some(IndexStorageParams {
-                pages_per_range: Some(16),
-                fillfactor: None,
-            }),
+            attributes: brin_pages_per_range(16),
             only: None,
             concurrently: None,
             schema: None,
@@ -503,7 +514,7 @@ fn partition_feature_ops() -> Vec<Op> {
             using: None,
             r#where: None,
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: Some(true),
             concurrently: None,
             schema: None,

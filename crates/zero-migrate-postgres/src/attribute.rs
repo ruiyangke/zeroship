@@ -9,14 +9,19 @@
 //! it to validation, to the refusal messages and to the generated TypeScript surface,
 //! and touches no neutral crate and no `match` anywhere.
 //!
-//! # The one that is already in the neutral IR
+//! # The two that used to live in the neutral IR
 //!
-//! [`IndexStorageParams`](zero_migrate_ir::ir::IndexStorageParams) holds `fillfactor` and
-//! `pages_per_range` as named fields in `zero-migrate-ir` — PostgreSQL storage parameters
-//! living in the crate whose purpose is to name no vendor. They are the reason this
-//! mechanism exists, and the `createIndex` declarations below are the first half of
-//! retiring them. The second half — moving every reader off `with` — reaches live drift,
-//! which already introspects `reloptions` and compares them, so it is a separate change.
+//! `IndexStorageParams` held `fillfactor` and `pages_per_range` as named fields in
+//! `zero-migrate-ir` and in the neutral contract crate's `IndexSnapshot` — PostgreSQL
+//! storage parameters living in the crates whose purpose is to name no vendor. Core's
+//! own drift pass then formatted them BY THOSE TWO SPELLINGS. They were the reason this
+//! mechanism exists.
+//!
+//! That type is now deleted. The `createIndex` declarations below are its whole
+//! replacement: they are what the renderer emits, what live introspection FILTERS
+//! `reloptions` down to, and what drift compares. The filter used to be two hardcoded
+//! field names and is now the vocabulary, so a third index storage parameter is a change
+//! to this file and to nothing else.
 
 use zero_migrate_backend::attribute::{AttrDef, AttrShape, AttributeVocabulary};
 use zero_migrate_backend::declare_attributes;

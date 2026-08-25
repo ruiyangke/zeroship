@@ -1133,7 +1133,7 @@ fn render_injected_index(
     if index.using.is_some()
         || index.r#where.is_some()
         || !index.include.is_empty()
-        || index.with.is_some()
+        || !index.attributes.is_empty()
         || index.only.is_some()
         || index.nulls_not_distinct.is_some()
     {

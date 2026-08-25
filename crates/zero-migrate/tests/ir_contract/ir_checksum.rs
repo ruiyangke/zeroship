@@ -576,7 +576,7 @@ fn checksum_of_ir_is_identical_across_dialect_renders() {
         r#where: None,
 
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: None,
         concurrently: Some(true),
         schema: None,

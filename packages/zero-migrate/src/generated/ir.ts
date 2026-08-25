@@ -393,7 +393,7 @@ export interface IrIndex {
   using?: IndexMethod | null;
   where?: Expr | null;
   include?: string[];
-  with?: IndexStorageParams | null;
+  attributes?: Attributes;
   only?: boolean | null;
   /** PG 15+ `NULLS NOT DISTINCT` on a UNIQUE index. PG-vendor. */
   nullsNotDistinct?: boolean | null;
@@ -578,7 +578,7 @@ export type Op =
       where?: Expr | null;
       concurrently?: boolean | null;
       include?: string[];
-      with?: IndexStorageParams | null;
+      attributes?: Attributes;
       only?: boolean | null;
       nullsNotDistinct?: boolean | null;
       schema?: string | null;

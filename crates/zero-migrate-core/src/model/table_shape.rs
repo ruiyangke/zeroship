@@ -576,7 +576,7 @@ fn inject_index_to_ir(index: &InjectIndex) -> Result<IrIndex, TableShapeError> {
         using: None,
         r#where: None,
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: None,
         nulls_not_distinct: None,
     })

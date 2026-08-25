@@ -48,6 +48,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use zero_migrate_backend::registry::VendorSet;
+use zero_migrate_ir::attribute::OpAttributes;
 
 use indexmap::IndexMap;
 use serde::Serialize;
@@ -1408,15 +1409,18 @@ fn render_indexes(vendors: VendorSet, body: &mut String, table_name: &str, index
             body.push_str(", include: ");
             body.push_str(&render_string_array(&index.include));
         }
-        if let Some(with) = &index.with {
-            let mut values = Vec::new();
-            if let Some(value) = with.pages_per_range {
-                values.push(format!("pagesPerRange: {value}"));
-            }
-            if let Some(value) = with.fillfactor {
-                values.push(format!("fillfactor: {value}"));
-            }
-            body.push_str(", with: { ");
+        // One object per DIALECT namespace, matching the authoring surface
+        // (`postgres: { fillfactor: 90 }`). Grouped rather than emitted key-by-key so a
+        // table carrying two backends' index options round-trips as two namespaces, and
+        // named by no vendor here: the namespace IS the key's dialect.
+        for dialect in index.attributes.attributes().dialects() {
+            let values: Vec<String> = index
+                .attributes
+                .attributes()
+                .for_dialect(dialect)
+                .map(|(key, value)| format!("{}: {}", key.name(), render_attribute_value_ts(value)))
+                .collect();
+            body.push_str(&format!(", {dialect}: {{ "));
             body.push_str(&values.join(", "));
             body.push_str(" }");
         }
@@ -1484,6 +1488,22 @@ fn render_partition_kind(kind: &str, columns: &[String], collapse: bool) -> Stri
     }
     value.push_str(" }");
     value
+}
+
+/// One attribute value as TypeScript source, for the generated authoring artifact.
+///
+/// Mirrors the shapes a vendor may DECLARE (`bool | int | enum | text`); the two that
+/// cannot be declared render as `null` rather than being dropped, so a hand-built value
+/// is visible in the emitted source instead of vanishing from it.
+fn render_attribute_value_ts(value: &zero_migrate_ir::ir::IrScalar) -> String {
+    use zero_migrate_ir::ir::IrScalar;
+    match value {
+        IrScalar::Bool(b) => b.to_string(),
+        IrScalar::Int(i) | IrScalar::Int64(i) => i.to_string(),
+        IrScalar::Str(text) => format!("{text:?}"),
+        IrScalar::Decimal(d) => format!("{d:?}"),
+        IrScalar::Null | IrScalar::Bytes(_) => "null".to_string(),
+    }
 }
 
 fn render_string_array(values: &[String]) -> String {

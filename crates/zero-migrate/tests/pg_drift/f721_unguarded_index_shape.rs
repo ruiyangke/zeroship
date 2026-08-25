@@ -50,7 +50,7 @@ fn index(name: &str, unique: bool, columns: &[&str]) -> IndexSnapshot {
         access_method: "btree".to_string(),
         predicate: None,
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: false,
         opclass: None,
         nulls_not_distinct: false,

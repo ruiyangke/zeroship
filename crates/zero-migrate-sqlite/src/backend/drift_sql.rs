@@ -572,7 +572,7 @@ async fn introspect_indexes_and_unique(
             access_method: "btree".to_string(),
             predicate: index.predicate,
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: false,
             opclass: None,
             nulls_not_distinct: false,

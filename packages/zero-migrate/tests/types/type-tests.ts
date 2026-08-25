@@ -395,7 +395,6 @@ export function indexGrammar(): void {
     using: "gin",
     where: (col) => col("active").isTrue(),
     include: ["id"],
-    with: { fillfactor: 90 },
     only: true,
     unique: true,
     nullsNotDistinct: true,
@@ -432,7 +431,10 @@ export function indexGrammar(): void {
 
   table("users").index("include_idx").add({ on: ["email"], include: ["id"] });
 
-  table("users").index("with_idx").add({ on: ["email"], with: { fillfactor: 90 } });
+  // No vendor storage-parameter case here, deliberately. `postgres: { … }` on an index
+  // typechecks only once `zero-migrate-postgres` is installed and merges its declaration
+  // into `VendorIndexAttributeNamespaces`; in THIS package that map is empty by design,
+  // exactly as it is for a table's `postgres: { … }`, which this file also never exercises.
 
   table("users").index("only_idx").add({ on: ["email"], only: true });
 

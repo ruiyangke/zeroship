@@ -2280,17 +2280,30 @@ function indexIncludeToIr(include) {
   const cols = stringArray(include, "index include");
   return cols.length === 0 ? void 0 : cols;
 }
-function indexWithToIr(params) {
-  if (params === void 0) return void 0;
-  if (!params || typeof params !== "object") {
-    throw structuredError("OP_INVALID", "index with(...) must be an object");
+function indexAttributesToIr(args) {
+  const namespaces = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (INDEX_PORTABLE_KEYS.includes(key)) continue;
+    if (isPlainObject(value)) namespaces[key] = value;
   }
-  const withParams = compact({
-    pagesPerRange: requireU32(params.pagesPerRange, "index with.pagesPerRange"),
-    fillfactor: requireU32(params.fillfactor, "index with.fillfactor")
-  });
-  return Object.keys(withParams).length === 0 ? void 0 : withParams;
+  const flat = flattenVendorAttributes(namespaces);
+  return Object.keys(flat).length === 0 ? void 0 : flat;
 }
+var INDEX_PORTABLE_KEYS = [
+  "name",
+  "on",
+  "columns",
+  "unique",
+  "using",
+  "where",
+  "include",
+  "only",
+  "nullsNotDistinct",
+  "concurrently",
+  "ifNotExists",
+  "schema",
+  "table"
+];
 function recordCreateEnum(name, args) {
   rejectUnknownKeys(args, CREATE_ENUM_KEYS, `enumType("${name}").create(...)`);
   requireString(name, "enumType(name)");
@@ -2589,7 +2602,6 @@ var INDEX_ADD_KEYS = [
   "using",
   "where",
   "include",
-  "with",
   "only",
   "nullsNotDistinct"
 ];
@@ -2747,7 +2759,7 @@ function recordCreateTable(name, args, checkExprResolver = resolveTableCheckExpr
         using: idx.using,
         where: resolveImmutableExpr(idx.where, "partial index predicate"),
         include: indexIncludeToIr(idx.include),
-        with: indexWithToIr(idx.with),
+        attributes: indexAttributesToIr(idx),
         only: requireOptionalBoolean(idx.only, "index only"),
         nullsNotDistinct: requireOptionalBoolean(idx.nullsNotDistinct, "index nullsNotDistinct")
       })
@@ -3129,7 +3141,9 @@ function recordDropConstraint(table2, name, args) {
   });
 }
 function recordCreateIndex(table2, name, args) {
-  rejectUnknownKeys(args, INDEX_ADD_KEYS, `table("${table2}").index("${name}").add(...)`);
+  const vendorAttributes = indexAttributesToIr(
+    splitVendorNamespaces(args, INDEX_ADD_KEYS, `table("${table2}").index("${name}").add(...)`)
+  );
   if (!Array.isArray(args.on)) {
     throw structuredError("OP_INVALID", ".index(name).add needs { on: IndexElementArg[] }");
   }
@@ -3141,7 +3155,7 @@ function recordCreateIndex(table2, name, args) {
     using: args.using,
     where: resolveImmutableExpr(args.where, "partial index predicate"),
     include: indexIncludeToIr(args.include),
-    with: indexWithToIr(args.with),
+    attributes: vendorAttributes,
     only: requireOptionalBoolean(args.only, "index only"),
     nullsNotDistinct: requireOptionalBoolean(args.nullsNotDistinct, "index nullsNotDistinct"),
     schema: args.schema,

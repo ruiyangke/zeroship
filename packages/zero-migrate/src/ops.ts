@@ -103,7 +103,6 @@ import type {
   IndexRef,
   IndexElementArg,
   InsertArgs,
-  IndexStorageParamsArg,
   Join,
   JoinKind,
   MaskOptions,
@@ -3012,17 +3011,30 @@ function indexIncludeToIr(include: readonly string[] | undefined): string[] | un
   return cols.length === 0 ? undefined : cols;
 }
 
-function indexWithToIr(params: IndexStorageParamsArg | undefined): Node | undefined {
-  if (params === undefined) return undefined;
-  if (!params || typeof params !== "object") {
-    throw structuredError("OP_INVALID", "index with(...) must be an object");
+/**
+ * Flatten an index's vendor namespaces into the wire form.
+ *
+ * REPLACES `indexWithToIr`, which typed exactly two PostgreSQL storage parameters
+ * (`pagesPerRange`, `fillfactor`) into a neutral `with` object. Those are now ordinary
+ * declarations in the PostgreSQL package, reached through the same
+ * `<dialect>: { … }` surface a table's options use, so this function names no vendor and
+ * no parameter.
+ */
+function indexAttributesToIr(args: object): Record<string, unknown> | undefined {
+  const namespaces: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (INDEX_PORTABLE_KEYS.includes(key)) continue;
+    if (isPlainObject(value)) namespaces[key] = value;
   }
-  const withParams = compact({
-    pagesPerRange: requireU32(params.pagesPerRange, "index with.pagesPerRange"),
-    fillfactor: requireU32(params.fillfactor, "index with.fillfactor"),
-  });
-  return Object.keys(withParams).length === 0 ? undefined : withParams;
+  const flat = flattenVendorAttributes(namespaces as never);
+  return Object.keys(flat).length === 0 ? undefined : flat;
 }
+
+/** Every PORTABLE key an index spec reads; anything else object-shaped is a namespace. */
+const INDEX_PORTABLE_KEYS = [
+  "name", "on", "columns", "unique", "using", "where", "include", "only",
+  "nullsNotDistinct", "concurrently", "ifNotExists", "schema", "table",
+];
 
 function recordCreateEnum(name: string, args: CreateEnumArgs): void {
   rejectUnknownKeys(args, CREATE_ENUM_KEYS, `enumType("${name}").create(...)`);
@@ -3396,8 +3408,7 @@ const INDEX_ADD_KEYS = [
   "using",
   "where",
   "include",
-  "with",
-  "only",
+    "only",
   "nullsNotDistinct",
 ] as const;
 
@@ -3575,7 +3586,7 @@ function recordCreateTable(
         using: idx.using,
         where: resolveImmutableExpr(idx.where as IndexExprFn | ExprChainType | Node | undefined, "partial index predicate"),
         include: indexIncludeToIr(idx.include),
-        with: indexWithToIr(idx.with),
+        attributes: indexAttributesToIr(idx),
         only: requireOptionalBoolean(idx.only, "index only"),
         nullsNotDistinct: requireOptionalBoolean(idx.nullsNotDistinct, "index nullsNotDistinct"),
       }),
@@ -4123,7 +4134,9 @@ function recordCreateIndex(
   name: string,
   args: IndexAddArgs,
 ): void {
-  rejectUnknownKeys(args, INDEX_ADD_KEYS, `table("${table}").index("${name}").add(...)`);
+  const vendorAttributes = indexAttributesToIr(
+    splitVendorNamespaces(args, INDEX_ADD_KEYS, `table("${table}").index("${name}").add(...)`),
+  );
   if (!Array.isArray(args.on)) {
     throw structuredError("OP_INVALID", ".index(name).add needs { on: IndexElementArg[] }");
   }
@@ -4135,7 +4148,7 @@ function recordCreateIndex(
     using: args.using,
     where: resolveImmutableExpr(args.where as IndexExprFn | ExprChainType | Node | undefined, "partial index predicate"),
     include: indexIncludeToIr(args.include),
-    with: indexWithToIr(args.with),
+    attributes: vendorAttributes,
     only: requireOptionalBoolean(args.only, "index only"),
     nullsNotDistinct: requireOptionalBoolean(args.nullsNotDistinct, "index nullsNotDistinct"),
     schema: args.schema,

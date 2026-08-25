@@ -48,7 +48,7 @@ fn hnsw_index_op() -> Op {
         r#where: None,
         concurrently: None,
         include: vec![],
-        with: None,
+        attributes: Default::default(),
         only: None,
         nulls_not_distinct: None,
         schema: None,

@@ -55,8 +55,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::attribute::{
-    AddColumnAttributes, AddConstraintAttributes, CreatePartitionAttributes, CreateTableAttributes,
-    SetTableOptionsAttributes,
+    AddColumnAttributes, AddConstraintAttributes, CreateIndexAttributes, CreatePartitionAttributes,
+    CreateTableAttributes, SetTableOptionsAttributes,
 };
 use crate::expr::Expr;
 #[allow(unused_imports)]
@@ -1814,26 +1814,6 @@ pub enum IndexMethod {
     Hnsw,
 }
 
-/// Typed `PostgreSQL` index storage parameters. Closed set: never raw SQL.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct IndexStorageParams {
-    /// BRIN pages-per-range storage parameter.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pages_per_range: Option<u32>,
-    /// Generic index fillfactor storage parameter.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fillfactor: Option<u32>,
-}
-
-impl IndexStorageParams {
-    /// True when no storage parameter would render.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.pages_per_range.is_none() && self.fillfactor.is_none()
-    }
-}
-
 /// An index definition inside a `createTable` op.
 ///
 /// `rename_all` is not decoration here. Every other field on this struct is a
@@ -1867,9 +1847,10 @@ pub struct IrIndex {
     /// Non-key covering columns (`INCLUDE (...)`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
-    /// Typed storage parameters (`WITH (...)`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub with: Option<IndexStorageParams>,
+    /// Vendor storage parameters, keyed `<dialect>.<name>`. Rendered by whichever
+    /// backend owns the namespace; see [`Op::CreateIndex`]'s `attributes`.
+    #[serde(default, skip_serializing_if = "CreateIndexAttributes::is_empty")]
+    pub attributes: CreateIndexAttributes,
     /// `PostgreSQL` `ON ONLY` for partitioned parents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub only: Option<bool>,
@@ -3152,9 +3133,15 @@ pub enum Op {
         /// Non-key covering columns (`INCLUDE (...)`).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         include: Vec<String>,
-        /// Typed storage parameters (`WITH (...)`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        with: Option<IndexStorageParams>,
+        /// The vendor attributes authored on this index, keyed by their full
+        /// `<dialect>.<name>` wire spelling.
+        ///
+        /// REPLACES `with: Option<IndexStorageParams>`, which held PostgreSQL's
+        /// `fillfactor` and `pages_per_range` as named fields in this NEUTRAL crate.
+        /// They are now ordinary declarations in the PostgreSQL crate, so a third index
+        /// storage parameter is a change to that vendor and to nothing here.
+        #[serde(default, skip_serializing_if = "CreateIndexAttributes::is_empty")]
+        attributes: CreateIndexAttributes,
         /// `PostgreSQL` `ON ONLY` for partitioned parents.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         only: Option<bool>,

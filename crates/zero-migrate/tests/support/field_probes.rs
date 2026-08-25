@@ -26,7 +26,7 @@ use zero_migrate_mysql::physical_type::MysqlPhysicalType;
 use zero_migrate::{
     ColumnCollationSnapshot, ColumnSnapshot, ConstraintSnapshot, GeneratedColumnSnapshot,
     GeneratedKindSnapshot, IdDefaultSnapshot, IdentityCol, IndexElementSnapshot, IndexSnapshot,
-    IndexStorageParams, TableSnapshot, TextStorageSnapshot, ValueFormat,
+    TableSnapshot, TextStorageSnapshot, ValueFormat,
 };
 
 /// One field, and a mutation that changes ONLY that field.
@@ -329,7 +329,7 @@ pub fn index_snapshot_probes() -> ProbeSet<IndexSnapshot> {
         access_method,
         predicate,
         include,
-        with,
+        attributes,
         only,
         opclass,
         nulls_not_distinct,
@@ -355,11 +355,12 @@ pub fn index_snapshot_probes() -> ProbeSet<IndexSnapshot> {
     index.probe("IndexSnapshot::include", include, |i| {
         i.include = vec!["c".to_string()];
     });
-    index.probe("IndexSnapshot::with", with, |i| {
-        i.with = Some(IndexStorageParams {
-            pages_per_range: None,
-            fillfactor: Some(70),
-        });
+    index.probe("IndexSnapshot::attributes", attributes, |i| {
+        i.attributes.insert(
+            zero_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
+                .expect("a well-formed key"),
+            zero_migrate::IrScalar::Int(70),
+        );
     });
     index.probe("IndexSnapshot::only", only, |i| i.only = true);
     index.probe("IndexSnapshot::opclass", opclass, |i| {

@@ -745,7 +745,7 @@ impl AuthoredState<'_> {
                 using,
                 r#where,
                 include,
-                with,
+                attributes,
                 only,
                 nulls_not_distinct,
                 ..
@@ -758,7 +758,7 @@ impl AuthoredState<'_> {
                         using: *using,
                         r#where: r#where.clone(),
                         include: include.clone(),
-                        with: with.clone(),
+                        attributes: attributes.clone(),
                         only: *only,
                         nulls_not_distinct: *nulls_not_distinct,
                     };

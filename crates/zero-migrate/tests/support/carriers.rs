@@ -374,7 +374,7 @@ fn walk_index(index: &IndexSnapshot, set: &mut CarrierSet) {
         access_method,
         predicate,
         include,
-        with,
+        attributes,
         only,
         opclass,
         nulls_not_distinct,
@@ -397,9 +397,11 @@ fn walk_index(index: &IndexSnapshot, set: &mut CarrierSet) {
         "a `pg_am.amname` (`btree`, `gin`, `gist`, `hnsw`).",
     );
     never_a_column_name(
-        "TableSnapshot::indexes[].with",
-        with,
-        "`IndexStorageParams` is two integers (`pages_per_range`, `fillfactor`).",
+        "TableSnapshot::indexes[].attributes",
+        attributes,
+        "vendor storage parameters, keyed `<dialect>.<name>`. The values are integers and \
+         identifiers - a fill percentage, a summarised block count - and the declared set \
+         names no column, so a rename has nothing here to follow.",
     );
     never_a_column_name("TableSnapshot::indexes[].only", only, "a bool.");
     never_a_column_name(

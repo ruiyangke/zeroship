@@ -721,16 +721,9 @@
                 "type": "string"
               }
             },
-            "with": {
-              "description": "Typed storage parameters (`WITH (...)`).",
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/IndexStorageParams"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "attributes": {
+              "description": "The vendor attributes authored on this index, keyed by their full\n`<dialect>.<name>` wire spelling.\n\nREPLACES `with: Option<IndexStorageParams>`, which held PostgreSQL's\n`fillfactor` and `pages_per_range` as named fields in this NEUTRAL crate.\nThey are now ordinary declarations in the PostgreSQL crate, so a third index\nstorage parameter is a change to that vendor and to nothing here.",
+              "$ref": "#/$defs/CreateIndexAttributes"
             },
             "only": {
               "description": "`PostgreSQL` `ON ONLY` for partitioned parents.",
@@ -5095,16 +5088,9 @@
             "type": "string"
           }
         },
-        "with": {
-          "description": "Typed storage parameters (`WITH (...)`).",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/IndexStorageParams"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "attributes": {
+          "description": "Vendor storage parameters, keyed `<dialect>.<name>`. Rendered by whichever\nbackend owns the namespace; see [`Op::CreateIndex`]'s `attributes`.",
+          "$ref": "#/$defs/CreateIndexAttributes"
         },
         "only": {
           "description": "`PostgreSQL` `ON ONLY` for partitioned parents.",
@@ -5244,30 +5230,16 @@
         }
       ]
     },
-    "IndexStorageParams": {
-      "description": "Typed `PostgreSQL` index storage parameters. Closed set: never raw SQL.",
+    "CreateIndexAttributes": {
+      "description": "Attributes on `Op::CreateIndex`.\n\nAttributes on `Op::CreateIndex` -- an index's storage parameters.\n\nThis carrier RETIRED `IndexStorageParams`, which held PostgreSQL's `fillfactor`\nand `pages_per_range` as named fields in this neutral crate and in the neutral\ncontract crate's `IndexSnapshot`. Both are now ordinary declarations in the\nPostgreSQL crate, and core's drift pass no longer spells either name.",
+      "$ref": "#/$defs/Attributes"
+    },
+    "Attributes": {
+      "description": "The attributes carried by one IR node.\n\nA `BTreeMap` rather than a `HashMap` because the order is part of the CHECKSUM: the\ncanonical serialization must not depend on insertion order, or one authored migration\nhashes differently per run.\n\nEmpty is the overwhelmingly common case and serializes away entirely\n(`skip_serializing_if`), so adding this field to an op does not change the wire form\nof any migration that carries no attributes — which is every migration authored before\nthis existed.",
       "type": "object",
-      "properties": {
-        "pagesPerRange": {
-          "description": "BRIN pages-per-range storage parameter.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "fillfactor": {
-          "description": "Generic index fillfactor storage parameter.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        }
-      },
-      "additionalProperties": false
+      "additionalProperties": {
+        "$ref": "#/$defs/IrScalar"
+      }
     },
     "PartitionSpec": {
       "description": "Partitioning strategy for a partitioned table parent.",
@@ -5417,13 +5389,6 @@
     "CreateTableAttributes": {
       "description": "Attributes on `Op::CreateTable` — the table's own storage options.",
       "$ref": "#/$defs/Attributes"
-    },
-    "Attributes": {
-      "description": "The attributes carried by one IR node.\n\nA `BTreeMap` rather than a `HashMap` because the order is part of the CHECKSUM: the\ncanonical serialization must not depend on insertion order, or one authored migration\nhashes differently per run.\n\nEmpty is the overwhelmingly common case and serializes away entirely\n(`skip_serializing_if`), so adding this field to an op does not change the wire form\nof any migration that carries no attributes — which is every migration authored before\nthis existed.",
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/IrScalar"
-      }
     },
     "PartitionBounds": {
       "description": "Partition bounds for `CREATE TABLE child PARTITION OF parent`.",

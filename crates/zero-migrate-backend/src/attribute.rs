@@ -12,7 +12,7 @@
 //! in the neutral crates changes, and no `match` anywhere gains an arm.
 //!
 //! That is the whole point of the design. The alternative — the one the tree already has
-//! in [`IndexStorageParams`](zero_migrate_ir::ir::IndexStorageParams) — is a vendor's
+//! in `IndexStorageParams`, now retired — was a vendor's
 //! knobs as named fields in the neutral IR, which requires editing the neutral crate to
 //! add one backend's storage parameter.
 //!
@@ -387,7 +387,7 @@ impl AttributeVocabulary {
     /// workspace census counted it a duplicate.
     ///
     /// That is not a nicety. It is the hard prerequisite for retiring
-    /// [`IndexStorageParams`](zero_migrate_ir::ir::IndexStorageParams), whose
+    /// `IndexStorageParams`, now retired, whose
     /// `fillfactor` must be declared at Index scope alongside the Table-scoped one that
     /// already ships.
     #[must_use]

@@ -677,7 +677,7 @@ fn create_index_render_is_byte_identical_pg() {
         r#where: None,
 
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: None,
         concurrently: None,
         schema: None,
@@ -1489,7 +1489,7 @@ fn create_table_with_authored_index_is_byte_identical_sqlite() {
             using: None,
             r#where: None,
             include: Vec::new(),
-            with: None,
+            attributes: Default::default(),
             only: None,
             nulls_not_distinct: None,
         }],
@@ -1903,7 +1903,7 @@ fn create_index_render_is_byte_identical_sqlite() {
         r#where: None,
 
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         only: None,
         concurrently: None,
         schema: None,

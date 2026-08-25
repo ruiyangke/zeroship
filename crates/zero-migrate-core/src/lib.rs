@@ -456,12 +456,12 @@ pub use model::ir::{
     validate_type_id_prefix, BackfillSetValue, CanonicalOpList, ColType, ColumnOrExpr,
     CommentTarget, CursorStability, EmptyContainerKind, ExclusionElement, ExclusionMethod,
     ExclusionOperator, GeneratedCol, IdentityCol, IndexElement, IndexMethod, IndexSortOrder,
-    IndexStorageParams, IrClassification, IrColumn, IrConstraint, IrConstraintKind, IrDefault,
-    IrFlagsOverride, IrIndex, IrJsonValue, IrMask, IrMaskKind, IrScalar, IrValue, IrVersionError,
-    MigrationIr, Op, PartitionBoundValue, PartitionBounds, PartitionSpec, PerRowGenerator,
-    RefAction, SafeI64, SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions,
-    TableRuntimeOptionsPatch, TableStrictness, ValueFormat, VectorMetric, CURRENT_IR_VERSION,
-    EXPR_INVALID_NUMERIC, TYPE_ID_MAX_PREFIX_LEN,
+    IrClassification, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrFlagsOverride,
+    IrIndex, IrJsonValue, IrMask, IrMaskKind, IrScalar, IrValue, IrVersionError, MigrationIr, Op,
+    PartitionBoundValue, PartitionBounds, PartitionSpec, PerRowGenerator, RefAction, SafeI64,
+    SafeU64, SequenceOwnedBy, SequenceRef, TableRuntimeOptions, TableRuntimeOptionsPatch,
+    TableStrictness, ValueFormat, VectorMetric, CURRENT_IR_VERSION, EXPR_INVALID_NUMERIC,
+    TYPE_ID_MAX_PREFIX_LEN,
 };
 // The fail-closed IR envelope load gate: deserialize →
 // `ir_version` → `validate_ir` → server-stamped ownership → advisory checksum-hint

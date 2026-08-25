@@ -299,3 +299,172 @@ mod a_wrong_attribute_is_refused_before_any_connection {
         .expect("85 is inside the declared 10..=100");
     }
 }
+
+/// The INDEX surface, which the generated TypeScript has advertised since vendor
+/// attributes landed and which nothing could reach.
+///
+/// `PostgresCreateIndexAttributes` is generated, exported and documented; until now
+/// `Op::CreateIndex` had no attribute field at all, so the typings described an authoring
+/// surface that did not exist. The two PostgreSQL index declarations existed only to
+/// retire [`IndexStorageParams`], which held `fillfactor` and `pages_per_range` as named
+/// fields in the NEUTRAL IR -- and which core's own drift pass then formatted by those
+/// two PostgreSQL spellings, inside the crate whose rule is to name no vendor.
+mod an_authored_index_attribute_reaches_the_ddl {
+    use super::{col, OWNER, SCHEMA};
+    use zero_migrate::{
+        IndexElement, IrAuthor, IrFlagsOverride, IrScalar, LiveSchema, MigrationIr, Op,
+        CURRENT_IR_VERSION,
+    };
+    use zero_migrate_ir::attribute::{AttrKey, Attributes, CreateIndexAttributes};
+
+    fn attrs(pairs: &[(&str, IrScalar)]) -> CreateIndexAttributes {
+        let mut carried = Attributes::new();
+        for (key, value) in pairs {
+            carried.insert(
+                AttrKey::parse(key).expect("a well-formed attribute key"),
+                value.clone(),
+            );
+        }
+        CreateIndexAttributes::from(carried)
+    }
+
+    fn create_index_sql(dialect: &zero_migrate::DialectId, index: Op) -> String {
+        let author = IrAuthor::new(
+            zero_migrate::shipping_vendors(),
+            SCHEMA,
+            OWNER,
+            dialect,
+            &crate::support::no_inject("app"),
+        );
+        let table = Op::CreateTable {
+            name: "widgets".to_string(),
+            columns: vec![col("id")],
+            primary_key: None,
+            constraints: Vec::new(),
+            indexes: Vec::new(),
+            partition_by: None,
+            runtime_options: None,
+            schema: None,
+            existence_guard: None,
+            attributes: Default::default(),
+        };
+        let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
+            ir_version: CURRENT_IR_VERSION,
+            name: "index_attribute".to_string(),
+            owner_app: OWNER.to_string(),
+            ops: vec![table, index],
+            flags: IrFlagsOverride::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+        author
+            .lower(&ir, &LiveSchema::default())
+            .expect("the index lowers")
+            .into_iter()
+            .map(|m| m.up)
+            .find(|sql| sql.contains("CREATE INDEX") || sql.contains("CREATE UNIQUE INDEX"))
+            .expect("a CREATE INDEX was rendered")
+    }
+
+    fn index_op(attributes: CreateIndexAttributes) -> Op {
+        Op::CreateIndex {
+            table: "widgets".to_string(),
+            columns: vec![IndexElement::Column {
+                name: "id".to_string(),
+                order: None,
+                opclass: None,
+                collation: None,
+            }],
+            name: Some("widgets_id_idx".to_string()),
+            unique: None,
+            using: None,
+            r#where: None,
+            concurrently: None,
+            include: Vec::new(),
+            only: None,
+            nulls_not_distinct: None,
+            schema: None,
+            existence_guard: None,
+            attributes,
+        }
+    }
+
+    #[test]
+    fn postgres_renders_a_declared_index_storage_parameter() {
+        let sql = create_index_sql(
+            &zero_migrate_postgres::DIALECT,
+            index_op(attrs(&[("postgres.fillfactor", IrScalar::Int(90))])),
+        );
+        assert!(
+            sql.contains("WITH (fillfactor='90')"),
+            "the authored `postgres.fillfactor` never reached the CREATE INDEX. \
+             Rendered:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn both_declared_index_parameters_render_in_one_with_clause() {
+        // BRIN accepts both. The ORDER is now the attribute map's canonical one
+        // (alphabetical by full key, so `fillfactor` before `pages_per_range`) rather
+        // than the order two struct fields happened to be declared in. Pinned because a
+        // canonical order is the property that keeps rendered DDL reproducible.
+        let sql = create_index_sql(
+            &zero_migrate_postgres::DIALECT,
+            index_op(attrs(&[
+                ("postgres.pages_per_range", IrScalar::Int(64)),
+                ("postgres.fillfactor", IrScalar::Int(90)),
+            ])),
+        );
+        assert!(
+            sql.contains("WITH (fillfactor='90', pages_per_range='64')"),
+            "expected one WITH clause in canonical key order. Rendered:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn an_index_carrying_no_attributes_emits_no_with_clause() {
+        let sql = create_index_sql(
+            &zero_migrate_postgres::DIALECT,
+            index_op(CreateIndexAttributes::new()),
+        );
+        assert!(
+            !sql.contains("WITH ("),
+            "an index with no storage parameters must emit no WITH clause. \
+             Rendered:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn a_table_only_key_is_refused_on_an_index() {
+        // `postgres.tablespace` IS declared -- for createTable, createPartition and
+        // setTableOptions, NOT for createIndex. This is the (key, op) identity earning
+        // its keep: a key-only check would accept it.
+        let ir = MigrationIr {
+            inverse_ops: None,
+            irreversible: None,
+            ir_version: CURRENT_IR_VERSION,
+            name: "index_refusal".to_string(),
+            owner_app: OWNER.to_string(),
+            ops: vec![index_op(attrs(&[(
+                "postgres.tablespace",
+                IrScalar::Str("fast".to_string()),
+            )]))],
+            flags: IrFlagsOverride::default(),
+            depends_on: Vec::new(),
+            supersedes: Vec::new(),
+            preconditions: Vec::new(),
+            checksum: None,
+        };
+        let err = zero_migrate::validate_ir(
+            zero_migrate::shipping_vendors(),
+            &ir,
+            &zero_migrate_postgres::DIALECT,
+        )
+        .expect_err("tablespace is not declared on createIndex");
+        assert!(err.to_string().contains("tablespace"), "{err}");
+    }
+}

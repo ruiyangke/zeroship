@@ -43,8 +43,7 @@ use crate::support::field_probes::{
 use zero_migrate::model::schema_model;
 use zero_migrate::{
     ColumnCollationSnapshot, ColumnSnapshot, GeneratedColumnSnapshot, GeneratedKindSnapshot,
-    IdDefaultSnapshot, IdentityCol, IndexSortOrder, IndexStorageParams, TableStrictness,
-    ValueFormat,
+    IdDefaultSnapshot, IdentityCol, IndexSortOrder, TableStrictness, ValueFormat,
 };
 
 /// Run the property: every declared field must change `==`.
@@ -216,7 +215,7 @@ fn model_index_probes() -> ProbeSet<schema_model::Index> {
         access_method,
         predicate,
         include,
-        with,
+        attributes,
         comment,
         expr_cascade_columns,
     } = base;
@@ -241,11 +240,12 @@ fn model_index_probes() -> ProbeSet<schema_model::Index> {
     set.probe("Index::include", include, |i| {
         i.include = vec!["c".to_string()];
     });
-    set.probe("Index::with", with, |i| {
-        i.with = Some(IndexStorageParams {
-            pages_per_range: None,
-            fillfactor: Some(70),
-        });
+    set.probe("Index::attributes", attributes, |i| {
+        i.attributes.insert(
+            zero_migrate_ir::attribute::AttrKey::parse("acme.fillfactor")
+                .expect("a well-formed key"),
+            zero_migrate::IrScalar::Int(70),
+        );
     });
     set.probe("Index::comment", comment, |i| {
         i.comment = Some("a note".to_string());
@@ -344,7 +344,7 @@ fn base_index() -> schema_model::Index {
         access_method: "btree".to_string(),
         predicate: None,
         include: Vec::new(),
-        with: None,
+        attributes: Default::default(),
         comment: None,
         expr_cascade_columns: None,
     }

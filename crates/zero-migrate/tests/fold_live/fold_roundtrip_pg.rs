@@ -1208,10 +1208,10 @@ async fn index_storage_parameter_lifecycle() {
         ],"primaryKey":["id"]},
         {"op":"createIndex","table":"storage_params","name":"storage_params_note_idx",
          "columns":[{"kind":"column","name":"note"}],
-         "with":{"fillfactor":70}},
+         "attributes":{"postgres.fillfactor":70}},
         {"op":"createIndex","table":"storage_params","name":"storage_params_brin_idx",
          "columns":[{"kind":"column","name":"bucket"}],"using":"brin",
-         "with":{"pagesPerRange":32}}
+         "attributes":{"postgres.pages_per_range":32}}
       ]
     }"#;
 

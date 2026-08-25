@@ -201,7 +201,7 @@ fn create_table_with_index_name(name: &str) -> Op {
             using: None,
             r#where: None,
             include: vec![],
-            with: None,
+            attributes: Default::default(),
             only: None,
             nulls_not_distinct: None,
         }],

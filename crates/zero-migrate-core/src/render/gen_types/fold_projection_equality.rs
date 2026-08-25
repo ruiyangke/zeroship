@@ -649,7 +649,7 @@ fn index_field_differences(mine: &IndexSnapshot, theirs: &IndexSnapshot) -> Vec<
         access_method,
         predicate,
         include,
-        with,
+        attributes,
         only,
         opclass,
         nulls_not_distinct,
@@ -669,7 +669,7 @@ fn index_field_differences(mine: &IndexSnapshot, theirs: &IndexSnapshot) -> Vec<
     check("access_method", *access_method == theirs.access_method);
     check("predicate", *predicate == theirs.predicate);
     check("include", *include == theirs.include);
-    check("with", *with == theirs.with);
+    check("attributes", *attributes == theirs.attributes);
     check("only", *only == theirs.only);
     check("opclass", *opclass == theirs.opclass);
     check(
