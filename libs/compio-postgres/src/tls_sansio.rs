@@ -44,11 +44,12 @@
 //! peer`. MEASURED 2026-08-24: the same 16 tests logged 3 of those lines on the
 //! TLS server and none at all on the plaintext one.
 //!
-//! It is log noise, not data loss - this side is closing either way - but it
-//! looks exactly like a driver defect to anyone reading a server log, and it
-//! was nearly diagnosed as one. Making it orderly means sending `close_notify`
-//! BEFORE the synchronous release, which is a change to the release design and
-//! not to this file.
+//! It was log noise rather than data loss - this side is closing either way -
+//! but it looks exactly like a driver defect to anyone reading a server log,
+//! and it was nearly diagnosed as one. FIXED on 2026-08-25 by sending
+//! `close_notify` BEFORE the synchronous release; the shape that took is at
+//! the end of this section, and it changed both the release design AND this
+//! file.
 //!
 //! ## What the fix is NOT, measured 2026-08-25
 //!
@@ -423,10 +424,7 @@ where
             // fresh socket chunk, or another step through one already held -
             // returns to the reader before giving rustls more, which is the
             // condition `feed_ciphertext_step` documents.
-            let n = self
-                .session
-                .lock()
-                .read_plaintext(&mut self.plain[..cap])?;
+            let n = self.session.lock().read_plaintext(&mut self.plain[..cap])?;
             if n > 0 {
                 return Ok(n);
             }
@@ -448,10 +446,7 @@ where
                     // second turns an orderly shutdown with trailing buffered
                     // ciphertext into a spurious error.
                     if peer_has_closed {
-                        return self
-                            .session
-                            .lock()
-                            .read_plaintext(&mut self.plain[..cap]);
+                        return self.session.lock().read_plaintext(&mut self.plain[..cap]);
                     }
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -477,10 +472,7 @@ where
                 // The socket is done, but anything rustls decrypted before the
                 // close is still owed to the caller. Only after that is this a
                 // real end of stream.
-                return self
-                    .session
-                    .lock()
-                    .read_plaintext(&mut self.plain[..cap]);
+                return self.session.lock().read_plaintext(&mut self.plain[..cap]);
             }
             self.cipher_read = 0;
             self.cipher_len = read;
