@@ -1,28 +1,17 @@
 //! `pg_service.conf`, end to end against a live server.
 //!
-//! Locating a service file reads `PGSERVICEFILE` from the PROCESS
-//! environment, and this suite does not set environment variables in-process:
-//! `std::env::set_var` is unsound to call once other threads exist, and a
-//! variable set for one test leaks into every other test in the binary.
-//!
-//! So the real path is exercised in a CHILD process. The parent writes a
-//! service file, re-runs this same test binary with `PGSERVICEFILE` pointing
-//! at it, and reads the child's exit status. `Command::env` is the safe way to
-//! set a variable, because it configures the child rather than mutating
-//! anything here.
-//!
-//! The child case is `#[ignore]`d so an ordinary run skips it rather than
-//! failing with no service file; the parent runs it explicitly with
-//! `--ignored --exact`. That also means it cannot pass vacuously - a skipped
-//! test is reported as ignored, and the parent asserts on the exit status of a
-//! run it requested by name.
+//! The service file's PATH comes from the caller here, never from the
+//! environment: this crate is a standalone, publishable driver and the
+//! workspace forbids a published library reading process configuration
+//! (`crates/core/tests/config_env_access_gate.rs`, exemption list empty). So
+//! these tests write a file and name it with `Config::service_file`, which is
+//! exactly what an application does.
 
 #[allow(dead_code)]
 mod common;
 use common::{suite_tls, test_url};
 use compio_postgres::Config;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 
 const SERVICE: &str = "zs_compio_service_test";
 
@@ -59,37 +48,24 @@ fn service_file_contents() -> String {
     )
 }
 
-/// Run the ignored child case with `PGSERVICEFILE` set to `path`.
-fn run_child(path: &PathBuf) -> std::process::Output {
-    Command::new(std::env::current_exe().expect("the test binary's own path"))
-        .args([
-            "--ignored",
-            "--exact",
-            "--nocapture",
-            "--test-threads=1",
-            "a_service_names_the_connection",
-        ])
-        .env("PGSERVICEFILE", path)
-        .env("PG_TEST_URL", test_url())
-        .output()
-        .expect("re-run this test binary as a child")
+/// Parse `service=<name> servicefile=<path>`, exactly as an application would.
+///
+/// The file is named IN THE STRING because expansion happens while parsing -
+/// the only point at which the set of explicitly given keys is still known.
+fn config_for_service(path: &Path) -> Result<Config, compio_postgres::Error> {
+    format!(
+        "service={SERVICE} servicefile={}",
+        path.to_str().expect("a UTF-8 temp path")
+    )
+    .parse()
 }
 
-/// THE CHILD CASE. Connects using nothing but a service name, so every
-/// connection parameter comes from the file the parent wrote.
 #[compio::test]
-#[ignore = "run by the parent case with PGSERVICEFILE set"]
-async fn a_service_names_the_connection() {
-    let dsn = format!("service={SERVICE}");
-    let config = dsn
-        .parse::<Config>()
-        .expect("the service expands into a usable config");
-    assert_eq!(
-        config.get_service(),
-        Some(SERVICE),
-        "the service name was not recorded"
-    );
+async fn a_service_file_supplies_every_connection_parameter() {
+    let path = service_file_path("good");
+    std::fs::write(&path, service_file_contents()).expect("write the service file");
 
+    let config = config_for_service(&path).expect("the service expands");
     let (client, connection) = config
         .connect(suite_tls())
         .await
@@ -104,60 +80,37 @@ async fn a_service_names_the_connection() {
         .await
         .expect("the connection works");
     assert_eq!(one, 1);
-}
-
-#[test]
-fn a_service_file_supplies_every_connection_parameter() {
-    let path = service_file_path("good");
-    std::fs::write(&path, service_file_contents()).expect("write the service file");
-
-    let output = run_child(&path);
 
     std::fs::remove_file(&path).ok();
-    assert!(
-        output.status.success(),
-        "the child could not connect through the service file:\n{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // A run that matched no test also exits 0, which would make the assertion
-    // above pass without connecting to anything.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("1 passed"),
-        "the child ran no test, so its success says nothing:\n{stdout}"
-    );
 }
 
-/// The control: the same machinery with a service file that does NOT define
-/// the service must fail. Without it, a child that silently ignored the file
-/// and connected some other way would look like success above.
+/// A service the file does not define is an error, not a silent fallback.
 #[test]
 fn an_undefined_service_is_an_error() {
     let path = service_file_path("undefined");
     std::fs::write(&path, "[some_other_service]\nhost=127.0.0.1\n")
         .expect("write the service file");
 
-    let output = run_child(&path);
+    let result = config_for_service(&path);
 
     std::fs::remove_file(&path).ok();
+    let error = result.expect_err("a service that is not defined must not resolve");
     assert!(
-        !output.status.success(),
-        "a service that is not defined connected anyway"
+        format!("{:?}", std::error::Error::source(&error)).contains(SERVICE),
+        "the error does not name the service that was not found: {error:?}"
     );
 }
 
-/// Naming a service with no service file anywhere is an error too, rather
-/// than a connection that quietly falls back to defaults.
+/// Naming a service with no service file is an error rather than a connection
+/// that quietly falls back to defaults - and specifically NOT a search of the
+/// environment, which this driver does not perform.
 #[test]
-fn a_missing_service_file_is_an_error() {
-    let path = service_file_path("absent_never_written");
-    assert!(!path.exists(), "this case needs a path that does not exist");
-
-    let output = run_child(&path);
-
+fn naming_a_service_without_a_file_is_an_error() {
+    let error = format!("service={SERVICE}")
+        .parse::<Config>()
+        .expect_err("a service with nowhere to read it from must not resolve");
     assert!(
-        !output.status.success(),
-        "a service naming a nonexistent file connected anyway"
+        format!("{:?}", std::error::Error::source(&error)).contains(SERVICE),
+        "the error does not name the service: {error:?}"
     );
 }

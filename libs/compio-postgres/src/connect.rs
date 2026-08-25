@@ -322,7 +322,10 @@ fn password_from_passfile(config: &Config, endpoint: &Endpoint) -> Option<Config
         return None;
     }
 
-    let path = passfile::resolve_path(config.get_passfile().map(Path::new))?;
+    // Only an explicitly configured file. libpq would fall back to
+    // `$PGPASSFILE` and `~/.pgpass`; resolving those is the caller's job, for
+    // the reason `passfile.rs` gives at length.
+    let path = Path::new(config.get_passfile()?);
     let user = config.get_user()?;
     // libpq defaults the database to the user, and matches the file on the
     // database it will actually connect to.
@@ -331,7 +334,7 @@ fn password_from_passfile(config: &Config, endpoint: &Endpoint) -> Option<Config
     let port = endpoint.port().to_string();
 
     let password = passfile::lookup(
-        &path,
+        path,
         passfile::PassfileKey {
             host: &host,
             port: &port,

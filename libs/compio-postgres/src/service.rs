@@ -64,38 +64,17 @@ impl fmt::Display for ServiceError {
 
 impl std::error::Error for ServiceError {}
 
-/// Where the service file lives: `$PGSERVICEFILE`, else
-/// `$HOME/.pg_service.conf`, else `$PGSYSCONFDIR/pg_service.conf`.
-///
-/// MEASURED: with `PGSERVICEFILE` unset and a `~/.pg_service.conf` in place,
-/// libpq found the service; with neither, it reported the service undefined.
-fn candidate_paths() -> Vec<PathBuf> {
-    candidate_paths_from(
-        std::env::var_os("PGSERVICEFILE"),
-        std::env::var_os("HOME"),
-        std::env::var_os("PGSYSCONFDIR"),
-    )
-}
-
-/// The environment-free half of [`candidate_paths`], so the precedence order
-/// can be tested without setting process-wide variables.
-fn candidate_paths_from(
-    service_file: Option<std::ffi::OsString>,
-    home: Option<std::ffi::OsString>,
-    sysconfdir: Option<std::ffi::OsString>,
-) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Some(explicit) = service_file.filter(|value| !value.is_empty()) {
-        paths.push(PathBuf::from(explicit));
-    }
-    if let Some(home) = home.filter(|value| !value.is_empty()) {
-        paths.push(PathBuf::from(home).join(".pg_service.conf"));
-    }
-    if let Some(sysconf) = sysconfdir.filter(|value| !value.is_empty()) {
-        paths.push(PathBuf::from(sysconf).join("pg_service.conf"));
-    }
-    paths
-}
+// THE PATH COMES FROM THE CALLER. libpq resolves an unset service file from
+// `$PGSERVICEFILE`, then `~/.pg_service.conf`, then
+// `$PGSYSCONFDIR/pg_service.conf`. This crate resolves none of them: it is a
+// standalone, publishable driver, and a published library takes resolved
+// options from its caller rather than reading process configuration. The
+// workspace enforces that in `crates/core/tests/config_env_access_gate.rs`
+// against a deliberately empty exemption list.
+//
+// So naming a `service` also means naming the file it lives in, through
+// `Config::service_file`. An application that wants libpq's search order
+// performs it and passes the winner.
 
 /// The `key=value` pairs of one section, or `None` if the file has no such
 /// section.
@@ -143,30 +122,27 @@ fn section_of(
     Ok(if in_section { Some(pairs) } else { None })
 }
 
-/// Resolve `service` to its connection parameters.
+/// Resolve `service` to its connection parameters, out of `path`.
 ///
-/// Searches each candidate path in order and uses the FIRST file that exists,
-/// matching libpq: a `PGSERVICEFILE` that exists but lacks the service is an
-/// error rather than a reason to look in `~/.pg_service.conf`.
-pub(crate) fn parameters(service: &str) -> Result<Vec<(String, String)>, ServiceError> {
-    for path in candidate_paths() {
-        if !path.is_file() {
-            continue;
-        }
-        let contents = std::fs::read_to_string(&path)
-            .map_err(|_| ServiceError::Unreadable { path: path.clone() })?;
-        return match section_of(&contents, service, &path)? {
-            Some(pairs) => Ok(pairs),
-            None => Err(ServiceError::Undefined {
-                service: service.to_owned(),
-                path,
-            }),
-        };
-    }
+/// A service the file does not define is an ERROR rather than a silent
+/// fallback - measured against libpq, which reports `definition of service
+/// "nosuch" not found`. Naming a service you do not have is a mistake, and
+/// connecting somewhere else instead would hide it.
+pub(crate) fn parameters(
+    service: &str,
+    path: &Path,
+) -> Result<Vec<(String, String)>, ServiceError> {
+    let contents = std::fs::read_to_string(path).map_err(|_| ServiceError::Unreadable {
+        path: path.to_path_buf(),
+    })?;
 
-    Err(ServiceError::NoServiceFile {
-        service: service.to_owned(),
-    })
+    match section_of(&contents, service, path)? {
+        Some(pairs) => Ok(pairs),
+        None => Err(ServiceError::Undefined {
+            service: service.to_owned(),
+            path: path.to_path_buf(),
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -181,39 +157,6 @@ mod tests {
         parse(contents, service)
             .expect("well-formed")
             .expect("the section exists")
-    }
-
-    fn os(value: &str) -> Option<std::ffi::OsString> {
-        Some(std::ffi::OsString::from(value))
-    }
-
-    #[test]
-    fn the_service_file_is_searched_in_libpq_order() {
-        let paths = candidate_paths_from(os("/explicit.conf"), os("/home/u"), os("/etc/pg"));
-        assert_eq!(
-            paths,
-            vec![
-                PathBuf::from("/explicit.conf"),
-                PathBuf::from("/home/u/.pg_service.conf"),
-                PathBuf::from("/etc/pg/pg_service.conf"),
-            ]
-        );
-    }
-
-    /// An unset OR EMPTY variable contributes no candidate. Empty matters
-    /// because an exported-but-blank `PGSERVICEFILE` would otherwise put the
-    /// path `""` ahead of the home directory and suppress it.
-    #[test]
-    fn an_unset_or_empty_variable_contributes_no_candidate() {
-        assert_eq!(
-            candidate_paths_from(None, os("/home/u"), None),
-            vec![PathBuf::from("/home/u/.pg_service.conf")]
-        );
-        assert_eq!(
-            candidate_paths_from(os(""), os("/home/u"), None),
-            vec![PathBuf::from("/home/u/.pg_service.conf")]
-        );
-        assert!(candidate_paths_from(None, None, None).is_empty());
     }
 
     #[test]

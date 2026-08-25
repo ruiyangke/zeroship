@@ -55,32 +55,19 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 /// The default when `PG_TEST_URL` is absent, matching the test suites.
 const DEFAULT_URL: &str = "postgres://postgres:zeroship@127.0.0.1:5455/zeroship";
 
-/// Every environment name this benchmark may read.
+/// The sealed key enum this crate reads the environment through, shared with
+/// the test suites rather than copied.
 ///
-/// Mirrors `tests/common/env.rs`: a sealed key rather than a `&str`, so the
-/// single raw read below cannot be pointed at an undeclared variable. The
-/// workspace denies `std::env::var` at every other call site.
-#[derive(Clone, Copy)]
-enum BenchEnvKey {
-    PgTestUrl,
-}
-
-impl BenchEnvKey {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::PgTestUrl => "PG_TEST_URL",
-        }
-    }
-}
-
-/// The one raw environment read in this target.
-#[allow(clippy::disallowed_methods)]
-fn env_value(key: BenchEnvKey) -> Option<String> {
-    std::env::var(key.name()).ok()
-}
+/// It was copied here, and the copy was the problem: the workspace gate
+/// recognises the sanctioned accessor BY PATH
+/// (`libs/<crate>/tests/common/env.rs`), so a local re-implementation of the
+/// same shape is an unsanctioned raw read plus an illicit `allow`, and
+/// `crates/core/tests/config_env_access_gate.rs` failed on exactly that.
+#[path = "../tests/common/env.rs"]
+mod env;
 
 fn test_url() -> String {
-    env_value(BenchEnvKey::PgTestUrl).unwrap_or_else(|| DEFAULT_URL.to_owned())
+    env::get(env::TestEnvKey::PgTestUrl).unwrap_or_else(|| DEFAULT_URL.to_owned())
 }
 
 /// What a case turns on. Each isolates one feature's per-operation cost
